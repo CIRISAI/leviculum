@@ -29,6 +29,42 @@ It installs `git` hooks (via `core.hooksPath = .githooks`), runner
 scripts, systemd user units, the separate cargo target dir, and the
 state dir. Re-running is safe.
 
+The installer detects the worktree it was run from and patches the
+systemd-unit `ExecStart` paths to match — so a `git worktree`-based
+second checkout (see "VM-mode install" below) installs its own units
+that fire against itself.
+
+### VM-mode install (CI worktree on a long-running host)
+
+For schneckenschreck or any other dedicated CI machine where the
+nightly Tier-3 runs land, install with `--vm-mode`:
+
+```
+git worktree add ~/coding/libreticulum-ci master
+cd ~/coding/libreticulum-ci
+bash scripts/install-ci.sh --vm-mode
+```
+
+`--vm-mode` differs from the default install in two ways:
+
+1. The git-hook wiring (`core.hooksPath = .githooks`) is **skipped**.
+   The VM never commits or pushes; hooks would never fire.
+2. A worktree-scoped marker file
+   (`.git/worktrees/<name>/leviculum-ci-vm-mode-marker`) is created.
+   `run-tier2.sh` and `run-tier3-hw.sh` check this marker at the
+   head of every run and, if present, invoke `_repo-sync.sh` to do
+   `git fetch + git checkout --force origin/master + git submodule
+   update --recursive`.
+
+The marker is per-worktree, not per-user: a manual invocation of
+`run-tier2.sh` from the developer's primary checkout will **not**
+trigger the destructive `--force` checkout against the wrong tree.
+
+The synced commit hash is appended to `last-results.txt` as
+`<timestamp> tier2 sync HEAD=<short-hash>` (or `tier3-hw` for the
+nightly), so you can correlate scheduled runs with the master commit
+they tested.
+
 ## Manual operation
 
 ```
