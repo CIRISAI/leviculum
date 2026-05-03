@@ -39,15 +39,22 @@ echo "[install-ci] state dir: ~/.local/state/leviculum-ci"
 mkdir -p ~/.cache/leviculum-ci-target
 echo "[install-ci] cargo target dir: ~/.cache/leviculum-ci-target"
 
-# 6. Install systemd user units
+# 6. Install systemd user units, patching the hardcoded
+#    %h/coding/libreticulum literal to point at the worktree this
+#    installer was actually run from.  Lets a `git worktree`-based
+#    second checkout (e.g. ~/coding/libreticulum-ci) install its
+#    own units that fire against itself, instead of silently
+#    targeting the developer's primary checkout.
 SYSTEMD_USER_DIR=~/.config/systemd/user
 mkdir -p "$SYSTEMD_USER_DIR"
-cp scripts/systemd/leviculum-ci-tier2.service \
-   scripts/systemd/leviculum-ci-tier2.timer \
-   scripts/systemd/leviculum-ci-nightly.service \
-   scripts/systemd/leviculum-ci-nightly.timer \
-   "$SYSTEMD_USER_DIR/"
-echo "[install-ci] systemd user units installed in $SYSTEMD_USER_DIR"
+for unit in scripts/systemd/leviculum-ci-tier2.service \
+            scripts/systemd/leviculum-ci-tier2.timer \
+            scripts/systemd/leviculum-ci-nightly.service \
+            scripts/systemd/leviculum-ci-nightly.timer; do
+    sed "s|%h/coding/libreticulum|$REPO_DIR|g" "$unit" \
+      > "$SYSTEMD_USER_DIR/$(basename "$unit")"
+done
+echo "[install-ci] systemd user units installed in $SYSTEMD_USER_DIR (path: $REPO_DIR)"
 
 # 7. Reload systemd
 systemctl --user daemon-reload
