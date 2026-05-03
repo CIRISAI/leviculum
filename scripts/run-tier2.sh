@@ -6,7 +6,16 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/tier2-$(date +%Y%m%d-%H%M%S)-$$.log"
 RESULTS="$LOG_DIR/last-results.txt"
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
+
+# Repo-sync at head of every run when the install was --vm-mode
+# (worktree-scoped marker inside .git/).  Brings this worktree to
+# origin/master before any test work.  Skipped on developer-machine
+# installs where the marker is absent.
+if [ -f "$(git rev-parse --git-dir)/leviculum-ci-vm-mode-marker" ]; then
+    bash "$(dirname "$0")/_repo-sync.sh"
+    echo "$(date -Iseconds) tier2 sync HEAD=$(git rev-parse --short HEAD)" >> "$RESULTS"
+fi
 
 # Rotate logs
 find "$LOG_DIR" -name 'tier*.log' -mtime +14 -delete 2>/dev/null || true

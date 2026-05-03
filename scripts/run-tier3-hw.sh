@@ -35,6 +35,17 @@ MARKER="$LOG_DIR/lock-contention"
 
 mkdir -p "$LOG_DIR"
 
+# Repo-sync at head of every run when the install was --vm-mode
+# (worktree-scoped marker inside .git/).  Brings this worktree to
+# origin/master before any test work.  Skipped on developer-machine
+# installs where the marker is absent.  Runs from $REPO_DIR (already
+# computed above) to ensure git rev-parse / fetch operate on the
+# right worktree.
+if [ -f "$(cd "$REPO_DIR" && git rev-parse --git-dir)/leviculum-ci-vm-mode-marker" ]; then
+    (cd "$REPO_DIR" && bash "$REPO_DIR/scripts/_repo-sync.sh")
+    echo "$(date -Iseconds) tier3-hw sync HEAD=$(cd "$REPO_DIR" && git rev-parse --short HEAD)" >> "$RESULTS"
+fi
+
 LOG="$LOG_DIR/nightly-hw-$(date +%Y%m%d-%H%M%S)-$$.log"
 
 # Always log to both stdout (for interactive feedback) and the per-run
