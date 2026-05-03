@@ -171,6 +171,53 @@ implementation-defined. If your `$HOME` is on a network filesystem,
 the lock behaviour is not guaranteed. This is a single-developer
 dev-box tool; not an issue in practice.
 
+## Hardware test profiles (Tier 3)
+
+Tier 3 (`just nightly`) runs LoRa hardware tests over USB-attached
+embedded devices.  Different tests need different subsets of the
+attached hardware powered on; the rest must stay off so that
+their RF activity does not contaminate the run.
+
+The mapping of devices to USB-hub ports lives at
+`reticulum-integ/profiles/devices.toml`.  Each LoRa test descriptor
+in `reticulum-integ/tests/lora_*.toml` may carry a
+`profile = "..."` field that names one of the profiles defined in
+`devices.toml`.  Tests without that field default to the `default`
+profile (= every device powered on).
+
+Active profile assignments on master HEAD:
+
+| Test descriptor | Profile | Active devices |
+|---|---|---|
+| `lora_lncp_bidir.toml` | `lora_lncp_bidir` | t-beam-1, t-beam-2 |
+| `lora_lnode_lncp_bidir.toml` | `lora_lnode_lncp_bidir` | pocket-v2, t114 |
+| (all other `lora_*.toml`) | `default` (implicit) | all five devices |
+
+Adding a new profile means: (a) declare the device subset in
+`devices.toml`, (b) add `profile = "<name>"` to the test descriptors
+that need it.  No code changes required.
+
+The `default` fallback is intentional: a test without an explicit
+profile keeps the historic behaviour of "all devices powered on,
+nothing power-managed", so existing tests are not at risk of
+silent regression from the introduction of the profile system.
+
+USB-hub power switching is performed by the hamster-side helper
+script (`scripts/usbhub-helper`) over a restricted SSH key from
+schneckenschreck.  See `scripts/run-tier3-hw.sh` for the
+orchestration logic.
+
+### libvirt USB-passthrough caveat
+
+When a device is disabled via the helper, hub power is genuinely
+cut on hamster — no power, no LoRa TX/RX, no MCU activity.  But
+the schneckenschreck VM keeps the cached USB-passthrough handle:
+`/dev/serial/by-id/...` symlinks and `lsusb` entries persist
+after the disable.  **`ssh hamster usbhub-helper status` is the
+source of truth, not VM-side device enumeration.**  The wrapper
+queries hamster after each profile transition and emits the
+authoritative state into the per-test log as `[CI_HW] hamster_status=...`.
+
 ## Troubleshooting
 
 | Symptom | Action |

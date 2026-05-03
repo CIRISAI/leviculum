@@ -1,0 +1,94 @@
+# devices.toml — single source of truth for the embedded hardware
+# attached to schneckenschreck via the hamster USB hub chain.  Used by
+# scripts/run-tier3-hw.sh to orchestrate hub-port power around LoRa
+# hardware tests.
+#
+# Topology: TerraMaster 4-port USB 2.0 hub (1-1) → Realtek RTS5411
+# mid-hub (1-1.3) → Realtek RTS5411 sub-sub-hub (1-1.3.4).  All hub
+# operations happen on hamster via `ssh hamster usbhub-helper ...`.
+#
+# `ppps = false` means per-port-power-switching does not actually cut
+# power to the device.  Heltec V4 stays enumerated regardless of port
+# power; the helper refuses `disable heltec-v4` and exposes
+# `disable-subhub` as the only way to remove its power (kills Pocket V2
+# alongside).  Mechanism is unknown — there is no battery installed —
+# pending investigation when a switching USB-hub arrives.
+
+# ----- Device map -----
+
+[devices.t-beam-1]
+hub      = "1-1.3"
+port     = 3
+ppps     = true
+firmware = "rnode"
+vid_pid  = "1a86:55d4"
+serial   = "5896004228"
+
+[devices.t-beam-2]
+hub      = "1-1"
+port     = 4
+ppps     = true
+firmware = "rnode"
+vid_pid  = "1a86:55d4"
+serial   = "5896000022"
+
+[devices.pocket-v2]
+hub      = "1-1.3.4"
+port     = 1
+ppps     = true
+firmware = "lnode"
+vid_pid  = "1209:0002"
+serial   = "ABFAB3F1807E459B"
+
+[devices.heltec-v4]
+hub      = "1-1.3.4"
+port     = 2
+ppps     = false
+firmware = "rnode"
+vid_pid  = "303a:1001"
+serial   = "44:1B:F6:69:77:24"
+
+[devices.t114]
+hub      = "1-1.3"
+port     = 2
+ppps     = true
+firmware = "lnode"
+vid_pid  = "1209:0001"
+serial   = "DEC9947DAD9D2869"
+
+# ----- Profiles -----
+#
+# Each profile lists the device-keys that must be on (`required`) and
+# the keys that must be off (`exclude`) for the test.  Devices not in
+# either list are left in their pre-test state.  `heltec_v4` is treated
+# specially (because it cannot be turned off per-port):
+#   "ignore"       — heltec-v4 may stay on; tests must tolerate it
+#   "must-be-on"   — heltec-v4 must remain on (no special action needed)
+#
+# `default` is the all-on fall-back assigned to every test that lacks an
+# explicit `profile = "..."` field in its descriptor.
+
+[profiles.lora_lncp_bidir]
+required  = ["t-beam-1", "t-beam-2"]
+exclude   = ["pocket-v2", "t114"]
+heltec_v4 = "ignore"
+
+[profiles.lora_lnode_lncp_bidir]
+required  = ["pocket-v2", "t114"]
+exclude   = ["t-beam-1", "t-beam-2"]
+heltec_v4 = "ignore"
+
+[profiles.multi_hop_relay]
+required  = ["t-beam-1", "t114", "t-beam-2"]
+exclude   = ["pocket-v2"]
+heltec_v4 = "ignore"
+
+[profiles.full_mesh_5node]
+required  = ["t-beam-1", "t-beam-2", "pocket-v2", "heltec-v4", "t114"]
+exclude   = []
+heltec_v4 = "must-be-on"
+
+[profiles.default]
+required  = ["t-beam-1", "t-beam-2", "pocket-v2", "heltec-v4", "t114"]
+exclude   = []
+heltec_v4 = "must-be-on"
