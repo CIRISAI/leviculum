@@ -10,6 +10,8 @@
 # Radio config matches firmware default (RadioConfig::eu_medium in
 # reticulum-nrf::lora).
 
+profile = "lora_lnode_lncp_bidir"
+
 [test]
 name = "lora_lnode_lncp_bidir"
 description = "lncp bidirectional 2KB between two LNodes over direct LoRa"
