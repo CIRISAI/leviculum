@@ -4,4 +4,4 @@ Description=Leviculum CI Tier 3 (nightly)
 [Service]
 Type=oneshot
 WorkingDirectory=%h/coding/libreticulum
-ExecStart=/bin/bash %h/coding/libreticulum/scripts/run-tier3.sh
+ExecStart=/bin/bash %h/coding/libreticulum/scripts/run-tier3-hw.sh
