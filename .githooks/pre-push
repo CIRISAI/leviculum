@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-# Always run Tier 0 fast checks
+# Always run Tier 0 fast checks (transitively pulls in mvr)
 just fast
 
-# Record Tier 0 pass in results log
+# Record Tier 0 + mvr pass in results log (mvr is fast's dep)
 mkdir -p ~/.local/state/leviculum-ci
-echo "$(date -Iseconds) tier0 GREEN" >> ~/.local/state/leviculum-ci/last-results.txt
+echo "$(date -Iseconds) tier0+mvr GREEN" >> ~/.local/state/leviculum-ci/last-results.txt
 
 # Check Tier 2 staleness: 5 commits or 8h → WARN, 10 commits or 24h → BLOCK
 STALENESS=$(bash scripts/check-tier2-staleness.sh)
