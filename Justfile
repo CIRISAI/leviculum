@@ -1,8 +1,18 @@
 # Exclude reticulum-integ: its lib tests are Docker-based and require
 # --test-threads=1 (run in Tier 2). Including them here would race-fail
 # and blow the 3 min budget.
+
+# Minimum-viable-reproduction tier — discipline tier, not size tier.
+# Each test < 5 s, deterministic, single named failure mode.  See
+# Codeberg #39 for design intent.  --test-threads=1 avoids
+# port/resource contention between concurrent integration-style tests
+# in the same binary.  Depends on build-integ-bins because the mvr
+# tests spawn the release lnsd/lncp binaries directly.
+mvr: build-integ-bins
+    cargo test -p reticulum-std --test mvr -- --test-threads=1
+
 # Tier 0 (~3 min, runs on every git push): fmt + clippy + workspace lib tests.
-fast:
+fast: mvr
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     cargo test --workspace --lib --exclude reticulum-integ
