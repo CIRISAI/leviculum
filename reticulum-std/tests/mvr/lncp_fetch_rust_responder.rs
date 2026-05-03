@@ -50,7 +50,20 @@ fn release_bin(name: &str) -> PathBuf {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.join("target"));
-    target_dir.join("release").join(name)
+    // Honor the workspace-level target triple from .cargo/config.toml
+    // (cargo puts release binaries under <target_dir>/<triple>/release/
+    // when a default --target is configured).  Fall back to the
+    // unprefixed <target_dir>/release/<name> for environments without a
+    // configured triple.  See the 2026-05-04 Stage-4 stop-report for the
+    // bug history.
+    let triple = std::env::var("CARGO_BUILD_TARGET")
+        .unwrap_or_else(|_| "x86_64-unknown-linux-musl".to_string());
+    let triple_release = target_dir.join(&triple).join("release").join(name);
+    if triple_release.exists() {
+        triple_release
+    } else {
+        target_dir.join("release").join(name)
+    }
 }
 
 /// Write a minimal lnsd INI config for the mvr.
