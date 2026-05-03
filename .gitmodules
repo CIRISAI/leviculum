@@ -1,6 +1,7 @@
 [submodule "vendor/Reticulum"]
 	path = vendor/Reticulum
-	url = https://github.com/markqvist/Reticulum.git
+	url = https://github.com/reallew/Reticulum.git
+	branch = libreticulum-patches
 [submodule "vendor/RNode_Firmware"]
 	path = vendor/RNode_Firmware
 	url = https://github.com/markqvist/RNode_Firmware.git
