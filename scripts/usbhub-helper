@@ -23,6 +23,21 @@ set -euo pipefail
 
 UHUBCTL=/usr/sbin/uhubctl
 
+# When invoked via SSH ForceCommand (`command="usbhub-helper $SSH_ORIGINAL_COMMAND"`
+# in authorized_keys), sshd runs us through the user's login shell.  Some
+# login shells (notably fish) do NOT word-split on variable expansion, so
+# `$SSH_ORIGINAL_COMMAND` arrives as a single positional argument like
+# "disable t-beam-1" instead of two args "disable" "t-beam-1".  Re-parse
+# from the env var using bash's own IFS-splitting (with globbing disabled,
+# so `enable *` won't expand against /etc), independent of the calling
+# shell.  Falls back to "$@" when not invoked via ssh.
+if [[ -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+    set -f
+    # shellcheck disable=SC2086
+    set -- $SSH_ORIGINAL_COMMAND
+    set +f
+fi
+
 DEVICE_KEYS=(t-beam-1 t-beam-2 pocket-v2 heltec-v4 t114)
 
 # device-key → hub
