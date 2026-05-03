@@ -58,6 +58,16 @@ pub(crate) enum RpcRequest {
     UnblackholeIdentity {
         identity_hash: Vec<u8>,
     },
+    // destination_data lifecycle commands (stubs — see handlers.rs)
+    DestinationDataUsed {
+        destination_hash: Vec<u8>,
+    },
+    DestinationDataRetain {
+        destination_hash: Vec<u8>,
+    },
+    DestinationDataUnretain {
+        destination_hash: Vec<u8>,
+    },
 }
 
 /// Parse an RPC request from pickle bytes.
@@ -155,6 +165,21 @@ pub(crate) fn parse_request(data: &[u8]) -> Result<RpcRequest, RpcError> {
         return Ok(RpcRequest::UnblackholeIdentity {
             identity_hash: identity_bytes,
         });
+    }
+
+    // Check for "destination_data" key (used / retain / unretain operations)
+    if let Some(op) = dict_get_str(&dict, "destination_data") {
+        let destination_hash = dict_get_bytes(&dict, "destination_hash")
+            .ok_or_else(|| RpcError::InvalidFormat("missing destination_hash".into()))?;
+        return match op.as_str() {
+            "used" => Ok(RpcRequest::DestinationDataUsed { destination_hash }),
+            "retain" => Ok(RpcRequest::DestinationDataRetain { destination_hash }),
+            "unretain" => Ok(RpcRequest::DestinationDataUnretain { destination_hash }),
+            other => Err(RpcError::InvalidFormat(format!(
+                "unknown destination_data operation: {}",
+                other
+            ))),
+        };
     }
 
     Err(RpcError::InvalidFormat("unrecognized request".into()))

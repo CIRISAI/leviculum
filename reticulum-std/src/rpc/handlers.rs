@@ -47,6 +47,28 @@ pub(super) fn handle_request(
         RpcRequest::GetBlackholedIdentities => pickle_dict(vec![]),
         RpcRequest::BlackholeIdentity { .. } => pickle_bool(true),
         RpcRequest::UnblackholeIdentity { .. } => pickle_bool(true),
+
+        // destination_data lifecycle stubs.
+        //
+        // Upstream Reticulum b5658c4 (2026-04-20, "Keep track of which
+        // known destinations are actually in use, so irrelevant
+        // destination data can be cleaned") added a known_destinations
+        // GC scheme exposed via three RPC ops on the destination_data
+        // dict key: "used", "retain", "unretain".  All five upstream
+        // call sites (Identity.recall x3, Transport x2) discard the
+        // return value as of 2026-05-03 — these are pure side-effect
+        // calls.
+        //
+        // Our Rust daemon does not maintain a known_destinations dict
+        // with last-used timestamps; destinations and paths live in
+        // different data structures with different lifetime semantics.
+        // The stubs honor the wire contract (accept the call, return
+        // pickle_bool(true)) without internal bookkeeping.  Safe iff
+        // no upstream caller starts reading the return value; revisit
+        // if that changes.
+        RpcRequest::DestinationDataUsed { .. } => pickle_bool(true),
+        RpcRequest::DestinationDataRetain { .. } => pickle_bool(true),
+        RpcRequest::DestinationDataUnretain { .. } => pickle_bool(true),
     };
 
     serialize_response(&response)
