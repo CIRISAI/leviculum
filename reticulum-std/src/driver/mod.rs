@@ -419,7 +419,7 @@ impl ReticulumNode {
                             max_reconnect_tries: config.max_reconnect_tries,
                             reconnect_notify: Some(reconnect_tx.clone()),
                         });
-                        tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
+                        tracing::debug!("TCP client interface for {} (reconnect enabled)", addr);
                         registry.register(handle);
                     }
                     "TCPServerInterface" => {
