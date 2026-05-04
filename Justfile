@@ -40,6 +40,7 @@ standard: fast
     cargo test -p reticulum-ffi
     cargo test -p reticulum-proxy
     cargo test -p reticulum-std --test rnsd_interop
+    cargo test -p reticulum-std --test event_log_subscriber -- --test-threads=1
 
 # Build the production binaries the integ runner mounts into Docker
 # containers. Explicit per-bin list avoids `--workspace --bins` which

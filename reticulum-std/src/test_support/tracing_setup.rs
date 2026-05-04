@@ -27,21 +27,32 @@ use std::sync::Once;
 
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 use tracing_subscriber::{fmt, EnvFilter, Registry};
 
 static INIT: Once = Once::new();
 
-/// Install the process-global subscriber.  Composes a `fmt` layer
-/// (with `with_test_writer` so libtest captures the output) with an
-/// `EnvFilter` driven by `RUST_LOG`.  Stage-6 commit 2 will extend
-/// this chain with the event-log layer; for now the chain is
-/// fmt-layer-only and behaviourally equivalent to the previous
-/// `tracing_subscriber::fmt().init()` call site.
+/// Install the process-global subscriber.  Composes:
+///
+/// - an `EnvFilter` driven by `RUST_LOG` (default `info`),
+/// - the standard `fmt` layer with `with_test_writer` so libtest
+///   captures the output, and
+/// - the event-log layer from
+///   [`crate::test_support::event_log::layer`], driven by an
+///   active-handles list shared with [`crate::test_support::event_log::init_event_log`].
+///
+/// Once-guarded — every test file that needs the global subscriber
+/// can call this safely; only the first call wins.
 pub fn init_tracing_with_event_log() {
     INIT.call_once(|| {
         let env_filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        let fmt_layer = fmt::layer().with_test_writer();
-        Registry::default().with(env_filter).with(fmt_layer).init();
+        // Filter is attached to the fmt layer only — keeps fmt-output
+        // tame at info-level by default while letting the event-log
+        // layer see every record.  RUST_LOG=debug still works for
+        // anyone who wants verbose fmt output.
+        let fmt_layer = fmt::layer().with_test_writer().with_filter(env_filter);
+        let event_layer = crate::test_support::event_log::layer();
+        Registry::default().with(fmt_layer).with(event_layer).init();
     });
 }

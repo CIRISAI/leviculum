@@ -6,4 +6,5 @@
 //!   composes the standard fmt layer with an optional event-log layer.
 //!   Used by `tests/rnsd_interop/common.rs::init_tracing()`.
 
+pub mod event_log;
 pub mod tracing_setup;
