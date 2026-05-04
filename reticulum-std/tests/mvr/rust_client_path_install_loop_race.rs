@@ -26,11 +26,7 @@ use rand_core::{OsRng, RngCore};
 use reticulum_core::{Destination, DestinationHash, DestinationType, Direction, Identity};
 use reticulum_std::driver::ReticulumNodeBuilder;
 
-#[path = "../rnsd_interop/harness.rs"]
-#[allow(dead_code)]
-mod harness;
-
-use harness::TestDaemon;
+use crate::harness::TestDaemon;
 
 const TRUNCATED_HASHBYTES: usize = 16;
 const LOOP_ITERATIONS: usize = 25;

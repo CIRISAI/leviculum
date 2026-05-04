@@ -32,11 +32,7 @@ use std::time::Duration;
 use reticulum_core::DestinationHash;
 use reticulum_std::driver::ReticulumNodeBuilder;
 
-#[path = "../rnsd_interop/harness.rs"]
-#[allow(dead_code)]
-mod harness;
-
-use harness::TestDaemon;
+use crate::harness::TestDaemon;
 
 const TRUNCATED_HASHBYTES: usize = 16;
 

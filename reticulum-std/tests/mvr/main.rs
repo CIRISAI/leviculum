@@ -10,6 +10,14 @@
 //! transport from process primitives and holds the rest of the protocol
 //! stack (daemon, client tools, resource machinery) unchanged.
 
+// Shared harness — loaded once here so all mvr test files can reach
+// it via `use crate::harness::...`.  Loading it once avoids the
+// `clippy::duplicate_mod` warning that fires when each mvr file
+// pulls in `#[path] mod harness;` independently.
+#[path = "../rnsd_interop/harness.rs"]
+#[allow(dead_code)]
+pub mod harness;
+
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
 mod rust_client_path_install_from_python;

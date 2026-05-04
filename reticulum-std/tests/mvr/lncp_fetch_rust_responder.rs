@@ -719,7 +719,9 @@ fn run_fetch_with_latency(delay_ms: u64) -> (bool, u64) {
         None => {
             stop.store(true, Ordering::Relaxed);
             let _ = lnsd_a.kill();
+            let _ = lnsd_a.wait();
             let _ = lnsd_b.kill();
+            let _ = lnsd_b.wait();
             return (false, t0.elapsed().as_secs());
         }
     };
@@ -810,7 +812,6 @@ fn lncp_fetch_latency_injection() {
 ///   * Packet reordering: swap two adjacent incoming frames in one
 ///     direction. Models the Bug #26 H5 "resource-strategy
 ///     registration race" hypothesis.
-
 fn spawn_latency_proxy_asymmetric(
     listen_port: u16,
     upstream_port: u16,
@@ -1031,7 +1032,9 @@ fn run_fetch_variant(
         None => {
             stop.store(true, Ordering::Relaxed);
             let _ = lnsd_a.kill();
+            let _ = lnsd_a.wait();
             let _ = lnsd_b.kill();
+            let _ = lnsd_b.wait();
             return (false, t0.elapsed().as_secs());
         }
     };
@@ -1309,7 +1312,9 @@ fn run_fetch_for_bug26(
         None => {
             stop.store(true, Ordering::Relaxed);
             let _ = lnsd_a.kill();
+            let _ = lnsd_a.wait();
             let _ = lnsd_b.kill();
+            let _ = lnsd_b.wait();
             return (false, t0.elapsed().as_secs(), String::new());
         }
     };

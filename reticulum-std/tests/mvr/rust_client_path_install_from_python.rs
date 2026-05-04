@@ -38,11 +38,7 @@ const TRUNCATED_HASHBYTES: usize = 16;
 // this mvr self-contained — #[path] imports of common.rs pull in a
 // web of unrelated modules (harness, test_daemon, link helpers) that
 // doesn't resolve cleanly from under `tests/mvr/`.
-#[path = "../rnsd_interop/harness.rs"]
-#[allow(dead_code)]
-mod harness;
-
-use harness::TestDaemon;
+use crate::harness::TestDaemon;
 
 fn parse_dest_hash(hex_str: &str) -> DestinationHash {
     let bytes: [u8; TRUNCATED_HASHBYTES] = hex::decode(hex_str)

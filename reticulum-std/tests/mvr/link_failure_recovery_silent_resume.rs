@@ -49,10 +49,6 @@ use reticulum_core::{Destination, DestinationHash, DestinationType, Direction, I
 use reticulum_std::driver::ReticulumNodeBuilder;
 use reticulum_std::NodeEvent;
 
-#[path = "../rnsd_interop/harness.rs"]
-#[allow(dead_code)]
-mod harness;
-
 /// Use a port band above the lncp_fetch mvr's 61500 base to avoid
 /// cross-file collisions when both files run in the same `cargo test`
 /// invocation. Bind-and-release picks a free port within the band.

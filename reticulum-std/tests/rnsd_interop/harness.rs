@@ -1944,6 +1944,15 @@ impl DaemonTopology {
     pub fn len(&self) -> usize {
         self.daemons.len()
     }
+
+    /// True if no daemons have been added yet.  Pairs with [`Self::len`]
+    /// to satisfy `clippy::len_without_is_empty`.  Currently unused by
+    /// callers — the `#[allow]` keeps the lint quiet for the rnsd_interop
+    /// test binary (where harness is included without `#[allow(dead_code)]`).
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.daemons.is_empty()
+    }
 }
 
 #[cfg(test)]
