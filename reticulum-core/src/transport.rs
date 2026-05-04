@@ -1046,12 +1046,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             packet.hops
         );
         tracing::debug!(
-            "[PKT_RX] iface={} type={:?} dst={} hops={} len={}",
-            self.iface_name(interface_index),
-            packet.flags.packet_type,
-            HexShort(&packet.destination_hash),
-            packet.hops,
-            raw.len()
+            event = "PKT_RX",
+            iface = %self.iface_name(interface_index),
+            r#type = ?packet.flags.packet_type,
+            dst = %HexShort(&packet.destination_hash),
+            hops = packet.hops,
+            len = raw.len(),
         );
 
         // Filter HEADER_2 packets not addressed to this transport instance
@@ -1622,11 +1622,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             is_path_response
         );
         tracing::debug!(
-            "[ANN_RX] dst={} hops={} iface={} path_response={}",
-            HexShort(&dest_hash),
-            packet.hops,
-            self.iface_name(interface_index),
-            is_path_response
+            event = "ANN_RX",
+            dst = %HexShort(&dest_hash),
+            hops = packet.hops,
+            iface = %self.iface_name(interface_index),
+            path_response = is_path_response,
         );
         let random_hash = *announce.random_hash();
 
@@ -1800,13 +1800,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let readback_ok = self.storage.get_path(&dest_hash).is_some();
             let table_len = self.storage.path_count();
             tracing::debug!(
-                "[PATH_ADD] dst={} hops={} iface={} next_hop={:?} source=announce ok={} table_len={}",
-                HexShort(&dest_hash),
-                packet.hops,
-                self.iface_name(interface_index),
-                packet.transport_id.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
-                readback_ok,
-                table_len
+                event = "PATH_ADD",
+                dst = %HexShort(&dest_hash),
+                hops = packet.hops,
+                iface = %self.iface_name(interface_index),
+                next_hop = ?packet.transport_id.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
+                source = "announce",
+                ok = readback_ok,
+                table_len = table_len,
             );
 
             if let Some(ref next_hop) = packet.transport_id {
@@ -2620,9 +2621,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Also deliver locally if destination is registered on this node
             if self.local_destinations.contains(&dest_hash) {
                 tracing::debug!(
-                    "[PKT_LOCAL] dst={} iface={} matched=true",
-                    HexShort(&dest_hash),
-                    self.iface_name(interface_index)
+                    event = "PKT_LOCAL",
+                    dst = %HexShort(&dest_hash),
+                    iface = %self.iface_name(interface_index),
+                    matched = true,
                 );
                 self.storage.add_packet_hash(full_packet_hash);
                 self.events.push(TransportEvent::PacketReceived {
@@ -2806,11 +2808,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     HexShort(&packet.destination_hash)
                 );
                 tracing::debug!(
-                    "[PKT_DROP] dst={} type={:?} hops={} iface_in={} reason=no_path",
-                    HexShort(&packet.destination_hash),
-                    packet.flags.packet_type,
-                    packet.hops,
-                    self.iface_name(source_interface_index)
+                    event = "PKT_DROP",
+                    dst = %HexShort(&packet.destination_hash),
+                    r#type = ?packet.flags.packet_type,
+                    hops = packet.hops,
+                    iface_in = %self.iface_name(source_interface_index),
+                    reason = "no_path",
                 );
                 self.stats.packets_dropped += 1;
                 return Ok(());
@@ -2824,15 +2827,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             packet.hops
         );
         tracing::debug!(
-            "[PKT_FORWARD] dst={} type={:?} hops={} iface_in={} iface_out={} next_hop={:?}",
-            HexShort(&packet.destination_hash),
-            packet.flags.packet_type,
-            packet.hops,
-            self.iface_name(source_interface_index),
-            self.iface_name(target_iface),
-            next_hop
-                .as_ref()
-                .map(|h| alloc::format!("{}", HexShort(&h[..])))
+            event = "PKT_FORWARD",
+            dst = %HexShort(&packet.destination_hash),
+            r#type = ?packet.flags.packet_type,
+            hops = packet.hops,
+            iface_in = %self.iface_name(source_interface_index),
+            iface_out = %self.iface_name(target_iface),
+            next_hop = ?next_hop.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
         );
 
         let now = self.clock.now_ms();

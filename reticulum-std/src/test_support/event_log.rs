@@ -111,15 +111,45 @@ pub struct EventSchema {
     pub required_keys: &'static [&'static str],
 }
 
-/// Production catalogue.  Stage 6 commit 4 expands this to one
-/// entry per converted call site; until then only `PKT_RX` is
-/// catalogued.  Adding entries without a live emitter is the
-/// "stale catalogue" failure mode (Variant 3 can't detect it),
-/// so we keep this minimal.
-pub const EVENT_CATALOG: &[EventSchema] = &[EventSchema {
-    name: "PKT_RX",
-    required_keys: &["iface", "type", "dst", "hops", "len"],
-}];
+/// Production catalogue — one entry per converted call site in
+/// `reticulum-core/src/transport.rs`.  Adding entries without a
+/// live emitter is the "stale catalogue" failure mode (Variant 3
+/// can't detect it), so every entry here MUST have a corresponding
+/// `tracing::debug!(event = "FOO", ...)` in production code.
+pub const EVENT_CATALOG: &[EventSchema] = &[
+    EventSchema {
+        name: "PKT_RX",
+        required_keys: &["iface", "type", "dst", "hops", "len"],
+    },
+    EventSchema {
+        name: "ANN_RX",
+        required_keys: &["dst", "hops", "iface", "path_response"],
+    },
+    EventSchema {
+        name: "PATH_ADD",
+        required_keys: &[
+            "dst",
+            "hops",
+            "iface",
+            "next_hop",
+            "ok",
+            "source",
+            "table_len",
+        ],
+    },
+    EventSchema {
+        name: "PKT_LOCAL",
+        required_keys: &["dst", "iface", "matched"],
+    },
+    EventSchema {
+        name: "PKT_DROP",
+        required_keys: &["dst", "hops", "iface_in", "reason", "type"],
+    },
+    EventSchema {
+        name: "PKT_FORWARD",
+        required_keys: &["dst", "hops", "iface_in", "iface_out", "next_hop", "type"],
+    },
+];
 
 /// Where the buffer is dumped on a panicking drop.
 enum DumpTarget {

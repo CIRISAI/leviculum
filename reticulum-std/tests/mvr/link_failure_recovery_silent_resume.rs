@@ -485,6 +485,15 @@ fn print_events(label: &str, events: &[String]) {
 /// against scaffolding regressions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn link_failure_recovery_silent_resume_with_forced_announce() {
+    // Wire the structured event-log subscriber.  All threads —
+    // main and tokio worker — route through the same global
+    // subscriber registered once via Layer composition (see
+    // reticulum_std::test_support::tracing_setup), so events
+    // emitted from inside `run_scenario` (which spawns work onto
+    // worker threads) end up in `_evlog`'s buffer.  On test
+    // panic, the Drop dumps the buffer to stderr.
+    let _evlog = reticulum_std::test_support::event_log::init_event_log();
+
     let opts = ScenarioOpts {
         block_s: 10,
         wait_s: 5,
@@ -502,6 +511,7 @@ async fn link_failure_recovery_silent_resume_with_forced_announce() {
          iface-level mechanism is even tested.",
         opts.wait_s,
     );
+    reticulum_std::assert_no_schema_violations!(_evlog);
 }
 
 /// Baseline: no forced announce. The unfixed iface holds whatever
