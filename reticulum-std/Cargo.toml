@@ -21,6 +21,12 @@ socket2.workspace = true
 libc.workspace = true
 tokio-serial.workspace = true
 tracing = { workspace = true, features = ["std"] }
+# Used by `test_support::tracing_setup` (and from commit 2 onward
+# `test_support::event_log`) for the test-harness subscriber.  The
+# crate's runtime presence is a few KB; production builds that don't
+# call into `test_support` see only compile-time pull-in via the
+# Layer trait used by the Registry composition.
+tracing-subscriber.workspace = true
 serde.workspace = true
 serde-pickle.workspace = true
 sha2 = { workspace = true, features = ["std"] }

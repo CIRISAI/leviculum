@@ -27,6 +27,7 @@ pub(crate) mod packet_hashlist;
 pub mod reticulum;
 pub(crate) mod rpc;
 pub(crate) mod storage;
+pub mod test_support;
 
 // Re-export commonly used core types for the high-level API
 pub use reticulum_core::node::{DeliveryError, LinkStats, NodeEvent};
