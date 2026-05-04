@@ -276,5 +276,8 @@ if [[ $RC -eq 0 ]]; then
 else
     log "[CI_HW] tier3 RED"
     echo "$(date -Iseconds) tier3 RED $LOG" >> "$RESULTS"
+    # One bundle per tier-3 run, not per failing profile group;
+    # per-profile RED log lines remain informational only.
+    bash "$REPO_DIR/scripts/_emit-auto-bug-bundle.sh" tier3-hw "$LOG" || true
 fi
 exit $RC

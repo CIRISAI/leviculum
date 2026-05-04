@@ -32,15 +32,14 @@ fi
 
 MARKER="$LOG_DIR/lock-contention"
 if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target just extensive > "$LOG" 2>&1; then
-    notify-send -u low "Leviculum CI" "Tier 2 extensive: GREEN"
     echo "$(date -Iseconds) tier2 GREEN $LOG" >> "$RESULTS"
 elif [ -f "$MARKER" ]; then
     # Another cargo-test invocation held the integ lock when Tier 2 tried
     # to start. Not a failure — deferred. See reticulum-integ/src/lock.rs.
+    # Lock-contention is NOT a RED — no bundle emit.
     rm -f "$MARKER"
-    notify-send -u normal "Leviculum CI" "Tier 2 extensive: SKIPPED — another test held the lock"
     echo "$(date -Iseconds) tier2 SKIPPED lock-held $LOG" >> "$RESULTS"
 else
-    notify-send -u critical "Leviculum CI" "Tier 2 extensive: RED — see $LOG"
     echo "$(date -Iseconds) tier2 RED $LOG" >> "$RESULTS"
+    bash "$(dirname "$0")/_emit-auto-bug-bundle.sh" tier2 "$LOG" || true
 fi
