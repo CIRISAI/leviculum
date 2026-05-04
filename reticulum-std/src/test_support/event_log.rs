@@ -89,13 +89,20 @@
 //! with a `=== EVENT LOG DUMP …` banner.
 
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
-use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter, Registry};
+
+const NODE_ENV_VAR: &str = "LEVICULUM_EVENT_NODE";
+const LOG_FILE_ENV_VAR: &str = "LEVICULUM_EVENT_LOG";
 
 /// Schema for one structured event.  Declares the keys that MUST be
 /// present on every emission of this event name.
@@ -249,6 +256,83 @@ fn active_list() -> &'static Arc<Mutex<Vec<ActiveHandle>>> {
     ACTIVE.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
 }
 
+/// Process-wide node identifier.  Read from `LEVICULUM_EVENT_NODE`
+/// at first access; defaults to `local`.  Cached via OnceLock so
+/// every emitted event gets a consistent prefix even if the env
+/// changes mid-run.
+fn node_name() -> &'static str {
+    static NODE: OnceLock<String> = OnceLock::new();
+    NODE.get_or_init(|| std::env::var(NODE_ENV_VAR).unwrap_or_else(|_| "local".to_string()))
+}
+
+/// Process-wide append-only event log file.  Returns `Some` only when
+/// `LEVICULUM_EVENT_LOG=<path>` is set in the environment at first
+/// access AND the file opens successfully.  Cached via OnceLock so
+/// the env-var lookup + file-open happens exactly once per process.
+fn event_log_file() -> Option<&'static Mutex<File>> {
+    static FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        std::env::var(LOG_FILE_ENV_VAR).ok().and_then(|p| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+                .map(Mutex::new)
+        })
+    })
+    .as_ref()
+}
+
+/// Read every input file as text, parse the trailing `t=<n>` token of
+/// each non-empty line, and return all lines sorted by parsed `n`
+/// (stable on tie).  Lines that fail `t=` parsing sort to the end
+/// with a synthetic timestamp of `u128::MAX`, preserving their
+/// relative order.
+pub fn merge_event_logs(paths: &[PathBuf]) -> Vec<String> {
+    let mut lines: Vec<(u128, usize, String)> = Vec::new();
+    let mut tie_breaker: usize = 0;
+    for path in paths {
+        let Ok(file) = File::open(path) else { continue };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let t = parse_t(&line).unwrap_or(u128::MAX);
+            lines.push((t, tie_breaker, line));
+            tie_breaker += 1;
+        }
+    }
+    lines.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    lines.into_iter().map(|(_, _, l)| l).collect()
+}
+
+fn parse_t(line: &str) -> Option<u128> {
+    line.split_whitespace()
+        .rev()
+        .find_map(|tok| tok.strip_prefix("t="))
+        .and_then(|n| n.parse::<u128>().ok())
+}
+
+/// Install a global tracing subscriber for production daemons (`lnsd`,
+/// the helper bin, etc.) that combines a standard fmt layer with the
+/// event-log layer when `LEVICULUM_EVENT_LOG` is set.  Unset → only
+/// fmt installed; runtime overhead matches the previous standalone
+/// `tracing_subscriber::fmt().init()` call.
+///
+/// `default_filter` is the env-filter directive used when `RUST_LOG`
+/// is unset (e.g. `"info"`, `"debug"`, …).
+pub fn install_global_subscriber(default_filter: &str) {
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let fmt_layer = fmt::layer().compact().with_filter(env_filter);
+    if std::env::var(LOG_FILE_ENV_VAR).is_ok() {
+        let _ = Registry::default().with(fmt_layer).with(layer()).try_init();
+    } else {
+        let _ = Registry::default().with(fmt_layer).try_init();
+    }
+}
+
 /// The layer registered into the global subscriber chain.  Driven by
 /// the active-handles list above.
 pub struct EventLogLayer {
@@ -280,14 +364,14 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
 
         let t_ms = self.init_time.elapsed().as_millis();
 
-        // Build the canonical line.  node= is reserved as the first
-        // field (commit 3 will source it from LEVICULUM_EVENT_NODE);
-        // for now hardcoded to "local".  Other fields alphabetical;
-        // t= last.
+        // Build the canonical line.  node= reserved as the first
+        // field, sourced from LEVICULUM_EVENT_NODE (default "local").
+        // Other fields alphabetical; t= last.
         let mut line = String::with_capacity(64);
         line.push_str(&event_name);
         line.push(' ');
-        line.push_str("node=local");
+        line.push_str("node=");
+        line.push_str(node_name());
         for (k, v) in &visitor.fields {
             // `node` from a tracing call would conflict with the
             // reserved prefix — env-var wins, user-supplied skipped.
@@ -303,6 +387,33 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
 
         let caller = self.caller(event);
 
+        // Build the field-violation lines once; they have no per-
+        // handle component, so all consumers (file + every active
+        // buffer) receive the same text.
+        let field_violation_lines: Vec<String> = visitor
+            .field_violations
+            .iter()
+            .map(|(field, problem)| {
+                format!(
+                    "EVENT_FIELD_VIOLATION event={} field={} value_problem={} caller={} t={}",
+                    event_name, field, problem, caller, t_ms,
+                )
+            })
+            .collect();
+
+        // Process-wide append-only file (when LEVICULUM_EVENT_LOG is
+        // set).  Production daemons + helper bin write here.  Schema
+        // violations are per-handle so they don't appear in the file.
+        if let Some(file) = event_log_file() {
+            if let Ok(mut f) = file.lock() {
+                let _ = writeln!(f, "{line}");
+                for v in &field_violation_lines {
+                    let _ = writeln!(f, "{v}");
+                }
+                let _ = f.flush();
+            }
+        }
+
         // Distribute to every active handle.  Per-handle:
         //   1. push the canonical line
         //   2. push one EVENT_FIELD_VIOLATION per offending field
@@ -314,12 +425,8 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
             let mut buf = handle.buffer.lock().unwrap();
             buf.push(line.clone());
 
-            for (field, problem) in &visitor.field_violations {
-                let v = format!(
-                    "EVENT_FIELD_VIOLATION event={} field={} value_problem={} caller={} t={}",
-                    event_name, field, problem, caller, t_ms,
-                );
-                buf.push(v);
+            for v in &field_violation_lines {
+                buf.push(v.clone());
             }
 
             let schema = EVENT_CATALOG

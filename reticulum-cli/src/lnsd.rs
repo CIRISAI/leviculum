@@ -7,7 +7,10 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+// (tracing-subscriber init goes through reticulum_std's
+// event_log::install_global_subscriber so the LEVICULUM_EVENT_LOG
+// env var is honoured for structured-event capture.  Codeberg #39
+// piece 1.)
 
 use reticulum_std::config::Config;
 use reticulum_std::Reticulum;
@@ -45,12 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         -1 => "warn",
         _ => "error",
     };
-    tracing_subscriber::fmt()
-        .compact()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
-        )
-        .init();
+    reticulum_std::test_support::event_log::install_global_subscriber(default_filter);
 
     info!("Starting lnsd v{}", env!("CARGO_PKG_VERSION"));
 
