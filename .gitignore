@@ -43,7 +43,8 @@ __pycache__/
 # Local deploy scripts
 scripts/deploy-*.fish
 
-# Claude Code local state (user-specific; settings.json is shared)
+# Claude Code local state (not shared with the repo)
+.claude/settings.json
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/projects/
