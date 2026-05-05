@@ -1102,6 +1102,7 @@ dependencies = [
 name = "reticulum-std"
 version = "0.6.3"
 dependencies = [
+ "clap",
  "hex",
  "hmac",
  "if-addrs",

@@ -27,6 +27,10 @@ tracing = { workspace = true, features = ["std"] }
 # call into `test_support` see only compile-time pull-in via the
 # Layer trait used by the Registry composition.
 tracing-subscriber.workspace = true
+# Used by the `jl` and `jldiff` binaries (Stage 7 / Codeberg #39 piece 4).
+# Same major version as reticulum-cli's clap; no workspace alias to keep
+# the per-crate Cargo.toml self-contained.
+clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde-pickle.workspace = true
 sha2 = { workspace = true, features = ["std"] }
