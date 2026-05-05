@@ -270,3 +270,64 @@ fn test_field_value_whitespace_violation() {
         "wrong event in violation: {v_eq}",
     );
 }
+
+/// Test — `SILENCE_LNODE_ENTER` and `SILENCE_LNODE_EXIT` (Codeberg #50
+/// Bug-A forensic events) emit through the catalogue with their
+/// required keys and trigger an `EVENT_SCHEMA_VIOLATION` when a
+/// required key is missing.
+#[test]
+fn test_silence_lnode_events_in_catalogue() {
+    let handle = init_event_log();
+
+    // Happy path — both events with all required keys.
+    tracing::debug!(
+        event = "SILENCE_LNODE_ENTER",
+        usb_serial = "DEC9947DAD9D2869",
+        port_path = "/dev/ttyACM6",
+    );
+    tracing::debug!(
+        event = "SILENCE_LNODE_EXIT",
+        usb_serial = "DEC9947DAD9D2869",
+        port_path = "/dev/ttyACM6",
+        result = "acked",
+    );
+    // Schema-violation path — EXIT missing `result` key.
+    tracing::debug!(
+        event = "SILENCE_LNODE_EXIT",
+        usb_serial = "ABFAB3F1807E459B",
+        port_path = "/dev/ttyACM4",
+    );
+
+    let enter = lines_for(&handle, "SILENCE_LNODE_ENTER");
+    assert_eq!(enter.len(), 1, "ENTER lines: {enter:?}");
+    assert!(enter[0].starts_with("SILENCE_LNODE_ENTER node=local "));
+    assert!(enter[0].contains(" port_path=/dev/ttyACM6 "));
+    assert!(
+        enter[0].contains(" usb_serial=DEC9947DAD9D2869 "),
+        "missing usb_serial: {}",
+        enter[0]
+    );
+
+    let exit = lines_for(&handle, "SILENCE_LNODE_EXIT");
+    // Three lines: 1 valid SILENCE_LNODE_EXIT + 1 invalid + 1
+    // EVENT_SCHEMA_VIOLATION for the invalid one.
+    assert_eq!(exit.len(), 3, "EXIT lines: {exit:?}");
+    let valid = exit
+        .iter()
+        .find(|l| l.starts_with("SILENCE_LNODE_EXIT") && l.contains("result=acked"))
+        .unwrap_or_else(|| panic!("missing valid EXIT: {exit:?}"));
+    assert!(valid.contains(" port_path=/dev/ttyACM6 "));
+
+    let violation = exit
+        .iter()
+        .find(|l| l.starts_with("EVENT_SCHEMA_VIOLATION"))
+        .unwrap_or_else(|| panic!("missing schema violation: {exit:?}"));
+    assert!(
+        violation.contains("event=SILENCE_LNODE_EXIT"),
+        "wrong event: {violation}"
+    );
+    assert!(
+        violation.contains("missing=[result]"),
+        "wrong missing keys: {violation}"
+    );
+}

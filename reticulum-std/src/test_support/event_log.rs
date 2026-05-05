@@ -149,6 +149,18 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PKT_FORWARD",
         required_keys: &["dst", "hops", "iface_in", "iface_out", "next_hop", "type"],
     },
+    // Codeberg #50 Bug-A forensic instrumentation.  Emitted by
+    // `reticulum-integ/src/runner.rs::silence_unused_lnode` at function
+    // entry and at every exit branch; lets jl/jldiff diff between
+    // RNode-only and T114-involved scenarios for any future hang.
+    EventSchema {
+        name: "SILENCE_LNODE_ENTER",
+        required_keys: &["usb_serial", "port_path"],
+    },
+    EventSchema {
+        name: "SILENCE_LNODE_EXIT",
+        required_keys: &["usb_serial", "port_path", "result"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.

@@ -1127,6 +1127,17 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
     use reticulum_core::rnode::{build_radio_config_frame, RadioConfigWire, RADIO_CONFIG_ACK};
     use std::io::{Read, Write};
 
+    // Codeberg #50 Bug-A forensic instrumentation.  Structured Stage-6
+    // event at function entry; matching EXIT event at every return
+    // branch carries `result` ∈ {open_failed, write_error,
+    // no_ack_after_3, acked}.  Lets jl/jldiff diff RNode-only and
+    // T114-involved scenarios for the silence path's outcomes.
+    tracing::debug!(
+        event = "SILENCE_LNODE_ENTER",
+        usb_serial = usb_serial,
+        port_path = port_path,
+    );
+
     let wire = RadioConfigWire {
         frequency_hz: radio.frequency as u32,
         bandwidth_hz: radio.bandwidth,
@@ -1152,17 +1163,25 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
         Ok(p) => p,
         Err(e) => {
             eprintln!("[silence] T114 {usb_serial} at {port_path}: open failed: {e}");
+            tracing::debug!(
+                event = "SILENCE_LNODE_EXIT",
+                usb_serial = usb_serial,
+                port_path = port_path,
+                result = "open_failed",
+            );
             return;
         }
     };
     // CDC-ACM only transmits after DTR is asserted (matches debug-capture path).
     let _ = port.write_data_terminal_ready(true);
 
+    let mut any_write_ok = false;
     for attempt in 1..=3u8 {
         if let Err(e) = port.write_all(&framed) {
             eprintln!("[silence] T114 {usb_serial}: write (attempt {attempt}) failed: {e}");
             continue;
         }
+        any_write_ok = true;
         let _ = port.flush();
 
         let mut deframer = Deframer::new();
@@ -1176,6 +1195,12 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
                             if data.as_slice() == RADIO_CONFIG_ACK {
                                 eprintln!(
                                     "[silence] T114 {usb_serial} at {port_path}: csma=on acked"
+                                );
+                                tracing::debug!(
+                                    event = "SILENCE_LNODE_EXIT",
+                                    usb_serial = usb_serial,
+                                    port_path = port_path,
+                                    result = "acked",
                                 );
                                 return;
                             }
@@ -1194,6 +1219,17 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
     }
     eprintln!(
         "[silence] T114 {usb_serial} at {port_path}: NO ACK after 3 attempts — idle T114 may still disturb channel"
+    );
+    let result = if any_write_ok {
+        "no_ack_after_3"
+    } else {
+        "write_error"
+    };
+    tracing::debug!(
+        event = "SILENCE_LNODE_EXIT",
+        usb_serial = usb_serial,
+        port_path = port_path,
+        result = result,
     );
 }
 
