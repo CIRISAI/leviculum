@@ -31,7 +31,7 @@ if [ -z "$(git log --since=midnight --oneline 2>/dev/null)" ]; then
 fi
 
 MARKER="$LOG_DIR/lock-contention"
-if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target just extensive > "$LOG" 2>&1; then
+if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 just extensive > "$LOG" 2>&1; then
     echo "$(date -Iseconds) tier2 GREEN $LOG" >> "$RESULTS"
 elif [ -f "$MARKER" ]; then
     # Another cargo-test invocation held the integ lock when Tier 2 tried

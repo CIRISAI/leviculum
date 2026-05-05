@@ -20,7 +20,7 @@ while [ -f "$DIRTY" ]; do
     # Per-iteration LOG so each run keeps its own file — never overwrite a
     # previous run's log (CLAUDE.md: failure logs must always survive).
     LOG="$LOG_DIR/tier1-$(date +%Y%m%d-%H%M%S)-$$.log"
-    if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target just standard > "$LOG" 2>&1; then
+    if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 just standard > "$LOG" 2>&1; then
         echo "$(date -Iseconds) tier1 GREEN $LOG" >> "$RESULTS"
     else
         echo "$(date -Iseconds) tier1 RED $LOG" >> "$RESULTS"

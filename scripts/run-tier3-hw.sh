@@ -97,7 +97,7 @@ log "[CI_HW] hamster helper reachable"
 # this transitively, but we drive cargo directly per-group so no Just
 # dependency chain runs.
 log "[CI_HW] building integ binaries (lnsd / lns / lncp / lora-proxy)"
-CARGO_TARGET_DIR=~/.cache/leviculum-ci-target \
+CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
   cargo build --release --bin lnsd --bin lns --bin lncp --bin lora-proxy
 
 # --- TOML helpers (python3 + tomllib) ---
@@ -225,7 +225,7 @@ run_group() {
     # All tests of this profile in one cargo invocation: cheaper than
     # spawning a fresh test binary per test.  --test-threads=1 keeps
     # the integ-lock contract intact.
-    CARGO_TARGET_DIR=~/.cache/leviculum-ci-target \
+    CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
       cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}"
 }
 
