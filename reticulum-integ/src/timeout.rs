@@ -43,6 +43,7 @@
 //! still strongly biased toward "real wedge" even at the
 //! generous default.
 
+use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -51,6 +52,11 @@ use std::time::Duration;
 /// complete within `secs`.  Panics raised inside `f` are re-raised on the
 /// test thread so `#[should_panic]` and the default test reporter behave
 /// normally.
+///
+/// On timeout, fires `scripts/_capture-wedge-forensics.sh` to capture
+/// T114 USB-serial-id, dmesg tail, lsusb, wchan, and any
+/// `LEVICULUM_EVENT_LOG` file before the panic — best-effort, never
+/// shadows the original timeout.  See Codeberg #50.
 pub fn run_with_timeout<F>(name: &str, secs: u64, f: F)
 where
     F: FnOnce() + Send + 'static,
@@ -67,12 +73,28 @@ where
     match rx.recv_timeout(Duration::from_secs(secs)) {
         Ok(Ok(())) => {}
         Ok(Err(payload)) => std::panic::resume_unwind(payload),
-        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
-            "LoRa test '{name}' timed out after {secs}s — \
-             hardware/firmware did not progress (Codeberg #50)"
-        ),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            capture_wedge_forensics(name);
+            panic!(
+                "LoRa test '{name}' timed out after {secs}s — \
+                 hardware/firmware did not progress (Codeberg #50)"
+            )
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
+            capture_wedge_forensics(name);
             panic!("LoRa test '{name}' worker thread died without producing a result")
         }
     }
+}
+
+/// Best-effort invocation of the forensic capture script.  Failures are
+/// swallowed — the timeout-panic must not be shadowed by capture
+/// problems.
+fn capture_wedge_forensics(name: &str) {
+    // Repo-root resolution: CARGO_MANIFEST_DIR points at
+    // `<repo>/reticulum-integ` at compile time; the script lives at
+    // `<repo>/scripts/_capture-wedge-forensics.sh`.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let script = format!("{manifest_dir}/../scripts/_capture-wedge-forensics.sh");
+    let _ = Command::new("bash").arg(&script).arg(name).output();
 }
