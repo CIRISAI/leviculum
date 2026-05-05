@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use reticulum_std::driver::ReticulumNodeBuilder;
+use reticulum_std::test_support::event_log::init_event_log;
 use reticulum_std::NodeEvent;
 
 use crate::harness::TestDaemon;
@@ -54,6 +55,9 @@ async fn test_node_creation_and_startup() {
 /// (mirrors simple_send.rs example behavior)
 #[tokio::test]
 async fn test_node_receives_announce_from_daemon() {
+    // Codeberg #49 P3 instrumentation: capture the Stage-6 event-log so a
+    // failed run produces a structured trace for jl/jldiff analysis.
+    let _evlog = init_event_log();
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
     let _storage = crate::common::temp_storage("test_node_receives_announce_from_daemon", "node");
 
@@ -120,6 +124,8 @@ async fn test_node_receives_announce_from_daemon() {
 /// (mirrors echo_server.rs event handling pattern)
 #[tokio::test]
 async fn test_node_receives_multiple_announces() {
+    // Codeberg #49 P3 instrumentation.
+    let _evlog = init_event_log();
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
     let _storage = crate::common::temp_storage("test_node_receives_multiple_announces", "node");
 
@@ -288,6 +294,8 @@ async fn test_node_restart() {
 /// receiving an announce, the node knows a path to the destination.
 #[tokio::test]
 async fn test_node_learns_path_from_announce() {
+    // Codeberg #49 P3 instrumentation.
+    let _evlog = init_event_log();
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
     let _storage = crate::common::temp_storage("test_node_learns_path_from_announce", "node");
 
