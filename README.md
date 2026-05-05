@@ -1,12 +1,13 @@
-# leviculum
+# Leviculum
 
-Leviculum is a Rust implementation of the [Reticulum](https://reticulum.network/) network stack. It is wire-compatible with the Python reference implementation and runs on Linux, macOS, and embedded devices.
+Leviculum is an independent reimplementation based on the [Reticulum protocol specification](https://reticulum.network).
+It is wire-compatible with Reticulum and runs on Linux, macOS, and embedded devices.
 
 ## What is Reticulum?
 
 Reticulum is a networking stack for building resilient, encrypted mesh networks over any transport medium. It works over LoRa radios, TCP, UDP, serial links, or anything that can carry bytes. Every node gets a cryptographic identity. Every connection is end-to-end encrypted. No servers, no accounts, no infrastructure required.
 
-## What does leviculum do?
+## What does Leviculum do?
 
 Leviculum provides the same functionality as Python Reticulum but compiled to native code. The `lnsd` daemon is a drop-in replacement for `rnsd`. The `lncp` file transfer tool replaces `rncp`. Python CLI tools like `rnstatus`, `rnpath`, and `rnprobe` work against a running `lnsd` without modification.
 
