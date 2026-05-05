@@ -331,3 +331,158 @@ fn test_silence_lnode_events_in_catalogue() {
         "wrong missing keys: {violation}"
     );
 }
+
+// Stage-6 catalogue expansion (Codeberg #50 P2 follow-up).  One test
+// per newly-added catalogue entry: emit with all required keys, then
+// emit missing one, assert the canonical line + the schema-violation
+// line for the missing-key case.
+
+fn assert_catalogue_round_trip(
+    handle: &EventLogHandle,
+    event_name: &str,
+    expected_required_keys: &[&str],
+) {
+    let lines = lines_for(handle, event_name);
+    // Must contain at least the canonical line emitted with all
+    // required keys plus a schema violation for the line we emitted
+    // with one missing key.
+    let canonical = lines
+        .iter()
+        .find(|l| l.starts_with(&format!("{event_name} ")))
+        .unwrap_or_else(|| panic!("missing canonical line for {event_name}: {lines:?}"));
+    for k in expected_required_keys {
+        assert!(
+            canonical.contains(&format!(" {k}=")),
+            "canonical line for {event_name} missing key '{k}': {canonical}"
+        );
+    }
+    let violation = lines
+        .iter()
+        .find(|l| {
+            l.starts_with("EVENT_SCHEMA_VIOLATION") && l.contains(&format!("event={event_name} "))
+        })
+        .unwrap_or_else(|| panic!("missing schema violation for {event_name}: {lines:?}"));
+    assert!(
+        violation.contains("missing="),
+        "violation has no missing= field: {violation}"
+    );
+}
+
+#[test]
+fn test_catalogue_emb_evict() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "EMB_EVICT",
+        map = "destinations",
+        len_before = 32_usize,
+        cap = 32_usize
+    );
+    tracing::debug!(event = "EMB_EVICT", map = "destinations"); // missing len_before, cap
+    assert_catalogue_round_trip(&handle, "EMB_EVICT", &["cap", "len_before", "map"]);
+}
+
+#[test]
+fn test_catalogue_emb_insert_fail() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "EMB_INSERT_FAIL",
+        map = "paths",
+        len_after_evict = 10_usize,
+        cap = 16_usize
+    );
+    tracing::debug!(event = "EMB_INSERT_FAIL", map = "paths"); // missing len_after_evict, cap
+    assert_catalogue_round_trip(
+        &handle,
+        "EMB_INSERT_FAIL",
+        &["cap", "len_after_evict", "map"],
+    );
+}
+
+#[test]
+fn test_catalogue_identity() {
+    let handle = init_event_log();
+    tracing::info!(
+        event = "IDENTITY",
+        node = "deadbeef00112233445566778899aabb"
+    );
+    tracing::info!(event = "IDENTITY"); // missing node
+    assert_catalogue_round_trip(&handle, "IDENTITY", &["node"]);
+}
+
+#[test]
+fn test_catalogue_path_lookup() {
+    let handle = init_event_log();
+    // found=true site emits dst, found, hops, iface
+    tracing::debug!(
+        event = "PATH_LOOKUP",
+        dst = "abc1",
+        found = true,
+        hops = 0_u8,
+        iface = "lora0"
+    );
+    // found=false site emits dst, found only — still satisfies required keys
+    tracing::debug!(event = "PATH_LOOKUP", dst = "abc2", found = false);
+    // Missing-required test: drop both dst and found
+    tracing::debug!(event = "PATH_LOOKUP", note = "incomplete");
+    assert_catalogue_round_trip(&handle, "PATH_LOOKUP", &["dst", "found"]);
+}
+
+#[test]
+fn test_catalogue_path_table() {
+    let handle = init_event_log();
+    tracing::debug!(event = "PATH_TABLE", size = 5_usize);
+    tracing::debug!(event = "PATH_TABLE"); // missing size
+    assert_catalogue_round_trip(&handle, "PATH_TABLE", &["size"]);
+}
+
+#[test]
+fn test_catalogue_path_table_entry() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "PATH_TABLE_ENTRY",
+        dst = "abc1",
+        hops = 1_u8,
+        iface = "lora0",
+        next_hop = "beta",
+        expires_in_ms = 9000_u64,
+    );
+    tracing::debug!(event = "PATH_TABLE_ENTRY", dst = "abc1"); // missing hops, iface, next_hop, expires_in_ms
+    assert_catalogue_round_trip(
+        &handle,
+        "PATH_TABLE_ENTRY",
+        &["dst", "expires_in_ms", "hops", "iface", "next_hop"],
+    );
+}
+
+#[test]
+fn test_catalogue_proof_gen() {
+    let handle = init_event_log();
+    tracing::debug!(event = "PROOF_GEN", for_pkt = "abcd", to_dst = "ef01");
+    tracing::debug!(event = "PROOF_GEN", for_pkt = "abcd"); // missing to_dst
+    assert_catalogue_round_trip(&handle, "PROOF_GEN", &["for_pkt", "to_dst"]);
+}
+
+#[test]
+fn test_catalogue_proof_send() {
+    let handle = init_event_log();
+    tracing::debug!(event = "PROOF_SEND", pkt = "abcd", iface = "lora0");
+    tracing::debug!(event = "PROOF_SEND", pkt = "abcd"); // missing iface
+    assert_catalogue_round_trip(&handle, "PROOF_SEND", &["iface", "pkt"]);
+}
+
+#[test]
+fn test_catalogue_reverse_add() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "REVERSE_ADD",
+        pkt_hash = "deadbeef",
+        in_iface = "lora0",
+        out_iface = "tcp1",
+    );
+    tracing::debug!(event = "REVERSE_ADD", pkt_hash = "deadbeef"); // missing in_iface, out_iface
+    assert_catalogue_round_trip(
+        &handle,
+        "REVERSE_ADD",
+        &["in_iface", "out_iface", "pkt_hash"],
+    );
+}

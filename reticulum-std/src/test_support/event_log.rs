@@ -161,6 +161,49 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "SILENCE_LNODE_EXIT",
         required_keys: &["usb_serial", "port_path", "result"],
     },
+    // Stage-6 catalogue expansion (Codeberg #39 piece 5 follow-up).
+    // Promotes the remaining `[TAG] k=v ...` printf-style sites to
+    // structured events.  See `docs/src/structured-event-logs.md`
+    // for the convention.
+    EventSchema {
+        name: "EMB_EVICT",
+        required_keys: &["cap", "len_before", "map"],
+    },
+    EventSchema {
+        name: "EMB_INSERT_FAIL",
+        required_keys: &["cap", "len_after_evict", "map"],
+    },
+    EventSchema {
+        name: "IDENTITY",
+        required_keys: &["node"],
+    },
+    EventSchema {
+        name: "PATH_LOOKUP",
+        // `hops` and `iface` are present only on the `found=true`
+        // branch; only `dst` and `found` are required across both
+        // call sites.
+        required_keys: &["dst", "found"],
+    },
+    EventSchema {
+        name: "PATH_TABLE",
+        required_keys: &["size"],
+    },
+    EventSchema {
+        name: "PATH_TABLE_ENTRY",
+        required_keys: &["dst", "expires_in_ms", "hops", "iface", "next_hop"],
+    },
+    EventSchema {
+        name: "PROOF_GEN",
+        required_keys: &["for_pkt", "to_dst"],
+    },
+    EventSchema {
+        name: "PROOF_SEND",
+        required_keys: &["iface", "pkt"],
+    },
+    EventSchema {
+        name: "REVERSE_ADD",
+        required_keys: &["in_iface", "out_iface", "pkt_hash"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.

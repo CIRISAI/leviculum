@@ -398,10 +398,10 @@ fn map_set<K: Eq + core::hash::Hash + Copy, V, const N: usize>(
         Ok(_) => {}
         Err((k, v)) => {
             tracing::debug!(
-                "[EMB_EVICT] map={} len_before={} cap={}",
-                label,
-                map.len(),
-                N
+                event = "EMB_EVICT",
+                map = label,
+                len_before = map.len(),
+                cap = N,
             );
             // Snapshot keys + drain kept (K, V) pairs into heap-backed Vecs.
             // heapless inline storage would put `N * size_of::<(K, V)>()` on
@@ -427,10 +427,10 @@ fn map_set<K: Eq + core::hash::Hash + Copy, V, const N: usize>(
             // Insert the new entry at the back.
             if map.insert(k, v).is_err() {
                 tracing::debug!(
-                    "[EMB_INSERT_FAIL] map={} len_after_evict={} cap={}",
-                    label,
-                    map.len(),
-                    N
+                    event = "EMB_INSERT_FAIL",
+                    map = label,
+                    len_after_evict = map.len(),
+                    cap = N,
                 );
             }
         }

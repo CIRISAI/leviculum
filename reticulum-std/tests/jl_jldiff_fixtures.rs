@@ -273,3 +273,82 @@ fn all_fixtures_roundtrip_no_filter() {
         );
     }
 }
+
+// --- p2_proof_and_identity.log -------------------------------------------
+
+const P2_LOG: &str = include_str!("fixtures/p2_proof_and_identity.log");
+
+/// Verifies the Stage-6 catalogue expansion (Codeberg #50 P2): every
+/// new event name (IDENTITY, EMB_EVICT, EMB_INSERT_FAIL, PATH_LOOKUP,
+/// PATH_TABLE, PATH_TABLE_ENTRY, PROOF_GEN, PROOF_SEND, REVERSE_ADD)
+/// is filterable by `jl --filter event=…` across a real-shape log.
+#[test]
+fn fixture_p2_filter_proof_gen() {
+    let (out, _err, rc) = pipe_through(jl().args(["--filter", "event=PROOF_GEN"]), P2_LOG);
+    assert_eq!(rc, 0);
+    let count = out.lines().filter(|l| l.starts_with("PROOF_GEN")).count();
+    assert_eq!(count, 3, "expected 3 PROOF_GEN events, got: {out}");
+}
+
+#[test]
+fn fixture_p2_filter_proof_send() {
+    let (out, _err, rc) = pipe_through(jl().args(["--filter", "event=PROOF_SEND"]), P2_LOG);
+    assert_eq!(rc, 0);
+    let count = out.lines().filter(|l| l.starts_with("PROOF_SEND")).count();
+    assert_eq!(count, 3);
+}
+
+#[test]
+fn fixture_p2_filter_path_table_family() {
+    // PATH_TABLE_ENTRY and PATH_TABLE are distinct events even though
+    // they share a prefix.  jl's filter is exact on event=, not prefix.
+    let (out_table, _, _) = pipe_through(jl().args(["--filter", "event=PATH_TABLE"]), P2_LOG);
+    let (out_entry, _, _) = pipe_through(jl().args(["--filter", "event=PATH_TABLE_ENTRY"]), P2_LOG);
+    assert_eq!(
+        out_table
+            .lines()
+            .filter(|l| l.starts_with("PATH_TABLE "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        out_entry
+            .lines()
+            .filter(|l| l.starts_with("PATH_TABLE_ENTRY "))
+            .count(),
+        2
+    );
+    // PATH_TABLE filter should NOT match PATH_TABLE_ENTRY lines.
+    assert_eq!(
+        out_table
+            .lines()
+            .filter(|l| l.starts_with("PATH_TABLE_ENTRY"))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn fixture_p2_jldiff_lossless_roundtrip() {
+    // Two copies of the same fixture diff to all-identical with no
+    // _ONLY surplus.  Smoke that the new event names round-trip
+    // through jldiff's parser identically to the originals.
+    let l = write_tmp(P2_LOG);
+    let r = write_tmp(P2_LOG);
+    let cmd_out = jldiff()
+        .args([
+            "--align-on",
+            "event,t",
+            l.path().to_str().unwrap(),
+            r.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn jldiff");
+    assert!(cmd_out.status.success());
+    let stdout = String::from_utf8_lossy(&cmd_out.stdout);
+    assert!(stdout.contains("LEFT_ONLY (0)"));
+    assert!(stdout.contains("RIGHT_ONLY (0)"));
+    assert!(stdout.contains("MATCHED_DIFFER (0 pairs)"));
+    let entries = P2_LOG.lines().count();
+    assert!(stdout.contains(&format!("MATCHED_IDENTICAL ({entries} pairs)")));
+}

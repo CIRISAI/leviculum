@@ -964,9 +964,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         proof_dest.copy_from_slice(&packet_hash[..TRUNCATED_HASHBYTES]);
         let packet = build_proof_packet(&proof_dest, &proof_data);
         tracing::debug!(
-            "[PROOF_GEN] for_pkt={} to_dst={}",
-            HexShort(&proof_dest),
-            HexShort(destination_hash)
+            event = "PROOF_GEN",
+            for_pkt = %HexShort(&proof_dest),
+            to_dst = %HexShort(destination_hash),
         );
 
         // Prefer explicit interface (PROVE_ALL), fall back to path lookup (PROVE_APP)
@@ -979,9 +979,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 .ok_or(TransportError::NoPath)?,
         };
         tracing::debug!(
-            "[PROOF_SEND] pkt={} iface={}",
-            HexShort(&proof_dest),
-            self.iface_name(interface_index)
+            event = "PROOF_SEND",
+            pkt = %HexShort(&proof_dest),
+            iface = %self.iface_name(interface_index),
         );
 
         self.send_packet_on_interface(interface_index, &packet)
@@ -1340,19 +1340,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if now.saturating_sub(self.last_path_snapshot_ms) >= 10_000 {
             self.last_path_snapshot_ms = now;
             let entries = self.storage.path_entries();
-            tracing::debug!("[PATH_TABLE] size={}", entries.len());
+            tracing::debug!(event = "PATH_TABLE", size = entries.len());
             for (dst, entry) in &entries {
                 let age_ms = entry.expires_ms.saturating_sub(now);
+                let next_hop_str = entry
+                    .next_hop
+                    .as_ref()
+                    .map(|h| alloc::format!("{}", HexShort(&h[..])))
+                    .unwrap_or_else(|| String::from("None"));
                 tracing::debug!(
-                    "[PATH_TABLE_ENTRY] dst={} hops={} iface={} next_hop={:?} expires_in_ms={}",
-                    HexShort(&dst[..]),
-                    entry.hops,
-                    self.iface_name(entry.interface_index),
-                    entry
-                        .next_hop
-                        .as_ref()
-                        .map(|h| alloc::format!("{}", HexShort(&h[..]))),
-                    age_ms
+                    event = "PATH_TABLE_ENTRY",
+                    dst = %HexShort(&dst[..]),
+                    hops = entry.hops,
+                    iface = %self.iface_name(entry.interface_index),
+                    next_hop = %next_hop_str,
+                    expires_in_ms = age_ms,
                 );
             }
         }
@@ -2792,10 +2794,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let (target_iface, needs_relay, next_hop) =
             if let Some(path) = self.storage.get_path(&packet.destination_hash) {
                 tracing::debug!(
-                    "[PATH_LOOKUP] dst={} found=true hops={} iface={}",
-                    HexShort(&packet.destination_hash),
-                    path.hops,
-                    self.iface_name(path.interface_index)
+                    event = "PATH_LOOKUP",
+                    dst = %HexShort(&packet.destination_hash),
+                    found = true,
+                    hops = path.hops,
+                    iface = %self.iface_name(path.interface_index),
                 );
                 (path.interface_index, path.needs_relay(), path.next_hop)
             } else {
@@ -2804,8 +2807,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     HexShort(&packet.destination_hash)
                 );
                 tracing::debug!(
-                    "[PATH_LOOKUP] dst={} found=false",
-                    HexShort(&packet.destination_hash)
+                    event = "PATH_LOOKUP",
+                    dst = %HexShort(&packet.destination_hash),
+                    found = false,
                 );
                 tracing::debug!(
                     event = "PKT_DROP",
@@ -2855,10 +2859,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             },
         );
         tracing::debug!(
-            "[REVERSE_ADD] pkt_hash={} in_iface={} out_iface={}",
-            HexShort(&truncated_hash),
-            self.iface_name(source_interface_index),
-            self.iface_name(target_iface)
+            event = "REVERSE_ADD",
+            pkt_hash = %HexShort(&truncated_hash),
+            in_iface = %self.iface_name(source_interface_index),
+            out_iface = %self.iface_name(target_iface),
         );
 
         if needs_relay {
