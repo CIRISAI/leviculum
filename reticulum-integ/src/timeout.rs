@@ -17,6 +17,31 @@
 //! LoRa tests would let us cancel co-operatively, but is out of scope —
 //! the firmware fix (Codeberg #50 Bug A) is the durable cure for the
 //! actual wedge.
+//!
+//! # Timeout calibration is empirical, not authoritative
+//!
+//! The per-test `secs` budgets in `executor.rs` are first-cut
+//! estimates from TOML-budget arithmetic, NOT measured runtimes.
+//! They are deliberately generous — a false timeout from a tight
+//! margin produces a future debugging session that re-derives
+//! this calibration context from scratch, which is much more
+//! expensive than the cost of a test taking 3 minutes when it
+//! could take 1.
+//!
+//! **If you observe a false timeout** (test that ran fine
+//! before, suddenly trips the deadline because hardware was a
+//! bit slower), the right fix is to **bump the budget**, not to
+//! investigate the test.  Re-tightening should only happen after
+//! we have a healthy-hardware runtime histogram across many
+//! nightlies — see Codeberg #50 for the empirical calibration
+//! follow-up.
+//!
+//! Real wedges (firmware bug, hardware non-responsive) will
+//! surface long before the test budget runs out: a healthy run
+//! under stress is single-digit minutes; a wedge waits the full
+//! budget.  The signal-to-noise ratio of "timeout fired" is
+//! still strongly biased toward "real wedge" even at the
+//! generous default.
 
 use std::sync::mpsc;
 use std::thread;

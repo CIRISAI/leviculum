@@ -2614,7 +2614,7 @@ mod tests {
     // even if the RNode device is not detected (reconnect runs in background).
     #[serial(lora)]
     fn lora_direct_rust() {
-        crate::timeout::run_with_timeout("lora_direct_rust", 120, || {
+        crate::timeout::run_with_timeout("lora_direct_rust", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_direct_rust.toml"
@@ -2637,7 +2637,7 @@ mod tests {
     // "configured"/"configuration failed" (Rust) or RNodeInterface errors (Python).
     #[serial(lora)]
     fn lora_interop_rust_python() {
-        crate::timeout::run_with_timeout("lora_interop_rust_python", 120, || {
+        crate::timeout::run_with_timeout("lora_interop_rust_python", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_interop_rust_python.toml"
@@ -2658,7 +2658,7 @@ mod tests {
     // Build lns with: cargo build --release --bin lns
     #[serial(lora)]
     fn lora_link_rust() {
-        crate::timeout::run_with_timeout("lora_link_rust", 120, || {
+        crate::timeout::run_with_timeout("lora_link_rust", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_link_rust.toml"
@@ -2681,7 +2681,7 @@ mod tests {
     // the `[nodes.*].type` field.
     #[serial(lora)]
     fn lora_link_python() {
-        crate::timeout::run_with_timeout("lora_link_python", 120, || {
+        crate::timeout::run_with_timeout("lora_link_python", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_link_python.toml"
@@ -2702,7 +2702,7 @@ mod tests {
     // Build lns with: cargo build --release --bin lns
     #[serial(lora)]
     fn lora_link_interop() {
-        crate::timeout::run_with_timeout("lora_link_interop", 120, || {
+        crate::timeout::run_with_timeout("lora_link_interop", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_link_interop.toml"
@@ -2720,7 +2720,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_tcp_bridge_rust_relay() {
-        crate::timeout::run_with_timeout("lora_tcp_bridge_rust_relay", 120, || {
+        crate::timeout::run_with_timeout("lora_tcp_bridge_rust_relay", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_tcp_bridge_rust_relay.toml"
@@ -2738,7 +2738,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_tcp_bridge_python_relay() {
-        crate::timeout::run_with_timeout("lora_tcp_bridge_python_relay", 120, || {
+        crate::timeout::run_with_timeout("lora_tcp_bridge_python_relay", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_tcp_bridge_python_relay.toml"
@@ -2756,7 +2756,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_tcp_bridge_python_selftest() {
-        crate::timeout::run_with_timeout("lora_tcp_bridge_python_selftest", 120, || {
+        crate::timeout::run_with_timeout("lora_tcp_bridge_python_selftest", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_tcp_bridge_python_selftest.toml"
@@ -2774,8 +2774,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_late_announce_2node() {
-        // Override: 5-min idle (60s + 300s sleeps) + path waits + selftest discovery
-        crate::timeout::run_with_timeout("lora_late_announce_2node", 600, || {
+        // 900 s budget = 410-450 s TOML scenario time + ~2× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_late_announce_2node", 900, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_late_announce_2node.toml"
@@ -2793,8 +2794,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_late_announce_4node() {
-        // Override: 5-min idle + path waits + selftest
-        crate::timeout::run_with_timeout("lora_late_announce_4node", 600, || {
+        // 900 s budget = 410-450 s TOML scenario time + ~2× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_late_announce_4node", 900, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_late_announce_4node.toml"
@@ -2812,8 +2814,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_late_announce_6node() {
-        // Override: 5-min idle + path waits + selftest
-        crate::timeout::run_with_timeout("lora_late_announce_6node", 600, || {
+        // 900 s budget = 410-450 s TOML scenario time + ~2× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_late_announce_6node", 900, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_late_announce_6node.toml"
@@ -2831,8 +2834,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_late_announce_8node() {
-        // Override: 5-min idle + path waits + selftest
-        crate::timeout::run_with_timeout("lora_late_announce_8node", 600, || {
+        // 900 s budget = 410-450 s TOML scenario time + ~2× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_late_announce_8node", 900, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_late_announce_8node.toml"
@@ -2850,8 +2854,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_late_announce_10node() {
-        // Override: 5-min idle + 4 rnprobes + selftest 360s discovery
-        crate::timeout::run_with_timeout("lora_late_announce_10node", 720, || {
+        // 1200 s budget = 480-570 s TOML scenario time + ~2× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_late_announce_10node", 1200, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_late_announce_10node.toml"
@@ -2869,7 +2874,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_rpc_after_selftest() {
-        crate::timeout::run_with_timeout("lora_rpc_after_selftest", 120, || {
+        crate::timeout::run_with_timeout("lora_rpc_after_selftest", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rpc_after_selftest.toml"
@@ -2887,7 +2892,7 @@ mod tests {
     #[ignore] // Requires 4 RNode devices
     #[serial(lora)]
     fn lora_multihop_transfer() {
-        crate::timeout::run_with_timeout("lora_multihop_transfer", 120, || {
+        crate::timeout::run_with_timeout("lora_multihop_transfer", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_multihop_transfer.toml"
@@ -2905,7 +2910,7 @@ mod tests {
     #[ignore] // Requires 4 RNode devices
     #[serial(lora)]
     fn lora_multihop_bidir() {
-        crate::timeout::run_with_timeout("lora_multihop_bidir", 120, || {
+        crate::timeout::run_with_timeout("lora_multihop_bidir", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_multihop_bidir.toml"
@@ -2923,7 +2928,7 @@ mod tests {
     #[ignore] // Requires 4 RNode devices
     #[serial(lora)]
     fn lora_multihop_link_loss() {
-        crate::timeout::run_with_timeout("lora_multihop_link_loss", 120, || {
+        crate::timeout::run_with_timeout("lora_multihop_link_loss", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_multihop_link_loss.toml"
@@ -2941,7 +2946,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_ratchet_basic() {
-        crate::timeout::run_with_timeout("lora_ratchet_basic", 120, || {
+        crate::timeout::run_with_timeout("lora_ratchet_basic", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_ratchet_basic.toml"
@@ -2959,7 +2964,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_ratchet_enforced() {
-        crate::timeout::run_with_timeout("lora_ratchet_enforced", 120, || {
+        crate::timeout::run_with_timeout("lora_ratchet_enforced", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_ratchet_enforced.toml"
@@ -2977,7 +2982,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_ratchet_rotation() {
-        crate::timeout::run_with_timeout("lora_ratchet_rotation", 120, || {
+        crate::timeout::run_with_timeout("lora_ratchet_rotation", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_ratchet_rotation.toml"
@@ -2995,7 +3000,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_path_recovery() {
-        crate::timeout::run_with_timeout("lora_path_recovery", 120, || {
+        crate::timeout::run_with_timeout("lora_path_recovery", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_path_recovery.toml"
@@ -3013,8 +3018,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_proxy_50kb() {
-        // Override: 50 KB transfer at Medium profile
-        crate::timeout::run_with_timeout("lora_lncp_proxy_50kb", 240, || {
+        // 480 s budget = 90-120 s TOML scenario time + ~4× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_lncp_proxy_50kb", 480, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_proxy_50kb.toml"
@@ -3032,7 +3038,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_link_teardown() {
-        crate::timeout::run_with_timeout("lora_link_teardown", 120, || {
+        crate::timeout::run_with_timeout("lora_link_teardown", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_link_teardown.toml"
@@ -3050,7 +3056,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_auth_fetch() {
-        crate::timeout::run_with_timeout("lora_lncp_auth_fetch", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_auth_fetch", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_auth_fetch.toml"
@@ -3068,7 +3074,7 @@ mod tests {
     #[ignore] // Requires 4 RNode devices
     #[serial(lora)]
     fn lora_4node_contention_rust() {
-        crate::timeout::run_with_timeout("lora_4node_contention_rust", 120, || {
+        crate::timeout::run_with_timeout("lora_4node_contention_rust", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_4node_contention_rust.toml"
@@ -3086,7 +3092,7 @@ mod tests {
     #[ignore] // Requires 4 RNode devices
     #[serial(lora)]
     fn lora_4node_contention_python() {
-        crate::timeout::run_with_timeout("lora_4node_contention_python", 120, || {
+        crate::timeout::run_with_timeout("lora_4node_contention_python", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_4node_contention_python.toml"
@@ -3104,7 +3110,7 @@ mod tests {
     #[ignore] // Requires 4 RNode devices
     #[serial(lora)]
     fn lora_4node_contention_mixed() {
-        crate::timeout::run_with_timeout("lora_4node_contention_mixed", 120, || {
+        crate::timeout::run_with_timeout("lora_4node_contention_mixed", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_4node_contention_mixed.toml"
@@ -3122,7 +3128,7 @@ mod tests {
     #[ignore] // Requires 4 RNode devices
     #[serial(lora)]
     fn lora_4node_sequential_python() {
-        crate::timeout::run_with_timeout("lora_4node_sequential_python", 120, || {
+        crate::timeout::run_with_timeout("lora_4node_sequential_python", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_4node_sequential_python.toml"
@@ -3140,8 +3146,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_dual_cluster_rust() {
-        // Override: 13-step dual-cluster topology
-        crate::timeout::run_with_timeout("lora_dual_cluster_rust", 240, || {
+        // 480 s budget = 13-step topology TOML scenario time + ~4× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_dual_cluster_rust", 480, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_dual_cluster_rust.toml"
@@ -3159,8 +3166,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_dual_cluster_mixed() {
-        // Override: 13-step dual-cluster mixed topology
-        crate::timeout::run_with_timeout("lora_dual_cluster_mixed", 240, || {
+        // 480 s budget = 13-step topology TOML scenario time + ~4× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_dual_cluster_mixed", 480, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_dual_cluster_mixed.toml"
@@ -3178,7 +3186,7 @@ mod tests {
     #[ignore] // Requires RNode hardware + lora-proxy binary
     #[serial(lora)]
     fn lora_proxy_loss() {
-        crate::timeout::run_with_timeout("lora_proxy_loss", 120, || {
+        crate::timeout::run_with_timeout("lora_proxy_loss", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_proxy_loss.toml"
@@ -3196,7 +3204,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_push() {
-        crate::timeout::run_with_timeout("lora_lncp_push", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_push", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_push.toml"
@@ -3214,7 +3222,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_fetch() {
-        crate::timeout::run_with_timeout("lora_lncp_fetch", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_fetch", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_fetch.toml"
@@ -3232,7 +3240,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_auth() {
-        crate::timeout::run_with_timeout("lora_lncp_auth", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_auth", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_auth.toml"
@@ -3250,7 +3258,7 @@ mod tests {
     #[ignore] // Requires RNode hardware + lora-proxy binary
     #[serial(lora)]
     fn lora_lncp_proxy() {
-        crate::timeout::run_with_timeout("lora_lncp_proxy", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_proxy", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_proxy.toml"
@@ -3268,8 +3276,9 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_size_sweep() {
-        // Override: 6 file sizes incl. 50 KB at Medium profile
-        crate::timeout::run_with_timeout("lora_lncp_size_sweep", 480, || {
+        // 900 s budget = 360-420 s TOML scenario time + ~2× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_lncp_size_sweep", 900, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_size_sweep.toml"
@@ -3287,7 +3296,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_proxy_4drop() {
-        crate::timeout::run_with_timeout("lora_lncp_proxy_4drop", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_proxy_4drop", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_proxy_4drop.toml"
@@ -3305,7 +3314,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_proxy_6drop() {
-        crate::timeout::run_with_timeout("lora_lncp_proxy_6drop", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_proxy_6drop", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_proxy_6drop.toml"
@@ -3323,7 +3332,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_link_loss() {
-        crate::timeout::run_with_timeout("lora_lncp_link_loss", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_link_loss", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_link_loss.toml"
@@ -3341,7 +3350,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_link_retry() {
-        crate::timeout::run_with_timeout("lora_lncp_link_retry", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_link_retry", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_link_retry.toml"
@@ -3359,7 +3368,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_proof_retry() {
-        crate::timeout::run_with_timeout("lora_lncp_proof_retry", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_proof_retry", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_proof_retry.toml"
@@ -3377,7 +3386,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lrncp_resource_proof_retry() {
-        crate::timeout::run_with_timeout("lora_lrncp_resource_proof_retry", 120, || {
+        crate::timeout::run_with_timeout("lora_lrncp_resource_proof_retry", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lrncp_resource_proof_retry.toml"
@@ -3395,7 +3404,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_bidir() {
-        crate::timeout::run_with_timeout("lora_lncp_bidir", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_bidir", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_bidir.toml"
@@ -3413,8 +3422,9 @@ mod tests {
     #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
     #[serial(lora)]
     fn lora_lnode_lncp_bidir() {
-        // Override: 32 KB bidirectional transfer
-        crate::timeout::run_with_timeout("lora_lnode_lncp_bidir", 240, || {
+        // 480 s budget = 32 KB bidi TOML scenario time + ~4× margin.
+        // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
+        crate::timeout::run_with_timeout("lora_lnode_lncp_bidir", 480, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lnode_lncp_bidir.toml"
@@ -3432,7 +3442,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_bridge() {
-        crate::timeout::run_with_timeout("lora_lncp_bridge", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_bridge", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_bridge.toml"
@@ -3452,7 +3462,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_rncp_push() {
-        crate::timeout::run_with_timeout("lora_rncp_push", 120, || {
+        crate::timeout::run_with_timeout("lora_rncp_push", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rncp_push.toml"
@@ -3470,7 +3480,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_rncp_fetch() {
-        crate::timeout::run_with_timeout("lora_rncp_fetch", 120, || {
+        crate::timeout::run_with_timeout("lora_rncp_fetch", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rncp_fetch.toml"
@@ -3488,7 +3498,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_rncp_auth() {
-        crate::timeout::run_with_timeout("lora_rncp_auth", 120, || {
+        crate::timeout::run_with_timeout("lora_rncp_auth", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rncp_auth.toml"
@@ -3506,7 +3516,7 @@ mod tests {
     #[ignore] // Requires RNode hardware + lora-proxy binary
     #[serial(lora)]
     fn lora_rncp_proxy() {
-        crate::timeout::run_with_timeout("lora_rncp_proxy", 120, || {
+        crate::timeout::run_with_timeout("lora_rncp_proxy", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rncp_proxy.toml"
@@ -3524,7 +3534,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_rncp_bridge() {
-        crate::timeout::run_with_timeout("lora_rncp_bridge", 120, || {
+        crate::timeout::run_with_timeout("lora_rncp_bridge", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rncp_bridge.toml"
@@ -3544,7 +3554,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_push_to_python() {
-        crate::timeout::run_with_timeout("lora_lncp_push_to_python", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_push_to_python", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_push_to_python.toml"
@@ -3562,7 +3572,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_rncp_push_to_rust() {
-        crate::timeout::run_with_timeout("lora_rncp_push_to_rust", 120, || {
+        crate::timeout::run_with_timeout("lora_rncp_push_to_rust", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rncp_push_to_rust.toml"
@@ -3580,7 +3590,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_fetch_from_python() {
-        crate::timeout::run_with_timeout("lora_lncp_fetch_from_python", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_fetch_from_python", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_fetch_from_python.toml"
@@ -3598,7 +3608,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_rncp_fetch_from_rust() {
-        crate::timeout::run_with_timeout("lora_rncp_fetch_from_rust", 120, || {
+        crate::timeout::run_with_timeout("lora_rncp_fetch_from_rust", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_rncp_fetch_from_rust.toml"
@@ -3616,7 +3626,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_auth_to_python() {
-        crate::timeout::run_with_timeout("lora_lncp_auth_to_python", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_auth_to_python", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_auth_to_python.toml"
@@ -3634,7 +3644,7 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_bridge_python_relay() {
-        crate::timeout::run_with_timeout("lora_lncp_bridge_python_relay", 120, || {
+        crate::timeout::run_with_timeout("lora_lncp_bridge_python_relay", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lncp_bridge_python_relay.toml"
@@ -3654,7 +3664,7 @@ mod tests {
     #[ignore] // Requires 3 RNode hardware devices
     #[serial(lora)]
     fn lora_3node_transfer() {
-        crate::timeout::run_with_timeout("lora_3node_transfer", 120, || {
+        crate::timeout::run_with_timeout("lora_3node_transfer", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_3node_transfer.toml"
@@ -3672,7 +3682,7 @@ mod tests {
     #[ignore] // Requires 3 RNode hardware devices
     #[serial(lora)]
     fn lora_3node_contention() {
-        crate::timeout::run_with_timeout("lora_3node_contention", 120, || {
+        crate::timeout::run_with_timeout("lora_3node_contention", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_3node_contention.toml"
@@ -3690,7 +3700,7 @@ mod tests {
     #[ignore] // Requires 3 RNode hardware devices
     #[serial(lora)]
     fn lora_3node_bidir() {
-        crate::timeout::run_with_timeout("lora_3node_bidir", 120, || {
+        crate::timeout::run_with_timeout("lora_3node_bidir", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_3node_bidir.toml"
@@ -3708,7 +3718,7 @@ mod tests {
     #[ignore] // Requires RNode + T114 hardware
     #[serial(lora)]
     fn lora_lnode_serial_relay() {
-        crate::timeout::run_with_timeout("lora_lnode_serial_relay", 120, || {
+        crate::timeout::run_with_timeout("lora_lnode_serial_relay", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lnode_serial_relay.toml"
@@ -3726,7 +3736,7 @@ mod tests {
     #[ignore] // Requires RNode + T114 hardware
     #[serial(lora)]
     fn lora_lnode_probe() {
-        crate::timeout::run_with_timeout("lora_lnode_probe", 120, || {
+        crate::timeout::run_with_timeout("lora_lnode_probe", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lnode_probe.toml"
@@ -3744,7 +3754,7 @@ mod tests {
     #[ignore] // Requires RNode + T114 hardware
     #[serial(lora)]
     fn lora_lnode_probe_ca() {
-        crate::timeout::run_with_timeout("lora_lnode_probe_ca", 120, || {
+        crate::timeout::run_with_timeout("lora_lnode_probe_ca", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lnode_probe_ca.toml"
@@ -3762,7 +3772,7 @@ mod tests {
     #[ignore] // Requires RNode + T114 hardware
     #[serial(lora)]
     fn lora_lnode_split() {
-        crate::timeout::run_with_timeout("lora_lnode_split", 120, || {
+        crate::timeout::run_with_timeout("lora_lnode_split", 300, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_lnode_split.toml"
