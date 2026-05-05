@@ -93,10 +93,7 @@ PKT_LOCAL node=alpha dst=huge iface=lora0 matched=true t=18446744073709551615
 #[test]
 fn test_jl_filter_no_match() {
     let input = "PKT_RX node=alpha dst=abc1 hops=0 iface=lora0 len=64 type=Data t=10\n";
-    let (out, err, rc) = pipe_through(
-        jl().args(["--filter", "event=NONEXISTENT_EVENT"]),
-        input,
-    );
+    let (out, err, rc) = pipe_through(jl().args(["--filter", "event=NONEXISTENT_EVENT"]), input);
     assert_eq!(rc, 0);
     assert!(out.is_empty());
     assert!(err.is_empty());
@@ -105,10 +102,8 @@ fn test_jl_filter_no_match() {
 #[test]
 fn test_jl_contradictory_filters() {
     let input = "PKT_LOCAL node=alpha dst=abc1 iface=lora0 matched=true t=150\n";
-    let (out, _err, rc) = pipe_through(
-        jl().args(["--filter", "t<100", "--filter", "t>200"]),
-        input,
-    );
+    let (out, _err, rc) =
+        pipe_through(jl().args(["--filter", "t<100", "--filter", "t>200"]), input);
     assert_eq!(rc, 0);
     assert!(out.is_empty());
 }
