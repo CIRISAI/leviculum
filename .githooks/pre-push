@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Lint Woodpecker pipelines first — schema-check is sub-second, so
+# bailing here saves the multi-minute Tier 0 below if a YAML is broken.
+woodpecker-cli lint .woodpecker/
+
 # Always run Tier 0 fast checks (transitively pulls in mvr)
 just fast
 
