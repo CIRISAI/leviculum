@@ -88,7 +88,7 @@ fi
 
 echo "[publish] uploading new assets"
 shopt -s nullglob
-for f in "$DIST"/*.tar.gz "$DIST"/*.sha256; do
+for f in "$DIST"/*.tar.gz "$DIST"/*.deb "$DIST"/*.sha256; do
     name=$(basename "$f")
     echo "[publish]   → $name"
     curl -sS -X POST -H "$AUTH_HEADER" \

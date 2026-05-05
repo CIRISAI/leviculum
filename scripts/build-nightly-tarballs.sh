@@ -32,6 +32,7 @@ mkdir -p "$DIST"
 pack_tarball() {
     local arch_dash="$1"    # amd64 | arm64
     local rust_triple="$2"  # x86_64-unknown-linux-musl | aarch64-unknown-linux-musl
+    local strip_tool="$3"   # strip | aarch64-linux-gnu-strip
 
     local name="leviculum-nightly-linux-${arch_dash}"
     local stage="$DIST/$name"
@@ -41,7 +42,7 @@ pack_tarball() {
 
     for bin in lnsd lns lncp; do
         cp "$src/$bin" "$stage/bin/$bin"
-        strip "$stage/bin/$bin" 2>/dev/null || true
+        "$strip_tool" "$stage/bin/$bin"
     done
 
     cp README.md LICENSE CHANGELOG.md "$stage/doc/"
@@ -76,8 +77,8 @@ copy_deb() {
     (cd "$DIST" && sha256sum "$stable" >"$stable.sha256")
 }
 
-pack_tarball amd64 x86_64-unknown-linux-musl
-pack_tarball arm64 aarch64-unknown-linux-musl
+pack_tarball amd64 x86_64-unknown-linux-musl  strip
+pack_tarball arm64 aarch64-unknown-linux-musl aarch64-linux-gnu-strip
 copy_deb amd64
 copy_deb arm64
 

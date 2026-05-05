@@ -24,17 +24,22 @@ steps:
     commands:
       - apt-get update && apt-get install -y musl-tools
       - cargo install --locked cargo-deb
+      - rustup target add x86_64-unknown-linux-musl
+      # Pin the build ID + DEB version once and persist them, so all
+      # subsequent steps see exactly the same values (no midnight-UTC
+      # drift between build-amd64 and build-arm64).
       - export LEVICULUM_BUILD_ID="nightly.$(date -u +%Y%m%d)-${CI_COMMIT_SHA:0:7}"
       - echo "$LEVICULUM_BUILD_ID" >.build-id
+      - WS_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+      - echo "${WS_VERSION}~nightly.$(date -u +%Y%m%d).${CI_COMMIT_SHA:0:7}" >.deb-version
       # `cargo clean -p reticulum-cli` avoids a Cargo incremental quirk
       # where repeated builds with the same LEVICULUM_BUILD_ID skip
       # relinking some binaries, leaving them with a stale version
       # string. Fresh containers rarely hit this, but the clean is
       # cheap insurance.
       - cargo clean -p reticulum-cli
-      - cargo build --release --bin lnsd --bin lns --bin lncp
-      - export DEB_VERSION="0.6.3~nightly.$(date -u +%Y%m%d).${CI_COMMIT_SHA:0:7}"
-      - cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --deb-version "$DEB_VERSION"
+      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
+      - cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --deb-version "$(cat .deb-version)"
 
   build-arm64:
     image: rust:bookworm
@@ -47,16 +52,18 @@ steps:
       - export PATH="/opt/zigvenv/bin:$PATH"
       - cargo install --locked cargo-deb
       - rustup target add aarch64-unknown-linux-musl
-      - export LEVICULUM_BUILD_ID="nightly.$(date -u +%Y%m%d)-${CI_COMMIT_SHA:0:7}"
+      - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - cargo clean -p reticulum-cli
       - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
-      - export DEB_VERSION="0.6.3~nightly.$(date -u +%Y%m%d).${CI_COMMIT_SHA:0:7}"
-      - cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --deb-version "$DEB_VERSION"
+      - cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --deb-version "$(cat .deb-version)"
 
   package:
     image: debian:bookworm-slim
     commands:
-      - apt-get update && apt-get install -y binutils coreutils tar
+      # binutils-aarch64-linux-gnu provides aarch64-linux-gnu-strip,
+      # used by build-nightly-tarballs.sh to strip the arm64 binaries
+      # (host strip only handles amd64).
+      - apt-get update && apt-get install -y binutils binutils-aarch64-linux-gnu coreutils tar
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - bash scripts/build-nightly-tarballs.sh
 
