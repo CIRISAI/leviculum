@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes dist/*.tar.gz + *.sha256 to the rolling `nightly` Codeberg
+# Publishes dist/*.deb + *.sha256 to the rolling `nightly` Codeberg
 # release. Called from .woodpecker/nightly.yml. Stable download URL:
 #   https://codeberg.org/${CI_REPO}/releases/download/nightly/<filename>
 #
@@ -7,44 +7,39 @@
 # Version info for each build is embedded in the binaries themselves
 # (lnsd --version) and in the release body.
 #
-# Required env:
-#   CI_REPO          — e.g. "Lew_Palm/leviculum" (set by Woodpecker)
-#   CI_COMMIT_SHA    — current commit (set by Woodpecker)
-#   CODEBERG_TOKEN   — token with write:repository scope
+# Authentication uses CI_NETRC_PASSWORD, which Woodpecker injects from
+# the codeberg-woodpecker OAuth integration. No manual token secret is
+# required in the Woodpecker UI.
+#
+# Required env (auto-set by Woodpecker):
+#   CI_REPO            — e.g. "Lew_Palm/leviculum"
+#   CI_COMMIT_SHA      — current commit
+#   CI_NETRC_PASSWORD  — OAuth token from Woodpecker
 #   LEVICULUM_BUILD_ID (optional, for release body)
 
 set -euo pipefail
 
 : "${CI_REPO:?CI_REPO not set}"
 : "${CI_COMMIT_SHA:?CI_COMMIT_SHA not set}"
-: "${CODEBERG_TOKEN:?CODEBERG_TOKEN not set}"
+: "${CI_NETRC_PASSWORD:?CI_NETRC_PASSWORD not set}"
 
 TAG="nightly"
 API="https://codeberg.org/api/v1"
-AUTH_HEADER="Authorization: token ${CODEBERG_TOKEN}"
+AUTH_HEADER="Authorization: token ${CI_NETRC_PASSWORD}"
 BUILD_ID="${LEVICULUM_BUILD_ID:-unknown}"
 
 DIST="$(cd "$(dirname "$0")/.." && pwd)/dist"
-[ -d "$DIST" ] || { echo "dist/ not found — run build-nightly-tarballs.sh first"; exit 1; }
+[ -d "$DIST" ] || { echo "dist/ not found — run collect-nightly-debs.sh first"; exit 1; }
 
 RELEASE_BODY=$(cat <<EOF
 Rolling nightly build. The assets under this release are **replaced on every CI run** — this tag always points at the latest nightly.
-
-**Tarballs** (statically linked, drop anywhere and run):
-
-\`\`\`
-https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-linux-amd64.tar.gz
-https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-linux-arm64.tar.gz
-\`\`\`
-
-**Debian / Ubuntu packages** (installs lnsd as a system service, sets up /etc/reticulum for Python-RNS client drop-in compatibility):
 
 \`\`\`
 https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-amd64.deb
 https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-arm64.deb
 \`\`\`
 
-\`sudo apt install ./leviculum-nightly-amd64.deb\` — no other system packages required, binaries are static musl. Tested against Debian 9+ / Ubuntu 16.04+.
+\`sudo apt install ./leviculum-nightly-amd64.deb\` — no other system packages required, binaries are static musl. Tested against Debian 9+ / Ubuntu 16.04+. Installs lnsd as a system service and sets up /etc/reticulum for Python-RNS client drop-in compatibility.
 
 Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`)
 
@@ -88,7 +83,7 @@ fi
 
 echo "[publish] uploading new assets"
 shopt -s nullglob
-for f in "$DIST"/*.tar.gz "$DIST"/*.deb "$DIST"/*.sha256; do
+for f in "$DIST"/*.deb "$DIST"/*.sha256; do
     name=$(basename "$f")
     echo "[publish]   → $name"
     curl -sS -X POST -H "$AUTH_HEADER" \

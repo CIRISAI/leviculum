@@ -1,19 +1,20 @@
 # Nightly build pipeline for leviculum.
 #
-# Publishes statically-linked linux-amd64 and linux-arm64 tarballs to a
-# rolling `nightly` release on Codeberg. Assets are overwritten each
-# run, so these download URLs are stable:
+# Builds two musl-static .deb packages (amd64 + arm64) and uploads
+# them to a rolling `nightly` release on Codeberg. Assets are
+# overwritten each run, so these download URLs stay stable:
 #
-#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-linux-amd64.tar.gz
-#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-linux-arm64.tar.gz
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-amd64.deb
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-arm64.deb
 #
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
 # file only reacts to the `event: cron` trigger. Suggested schedule:
 # `0 2 * * *` (02:00 UTC daily).
 #
-# Secrets (Repo → Settings → Secrets on ci.codeberg.org):
-#   codeberg_token — Codeberg access token, scope write:repository
+# Authentication uses Woodpecker's CI_NETRC_PASSWORD, injected
+# automatically from the codeberg-woodpecker OAuth integration. No
+# manual secret in the Woodpecker UI is needed.
 
 when:
   event: cron
@@ -60,18 +61,10 @@ steps:
   package:
     image: debian:bookworm-slim
     commands:
-      # binutils-aarch64-linux-gnu provides aarch64-linux-gnu-strip,
-      # used by build-nightly-tarballs.sh to strip the arm64 binaries
-      # (host strip only handles amd64).
-      - apt-get update && apt-get install -y binutils binutils-aarch64-linux-gnu coreutils tar
-      - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      - bash scripts/build-nightly-tarballs.sh
+      - bash scripts/collect-nightly-debs.sh
 
   publish:
     image: debian:bookworm-slim
-    environment:
-      CODEBERG_TOKEN:
-        from_secret: codeberg_token
     commands:
       - apt-get update && apt-get install -y curl jq
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"

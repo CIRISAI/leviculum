@@ -40,23 +40,7 @@ sudo usermod -aG leviculum "$USER"
 
 That covers everything: the native Rust clients (`lns`, `lncp`) talk to lnsd via the shared-instance socket, and Python Reticulum tools (`rnstatus`, `rncp`, `rnpath`, `rnprobe`, Sideband, Nomadnet, …) auto-detect `/etc/reticulum` (per `RNS.Reticulum.__init__`'s standard lookup) and connect through the same socket. If you ever swap lnsd out for the Python `rnsd` daemon, the same configdir keeps working — `lnsd` and `rnsd` are wire- and config-compatible.
 
-The binaries are statically linked against musl, so the package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 (amd64 + arm64) regardless of host glibc.
-
-### Nightly tarball
-
-For userspace installation (no system service, no user/group setup), prebuilt statically-linked tarballs are published alongside the `.deb`s:
-
-```sh
-# amd64
-wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-linux-amd64.tar.gz
-# arm64
-wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-linux-arm64.tar.gz
-
-tar xzf leviculum-nightly-linux-*.tar.gz
-./leviculum-nightly-linux-*/bin/lnsd --version
-```
-
-Each tarball contains `bin/{lnsd,lns,lncp}` plus `README.md`, `LICENSE`, `CHANGELOG.md`, and a `VERSION` file. The exact build is embedded in the binaries (`lnsd --version` prints e.g. `0.6.3-nightly.20260419-5a5df20`). SHA-256 checksums are published alongside every artefact with the suffix `.sha256`.
+The binaries are statically linked against musl, so the package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 (amd64 + arm64) regardless of host glibc. SHA-256 checksums are published alongside every `.deb` with the suffix `.sha256`. The exact build is embedded in the binaries — `lnsd --version` prints e.g. `0.6.3-nightly.20260419-5a5df20`.
 
 ### Build from source
 
