@@ -64,7 +64,10 @@ steps:
       # cargo-zigbuild uses Zig as the C compiler/linker — the only way
       # to cross-compile to aarch64-musl from an amd64 rust:bookworm
       # image without docker-in-docker or a dedicated arm64 runner.
-      - apt-get update && apt-get install -y python3 python3-pip python3-venv xz-utils curl
+      # binutils-aarch64-linux-gnu provides aarch64-linux-gnu-strip,
+      # used by cargo-deb to strip the aarch64 musl binaries (host
+      # strip is amd64-only and rejects aarch64 ELFs).
+      - apt-get update && apt-get install -y python3 python3-pip python3-venv xz-utils curl binutils-aarch64-linux-gnu
       - python3 -m venv /opt/zigvenv && /opt/zigvenv/bin/pip install cargo-zigbuild ziglang
       - export PATH="/opt/zigvenv/bin:$PATH"
       - cargo install --locked cargo-deb

@@ -40,3 +40,11 @@ check-embedded = "build -p reticulum-core --target thumbv7em-none-eabihf --targe
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+# Cross-strip for aarch64 musl-static .deb builds. Host strip is
+# amd64-only and rejects aarch64 ELFs with "unable to recognise the
+# format". cargo-deb reads this `strip` key from .cargo/config.toml
+# when packaging for the target. Requires binutils-aarch64-linux-gnu
+# in the build container — see .woodpecker/nightly.yml build-arm64.
+[target.aarch64-unknown-linux-musl]
+strip = { path = "aarch64-linux-gnu-strip" }
