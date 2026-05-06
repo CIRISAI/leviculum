@@ -7,25 +7,27 @@
 # Version info for each build is embedded in the binaries themselves
 # (lnsd --version) and in the release body.
 #
-# Authentication uses CI_NETRC_PASSWORD, which Woodpecker injects from
-# the codeberg-woodpecker OAuth integration. No manual token secret is
-# required in the Woodpecker UI.
+# Authentication uses a Codeberg API token with `write:repository`
+# scope, exposed to the publish step via the Woodpecker secret
+# `codeberg_token`. CI_NETRC_PASSWORD (Woodpecker's OAuth-derived
+# token) is NOT visible outside the clone step, so a manual token is
+# required.
 #
-# Required env (auto-set by Woodpecker):
-#   CI_REPO            — e.g. "Lew_Palm/leviculum"
-#   CI_COMMIT_SHA      — current commit
-#   CI_NETRC_PASSWORD  — OAuth token from Woodpecker
+# Required env (set by Woodpecker):
+#   CI_REPO         — e.g. "Lew_Palm/leviculum"
+#   CI_COMMIT_SHA   — current commit
+#   CODEBERG_TOKEN  — Codeberg API token (Woodpecker secret)
 #   LEVICULUM_BUILD_ID (optional, for release body)
 
 set -euo pipefail
 
 : "${CI_REPO:?CI_REPO not set}"
 : "${CI_COMMIT_SHA:?CI_COMMIT_SHA not set}"
-: "${CI_NETRC_PASSWORD:?CI_NETRC_PASSWORD not set}"
+: "${CODEBERG_TOKEN:?CODEBERG_TOKEN not set}"
 
 TAG="nightly"
 API="https://codeberg.org/api/v1"
-AUTH_HEADER="Authorization: token ${CI_NETRC_PASSWORD}"
+AUTH_HEADER="Authorization: token ${CODEBERG_TOKEN}"
 BUILD_ID="${LEVICULUM_BUILD_ID:-unknown}"
 
 DIST="$(cd "$(dirname "$0")/.." && pwd)/dist"

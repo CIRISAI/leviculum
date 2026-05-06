@@ -12,9 +12,10 @@
 # file only reacts to the `event: cron` trigger. Suggested schedule:
 # `0 2 * * *` (02:00 UTC daily).
 #
-# Authentication uses Woodpecker's CI_NETRC_PASSWORD, injected
-# automatically from the codeberg-woodpecker OAuth integration. No
-# manual secret in the Woodpecker UI is needed.
+# Authentication for the publish step uses a Codeberg API token
+# (write:repository scope) supplied via the Woodpecker secret
+# `codeberg_token`. NETRC is only visible inside the clone step,
+# not in user-defined steps, so a manual token is required.
 
 when:
   event: cron
@@ -84,6 +85,9 @@ steps:
 
   publish:
     image: debian:bookworm-slim
+    environment:
+      CODEBERG_TOKEN:
+        from_secret: codeberg_token
     commands:
       - apt-get update && apt-get install -y curl jq
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
