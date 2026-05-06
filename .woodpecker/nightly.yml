@@ -28,12 +28,14 @@ steps:
       - rustup target add x86_64-unknown-linux-musl
       # Pin the build ID + DEB version once and persist them, so all
       # subsequent steps see exactly the same values (no midnight-UTC
-      # drift between build-amd64 and build-arm64).
-      # Woodpecker pre-substitutes ${...} from its own env set BEFORE
-      # handing the line to the shell — any unknown ${VAR} (e.g. one
-      # set in a previous command) silently expands to empty. Use
-      # $(...) subshells for shell-local lookups; only Woodpecker
-      # variables (${CI_COMMIT_SHA}, etc.) belong inside ${...}.
+      # drift between build-amd64 and build-arm64). Use $(...)
+      # subshells for shell-local values: Woodpecker pre-substitutes
+      # brace-style references (CI_COMMIT_SHA etc.) before the shell
+      # ever sees the line, and unknown brace-style names expand to
+      # empty without warning. Reserve brace form for true Woodpecker
+      # variables only — and never write a literal example of brace
+      # form in a comment, since the pre-substitutor scans the raw
+      # YAML text and chokes on dot-ellipsis placeholders.
       - echo "nightly.$(date -u +%Y%m%d)-${CI_COMMIT_SHA:0:7}" >.build-id
       - echo "$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)~nightly.$(date -u +%Y%m%d).${CI_COMMIT_SHA:0:7}" >.deb-version
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
