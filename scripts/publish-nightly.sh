@@ -81,10 +81,18 @@ else
             "$API/repos/$CI_REPO/releases/$release_id" -d @- >/dev/null
 
     echo "[publish] deleting existing assets"
+    # Forgejo's asset-delete endpoint is
+    # /repos/{owner}/{repo}/releases/{release_id}/assets/{attachment_id}.
+    # The release_id segment is mandatory — omitting it yields a silent
+    # 404 with -sS, which is exactly what happened before this fix and
+    # caused assets to accumulate across runs (12 stale entries on the
+    # nightly tag pointing at three different builds).
     echo "$release_json" | jq -r '.assets[].id' | while read -r asset_id; do
         [ -n "$asset_id" ] || continue
-        curl -sS -X DELETE -H "$AUTH_HEADER" \
-            "$API/repos/$CI_REPO/releases/assets/$asset_id"
+        http_code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+            -H "$AUTH_HEADER" \
+            "$API/repos/$CI_REPO/releases/$release_id/assets/$asset_id")
+        echo "[publish]   delete asset $asset_id → HTTP $http_code"
     done
 fi
 
