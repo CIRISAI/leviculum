@@ -56,16 +56,17 @@ release_id=$(echo "$release_json" | jq -r '.id // empty')
 
 if [ -z "$release_id" ]; then
     echo "[publish] no existing release, creating"
-    # target_commitish omitted on purpose: Codeberg's API rejected
-    # the bare $CI_COMMIT_SHA with "The target couldn't be found"
-    # (build #40). Without the field, the API defaults to the
-    # repo's default branch (master at HEAD), which is what we want
-    # for a rolling nightly tag anyway. The exact build SHA still
-    # appears in the release body.
+    # target_commitish must be a branch name when the tag doesn't
+    # yet exist — Forgejo rejected both the bare SHA (build #40) and
+    # an omitted field (build #41) with "The target couldn't be
+    # found." Use the default branch from Woodpecker, which is
+    # 'master' here. The exact build SHA still appears in the body.
+    BRANCH="${CI_REPO_DEFAULT_BRANCH:-master}"
     release_json=$(jq -n \
         --arg tag "$TAG" \
+        --arg target "$BRANCH" \
         --arg body "$RELEASE_BODY" \
-        '{tag_name:$tag, name:"Nightly Builds", body:$body, draft:false, prerelease:true}' \
+        '{tag_name:$tag, target_commitish:$target, name:"Nightly Builds", body:$body, draft:false, prerelease:true}' \
         | curl -sS -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases" -d @-)
     release_id=$(echo "$release_json" | jq -r '.id')
