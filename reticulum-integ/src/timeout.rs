@@ -4,6 +4,25 @@
 //! on the test thread.  On timeout the test panics with a clear message and
 //! the harness moves on to the next test.  See Codeberg #50.
 //!
+//! # Panic-message disambiguation (Codeberg #52)
+//!
+//! When the primary `recv_timeout(secs)` returns `Timeout`, the helper does a
+//! brief follow-up `recv_timeout(50ms)` to distinguish two cases:
+//!
+//! - **Worker still active** — follow-up also returns `Timeout`. Real wedge:
+//!   "hardware/firmware did not progress (Codeberg #50 class)". Forensic
+//!   capture script fires.
+//! - **Worker just completed** — follow-up returns `Ok(_)`. The test scenario
+//!   reached its closing point but the runner cleanup pushed the wallclock
+//!   past the wrapper budget. The cause is wrapper-too-tight, not a wedge:
+//!   "raise wrapper budget for this test (Codeberg #52-style)". No forensic
+//!   capture (the test wasn't stuck).
+//!
+//! The disambiguation lets the next reader see at a glance whether to fix the
+//! firmware/hardware or to bump the wrapper budget. Mis-attribution to
+//! Codeberg #50 was the trigger for landing this — the audit on Codeberg #52
+//! reproduced wrapper-too-tight failures that spuriously named #50.
+//!
 //! # Leaked-thread caveat
 //!
 //! If the closure exceeds the timeout, the worker thread is detached — we
@@ -74,11 +93,25 @@ where
         Ok(Ok(())) => {}
         Ok(Err(payload)) => std::panic::resume_unwind(payload),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            capture_wedge_forensics(name);
-            panic!(
-                "LoRa test '{name}' timed out after {secs}s — \
-                 hardware/firmware did not progress (Codeberg #50)"
-            )
+            // Brief grace period: did the worker actually complete just past
+            // our deadline? If so, the cause is wrapper-too-tight (Codeberg
+            // #52-style), not a hardware/firmware wedge (Codeberg #50 class).
+            // See the module-level "Panic-message disambiguation" doc-comment.
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(())) => panic!(
+                    "LoRa test '{name}' wrapper-tight: worker completed but \
+                     cleanup pushed total wallclock past {secs}s — \
+                     raise wrapper budget for this test (Codeberg #52-style)"
+                ),
+                Ok(Err(payload)) => std::panic::resume_unwind(payload),
+                Err(_) => {
+                    capture_wedge_forensics(name);
+                    panic!(
+                        "LoRa test '{name}' wedge: worker still active after {secs}s — \
+                         likely hardware/firmware did not progress (Codeberg #50 class)"
+                    )
+                }
+            }
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             capture_wedge_forensics(name);
