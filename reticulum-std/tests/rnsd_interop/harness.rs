@@ -727,9 +727,7 @@ impl TestDaemon {
         match self.get_interfaces().await {
             Ok(ifaces) => self.initial_peer_count = ifaces.len(),
             Err(e) => {
-                tracing::debug!(
-                    "snapshot_initial_peer_count: get_interfaces failed: {e:?}"
-                );
+                tracing::debug!("snapshot_initial_peer_count: get_interfaces failed: {e:?}");
             }
         }
     }

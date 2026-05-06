@@ -956,7 +956,9 @@ impl ReticulumNode {
         }
         let signals: Vec<(usize, std::sync::Arc<crate::interfaces::ReadySignal>)> = {
             let map = self.iface_ready_map.lock().unwrap();
-            map.iter().map(|(k, v)| (*k, std::sync::Arc::clone(v))).collect()
+            map.iter()
+                .map(|(k, v)| (*k, std::sync::Arc::clone(v)))
+                .collect()
         };
         if signals.is_empty() {
             return Ok(());
