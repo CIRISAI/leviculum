@@ -1633,16 +1633,20 @@ fn dispatch_output(
             match event_tx.try_send(event) {
                 Ok(()) => {}
                 Err(TrySendError::Full(ev)) => {
+                    let dropped_event_type = ev.variant_name();
                     tracing::warn!(
-                        "Event channel full (capacity {}), dropping: {:?}",
-                        EVENT_CHANNEL_CAPACITY,
-                        ev
+                        event = "EVENT_CHANNEL_FULL",
+                        queue_capacity = EVENT_CHANNEL_CAPACITY,
+                        dropped_event_type = dropped_event_type,
+                        "Event channel full, dropping event"
                     );
                 }
                 Err(TrySendError::Closed(ev)) => {
+                    let dropped_event_type = ev.variant_name();
                     tracing::warn!(
-                        "Event channel closed (receiver dropped), dropping: {:?}",
-                        ev
+                        event = "EVENT_CHANNEL_CLOSED",
+                        dropped_event_type = dropped_event_type,
+                        "Event channel closed (receiver dropped), dropping event"
                     );
                 }
             }

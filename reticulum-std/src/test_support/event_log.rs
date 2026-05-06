@@ -204,6 +204,18 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "REVERSE_ADD",
         required_keys: &["in_iface", "out_iface", "pkt_hash"],
     },
+    // Silent-drop observability for the NodeEvent application channel.
+    // Emission at reticulum-std/src/driver/mod.rs in the event_tx.try_send
+    // loop; dropped_event_type carries NodeEvent::variant_name() so a
+    // saturating queue is greppable per-event-type.
+    EventSchema {
+        name: "EVENT_CHANNEL_FULL",
+        required_keys: &["queue_capacity", "dropped_event_type"],
+    },
+    EventSchema {
+        name: "EVENT_CHANNEL_CLOSED",
+        required_keys: &["dropped_event_type"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.

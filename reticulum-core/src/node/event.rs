@@ -327,6 +327,48 @@ pub enum NodeEvent {
     InterfaceDown(usize),
 }
 
+impl NodeEvent {
+    /// Stable string identifier for the event variant.
+    ///
+    /// Used as a scalar token in structured tracing fields where a full
+    /// `Debug` rendering would break Stage-6 event-log line tokenisation
+    /// (whitespace) or expose volatile internal data. The returned string
+    /// has no whitespace and is stable across releases — adding a new
+    /// `NodeEvent` variant requires extending the match.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            NodeEvent::AnnounceReceived { .. } => "AnnounceReceived",
+            NodeEvent::PathFound { .. } => "PathFound",
+            NodeEvent::PathRequestReceived { .. } => "PathRequestReceived",
+            NodeEvent::PathLost { .. } => "PathLost",
+            NodeEvent::PacketReceived { .. } => "PacketReceived",
+            NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",
+            NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",
+            NodeEvent::LinkRequest { .. } => "LinkRequest",
+            NodeEvent::LinkEstablished { .. } => "LinkEstablished",
+            NodeEvent::MessageReceived { .. } => "MessageReceived",
+            NodeEvent::LinkDataReceived { .. } => "LinkDataReceived",
+            NodeEvent::LinkStale { .. } => "LinkStale",
+            NodeEvent::LinkRecovered { .. } => "LinkRecovered",
+            NodeEvent::ChannelRetransmit { .. } => "ChannelRetransmit",
+            NodeEvent::LinkIdentified { .. } => "LinkIdentified",
+            NodeEvent::LinkClosed { .. } => "LinkClosed",
+            NodeEvent::PacketProofRequested { .. } => "PacketProofRequested",
+            NodeEvent::LinkProofRequested { .. } => "LinkProofRequested",
+            NodeEvent::LinkDeliveryConfirmed { .. } => "LinkDeliveryConfirmed",
+            NodeEvent::ResourceAdvertised { .. } => "ResourceAdvertised",
+            NodeEvent::ResourceTransferStarted { .. } => "ResourceTransferStarted",
+            NodeEvent::ResourceProgress { .. } => "ResourceProgress",
+            NodeEvent::ResourceCompleted { .. } => "ResourceCompleted",
+            NodeEvent::ResourceFailed { .. } => "ResourceFailed",
+            NodeEvent::RequestReceived { .. } => "RequestReceived",
+            NodeEvent::ResponseReceived { .. } => "ResponseReceived",
+            NodeEvent::RequestTimedOut { .. } => "RequestTimedOut",
+            NodeEvent::InterfaceDown(_) => "InterfaceDown",
+        }
+    }
+}
+
 /// Reason why a delivery failed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -356,5 +398,22 @@ mod tests {
         let err = DeliveryError::Timeout;
         let err2 = err;
         assert_eq!(err, err2);
+    }
+
+    #[test]
+    fn variant_name_no_whitespace() {
+        // Stage-6 event-log fields tokenise on whitespace; the
+        // dropped_event_type field carries this string verbatim, so no
+        // variant_name may contain whitespace, '=', or non-printable
+        // bytes. A constructable sample of every variant would need
+        // every payload type — instead we sanity-check the obvious
+        // ones plus the contract on a unit-payload variant that is
+        // always constructable.
+        let e = NodeEvent::InterfaceDown(0);
+        let name = e.variant_name();
+        assert_eq!(name, "InterfaceDown");
+        assert!(!name.contains(char::is_whitespace));
+        assert!(!name.contains('='));
+        assert!(name.chars().all(|c| !c.is_control()));
     }
 }
