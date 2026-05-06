@@ -130,6 +130,10 @@ fn spawn_local_interface_from_stream(
         outgoing: outgoing_tx,
         counters,
         credit: None,
+        // The Unix-socket stream already exists when this function
+        // is called (server-accepted), so the interface is ready
+        // immediately.
+        ready: super::ReadySignal::ready_immediate(),
     }
 }
 
@@ -183,6 +187,10 @@ pub(crate) fn spawn_local_client(
         outgoing: outgoing_tx,
         counters,
         credit: None,
+        // Local IPC client connect already succeeded
+        // (`UnixStream::connect_addr` above is synchronous), so the
+        // interface is ready immediately.
+        ready: super::ReadySignal::ready_immediate(),
     })
 }
 

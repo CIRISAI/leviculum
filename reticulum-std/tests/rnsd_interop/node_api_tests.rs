@@ -70,18 +70,13 @@ async fn test_node_receives_announce_from_daemon() {
         .expect("Failed to build node");
 
     node.start().await.expect("Failed to start node");
-
-    // E.1 confirmation probe (Codeberg #49 hypothesis E): wait for
-    // the TCP client reconnect task to establish the connection and
-    // for the daemon to register the peer in its TCPServerInterface
-    // broadcast list. node.start() returns after spawning the
-    // connect task — NOT after the connection is established. This
-    // is a hope-for-stable-timing experimental probe; the production
-    // fix replaces this with a programmatic wait_for_interface_ready
-    // API. See bug ledger 49.md hypothesis E and the Phase-0 audit
-    // in /tmp/leviculum/report.md (2026-05-06). Do not propagate
-    // this pattern to other tests — read the ledger first.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    node.wait_for_interfaces_ready(Duration::from_secs(2))
+        .await
+        .expect("Interfaces should become ready");
+    daemon
+        .wait_for_peer_count(1, Duration::from_secs(2))
+        .await
+        .expect("Daemon should register peer");
 
     // Take event receiver
     let mut events = node
@@ -149,18 +144,13 @@ async fn test_node_receives_multiple_announces() {
         .expect("Failed to build node");
 
     node.start().await.expect("Failed to start node");
-
-    // E.1 confirmation probe (Codeberg #49 hypothesis E): wait for
-    // the TCP client reconnect task to establish the connection and
-    // for the daemon to register the peer in its TCPServerInterface
-    // broadcast list. node.start() returns after spawning the
-    // connect task — NOT after the connection is established. This
-    // is a hope-for-stable-timing experimental probe; the production
-    // fix replaces this with a programmatic wait_for_interface_ready
-    // API. See bug ledger 49.md hypothesis E and the Phase-0 audit
-    // in /tmp/leviculum/report.md (2026-05-06). Do not propagate
-    // this pattern to other tests — read the ledger first.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    node.wait_for_interfaces_ready(Duration::from_secs(2))
+        .await
+        .expect("Interfaces should become ready");
+    daemon
+        .wait_for_peer_count(1, Duration::from_secs(2))
+        .await
+        .expect("Daemon should register peer");
 
     let mut events = node
         .take_event_receiver()
@@ -266,6 +256,13 @@ async fn test_node_graceful_shutdown() {
         .expect("Failed to build node");
 
     node.start().await.expect("Failed to start node");
+    node.wait_for_interfaces_ready(Duration::from_secs(2))
+        .await
+        .expect("Interfaces should become ready");
+    daemon
+        .wait_for_peer_count(1, Duration::from_secs(2))
+        .await
+        .expect("Daemon should register peer");
     let mut events = node.take_event_receiver().unwrap();
 
     // Register and announce to ensure activity
@@ -331,18 +328,13 @@ async fn test_node_learns_path_from_announce() {
         .expect("Failed to build node");
 
     node.start().await.expect("Failed to start node");
-
-    // E.1 confirmation probe (Codeberg #49 hypothesis E): wait for
-    // the TCP client reconnect task to establish the connection and
-    // for the daemon to register the peer in its TCPServerInterface
-    // broadcast list. node.start() returns after spawning the
-    // connect task — NOT after the connection is established. This
-    // is a hope-for-stable-timing experimental probe; the production
-    // fix replaces this with a programmatic wait_for_interface_ready
-    // API. See bug ledger 49.md hypothesis E and the Phase-0 audit
-    // in /tmp/leviculum/report.md (2026-05-06). Do not propagate
-    // this pattern to other tests — read the ledger first.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    node.wait_for_interfaces_ready(Duration::from_secs(2))
+        .await
+        .expect("Interfaces should become ready");
+    daemon
+        .wait_for_peer_count(1, Duration::from_secs(2))
+        .await
+        .expect("Daemon should register peer");
 
     let mut events = node
         .take_event_receiver()

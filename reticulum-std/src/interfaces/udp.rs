@@ -76,6 +76,9 @@ pub(crate) fn spawn_udp_interface(
         outgoing: outgoing_tx,
         counters,
         credit: None,
+        // UDP sockets are bound before the handle is returned;
+        // immediate-ready.
+        ready: super::ReadySignal::ready_immediate(),
     })
 }
 

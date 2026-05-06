@@ -927,6 +927,13 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
         outgoing: outgoing_tx,
         counters,
         credit: None,
+        // RNode serial-port readiness is async (port open + firmware
+        // probe + radio config) but is currently outside the scope of
+        // wait_for_interface_ready (TCP-client race is the bug we
+        // fixed in this batch).  Pre-signal so the API doesn't block
+        // on RNode interfaces; future work can convert this to a
+        // post-port-open signal if needed.
+        ready: super::ReadySignal::ready_immediate(),
     }
 }
 

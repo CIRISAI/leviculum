@@ -115,6 +115,8 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
         outgoing: outgoing_tx,
         counters,
         credit,
+        // Serial-port readiness mirrors RNode (see note there).
+        ready: super::ReadySignal::ready_immediate(),
     }
 }
 

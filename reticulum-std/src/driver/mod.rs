@@ -147,6 +147,45 @@ enum RecvEvent {
     Disconnected(InterfaceId),
 }
 
+/// Reason a `wait_for_interface_ready` call did not return `Ok(())`.
+///
+/// Returned by [`ReticulumNode::wait_for_interface_ready`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterfaceReadyError {
+    /// The interface index did not match any registered interface.
+    Unknown { idx: usize },
+    /// The readiness deadline elapsed before the interface signalled
+    /// ready.
+    TimedOut { idx: usize },
+    /// `start()` has not been called yet, so no interfaces are
+    /// registered.
+    NotStarted,
+}
+
+impl std::fmt::Display for InterfaceReadyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InterfaceReadyError::Unknown { idx } => write!(f, "unknown interface index {idx}"),
+            InterfaceReadyError::TimedOut { idx } => {
+                write!(f, "interface {idx} did not become ready in time")
+            }
+            InterfaceReadyError::NotStarted => write!(f, "node not started"),
+        }
+    }
+}
+
+impl std::error::Error for InterfaceReadyError {}
+
+/// Per-interface readiness state reported by
+/// [`ReticulumNode::wait_for_interfaces_ready`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadyState {
+    /// The interface did not signal ready before the shared deadline.
+    TimedOut,
+    /// `start()` had not been called when the wait began.
+    NotStarted,
+}
+
 /// High-level async Reticulum node
 ///
 /// `ReticulumNode` provides an async API for interacting with the Reticulum
@@ -187,6 +226,11 @@ pub struct ReticulumNode {
     start_time: std::time::Instant,
     /// Shared interface I/O counters, populated by the event loop.
     iface_stats_map: InterfaceStatsMap,
+    /// Per-interface readiness signals, keyed by interface index.
+    /// Populated by `start()` once interfaces are spawned.  Read by
+    /// [`wait_for_interface_ready`](Self::wait_for_interface_ready)
+    /// and [`wait_for_interfaces_ready`](Self::wait_for_interfaces_ready).
+    iface_ready_map: crate::interfaces::InterfaceReadyMap,
 }
 
 impl ReticulumNode {
@@ -225,6 +269,7 @@ impl ReticulumNode {
             connect_instance_name: None,
             start_time: std::time::Instant::now(),
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -259,6 +304,7 @@ impl ReticulumNode {
             // Register human-readable interface names, HW_MTU, and counters with core
             {
                 let mut stats = self.iface_stats_map.lock().unwrap();
+                let mut ready = self.iface_ready_map.lock().unwrap();
                 for handle in registry.handles() {
                     core.set_interface_name(handle.info.id.0, handle.info.name.clone());
                     if let Some(hw_mtu) = handle.info.hw_mtu {
@@ -268,6 +314,7 @@ impl ReticulumNode {
                         tracing::info!("Interface {} bitrate: {} bps", handle.info.name, bitrate);
                     }
                     stats.insert(handle.info.id.0, Arc::clone(&handle.counters));
+                    ready.insert(handle.info.id.0, Arc::clone(&handle.ready));
                 }
             }
 
@@ -843,6 +890,95 @@ impl ReticulumNode {
     /// This allows consuming node events directly. Can only be called once.
     pub fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
         self.event_rx.take()
+    }
+
+    /// Wait until the interface at index `idx` has reached its readiness
+    /// condition, or return `Err(InterfaceReadyError)` after `timeout`.
+    ///
+    /// # Readiness contract (per interface type)
+    ///
+    /// - **TCP client (`add_tcp_client`):** ready once the kernel-level
+    ///   TCP three-way handshake has succeeded
+    ///   (`TcpStream::connect` returned Ok).  This is Option α
+    ///   semantics from the Codeberg #49 audit: it does **not**
+    ///   guarantee that the remote peer has completed any
+    ///   post-accept registration steps it may run.  Tests that
+    ///   need the daemon-side peer-registration acknowledgement
+    ///   should pair this call with a daemon-side check (e.g. the
+    ///   test harness's `TestDaemon::wait_for_peer_count`).
+    /// - **TCP server (`add_tcp_server`):** the listener is bound
+    ///   before the handle is registered; the API returns
+    ///   immediately as ready.
+    /// - **UDP, RNode, AutoInterface, Local IPC:** ready once the
+    ///   underlying socket / port is bound or the IPC stream is
+    ///   connected — currently signalled at handle construction
+    ///   time, so the API returns immediately as ready.
+    ///
+    /// Returns `Err(InterfaceReadyError::Unknown)` if `idx` does not
+    /// match any registered interface; `Err(InterfaceReadyError::TimedOut)`
+    /// if the readiness deadline elapsed before the signal fired;
+    /// `Err(InterfaceReadyError::NotStarted)` if `start()` has not
+    /// yet been called.
+    pub async fn wait_for_interface_ready(
+        &self,
+        idx: usize,
+        timeout: std::time::Duration,
+    ) -> Result<(), InterfaceReadyError> {
+        if self.runner_handle.is_none() {
+            return Err(InterfaceReadyError::NotStarted);
+        }
+        let signal = {
+            let map = self.iface_ready_map.lock().unwrap();
+            map.get(&idx).cloned()
+        };
+        match signal {
+            Some(s) => s
+                .wait(timeout)
+                .await
+                .map_err(|_| InterfaceReadyError::TimedOut { idx }),
+            None => Err(InterfaceReadyError::Unknown { idx }),
+        }
+    }
+
+    /// Wait until **all** registered interfaces are ready, or return
+    /// `Err` listing the ones that timed out.
+    ///
+    /// The deadline is shared across all interfaces; each
+    /// individual wait gets the remaining budget rather than the
+    /// full `timeout`.  See [`wait_for_interface_ready`](Self::wait_for_interface_ready)
+    /// for the per-interface readiness contract.
+    pub async fn wait_for_interfaces_ready(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), Vec<(usize, ReadyState)>> {
+        if self.runner_handle.is_none() {
+            return Err(vec![(0, ReadyState::NotStarted)]);
+        }
+        let signals: Vec<(usize, std::sync::Arc<crate::interfaces::ReadySignal>)> = {
+            let map = self.iface_ready_map.lock().unwrap();
+            map.iter().map(|(k, v)| (*k, std::sync::Arc::clone(v))).collect()
+        };
+        if signals.is_empty() {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut failures = Vec::new();
+        for (idx, sig) in signals {
+            let now = tokio::time::Instant::now();
+            let remaining = if deadline > now {
+                deadline - now
+            } else {
+                std::time::Duration::ZERO
+            };
+            if sig.wait(remaining).await.is_err() {
+                failures.push((idx, ReadyState::TimedOut));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
+        }
     }
 
     /// Get the number of active (established) links
@@ -2025,6 +2161,7 @@ mod tests {
             outgoing: out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: None, // always-ready
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         });
         let mut retry_queues = BTreeMap::new();
         retry_queues
@@ -2071,6 +2208,7 @@ mod tests {
                 outgoing: out_tx,
                 counters: Arc::new(InterfaceCounters::new()),
                 credit: Some(Arc::new(Mutex::new(credit))),
+                ready: crate::interfaces::ReadySignal::ready_immediate(),
             });
         }
         // Both queues carry a full-MTU packet, both heads are
@@ -2134,6 +2272,7 @@ mod tests {
             outgoing: l_out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(Arc::new(Mutex::new(saturated))),
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         });
 
         // Plain handle (iface_idx=2), credit = None (always ready).
@@ -2152,6 +2291,7 @@ mod tests {
             outgoing: p_out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         });
 
         // Queue one packet on each interface.
@@ -2199,6 +2339,7 @@ mod tests {
             outgoing: p_out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         });
         let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
         let queue = retry_queues.entry(0).or_default();
@@ -2265,6 +2406,7 @@ mod tests {
             outgoing: lora_out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(Arc::new(Mutex::new(lora_credit))),
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         };
 
         let (_plain_inc_tx, plain_inc_rx) = tokio::sync::mpsc::channel(4);
@@ -2282,6 +2424,7 @@ mod tests {
             outgoing: plain_out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         };
         registry.register(lora_handle);
         registry.register(plain_handle);
@@ -2343,6 +2486,7 @@ mod tests {
             outgoing: out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(Arc::new(Mutex::new(credit))),
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         };
         registry.register(handle);
 
@@ -2392,6 +2536,7 @@ mod tests {
             outgoing: out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         };
         registry.register(handle);
 
@@ -2441,6 +2586,7 @@ mod tests {
             outgoing: out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: Some(credit.clone()),
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
         };
         registry.register(handle);
 

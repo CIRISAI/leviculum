@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{IncomingPacket, InterfaceCounters, InterfaceInfo, OutgoingPacket};
+use super::{IncomingPacket, InterfaceCounters, InterfaceInfo, OutgoingPacket, ReadySignal};
 use rand_core::RngCore;
 use reticulum_core::constants::MTU;
 use reticulum_core::framing::hdlc::{frame, DeframeResult, Deframer};
@@ -150,6 +150,10 @@ pub(crate) fn spawn_tcp_interface_from_stream(
         outgoing: outgoing_tx,
         counters,
         credit: None,
+        // Server-spawned children are pre-signaled — by the time we
+        // hand the handle to the registry, the underlying TCP stream
+        // already exists and is bidirectionally usable.
+        ready: ReadySignal::ready_immediate(),
     }
 }
 
@@ -261,10 +265,12 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
     let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
+    let ready = ReadySignal::new();
 
     let id = config.id;
     let task_name = config.name.clone();
     let task_counters = Arc::clone(&counters);
+    let task_ready = Arc::clone(&ready);
 
     tokio::spawn(async move {
         tcp_client_reconnect_task(
@@ -278,6 +284,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             config.max_reconnect_tries,
             task_counters,
             config.reconnect_notify,
+            task_ready,
         )
         .await;
     });
@@ -295,6 +302,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
         outgoing: outgoing_tx,
         counters,
         credit: None,
+        ready,
     }
 }
 
@@ -317,6 +325,7 @@ async fn tcp_client_reconnect_task(
     max_reconnect_tries: Option<u64>,
     counters: Arc<InterfaceCounters>,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    ready: Arc<ReadySignal>,
 ) {
     let mut attempt = 0u64;
     let mut has_connected_before = false;
@@ -327,6 +336,12 @@ async fn tcp_client_reconnect_task(
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
                 attempt = 0;
+                // Per the wait_for_interface_ready contract (Option α):
+                // ready fires when the kernel-level TCP three-way
+                // handshake has succeeded.  This is idempotent, so
+                // reconnects after a drop are safe — the signal stays
+                // ready for the lifetime of the interface.
+                ready.signal_ready();
                 tracing::info!("{}: connected to {}", name, addr);
 
                 // Notify the driver about reconnection so it can re-announce

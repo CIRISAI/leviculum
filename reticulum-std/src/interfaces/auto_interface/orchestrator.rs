@@ -638,6 +638,10 @@ fn handle_discovery_packet(
         outgoing: outgoing_tx,
         counters: Arc::clone(&counters),
         credit: None,
+        // AutoInterface peers materialise per discovery; the UDP
+        // socket pair already exists by the time this handle is
+        // constructed, so the interface is ready immediately.
+        ready: crate::interfaces::ReadySignal::ready_immediate(),
     };
 
     let now = Instant::now();

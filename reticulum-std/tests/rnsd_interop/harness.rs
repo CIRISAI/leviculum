@@ -167,6 +167,14 @@ pub struct TestDaemon {
     udp_forward_port: Option<u16>,
     /// Probe destination hash (hex, set when --respond-to-probes is used)
     probe_dest_hash: Option<String>,
+    /// Snapshot of `len(Transport.interfaces)` taken once startup
+    /// (READY + 200 ms sleep + cmd-port ping) completes — i.e. the
+    /// daemon's "no peers yet" baseline before any test connects.
+    /// Used by [`wait_for_peer_count`](Self::wait_for_peer_count) to
+    /// wait for an *increase* rather than an absolute count, so the
+    /// helper stays correct as new TestDaemon variants add interfaces
+    /// (UDP, AutoInterface, future LoRa).
+    initial_peer_count: usize,
 }
 
 impl TestDaemon {
@@ -316,18 +324,22 @@ impl TestDaemon {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Verify we can connect to the command port
-        let daemon = Self {
+        let mut daemon = Self {
             process,
             rns_port,
             cmd_port,
             udp_listen_port: None,
             udp_forward_port: None,
             probe_dest_hash: None,
+            initial_peer_count: 0,
         };
 
         // Ping to verify daemon is responsive
         match daemon.ping().await {
-            Ok(_) => Ok(daemon),
+            Ok(_) => {
+                daemon.snapshot_initial_peer_count().await;
+                Ok(daemon)
+            }
             Err(e) => {
                 // Daemon didn't respond, clean up
                 drop(daemon);
@@ -417,17 +429,21 @@ impl TestDaemon {
         // Wait briefly for interfaces to fully initialize
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let daemon = Self {
+        let mut daemon = Self {
             process,
             rns_port,
             cmd_port,
             udp_listen_port: Some(udp_listen_port),
             udp_forward_port: Some(udp_forward_port),
             probe_dest_hash: None,
+            initial_peer_count: 0,
         };
 
         match daemon.ping().await {
-            Ok(_) => Ok(daemon),
+            Ok(_) => {
+                daemon.snapshot_initial_peer_count().await;
+                Ok(daemon)
+            }
             Err(e) => {
                 drop(daemon);
                 Err(e)
@@ -532,17 +548,21 @@ impl TestDaemon {
         // Wait for local socket to be ready
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let daemon = Self {
+        let mut daemon = Self {
             process,
             rns_port,
             cmd_port,
             udp_listen_port: None,
             udp_forward_port: None,
             probe_dest_hash: None,
+            initial_peer_count: 0,
         };
 
         match daemon.ping().await {
-            Ok(_) => Ok(daemon),
+            Ok(_) => {
+                daemon.snapshot_initial_peer_count().await;
+                Ok(daemon)
+            }
             Err(e) => {
                 drop(daemon);
                 Err(e)
@@ -623,17 +643,21 @@ impl TestDaemon {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let daemon = Self {
+        let mut daemon = Self {
             process,
             rns_port,
             cmd_port,
             udp_listen_port: None,
             udp_forward_port: None,
             probe_dest_hash,
+            initial_peer_count: 0,
         };
 
         match daemon.ping().await {
-            Ok(_) => Ok(daemon),
+            Ok(_) => {
+                daemon.snapshot_initial_peer_count().await;
+                Ok(daemon)
+            }
             Err(e) => {
                 drop(daemon);
                 Err(e)
@@ -672,6 +696,10 @@ impl TestDaemon {
         // fails harmlessly instead of shutting down our new live daemon.
         new_daemon.cmd_port = 0;
 
+        // The fresh daemon's baseline supersedes ours so a post-restart
+        // wait_for_peer_count counts only NEW connections.
+        self.initial_peer_count = new_daemon.initial_peer_count;
+
         Ok(())
     }
 
@@ -683,6 +711,66 @@ impl TestDaemon {
     /// Get the address for the JSON-RPC command interface.
     pub fn cmd_addr(&self) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], self.cmd_port))
+    }
+
+    /// Snapshot the daemon's `len(Transport.interfaces)` once startup
+    /// has settled.  Called from each `start_*` constructor right after
+    /// the cmd-port `ping` returns OK; the recorded value is the
+    /// "no-peer" baseline that [`wait_for_peer_count`](Self::wait_for_peer_count)
+    /// measures increases against.
+    ///
+    /// On JSON-RPC failure the baseline stays at 0 — the
+    /// `wait_for_peer_count` helper then degrades to absolute-count
+    /// semantics, which is harmless for the single-test-daemon
+    /// topology this harness supports today.
+    async fn snapshot_initial_peer_count(&mut self) {
+        match self.get_interfaces().await {
+            Ok(ifaces) => self.initial_peer_count = ifaces.len(),
+            Err(e) => {
+                tracing::debug!(
+                    "snapshot_initial_peer_count: get_interfaces failed: {e:?}"
+                );
+            }
+        }
+    }
+
+    /// Wait until the daemon's `Transport.interfaces` list has grown
+    /// by at least `n` entries since startup, or return
+    /// [`HarnessError::StartupTimeout`] when `timeout` elapses.
+    ///
+    /// **Snapshot-and-wait-for-increase** semantics: the baseline is
+    /// the snapshot taken at startup, NOT zero.  This makes the helper
+    /// robust against TestDaemon variants that already have non-
+    /// TCPServer interfaces (UDP, AutoInterface, future LoRa) — the
+    /// caller asks "1 more peer than baseline" rather than "exactly 2
+    /// total interfaces".
+    ///
+    /// Used to close the connect-vs-broadcast race on the test side
+    /// (Codeberg #49 hypothesis E): after `node.start().await` plus
+    /// `node.wait_for_interface_ready(...)`, call this with `n = 1`
+    /// before the first `announce_destination` to guarantee the
+    /// daemon's `RNS.Transport.interfaces` list contains the test's
+    /// TCP-client peer (registered by the per-connection handler
+    /// thread spawned by `ThreadingTCPServer`, see Phase A1 audit).
+    pub async fn wait_for_peer_count(
+        &self,
+        n: usize,
+        timeout: Duration,
+    ) -> Result<(), HarnessError> {
+        let target = self.initial_peer_count + n;
+        let deadline = std::time::Instant::now() + timeout;
+        let poll_interval = Duration::from_millis(20);
+        loop {
+            if let Ok(ifaces) = self.get_interfaces().await {
+                if ifaces.len() >= target {
+                    return Ok(());
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(HarnessError::StartupTimeout);
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
     }
 
     /// Get the daemon's UDP listen address (where it receives datagrams).

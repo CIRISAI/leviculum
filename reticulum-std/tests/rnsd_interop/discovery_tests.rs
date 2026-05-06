@@ -299,6 +299,13 @@ async fn test_multiple_daemon_announces() {
         .expect("Failed to build node");
 
     node.start().await.expect("Failed to start node");
+    node.wait_for_interfaces_ready(Duration::from_secs(2))
+        .await
+        .expect("Interfaces should become ready");
+    daemon
+        .wait_for_peer_count(1, Duration::from_secs(2))
+        .await
+        .expect("Daemon should register peer");
 
     let mut events = node
         .take_event_receiver()

@@ -19,13 +19,13 @@ pub(crate) mod tcp;
 pub use tcp::{disable_fault_injection, enable_fault_injection};
 pub(crate) mod udp;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use reticulum_core::traits::{InterfaceError, InterfaceMode};
 use reticulum_core::transport::InterfaceId;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use self::airtime::AirtimeCredit;
 
@@ -150,6 +150,90 @@ pub(crate) fn spawn_traffic_counter(iface_stats_map: InterfaceStatsMap) {
 pub(crate) type InterfaceStatsMap =
     Arc<std::sync::Mutex<std::collections::BTreeMap<usize, Arc<InterfaceCounters>>>>;
 
+/// Per-interface readiness signal.
+///
+/// Created by each interface spawn function and shared with the
+/// driver via the [`InterfaceReadyMap`].  Owners of an `Arc<ReadySignal>`
+/// can:
+///
+/// - Call [`signal_ready`](Self::signal_ready) once the interface has
+///   reached its readiness condition (TCP client: connect Ok; UDP /
+///   server / immediate-ready interfaces: at construction).
+/// - Call [`wait`](Self::wait) to await the readiness condition with
+///   a timeout.
+/// - Call [`is_ready`](Self::is_ready) for a non-blocking check.
+///
+/// The readiness contract per interface type is documented on
+/// [`crate::driver::ReticulumNode::wait_for_interface_ready`].
+pub struct ReadySignal {
+    flag: AtomicBool,
+    notify: Notify,
+}
+
+impl ReadySignal {
+    /// Create a new `not yet ready` signal.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            flag: AtomicBool::new(false),
+            notify: Notify::new(),
+        })
+    }
+
+    /// Create a signal that is already in the ready state.  Used by
+    /// interface types whose readiness is established synchronously
+    /// at construction (TCP server listener, UDP socket, local IPC
+    /// shared-instance client) — the spawn function can return a
+    /// pre-signaled handle.
+    pub fn ready_immediate() -> Arc<Self> {
+        let s = Self {
+            flag: AtomicBool::new(true),
+            notify: Notify::new(),
+        };
+        Arc::new(s)
+    }
+
+    /// Mark the interface ready and wake all waiters.
+    ///
+    /// Idempotent — repeat calls are no-ops once the flag is set.
+    pub fn signal_ready(&self) {
+        if !self.flag.swap(true, Ordering::Release) {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// Non-blocking readiness check.
+    pub fn is_ready(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    /// Wait for the interface to become ready, or return `Err` after
+    /// `timeout` elapses.  Returns immediately if already ready.
+    pub async fn wait(&self, timeout: Duration) -> Result<(), tokio::time::error::Elapsed> {
+        if self.is_ready() {
+            return Ok(());
+        }
+        // Register the waiter BEFORE the second flag check to avoid a
+        // race where signal_ready runs between the first check and
+        // notified.await — Notify::notified() is permit-aware so a
+        // wakeup that arrives between registration and await is still
+        // delivered, but the second is_ready re-check covers the
+        // permit-already-consumed case for callers waking after the
+        // signal has been observable.
+        let notified = self.notify.notified();
+        if self.is_ready() {
+            return Ok(());
+        }
+        tokio::time::timeout(timeout, notified).await
+    }
+}
+
+/// Shared map of interface readiness signals, keyed by interface ID
+/// index.  Populated by the driver when interfaces are spawned;
+/// consumed by [`crate::driver::ReticulumNode::wait_for_interface_ready`]
+/// and friends.
+pub(crate) type InterfaceReadyMap =
+    Arc<std::sync::Mutex<std::collections::BTreeMap<usize, Arc<ReadySignal>>>>;
+
 /// Packet received from an interface, ready for the event loop
 pub(crate) struct IncomingPacket {
     pub data: Vec<u8>,
@@ -197,6 +281,12 @@ pub(crate) struct InterfaceHandle {
     /// `try_send_prioritized` (credit-charge) and by Phase B4's
     /// `next_slot_ms` override. See `airtime.rs` for the bucket model.
     pub credit: Option<Arc<Mutex<AirtimeCredit>>>,
+    /// Readiness signal — fires when the interface has completed any
+    /// connection / bind / handshake step it needs before it can route
+    /// packets.  TCP-client interfaces fire on connect Ok; immediate-
+    /// ready interfaces (UDP, server listeners, local IPC) ship as
+    /// pre-signaled.  Read by `ReticulumNode::wait_for_interface_ready`.
+    pub ready: Arc<ReadySignal>,
 }
 
 impl reticulum_core::traits::Interface for InterfaceHandle {
@@ -350,6 +440,7 @@ mod tests {
             outgoing: out_tx,
             counters: Arc::new(InterfaceCounters::new()),
             credit: None,
+            ready: ReadySignal::ready_immediate(),
         };
         (handle, out_rx)
     }
