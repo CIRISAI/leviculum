@@ -45,6 +45,15 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-arm6
 
 \`sudo apt install ./leviculum-nightly-amd64.deb\` installs \`lnsd\` as a systemd service and sets up \`/etc/reticulum\` for Python-RNS client drop-in compatibility.
 
+**Userspace tarball** (just the binaries plus README/LICENSE/CHANGELOG, no service, no root needed):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-arm64.tar.gz
+\`\`\`
+
+\`tar xzf leviculum-nightly-amd64.tar.gz && ./leviculum-nightly-amd64/bin/lnsd --version\` runs without installing anything system-wide.
+
 **Source tarball** (tracked files at the same commit as the .debs above, no submodules):
 
 \`\`\`

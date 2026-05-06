@@ -85,6 +85,7 @@ steps:
       # git for the source tarball (`git archive HEAD`); coreutils for
       # sha256sum is already in the slim image.
       - apt-get update && apt-get install -y git
+      - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - bash scripts/collect-nightly-debs.sh
 
   publish:
