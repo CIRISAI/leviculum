@@ -19,6 +19,16 @@
 when:
   event: cron
 
+# Skip submodule init: vendor/ holds the Python reference Reticulum
+# implementation and two firmware reference repos, none of which the
+# .deb build touches. Saves bandwidth + clone time on every step.
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+      submodules: false
+
 steps:
   build-amd64:
     image: rust:bookworm
