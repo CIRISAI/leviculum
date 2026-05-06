@@ -1,6 +1,8 @@
 #!/bin/sh
-# prerm for leviculum — stopping the service is handled by the
-# #DEBHELPER# token cargo-deb expands from the systemd-units metadata.
+# prerm for leviculum. Service teardown is auto-injected by cargo-deb
+# from the systemd-units metadata (the marker below). Note: cargo-deb
+# substitutes the marker as plain text wherever it appears, including
+# inside comments — so we never spell it out twice in the same file.
 
 set -e
 
