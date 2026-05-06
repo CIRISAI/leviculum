@@ -71,6 +71,18 @@ async fn test_node_receives_announce_from_daemon() {
 
     node.start().await.expect("Failed to start node");
 
+    // E.1 confirmation probe (Codeberg #49 hypothesis E): wait for
+    // the TCP client reconnect task to establish the connection and
+    // for the daemon to register the peer in its TCPServerInterface
+    // broadcast list. node.start() returns after spawning the
+    // connect task — NOT after the connection is established. This
+    // is a hope-for-stable-timing experimental probe; the production
+    // fix replaces this with a programmatic wait_for_interface_ready
+    // API. See bug ledger 49.md hypothesis E and the Phase-0 audit
+    // in /tmp/leviculum/report.md (2026-05-06). Do not propagate
+    // this pattern to other tests — read the ledger first.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Take event receiver
     let mut events = node
         .take_event_receiver()
@@ -137,6 +149,18 @@ async fn test_node_receives_multiple_announces() {
         .expect("Failed to build node");
 
     node.start().await.expect("Failed to start node");
+
+    // E.1 confirmation probe (Codeberg #49 hypothesis E): wait for
+    // the TCP client reconnect task to establish the connection and
+    // for the daemon to register the peer in its TCPServerInterface
+    // broadcast list. node.start() returns after spawning the
+    // connect task — NOT after the connection is established. This
+    // is a hope-for-stable-timing experimental probe; the production
+    // fix replaces this with a programmatic wait_for_interface_ready
+    // API. See bug ledger 49.md hypothesis E and the Phase-0 audit
+    // in /tmp/leviculum/report.md (2026-05-06). Do not propagate
+    // this pattern to other tests — read the ledger first.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mut events = node
         .take_event_receiver()
@@ -307,6 +331,18 @@ async fn test_node_learns_path_from_announce() {
         .expect("Failed to build node");
 
     node.start().await.expect("Failed to start node");
+
+    // E.1 confirmation probe (Codeberg #49 hypothesis E): wait for
+    // the TCP client reconnect task to establish the connection and
+    // for the daemon to register the peer in its TCPServerInterface
+    // broadcast list. node.start() returns after spawning the
+    // connect task — NOT after the connection is established. This
+    // is a hope-for-stable-timing experimental probe; the production
+    // fix replaces this with a programmatic wait_for_interface_ready
+    // API. See bug ledger 49.md hypothesis E and the Phase-0 audit
+    // in /tmp/leviculum/report.md (2026-05-06). Do not propagate
+    // this pattern to other tests — read the ledger first.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mut events = node
         .take_event_receiver()
