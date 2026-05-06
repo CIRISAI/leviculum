@@ -56,22 +56,26 @@ release_id=$(echo "$release_json" | jq -r '.id // empty')
 
 if [ -z "$release_id" ]; then
     echo "[publish] no existing release, creating"
+    # target_commitish omitted on purpose: Codeberg's API rejected
+    # the bare $CI_COMMIT_SHA with "The target couldn't be found"
+    # (build #40). Without the field, the API defaults to the
+    # repo's default branch (master at HEAD), which is what we want
+    # for a rolling nightly tag anyway. The exact build SHA still
+    # appears in the release body.
     release_json=$(jq -n \
         --arg tag "$TAG" \
-        --arg target "$CI_COMMIT_SHA" \
         --arg body "$RELEASE_BODY" \
-        '{tag_name:$tag, target_commitish:$target, name:"Nightly Builds", body:$body, draft:false, prerelease:true}' \
+        '{tag_name:$tag, name:"Nightly Builds", body:$body, draft:false, prerelease:true}' \
         | curl -sS -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases" -d @-)
     release_id=$(echo "$release_json" | jq -r '.id')
     [ -n "$release_id" ] && [ "$release_id" != "null" ] || { echo "[publish] create failed: $release_json"; exit 1; }
     echo "[publish] created release id=${release_id}"
 else
-    echo "[publish] found release id=${release_id}, refreshing body + commitish"
+    echo "[publish] found release id=${release_id}, refreshing body"
     jq -n \
-        --arg target "$CI_COMMIT_SHA" \
         --arg body "$RELEASE_BODY" \
-        '{target_commitish:$target, body:$body}' \
+        '{body:$body}' \
         | curl -sS -X PATCH -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases/$release_id" -d @- >/dev/null
 
