@@ -43,7 +43,7 @@ duration_secs = 25
 [[steps]]
 action = "exec"
 on = "alpha"
-command = "lns selftest 127.0.0.1:4242 beta:4242 --mode link --discovery-timeout 120"
+command = "lns selftest 127.0.0.1:4242 beta:4242 --mode link --rate 1 --duration 60 --discovery-timeout 120"
 expect_exit_code = 0
 
 [[steps]]
@@ -53,5 +53,5 @@ duration_secs = 5
 [[steps]]
 action = "exec"
 on = "alpha"
-command = "lns selftest 127.0.0.1:4242 beta:4242 --mode link --discovery-timeout 120"
+command = "lns selftest 127.0.0.1:4242 beta:4242 --mode link --rate 1 --duration 60 --discovery-timeout 120"
 expect_exit_code = 0
