@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # Collects the .deb packages produced by cargo-deb in the build-amd64
-# and build-arm64 steps and stages them under dist/ with stable
-# filenames, so the rolling release URL stays valid across nightly
-# runs.
+# and build-arm64 steps, and produces a source tarball from HEAD.
+# Stages everything under dist/ with stable filenames so the rolling
+# release URLs stay valid across nightly runs.
 #
 # Expects:
 #   target/debian/leviculum_*_amd64.deb
 #   target/debian/leviculum_*_arm64.deb
+#   git available on PATH
 #
 # Produces:
 #   dist/leviculum-nightly-amd64.deb       + .sha256
 #   dist/leviculum-nightly-arm64.deb       + .sha256
-# The actual package version lives in the .deb control metadata and
-# the embedded --version string, not in the filename.
+#   dist/leviculum-nightly-source.tar.gz   + .sha256
+# The .deb version lives in the control metadata and the embedded
+# --version string, not in the filename. The source tarball is a
+# git archive of HEAD (tracked files only, no vendor/ submodules,
+# no target/ build output).
 
 set -euo pipefail
 
@@ -43,6 +47,15 @@ collect_deb() {
 
 collect_deb amd64
 collect_deb arm64
+
+# Source tarball at the same commit as the binaries. git archive
+# emits only tracked files, so vendor/ submodules and target/ never
+# enter the tarball. The --prefix gives `tar xzf` a clean directory
+# layout: leviculum-nightly/{Cargo.toml, reticulum-*, …}.
+git archive --format=tar.gz --prefix=leviculum-nightly/ \
+    -o "$DIST/leviculum-nightly-source.tar.gz" HEAD
+(cd "$DIST" && sha256sum leviculum-nightly-source.tar.gz \
+    >leviculum-nightly-source.tar.gz.sha256)
 
 echo "=== dist/ ==="
 ls -la "$DIST"

@@ -82,6 +82,9 @@ steps:
   package:
     image: debian:bookworm-slim
     commands:
+      # git for the source tarball (`git archive HEAD`); coreutils for
+      # sha256sum is already in the slim image.
+      - apt-get update && apt-get install -y git
       - bash scripts/collect-nightly-debs.sh
 
   publish:

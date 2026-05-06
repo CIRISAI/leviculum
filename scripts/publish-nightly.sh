@@ -36,12 +36,22 @@ DIST="$(cd "$(dirname "$0")/.." && pwd)/dist"
 RELEASE_BODY=$(cat <<EOF
 Rolling nightly build. The assets under this release are **replaced on every CI run** — this tag always points at the latest nightly.
 
+**Debian / Ubuntu packages** (statically linked musl, runs on Debian 9+ / Ubuntu 16.04+, no extra packages needed):
+
 \`\`\`
 https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-amd64.deb
 https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-arm64.deb
 \`\`\`
 
-\`sudo apt install ./leviculum-nightly-amd64.deb\` — no other system packages required, binaries are static musl. Tested against Debian 9+ / Ubuntu 16.04+. Installs lnsd as a system service and sets up /etc/reticulum for Python-RNS client drop-in compatibility.
+\`sudo apt install ./leviculum-nightly-amd64.deb\` installs \`lnsd\` as a systemd service and sets up \`/etc/reticulum\` for Python-RNS client drop-in compatibility.
+
+**Source tarball** (tracked files at the same commit as the .debs above, no submodules):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-source.tar.gz
+\`\`\`
+
+Each asset is published with a matching \`.sha256\` next to it.
 
 Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`)
 
@@ -98,7 +108,7 @@ fi
 
 echo "[publish] uploading new assets"
 shopt -s nullglob
-for f in "$DIST"/*.deb "$DIST"/*.sha256; do
+for f in "$DIST"/*.deb "$DIST"/*.tar.gz "$DIST"/*.sha256; do
     name=$(basename "$f")
     echo "[publish]   → $name"
     curl -sS -X POST -H "$AUTH_HEADER" \
