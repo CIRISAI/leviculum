@@ -3038,7 +3038,14 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_link_teardown() {
-        crate::timeout::run_with_timeout("lora_link_teardown", 300, || {
+        // 420 s budget = 25 s init + 2 × 135 s (95th percentile under
+        // contention) + 5 s + ~30 s runner cleanup = ~330 s + ~90 s
+        // headroom. The 300 s wrapper used by sibling lora_link_*
+        // tests does not fit because teardown runs TWO selftest
+        // cycles where siblings run one. Audit-confirmed empirically
+        // 2026-05-07; pre-fix 0/10 PASS, post-fix-only-TOML 6/10 PASS,
+        // post-combo target 8-10/10 PASS. Codeberg #52.
+        crate::timeout::run_with_timeout("lora_link_teardown", 420, || {
             let toml_str = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/lora_link_teardown.toml"
