@@ -57,7 +57,11 @@ steps:
       # cheap insurance.
       - cargo clean -p reticulum-cli
       - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
-      - cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --deb-version "$(cat .deb-version)"
+      # --no-strip: rust strips debuginfo at link time (see workspace
+      # Cargo.toml [profile.release] strip = "debuginfo"). cargo-deb's
+      # default strip --strip-all corrupted x86_64 musl-static binaries
+      # (SIGSEGV at startup), so we skip it entirely.
+      - cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
 
   build-arm64:
     image: rust:bookworm
@@ -65,10 +69,7 @@ steps:
       # cargo-zigbuild uses Zig as the C compiler/linker — the only way
       # to cross-compile to aarch64-musl from an amd64 rust:bookworm
       # image without docker-in-docker or a dedicated arm64 runner.
-      # binutils-aarch64-linux-gnu provides aarch64-linux-gnu-strip,
-      # used by cargo-deb to strip the aarch64 musl binaries (host
-      # strip is amd64-only and rejects aarch64 ELFs).
-      - apt-get update && apt-get install -y python3 python3-pip python3-venv xz-utils curl binutils-aarch64-linux-gnu
+      - apt-get update && apt-get install -y python3 python3-pip python3-venv xz-utils curl
       - python3 -m venv /opt/zigvenv && /opt/zigvenv/bin/pip install cargo-zigbuild ziglang
       - export PATH="/opt/zigvenv/bin:$PATH"
       - cargo install --locked cargo-deb
@@ -76,7 +77,7 @@ steps:
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - cargo clean -p reticulum-cli
       - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
-      - cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --deb-version "$(cat .deb-version)"
+      - cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
 
   package:
     image: debian:bookworm-slim

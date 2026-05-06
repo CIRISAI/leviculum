@@ -71,3 +71,13 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.x25519-dalek]
 opt-level = 3
+
+# Strip debug info (not symbols) at link time. Rustc passes the right
+# flags per target, which avoids the post-link `strip --strip-all` that
+# cargo-deb runs by default — that one corrupted x86_64 musl-static
+# binaries (segfault at startup, see commit history). "debuginfo" keeps
+# the symbol table, so panic backtraces still show function names.
+# .deb builds pair this with `cargo deb --no-strip` in
+# .woodpecker/nightly.yml so cargo-deb's strip is skipped entirely.
+[profile.release]
+strip = "debuginfo"
