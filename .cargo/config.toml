@@ -14,8 +14,18 @@
 [build]
 target = "x86_64-unknown-linux-musl"
 
+# Use rust-lld (bundled with rustc) and link-self-contained instead of
+# the system musl-gcc wrapper. Reason: Debian Bookworm's musl-tools
+# 1.2.3 mishandles -static-pie and produces a dynamic-PIE binary with
+# an INTERP entry pointing at /lib/ld-musl-x86_64.so.1 — which doesn't
+# exist on a glibc host, so the kernel can't load the interpreter and
+# the binary segfaults at startup. rust-lld + self-contained avoids
+# the buggy wrapper entirely and produces a real static-PIE binary
+# that runs on any Linux. Newer host musl-tools (≥ 1.2.4) work too,
+# but we'd rather not depend on the host musl version.
 [target.x86_64-unknown-linux-musl]
-linker = "musl-gcc"
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes"]
 
 [alias]
 # Development workflow
