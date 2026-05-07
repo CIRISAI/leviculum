@@ -299,6 +299,52 @@ pub enum Step {
         #[serde(default)]
         label: String,
     },
+    /// Spawn the long-running LXMF helper (`scripts/lxmf_node.py`) inside
+    /// `on`'s container. Waits for the helper's `EVENT lxmf_ready hash=…`
+    /// line and stores the destination hash under cache key `lxmf_hash:<on>`.
+    #[serde(rename = "lxmf_start")]
+    LxmfStart {
+        on: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default = "default_lxmf_ready_timeout")]
+        timeout_secs: u64,
+    },
+    /// Trigger an LXMF announce on `on`'s helper.
+    #[serde(rename = "lxmf_announce")]
+    LxmfAnnounce { on: String },
+    /// Block until `on`'s helper has learned `peer`'s identity AND has a
+    /// resolved path to it. `peer` is a node name; the corresponding hash
+    /// must already be in the cache (i.e. `peer` ran `lxmf_start` first).
+    #[serde(rename = "lxmf_wait_for_peer")]
+    LxmfWaitForPeer {
+        on: String,
+        peer: String,
+        #[serde(default = "default_step_timeout")]
+        timeout_secs: u64,
+    },
+    /// Send an LXMF message from `from` to `to` with `body` as UTF-8 content.
+    /// Does not block on delivery; pair with `lxmf_assert_received`.
+    #[serde(rename = "lxmf_send")]
+    LxmfSend {
+        from: String,
+        to: String,
+        body: String,
+    },
+    /// Block until `on`'s helper has reported a received LXMF message from
+    /// `from` whose body equals `body` (UTF-8 byte-exact comparison).
+    #[serde(rename = "lxmf_assert_received")]
+    LxmfAssertReceived {
+        on: String,
+        from: String,
+        body: String,
+        #[serde(default = "default_lxmf_assert_timeout")]
+        timeout_secs: u64,
+    },
+    /// Send `quit` to `on`'s helper and wait for it to exit cleanly.
+    /// Optional: the runner shuts every helper down at test teardown.
+    #[serde(rename = "lxmf_stop")]
+    LxmfStop { on: String },
 }
 
 /// Benchmark pair: probe from one node to another.
@@ -350,6 +396,14 @@ fn default_transfer_timeout() -> u64 {
 
 fn default_step_timeout() -> u64 {
     30
+}
+
+fn default_lxmf_ready_timeout() -> u64 {
+    30
+}
+
+fn default_lxmf_assert_timeout() -> u64 {
+    60
 }
 
 fn default_expect_success() -> String {

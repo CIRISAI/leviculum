@@ -5,6 +5,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+
 use crate::runner::{RunnerError, TestRunner};
 use crate::topology::{scale_timeout, timeout_scale, ParallelTransferDef, Step};
 
@@ -601,6 +604,58 @@ fn execute_step(
             );
             execute_benchmark(runner, index, pairs, *duration_secs, label)
         }
+        Step::LxmfStart {
+            on,
+            display_name,
+            timeout_secs,
+        } => {
+            let dn = display_name.as_deref().unwrap_or(on);
+            println!("[{step_num}/{total}] lxmf_start on {on} (display_name={dn})...");
+            execute_lxmf_start(runner, index, on, dn, scale_timeout(*timeout_secs), cache)
+        }
+        Step::LxmfAnnounce { on } => {
+            println!("[{step_num}/{total}] lxmf_announce on {on}...");
+            execute_lxmf_announce(runner, index, on)
+        }
+        Step::LxmfWaitForPeer {
+            on,
+            peer,
+            timeout_secs,
+        } => {
+            println!("[{step_num}/{total}] lxmf_wait_for_peer on {on} for {peer}...");
+            execute_lxmf_wait_for_peer(runner, index, on, peer, scale_timeout(*timeout_secs), cache)
+        }
+        Step::LxmfSend { from, to, body } => {
+            println!(
+                "[{step_num}/{total}] lxmf_send {from} -> {to} ({} bytes)...",
+                body.len()
+            );
+            execute_lxmf_send(runner, index, from, to, body, cache)
+        }
+        Step::LxmfAssertReceived {
+            on,
+            from,
+            body,
+            timeout_secs,
+        } => {
+            println!(
+                "[{step_num}/{total}] lxmf_assert_received on {on} from {from} ({} bytes)...",
+                body.len()
+            );
+            execute_lxmf_assert_received(
+                runner,
+                index,
+                on,
+                from,
+                body,
+                scale_timeout(*timeout_secs),
+                cache,
+            )
+        }
+        Step::LxmfStop { on } => {
+            println!("[{step_num}/{total}] lxmf_stop on {on}...");
+            execute_lxmf_stop(runner, index, on)
+        }
     }
 }
 
@@ -865,6 +920,279 @@ fn execute_iptables_rule(
         "restored"
     };
     println!("  {verb} {from} <-> {to}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// LXMF step handlers
+// ---------------------------------------------------------------------------
+
+/// Cache key for the LXMF destination hash of a node's helper.
+fn lxmf_cache_key(node: &str) -> String {
+    format!("lxmf_hash:{node}")
+}
+
+fn lookup_peer_hash(
+    cache: &BTreeMap<String, String>,
+    peer: &str,
+    action: &str,
+    index: usize,
+) -> Result<String, StepError> {
+    cache
+        .get(&lxmf_cache_key(peer))
+        .cloned()
+        .ok_or_else(|| StepError::StepFailed {
+            step_index: index,
+            action: action.into(),
+            detail: format!("no cached LXMF hash for '{peer}' — run lxmf_start on '{peer}' first"),
+        })
+}
+
+fn execute_lxmf_start(
+    runner: &TestRunner,
+    index: usize,
+    on: &str,
+    display_name: &str,
+    timeout_secs: u64,
+    cache: &mut BTreeMap<String, String>,
+) -> Result<(), StepError> {
+    let helper = runner
+        .lxmf_spawn(on, display_name)
+        .map_err(|e| StepError::StepFailed {
+            step_index: index,
+            action: format!("lxmf_start on {on}"),
+            detail: e.to_string(),
+        })?;
+
+    let since = Instant::now();
+    let event = helper
+        .wait_for_event(
+            |ev| ev.name == "lxmf_ready",
+            since,
+            Duration::from_secs(timeout_secs),
+        )
+        .ok_or_else(|| StepError::StepFailed {
+            step_index: index,
+            action: format!("lxmf_start on {on}"),
+            detail: format!("no EVENT lxmf_ready received within {timeout_secs}s"),
+        })?;
+
+    let hash = event
+        .fields
+        .get("hash")
+        .cloned()
+        .ok_or_else(|| StepError::StepFailed {
+            step_index: index,
+            action: format!("lxmf_start on {on}"),
+            detail: "EVENT lxmf_ready has no 'hash' field".into(),
+        })?;
+
+    cache.insert(lxmf_cache_key(on), hash.clone());
+    println!("  lxmf_ready on {on}: hash={hash}");
+    Ok(())
+}
+
+fn execute_lxmf_announce(runner: &TestRunner, index: usize, on: &str) -> Result<(), StepError> {
+    let helper = runner.lxmf_helper(on)?;
+    let since = Instant::now();
+    helper
+        .send_command("announce")
+        .map_err(|e| StepError::StepFailed {
+            step_index: index,
+            action: format!("lxmf_announce on {on}"),
+            detail: e.to_string(),
+        })?;
+    // Confirm the helper observed and emitted the announce; otherwise we'd
+    // race ahead while the helper hasn't even processed the stdin line yet.
+    helper
+        .wait_for_event(
+            |ev| ev.name == "lxmf_announce_sent",
+            since,
+            Duration::from_secs(5),
+        )
+        .ok_or_else(|| StepError::StepFailed {
+            step_index: index,
+            action: format!("lxmf_announce on {on}"),
+            detail: "no lxmf_announce_sent event within 5s".into(),
+        })?;
+    println!("  announce sent on {on}");
+    Ok(())
+}
+
+fn execute_lxmf_wait_for_peer(
+    runner: &TestRunner,
+    index: usize,
+    on: &str,
+    peer: &str,
+    timeout_secs: u64,
+    cache: &mut BTreeMap<String, String>,
+) -> Result<(), StepError> {
+    let action = format!("lxmf_wait_for_peer on {on} for {peer}");
+    let peer_hash = lookup_peer_hash(cache, peer, &action, index)?;
+
+    let helper = runner.lxmf_helper(on)?;
+    let since = Instant::now();
+    helper
+        .send_command(&format!("wait_for_peer {peer_hash} {timeout_secs}"))
+        .map_err(|e| StepError::StepFailed {
+            step_index: index,
+            action: action.clone(),
+            detail: e.to_string(),
+        })?;
+
+    let peer_hash_match = peer_hash.clone();
+    let event = helper
+        .wait_for_event(
+            move |ev| {
+                (ev.name == "lxmf_wait_for_peer_ok" || ev.name == "lxmf_wait_for_peer_timeout")
+                    && ev.fields.get("peer") == Some(&peer_hash_match)
+            },
+            since,
+            Duration::from_secs(timeout_secs + 5),
+        )
+        .ok_or_else(|| StepError::StepFailed {
+            step_index: index,
+            action: action.clone(),
+            detail: format!(
+                "no wait_for_peer_{{ok,timeout}} event within {}s grace",
+                timeout_secs + 5
+            ),
+        })?;
+
+    if event.name == "lxmf_wait_for_peer_ok" {
+        println!("  {on} learned {peer} ({peer_hash})");
+        Ok(())
+    } else {
+        Err(StepError::StepFailed {
+            step_index: index,
+            action,
+            detail: format!(
+                "{on} did not learn identity AND path for {peer} ({peer_hash}) within {timeout_secs}s"
+            ),
+        })
+    }
+}
+
+fn execute_lxmf_send(
+    runner: &TestRunner,
+    index: usize,
+    from: &str,
+    to: &str,
+    body: &str,
+    cache: &mut BTreeMap<String, String>,
+) -> Result<(), StepError> {
+    let action = format!("lxmf_send {from} -> {to}");
+    let to_hash = lookup_peer_hash(cache, to, &action, index)?;
+    let body_b64 = B64.encode(body.as_bytes());
+
+    let helper = runner.lxmf_helper(from)?;
+    let since = Instant::now();
+    helper
+        .send_command(&format!("send {to_hash} {body_b64}"))
+        .map_err(|e| StepError::StepFailed {
+            step_index: index,
+            action: action.clone(),
+            detail: e.to_string(),
+        })?;
+
+    let to_hash_match = to_hash.clone();
+    let body_b64_match = body_b64.clone();
+    let event = helper
+        .wait_for_event(
+            move |ev| {
+                if ev.name == "lxmf_error" {
+                    return true;
+                }
+                ev.name == "lxmf_msg_sent"
+                    && ev.fields.get("dst") == Some(&to_hash_match)
+                    && ev.fields.get("body_b64") == Some(&body_b64_match)
+            },
+            since,
+            Duration::from_secs(10),
+        )
+        .ok_or_else(|| StepError::StepFailed {
+            step_index: index,
+            action: action.clone(),
+            detail: "no lxmf_msg_sent event within 10s".into(),
+        })?;
+
+    if event.name == "lxmf_error" {
+        return Err(StepError::StepFailed {
+            step_index: index,
+            action,
+            detail: format!(
+                "helper reported error: {}",
+                event.fields.get("detail").cloned().unwrap_or_default()
+            ),
+        });
+    }
+    println!("  queued {} bytes for delivery to {to}", body.len());
+    Ok(())
+}
+
+fn execute_lxmf_assert_received(
+    runner: &TestRunner,
+    index: usize,
+    on: &str,
+    from: &str,
+    body: &str,
+    timeout_secs: u64,
+    cache: &mut BTreeMap<String, String>,
+) -> Result<(), StepError> {
+    let action = format!("lxmf_assert_received on {on} from {from}");
+    let from_hash = lookup_peer_hash(cache, from, &action, index)?;
+    let body_b64 = B64.encode(body.as_bytes());
+
+    let helper = runner.lxmf_helper(on)?;
+
+    // The matching message may have arrived before this step started; we
+    // therefore scan from the helper's beginning, not from `now`. Saturate
+    // to the helper's earliest possible Instant by going one hour back.
+    let since = Instant::now()
+        .checked_sub(Duration::from_secs(3600))
+        .unwrap_or_else(Instant::now);
+
+    let from_hash_match = from_hash.clone();
+    let body_b64_match = body_b64.clone();
+    helper
+        .wait_for_event(
+            move |ev| {
+                ev.name == "lxmf_msg_received"
+                    && ev.fields.get("src") == Some(&from_hash_match)
+                    && ev.fields.get("body_b64") == Some(&body_b64_match)
+            },
+            since,
+            Duration::from_secs(timeout_secs),
+        )
+        .ok_or_else(|| StepError::StepFailed {
+            step_index: index,
+            action: action.clone(),
+            detail: format!(
+                "no matching lxmf_msg_received event within {timeout_secs}s (src={from_hash}, body_b64={body_b64})"
+            ),
+        })
+        .map(|event| {
+            let sig = event
+                .fields
+                .get("sig_valid")
+                .map(|s| s.as_str())
+                .unwrap_or("?");
+            let enc = event
+                .fields
+                .get("transport_encryption")
+                .map(|s| s.as_str())
+                .unwrap_or("?");
+            println!("  {on} received from {from}: sig_valid={sig} encryption={enc}");
+        })
+}
+
+fn execute_lxmf_stop(runner: &TestRunner, _index: usize, on: &str) -> Result<(), StepError> {
+    if let Some(helper) = runner.lxmf_remove(on) {
+        helper.shutdown();
+        println!("  {on} helper stopped");
+    } else {
+        println!("  {on} helper already absent (no-op)");
+    }
     Ok(())
 }
 
@@ -4220,6 +4548,23 @@ mod tests {
             "/tests/bench_dual_pair_slow_ca.toml"
         ))
         .expect("bench_dual_pair_slow_ca.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        let mut runner = require_runner!(scenario);
+        run_test(&mut runner).expect("test failed");
+    }
+
+    // -----------------------------------------------------------------------
+    // LXMF integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[serial(docker)]
+    fn lxmf_two_node_basic() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lxmf_two_node_basic.toml"
+        ))
+        .expect("lxmf_two_node_basic.toml not found");
         let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
         let mut runner = require_runner!(scenario);
         run_test(&mut runner).expect("test failed");

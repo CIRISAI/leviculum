@@ -1,0 +1,81 @@
+[test]
+name = "lxmf_two_node_basic"
+description = "Alice and Bob each run lnsd, announce after a settle delay, mutually learn each other's identity, then exchange one LXMF message in each direction"
+timeout_secs = 180
+
+[nodes.alice]
+type = "rust"
+
+[nodes.bob]
+type = "rust"
+
+[links]
+alice-bob = "tcp"
+
+# 1. Spawn the LXMF helper on each node and capture its destination hash.
+[[steps]]
+action = "lxmf_start"
+on = "alice"
+display_name = "Alice"
+
+[[steps]]
+action = "lxmf_start"
+on = "bob"
+display_name = "Bob"
+
+# 2. Settle delay so both helpers and the underlying RNS stack are quiescent
+#    before announces fly. Mirrors the user behaviour of "open the messenger,
+#    let it sit a moment, then announce".
+[[steps]]
+action = "sleep"
+duration_secs = 3
+
+# 3. Both nodes announce their LXMF delivery destination.
+[[steps]]
+action = "lxmf_announce"
+on = "alice"
+
+[[steps]]
+action = "lxmf_announce"
+on = "bob"
+
+# 4. STEP-1 ASSERTION: each side has learned the other's identity
+#    AND has a resolved path. This is the "kennenlernen" check.
+[[steps]]
+action = "lxmf_wait_for_peer"
+on = "alice"
+peer = "bob"
+timeout_secs = 30
+
+[[steps]]
+action = "lxmf_wait_for_peer"
+on = "bob"
+peer = "alice"
+timeout_secs = 30
+
+# 5. STEP-2 ASSERTION: bidirectional LXMF message exchange.
+[[steps]]
+action = "lxmf_send"
+from = "alice"
+to = "bob"
+body = "hello bob from alice"
+
+[[steps]]
+action = "lxmf_send"
+from = "bob"
+to = "alice"
+body = "hello alice from bob"
+
+[[steps]]
+action = "lxmf_assert_received"
+on = "bob"
+from = "alice"
+body = "hello bob from alice"
+timeout_secs = 60
+
+[[steps]]
+action = "lxmf_assert_received"
+on = "alice"
+from = "bob"
+body = "hello alice from bob"
+timeout_secs = 60
