@@ -24,8 +24,9 @@ pub struct TestScenario {
 
 /// Link definition: either a simple type string or a detailed table with IFAC config.
 ///
-/// Simple form (backward compatible): `alice-bob = "tcp"`
-/// Detailed form: `[links.alice-bob]` with `type`, `networkname`, `passphrase`, `ifac_size`.
+/// Simple form (backward compatible): `alice-bob = "tcp"` or `alice-bob = "auto"`
+/// Detailed form: `[links.alice-bob]` with `type`, `networkname`, `passphrase`,
+/// `ifac_size`, `group_id`.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum LinkDef {
@@ -40,6 +41,10 @@ pub enum LinkDef {
         /// IFAC size in bits (divided by 8 for bytes, matching Python convention).
         #[serde(default)]
         ifac_size: Option<usize>,
+        /// AutoInterface group_id. Only meaningful for `type = "auto"`.
+        /// When omitted, the assigner derives one from the test name.
+        #[serde(default)]
+        group_id: Option<String>,
     },
 }
 
@@ -69,6 +74,13 @@ impl LinkDef {
         match self {
             LinkDef::Simple(_) => None,
             LinkDef::Detailed { ifac_size, .. } => *ifac_size,
+        }
+    }
+
+    pub fn group_id(&self) -> Option<&str> {
+        match self {
+            LinkDef::Simple(_) => None,
+            LinkDef::Detailed { group_id, .. } => group_id.as_deref(),
         }
     }
 }
@@ -524,65 +536,105 @@ pub enum InterfaceEntry {
         port: u16,
         ifac: IfacParams,
     },
+    /// AutoInterface (IPv6 link-local multicast). All nodes sharing a
+    /// `group_id` discover each other automatically.
+    Auto { group_id: String },
+}
+
+/// Default AutoInterface group_id derived from the test name.
+pub fn default_auto_group_id(test_name: &str) -> String {
+    format!("test_{test_name}")
 }
 
 /// Parse all links and return a map: node_name -> Vec<InterfaceEntry>.
 ///
-/// Convention: for link key "X-Y" (with X < Y alphabetically), X gets the
-/// server role and Y gets the client role. Each server node gets a unique port
-/// starting from 4242, incrementing per additional link.
+/// TCP links: for key "X-Y" (X < Y alphabetically), X gets the server role
+/// and Y gets the client role. Each server node gets a unique port starting
+/// from 4242, incrementing per additional link.
+///
+/// Auto links: every node appearing in any auto link gets a single
+/// `[[Auto]]` entry per distinct `group_id`. Default group_id is
+/// `test_<test_name>` so parallel test runs do not see each other.
 pub fn assign_interfaces(
     links: &BTreeMap<String, LinkDef>,
+    test_name: &str,
 ) -> Result<BTreeMap<String, Vec<InterfaceEntry>>, String> {
     let mut interfaces: BTreeMap<String, Vec<InterfaceEntry>> = BTreeMap::new();
     // Track next port per server node.
     let mut server_ports: BTreeMap<String, u16> = BTreeMap::new();
+    // Set of (node, group_id) pairs seen for auto links — dedupes when a
+    // node appears in multiple auto pair-links sharing the same group_id.
+    let mut auto_memberships: BTreeMap<String, std::collections::BTreeSet<String>> =
+        BTreeMap::new();
 
     for (link_key, link_def) in links {
-        if link_def.link_type() != "tcp" {
-            return Err(format!("unsupported link type: {}", link_def.link_type()));
-        }
-
         let parts: Vec<&str> = link_key.split('-').collect();
         if parts.len() != 2 {
             return Err(format!("link key must be 'nodeA-nodeB', got: {link_key}"));
         }
 
-        // Alphabetically first = server, second = client.
-        let (server, client) = if parts[0] <= parts[1] {
-            (parts[0].to_string(), parts[1].to_string())
-        } else {
-            (parts[1].to_string(), parts[0].to_string())
-        };
+        match link_def.link_type() {
+            "tcp" => {
+                // Alphabetically first = server, second = client.
+                let (server, client) = if parts[0] <= parts[1] {
+                    (parts[0].to_string(), parts[1].to_string())
+                } else {
+                    (parts[1].to_string(), parts[0].to_string())
+                };
 
-        let ifac = IfacParams {
-            networkname: link_def.networkname().map(String::from),
-            passphrase: link_def.passphrase().map(String::from),
-            ifac_size: link_def.ifac_size(),
-        };
+                let ifac = IfacParams {
+                    networkname: link_def.networkname().map(String::from),
+                    passphrase: link_def.passphrase().map(String::from),
+                    ifac_size: link_def.ifac_size(),
+                };
 
-        let port = server_ports.entry(server.clone()).or_insert(4242);
-        let current_port = *port;
-        *port += 1;
+                let port = server_ports.entry(server.clone()).or_insert(4242);
+                let current_port = *port;
+                *port += 1;
 
-        interfaces
-            .entry(server.clone())
-            .or_default()
-            .push(InterfaceEntry::TcpServer {
-                peer: client.clone(),
-                port: current_port,
-                ifac: ifac.clone(),
-            });
+                interfaces
+                    .entry(server.clone())
+                    .or_default()
+                    .push(InterfaceEntry::TcpServer {
+                        peer: client.clone(),
+                        port: current_port,
+                        ifac: ifac.clone(),
+                    });
 
-        interfaces
-            .entry(client.clone())
-            .or_default()
-            .push(InterfaceEntry::TcpClient {
-                peer: server.clone(),
-                target_host: server.clone(),
-                port: current_port,
-                ifac,
-            });
+                interfaces
+                    .entry(client.clone())
+                    .or_default()
+                    .push(InterfaceEntry::TcpClient {
+                        peer: server.clone(),
+                        target_host: server.clone(),
+                        port: current_port,
+                        ifac,
+                    });
+            }
+            "auto" => {
+                let group_id = link_def
+                    .group_id()
+                    .map(String::from)
+                    .unwrap_or_else(|| default_auto_group_id(test_name));
+                for node in [parts[0], parts[1]] {
+                    auto_memberships
+                        .entry(node.to_string())
+                        .or_default()
+                        .insert(group_id.clone());
+                }
+            }
+            other => {
+                return Err(format!("unsupported link type: {other}"));
+            }
+        }
+    }
+
+    // Emit one [[Auto]] entry per (node, group_id) pair.
+    for (node, group_ids) in auto_memberships {
+        let entry = interfaces.entry(node).or_default();
+        for group_id in group_ids {
+            entry.push(InterfaceEntry::Auto { group_id });
+        }
     }
 
     Ok(interfaces)
@@ -652,6 +704,16 @@ pub fn render_config(
                 writeln!(out, "    target_port = {port}").ok();
                 writeln!(out, "    ingress_control = false").ok();
                 render_ifac_params(&mut out, ifac);
+            }
+            InterfaceEntry::Auto { group_id } => {
+                writeln!(out, "  [[Auto-{group_id}]]").ok();
+                writeln!(out, "    type = AutoInterface").ok();
+                writeln!(out, "    enabled = yes").ok();
+                writeln!(out, "    group_id = {group_id}").ok();
+                // discovery_scope = link confines multicast to the local
+                // segment (Docker bridge), which is what we want for
+                // container tests.
+                writeln!(out, "    discovery_scope = link").ok();
             }
         }
     }
@@ -733,7 +795,7 @@ pub fn render_config(
 ///   - `{base_dir}/{node_name}/storage/transport_identity` (64 random bytes)
 ///   - `{base_dir}/{node_name}/config` (Reticulum INI format)
 pub fn generate_node_configs(scenario: &TestScenario, base_dir: &Path) -> io::Result<()> {
-    let interfaces = assign_interfaces(&scenario.links)
+    let interfaces = assign_interfaces(&scenario.links, &scenario.test.name)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     // Validate: if any node has rnode set, [radio] must be present.
@@ -1060,7 +1122,7 @@ hub-spoke1 = "tcp"
 hub-spoke2 = "tcp"
 "#;
         let scenario = parse_scenario(toml_str).unwrap();
-        let interfaces = assign_interfaces(&scenario.links).unwrap();
+        let interfaces = assign_interfaces(&scenario.links, &scenario.test.name).unwrap();
 
         // hub is alphabetically first in both links → hub is server for both
         let hub_ifaces = &interfaces["hub"];
@@ -1082,7 +1144,7 @@ hub-spoke2 = "tcp"
     fn unsupported_link_type_errors() {
         let mut links = BTreeMap::new();
         links.insert("alice-bob".to_string(), LinkDef::Simple("udp".into()));
-        let result = assign_interfaces(&links);
+        let result = assign_interfaces(&links, "test");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unsupported link type"));
     }
@@ -1091,7 +1153,7 @@ hub-spoke2 = "tcp"
     fn malformed_link_key_errors() {
         let mut links = BTreeMap::new();
         links.insert("alice".to_string(), LinkDef::Simple("tcp".into()));
-        let result = assign_interfaces(&links);
+        let result = assign_interfaces(&links, "test");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("nodeA-nodeB"));
     }
@@ -1522,9 +1584,10 @@ passphrase = "secret456"
                 networkname: Some("net1".into()),
                 passphrase: Some("pass1".into()),
                 ifac_size: Some(64),
+                group_id: None,
             },
         );
-        let interfaces = assign_interfaces(&links).unwrap();
+        let interfaces = assign_interfaces(&links, "test").unwrap();
         let alice_ifaces = &interfaces["alice"];
         let bob_ifaces = &interfaces["bob"];
 
@@ -1684,5 +1747,118 @@ file_sizes = [1024]
             }
             other => panic!("expected FileTransfer, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // AutoInterface link tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_link_simple_form_assigns_default_group_id() {
+        let mut links = BTreeMap::new();
+        links.insert("alice-bob".to_string(), LinkDef::Simple("auto".into()));
+        let interfaces = assign_interfaces(&links, "mytest").unwrap();
+
+        for node in ["alice", "bob"] {
+            let entries = &interfaces[node];
+            assert_eq!(entries.len(), 1, "{node}: expected one Auto entry");
+            match &entries[0] {
+                InterfaceEntry::Auto { group_id } => {
+                    assert_eq!(group_id, "test_mytest");
+                }
+                other => panic!("{node}: expected Auto, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn auto_link_detailed_form_with_explicit_group_id() {
+        let mut links = BTreeMap::new();
+        links.insert(
+            "alice-bob".to_string(),
+            LinkDef::Detailed {
+                link_type: "auto".into(),
+                networkname: None,
+                passphrase: None,
+                ifac_size: None,
+                group_id: Some("custom_group".into()),
+            },
+        );
+        let interfaces = assign_interfaces(&links, "mytest").unwrap();
+        match &interfaces["alice"][0] {
+            InterfaceEntry::Auto { group_id } => assert_eq!(group_id, "custom_group"),
+            other => panic!("expected Auto, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_link_three_nodes_share_one_group() {
+        let mut links = BTreeMap::new();
+        links.insert("alice-bob".to_string(), LinkDef::Simple("auto".into()));
+        links.insert("bob-charlie".to_string(), LinkDef::Simple("auto".into()));
+        let interfaces = assign_interfaces(&links, "tri").unwrap();
+
+        // Each of the three nodes should have exactly one [[Auto]] entry,
+        // all with the same group_id (no duplication for shared nodes).
+        for node in ["alice", "bob", "charlie"] {
+            let entries = &interfaces[node];
+            assert_eq!(entries.len(), 1, "{node}: expected one Auto entry");
+            match &entries[0] {
+                InterfaceEntry::Auto { group_id } => assert_eq!(group_id, "test_tri"),
+                other => panic!("{node}: expected Auto, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn auto_and_tcp_links_can_coexist() {
+        let mut links = BTreeMap::new();
+        links.insert("alice-bob".to_string(), LinkDef::Simple("auto".into()));
+        links.insert("alice-charlie".to_string(), LinkDef::Simple("tcp".into()));
+        let interfaces = assign_interfaces(&links, "mixed").unwrap();
+
+        // alice gets one Auto + one TcpServer (alphabetically first in alice-charlie).
+        let alice = &interfaces["alice"];
+        assert_eq!(alice.len(), 2);
+        let has_auto = alice
+            .iter()
+            .any(|e| matches!(e, InterfaceEntry::Auto { .. }));
+        let has_tcp_server = alice
+            .iter()
+            .any(|e| matches!(e, InterfaceEntry::TcpServer { .. }));
+        assert!(has_auto && has_tcp_server);
+
+        // bob gets only Auto.
+        assert!(matches!(interfaces["bob"][0], InterfaceEntry::Auto { .. }));
+        // charlie gets only TcpClient.
+        assert!(matches!(
+            interfaces["charlie"][0],
+            InterfaceEntry::TcpClient { .. }
+        ));
+    }
+
+    #[test]
+    fn render_config_emits_auto_block() {
+        let node = NodeDef {
+            node_type: "rust".into(),
+            respond_to_probes: false,
+            enable_transport: true,
+            rnode: false,
+            rnode_proxy: false,
+            listen_port: None,
+            rnode_interfaces: None,
+            serial: false,
+            rnode_path: None,
+            serial_path: None,
+            debug_serial_path: None,
+        };
+        let entries = vec![InterfaceEntry::Auto {
+            group_id: "test_foo".into(),
+        }];
+        let ini = render_config(&node, &entries, None);
+        assert!(ini.contains("[[Auto-test_foo]]"));
+        assert!(ini.contains("type = AutoInterface"));
+        assert!(ini.contains("group_id = test_foo"));
+        assert!(ini.contains("discovery_scope = link"));
     }
 }

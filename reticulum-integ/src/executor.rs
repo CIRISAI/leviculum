@@ -4569,4 +4569,17 @@ mod tests {
         let mut runner = require_runner!(scenario);
         run_test(&mut runner).expect("test failed");
     }
+
+    #[test]
+    #[serial(docker)]
+    fn lxmf_two_node_auto() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lxmf_two_node_auto.toml"
+        ))
+        .expect("lxmf_two_node_auto.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        let mut runner = require_runner!(scenario);
+        run_test(&mut runner).expect("test failed");
+    }
 }
