@@ -187,6 +187,12 @@ pub struct ReticulumNode {
     start_time: std::time::Instant,
     /// Shared interface I/O counters, populated by the event loop.
     iface_stats_map: InterfaceStatsMap,
+    /// Channel for hot-adding interfaces to the running event loop.
+    new_iface_tx: Option<mpsc::Sender<InterfaceHandle>>,
+    /// Channel for notifying the event loop of reconnected interfaces.
+    reconnect_tx: Option<mpsc::Sender<InterfaceId>>,
+    /// Monotonic counter for assigning interface IDs to dynamic interfaces.
+    next_iface_id: Option<Arc<AtomicUsize>>,
 }
 
 impl ReticulumNode {
@@ -225,6 +231,9 @@ impl ReticulumNode {
             connect_instance_name: None,
             start_time: std::time::Instant::now(),
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            new_iface_tx: None,
+            reconnect_tx: None,
+            next_iface_id: None,
         }
     }
 
@@ -309,6 +318,9 @@ impl ReticulumNode {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
+        self.new_iface_tx = Some(new_iface_tx.clone());
+        self.reconnect_tx = Some(reconnect_tx.clone());
+        self.next_iface_id = Some(next_id);
 
         // Channel for dispatching TickOutput from outside the event loop.
         // connect(), send_on_link(), close_link(), and
@@ -768,6 +780,33 @@ impl ReticulumNode {
             .as_ref()
             .map(|h| !h.is_finished())
             .unwrap_or(false)
+    }
+
+    /// Hot-add a TCP client interface to the running node.
+    /// The interface will connect (with auto-reconnect) and begin
+    /// receiving/sending packets immediately.
+    pub async fn add_tcp_client(&self, addr: std::net::SocketAddr) -> Result<(), Error> {
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let reconnect_tx = self.reconnect_tx.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.next_iface_id.as_ref().ok_or(Error::NotRunning)?;
+
+        let id = InterfaceId(next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let name = format!("tcp:{}", addr);
+
+        let handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
+            id,
+            name: name.clone(),
+            addr,
+            buffer_size: TCP_DEFAULT_BUFFER_SIZE,
+            corrupt_every: self.corrupt_every,
+            reconnect_interval: Duration::from_secs(5),
+            max_reconnect_tries: None,
+            reconnect_notify: Some(reconnect_tx.clone()),
+        });
+
+        new_iface_tx.send(handle).await.map_err(|_| Error::NotRunning)?;
+        tracing::info!("Hot-added TCP interface: {} (id={})", name, id.0);
+        Ok(())
     }
 
     /// Register a destination for incoming links
@@ -1588,7 +1627,7 @@ fn dispatch_output(
         let queue = retry_queues.entry(iface_idx).or_default();
         if queue.len() >= RETRY_QUEUE_CAP {
             queue.pop_front();
-            tracing::warn!(
+            tracing::debug!(
                 "Retry queue full for iface {}, dropping oldest packet",
                 iface_idx,
             );
