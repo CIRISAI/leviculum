@@ -12,6 +12,11 @@ RUN apt-get update && apt-get install -y \
 COPY vendor/Reticulum /tmp/rns-src
 RUN pip3 install --break-system-packages /tmp/rns-src && rm -rf /tmp/rns-src
 
+# Install Python LXMF from vendor directory at build time. Required by
+# the lxmf_node.py helper used in LXMF integration tests.
+COPY vendor/LXMF /tmp/lxmf-src
+RUN pip3 install --break-system-packages /tmp/lxmf-src && rm -rf /tmp/lxmf-src
+
 # Create reticulum config directory
 RUN mkdir -p /root/.reticulum/storage
 

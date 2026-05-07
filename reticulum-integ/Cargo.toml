@@ -23,6 +23,7 @@ tempfile = "3"
 rand = "0.8"
 serialport = "4"
 libc = "0.2"
+base64 = "0.22"
 # Codeberg #50 Bug-A forensic instrumentation: emit structured
 # Stage-6 events from `silence_unused_lnode` so future hangs in this
 # code path are jl/jldiff-able.

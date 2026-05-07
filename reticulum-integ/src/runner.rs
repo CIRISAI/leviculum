@@ -5,12 +5,14 @@ use std::io;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
 use crate::compose::generate_compose;
+use crate::lxmf::{helper_log_path, LxmfHelper};
 use crate::topology::{apply_radio_overrides, generate_node_configs, TestScenario};
 
 /// Monotonic counter for generating unique run IDs within a process.
@@ -115,6 +117,9 @@ pub struct TestRunner {
     /// Background `dmesg --follow` process for capturing USB/kernel events.
     /// Started in `up()`, killed in `down()`.
     dmesg_process: Option<Child>,
+    /// Long-running LXMF helper processes spawned via `lxmf_start` steps,
+    /// keyed by node name. Shutdown happens in `down()` before compose down.
+    lxmf_helpers: Mutex<BTreeMap<String, Arc<LxmfHelper>>>,
 }
 
 impl TestRunner {
@@ -211,6 +216,7 @@ impl TestRunner {
             proxy_processes,
             proxy_sockets,
             dmesg_process: None,
+            lxmf_helpers: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -420,6 +426,10 @@ impl TestRunner {
     /// Bring down containers with a 10-second timeout. No-op if not up.
     /// Always saves container logs before teardown.
     pub fn down(&mut self) -> Result<(), RunnerError> {
+        // Shut down LXMF helpers first: their `docker exec` subprocesses
+        // would hang on container teardown, blocking the runner.
+        self.lxmf_kill_all();
+
         if !self.is_up {
             self.kill_proxies();
             return Ok(());
@@ -681,6 +691,73 @@ impl TestRunner {
         cmd.args(args);
         let output = cmd.output()?;
         Ok(output)
+    }
+
+    /// Spawn a long-running LXMF helper inside a node's container.
+    ///
+    /// The helper is `scripts/lxmf_node.py` driven via `docker exec -i`.
+    /// Stdin is held open for the helper's lifetime and used to send
+    /// commands; stdout is parsed for structured `EVENT …` lines.
+    /// Errors if a helper is already running for this node.
+    pub fn lxmf_spawn(
+        &self,
+        node: &str,
+        display_name: &str,
+    ) -> Result<Arc<LxmfHelper>, RunnerError> {
+        {
+            let guard = self.lxmf_helpers.lock().unwrap();
+            if guard.contains_key(node) {
+                return Err(RunnerError::Io(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("lxmf helper for '{node}' already running"),
+                )));
+            }
+        }
+        let container = self.container_name(node);
+        let logs_dir = Self::logs_dir();
+        let _ = fs::create_dir_all(&logs_dir);
+        let ts = Self::utc_timestamp();
+        let log_path = helper_log_path(&logs_dir, &self.scenario.test.name, node, &ts);
+        let helper = Arc::new(LxmfHelper::spawn(container, display_name, log_path)?);
+        self.lxmf_helpers
+            .lock()
+            .unwrap()
+            .insert(node.to_string(), Arc::clone(&helper));
+        Ok(helper)
+    }
+
+    /// Look up a previously spawned LXMF helper.
+    pub fn lxmf_helper(&self, node: &str) -> Result<Arc<LxmfHelper>, RunnerError> {
+        self.lxmf_helpers
+            .lock()
+            .unwrap()
+            .get(node)
+            .cloned()
+            .ok_or_else(|| {
+                RunnerError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no lxmf helper for '{node}'; call lxmf_start step first"),
+                ))
+            })
+    }
+
+    /// Remove a single helper entry without affecting siblings. Returns the
+    /// `Arc` so the caller can `shutdown()` it. No-op if the key is absent.
+    pub fn lxmf_remove(&self, node: &str) -> Option<Arc<LxmfHelper>> {
+        self.lxmf_helpers.lock().unwrap().remove(node)
+    }
+
+    /// Shut down all LXMF helpers (sends `quit`, then SIGKILL on timeout).
+    /// Idempotent: safe to call multiple times.
+    pub fn lxmf_kill_all(&self) {
+        let drained: Vec<(String, Arc<LxmfHelper>)> = {
+            let mut guard = self.lxmf_helpers.lock().unwrap();
+            std::mem::take(&mut *guard).into_iter().collect()
+        };
+        for (name, helper) in drained {
+            eprintln!("[lxmf] shutting down helper for '{name}'");
+            helper.shutdown();
+        }
     }
 }
 
@@ -1338,7 +1415,8 @@ impl Drop for TestRunner {
             // Best-effort teardown on panic or early return.
             let _ = self.down();
         }
-        // Ensure proxies are killed even if down() wasn't called.
+        // Ensure helpers and proxies are killed even if down() wasn't called.
+        self.lxmf_kill_all();
         self.kill_proxies();
     }
 }
