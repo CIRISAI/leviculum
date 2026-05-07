@@ -2066,6 +2066,71 @@ mod tests {
         );
     }
 
+    /// Regression: announces originating from a local IPC client must be
+    /// rebroadcast to the network even when `enable_transport=false`.
+    ///
+    /// Pre-fix the `should_rebroadcast` decision required `enable_transport`
+    /// unconditionally, and the retry scheduler bailed out early on
+    /// non-transport nodes. The combined effect was that a non-transport node
+    /// running an LXMF / Nomadnet client could register a destination locally
+    /// but never propagate the announce on the wire — to other peers the
+    /// node looked silent. This caused the asymmetric "Bob doesn't get
+    /// Alice's pubkey" symptom on hamster ↔ miauhaus when only one side had
+    /// `enable_transport=Yes`.
+    #[test]
+    fn test_local_client_announce_rebroadcasts_with_transport_disabled() {
+        use crate::transport::{Action, InterfaceId};
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().enable_transport(false).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+
+        // Interface 0: regular network interface. Interface 1: local IPC.
+        node.transport
+            .register_interface(alloc::boxed::Box::new(MockInterface::new("net0", 1)));
+        node.transport
+            .register_interface(alloc::boxed::Box::new(MockInterface::new("local0", 1)));
+        node.transport.set_local_client(1, true);
+
+        // Build an announce for a destination owned by the local client.
+        let identity = Identity::generate(&mut OsRng);
+        let mut client_dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "lxmftest",
+            &["delivery"],
+        )
+        .unwrap();
+        let announce_packet = client_dest
+            .announce(None, &mut OsRng, TEST_TIME_MS)
+            .unwrap();
+        let mut buf = [0u8; crate::constants::MTU];
+        let len = announce_packet.pack(&mut buf).unwrap();
+
+        // Feed the announce in on the local-client interface (id 1).
+        let _ = node.handle_packet(InterfaceId(1), &buf[..len]);
+
+        // Push past the 250 ms local-client batching delay and the scheduler
+        // jitter window so any pending rebroadcast must have fired.
+        node.transport().clock().set(TEST_TIME_MS + 100_000);
+        let output = node.handle_timeout();
+
+        let has_rebroadcast = output
+            .actions
+            .iter()
+            .any(|a| matches!(a, Action::Broadcast { .. }));
+        assert!(
+            has_rebroadcast,
+            "non-transport node must rebroadcast announces originating from local IPC \
+             clients so the registered destination becomes visible to peers; got: {:?}",
+            output.actions
+        );
+    }
+
     #[test]
     fn test_connect_queues_send_action() {
         use crate::transport::{Action, InterfaceId};

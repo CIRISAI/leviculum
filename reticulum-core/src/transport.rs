@@ -1852,23 +1852,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
             }
 
-            // Determine if we should rebroadcast.
-            // Suppress rebroadcast when rate-limited (announce arrived within
-            // rate window but had fewer hops, so path table was still updated).
-            let should_rebroadcast =
-                self.config.enable_transport && !is_path_response && !rate_blocked && !rate_limited;
-
-            tracing::debug!(
-                dest = %HexShort(&dest_hash),
-                hops = packet.hops,
-                transport = self.config.enable_transport,
-                is_path_response,
-                rate_blocked,
-                rate_limited,
-                should_rebroadcast,
-                "announce rebroadcast decision"
-            );
-
             // Track local client destinations (Block B). When an announce arrives
             // from a local client, record (iface_id → dest_hash) so we can detect
             // client reconnects and manage per-client destination state.
@@ -1882,6 +1865,35 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             } else {
                 false
             };
+
+            // Determine if we should rebroadcast. Two independent cases qualify:
+            //   * `enable_transport`: this node forwards announces from other
+            //     peers as part of its transit role.
+            //   * `from_local`: the announce originated from one of our own
+            //     shared-instance clients via the local IPC. Without
+            //     rebroadcasting it, our locally-registered destination would
+            //     never be visible to other peers on the network — the node
+            //     could not be reached even though it had announced. This is
+            //     orthogonal to transit forwarding and must hold even when
+            //     `enable_transport=false`.
+            // Suppress rebroadcast when rate-limited (announce arrived within
+            // rate window but had fewer hops, so path table was still updated).
+            let should_rebroadcast = (self.config.enable_transport || from_local)
+                && !is_path_response
+                && !rate_blocked
+                && !rate_limited;
+
+            tracing::debug!(
+                dest = %HexShort(&dest_hash),
+                hops = packet.hops,
+                transport = self.config.enable_transport,
+                from_local,
+                is_path_response,
+                rate_blocked,
+                rate_limited,
+                should_rebroadcast,
+                "announce rebroadcast decision"
+            );
 
             // Local client first-registration: delay rebroadcast by 250ms to
             // batch multiple registrations during startup (Python Transport.py:2232).
@@ -3890,9 +3902,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     fn check_announce_rebroadcasts(&mut self, now: u64) {
-        if !self.config.enable_transport {
-            return;
-        }
+        // Note: this scheduler runs even when `enable_transport=false`, because
+        // a non-transport node still needs to (re)broadcast announces that
+        // originated from its own local clients (handle_announce sets a
+        // retransmit_at_ms on those when `from_local=true`). Foreign-origin
+        // announces on a non-transport node are stored without a retransmit
+        // schedule, so they are inert in the loop below — the
+        // `if let Some(retransmit_at)` guard filters them out.
 
         // Collect entries that need action
         let mut to_remove = Vec::new();
