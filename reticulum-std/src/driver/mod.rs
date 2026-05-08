@@ -100,8 +100,15 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 const FLUSH_INTERVAL_SECS: u64 = 3600;
 
 /// Maximum packets per interface in the retry queue.
-/// Covers ~47s of LoRa traffic at 2734 bps. When full, oldest is dropped.
-const RETRY_QUEUE_CAP: usize = 64;
+/// Sized to absorb announce-burst fan-out from transit peers; observed
+/// peak >500 packets in a single event-loop tick on transit-active lnsd.
+/// When full, oldest is dropped.
+const RETRY_QUEUE_CAP: usize = 1024;
+
+/// Depth at which `push_retry_with_warn` emits a one-shot tracing::warn
+/// to flag that first-order backpressure may be mis-tuned. Held at
+/// 12.5 % of `RETRY_QUEUE_CAP` so the warn fires well before drops do.
+const RETRY_QUEUE_DEPTH_WARN: usize = 128;
 
 /// Build an IfacConfig from interface configuration, if IFAC params are present.
 fn build_ifac_config(config: &InterfaceConfig) -> Option<reticulum_core::ifac::IfacConfig> {
@@ -1439,8 +1446,8 @@ async fn run_event_loop(
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(FLUSH_INTERVAL_SECS);
     let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
     // Track which per-interface queues have already emitted the
-    // depth-≥-8 warning so we don't spam once the queue is deep.
-    // Cleared when the queue drops back below 8.
+    // depth-high warning so we don't spam once the queue is deep.
+    // Cleared when the queue drops back below RETRY_QUEUE_DEPTH_WARN.
     let mut retry_queue_warned: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
     // Monotonic high-watermark of each retry_queue's depth since
@@ -1746,9 +1753,14 @@ fn dispatch_output(
     retry_queues.retain(|_, queue| !queue.is_empty());
 
     // Clear the per-queue warned flag when the queue drops back
-    // below 8 so a future re-crossing re-emits the warning. Also
-    // drop entries for queues that no longer exist.
-    retry_queue_warned.retain(|idx| retry_queues.get(idx).map(|q| q.len() >= 8).unwrap_or(false));
+    // below RETRY_QUEUE_DEPTH_WARN so a future re-crossing re-emits
+    // the warning. Also drop entries for queues that no longer exist.
+    retry_queue_warned.retain(|idx| {
+        retry_queues
+            .get(idx)
+            .map(|q| q.len() >= RETRY_QUEUE_DEPTH_WARN)
+            .unwrap_or(false)
+    });
 
     // Push per-interface next_slot_ms + max_airtime_ms into the
     // Transport backchannels. Transport can't hold handles
@@ -1793,9 +1805,9 @@ fn dispatch_output(
 }
 
 /// Append `data` to the per-interface retry queue. Emit a single
-/// tracing::warn when the queue depth crosses from < 8 to == 8;
-/// update the monotonic max-depth high-watermark and log at info!
-/// whenever it increases.
+/// tracing::warn when the queue depth first crosses
+/// `RETRY_QUEUE_DEPTH_WARN`; update the monotonic max-depth high-
+/// watermark and log at info! whenever it increases.
 fn push_retry_with_warn(
     queue: &mut VecDeque<Vec<u8>>,
     iface_idx: usize,
@@ -1805,7 +1817,10 @@ fn push_retry_with_warn(
 ) {
     let len_before = queue.len();
     queue.push_back(data);
-    if len_before < 8 && queue.len() == 8 && !warned.contains(&iface_idx) {
+    if len_before < RETRY_QUEUE_DEPTH_WARN
+        && queue.len() == RETRY_QUEUE_DEPTH_WARN
+        && !warned.contains(&iface_idx)
+    {
         tracing::warn!(
             iface = iface_idx,
             depth = queue.len(),
@@ -2056,49 +2071,57 @@ mod tests {
     }
 
     /// push_retry_with_warn inserts an entry into the `warned` set
-    /// the first time queue depth crosses from < 8 to == 8.
-    /// Subsequent pushes beyond 8 do NOT re-insert.
+    /// the first time queue depth reaches RETRY_QUEUE_DEPTH_WARN.
+    /// Subsequent pushes beyond the threshold do NOT re-insert.
     #[test]
-    fn push_retry_warns_once_when_crossing_depth_8() {
+    fn push_retry_warns_once_when_crossing_warn_depth() {
         let mut q: VecDeque<Vec<u8>> = VecDeque::new();
         let mut warned: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
-        // Push 7 entries → never warns.
-        for _ in 0..7 {
+        // Fill up to one below the warn threshold → never warns.
+        for _ in 0..(RETRY_QUEUE_DEPTH_WARN - 1) {
             push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
         }
-        assert!(!warned.contains(&1), "7 packets must not trigger warn");
-        // Push 8th → crosses threshold.
+        assert!(
+            !warned.contains(&1),
+            "below-threshold depth must not trigger warn"
+        );
+        // Push one more → crosses threshold.
         push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
-        assert!(warned.contains(&1), "8 packets must trigger warn");
-        // Push 9th → already warned, set membership unchanged (idempotent).
+        assert!(
+            warned.contains(&1),
+            "reaching RETRY_QUEUE_DEPTH_WARN must trigger warn"
+        );
+        // Push past threshold → already warned, set membership unchanged (idempotent).
         push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
         assert!(warned.contains(&1));
         assert_eq!(warned.len(), 1, "no duplicate entries");
     }
 
     /// Clearing the warned flag (as dispatch_output does after the
-    /// retain loop) allows a future 7→8 crossing to re-emit.
+    /// retain loop) allows a future re-crossing of the warn depth
+    /// to re-emit.
     #[test]
-    fn push_retry_rewarns_after_queue_drains_below_8() {
+    fn push_retry_rewarns_after_queue_drains_below_warn_depth() {
         let mut q: VecDeque<Vec<u8>> = VecDeque::new();
         let mut warned: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
-        for _ in 0..8 {
+        for _ in 0..RETRY_QUEUE_DEPTH_WARN {
             push_retry_with_warn(&mut q, 2, vec![0u8; 8], &mut warned, &mut max_depth);
         }
         assert!(warned.contains(&2));
-        // Drain below 8 (simulate: clear queue, clear warned per the
-        // retain-clause in dispatch_output).
+        // Drain below the warn threshold (simulate: clear queue,
+        // clear warned per the retain-clause in dispatch_output).
         q.clear();
         warned.retain(|idx| {
             let _ = idx;
-            // Mirror dispatch_output's clause: keep only if queue.len() >= 8
+            // Mirror dispatch_output's clause:
+            // keep only if queue.len() >= RETRY_QUEUE_DEPTH_WARN
             false // queue is empty now
         });
         assert!(!warned.contains(&2));
-        // Rebuild to 8 → warn re-emitted.
-        for _ in 0..8 {
+        // Rebuild to threshold → warn re-emitted.
+        for _ in 0..RETRY_QUEUE_DEPTH_WARN {
             push_retry_with_warn(&mut q, 2, vec![0u8; 8], &mut warned, &mut max_depth);
         }
         assert!(warned.contains(&2));

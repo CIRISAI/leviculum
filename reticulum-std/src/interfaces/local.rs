@@ -22,7 +22,12 @@ use tokio::sync::mpsc;
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
 
 /// Default channel buffer size for local interfaces.
-pub(crate) const LOCAL_DEFAULT_BUFFER_SIZE: usize = 256;
+///
+/// Sized to absorb announce-burst fan-out from transit peers: a single
+/// transit-active node has been observed emitting ~500 directed
+/// SendPackets per Local-Client in a single event-loop tick. 4096 gives
+/// 16× headroom on the original 256-cap and ~8× on the worst-case burst.
+pub(crate) const LOCAL_DEFAULT_BUFFER_SIZE: usize = 4096;
 
 /// Hardware MTU for local interfaces (same as TCP, local IPC).
 const LOCAL_HW_MTU: u32 = 262_144;
