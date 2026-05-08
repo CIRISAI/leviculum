@@ -118,7 +118,9 @@ impl Envelope {
     /// # Example
     ///
     /// ```
-    /// use reticulum_core::link::channel::{Channel, Message, ChannelError, Envelope};
+    /// use reticulum_core::link::channel::{
+    ///     Channel, ChannelError, Envelope, Message, ReceiveOutcome,
+    /// };
     ///
     /// struct MyMessage { data: Vec<u8> }
     /// impl Message for MyMessage {
@@ -136,7 +138,7 @@ impl Envelope {
     /// // Receive envelope and unpack
     /// let mut receiver = Channel::new();
     /// let envelope = match receiver.receive(&packet_data, [0u8; 32]).unwrap() {
-    ///     super::ReceiveOutcome::Delivered(env) => env,
+    ///     ReceiveOutcome::Delivered(env) => env,
     ///     _ => panic!("expected delivery"),
     /// };
     /// let msg: MyMessage = envelope.unpack_message().unwrap();
