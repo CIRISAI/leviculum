@@ -387,6 +387,33 @@ pub struct RateTableExport {
     pub blocked_until_ms: u64,
 }
 
+/// Exported link table entry for RPC reporting (the `link_table`
+/// shared-instance RPC, `lns diag` v2). One entry per [`crate::link::Link`]
+/// the local node is participating in (initiator and responder side),
+/// regardless of state — the `state` field disambiguates. Python `rnsd` does
+/// not expose a per-link table at the RPC level (it has `link_count` only);
+/// we're inventing the response shape, kept to pickle-friendly scalars so
+/// the wire response is what Python clients would deserialise into a list
+/// of dicts.
+#[derive(Debug, Clone)]
+pub struct LinkTableExport {
+    /// Link ID (16 bytes).
+    pub link_id: [u8; TRUNCATED_HASHBYTES],
+    /// Lowercase ASCII state name: `"pending"`, `"handshake"`, `"active"`,
+    /// `"stale"`, or `"closed"`.
+    pub state: &'static str,
+    /// Hash of the destination this link addresses (16 bytes).
+    pub destination_hash: [u8; TRUNCATED_HASHBYTES],
+    /// Wall-clock age of the link in seconds — time since the handshake
+    /// completed (`Link::established_at_secs`). `None` for links that have
+    /// not yet established (Pending / Handshake states); rendered as `null`
+    /// in the response.
+    pub age_secs: Option<u64>,
+    /// Index of the interface the link is attached to. `None` for links
+    /// that have not yet been bound to an interface.
+    pub interface_index: Option<usize>,
+}
+
 /// Transport statistics
 #[derive(Debug, Default, Clone)]
 pub struct TransportStats {

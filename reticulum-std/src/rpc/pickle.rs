@@ -18,6 +18,10 @@ pub(crate) enum RpcRequest {
     // GET commands
     GetInterfaceStats,
     GetLinkCount,
+    /// Local link inventory — Leviculum-only extension; no Python `rnsd`
+    /// precedent (Python only exposes `link_count`). Response is a list of
+    /// dicts; see `LinkTableExport` for the per-row shape.
+    GetLinkTable,
     GetPathTable {
         max_hops: Option<i64>,
     },
@@ -85,6 +89,7 @@ pub(crate) fn parse_request(data: &[u8]) -> Result<RpcRequest, RpcError> {
         return match get_val.as_str() {
             "interface_stats" => Ok(RpcRequest::GetInterfaceStats),
             "link_count" => Ok(RpcRequest::GetLinkCount),
+            "link_table" => Ok(RpcRequest::GetLinkTable),
             "path_table" => {
                 let max_hops = dict_get_int(&dict, "max_hops");
                 Ok(RpcRequest::GetPathTable { max_hops })

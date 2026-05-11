@@ -364,19 +364,64 @@ async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8
     }
     let _ = writeln!(out);
 
-    // link_count (no per-link table query exists in the RPC protocol yet)
+    // link_count (the Python-compat scalar — also available against rnsd).
     let _ = writeln!(out, "## link_count");
     match reticulum_std::rpc_query(instance_name, authkey, "link_count").await {
         Ok(v) => {
             let _ = writeln!(out, "active links: {}", pretty_json(&v));
-            let _ = writeln!(
-                out,
-                "(the shared-instance RPC exposes only a count, not a per-link table)"
-            );
         }
         Err(e) => {
             let _ = writeln!(out, "<unavailable: {e}>");
         }
+    }
+    let _ = writeln!(out);
+
+    // link_table (Leviculum-only extension; Python rnsd rejects it with an
+    // "unknown get command" error, which surfaces here as `<unavailable: …>`.
+    // The `link_count` query above is the Python-compat fallback).
+    let _ = writeln!(out, "## link_table");
+    match reticulum_std::rpc_query(instance_name, authkey, "link_table").await {
+        Ok(v) => {
+            render_link_table_summary(out, &v);
+            let _ = writeln!(out);
+            let _ = writeln!(out, "raw:");
+            let _ = writeln!(out, "{}", pretty_json(&v));
+        }
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "<unavailable: {e}>  (Leviculum-only RPC; expected against Python rnsd)"
+            );
+        }
+    }
+}
+
+fn render_link_table_summary(out: &mut String, v: &serde_json::Value) {
+    let Some(list) = v.as_array() else {
+        let _ = writeln!(out, "(no link_table array in response)");
+        return;
+    };
+    let _ = writeln!(out, "links ({}):", list.len());
+    if list.is_empty() {
+        return;
+    }
+    for link in list {
+        let link_id = link.get("link_id").and_then(|x| x.as_str()).unwrap_or("?");
+        let state = link.get("state").and_then(|x| x.as_str()).unwrap_or("?");
+        let peer = link
+            .get("destination_hash")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?");
+        let age = link
+            .get("age")
+            .and_then(|x| x.as_f64())
+            .map(|s| format!("{s:.0}s"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let iface = link.get("interface").and_then(|x| x.as_str()).unwrap_or("");
+        let _ = writeln!(
+            out,
+            "  - {link_id}  state={state}  peer={peer}  age={age}  iface={iface}"
+        );
     }
 }
 
@@ -760,5 +805,51 @@ tx_power = 7
         assert_eq!(format_duration(3661.0), "1h 1m 1s");
         assert_eq!(format_duration(90_061.0), "1d 1h 1m 1s");
         assert_eq!(format_duration(-1.0), "?");
+    }
+
+    /// `render_link_table_summary` formats a JSON array of per-link rows
+    /// (matching the `link_table` RPC response decoded by `rpc_query`) into
+    /// the one-line-per-link summary in the bundle's `## link_table` section.
+    #[test]
+    fn render_link_table_summary_renders_per_link_lines() {
+        let v = serde_json::json!([
+            {
+                "link_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "state": "active",
+                "destination_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "age": 42.7,
+                "interface": "TCPInterface[example/1.2.3.4:4242]"
+            },
+            {
+                "link_id": "cccccccccccccccccccccccccccccccc",
+                "state": "pending",
+                "destination_hash": "dddddddddddddddddddddddddddddddd",
+                "age": null,
+                "interface": ""
+            }
+        ]);
+        let mut out = String::new();
+        render_link_table_summary(&mut out, &v);
+        assert!(out.contains("links (2):"), "got: {out}");
+        assert!(
+            out.contains(
+                "  - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  state=active  \
+                 peer=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  age=43s  \
+                 iface=TCPInterface[example/1.2.3.4:4242]"
+            ),
+            "active link row missing or wrong, got: {out}"
+        );
+        assert!(
+            out.contains(
+                "  - cccccccccccccccccccccccccccccccc  state=pending  \
+                 peer=dddddddddddddddddddddddddddddddd  age=n/a  iface="
+            ),
+            "pending link row missing or wrong, got: {out}"
+        );
+
+        // Empty array path renders just the header, no rows.
+        let mut empty_out = String::new();
+        render_link_table_summary(&mut empty_out, &serde_json::json!([]));
+        assert_eq!(empty_out, "links (0):\n");
     }
 }

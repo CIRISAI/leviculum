@@ -394,6 +394,38 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .count()
     }
 
+    /// Return all local links as RPC-exportable rows.
+    ///
+    /// One entry per [`crate::link::Link`] currently in [`Self::links`],
+    /// regardless of state — the `state` field on the returned struct
+    /// disambiguates `pending` / `handshake` / `active` / `stale` / `closed`.
+    /// Backs the `link_table` shared-instance RPC (`lns diag` v2).
+    pub fn link_table_entries(&self) -> alloc::vec::Vec<crate::transport::LinkTableExport> {
+        let now_secs = self.transport.clock().now_ms() / MS_PER_SECOND;
+        self.links
+            .values()
+            .map(|link| {
+                let state = match link.state() {
+                    LinkState::Pending => "pending",
+                    LinkState::Handshake => "handshake",
+                    LinkState::Active => "active",
+                    LinkState::Stale => "stale",
+                    LinkState::Closed => "closed",
+                };
+                let age_secs = link
+                    .established_at_secs()
+                    .map(|est| now_secs.saturating_sub(est));
+                crate::transport::LinkTableExport {
+                    link_id: *link.id().as_bytes(),
+                    state,
+                    destination_hash: *link.destination_hash().as_bytes(),
+                    age_secs,
+                    interface_index: link.attached_interface(),
+                }
+            })
+            .collect()
+    }
+
     // Link Data Transfer
     /// Send data on an existing link via Channel (reliable, ordered)
     pub fn send_on_link(

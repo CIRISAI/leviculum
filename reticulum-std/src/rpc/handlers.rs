@@ -29,6 +29,7 @@ pub(super) fn handle_request(
             auto_peer_count,
         ),
         RpcRequest::GetLinkCount => pickle_int(core.active_link_count() as i64),
+        RpcRequest::GetLinkTable => build_link_table(core),
         RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
         RpcRequest::GetRateTable => build_rate_table(core, start_time),
         RpcRequest::GetNextHop { destination_hash } => get_next_hop(core, destination_hash),
@@ -286,6 +287,46 @@ fn build_path_table(
             ),
             (pickle_str_key("hops"), pickle_int(python_hops)),
             (pickle_str_key("expires"), pickle_float(expires_secs)),
+            (pickle_str_key("interface"), pickle_str(iface_name)),
+        ]);
+        list.push(dict);
+    }
+    pickle_list(list)
+}
+
+// Link Table (Leviculum-only `link_table` RPC — `lns diag` v2)
+/// Build the `link_table` response — a list of per-link dicts.
+///
+/// One entry per local [`crate::link::Link`] regardless of state. Python
+/// `rnsd` has no `link_table` precedent (it exposes `link_count` only); the
+/// response shape is therefore a Leviculum extension, kept to
+/// pickle-friendly scalars so Python clients can still deserialise it into
+/// a list of dicts if they ever consume it.
+fn build_link_table(core: &StdNodeCore) -> Value {
+    let entries = core.link_table_entries();
+    let iface_stats = core.interface_stats();
+
+    let mut list = Vec::new();
+    for entry in &entries {
+        let iface_name = entry
+            .interface_index
+            .and_then(|idx| iface_stats.iter().find(|s| s.id == idx))
+            .map(|s| s.name.as_str())
+            .unwrap_or("");
+        let dict = pickle_dict(vec![
+            (pickle_str_key("link_id"), pickle_bytes(&entry.link_id)),
+            (pickle_str_key("state"), pickle_str(entry.state)),
+            (
+                pickle_str_key("destination_hash"),
+                pickle_bytes(&entry.destination_hash),
+            ),
+            (
+                pickle_str_key("age"),
+                match entry.age_secs {
+                    Some(s) => pickle_float(s as f64),
+                    None => pickle_none(),
+                },
+            ),
             (pickle_str_key("interface"), pickle_str(iface_name)),
         ]);
         list.push(dict);

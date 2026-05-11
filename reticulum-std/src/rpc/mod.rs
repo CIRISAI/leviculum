@@ -213,11 +213,14 @@ pub(crate) async fn rpc_client_call(
 /// RPC socket (`\0rns/{instance_name}/rpc`) and return the response decoded into
 /// a [`serde_json::Value`].
 ///
-/// `get_key` must be one of the parameterless RPC keys understood by the daemon
-/// (and by Python `rnsd`): `"interface_stats"`, `"path_table"`, `"link_count"`,
-/// `"rate_table"`, `"blackholed_identities"`. Queries that take parameters
-/// (`next_hop`, `packet_rssi`, …) and the mutating `drop`/`blackhole`/
-/// `destination_data` ops are intentionally not reachable through this helper.
+/// `get_key` must be one of the parameterless RPC keys understood by the daemon:
+/// `"interface_stats"`, `"path_table"`, `"link_count"`, `"link_table"`,
+/// `"rate_table"`, `"blackholed_identities"`. The first five overlap with
+/// Python `rnsd` (`"link_table"` is a Leviculum-only extension — Python has
+/// only `link_count` — and degrades to `<unavailable>` against an `rnsd` that
+/// rejects it). Queries that take parameters (`next_hop`, `packet_rssi`, …)
+/// and the mutating `drop`/`blackhole`/`destination_data` ops are
+/// intentionally not reachable through this helper.
 ///
 /// `authkey` is `SHA256(transport_identity)` — the daemon derives the same key
 /// from its `{config_dir}/storage/transport_identity` file (raw 64 bytes).
@@ -577,6 +580,43 @@ mod tests {
             elapsed < RPC_CLIENT_TIMEOUT + std::time::Duration::from_secs(3),
             "took far longer than the timeout: {elapsed:?}"
         );
+    }
+
+    /// `rpc_query("link_table")` round-trips against our own server and
+    /// decodes to a JSON array. Empty for a freshly-built test core that has
+    /// no links; the per-row response shape is exercised in the diag-side
+    /// rendering test (`reticulum-cli::diag::tests`).
+    ///
+    /// `link_table` is a Leviculum-only extension (Python `rnsd` has no
+    /// equivalent — it exposes `link_count` only). This test guards against
+    /// regressions in the request → handler → response wiring.
+    #[tokio::test]
+    async fn test_rpc_query_link_table_round_trip() {
+        let core = make_test_core(true);
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+
+        let instance_name = format!("rpctest_lt_{}", std::process::id());
+
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            empty_online_map(),
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let json = rpc_query(&instance_name, &authkey, "link_table")
+            .await
+            .expect("link_table query should succeed");
+        let arr = json
+            .as_array()
+            .expect("link_table response should be a JSON array");
+        assert!(arr.is_empty(), "fresh test core has no links: {arr:?}");
     }
 
     /// Codeberg #56: the `status` field of each per-interface dict must
