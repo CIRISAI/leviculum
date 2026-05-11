@@ -2,7 +2,8 @@
 # daemon over the shared-instance RPC, with the identity private key never
 # leaking into the output. Mirrors `rnstatus_transport_info.toml`: one Rust
 # daemon (alice) and one Python daemon (bob) linked over TCP, so the same
-# `lns diag` is exercised against both (drop-in compat).
+# `lns diag` is exercised against both — and both must produce a *populated*
+# daemon-view section (Python-rnsd drop-in compat is Priority 1).
 #
 # Docker-based scenario (the whole reticulum-integ framework is) — runs via
 # `cargo test --release -p reticulum-integ executor::tests::lns_diag`.
@@ -103,10 +104,12 @@ command = "sh /opt/integ-scripts/lns_diag_no_secret.sh"
 expect_exit_code = 0
 expect_stdout_contains = "ok: identity bytes absent"
 
-# --- Python daemon (bob): drop-in / graceful degradation ---
+# --- Python daemon (bob): drop-in compat — same assertions as alice ---
+# `lns diag` against a Python `rnsd` must produce a fully populated daemon-view
+# section, not just degrade gracefully. (The identity-key-leak property is
+# daemon-agnostic — alice's lns_diag_no_secret.sh step + the
+# `identity_private_key_never_enters_the_bundle` unit test cover it.)
 
-# Runs cleanly against rnsd and emits a complete bundle with the daemon-view
-# section (whether or not every RPC query is supported there).
 [[steps]]
 action = "exec"
 on = "bob"
@@ -120,6 +123,43 @@ on = "bob"
 command = "lns diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "Daemon view"
+
+# interface_stats came back populated against rnsd.
+[[steps]]
+action = "exec"
+on = "bob"
+command = "lns diag --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "daemon uptime:"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "lns diag --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "transport id:"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "lns diag --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "interfaces ("
+
+# path_table query worked against rnsd (with the max_hops=None we now send).
+[[steps]]
+action = "exec"
+on = "bob"
+command = "lns diag --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "known paths:"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "lns diag --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "active links:"
 
 [[steps]]
 action = "exec"
