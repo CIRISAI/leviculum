@@ -6,6 +6,7 @@
 
 - [Installation](guide/installation.md)
 - [Configuration](guide/configuration.md)
+- [lnsd Quickstart](lnsd-quickstart.md)
 
 # Architecture
 
