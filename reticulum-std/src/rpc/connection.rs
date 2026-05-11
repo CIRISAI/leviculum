@@ -193,7 +193,6 @@ pub(crate) async fn server_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 /// Matches Python's `Client()` which calls:
 /// 1. `answer_challenge(conn, authkey)`, client answers server's challenge
 /// 2. `deliver_challenge(conn, authkey)`, client authenticates server
-#[cfg(test)]
 pub(crate) async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     authkey: &[u8; 32],

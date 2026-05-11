@@ -135,9 +135,8 @@ async fn handle_rpc_connection(
     Ok(())
 }
 
-// Client-side functions (for integration tests)
+// Client-side functions
 /// Connect to the RPC server, perform handshake, send request, receive response.
-#[cfg(test)]
 pub(crate) async fn rpc_client_call(
     abstract_name: &str,
     authkey: &[u8; 32],
@@ -165,6 +164,112 @@ pub(crate) async fn rpc_client_call(
             .map_err(|e| RpcError::Pickle(format!("deserialize response: {}", e)))?;
 
     Ok(response)
+}
+
+/// Issue a parameterless `get` query against a running shared-instance daemon's
+/// RPC socket (`\0rns/{instance_name}/rpc`) and return the response decoded into
+/// a [`serde_json::Value`].
+///
+/// `get_key` must be one of the parameterless RPC keys understood by the daemon
+/// (and by Python `rnsd`): `"interface_stats"`, `"path_table"`, `"link_count"`,
+/// `"rate_table"`, `"blackholed_identities"`. Queries that take parameters
+/// (`next_hop`, `packet_rssi`, …) and the mutating `drop`/`blackhole`/
+/// `destination_data` ops are intentionally not reachable through this helper.
+///
+/// `authkey` is `SHA256(transport_identity)` — the daemon derives the same key
+/// from its `{config_dir}/storage/transport_identity` file (raw 64 bytes).
+///
+/// Returns the response as JSON: pickle dicts become objects (non-string keys
+/// stringified), `bytes` values become lowercase hex strings, tuples/lists/sets
+/// become arrays, `None` becomes `null`, big ints become decimal strings.
+pub async fn rpc_query(
+    instance_name: &str,
+    authkey: &[u8; 32],
+    get_key: &str,
+) -> Result<serde_json::Value, crate::Error> {
+    let abstract_name = format!("rns/{}/rpc", instance_name);
+    let request = pickle::pickle_dict(vec![(
+        pickle::pickle_str_key("get"),
+        pickle::pickle_str(get_key),
+    )]);
+    let response = rpc_client_call(&abstract_name, authkey, &request)
+        .await
+        .map_err(|e| match e {
+            RpcError::Io(io) => crate::Error::Io(io),
+            other => crate::Error::Config(format!("shared-instance RPC error: {other}")),
+        })?;
+    Ok(pickle_value_to_json(&response))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+fn f64_to_json(f: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(f)
+        .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn pickle_value_to_json(v: &serde_pickle::value::Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    use serde_pickle::value::Value as P;
+    match v {
+        P::None => J::Null,
+        P::Bool(b) => J::Bool(*b),
+        P::I64(n) => J::from(*n),
+        P::Int(n) => J::String(n.to_string()),
+        P::F64(f) => f64_to_json(*f),
+        P::Bytes(b) => J::String(hex_lower(b)),
+        P::String(s) => J::String(s.clone()),
+        P::List(items) | P::Tuple(items) => {
+            J::Array(items.iter().map(pickle_value_to_json).collect())
+        }
+        P::Set(items) | P::FrozenSet(items) => {
+            J::Array(items.iter().map(pickle_hashable_to_json).collect())
+        }
+        P::Dict(d) => J::Object(
+            d.iter()
+                .map(|(k, v)| (pickle_hashable_key_string(k), pickle_value_to_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+fn pickle_hashable_to_json(h: &serde_pickle::value::HashableValue) -> serde_json::Value {
+    use serde_json::Value as J;
+    use serde_pickle::value::HashableValue as H;
+    match h {
+        H::None => J::Null,
+        H::Bool(b) => J::Bool(*b),
+        H::I64(n) => J::from(*n),
+        H::Int(n) => J::String(n.to_string()),
+        H::F64(f) => f64_to_json(*f),
+        H::Bytes(b) => J::String(hex_lower(b)),
+        H::String(s) => J::String(s.clone()),
+        H::Tuple(items) => J::Array(items.iter().map(pickle_hashable_to_json).collect()),
+        H::FrozenSet(items) => J::Array(items.iter().map(pickle_hashable_to_json).collect()),
+    }
+}
+
+fn pickle_hashable_key_string(h: &serde_pickle::value::HashableValue) -> String {
+    use serde_pickle::value::HashableValue as H;
+    match h {
+        H::String(s) => s.clone(),
+        H::I64(n) => n.to_string(),
+        H::Int(n) => n.to_string(),
+        H::Bool(b) => b.to_string(),
+        H::Bytes(b) => hex_lower(b),
+        H::F64(f) => f.to_string(),
+        H::None => "null".to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 #[cfg(test)]

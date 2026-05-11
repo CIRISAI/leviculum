@@ -49,3 +49,6 @@ pub use config::Config;
 pub use driver::{LinkHandle, PacketSender, ReticulumNode, ReticulumNodeBuilder};
 pub use error::{Error, Result};
 pub use reticulum::Reticulum;
+/// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).
+/// Used by `lns diag` to query a running `lnsd`/`rnsd`.
+pub use rpc::rpc_query;

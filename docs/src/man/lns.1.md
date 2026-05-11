@@ -69,6 +69,26 @@ Options:
 **--mode** *mode*
 :   Which phases to run: all, link, packet, ratchet-basic, ratchet-enforced, bulk-transfer, ratchet-rotation (default: all).
 
+### lns diag
+
+Collect a self-contained diagnostic bundle from a running **lnsd** (or **rnsd**) for attaching to bug reports: versions/build, the secret-redacted config and configured interfaces, the daemon's live view via the shared-instance RPC (interface stats, path table, link count), best-effort system info, and an event-log pointer. Printed to stdout by default. Use the global **-c**/**--config** to point at the daemon's config directory.
+
+Secrets are redacted — IFAC `passphrase` and `networkname` never appear, and the node identity private key (`storage/transport_identity`) is never read into the bundle (it is used only to derive the RPC authkey). Queries the daemon doesn't support (e.g. when run against Python **rnsd**) are reported as unavailable rather than failing.
+
+Options:
+
+**--output** *path*
+:   Write the bundle to *path* instead of stdout (a one-line confirmation is printed to stderr).
+
+**--instance-name** *name*
+:   Shared-instance name to query (default: from the config, else `default`).
+
+**--event-log** *path*
+:   Tail this structured event-log file into the bundle (when **lnsd** was started with `LEVICULUM_EVENT_LOG` set).
+
+**--no-rpc**
+:   Skip the daemon RPC queries; emit only the config, versions, and system sections.
+
 ## EXAMPLES
 
 Show network status:

@@ -2842,6 +2842,19 @@ mod tests {
 
     #[test]
     #[serial(docker)]
+    fn lns_diag() {
+        let toml_str =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/lns_diag.toml"))
+                .expect("lns_diag.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+        let mut runner = require_runner!(scenario);
+
+        run_test(&mut runner).expect("test failed");
+    }
+
+    #[test]
+    #[serial(docker)]
     fn rust_probe_through_python_relay() {
         let toml_str = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),

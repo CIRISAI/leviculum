@@ -1,0 +1,76 @@
+# `lns diag` — collects a self-contained diagnostic bundle from a running
+# daemon over the shared-instance RPC, with the identity private key never
+# leaking into the output. Mirrors `rnstatus_transport_info.toml`: one Rust
+# daemon (alice) and one Python daemon (bob) linked over TCP, so the same
+# `lns diag` is exercised against both (drop-in compat).
+#
+# Docker-based scenario (the whole reticulum-integ framework is) — runs via
+# `cargo test --release -p reticulum-integ --lib executor::tests::lns_diag`.
+# WRITTEN, NOT RUN this batch: Coder1's hardware/Docker batch owns the host.
+
+[test]
+name = "lns_diag"
+description = "lns diag collects a daemon bundle from Rust and Python daemons without leaking the identity key"
+timeout_secs = 90
+
+[nodes.alice]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bob]
+type = "python"
+respond_to_probes = true
+
+[links]
+alice-bob = "tcp"
+
+# Let the link come up and the probe-destination announces cross both ways so
+# the path table on each side is non-empty.
+[[steps]]
+action = "sleep"
+duration_secs = 8
+
+# --- Rust daemon (alice) ---
+
+# Basic: lns diag runs cleanly and emits a bundle.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "lns diag --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Leviculum diagnostic bundle"
+
+# Strong path: the bundle reached the daemon's RPC and has the live view —
+# interface stats (daemon uptime + transport id + interfaces list), the path
+# table line, and no failed/unavailable query.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "sh -c 'lns diag -c /root/.reticulum > /tmp/diag-alice.txt; grep -q \"Leviculum diagnostic bundle\" /tmp/diag-alice.txt && grep -q \"Daemon view\" /tmp/diag-alice.txt && grep -q \"daemon uptime:\" /tmp/diag-alice.txt && grep -q \"transport id:\" /tmp/diag-alice.txt && grep -q \"interfaces (\" /tmp/diag-alice.txt && grep -q \"known paths:\" /tmp/diag-alice.txt && grep -q \"end of diagnostic bundle\" /tmp/diag-alice.txt && ! grep -q \"<unavailable\" /tmp/diag-alice.txt && ! grep -q \"cannot derive RPC authkey\" /tmp/diag-alice.txt'"
+expect_exit_code = 0
+
+# Security: the 64 raw bytes of storage/transport_identity (hex-encoded the
+# way the bundle would render any byte field) must appear nowhere in the
+# output. `test -n` guards against a wrong path silently passing the negation.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "sh -c 'h=$(od -An -tx1 -v /root/.reticulum/storage/transport_identity | tr -dc 0-9a-f); test -n \"$h\" && ! lns diag -c /root/.reticulum | grep -qiF \"$h\"'"
+expect_exit_code = 0
+
+# --- Python daemon (bob): drop-in / graceful degradation ---
+
+# lns diag runs cleanly against rnsd and emits a complete bundle with the
+# daemon-view section (whether or not every RPC query is supported there).
+[[steps]]
+action = "exec"
+on = "bob"
+command = "lns diag --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Leviculum diagnostic bundle"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "sh -c 'lns diag -c /root/.reticulum > /tmp/diag-bob.txt; grep -q \"Leviculum diagnostic bundle\" /tmp/diag-bob.txt && grep -q \"Daemon view\" /tmp/diag-bob.txt && grep -q \"end of diagnostic bundle\" /tmp/diag-bob.txt'"
+expect_exit_code = 0

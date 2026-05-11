@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 use tokio::io::AsyncBufReadExt;
 
 mod cp;
+mod diag;
 mod selftest;
 
 use reticulum_std::driver::{LinkHandle, PacketSender, ReticulumNodeBuilder};
@@ -464,6 +465,32 @@ enum Commands {
         /// Path to identity file (default: generate ephemeral)
         #[arg(long)]
         identity: Option<PathBuf>,
+    },
+
+    /// Collect a diagnostic bundle from a running lnsd (or rnsd) for bug reports
+    ///
+    /// Queries the shared-instance RPC for the daemon's live view (interface
+    /// stats, path table, link count), bundles it with the secret-redacted
+    /// config, versions, and system info. Prints to stdout by default.
+    /// Secrets (IFAC passphrase/networkname) are redacted; the identity
+    /// private key is never read or emitted. Unsupported queries (e.g. against
+    /// rnsd) degrade gracefully instead of failing.
+    Diag {
+        /// Write the bundle to this path instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Shared-instance name to query (default: from config, else "default")
+        #[arg(long)]
+        instance_name: Option<String>,
+
+        /// Tail this structured event-log file into the bundle
+        #[arg(long)]
+        event_log: Option<PathBuf>,
+
+        /// Skip the daemon RPC queries; emit only config / versions / system
+        #[arg(long)]
+        no_rpc: bool,
     },
 }
 
@@ -1300,6 +1327,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Connect { addr, identity } => {
             run_connect(addr, identity, args.corrupt_every).await?;
+        }
+
+        Commands::Diag {
+            output,
+            instance_name,
+            event_log,
+            no_rpc,
+        } => {
+            diag::run(
+                diag::DiagOptions {
+                    config_dir: args.config,
+                    instance_name,
+                    event_log,
+                    no_rpc,
+                },
+                output,
+            )
+            .await?;
         }
     }
 
