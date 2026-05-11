@@ -19,6 +19,19 @@ fn err(msg: impl std::fmt::Display) -> Box<dyn std::error::Error> {
     msg.to_string().into()
 }
 
+/// Resolve at `deadline` if `Some`; never resolve if `None`.
+///
+/// Used so the transfer loop's `select!` timeout arm is a no-op when
+/// the user did not pass `-w` (the default). The deadline is absolute,
+/// so re-creating this future per loop iteration still resolves at the
+/// original instant.
+async fn deadline_or_never(deadline: Option<Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 /// Load an identity from disk, or generate a new one and save it.
 pub fn load_or_generate_identity(path: &Path) -> Result<Identity, Box<dyn std::error::Error>> {
     if path.exists() {
@@ -129,7 +142,7 @@ pub async fn run_send(
     events: &mut mpsc::Receiver<NodeEvent>,
     file_path: &str,
     destination: &str,
-    timeout_secs: f64,
+    timeout_secs: Option<f64>,
     verbose: u8,
     quiet: bool,
     no_compress: bool,
@@ -160,7 +173,8 @@ pub async fn run_send(
     node.send_resource(&link_id, &data, Some(&metadata_bytes), !no_compress)
         .await?;
 
-    let transfer_deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
+    let transfer_deadline: Option<Instant> =
+        timeout_secs.map(|s| Instant::now() + Duration::from_secs_f64(s));
     let mut speed_tracker = SpeedTracker::new();
     loop {
         tokio::select! {
@@ -213,8 +227,7 @@ pub async fn run_send(
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep_until(
-                tokio::time::Instant::from_std(transfer_deadline)) => {
+            _ = deadline_or_never(transfer_deadline) => {
                 return Err(err("The transfer timed out"));
             }
         }
@@ -574,7 +587,7 @@ pub async fn run_fetch(
     destination: &str,
     save_dir: Option<PathBuf>,
     overwrite: bool,
-    timeout_secs: f64,
+    timeout_secs: Option<f64>,
     verbose: u8,
     quiet: bool,
     no_compress: bool,
@@ -603,7 +616,8 @@ pub async fn run_fetch(
         eprintln!("Fetch requested: {}", remote_path);
     }
 
-    let transfer_deadline = Instant::now() + Duration::from_secs_f64(timeout_secs);
+    let transfer_deadline: Option<Instant> =
+        timeout_secs.map(|s| Instant::now() + Duration::from_secs_f64(s));
     let mut got_response = false;
     let mut segment_buffer: Vec<u8> = Vec::new();
     let mut segment_metadata: Option<Vec<u8>> = None;
@@ -711,8 +725,7 @@ pub async fn run_fetch(
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep_until(
-                tokio::time::Instant::from_std(transfer_deadline)) => {
+            _ = deadline_or_never(transfer_deadline) => {
                 return Err(err("Fetch transfer timed out"));
             }
         }
@@ -969,7 +982,7 @@ mod tests {
             &mut sev,
             file_path.to_str().unwrap(),
             &crate::hex_encode(dest_hash.as_bytes()),
-            15.0,
+            Some(15.0),
             1,
             false,
             false,
@@ -1038,7 +1051,7 @@ mod tests {
             &mut sev,
             file_path.to_str().unwrap(),
             &crate::hex_encode(dest_hash.as_bytes()),
-            10.0,
+            Some(10.0),
             1,
             false,
             false,
@@ -1097,7 +1110,7 @@ mod tests {
             &mut sev,
             file_path.to_str().unwrap(),
             &crate::hex_encode(dest_hash.as_bytes()),
-            15.0,
+            Some(15.0),
             1,
             false,
             false,
@@ -1111,6 +1124,77 @@ mod tests {
             result.err()
         );
 
+        assert!(
+            tmp.path().join("received").join("testfile.bin").exists(),
+            "Received file should exist"
+        );
+
+        listener_handle.abort();
+    }
+
+    /// `run_send` with `timeout_secs = None` (the default once `-w` is
+    /// optional) must run the transfer to completion without ever taking
+    /// the timeout-error branch. Fast in-process transfer over TCP.
+    #[tokio::test]
+    async fn transfer_no_timeout_when_none() {
+        let (listener_node, mut lev, sender_node, mut sev, tmp) = setup_connected_nodes().await;
+
+        let listener_id = Identity::generate(&mut OsRng);
+        let dest_hash = dest_hash_for(&listener_id);
+
+        let file_path = tmp.path().join("testfile.bin");
+        std::fs::write(&file_path, b"no timeout test").unwrap();
+        let save_dir = tmp.path().join("received");
+        std::fs::create_dir(&save_dir).unwrap();
+
+        let listener_handle = tokio::spawn(async move {
+            run_listen(
+                &listener_node,
+                &mut lev,
+                listener_id,
+                Some(save_dir),
+                false,
+                true, // no_auth = true
+                &[],
+                0,
+                1,
+                false,
+                false, // allow_fetch
+                None,  // fetch_jail
+                false, // phy_rates
+            )
+            .await
+            .map_err(|e| e.to_string())
+        });
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // timeout_secs = None — no transfer-phase deadline at all.
+        let result = run_send(
+            &sender_node,
+            &mut sev,
+            file_path.to_str().unwrap(),
+            &crate::hex_encode(dest_hash.as_bytes()),
+            None,
+            1,
+            false,
+            false,
+            None,  // no identity
+            false, // phy_rates
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "Transfer with timeout=None should complete: {:?}",
+            result.err()
+        );
+        // Specifically must NOT have hit the timeout branch.
+        if let Err(e) = &result {
+            assert!(
+                !e.to_string().contains("timed out"),
+                "timeout=None must never produce a timeout error, got: {e}"
+            );
+        }
         assert!(
             tmp.path().join("received").join("testfile.bin").exists(),
             "Received file should exist"
@@ -1290,7 +1374,7 @@ mod tests {
             &crate::hex_encode(dest_hash.as_bytes()),
             Some(save_dir.clone()),
             false,
-            15.0,
+            Some(15.0),
             1,
             false,
             false,
@@ -1354,7 +1438,7 @@ mod tests {
             &crate::hex_encode(dest_hash.as_bytes()),
             Some(save_dir),
             false,
-            15.0,
+            Some(15.0),
             1,
             false,
             false,
@@ -1422,7 +1506,7 @@ mod tests {
             &crate::hex_encode(dest_hash.as_bytes()),
             Some(save_dir),
             false,
-            15.0,
+            Some(15.0),
             1,
             false,
             false,

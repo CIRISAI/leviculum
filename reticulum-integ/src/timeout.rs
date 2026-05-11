@@ -120,6 +120,27 @@ where
     }
 }
 
+/// Size-based wrapper timeout (seconds) for LoRa LNCP transfer tests.
+///
+/// Deliberately ULTRA-conservative: assumes **10 B/s** sustained
+/// throughput (observed on the lab proxy is ~237 B/s, so this is a
+/// ~24x margin) plus a flat **600 s buffer per independent transfer**
+/// for init, link-establishment, retransmits, and Docker teardown.
+///
+/// This timeout is NOT a correctness check — it exists only so a wedged
+/// test eventually aborts rather than wedging the nightly runner
+/// indefinitely (Codeberg #50 class of failure). Err massively on the
+/// side of too-long. Bug #53 was caused by the *opposite* — a too-tight
+/// transfer cap (`lncp -w 120`) silently false-killing a healthy 50 KB
+/// LoRa transfer at ~28 KB.
+///
+/// `num_transfers` is `file_sizes.len() × repeats` for the scenario.
+pub fn lncp_lora_wrapper_secs(total_transfer_bytes: u64, num_transfers: u64) -> u64 {
+    const ULTRA_CONSERVATIVE_BPS: u64 = 10;
+    const FLAT_BUFFER_SECS_PER_TRANSFER: u64 = 600;
+    total_transfer_bytes / ULTRA_CONSERVATIVE_BPS + FLAT_BUFFER_SECS_PER_TRANSFER * num_transfers
+}
+
 /// Best-effort invocation of the forensic capture script.  Failures are
 /// swallowed — the timeout-panic must not be shadowed by capture
 /// problems.

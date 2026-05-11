@@ -30,7 +30,9 @@ fn test_timeout_fires_wedge() {
 }
 
 #[test]
-#[should_panic(expected = "wrapper-tight: worker completed but cleanup pushed total wallclock past 1s")]
+#[should_panic(
+    expected = "wrapper-tight: worker completed but cleanup pushed total wallclock past 1s"
+)]
 fn test_timeout_fires_wrapper_tight() {
     // Worker sleeps 1010 ms, wrapper times out at 1 s. After the primary
     // timeout the 50 ms grace period catches the worker's completion.

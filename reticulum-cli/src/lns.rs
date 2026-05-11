@@ -419,9 +419,13 @@ enum Commands {
         #[arg(short, long)]
         listen: bool,
 
-        /// Timeout in seconds for path discovery and link establishment
-        #[arg(short = 'w', default_value = "15.0")]
-        timeout: f64,
+        /// Fetch / transfer phase timeout in seconds. Counts after the link
+        /// is established (link establishment has its own internal budget).
+        /// Default: no timeout — the transfer runs to completion or until
+        /// you interrupt it. Slow transports (LoRa) need no artificial cap;
+        /// set this only if you want a hard wall-clock bound on the transfer.
+        #[arg(short = 'w')]
+        timeout: Option<f64>,
 
         /// Save received files in this directory (listen mode)
         #[arg(short, long)]

@@ -1974,7 +1974,19 @@ fn execute_transfer_direction(
     println!("  path found");
 
     // 5. For each file size, for each repeat: create, send, verify
-    let timeout_str = timeout_secs.to_string();
+    //
+    // Per-transfer shell `timeout` wrapper. For LoRa scenarios this is
+    // size-based and deliberately ultra-generous (Codeberg #53): the
+    // TOML `timeout_secs` was sized when `lncp -w` still capped the
+    // transfer phase; with `-w` now unlimited, the shell `timeout` is
+    // the per-transfer backstop and must not false-kill a healthy-but-
+    // slow LoRa transfer. Non-LoRa (fast TCP) keeps the TOML value.
+    let timeout_str = if has_rnode {
+        let max_size = file_sizes.iter().copied().max().unwrap_or(0);
+        crate::timeout::lncp_lora_wrapper_secs(max_size, 1).to_string()
+    } else {
+        timeout_secs.to_string()
+    };
     // For fetch mode, determine the remote file path
     let remote_file_path = if !fetch_path.is_empty() {
         fetch_path.to_string()
@@ -2043,12 +2055,16 @@ fn execute_transfer_direction(
                 .to_string();
 
             // 5b. Transfer file
-            // LoRa tests need a longer sender timeout to accommodate link
-            // request retries: establishment_timeout × (1 + max_retries).
-            let sender_wait = if has_rnode { "120" } else { "60" };
+            //
+            // No `-w` is passed to lncp: as of the Codeberg-#53 fix, `lncp -w`
+            // defaults to unlimited (a 15 s default silently aborted slow LoRa
+            // transfers — Bug #53). The transfer runs to completion; the only
+            // broken-test-abort mechanisms are the per-transfer shell `timeout`
+            // (`timeout_str`, size-based for LoRa scenarios — see step 5 above)
+            // and the test-level `run_with_timeout` wrapper.
             let start = Instant::now();
             let send_output = if is_fetch {
-                // Fetch mode: sender runs `<tool> -f <remote_path> <dest_hash> -s /tmp/received -w <timeout>`
+                // Fetch mode: sender runs `<tool> -f <remote_path> <dest_hash> -s /tmp/received`
                 let mut args: Vec<String> = vec![
                     "timeout".into(),
                     timeout_str.clone(),
@@ -2058,8 +2074,6 @@ fn execute_transfer_direction(
                     dest_hash.clone(),
                     "-s".into(),
                     "/tmp/received".into(),
-                    "-w".into(),
-                    sender_wait.into(),
                 ];
                 // Append extra sender flags
                 for flag in sender_flags.split_whitespace() {
@@ -2068,15 +2082,13 @@ fn execute_transfer_direction(
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 runner.docker_exec(send_node, &args_ref)?
             } else {
-                // Push mode: sender runs `<tool> <file> <dest_hash> -w <timeout>`
+                // Push mode: sender runs `<tool> <file> <dest_hash>`
                 let mut args: Vec<String> = vec![
                     "timeout".into(),
                     timeout_str.clone(),
                     send_tool.into(),
                     "/tmp/test_transfer.bin".into(),
                     dest_hash.clone(),
-                    "-w".into(),
-                    sender_wait.into(),
                 ];
                 for flag in sender_flags.split_whitespace() {
                     args.push(flag.into());
@@ -3348,18 +3360,22 @@ mod tests {
     fn lora_lncp_proxy_50kb() {
         // 480 s budget = 90-120 s TOML scenario time + ~4× margin.
         // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
-        crate::timeout::run_with_timeout("lora_lncp_proxy_50kb", 480, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_proxy_50kb.toml"
-            ))
-            .expect("lora_lncp_proxy_50kb.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_proxy_50kb",
+            crate::timeout::lncp_lora_wrapper_secs(51200, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_proxy_50kb.toml"
+                ))
+                .expect("lora_lncp_proxy_50kb.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
@@ -3391,18 +3407,22 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_auth_fetch() {
-        crate::timeout::run_with_timeout("lora_lncp_auth_fetch", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_auth_fetch.toml"
-            ))
-            .expect("lora_lncp_auth_fetch.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_auth_fetch",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_auth_fetch.toml"
+                ))
+                .expect("lora_lncp_auth_fetch.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
@@ -3539,72 +3559,88 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_push() {
-        crate::timeout::run_with_timeout("lora_lncp_push", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_push.toml"
-            ))
-            .expect("lora_lncp_push.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_push",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_push.toml"
+                ))
+                .expect("lora_lncp_push.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_fetch() {
-        crate::timeout::run_with_timeout("lora_lncp_fetch", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_fetch.toml"
-            ))
-            .expect("lora_lncp_fetch.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_fetch",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_fetch.toml"
+                ))
+                .expect("lora_lncp_fetch.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_auth() {
-        crate::timeout::run_with_timeout("lora_lncp_auth", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_auth.toml"
-            ))
-            .expect("lora_lncp_auth.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_auth",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_auth.toml"
+                ))
+                .expect("lora_lncp_auth.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware + lora-proxy binary
     #[serial(lora)]
     fn lora_lncp_proxy() {
-        crate::timeout::run_with_timeout("lora_lncp_proxy", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_proxy.toml"
-            ))
-            .expect("lora_lncp_proxy.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_proxy",
+            crate::timeout::lncp_lora_wrapper_secs(2048, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_proxy.toml"
+                ))
+                .expect("lora_lncp_proxy.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
@@ -3613,108 +3649,132 @@ mod tests {
     fn lora_lncp_size_sweep() {
         // 900 s budget = 360-420 s TOML scenario time + ~2× margin.
         // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
-        crate::timeout::run_with_timeout("lora_lncp_size_sweep", 900, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_size_sweep.toml"
-            ))
-            .expect("lora_lncp_size_sweep.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_size_sweep",
+            crate::timeout::lncp_lora_wrapper_secs(64 + 512 + 2048 + 5120 + 10240 + 51200, 6),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_size_sweep.toml"
+                ))
+                .expect("lora_lncp_size_sweep.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_proxy_4drop() {
-        crate::timeout::run_with_timeout("lora_lncp_proxy_4drop", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_proxy_4drop.toml"
-            ))
-            .expect("lora_lncp_proxy_4drop.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_proxy_4drop",
+            crate::timeout::lncp_lora_wrapper_secs(10240, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_proxy_4drop.toml"
+                ))
+                .expect("lora_lncp_proxy_4drop.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_proxy_6drop() {
-        crate::timeout::run_with_timeout("lora_lncp_proxy_6drop", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_proxy_6drop.toml"
-            ))
-            .expect("lora_lncp_proxy_6drop.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_proxy_6drop",
+            crate::timeout::lncp_lora_wrapper_secs(10240, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_proxy_6drop.toml"
+                ))
+                .expect("lora_lncp_proxy_6drop.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_link_loss() {
-        crate::timeout::run_with_timeout("lora_lncp_link_loss", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_link_loss.toml"
-            ))
-            .expect("lora_lncp_link_loss.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_link_loss",
+            crate::timeout::lncp_lora_wrapper_secs(2048, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_link_loss.toml"
+                ))
+                .expect("lora_lncp_link_loss.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_link_retry() {
-        crate::timeout::run_with_timeout("lora_lncp_link_retry", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_link_retry.toml"
-            ))
-            .expect("lora_lncp_link_retry.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_link_retry",
+            crate::timeout::lncp_lora_wrapper_secs(2048, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_link_retry.toml"
+                ))
+                .expect("lora_lncp_link_retry.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_proof_retry() {
-        crate::timeout::run_with_timeout("lora_lncp_proof_retry", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_proof_retry.toml"
-            ))
-            .expect("lora_lncp_proof_retry.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_proof_retry",
+            crate::timeout::lncp_lora_wrapper_secs(2048, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_proof_retry.toml"
+                ))
+                .expect("lora_lncp_proof_retry.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
@@ -3739,18 +3799,22 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_bidir() {
-        crate::timeout::run_with_timeout("lora_lncp_bidir", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_bidir.toml"
-            ))
-            .expect("lora_lncp_bidir.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_bidir",
+            crate::timeout::lncp_lora_wrapper_secs(2048, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_bidir.toml"
+                ))
+                .expect("lora_lncp_bidir.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
@@ -3759,36 +3823,44 @@ mod tests {
     fn lora_lnode_lncp_bidir() {
         // 480 s budget = 32 KB bidi TOML scenario time + ~4× margin.
         // Empirically uncalibrated; bump generously on false timeout. (Codeberg #50)
-        crate::timeout::run_with_timeout("lora_lnode_lncp_bidir", 480, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lnode_lncp_bidir.toml"
-            ))
-            .expect("lora_lnode_lncp_bidir.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lnode_lncp_bidir",
+            crate::timeout::lncp_lora_wrapper_secs(32768, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lnode_lncp_bidir.toml"
+                ))
+                .expect("lora_lnode_lncp_bidir.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_bridge() {
-        crate::timeout::run_with_timeout("lora_lncp_bridge", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_bridge.toml"
-            ))
-            .expect("lora_lncp_bridge.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_bridge",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_bridge.toml"
+                ))
+                .expect("lora_lncp_bridge.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     // Python-to-Python LoRa tests
@@ -3889,18 +3961,22 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_push_to_python() {
-        crate::timeout::run_with_timeout("lora_lncp_push_to_python", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_push_to_python.toml"
-            ))
-            .expect("lora_lncp_push_to_python.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_push_to_python",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_push_to_python.toml"
+                ))
+                .expect("lora_lncp_push_to_python.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
@@ -3925,18 +4001,22 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_fetch_from_python() {
-        crate::timeout::run_with_timeout("lora_lncp_fetch_from_python", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_fetch_from_python.toml"
-            ))
-            .expect("lora_lncp_fetch_from_python.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_fetch_from_python",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_fetch_from_python.toml"
+                ))
+                .expect("lora_lncp_fetch_from_python.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
@@ -3961,36 +4041,44 @@ mod tests {
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_auth_to_python() {
-        crate::timeout::run_with_timeout("lora_lncp_auth_to_python", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_auth_to_python.toml"
-            ))
-            .expect("lora_lncp_auth_to_python.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_auth_to_python",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_auth_to_python.toml"
+                ))
+                .expect("lora_lncp_auth_to_python.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_bridge_python_relay() {
-        crate::timeout::run_with_timeout("lora_lncp_bridge_python_relay", 300, || {
-            let toml_str = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/lora_lncp_bridge_python_relay.toml"
-            ))
-            .expect("lora_lncp_bridge_python_relay.toml not found");
-            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        crate::timeout::run_with_timeout(
+            "lora_lncp_bridge_python_relay",
+            crate::timeout::lncp_lora_wrapper_secs(1024, 1),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_lncp_bridge_python_relay.toml"
+                ))
+                .expect("lora_lncp_bridge_python_relay.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
-            let mut runner = require_runner!(scenario);
+                let mut runner = require_runner!(scenario);
 
-            run_test(&mut runner).expect("test failed");
-        });
+                run_test(&mut runner).expect("test failed");
+            },
+        );
     }
 
     // 3-node shared medium LoRa tests (require 3 RNode devices)
