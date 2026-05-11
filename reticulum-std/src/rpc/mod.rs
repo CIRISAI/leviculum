@@ -136,7 +136,20 @@ async fn handle_rpc_connection(
 }
 
 // Client-side functions
+
+/// Wall-clock cap on the shared-instance RPC handshake + request/response.
+///
+/// The socket is a local abstract Unix socket, so 5 s is generous. Its real
+/// job is to keep a client (`lns diag`, future `lns status`/`interfaces`, …)
+/// from blocking forever when the daemon is unresponsive or speaks a slightly
+/// different RPC dialect — e.g. a Python `rnsd` that hits an error handling an
+/// unexpected request and sends no response at all.
+const RPC_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Connect to the RPC server, perform handshake, send request, receive response.
+///
+/// The whole handshake + round-trip is bounded by [`RPC_CLIENT_TIMEOUT`]; on
+/// expiry this returns a `TimedOut` I/O error rather than hanging.
 pub(crate) async fn rpc_client_call(
     abstract_name: &str,
     authkey: &[u8; 32],
@@ -148,22 +161,36 @@ pub(crate) async fn rpc_client_call(
     let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
+    // `connect_addr` on an abstract socket either succeeds immediately or
+    // fails immediately (ECONNREFUSED if nothing is listening) — it does not
+    // block, so it stays outside the timeout.
     let std_stream = std::os::unix::net::UnixStream::connect_addr(&addr)?;
     std_stream.set_nonblocking(true)?;
     let mut stream = UnixStream::from_std(std_stream)?;
 
-    connection::client_handshake(&mut stream, authkey).await?;
-
     let request_bytes = serde_pickle::value_to_vec(request, Default::default())
         .map_err(|e| RpcError::Pickle(format!("serialize request: {}", e)))?;
-    write_message(&mut stream, &request_bytes).await?;
 
-    let response_bytes = read_message(&mut stream).await?;
-    let response: serde_pickle::value::Value =
-        serde_pickle::value_from_slice(&response_bytes, Default::default())
-            .map_err(|e| RpcError::Pickle(format!("deserialize response: {}", e)))?;
+    let exchange = async {
+        connection::client_handshake(&mut stream, authkey).await?;
+        write_message(&mut stream, &request_bytes).await?;
+        let response_bytes = read_message(&mut stream).await?;
+        let response: serde_pickle::value::Value =
+            serde_pickle::value_from_slice(&response_bytes, Default::default())
+                .map_err(|e| RpcError::Pickle(format!("deserialize response: {}", e)))?;
+        Ok::<_, RpcError>(response)
+    };
 
-    Ok(response)
+    match tokio::time::timeout(RPC_CLIENT_TIMEOUT, exchange).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(RpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "shared-instance RPC did not complete within {} s",
+                RPC_CLIENT_TIMEOUT.as_secs()
+            ),
+        ))),
+    }
 }
 
 /// Issue a parameterless `get` query against a running shared-instance daemon's
@@ -188,10 +215,19 @@ pub async fn rpc_query(
     get_key: &str,
 ) -> Result<serde_json::Value, crate::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
-    let request = pickle::pickle_dict(vec![(
-        pickle::pickle_str_key("get"),
-        pickle::pickle_str(get_key),
-    )]);
+    let mut entries = vec![(pickle::pickle_str_key("get"), pickle::pickle_str(get_key))];
+    // Python `rnsd`'s `path_table` RPC handler reads `call["max_hops"]`
+    // unconditionally (it `KeyError`s — and then sends no response — when the
+    // key is absent). Python's own client always sends the key, value `None`
+    // for "no hop limit" (RNS/Reticulum.py:1331). Our server treats absent and
+    // `None` identically, so this is harmless against `lnsd` too.
+    if get_key == "path_table" {
+        entries.push((
+            pickle::pickle_str_key("max_hops"),
+            serde_pickle::value::Value::None,
+        ));
+    }
+    let request = pickle::pickle_dict(entries);
     let response = rpc_client_call(&abstract_name, authkey, &request)
         .await
         .map_err(|e| match e {
@@ -421,5 +457,101 @@ mod tests {
             Value::I64(count) => assert_eq!(count, 0, "no links established"),
             other => panic!("expected int, got: {:?}", other),
         }
+    }
+
+    /// `rpc_query("path_table")` must send `{"get":"path_table","max_hops":None}`
+    /// (Python `rnsd` `KeyError`s on a missing `max_hops`). Verify the request
+    /// round-trips against our own server and decodes to a JSON array, and that
+    /// an explicit `max_hops: None` request is accepted directly.
+    #[tokio::test]
+    async fn test_rpc_query_path_table_sends_max_hops() {
+        let core = make_test_core(true);
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+
+        let instance_name = format!("rpctest_pt_{}", std::process::id());
+
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // rpc_query builds `rns/{instance_name}/rpc` internally and, for
+        // path_table, appends `max_hops: None`.
+        let json = rpc_query(&instance_name, &authkey, "path_table")
+            .await
+            .expect("path_table query should succeed");
+        assert!(
+            json.is_array(),
+            "path_table should decode to a JSON array, got: {json:?}"
+        );
+
+        // The explicit `max_hops: None` request shape (what rpc_query sends, and
+        // what Python's client sends) is accepted by our server.
+        let abstract_name = format!("rns/{}/rpc", instance_name);
+        let req = pickle_dict(vec![
+            (pickle_str_key("get"), pickle_str("path_table")),
+            (pickle_str_key("max_hops"), Value::None),
+        ]);
+        let resp = rpc_client_call(&abstract_name, &authkey, &req)
+            .await
+            .expect("explicit max_hops:None request should round-trip");
+        assert!(
+            matches!(resp, Value::List(_)),
+            "expected a list, got: {resp:?}"
+        );
+    }
+
+    /// `rpc_client_call` must not hang forever when the peer accepts the
+    /// connection but never speaks (e.g. a daemon that errored handling the
+    /// request and sent no response). It should fail with a `TimedOut` error
+    /// within the [`RPC_CLIENT_TIMEOUT`] window.
+    #[tokio::test]
+    async fn test_rpc_client_call_times_out_on_mute_peer() {
+        use std::os::linux::net::SocketAddrExt;
+
+        let abstract_name = format!("rns/rpc-mute-{}/rpc", std::process::id());
+        let addr =
+            std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes()).unwrap();
+        let std_listener = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(std_listener).unwrap();
+
+        // Accept connections and hold them open without ever writing a byte.
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                // Keep the stream alive but mute.
+                tokio::spawn(async move {
+                    let _held = stream;
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                });
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("interface_stats"))]);
+        let start = std::time::Instant::now();
+        let result = rpc_client_call(&abstract_name, &[0u8; 32], &request).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(RpcError::Io(ref e)) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            other => panic!("expected TimedOut I/O error, got: {other:?}"),
+        }
+        assert!(
+            elapsed >= RPC_CLIENT_TIMEOUT.saturating_sub(std::time::Duration::from_millis(500)),
+            "should have waited ~{:?}, only waited {elapsed:?}",
+            RPC_CLIENT_TIMEOUT
+        );
+        assert!(
+            elapsed < RPC_CLIENT_TIMEOUT + std::time::Duration::from_secs(3),
+            "took far longer than the timeout: {elapsed:?}"
+        );
     }
 }
