@@ -82,7 +82,9 @@ use crate::interfaces::tcp::{
     spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::udp::spawn_udp_interface;
-use crate::interfaces::{InterfaceHandle, InterfaceRegistry, InterfaceStatsMap};
+use crate::interfaces::{
+    InterfaceHandle, InterfaceOnlineMap, InterfaceRegistry, InterfaceStatsMap,
+};
 use crate::storage::Storage;
 
 /// Type alias for the concrete NodeCore used by std platforms
@@ -233,6 +235,11 @@ pub struct ReticulumNode {
     start_time: std::time::Instant,
     /// Shared interface I/O counters, populated by the event loop.
     iface_stats_map: InterfaceStatsMap,
+    /// Per-interface online status, keyed by interface index. Inserted
+    /// `true` on registration, removed on disconnect. Read by the RPC
+    /// handler so the `interface_stats.status` field reflects the real
+    /// `is_online()` of each interface (Codeberg #56).
+    iface_online_map: InterfaceOnlineMap,
     /// Per-interface readiness signals, keyed by interface index.
     /// Populated by `start()` once interfaces are spawned.  Read by
     /// [`wait_for_interface_ready`](Self::wait_for_interface_ready)
@@ -276,6 +283,7 @@ impl ReticulumNode {
             connect_instance_name: None,
             start_time: std::time::Instant::now(),
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            iface_online_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
@@ -311,6 +319,7 @@ impl ReticulumNode {
             // Register human-readable interface names, HW_MTU, and counters with core
             {
                 let mut stats = self.iface_stats_map.lock().unwrap();
+                let mut online = self.iface_online_map.lock().unwrap();
                 let mut ready = self.iface_ready_map.lock().unwrap();
                 for handle in registry.handles() {
                     core.set_interface_name(handle.info.id.0, handle.info.name.clone());
@@ -321,6 +330,7 @@ impl ReticulumNode {
                         tracing::info!("Interface {} bitrate: {} bps", handle.info.name, bitrate);
                     }
                     stats.insert(handle.info.id.0, Arc::clone(&handle.counters));
+                    online.insert(handle.info.id.0, true);
                     ready.insert(handle.info.id.0, Arc::clone(&handle.ready));
                 }
             }
@@ -378,6 +388,7 @@ impl ReticulumNode {
         let inner = Arc::clone(&self.inner);
         let event_tx = self.event_tx.clone();
         let iface_stats_map = Arc::clone(&self.iface_stats_map);
+        let iface_online_map = Arc::clone(&self.iface_online_map);
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -392,6 +403,7 @@ impl ReticulumNode {
                     shutdown: shutdown_rx,
                 },
                 iface_stats_map,
+                iface_online_map,
             )
             .await;
         });
@@ -756,6 +768,7 @@ impl ReticulumNode {
                 authkey,
                 self.start_time,
                 Arc::clone(&self.iface_stats_map),
+                Arc::clone(&self.iface_online_map),
                 self.auto_peer_count_rx.as_ref().cloned(),
             ) {
                 tracing::warn!("Failed to start RPC server: {}", e);
@@ -1436,6 +1449,7 @@ async fn run_event_loop(
     mut registry: InterfaceRegistry,
     channels: EventLoopChannels,
     iface_stats_map: InterfaceStatsMap,
+    iface_online_map: InterfaceOnlineMap,
 ) {
     let event_tx = channels.event_tx;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
@@ -1557,6 +1571,10 @@ async fn run_event_loop(
                             let mut stats = iface_stats_map.lock().unwrap();
                             stats.remove(&iface_id.0);
                         }
+                        {
+                            let mut online = iface_online_map.lock().unwrap();
+                            online.remove(&iface_id.0);
+                        }
                     }
                 }
             }
@@ -1637,6 +1655,10 @@ async fn run_event_loop(
                 {
                     let mut stats = iface_stats_map.lock().unwrap();
                     stats.insert(iface_idx, Arc::clone(&handle.counters));
+                }
+                {
+                    let mut online = iface_online_map.lock().unwrap();
+                    online.insert(iface_idx, true);
                 }
                 registry.register(handle);
 

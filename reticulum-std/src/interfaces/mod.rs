@@ -150,6 +150,17 @@ pub(crate) fn spawn_traffic_counter(iface_stats_map: InterfaceStatsMap) {
 pub(crate) type InterfaceStatsMap =
     Arc<std::sync::Mutex<std::collections::BTreeMap<usize, Arc<InterfaceCounters>>>>;
 
+/// Shared map of per-interface online status, keyed by interface ID index.
+///
+/// Populated by the driver when an interface registers (`true`) and updated
+/// on disconnect (entry removed alongside the stats entry — once the core
+/// also drops the interface name, the RPC layer's `interface_stats`
+/// enumeration won't visit the interface anyway). The RPC handler reads
+/// this to thread real `is_online()` into the `status` field of the
+/// `interface_stats` response (Codeberg #56). A missing entry falls back
+/// to `true` — preserves the pre-fix behavior for any caller-side mismatch.
+pub(crate) type InterfaceOnlineMap = Arc<std::sync::Mutex<std::collections::BTreeMap<usize, bool>>>;
+
 /// Per-interface readiness signal.
 ///
 /// Created by each interface spawn function and shared with the

@@ -8,7 +8,7 @@ use serde_pickle::value::Value;
 use super::error::RpcError;
 use super::pickle::*;
 use crate::driver::StdNodeCore;
-use crate::interfaces::InterfaceStatsMap;
+use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
 
 /// Dispatch an RPC request against node state and return the pickle-encoded response.
 pub(super) fn handle_request(
@@ -16,13 +16,18 @@ pub(super) fn handle_request(
     core: &mut StdNodeCore,
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
+    iface_online_map: &InterfaceOnlineMap,
     auto_peer_count: usize,
 ) -> Result<Vec<u8>, RpcError> {
     let response = match request {
         // Full implementations
-        RpcRequest::GetInterfaceStats => {
-            build_interface_stats(core, start_time, iface_stats_map, auto_peer_count)
-        }
+        RpcRequest::GetInterfaceStats => build_interface_stats(
+            core,
+            start_time,
+            iface_stats_map,
+            iface_online_map,
+            auto_peer_count,
+        ),
         RpcRequest::GetLinkCount => pickle_int(core.active_link_count() as i64),
         RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
         RpcRequest::GetRateTable => build_rate_table(core, start_time),
@@ -80,6 +85,7 @@ fn build_interface_stats(
     core: &StdNodeCore,
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
+    iface_online_map: &InterfaceOnlineMap,
     auto_peer_count: usize,
 ) -> Value {
     let stats = core.interface_stats();
@@ -87,6 +93,7 @@ fn build_interface_stats(
     let transport_enabled = core.transport_config().enable_transport;
     let uptime = start_time.elapsed().as_secs_f64();
     let counters_map = iface_stats_map.lock().unwrap();
+    let online_map = iface_online_map.lock().unwrap();
     let ifac_configs = core.clone_ifac_configs();
 
     // Count local clients for the "clients" field on LocalInterface
@@ -158,8 +165,22 @@ fn build_interface_stats(
             (pickle_str_key("txb"), pickle_int(txb as i64)),
             (pickle_str_key("rxs"), pickle_float(rxs)),
             (pickle_str_key("txs"), pickle_float(txs)),
-            (pickle_str_key("status"), pickle_bool(true)),
-            (pickle_str_key("mode"), pickle_int(0x01)), // MODE_FULL
+            // status: real `Interface::is_online()` (Codeberg #56). Source of
+            // truth is `iface_online_map`, populated by the driver on register
+            // and cleared on disconnect. Missing entry → fall back to `true`
+            // (preserves the pre-fix behavior for any caller-side mismatch).
+            (
+                pickle_str_key("status"),
+                pickle_bool(online_map.get(&entry.id).copied().unwrap_or(true)),
+            ),
+            // mode: hardcoded MODE_FULL (0x01). The Rust `InterfaceMode` is a
+            // three-bool struct (broadcast/local/multiple_access) with no
+            // direct mapping to Python's discrete mode enum — and every
+            // `InterfaceHandle::mode()` impl returns the default. Threading a
+            // meaningful per-interface mode needs Codeberg #11 (Python-parity
+            // mode enum) to land first; until then MODE_FULL matches what
+            // every interface effectively is from Python's POV.
+            (pickle_str_key("mode"), pickle_int(0x01)),
             (pickle_str_key("bitrate"), bitrate),
             (pickle_str_key("clients"), clients),
             (pickle_str_key("peers"), peers),

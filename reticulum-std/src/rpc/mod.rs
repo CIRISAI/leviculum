@@ -20,7 +20,7 @@ use tokio::net::UnixListener;
 use tokio::sync::watch;
 
 use crate::driver::StdNodeCore;
-use crate::interfaces::InterfaceStatsMap;
+use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
 use connection::{read_message, server_handshake, write_message};
 use error::RpcError;
 use handlers::handle_request;
@@ -30,12 +30,14 @@ use pickle::parse_request;
 ///
 /// Accepts connections concurrently (each in its own task).
 /// Each connection: handshake -> read request -> dispatch -> write response -> close.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_rpc_server(
     instance_name: &str,
     core: Arc<Mutex<StdNodeCore>>,
     authkey: [u8; 32],
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
+    iface_online_map: InterfaceOnlineMap,
     auto_peer_count_rx: Option<watch::Receiver<usize>>,
 ) -> Result<(), std::io::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
@@ -59,6 +61,7 @@ pub(crate) fn spawn_rpc_server(
             authkey,
             start_time,
             iface_stats_map,
+            iface_online_map,
             auto_peer_count_rx,
         )
         .await;
@@ -68,12 +71,14 @@ pub(crate) fn spawn_rpc_server(
 }
 
 /// Accept loop: spawns a task per connection.
+#[allow(clippy::too_many_arguments)]
 async fn rpc_accept_loop(
     listener: UnixListener,
     core: Arc<Mutex<StdNodeCore>>,
     authkey: [u8; 32],
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
+    iface_online_map: InterfaceOnlineMap,
     auto_peer_count_rx: Option<watch::Receiver<usize>>,
 ) {
     loop {
@@ -87,6 +92,7 @@ async fn rpc_accept_loop(
 
         let core = Arc::clone(&core);
         let stats_map = Arc::clone(&iface_stats_map);
+        let online_map = Arc::clone(&iface_online_map);
         let peer_count_rx = auto_peer_count_rx.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_rpc_connection(
@@ -95,6 +101,7 @@ async fn rpc_accept_loop(
                 &authkey,
                 start_time,
                 &stats_map,
+                &online_map,
                 &peer_count_rx,
             )
             .await
@@ -106,12 +113,14 @@ async fn rpc_accept_loop(
 }
 
 /// Handle a single RPC connection: handshake -> read -> dispatch -> write -> close.
+#[allow(clippy::too_many_arguments)]
 async fn handle_rpc_connection(
     mut stream: tokio::net::UnixStream,
     core: &Arc<Mutex<StdNodeCore>>,
     authkey: &[u8; 32],
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
+    iface_online_map: &InterfaceOnlineMap,
     auto_peer_count_rx: &Option<watch::Receiver<usize>>,
 ) -> Result<(), RpcError> {
     server_handshake(&mut stream, authkey).await?;
@@ -127,7 +136,14 @@ async fn handle_rpc_connection(
             .as_ref()
             .map(|rx| *rx.borrow())
             .unwrap_or(0);
-        handle_request(&request, &mut core, start_time, iface_stats_map, peer_count)?
+        handle_request(
+            &request,
+            &mut core,
+            start_time,
+            iface_stats_map,
+            iface_online_map,
+            peer_count,
+        )?
     };
 
     write_message(&mut stream, &response_bytes).await?;
@@ -349,6 +365,10 @@ mod tests {
         Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
     }
 
+    fn empty_online_map() -> InterfaceOnlineMap {
+        Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    }
+
     /// Spawn a minimal RPC server and test it with a Rust client.
     #[tokio::test]
     async fn test_rpc_interface_stats_round_trip() {
@@ -365,6 +385,7 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
+            empty_online_map(),
             None,
         )
         .unwrap();
@@ -416,6 +437,7 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
+            empty_online_map(),
             None,
         )
         .unwrap();
@@ -443,6 +465,7 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
+            empty_online_map(),
             None,
         )
         .unwrap();
@@ -477,6 +500,7 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
+            empty_online_map(),
             None,
         )
         .unwrap();
@@ -553,5 +577,90 @@ mod tests {
             elapsed < RPC_CLIENT_TIMEOUT + std::time::Duration::from_secs(3),
             "took far longer than the timeout: {elapsed:?}"
         );
+    }
+
+    /// Codeberg #56: the `status` field of each per-interface dict must
+    /// reflect the real `Interface::is_online()` value (sourced from
+    /// `iface_online_map`), not the hardcoded `true` it used to be.
+    ///
+    /// Sets up a core with one named interface, marks it offline in the
+    /// online map, queries `interface_stats`, and asserts the entry
+    /// reports `status: false`. Inverse: a second core+name with the
+    /// online map set to `true` reports `status: true`.
+    #[tokio::test]
+    async fn test_rpc_interface_stats_status_reflects_is_online() {
+        for (case, expected_status) in [("offline", false), ("online", true)] {
+            let core = make_test_core(true);
+            let start_time = std::time::Instant::now();
+            let authkey = derive_authkey(&core);
+
+            // Register a fake interface in the core so `core.interface_stats()`
+            // returns one entry. The driver does this via `core.set_interface_name()`
+            // after registering the handle — here we do it directly.
+            let iface_id: usize = 4242;
+            let iface_name = format!("TCPInterface[lns-#56-{case}/fake:0000]");
+            {
+                let mut c = core.lock().unwrap();
+                c.set_interface_name(iface_id, iface_name.clone());
+            }
+
+            let online_map: InterfaceOnlineMap =
+                Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+            {
+                let mut m = online_map.lock().unwrap();
+                m.insert(iface_id, expected_status);
+            }
+
+            let instance_name = format!("rpctest_status_{}_{case}", std::process::id());
+            let abstract_name = format!("rns/{instance_name}/rpc");
+
+            spawn_rpc_server(
+                &instance_name,
+                Arc::clone(&core),
+                authkey,
+                start_time,
+                empty_stats_map(),
+                Arc::clone(&online_map),
+                None,
+            )
+            .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("interface_stats"))]);
+            let response = rpc_client_call(&abstract_name, &authkey, &request)
+                .await
+                .unwrap();
+
+            let Value::Dict(d) = &response else {
+                panic!("expected dict response, got: {response:?}");
+            };
+            let Some(Value::List(ifaces)) = d.get(&HashableValue::String("interfaces".into()))
+            else {
+                panic!("response missing `interfaces` list");
+            };
+            assert_eq!(
+                ifaces.len(),
+                1,
+                "expected exactly one interface in the response ({case} case), got {ifaces:?}"
+            );
+            let Value::Dict(iface) = &ifaces[0] else {
+                panic!("interface entry not a dict: {:?}", ifaces[0]);
+            };
+            let status = iface
+                .get(&HashableValue::String("status".into()))
+                .expect("interface entry missing `status`");
+            assert_eq!(
+                status,
+                &Value::Bool(expected_status),
+                "interface {case}: status should be Bool({expected_status})"
+            );
+            // Also confirm the entry actually corresponds to the interface we
+            // registered (the name flows through unchanged).
+            assert_eq!(
+                iface.get(&HashableValue::String("name".into())),
+                Some(&Value::String(iface_name)),
+                "interface {case}: name mismatch"
+            );
+        }
     }
 }
