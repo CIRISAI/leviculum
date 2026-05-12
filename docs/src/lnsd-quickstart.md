@@ -88,15 +88,16 @@ TCP uplink to a public entrypoint. Edit `/etc/reticulum/config` to:
     type = AutoInterface
     enabled = Yes
 
-  # 2. TCP uplink to a public entrypoint. The Reticulum project's
-  # historical Amsterdam testnet entrypoint is the canonical example
-  # in upstream docs; entrypoints rotate, so confirm the current list
-  # in the Reticulum manual (Bootstrapping Connectivity) or community
-  # channels before relying on this in production.
-  [[Reticulum Testnet]]
+  # 2. TCP uplink to a public entrypoint. Pick a node from the
+  # community directory: https://directory.rns.recipes/  (entrypoints
+  # rotate; for redundancy add two or three, and see the Reticulum
+  # manual's "Bootstrapping Connectivity" section for the
+  # discover_interfaces auto-peering option). Example below: the
+  # RNS TCP Node Germany 002 entry.
+  [[RNS TCP Node Germany 002]]
     type = TCPClientInterface
     enabled = Yes
-    target_host = amsterdam.connect.reticulum.network
+    target_host = 193.26.158.230
     target_port = 4965
 ```
 
@@ -182,7 +183,7 @@ daemon uptime: 12m 34s (754s)
 interfaces (3):
   - Shared Instance[rns/default]  type=LocalServerInterface status=up rxb=0 txb=0 clients=1
   - AutoInterface[Default Interface/eth0/aabbccdd]  type=AutoInterface status=up rxb=482 txb=917 peers=2
-  - TCPInterface[Reticulum Testnet/amsterdam.connect.reticulum.network:4965]  type=TCPClientInterface status=up rxb=14211 txb=8332
+  - TCPInterface[RNS TCP Node Germany 002/193.26.158.230:4965]  type=TCPClientInterface status=up rxb=14211 txb=8332
 
 ## path_table
 known paths: 7
