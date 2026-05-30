@@ -943,6 +943,17 @@ impl ReticulumNode {
         self.inner.lock().unwrap().path_count()
     }
 
+    /// Read the current monotonic-clock value (milliseconds since
+    /// NodeCore construction).
+    ///
+    /// Exposed to let observability surfaces convert
+    /// `PathTableExport.expires_ms` / `RateTableExport.blocked_until_ms`
+    /// (both monotonic) into wall-clock projections by anchoring
+    /// against `std::time::SystemTime::now()` at call time.
+    pub fn now_ms(&self) -> u64 {
+        self.inner.lock().unwrap().now_ms()
+    }
+
     /// Snapshot every known path-table entry.
     ///
     /// Returns owned `PathTableExport` clones — the inner storage map
