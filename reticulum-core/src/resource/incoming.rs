@@ -216,7 +216,7 @@ impl IncomingResource {
             // Append last known map hash
             if self.hashmap_height > 0 {
                 if let Some(last_hash) = self.hashmap[self.hashmap_height - 1] {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         "REQ: HASHMAP_EXHAUSTED, hashmap_height={}, last_map_hash={:02x}{:02x}{:02x}{:02x}, outstanding={}, consecutive_height={}, window={}",
                         self.hashmap_height,
                         last_hash[0], last_hash[1], last_hash[2], last_hash[3],
@@ -226,16 +226,16 @@ impl IncomingResource {
                     );
                     req.extend_from_slice(&last_hash);
                 } else {
-                    tracing::warn!("REQ: HASHMAP_EXHAUSTED but last entry is None!");
+                    crate::tracing::warn!("REQ: HASHMAP_EXHAUSTED but last entry is None!");
                     req.extend_from_slice(&[0u8; RESOURCE_HASHMAP_LEN]);
                 }
             } else {
-                tracing::warn!("REQ: HASHMAP_EXHAUSTED but hashmap_height=0!");
+                crate::tracing::warn!("REQ: HASHMAP_EXHAUSTED but hashmap_height=0!");
                 req.extend_from_slice(&[0u8; RESOURCE_HASHMAP_LEN]);
             }
             self.waiting_for_hmu = true;
         } else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "REQ: NOT_EXHAUSTED, outstanding={}, consecutive_height={}, hashmap_height={}, window={}",
                 self.outstanding_parts,
                 self.consecutive_completed_height,
@@ -351,7 +351,7 @@ impl IncomingResource {
                 self.req_sent_ms = Some(now_ms);
                 return ResourcePartResult::SendRequest(req);
             } else {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Window complete but waiting_for_hmu=true, consecutive_height={}, hashmap_height={}",
                     self.consecutive_completed_height,
                     self.hashmap_height,
@@ -403,7 +403,7 @@ impl IncomingResource {
         let seg_len = HASHMAP_MAX_LEN;
         let num_entries = hashmap_bytes.len() / RESOURCE_HASHMAP_LEN;
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "HMU received: segment={}, seg_len={}, num_entries={}, hashmap_height_before={}",
             segment,
             seg_len,
@@ -573,7 +573,7 @@ impl IncomingResource {
 
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.retries += 1;
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         "Resource timeout: retry={}/{}, waiting_for_hmu={}, consecutive_height={}, hashmap_height={}, outstanding={}",
                         self.retries, RESOURCE_MAX_RETRIES,
                         self.waiting_for_hmu,

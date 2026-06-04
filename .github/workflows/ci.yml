@@ -120,20 +120,23 @@ jobs:
 
   # ─── embedded: no_std core cross-build for MCU targets ──────────────
   # Leviculum's analog of edge's mobile cross-compile rigor: reticulum-core is
-  # no_std and must keep building for the nrf52 (thumbv7em) firmware target.
-  # --target overrides the musl default.
+  # no_std and must keep building for the firmware targets. --target overrides
+  # the musl default.
   #
-  # thumbv6m (Cortex-M0/M0+, e.g. rp2040) is intentionally NOT gated: it lacks
-  # the atomic CAS / atomic-ptr instructions `tracing-core` requires (its
-  # `alloc::sync`/spin paths), so the build fails without a portable-atomic +
-  # critical-section polyfill. Real M0 support is tracked in Leviculum #6.
+  # thumbv7em (nrf52, Cortex-M4) has atomic CAS, so it builds with the default
+  # feature set (tracing on). thumbv6m (rp2040, Cortex-M0/M0+) lacks atomic CAS,
+  # which tracing-core requires — so it builds with `--no-default-features`,
+  # which disables core's optional `tracing` feature (the level macros become
+  # no-ops via the shim in lib.rs). Closes Leviculum #6.
   embedded:
-    name: build reticulum-core (no_std MCU)
+    name: build reticulum-core (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target: [thumbv7em-none-eabihf]
+        include:
+          - { target: thumbv7em-none-eabihf, args: "" }
+          - { target: thumbv6m-none-eabi, args: "--no-default-features" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -143,7 +146,7 @@ jobs:
         with:
           key: embedded-${{ matrix.target }}
       - name: cargo build -p reticulum-core --target ${{ matrix.target }}
-        run: cargo build -p reticulum-core --target ${{ matrix.target }}
+        run: cargo build -p reticulum-core --target ${{ matrix.target }} ${{ matrix.args }}
 
   # ─── cross-check: pre-flight reticulum-core on CIRISEdge's targets ──
   # `cargo check` (no link → no NDK/linker needed) on the targets edge
