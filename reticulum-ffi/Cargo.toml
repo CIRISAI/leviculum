@@ -17,7 +17,11 @@ tokio.workspace = true
 rand_core.workspace = true
 
 [build-dependencies]
-cbindgen = "0.27"
+# default-features off drops cbindgen's only default feature, `clap` (its
+# standalone CLI) — build.rs uses just the `cbindgen::Builder` library API.
+# This removes clap + anstream/anstyle*/strsim/colorchoice from the build
+# graph entirely (they were only here for cbindgen's unused CLI).
+cbindgen = { version = "0.27", default-features = false }
 
 # reticulum-ffi is a stub/orphaned crate (§9.2 of CLEANUP_NOTES) —
 # dependencies sit in Cargo.toml even though the stub does not import
