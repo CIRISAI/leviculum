@@ -278,10 +278,8 @@ async fn detect_on_port(
     };
 
     read_frames_until_deadline(port, DETECT_TIMEOUT, |command, payload| match command {
-        rnode::CMD_DETECT => {
-            if payload.first() == Some(&rnode::DETECT_RESP) {
-                result.detected = true;
-            }
+        rnode::CMD_DETECT if payload.first() == Some(&rnode::DETECT_RESP) => {
+            result.detected = true;
         }
         rnode::CMD_FW_VERSION => {
             result.firmware_version = rnode::decode_firmware_version(payload);

@@ -342,14 +342,14 @@ async fn event_task_a(
 ) {
     while let Some(event) = event_rx.recv().await {
         match event {
-            NodeEvent::AnnounceReceived { announce, .. } => {
-                if *announce.destination_hash() == dest_hash_b {
-                    let pk = announce.public_key();
-                    let mut key = [0u8; 32];
-                    key.copy_from_slice(&pk[32..64]);
-                    *state.b_signing_key.lock().unwrap() = Some(key);
-                    state.a_discovered_b.notify_one();
-                }
+            NodeEvent::AnnounceReceived { announce, .. }
+                if *announce.destination_hash() == dest_hash_b =>
+            {
+                let pk = announce.public_key();
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&pk[32..64]);
+                *state.b_signing_key.lock().unwrap() = Some(key);
+                state.a_discovered_b.notify_one();
             }
             NodeEvent::LinkEstablished { link_id, .. } => {
                 *link_id_a.lock().unwrap() = Some(link_id);
@@ -398,14 +398,14 @@ async fn event_task_b(
 ) {
     while let Some(event) = event_rx.recv().await {
         match event {
-            NodeEvent::AnnounceReceived { announce, .. } => {
-                if *announce.destination_hash() == dest_hash_a {
-                    let pk = announce.public_key();
-                    let mut key = [0u8; 32];
-                    key.copy_from_slice(&pk[32..64]);
-                    *state.a_signing_key.lock().unwrap() = Some(key);
-                    state.b_discovered_a.notify_one();
-                }
+            NodeEvent::AnnounceReceived { announce, .. }
+                if *announce.destination_hash() == dest_hash_a =>
+            {
+                let pk = announce.public_key();
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&pk[32..64]);
+                *state.a_signing_key.lock().unwrap() = Some(key);
+                state.b_discovered_a.notify_one();
             }
             NodeEvent::LinkRequest { link_id, .. } => {
                 *state.pending_link_b.lock().unwrap() = Some(link_id);

@@ -793,21 +793,24 @@ mod tests {
         assert_ne!(local.port(), 0, "OS should assign a port");
     }
 
-    // Skipped on macOS: `recv_from_any`'s round-robin returns a different
-    // socket_index than on Linux for this unicast-to-second-socket case —
-    // a real macOS UDP readiness/ordering difference under investigation
-    // (see Leviculum #5). The auto-interface (multicast peer discovery) is
-    // Linux-primary; gating keeps the darwin CI job honest without faking it.
-    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn test_recv_from_any_single_socket() {
-        // Bind two sockets, send to the second, verify recv_from_any returns it
+        // Bind two sockets, send to the second, verify recv_from_any returns it.
         let s1 = bind_outbound_socket().unwrap();
         let s2 = bind_outbound_socket().unwrap();
-        let s2_addr = s2.local_addr().unwrap();
+        let s2_port = s2.local_addr().unwrap().port();
+
+        // Sockets bind to the unspecified address (`::`), so `local_addr()`
+        // reports `[::]:port` — which is not a valid unicast *destination*.
+        // Linux delivers a packet sent to `::` locally anyway; macOS (more
+        // correctly) does not, so addressing s2 by its raw local_addr made the
+        // test Linux-only. Send to loopback `[::1]:port` instead — the
+        // `::`-bound s2 still receives it — so the test is portable.
+        let dest: std::net::SocketAddr =
+            SocketAddrV6::new(Ipv6Addr::LOCALHOST, s2_port, 0, 0).into();
 
         let sender = bind_outbound_socket().unwrap();
-        sender.send_to(b"hello", s2_addr).await.unwrap();
+        sender.send_to(b"hello", dest).await.unwrap();
 
         let sockets = [s1, s2];
         let mut buf = [0u8; 64];

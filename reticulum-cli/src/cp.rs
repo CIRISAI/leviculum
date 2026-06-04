@@ -185,8 +185,8 @@ pub async fn run_send(
                 match event {
                     Some(NodeEvent::ResourceProgress {
                         is_sender: true, progress, transfer_size, ..
-                    }) => {
-                        if !quiet {
+                    })
+                        if !quiet => {
                             let app_bytes = progress as f64 * send_data_size as f64;
                             let phy_bytes = progress as f64 * transfer_size as f64;
                             speed_tracker.update(app_bytes, phy_bytes);
@@ -209,7 +209,6 @@ pub async fn run_send(
                                 speed_str,
                                 phy_str);
                         }
-                    }
                     Some(NodeEvent::ResourceCompleted { is_sender: true, .. }) => {
                         if !quiet {
                             eprint!("\r");
@@ -354,8 +353,8 @@ pub async fn run_listen(
                     }
                     Some(NodeEvent::ResourceProgress {
                         is_sender: false, progress, transfer_size, data_size, ..
-                    }) => {
-                        if !quiet {
+                    })
+                        if !quiet => {
                             let app_bytes = progress as f64 * data_size as f64;
                             let phy_bytes = progress as f64 * transfer_size as f64;
                             speed_tracker.update(app_bytes, phy_bytes);
@@ -377,7 +376,6 @@ pub async fn run_listen(
                                 speed_str,
                                 phy_str);
                         }
-                    }
                     Some(NodeEvent::ResourceCompleted {
                         data, metadata, is_sender: false,
                         segment_index, total_segments, ..
@@ -412,16 +410,14 @@ pub async fn run_listen(
                             );
                         }
                     }
-                    Some(NodeEvent::ResourceFailed { error, .. }) => {
-                        if verbose > 0 {
+                    Some(NodeEvent::ResourceFailed { error, .. })
+                        if verbose > 0 => {
                             eprintln!("Transfer failed: {:?}", error);
                         }
-                    }
-                    Some(NodeEvent::LinkClosed { .. }) => {
-                        if verbose > 0 {
+                    Some(NodeEvent::LinkClosed { .. })
+                        if verbose > 0 => {
                             eprintln!("Link closed");
                         }
-                    }
                     Some(NodeEvent::RequestReceived {
                         link_id, request_id, path, data, ..
                     }) if path == "fetch_file" => {
@@ -676,8 +672,8 @@ pub async fn run_fetch(
                     }
                     Some(NodeEvent::ResourceProgress {
                         is_sender: false, progress, transfer_size, data_size, ..
-                    }) => {
-                        if !quiet {
+                    })
+                        if !quiet => {
                             let app_bytes = progress as f64 * data_size as f64;
                             let phy_bytes = progress as f64 * transfer_size as f64;
                             speed_tracker.update(app_bytes, phy_bytes);
@@ -700,7 +696,6 @@ pub async fn run_fetch(
                                 speed_str,
                                 phy_str);
                         }
-                    }
                     Some(NodeEvent::ResourceCompleted {
                         data, metadata, is_sender: false,
                         segment_index, total_segments, ..
