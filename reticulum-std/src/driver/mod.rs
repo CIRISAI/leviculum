@@ -943,6 +943,73 @@ impl ReticulumNode {
         self.inner.lock().unwrap().path_count()
     }
 
+    /// Read the current monotonic-clock value (milliseconds since
+    /// NodeCore construction).
+    ///
+    /// Exposed to let observability surfaces convert
+    /// `PathTableExport.expires_ms` / `RateTableExport.blocked_until_ms`
+    /// (both monotonic) into wall-clock projections by anchoring
+    /// against `std::time::SystemTime::now()` at call time.
+    pub fn now_ms(&self) -> u64 {
+        self.inner.lock().unwrap().now_ms()
+    }
+
+    /// Snapshot every known path-table entry.
+    ///
+    /// Returns owned `PathTableExport` clones — the inner storage map
+    /// is unlocked before the result returns to the caller, so no
+    /// mutex-borrowed references escape. Intended for downstream
+    /// observability surfaces (routing-table inspectors, federation
+    /// diagnostics). Snapshot reflects the table at call time; entries
+    /// may be evicted by subsequent expiry sweeps.
+    pub fn path_table_entries(&self) -> Vec<reticulum_core::transport::PathTableExport> {
+        self.inner.lock().unwrap().path_table_entries()
+    }
+
+    /// Snapshot every announce-rate-table entry.
+    ///
+    /// Returns owned `RateTableExport` clones; same deep-clone /
+    /// mutex-release contract as [`Self::path_table_entries`]. Used by
+    /// operator tools that need to inspect per-source announce
+    /// frequency / ban state.
+    pub fn rate_table_entries(&self) -> Vec<reticulum_core::transport::RateTableExport> {
+        self.inner.lock().unwrap().rate_table_entries()
+    }
+
+    /// Look up a single path entry by destination hash.
+    ///
+    /// Returns a cloned `PathEntry` (no mutex-borrowed reference
+    /// escapes) or `None` when the destination is unknown.
+    pub fn get_path_clone(
+        &self,
+        dest_hash: &reticulum_core::DestinationHash,
+    ) -> Option<reticulum_core::storage_types::PathEntry> {
+        self.inner.lock().unwrap().get_path_clone(dest_hash.as_bytes())
+    }
+
+    /// Drop a specific path entry by destination hash.
+    ///
+    /// Returns `true` if the entry existed and was removed, `false`
+    /// when it was not present. The local path cache only — does
+    /// not emit any wire-level invalidation packet.
+    pub fn remove_path(&self, dest_hash: &reticulum_core::DestinationHash) -> bool {
+        self.inner.lock().unwrap().remove_path(dest_hash.as_bytes())
+    }
+
+    /// Drop every path whose `next_hop` matches the supplied transport
+    /// identity hash.
+    ///
+    /// Returns the count of paths removed. Useful when a transport
+    /// peer is known to be down: the caller bulk-evicts every path
+    /// routed via that peer in a single call rather than iterating
+    /// the table and calling [`Self::remove_path`] per entry.
+    pub fn drop_all_paths_via(
+        &self,
+        via_hash: &reticulum_core::DestinationHash,
+    ) -> usize {
+        self.inner.lock().unwrap().drop_all_paths_via(via_hash.as_bytes())
+    }
+
     /// Get transport statistics (packets sent, received, forwarded, dropped)
     pub fn transport_stats(&self) -> reticulum_core::transport::TransportStats {
         self.inner.lock().unwrap().transport_stats()
