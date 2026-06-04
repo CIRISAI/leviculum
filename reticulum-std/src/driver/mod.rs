@@ -270,7 +270,19 @@ impl ReticulumNode {
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<InterfaceId>(16);
 
         // Initialize interfaces, the driver owns them, NOT NodeCore
-        let registry = self.initialize_interfaces(&next_id, &new_iface_tx, &reconnect_tx)?;
+        // Interface init is the one fallible step after the runtime exists
+        // (e.g. a TCPServerInterface bind failure). On error, tear the runtime
+        // down with shutdown_background() before propagating — a bare `?` would
+        // drop the live Runtime here, and a blocking Runtime drop inside the
+        // caller's async context panics, masking the real interface error.
+        let registry = match self.initialize_interfaces(&next_id, &new_iface_tx, &reconnect_tx) {
+            Ok(registry) => registry,
+            Err(e) => {
+                drop(enter_guard);
+                runtime.shutdown_background();
+                return Err(e);
+            }
+        };
 
         {
             let mut core = self.inner.lock().unwrap();
@@ -1943,6 +1955,39 @@ mod tests {
             node.stop()
                 .await
                 .expect("stop — event loop must not have panicked");
+        });
+    }
+
+    /// Regression for the runtime-cleanup-on-error path (Codex review on #7):
+    /// when interface init fails *after* the node runtime is built, start()
+    /// must return the error — not panic by blocking-dropping the Runtime
+    /// inside the host's async context.
+    #[test]
+    fn start_surfaces_interface_init_error_without_panicking() {
+        // Occupy a port so the node's TCP server bind fails during init.
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let busy: std::net::SocketAddr = occupied.local_addr().expect("local_addr");
+
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(true)
+            .add_tcp_server(busy)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync");
+
+        let host = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("host runtime");
+        host.block_on(async {
+            // Pre-fix this panicked (blocking Runtime drop in async context);
+            // post-fix it returns the bind error cleanly.
+            let result = node.start().await;
+            assert!(
+                result.is_err(),
+                "start() should surface the TCP bind failure, got {result:?}"
+            );
         });
     }
 
