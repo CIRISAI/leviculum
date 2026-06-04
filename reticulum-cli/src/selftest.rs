@@ -334,7 +334,7 @@ fn compute_sp_verdict(stats: &SelftestStats, warnings: &[String]) -> Verdict {
 
 // Event Tasks
 async fn event_task_a(
-    mut event_rx: tokio::sync::mpsc::Receiver<NodeEvent>,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<NodeEvent>,
     state: Arc<SharedState>,
     dest_hash_b: DestinationHash,
     link_id_a: Arc<Mutex<Option<LinkId>>>,
@@ -391,7 +391,7 @@ async fn event_task_a(
 }
 
 async fn event_task_b(
-    mut event_rx: tokio::sync::mpsc::Receiver<NodeEvent>,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<NodeEvent>,
     state: Arc<SharedState>,
     dest_hash_a: DestinationHash,
     start_time: Instant,

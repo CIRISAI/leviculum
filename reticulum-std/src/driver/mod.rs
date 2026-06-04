@@ -57,12 +57,12 @@ pub use stream::LinkHandle;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::interfaces::IncomingPacket;
@@ -126,9 +126,32 @@ fn build_ifac_config(config: &InterfaceConfig) -> Option<reticulum_core::ifac::I
     }
 }
 
+/// Sink for application events emitted by the event loop.
+///
+/// The channel is unbounded so a draining consumer never loses control-plane
+/// events (issue #4). But a node whose `take_event_receiver()` was never called
+/// — e.g. the `lnsd` daemon, which only waits on signals — has no one draining,
+/// and an unbounded channel would otherwise accumulate every `NodeEvent`
+/// forever. `emit()` therefore drops events until a consumer attaches (the
+/// `wanted` flag, set by `take_event_receiver`), restoring the no-leak property
+/// of the old bounded channel for that case.
+#[derive(Clone)]
+struct EventSink {
+    tx: mpsc::UnboundedSender<NodeEvent>,
+    wanted: Arc<AtomicBool>,
+}
+
+impl EventSink {
+    fn emit(&self, event: NodeEvent) {
+        if self.wanted.load(Ordering::Relaxed) {
+            let _ = self.tx.send(event);
+        }
+    }
+}
+
 /// Channels consumed by the event loop.
 struct EventLoopChannels {
-    event_tx: mpsc::Sender<NodeEvent>,
+    event_tx: EventSink,
     action_dispatch_rx: mpsc::Receiver<TickOutput>,
     new_interface_rx: mpsc::Receiver<InterfaceHandle>,
     reconnect_rx: mpsc::Receiver<InterfaceId>,
@@ -153,10 +176,21 @@ pub struct ReticulumNode {
     inner: Arc<Mutex<StdNodeCore>>,
     /// Interface configurations
     interfaces: Vec<InterfaceConfig>,
-    /// Event sender for the runner
-    event_tx: mpsc::Sender<NodeEvent>,
+    /// Event sender for the runner.
+    ///
+    /// Unbounded: control-plane events (`AnnounceReceived`, link lifecycle) must
+    /// not be dropped — RNS delivers announce handlers losslessly, and dropping
+    /// a one-shot `AnnounceReceived` under load stalled discovery (issue #4).
+    /// An unbounded channel never drops and never blocks the event loop; a
+    /// consumer that stops draining grows memory, which is a louder, debuggable
+    /// failure than silent loss.
+    event_tx: mpsc::UnboundedSender<NodeEvent>,
     /// Event receiver for consuming events
-    event_rx: Option<mpsc::Receiver<NodeEvent>>,
+    event_rx: Option<mpsc::UnboundedReceiver<NodeEvent>>,
+    /// Set true by `take_event_receiver()`. While false (no consumer attached,
+    /// e.g. a daemon that never drains), the event loop drops events instead of
+    /// accumulating them in the unbounded channel.
+    events_wanted: Arc<AtomicBool>,
     /// Shutdown sender
     shutdown_tx: Option<watch::Sender<bool>>,
     /// Runner task handle
@@ -210,7 +244,7 @@ impl ReticulumNode {
         interfaces: Vec<InterfaceConfig>,
         corrupt_every: Option<u64>,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         // Create dummy channel; real one is created in start()
         let (action_dispatch_tx, _) = mpsc::channel(1);
 
@@ -219,6 +253,7 @@ impl ReticulumNode {
             interfaces,
             event_tx,
             event_rx: Some(event_rx),
+            events_wanted: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
             runner_handle: None,
             action_dispatch_tx,
@@ -362,7 +397,10 @@ impl ReticulumNode {
 
         // Clone handles for the runner
         let inner = Arc::clone(&self.inner);
-        let event_tx = self.event_tx.clone();
+        let event_tx = EventSink {
+            tx: self.event_tx.clone(),
+            wanted: Arc::clone(&self.events_wanted),
+        };
         let iface_stats_map = Arc::clone(&self.iface_stats_map);
 
         // Spawn the runner
@@ -894,7 +932,10 @@ impl ReticulumNode {
     /// Take the event receiver
     ///
     /// This allows consuming node events directly. Can only be called once.
-    pub fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
+    pub fn take_event_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<NodeEvent>> {
+        // Mark that a consumer is now draining events, so the event loop
+        // delivers them losslessly instead of dropping to avoid unbounded growth.
+        self.events_wanted.store(true, Ordering::Relaxed);
         self.event_rx.take()
     }
 
@@ -1668,7 +1709,7 @@ async fn run_event_loop(
 fn dispatch_output(
     output: TickOutput,
     registry: &mut InterfaceRegistry,
-    event_tx: &mpsc::Sender<NodeEvent>,
+    event_tx: &EventSink,
     inner: &Arc<Mutex<StdNodeCore>>,
     retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
     retry_queue_warned: &mut std::collections::BTreeSet<usize>,
@@ -1739,27 +1780,14 @@ fn dispatch_output(
     //     airtime.
     push_interface_state(registry, inner);
 
-    // 6. Forward events to application (best effort, drop if full)
+    // 6. Forward events to the application via the EventSink: lossless to a
+    // draining consumer (unbounded, never blocks the event loop), and dropped
+    // when no consumer has attached so the channel can't grow without bound.
     for event in output.events {
         if let NodeEvent::LinkEstablished { link_id, .. } = &event {
             tracing::debug!("Link established: {:?}", link_id);
         }
-        match event_tx.try_send(event) {
-            Ok(()) => {}
-            Err(TrySendError::Full(ev)) => {
-                tracing::warn!(
-                    "Event channel full (capacity {}), dropping: {:?}",
-                    EVENT_CHANNEL_CAPACITY,
-                    ev
-                );
-            }
-            Err(TrySendError::Closed(ev)) => {
-                tracing::warn!(
-                    "Event channel closed (receiver dropped), dropping: {:?}",
-                    ev
-                );
-            }
-        }
+        event_tx.emit(event);
     }
 }
 
@@ -1998,6 +2026,42 @@ mod tests {
                 "start() should surface the TCP bind failure, got {result:?}"
             );
         });
+    }
+
+    /// Regression for the unbounded-channel leak (Codex review on #9): with no
+    /// consumer attached (a daemon that never calls `take_event_receiver`), the
+    /// EventSink must DROP events rather than accumulate them in the unbounded
+    /// channel; once a consumer attaches it must deliver losslessly (#4).
+    #[test]
+    fn event_sink_drops_until_consumer_attaches() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<NodeEvent>();
+        let wanted = Arc::new(AtomicBool::new(false));
+        let sink = EventSink {
+            tx,
+            wanted: Arc::clone(&wanted),
+        };
+        let ev = || NodeEvent::PathFound {
+            destination_hash: reticulum_core::DestinationHash::new([0xAB; 16]),
+            hops: 1,
+            interface_index: 0,
+        };
+
+        // No consumer: emitted events are dropped — the channel cannot grow.
+        for _ in 0..1000 {
+            sink.emit(ev());
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "events must drop before any consumer attaches (no unbounded growth)"
+        );
+
+        // Consumer attaches (as take_event_receiver does) → lossless delivery.
+        wanted.store(true, Ordering::Relaxed);
+        sink.emit(ev());
+        assert!(
+            matches!(rx.try_recv(), Ok(NodeEvent::PathFound { .. })),
+            "events must be delivered once a consumer is draining"
+        );
     }
 
     /// push_retry_with_warn inserts an entry into the `warned` set

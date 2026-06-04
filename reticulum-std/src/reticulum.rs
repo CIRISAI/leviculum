@@ -91,7 +91,7 @@ impl Reticulum {
     }
 
     /// Take the event receiver (can only be called once)
-    pub fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
+    pub fn take_event_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<NodeEvent>> {
         self.node.take_event_receiver()
     }
 }
