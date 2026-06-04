@@ -19,15 +19,6 @@ use crate::harness::{find_available_ports, TestDaemon};
 /// Unique counter to avoid collisions between parallel tests.
 static PROBE_TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Path to vendor rnprobe script.
-const RNPROBE_PY: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnprobe.py"
-);
-
-/// Path to vendor Reticulum package (for PYTHONPATH).
-const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/Reticulum");
-
 /// Create a temp config directory with a Python-compatible config file and
 /// transport_identity file so that Python tools derive the same RPC auth key.
 fn create_probe_config_dir(instance_name: &str, identity_bytes: &[u8; 64]) -> PathBuf {
@@ -160,16 +151,17 @@ async fn test_rnprobe_reports_correct_hops() {
 
     // Phase 6: Run rnprobe
     let config_str = config_dir.to_str().expect("config dir must be valid UTF-8");
-    let output = tokio::process::Command::new("python3")
-        .arg(RNPROBE_PY)
+    let (argv, pythonpath) = crate::common::rns_utility("rnprobe");
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .arg("--config")
         .arg(config_str)
         .args(["-n", "1", "-t", "15"])
-        .args(["rnstransport.probe", &py_probe_hex])
-        .env("PYTHONPATH", VENDOR_RNS_ROOT)
-        .output()
-        .await
-        .expect("Failed to run rnprobe");
+        .args(["rnstransport.probe", &py_probe_hex]);
+    if let Some(pp) = pythonpath {
+        cmd.env("PYTHONPATH", pp);
+    }
+    let output = cmd.output().await.expect("Failed to run rnprobe");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

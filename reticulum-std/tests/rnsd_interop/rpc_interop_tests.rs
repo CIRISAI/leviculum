@@ -20,19 +20,6 @@ use crate::harness::find_available_ports;
 /// Unique counter to avoid collisions between parallel tests.
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Path to vendor Python utilities.
-const RNSTATUS_PY: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnstatus.py"
-);
-const RNPATH_PY: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnpath.py"
-);
-
-/// Path to vendor Reticulum package (for PYTHONPATH).
-const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/Reticulum");
-
 /// Start a Rust daemon with shared instance + RPC and return the node,
 /// instance name, TCP address, and the identity's private key bytes
 /// (needed to write the transport_identity file for Python tools).
@@ -117,21 +104,23 @@ fn create_python_config_dir(instance_name: &str, identity_bytes: &[u8; 64]) -> P
     tempdir
 }
 
-/// Run a Python utility and return its output.
-async fn run_python_tool(script: &str, args: &[&str], config_dir: &Path) -> Output {
+/// Run an RNS CLI utility (by tool stem, e.g. `"rnstatus"`) and return its
+/// output. Resolves to the vendored script or the pip-installed module via
+/// [`crate::common::rns_utility`].
+async fn run_python_tool(tool: &str, args: &[&str], config_dir: &Path) -> Output {
     let config_str = config_dir.to_str().expect("config dir must be valid UTF-8");
+    let (argv, pythonpath) = crate::common::rns_utility(tool);
 
-    let output = tokio::process::Command::new("python3")
-        .arg(script)
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .arg("--config")
         .arg(config_str)
-        .args(args)
-        .env("PYTHONPATH", VENDOR_RNS_ROOT)
-        .output()
-        .await
-        .expect("failed to spawn python3");
+        .args(args);
+    if let Some(pp) = pythonpath {
+        cmd.env("PYTHONPATH", pp);
+    }
 
-    output
+    cmd.output().await.expect("failed to spawn python3")
 }
 
 use crate::common::cleanup_config_dir;
@@ -149,7 +138,7 @@ async fn test_rnstatus_against_rust_daemon() {
         start_rust_daemon_with_rpc().await;
     let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
 
-    let output = run_python_tool(RNSTATUS_PY, &[], &config_dir).await;
+    let output = run_python_tool("rnstatus", &[], &config_dir).await;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -190,7 +179,7 @@ async fn test_rnstatus_json_against_rust_daemon() {
         start_rust_daemon_with_rpc().await;
     let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
 
-    let output = run_python_tool(RNSTATUS_PY, &["--json"], &config_dir).await;
+    let output = run_python_tool("rnstatus", &["--json"], &config_dir).await;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -241,7 +230,7 @@ async fn test_rnpath_table_against_rust_daemon() {
         start_rust_daemon_with_rpc().await;
     let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
 
-    let output = run_python_tool(RNPATH_PY, &["-t"], &config_dir).await;
+    let output = run_python_tool("rnpath", &["-t"], &config_dir).await;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -267,7 +256,7 @@ async fn test_rnpath_rate_table_against_rust_daemon() {
         start_rust_daemon_with_rpc().await;
     let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
 
-    let output = run_python_tool(RNPATH_PY, &["-r"], &config_dir).await;
+    let output = run_python_tool("rnpath", &["-r"], &config_dir).await;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -291,7 +280,7 @@ async fn test_rnstatus_link_stats_against_rust_daemon() {
         start_rust_daemon_with_rpc().await;
     let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
 
-    let output = run_python_tool(RNSTATUS_PY, &["-l"], &config_dir).await;
+    let output = run_python_tool("rnstatus", &["-l"], &config_dir).await;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
