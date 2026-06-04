@@ -376,7 +376,7 @@ impl Channel {
             // SRTT = (1-alpha)*SRTT + alpha*R, alpha = 1/8
             self.srtt_ms = 0.875 * self.srtt_ms + 0.125 * sample;
         }
-        tracing::debug!(
+        crate::tracing::debug!(
             sample_ms,
             srtt = self.srtt_ms,
             rttvar = self.rttvar_ms,
@@ -409,7 +409,7 @@ impl Channel {
         } else {
             self.window_min = CHANNEL_WINDOW_MIN_VERY_SLOW;
             self.window_max = CHANNEL_WINDOW_MAX_VERY_SLOW;
-            tracing::debug!(rtt_ms, "channel: VERY_SLOW tier (RTT >= 2s), window_max=3");
+            crate::tracing::debug!(rtt_ms, "channel: VERY_SLOW tier (RTT >= 2s), window_max=3");
         }
         // Clamp current window to new limits
         self.window = self.window.clamp(self.window_min, self.window_max);
@@ -499,7 +499,7 @@ impl Channel {
 
         // 1. Window check FIRST, no point pacing if there's no slot
         if !self.is_ready_to_send() {
-            tracing::debug!(
+            crate::tracing::debug!(
                 tx_ring = self.tx_ring.len(),
                 window = self.window,
                 window_max = self.window_max,
@@ -529,7 +529,7 @@ impl Channel {
 
         let queue_len = self.tx_ring.len();
         let timeout_ms = calculate_timeout(1, rtt_ms, queue_len, self.window); // for logging only
-        tracing::debug!(
+        crate::tracing::debug!(
             seq = sequence,
             tx_ring = queue_len,
             window = self.window,
@@ -582,7 +582,7 @@ impl Channel {
         // Return AlreadyDelivered so the caller generates a proof, the original
         // proof was likely lost on the return path.
         if offset >= CHANNEL_SEQ_MODULUS as usize / 2 {
-            tracing::debug!(
+            crate::tracing::debug!(
                 seq = envelope.sequence,
                 next_rx = self.next_rx_sequence,
                 "channel: duplicate/backward sequence, re-proving"
@@ -749,7 +749,7 @@ impl Channel {
             // Overwrite pacing with SRTT (adjust_window used handshake RTT)
             let eff_rtt = self.effective_rtt_ms(rtt_ms);
             self.recalculate_pacing(eff_rtt);
-            tracing::debug!(
+            crate::tracing::debug!(
                 seq = sequence,
                 tx_ring = self.tx_ring.len(),
                 window = self.window,
@@ -758,7 +758,7 @@ impl Channel {
             );
             true
         } else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 seq = sequence,
                 tx_ring = self.tx_ring.len(),
                 "channel: delivered — seq not found (duplicate ACK?)"
@@ -803,7 +803,7 @@ impl Channel {
             // Timeout occurred
             if tries >= self.max_tries {
                 let seq = self.tx_ring[i].envelope.sequence;
-                tracing::debug!(
+                crate::tracing::debug!(
                     seq,
                     tries,
                     max_tries = self.max_tries,
@@ -830,7 +830,7 @@ impl Channel {
                 tries: new_tries,
             });
 
-            tracing::debug!(
+            crate::tracing::debug!(
                 seq,
                 tries = new_tries,
                 tx_ring = tx_ring_len,
@@ -865,7 +865,7 @@ impl Channel {
                 .pacing_interval_ms
                 .saturating_mul(1u64 << doublings)
                 .min(eff_rtt.max(1));
-            tracing::debug!(
+            crate::tracing::debug!(
                 pacing_ms = self.pacing_interval_ms,
                 doublings,
                 eff_rtt,

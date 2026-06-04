@@ -222,7 +222,11 @@ pub fn dispatch_actions(
                     Some(cfg) => match cfg.apply_ifac(&data) {
                         Ok(wrapped) => wrapped,
                         Err(e) => {
-                            tracing::warn!("IFAC apply failed on iface {}: {:?}", iface.0, e);
+                            crate::tracing::warn!(
+                                "IFAC apply failed on iface {}: {:?}",
+                                iface.0,
+                                e
+                            );
                             continue;
                         }
                     },
@@ -255,7 +259,11 @@ pub fn dispatch_actions(
                         Some(cfg) => match cfg.apply_ifac(&data) {
                             Ok(wrapped) => iface_obj.try_send_prioritized(&wrapped, false),
                             Err(e) => {
-                                tracing::warn!("IFAC apply failed on iface {}: {:?}", iface_idx, e);
+                                crate::tracing::warn!(
+                                    "IFAC apply failed on iface {}: {:?}",
+                                    iface_idx,
+                                    e
+                                );
                                 continue;
                             }
                         },
@@ -963,7 +971,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut proof_dest = [0u8; TRUNCATED_HASHBYTES];
         proof_dest.copy_from_slice(&packet_hash[..TRUNCATED_HASHBYTES]);
         let packet = build_proof_packet(&proof_dest, &proof_data);
-        tracing::debug!(
+        crate::tracing::debug!(
             "[PROOF_GEN] for_pkt={} to_dst={}",
             HexShort(&proof_dest),
             HexShort(destination_hash)
@@ -978,7 +986,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 .map(|p| p.interface_index)
                 .ok_or(TransportError::NoPath)?,
         };
-        tracing::debug!(
+        crate::tracing::debug!(
             "[PROOF_SEND] pkt={} iface={}",
             HexShort(&proof_dest),
             self.iface_name(interface_index)
@@ -1005,7 +1013,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             Some(cfg) => match cfg.verify_ifac(raw) {
                 Ok(clean) => Cow::Owned(clean),
                 Err(_) => {
-                    tracing::trace!(
+                    crate::tracing::trace!(
                         "Dropping packet: IFAC verification failed on iface {}",
                         self.iface_name(interface_index)
                     );
@@ -1015,7 +1023,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             },
             None => {
                 if IfacConfig::has_ifac_flag(raw) {
-                    tracing::trace!(
+                    crate::tracing::trace!(
                         "Dropping IFAC-tagged packet on non-IFAC iface {}",
                         self.iface_name(interface_index)
                     );
@@ -1038,14 +1046,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             packet.hops = packet.hops.saturating_sub(1);
         }
 
-        tracing::trace!(
+        crate::tracing::trace!(
             "incoming packet ptype={:?} dest=<{}> iface={} hops={}",
             packet.flags.packet_type,
             HexShort(&packet.destination_hash),
             self.iface_name(interface_index),
             packet.hops
         );
-        tracing::debug!(
+        crate::tracing::debug!(
             "[PKT_RX] iface={} type={:?} dst={} hops={} len={}",
             self.iface_name(interface_index),
             packet.flags.packet_type,
@@ -1060,7 +1068,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             && packet.flags.packet_type != PacketType::Announce
             && packet.transport_id != Some(*self.identity.hash())
         {
-            tracing::trace!(
+            crate::tracing::trace!(
                 "Dropped packet for <{}> on {}, transport ID mismatch",
                 HexShort(&packet.destination_hash),
                 self.iface_name(interface_index)
@@ -1076,7 +1084,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         {
             // PLAIN/GROUP announces are always invalid
             if packet.flags.packet_type == PacketType::Announce {
-                tracing::trace!(
+                crate::tracing::trace!(
                     "Dropped invalid PLAIN/GROUP announce for <{}> on {}",
                     HexShort(&packet.destination_hash),
                     self.iface_name(interface_index)
@@ -1088,7 +1096,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Python Transport.py:1205: hops > 1 after increment on receipt.
             // We now also increment on receipt, so the check is the same.
             if packet.hops > 1 {
-                tracing::trace!(
+                crate::tracing::trace!(
                     "Dropped PLAIN/GROUP packet for <{}> on {}, hops={}, not direct",
                     HexShort(&packet.destination_hash),
                     self.iface_name(interface_index),
@@ -1165,13 +1173,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             && self.storage.has_packet_hash(&full_packet_hash)
         {
             if packet.context == PacketContext::Lrproof {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Dropped duplicate LRPROOF for <{}> on {}",
                     HexShort(&packet.destination_hash),
                     self.iface_name(interface_index)
                 );
             } else {
-                tracing::trace!(
+                crate::tracing::trace!(
                     "Dropped duplicate packet for <{}> on {}",
                     HexShort(&packet.destination_hash),
                     self.iface_name(interface_index)
@@ -1340,10 +1348,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if now.saturating_sub(self.last_path_snapshot_ms) >= 10_000 {
             self.last_path_snapshot_ms = now;
             let entries = self.storage.path_entries();
-            tracing::debug!("[PATH_TABLE] size={}", entries.len());
+            crate::tracing::debug!("[PATH_TABLE] size={}", entries.len());
             for (dst, entry) in &entries {
                 let age_ms = entry.expires_ms.saturating_sub(now);
-                tracing::debug!(
+                crate::tracing::debug!(
                     "[PATH_TABLE_ENTRY] dst={} hops={} iface={} next_hop={:?} expires_in_ms={}",
                     HexShort(&dst[..]),
                     entry.hops,
@@ -1607,21 +1615,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Don't process announces for our own destinations, these are echoes
         // from neighbors rebroadcasting our announce back to us.
         if self.local_destinations.contains(&dest_hash) {
-            tracing::trace!(
+            crate::tracing::trace!(
                 dest = %HexShort(&dest_hash),
                 "Dropped announce for own destination (echo)"
             );
             return Ok(());
         }
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "received announce dest=<{}> iface={} hops={} path_response={}",
             HexShort(&dest_hash),
             self.iface_name(interface_index),
             packet.hops,
             is_path_response
         );
-        tracing::debug!(
+        crate::tracing::debug!(
             "[ANN_RX] dst={} hops={} iface={} path_response={}",
             HexShort(&dest_hash),
             packet.hops,
@@ -1640,7 +1648,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 && !self.path_is_unresponsive(&dest_hash)
                 && packet.hops >= path.hops
             {
-                tracing::trace!(
+                crate::tracing::trace!(
                     dest = %HexShort(&dest_hash),
                     "Dropped announce, random hash already seen (replay)"
                 );
@@ -1673,7 +1681,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     if existing.retries > 0 && existing.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
                     {
                         existing.retransmit_at_ms = None;
-                        tracing::trace!(
+                        crate::tracing::trace!(
                             dest = %HexShort(&dest_hash),
                             "Rebroadcasted announce has been passed on to another node, no further tries needed"
                         );
@@ -1685,7 +1693,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // Another node forwarded our rebroadcast (hops+2 means they got
                     // our retransmit at hops+1 and forwarded it)
                     existing.retransmit_at_ms = None;
-                    tracing::trace!(
+                    crate::tracing::trace!(
                         dest = %HexShort(&dest_hash),
                         "Rebroadcasted announce has been forwarded by another node, no further tries needed"
                     );
@@ -1763,7 +1771,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // But if the path WOULD improve (e.g. fewer hops via shorter route),
         // allow the update, only suppress the rebroadcast.
         if rate_limited && !should_update {
-            tracing::trace!(
+            crate::tracing::trace!(
                 dest = %HexShort(&dest_hash),
                 "Dropped announce, rate limited (no path improvement)"
             );
@@ -1799,7 +1807,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             );
             let readback_ok = self.storage.get_path(&dest_hash).is_some();
             let table_len = self.storage.path_count();
-            tracing::debug!(
+            crate::tracing::debug!(
                 "[PATH_ADD] dst={} hops={} iface={} next_hop={:?} source=announce ok={} table_len={}",
                 HexShort(&dest_hash),
                 packet.hops,
@@ -1810,7 +1818,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             );
 
             if let Some(ref next_hop) = packet.transport_id {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Destination <{}> is now {} hops away via <{}> on {}",
                     HexShort(&dest_hash),
                     packet.hops,
@@ -1818,7 +1826,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     self.iface_name(interface_index)
                 );
             } else {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Destination <{}> is now {} hops away (direct) on {}",
                     HexShort(&dest_hash),
                     packet.hops,
@@ -1843,7 +1851,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             };
 
             if rate_blocked {
-                tracing::trace!(
+                crate::tracing::trace!(
                     dest = %HexShort(&dest_hash),
                     "Announce rebroadcast blocked by per-destination rate limit"
                 );
@@ -1855,7 +1863,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let should_rebroadcast =
                 self.config.enable_transport && !is_path_response && !rate_blocked && !rate_limited;
 
-            tracing::debug!(
+            crate::tracing::debug!(
                 dest = %HexShort(&dest_hash),
                 hops = packet.hops,
                 transport = self.config.enable_transport,
@@ -1892,7 +1900,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // (inserts entry) + Transport.py:519-540 (scheduler fires).
 
             if delay_for_local_registration {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Delaying rebroadcast of local client announce for <{}> by {}ms",
                     HexShort(&dest_hash),
                     LOCAL_CLIENT_ANNOUNCE_DELAY_MS
@@ -1945,7 +1953,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Log when an announce is queued for rebroadcast (aids collision diagnosis)
                 if let Some(entry) = self.storage.get_announce(&dest_hash) {
                     if entry.retransmit_at_ms.is_some() {
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             "announce queued for rebroadcast dest=<{}> hops={} retransmit_at_ms={:?} retries={}",
                             HexShort(&dest_hash),
                             entry.hops,
@@ -2005,7 +2013,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 interface_index,
             });
         } else {
-            tracing::trace!(
+            crate::tracing::trace!(
                 "Valid announce for <{}> {} hops away on {}, but path not updated (current path is equal or better)",
                 HexShort(&dest_hash), packet.hops, self.iface_name(interface_index)
             );
@@ -2035,7 +2043,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let dest_hash = packet.destination_hash;
         let is_local = self.local_destinations.contains(&dest_hash);
 
-        tracing::trace!(
+        crate::tracing::trace!(
             "handling link request dest=<{}> iface={} local={}",
             HexShort(&dest_hash),
             self.iface_name(interface_index),
@@ -2044,7 +2052,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Check if we have this destination registered (NodeCore gates accepts_links)
         if is_local {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Link request for <{}> received on {}, delivering to local destination",
                 HexShort(&dest_hash),
                 self.iface_name(interface_index)
@@ -2074,7 +2082,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     )
                 } else {
                     // No path known, drop
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         "Link request for <{}> on {}, no path known, dropping",
                         HexShort(&dest_hash),
                         self.iface_name(interface_index)
@@ -2184,7 +2192,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 }
             };
 
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Forwarding link request for <{}> from {} to {}, {} hops remaining",
                 HexShort(&dest_hash),
                 self.iface_name(interface_index),
@@ -2210,7 +2218,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let dest_hash = packet.destination_hash;
         let proof_data = packet.data.as_slice();
 
-        tracing::trace!(
+        crate::tracing::trace!(
             "handling proof dest=<{}> iface={} proof_len={}",
             HexShort(&dest_hash),
             self.iface_name(interface_index),
@@ -2219,7 +2227,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Promote LRPROOF logging to DEBUG for diagnostics
         if packet.context == PacketContext::Lrproof {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "LRPROOF arrived dest=<{}> iface={} hops={} proof_len={}",
                 HexShort(&dest_hash),
                 self.iface_name(interface_index),
@@ -2242,7 +2250,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             truncated.copy_from_slice(&proof_packet_hash[..TRUNCATED_HASHBYTES]);
 
             if let Some(receipt) = self.storage.get_receipt(&truncated) {
-                tracing::trace!(
+                crate::tracing::trace!(
                     dest = %HexShort(&dest_hash),
                     "Proof matched local receipt (explicit format)"
                 );
@@ -2262,7 +2270,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Look up receipt by that hash, then reconstruct explicit format
             // so NodeCore can verify uniformly.
             if let Some(receipt) = self.storage.get_receipt(&dest_hash) {
-                tracing::trace!(
+                crate::tracing::trace!(
                     dest = %HexShort(&dest_hash),
                     "Proof matched local receipt (implicit format)"
                 );
@@ -2284,7 +2292,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Check if this is for a registered destination (legacy behavior)
         if self.local_destinations.contains(&dest_hash) {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Proof for <{}> delivered to local destination on {}",
                 HexShort(&dest_hash),
                 self.iface_name(interface_index)
@@ -2309,7 +2317,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if self.config.enable_transport || from_local || for_local_link {
             if let Some(link_entry) = self.storage.get_link_entry(&dest_hash).cloned() {
                 if packet.context == PacketContext::Lrproof {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         "LRPROOF link_table hit dest=<{}> iface={} hops={} entry(next_hop={} remaining={} recv={} hops={})",
                         HexShort(&dest_hash),
                         self.iface_name(interface_index),
@@ -2324,7 +2332,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let target_iface = if interface_index == link_entry.next_hop_interface_index {
                     // From destination side: check remaining_hops
                     if packet.hops != link_entry.remaining_hops {
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
                             remaining_hops = link_entry.remaining_hops,
@@ -2337,7 +2345,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } else if interface_index == link_entry.received_interface_index {
                     // From initiator side: check taken hops
                     if packet.hops != link_entry.hops {
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
                             entry_hops = link_entry.hops,
@@ -2348,7 +2356,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     }
                     link_entry.next_hop_interface_index
                 } else {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         "Dropped proof for <{}> on {}, unknown link direction (next_hop={}, recv={})",
                         HexShort(&dest_hash),
                         self.iface_name(interface_index),
@@ -2373,7 +2381,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     if proof_data.len() != LINK_PROOF_SIZE_MIN
                         && proof_data.len() != LINK_PROOF_SIZE_MAX
                     {
-                        tracing::warn!(
+                        crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),
                             len = proof_data.len(),
                             "Dropped LRPROOF, malformed proof size"
@@ -2414,7 +2422,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 {
                                     let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
                                     if vk.verify(&signed, &sig).is_err() {
-                                        tracing::warn!(
+                                        crate::tracing::warn!(
                                             dest = %HexShort(&dest_hash),
                                             "Dropped LRPROOF, signature verification failed"
                                         );
@@ -2424,7 +2432,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 }
                             }
                             Err(_) => {
-                                tracing::warn!(
+                                crate::tracing::warn!(
                                     dest = %HexShort(&dest_hash),
                                     "Dropped LRPROOF, malformed Ed25519 key"
                                 );
@@ -2437,7 +2445,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // If peer_signing_key is None, announce was not cached at link creation.
                     // Forward anyway (cannot validate without key).
                     if link_entry.peer_signing_key.is_none() {
-                        tracing::warn!(
+                        crate::tracing::warn!(
                             link_id = ?dest_hash,
                             "forwarding LRPROOF without signature validation — announce not cached for link"
                         );
@@ -2460,7 +2468,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 }
 
                 // Forward proof via link table
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Proof for <{}> forwarding via link table to {}",
                     HexShort(&dest_hash),
                     self.iface_name(target_iface)
@@ -2472,14 +2480,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     &mut forwarded,
                 );
             } else if packet.context == PacketContext::Lrproof {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "LRPROOF for <{}> on {}: no link_table entry found",
                     HexShort(&dest_hash),
                     self.iface_name(interface_index),
                 );
             }
         } else if packet.context == PacketContext::Lrproof {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "LRPROOF for <{}> on {}: transport={} from_local={} for_local={}",
                 HexShort(&dest_hash),
                 self.iface_name(interface_index),
@@ -2503,7 +2511,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // original packet was forwarded to) and be routed back to the
                     // receiving interface (where the original packet came from).
                     if interface_index == reverse_entry.outbound_interface_index {
-                        tracing::trace!(
+                        crate::tracing::trace!(
                             "Proof for <{}> forwarding via reverse table to {}",
                             HexShort(&dest_hash),
                             self.iface_name(reverse_entry.receiving_interface_index)
@@ -2558,7 +2566,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ) -> Result<(), TransportError> {
         let dest_hash = packet.destination_hash;
 
-        tracing::trace!(
+        crate::tracing::trace!(
             "handling data packet dest=<{}> iface={} hops={} data_len={}",
             HexShort(&dest_hash),
             self.iface_name(interface_index),
@@ -2568,7 +2576,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Intercept path requests (before normal destination routing)
         if dest_hash == self.path_request_hash {
-            tracing::trace!(
+            crate::tracing::trace!(
                 "Intercepted path request on {}",
                 self.iface_name(interface_index)
             );
@@ -2590,14 +2598,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let from_local = self.is_local_client(interface_index);
             if from_local {
                 // Local client → broadcast on all interfaces except sender
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Plain broadcast from local client on {}, forwarding to all interfaces",
                     self.iface_name(interface_index)
                 );
                 self.forward_on_all_except(interface_index, &mut packet);
             } else if self.has_local_clients() {
                 // Network → forward only to local client interfaces
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Plain broadcast from {} for <{}>, forwarding to local clients",
                     self.iface_name(interface_index),
                     HexShort(&dest_hash)
@@ -2619,7 +2627,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
             // Also deliver locally if destination is registered on this node
             if self.local_destinations.contains(&dest_hash) {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "[PKT_LOCAL] dst={} iface={} matched=true",
                     HexShort(&dest_hash),
                     self.iface_name(interface_index)
@@ -2644,7 +2652,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Check if we have this destination registered
         if self.local_destinations.contains(&dest_hash) {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Data packet for <{}> delivered to local destination on {}",
                 HexShort(&dest_hash),
                 self.iface_name(interface_index)
@@ -2678,7 +2686,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     let target_iface = if interface_index == link_entry.next_hop_interface_index {
                         // From destination side: check remaining_hops
                         if packet.hops != link_entry.remaining_hops {
-                            tracing::trace!(
+                            crate::tracing::trace!(
                                 dest = %HexShort(&dest_hash),
                                 "Dropped data packet, hop count mismatch (remaining_hops)"
                             );
@@ -2688,7 +2696,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     } else if interface_index == link_entry.received_interface_index {
                         // From initiator side: check taken hops
                         if packet.hops != link_entry.hops {
-                            tracing::trace!(
+                            crate::tracing::trace!(
                                 dest = %HexShort(&dest_hash),
                                 "Dropped data packet, hop count mismatch (taken hops)"
                             );
@@ -2696,7 +2704,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         }
                         link_entry.next_hop_interface_index
                     } else {
-                        tracing::trace!(
+                        crate::tracing::trace!(
                             "Dropped data packet for <{}> on {}, unknown link direction",
                             HexShort(&dest_hash),
                             self.iface_name(interface_index)
@@ -2733,7 +2741,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     }
 
                     // Forward data via link table
-                    tracing::trace!(
+                    crate::tracing::trace!(
                         "Data packet for <{}> forwarding via link table to {}",
                         HexShort(&dest_hash),
                         self.iface_name(target_iface)
@@ -2752,7 +2760,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // links (link_ids never appear in path_table), fall through to
             // the delivery code below.
             if packet.flags.dest_type != DestinationType::Link {
-                tracing::trace!(
+                crate::tracing::trace!(
                     "Data packet for <{}> forwarding via path table",
                     HexShort(&dest_hash)
                 );
@@ -2789,7 +2797,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Read path data into locals (releases immutable borrow)
         let (target_iface, needs_relay, next_hop) =
             if let Some(path) = self.storage.get_path(&packet.destination_hash) {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "[PATH_LOOKUP] dst={} found=true hops={} iface={}",
                     HexShort(&packet.destination_hash),
                     path.hops,
@@ -2797,15 +2805,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
                 (path.interface_index, path.needs_relay(), path.next_hop)
             } else {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Cannot forward packet for <{}>, no path known, dropping",
                     HexShort(&packet.destination_hash)
                 );
-                tracing::debug!(
+                crate::tracing::debug!(
                     "[PATH_LOOKUP] dst={} found=false",
                     HexShort(&packet.destination_hash)
                 );
-                tracing::debug!(
+                crate::tracing::debug!(
                     "[PKT_DROP] dst={} type={:?} hops={} iface_in={} reason=no_path",
                     HexShort(&packet.destination_hash),
                     packet.flags.packet_type,
@@ -2816,14 +2824,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 return Ok(());
             };
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "Forwarding packet for <{}> from {} to {}, {} hops",
             HexShort(&packet.destination_hash),
             self.iface_name(source_interface_index),
             self.iface_name(target_iface),
             packet.hops
         );
-        tracing::debug!(
+        crate::tracing::debug!(
             "[PKT_FORWARD] dst={} type={:?} hops={} iface_in={} iface_out={} next_hop={:?}",
             HexShort(&packet.destination_hash),
             packet.flags.packet_type,
@@ -2853,7 +2861,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 outbound_interface_index: target_iface,
             },
         );
-        tracing::debug!(
+        crate::tracing::debug!(
             "[REVERSE_ADD] pkt_hash={} in_iface={} out_iface={}",
             HexShort(&truncated_hash),
             self.iface_name(source_interface_index),
@@ -2920,7 +2928,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut new_data = payload.to_vec();
         new_data[LINK_REQUEST_BASE_SIZE..signaling_size].copy_from_slice(&new_sig);
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "Clamped link request MTU from {} to {} (prev-hop HW_MTU={}, next-hop HW_MTU={})",
             path_mtu,
             clamped,
@@ -2972,7 +2980,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         packet: &mut Packet,
     ) -> Result<(), TransportError> {
         if packet.hops > self.config.max_hops {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Dropped packet on {}, max hops exceeded (hops={}, max={})",
                 self.iface_name(target_iface),
                 packet.hops,
@@ -2984,7 +2992,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Suppress same-interface relay on shared media.
         if receiving_iface == Some(target_iface) {
-            tracing::trace!(
+            crate::tracing::trace!(
                 "Suppressed same-interface relay on {}",
                 self.iface_name(target_iface)
             );
@@ -3003,7 +3011,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// which explicitly skips the receiving interface.
     fn forward_on_all_except(&mut self, except_index: usize, packet: &mut Packet) {
         if packet.hops > self.config.max_hops {
-            tracing::debug!(
+            crate::tracing::debug!(
                 hops = packet.hops,
                 max_hops = self.config.max_hops,
                 "Dropped broadcast packet, max hops exceeded"
@@ -3027,7 +3035,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// in process_incoming, seeded here before the broadcast is emitted.
     fn forward_on_all(&mut self, packet: &mut Packet) {
         if packet.hops > self.config.max_hops {
-            tracing::debug!(
+            crate::tracing::debug!(
                 hops = packet.hops,
                 max_hops = self.config.max_hops,
                 "Dropped broadcast packet, max hops exceeded"
@@ -3612,14 +3620,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Path request format: dest_hash(16) + [transport_id(16)] + tag(16)
         // Minimum: dest_hash(16) + tag(16) = 32 bytes
         if data.len() < 32 {
-            tracing::trace!(len = data.len(), "Dropped truncated path request");
+            crate::tracing::trace!(len = data.len(), "Dropped truncated path request");
             return Ok(());
         }
 
         let mut requested_hash = [0u8; TRUNCATED_HASHBYTES];
         requested_hash.copy_from_slice(&data[..TRUNCATED_HASHBYTES]);
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "Path request for <{}> on {}",
             HexShort(&requested_hash),
             self.iface_name(interface_index)
@@ -3636,7 +3644,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         dedup_key[TRUNCATED_HASHBYTES..].copy_from_slice(&tag);
 
         if self.storage.check_path_request_tag(&dedup_key) {
-            tracing::trace!(
+            crate::tracing::trace!(
                 "Ignoring duplicate path request for <{}>",
                 HexShort(&requested_hash)
             );
@@ -3645,7 +3653,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // 1. Check if it's a local destination
         if self.local_destinations.contains(&requested_hash) {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Answering path request for <{}> on {}, destination is local",
                 HexShort(&requested_hash),
                 self.iface_name(interface_index)
@@ -3664,7 +3672,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 let now = self.clock.now_ms();
                 let hops = Packet::unpack(&cached_raw).map(|p| p.hops).unwrap_or(0);
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Setting up deferred path response for local dest <{}>",
                     HexShort(&requested_hash)
                 );
@@ -3712,7 +3720,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     let size = announce.packed_size();
                     let mut buf = alloc::vec![0u8; size];
                     if let Ok(len) = announce.pack(&mut buf) {
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             "Answering path request for <{}> from local client, path is known",
                             HexShort(&requested_hash),
                         );
@@ -3730,7 +3738,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Send only to the requesting interface (Python Transport.py:1037-1038).
         if self.config.enable_transport {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Answering path request for <{}> on {}, path is known",
                     HexShort(&requested_hash),
                     self.iface_name(interface_index)
@@ -3771,7 +3779,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .get_discovery_path_request(&requested_hash)
                     .is_some()
                 {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         "Already have a pending discovery path request for <{}>",
                         HexShort(&requested_hash)
                     );
@@ -3783,7 +3791,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     );
                 }
 
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Attempting to discover unknown path to <{}> on behalf of path request on {}",
                     HexShort(&requested_hash),
                     self.iface_name(interface_index)
@@ -3843,7 +3851,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if from_local {
             let mut buf = [0u8; crate::constants::MTU];
             let len = packet.pack(&mut buf)?;
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Path request for <{}> from local client, forwarding to network interfaces",
                 HexShort(&requested_hash),
             );
@@ -3990,7 +3998,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 .get_announce(&dest_hash)
                 .map(|e| e.retries)
                 .unwrap_or(0);
-            tracing::debug!(
+            crate::tracing::debug!(
                 "announce retry firing dest=<{}> retries={} target={:?}",
                 HexShort(&dest_hash),
                 retry_num,
@@ -4002,7 +4010,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // scheduler-driven announces-per-second vs driver-level bytes-
             // to-serial events. Measurement-only; DEBUG-level under a
             // dedicated target so it filters independently.
-            tracing::debug!(
+            crate::tracing::debug!(
                 target: "reticulum_core::transport::announce_trace",
                 "ANNOUNCE_EMIT dest={} retries={} hops={} target={:?}",
                 HexShort(&dest_hash),
@@ -4036,7 +4044,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     let size = parsed.packed_size();
                     let mut buf = alloc::vec![0u8; size];
                     if let Ok(len) = parsed.pack(&mut buf) {
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             "Sending targeted path response for <{}> to iface:{} ({} bytes)",
                             HexShort(&dest_hash),
                             target_iface,
@@ -4085,7 +4093,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let next_at = now + PATHFINDER_G_MS + jitter;
                 entry.retransmit_at_ms = Some(next_at);
                 entry.retries += 1;
-                tracing::debug!(
+                crate::tracing::debug!(
                     "announce retry scheduled dest=<{}> retries={} next_at_ms={}",
                     HexShort(&dest_hash),
                     entry.retries,
@@ -4276,7 +4284,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 tag[..8].copy_from_slice(&now_bytes);
                 tag[8..16].copy_from_slice(&dest_hash[..8]);
                 if let Err(e) = self.request_path(&dest_hash, None, &tag) {
-                    tracing::debug!(%e, "path request failed (best-effort)");
+                    crate::tracing::debug!(%e, "path request failed (best-effort)");
                 }
             }
         }
@@ -4376,7 +4384,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
             let mut buf = [0u8; MTU];
             if let Ok(len) = fresh_packet.pack(&mut buf) {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Retrying discovery path request for <{}>",
                     HexShort(&dest_hash)
                 );
@@ -4411,7 +4419,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             return;
         }
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "Answering discovery path request for <{}> on {}",
             HexShort(dest_hash),
             self.iface_name(requesting_iface)

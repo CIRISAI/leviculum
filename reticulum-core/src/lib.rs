@@ -58,8 +58,37 @@
 
 #![no_std]
 #![warn(unreachable_pub)]
+// With the `tracing` feature off (atomic-less MCU builds), the level macros are
+// no-ops, so code that exists only to format trace messages (hex-formatting
+// wrappers, trace-only locals) becomes unused. Tolerate that in the no-tracing
+// config only; the default build keeps full warnings.
+#![cfg_attr(
+    not(feature = "tracing"),
+    allow(dead_code, unused_variables, unused_imports)
+)]
 
 extern crate alloc;
+
+/// Logging facade: the crate logs via `crate::tracing::{debug,trace,info,warn}!`.
+///
+/// With the `tracing` feature on, these re-export the real `tracing` crate's
+/// macros. With it off — e.g. Cortex-M0 / thumbv6m, where tracing-core's
+/// atomic-CAS callsite registry will not compile — they become no-ops, so the
+/// crate builds on atomic-less MCUs without touching any call site.
+#[cfg(feature = "tracing")]
+pub(crate) mod tracing {
+    pub(crate) use ::tracing::{debug, info, trace, warn};
+}
+#[cfg(not(feature = "tracing"))]
+pub(crate) mod tracing {
+    macro_rules! noop {
+        ($($tt:tt)*) => {{}};
+    }
+    pub(crate) use noop as debug;
+    pub(crate) use noop as info;
+    pub(crate) use noop as trace;
+    pub(crate) use noop as warn;
+}
 
 pub(crate) mod announce;
 #[cfg(feature = "compression")]

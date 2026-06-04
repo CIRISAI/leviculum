@@ -397,7 +397,7 @@ fn map_set<K: Eq + core::hash::Hash + Copy, V, const N: usize>(
     match map.insert(key, value) {
         Ok(_) => {}
         Err((k, v)) => {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "[EMB_EVICT] map={} len_before={} cap={}",
                 label,
                 map.len(),
@@ -426,7 +426,7 @@ fn map_set<K: Eq + core::hash::Hash + Copy, V, const N: usize>(
             }
             // Insert the new entry at the back.
             if map.insert(k, v).is_err() {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "[EMB_INSERT_FAIL] map={} len_after_evict={} cap={}",
                     label,
                     map.len(),
