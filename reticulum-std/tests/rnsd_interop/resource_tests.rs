@@ -70,7 +70,7 @@ async fn setup_link(
     accept_resources: bool,
 ) -> (
     ReticulumNode,
-    mpsc::Receiver<NodeEvent>,
+    mpsc::UnboundedReceiver<NodeEvent>,
     TestDaemon,
     TestDaemon,
     LinkId,

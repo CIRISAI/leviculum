@@ -62,7 +62,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::interfaces::IncomingPacket;
@@ -128,7 +128,7 @@ fn build_ifac_config(config: &InterfaceConfig) -> Option<reticulum_core::ifac::I
 
 /// Channels consumed by the event loop.
 struct EventLoopChannels {
-    event_tx: mpsc::Sender<NodeEvent>,
+    event_tx: mpsc::UnboundedSender<NodeEvent>,
     action_dispatch_rx: mpsc::Receiver<TickOutput>,
     new_interface_rx: mpsc::Receiver<InterfaceHandle>,
     reconnect_rx: mpsc::Receiver<InterfaceId>,
@@ -153,10 +153,17 @@ pub struct ReticulumNode {
     inner: Arc<Mutex<StdNodeCore>>,
     /// Interface configurations
     interfaces: Vec<InterfaceConfig>,
-    /// Event sender for the runner
-    event_tx: mpsc::Sender<NodeEvent>,
+    /// Event sender for the runner.
+    ///
+    /// Unbounded: control-plane events (`AnnounceReceived`, link lifecycle) must
+    /// not be dropped — RNS delivers announce handlers losslessly, and dropping
+    /// a one-shot `AnnounceReceived` under load stalled discovery (issue #4).
+    /// An unbounded channel never drops and never blocks the event loop; a
+    /// consumer that stops draining grows memory, which is a louder, debuggable
+    /// failure than silent loss.
+    event_tx: mpsc::UnboundedSender<NodeEvent>,
     /// Event receiver for consuming events
-    event_rx: Option<mpsc::Receiver<NodeEvent>>,
+    event_rx: Option<mpsc::UnboundedReceiver<NodeEvent>>,
     /// Shutdown sender
     shutdown_tx: Option<watch::Sender<bool>>,
     /// Runner task handle
@@ -210,7 +217,7 @@ impl ReticulumNode {
         interfaces: Vec<InterfaceConfig>,
         corrupt_every: Option<u64>,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         // Create dummy channel; real one is created in start()
         let (action_dispatch_tx, _) = mpsc::channel(1);
 
@@ -894,7 +901,7 @@ impl ReticulumNode {
     /// Take the event receiver
     ///
     /// This allows consuming node events directly. Can only be called once.
-    pub fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
+    pub fn take_event_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<NodeEvent>> {
         self.event_rx.take()
     }
 
@@ -1668,7 +1675,7 @@ async fn run_event_loop(
 fn dispatch_output(
     output: TickOutput,
     registry: &mut InterfaceRegistry,
-    event_tx: &mpsc::Sender<NodeEvent>,
+    event_tx: &mpsc::UnboundedSender<NodeEvent>,
     inner: &Arc<Mutex<StdNodeCore>>,
     retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
     retry_queue_warned: &mut std::collections::BTreeSet<usize>,
@@ -1739,26 +1746,19 @@ fn dispatch_output(
     //     airtime.
     push_interface_state(registry, inner);
 
-    // 6. Forward events to application (best effort, drop if full)
+    // 6. Forward events to the application. The channel is unbounded, so this
+    // never drops (control-plane events like AnnounceReceived must not be lost)
+    // and never blocks the event loop. The only error is a closed channel
+    // (receiver dropped), which is benign — the consumer is gone.
     for event in output.events {
         if let NodeEvent::LinkEstablished { link_id, .. } = &event {
             tracing::debug!("Link established: {:?}", link_id);
         }
-        match event_tx.try_send(event) {
-            Ok(()) => {}
-            Err(TrySendError::Full(ev)) => {
-                tracing::warn!(
-                    "Event channel full (capacity {}), dropping: {:?}",
-                    EVENT_CHANNEL_CAPACITY,
-                    ev
-                );
-            }
-            Err(TrySendError::Closed(ev)) => {
-                tracing::warn!(
-                    "Event channel closed (receiver dropped), dropping: {:?}",
-                    ev
-                );
-            }
+        if let Err(mpsc::error::SendError(ev)) = event_tx.send(event) {
+            tracing::debug!(
+                "Event channel closed (receiver dropped), dropping: {:?}",
+                ev
+            );
         }
     }
 }

@@ -975,7 +975,7 @@ async fn try_send(
 
 /// Event loop task: reads NodeEvents and prints them, updating shared state.
 async fn event_loop(
-    mut event_rx: tokio::sync::mpsc::Receiver<NodeEvent>,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<NodeEvent>,
     state: Arc<Mutex<SessionState>>,
 ) {
     use tokio::io::AsyncWriteExt;

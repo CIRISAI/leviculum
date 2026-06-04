@@ -43,7 +43,7 @@ pub fn load_or_generate_identity(path: &Path) -> Result<Identity, Box<dyn std::e
 #[allow(clippy::too_many_arguments)]
 async fn establish_link(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut mpsc::UnboundedReceiver<NodeEvent>,
     destination: &str,
     identity: Option<&Identity>,
     timeout_secs: f64,
@@ -132,7 +132,7 @@ async fn establish_link(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_send(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut mpsc::UnboundedReceiver<NodeEvent>,
     file_path: &str,
     destination: &str,
     timeout_secs: f64,
@@ -243,7 +243,7 @@ pub async fn run_send(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_listen(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut mpsc::UnboundedReceiver<NodeEvent>,
     identity: Identity,
     save_dir: Option<PathBuf>,
     overwrite: bool,
@@ -586,7 +586,7 @@ fn encode_msgpack_string(s: &str) -> Vec<u8> {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_fetch(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut mpsc::UnboundedReceiver<NodeEvent>,
     remote_path: &str,
     destination: &str,
     save_dir: Option<PathBuf>,
@@ -920,9 +920,9 @@ mod tests {
     /// Create two connected ReticulumNode instances for testing.
     async fn setup_connected_nodes() -> (
         reticulum_std::driver::ReticulumNode,
-        mpsc::Receiver<NodeEvent>,
+        mpsc::UnboundedReceiver<NodeEvent>,
         reticulum_std::driver::ReticulumNode,
-        mpsc::Receiver<NodeEvent>,
+        mpsc::UnboundedReceiver<NodeEvent>,
         tempfile::TempDir,
     ) {
         let port = find_available_port();
