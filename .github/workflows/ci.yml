@@ -48,8 +48,12 @@ jobs:
         run: cargo fmt --all -- --check
       # -D warnings is scoped to clippy (not a global RUSTFLAGS) so upstream
       # dependency warnings don't fail the gate — only our own code does.
+      # --workspace (lib + bins of every member) matches the existing
+      # .woodpecker gate; the test harness uses intentional patterns
+      # (shared #[path] module include, Drop-managed child processes) that
+      # --all-targets would flag, so it is deliberately not used here.
       - name: cargo clippy -D warnings
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
 
   # ─── test-linux: workspace unit tests (musl) ────────────────────────
   test-linux:
@@ -116,15 +120,20 @@ jobs:
 
   # ─── embedded: no_std core cross-build for MCU targets ──────────────
   # Leviculum's analog of edge's mobile cross-compile rigor: reticulum-core is
-  # no_std and must keep building for the nrf52 (thumbv7em) / rp2040 (thumbv6m)
-  # firmware targets. --target overrides the musl default.
+  # no_std and must keep building for the nrf52 (thumbv7em) firmware target.
+  # --target overrides the musl default.
+  #
+  # thumbv6m (Cortex-M0/M0+, e.g. rp2040) is intentionally NOT gated: it lacks
+  # the atomic CAS / atomic-ptr instructions `tracing-core` requires (its
+  # `alloc::sync`/spin paths), so the build fails without a portable-atomic +
+  # critical-section polyfill. Real M0 support is tracked in Leviculum #6.
   embedded:
     name: build reticulum-core (no_std MCU)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target: [thumbv7em-none-eabihf, thumbv6m-none-eabi]
+        target: [thumbv7em-none-eabihf]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

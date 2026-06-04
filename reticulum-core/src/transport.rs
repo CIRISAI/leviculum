@@ -4141,11 +4141,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Compute holdoff: wait_ms = (bytes * 8 * 1000) / (bitrate * cap% / 100)
                 let tx_bits = raw.len() as u64 * 8;
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
-                let wait_ms = if cap_bps > 0 {
-                    (tx_bits * 1000) / cap_bps
-                } else {
-                    0
-                };
+                let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
                 cap.allowed_at_ms = now + wait_ms;
             } else if cap.queue.len() < self.config.max_queued_announces {
                 cap.queue.push_back(QueuedAnnounce {
@@ -4204,11 +4200,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Compute holdoff for next announce
                 let tx_bits = raw_len as u64 * 8;
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
-                let wait_ms = if cap_bps > 0 {
-                    (tx_bits * 1000) / cap_bps
-                } else {
-                    0
-                };
+                let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
                 cap.allowed_at_ms = now + wait_ms;
             }
         }
