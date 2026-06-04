@@ -249,7 +249,16 @@ impl ReticulumNode {
         // without `enable_time()` (the PyO3/edge case that panicked at
         // `sleep_until`). `start()`'s body is synchronous up to the spawns, so
         // holding the enter guard across it (no await) is sound.
+        //
+        // Single worker thread: the node's work is async-I/O bound (network +
+        // light per-packet crypto), so one cooperatively-scheduled worker is
+        // sufficient, and it keeps the node from adding `num_cpus` threads on
+        // top of an embedding host's own runtime — that oversubscription, plus
+        // the genuine parallelism a multi-worker pool introduced between the
+        // event loop and the public API, is the kind of thing that surfaces
+        // latent ordering races in a cohabiting host (CIRISEdge#58).
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .thread_name("reticulum-node")
             .build()
