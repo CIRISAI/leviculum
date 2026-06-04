@@ -21,4 +21,13 @@ tokio-serial = { workspace = true }
 nix = { version = "0.29", features = ["fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-clap = { version = "4", features = ["derive"] }
+# default-features off (matches reticulum-cli) so clap's `color`/`suggestions`
+# transitive deps (anstream/anstyle*/strsim) stay out of the workspace graph —
+# cargo unifies clap features, so both clap users must agree to drop them.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+] }

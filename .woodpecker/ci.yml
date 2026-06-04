@@ -20,12 +20,24 @@ steps:
       - cargo fmt --all -- --check
       - cargo clippy --all -- -D warnings
       - cargo test -p reticulum-core --lib
+      - cargo test -p reticulum-std --lib
 
   interop:
     image: rust:bookworm
     commands:
-      - apt-get update && apt-get install -y python3 musl-tools
-      - git submodule update --init vendor/Reticulum
+      # Interop runs the real Python-RNS CLI tools against the Rust daemon.
+      # RNS migrated its shared-instance RPC codec to msgpack and its repo is
+      # no longer vendored as a submodule, so we install released RNS from PyPI.
+      # Python is pinned to 3.10 (the oldest supported runtime — older mobile
+      # platforms) via uv, so CI exercises the version floor rather than the
+      # image's default interpreter.
+      - apt-get update && apt-get install -y musl-tools curl ca-certificates
+      - curl -LsSf https://astral.sh/uv/install.sh | sh
+      - export PATH="$HOME/.local/bin:$PATH"
+      - uv python install 3.10
+      - uv venv --python 3.10 /opt/rnsvenv
+      - VIRTUAL_ENV=/opt/rnsvenv uv pip install rns
+      - export PATH="/opt/rnsvenv/bin:$PATH"   # harness spawns `python3`
       - cargo test -p reticulum-std --test rnsd_interop
 
   build-book:

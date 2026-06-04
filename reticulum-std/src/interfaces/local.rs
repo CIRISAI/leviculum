@@ -35,7 +35,8 @@ fn bind_local_listener(abstract_name: &str) -> Result<std::os::unix::net::UnixLi
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let path = std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
+        let path =
+            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
         // Remove stale socket file if it exists
         let _ = std::fs::remove_file(&path);
         std::os::unix::net::UnixListener::bind(&path)
@@ -56,7 +57,8 @@ fn connect_local(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, 
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let path = std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
+        let path =
+            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
         std::os::unix::net::UnixStream::connect(&path)
     }
 }

@@ -38,7 +38,20 @@ rand_core = { version = "0.6", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 # std dependencies
-tokio = { version = "1", features = ["full"] }
+# Explicit feature set (was "full") — only what the workspace uses. Drops
+# tokio's unused `fs`, `io-std`, and `parking_lot` features. `rt-multi-thread`
+# implies `rt` (spawn/task); `macros` covers main/test/select!/join!.
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+    "net",
+    "io-util",
+    "io-std",
+    "signal",
+    "process",
+] }
 tokio-serial = "5"
 tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

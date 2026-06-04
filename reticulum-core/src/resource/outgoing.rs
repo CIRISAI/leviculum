@@ -404,6 +404,9 @@ impl OutgoingResource {
             self.receiver_min_consecutive_height =
                 part_index.saturating_sub(1 + RESOURCE_WINDOW_MAX_FAST);
 
+            // The `> 0` guard protects a whole segment-building block, not a
+            // lone division, so `checked_div` doesn't express it cleanly.
+            #[allow(clippy::manual_checked_ops)]
             if hashmap_max > 0 {
                 let segment = part_index / hashmap_max;
 

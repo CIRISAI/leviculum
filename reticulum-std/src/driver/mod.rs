@@ -984,7 +984,10 @@ impl ReticulumNode {
         &self,
         dest_hash: &reticulum_core::DestinationHash,
     ) -> Option<reticulum_core::storage_types::PathEntry> {
-        self.inner.lock().unwrap().get_path_clone(dest_hash.as_bytes())
+        self.inner
+            .lock()
+            .unwrap()
+            .get_path_clone(dest_hash.as_bytes())
     }
 
     /// Drop a specific path entry by destination hash.
@@ -1003,11 +1006,11 @@ impl ReticulumNode {
     /// peer is known to be down: the caller bulk-evicts every path
     /// routed via that peer in a single call rather than iterating
     /// the table and calling [`Self::remove_path`] per entry.
-    pub fn drop_all_paths_via(
-        &self,
-        via_hash: &reticulum_core::DestinationHash,
-    ) -> usize {
-        self.inner.lock().unwrap().drop_all_paths_via(via_hash.as_bytes())
+    pub fn drop_all_paths_via(&self, via_hash: &reticulum_core::DestinationHash) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .drop_all_paths_via(via_hash.as_bytes())
     }
 
     /// Get transport statistics (packets sent, received, forwarded, dropped)

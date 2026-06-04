@@ -22,7 +22,9 @@ use tokio::net::UnixListener;
 ///
 /// On Linux, uses abstract sockets. On other Unix systems,
 /// falls back to filesystem sockets in the temp directory.
-fn bind_rpc_listener(abstract_name: &str) -> Result<std::os::unix::net::UnixListener, std::io::Error> {
+fn bind_rpc_listener(
+    abstract_name: &str,
+) -> Result<std::os::unix::net::UnixListener, std::io::Error> {
     #[cfg(target_os = "linux")]
     {
         use std::os::linux::net::SocketAddrExt;
@@ -32,7 +34,8 @@ fn bind_rpc_listener(abstract_name: &str) -> Result<std::os::unix::net::UnixList
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let path = std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
+        let path =
+            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
         let _ = std::fs::remove_file(&path);
         std::os::unix::net::UnixListener::bind(&path)
     }
@@ -50,7 +53,8 @@ fn connect_rpc(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, st
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let path = std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
+        let path =
+            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
         std::os::unix::net::UnixStream::connect(&path)
     }
 }
@@ -148,9 +152,9 @@ async fn handle_rpc_connection(
     server_handshake(&mut stream, authkey).await?;
 
     let request_bytes = read_message(&mut stream).await?;
-    let request = parse_request(&request_bytes)?;
+    let (request, codec) = parse_request(&request_bytes)?;
 
-    tracing::debug!("RPC request: {:?}", request);
+    tracing::debug!("RPC request: {:?} ({:?})", request, codec);
 
     let response_bytes = {
         let mut core = core.lock().unwrap();
@@ -158,7 +162,14 @@ async fn handle_rpc_connection(
             .as_ref()
             .map(|rx| *rx.borrow())
             .unwrap_or(0);
-        handle_request(&request, &mut core, start_time, iface_stats_map, peer_count)?
+        handle_request(
+            &request,
+            &mut core,
+            start_time,
+            iface_stats_map,
+            peer_count,
+            codec,
+        )?
     };
 
     write_message(&mut stream, &response_bytes).await?;

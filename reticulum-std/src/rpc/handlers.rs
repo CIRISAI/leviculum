@@ -17,6 +17,7 @@ pub(super) fn handle_request(
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
     auto_peer_count: usize,
+    codec: Codec,
 ) -> Result<Vec<u8>, RpcError> {
     let response = match request {
         // Full implementations
@@ -49,7 +50,7 @@ pub(super) fn handle_request(
         RpcRequest::UnblackholeIdentity { .. } => pickle_bool(true),
     };
 
-    serialize_response(&response)
+    serialize_response(&response, codec)
 }
 
 // Interface Stats (rnstatus)
