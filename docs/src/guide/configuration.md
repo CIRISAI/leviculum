@@ -18,3 +18,15 @@ Use `--config` to specify an alternative configuration directory.
 ```
 
 See the [Reticulum documentation](https://reticulum.network/manual/) for the full configuration reference. Leviculum accepts the same options.
+
+## Leviculum-specific options
+
+These keys are ignored by Python Reticulum and optional in Leviculum:
+
+```ini
+[reticulum]
+  # Seconds between periodic storage flushes (crash protection only,
+  # normal shutdown always flushes). Default: 3600. Battery-powered or
+  # SD-card deployments may want a longer or shorter interval.
+  flush_interval = 3600
+```

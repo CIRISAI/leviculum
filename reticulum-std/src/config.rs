@@ -50,6 +50,20 @@ pub struct ReticulumConfig {
     /// Storage path (relative to config dir or absolute)
     #[serde(default)]
     pub storage_path: Option<PathBuf>,
+    /// Interval between periodic storage flushes (seconds).
+    ///
+    /// Crash protection only, normal shutdown flushes via the signal
+    /// handler. Battery-powered or SD-card deployments may want a
+    /// different interval. Default: 3600 (one hour).
+    #[serde(default = "default_flush_interval_secs")]
+    pub flush_interval_secs: u64,
+}
+
+/// Default interval between periodic storage flushes (seconds)
+pub const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 3600;
+
+fn default_flush_interval_secs() -> u64 {
+    DEFAULT_FLUSH_INTERVAL_SECS
 }
 
 fn default_true() -> bool {
@@ -70,6 +84,7 @@ impl Default for ReticulumConfig {
             respond_to_probes: false,
             remote_management_enabled: false,
             storage_path: None,
+            flush_interval_secs: DEFAULT_FLUSH_INTERVAL_SECS,
         }
     }
 }
@@ -290,6 +305,23 @@ mod tests {
             config.reticulum.enable_transport,
             "missing enable_transport should default to true"
         );
+    }
+
+    #[test]
+    fn test_flush_interval_defaults_when_missing_from_toml() {
+        let toml_str = "[reticulum]\nuse_implicit_proof = true\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.reticulum.flush_interval_secs, DEFAULT_FLUSH_INTERVAL_SECS,
+            "missing flush_interval_secs should default to 3600"
+        );
+    }
+
+    #[test]
+    fn test_flush_interval_explicit_in_toml() {
+        let toml_str = "[reticulum]\nflush_interval_secs = 120\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.reticulum.flush_interval_secs, 120);
     }
 
     #[test]

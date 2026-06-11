@@ -159,6 +159,11 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         "remote_management_enabled" => {
             config.remote_management_enabled = parse_bool(value);
         }
+        "flush_interval" => {
+            if let Ok(v) = value.trim().parse() {
+                config.flush_interval_secs = v;
+            }
+        }
         _ => {} // Ignore unknown keys (shared_instance_port, etc.)
     }
 }
@@ -461,6 +466,37 @@ mod tests {
         assert!(!config.reticulum.enable_transport);
         assert!(config.reticulum.shared_instance);
         assert!(config.interfaces.is_empty());
+    }
+
+    #[test]
+    fn test_flush_interval_parsed() {
+        let config = parse_ini(
+            r#"
+[reticulum]
+  flush_interval = 600
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.reticulum.flush_interval_secs, 600);
+    }
+
+    #[test]
+    fn test_flush_interval_default_when_absent() {
+        let config = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert_eq!(
+            config.reticulum.flush_interval_secs,
+            crate::config::DEFAULT_FLUSH_INTERVAL_SECS,
+            "absence of flush_interval must keep the 3600 s default"
+        );
+    }
+
+    #[test]
+    fn test_flush_interval_unparseable_keeps_default() {
+        let config = parse_ini("[reticulum]\n  flush_interval = often\n").unwrap();
+        assert_eq!(
+            config.reticulum.flush_interval_secs,
+            crate::config::DEFAULT_FLUSH_INTERVAL_SECS
+        );
     }
 
     #[test]

@@ -45,6 +45,8 @@ pub struct ReticulumNodeBuilder {
     share_instance_explicit: Option<bool>,
     /// Explicit instance_name override (takes priority over config value)
     instance_name_explicit: Option<String>,
+    /// Explicit flush_interval_secs override (takes priority over config value)
+    flush_interval_secs_explicit: Option<u64>,
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
@@ -74,6 +76,7 @@ impl ReticulumNodeBuilder {
             enable_transport_explicit: None,
             share_instance_explicit: None,
             instance_name_explicit: None,
+            flush_interval_secs_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
         }
@@ -379,6 +382,16 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Set the interval between periodic storage flushes in seconds.
+    ///
+    /// Crash protection only, normal shutdown flushes via the signal
+    /// handler. If not called, the value from the loaded config is used
+    /// (default: 3600 seconds).
+    pub fn flush_interval_secs(mut self, secs: u64) -> Self {
+        self.flush_interval_secs_explicit = Some(secs);
+        self
+    }
+
     /// Set path expiry duration in seconds.
     ///
     /// Paths not refreshed within this duration will be removed.
@@ -421,6 +434,11 @@ impl ReticulumNodeBuilder {
         let instance_name = self
             .instance_name_explicit
             .unwrap_or_else(|| config.reticulum.instance_name.clone());
+
+        // Apply flush interval: explicit override > config value
+        let flush_interval_secs = self
+            .flush_interval_secs_explicit
+            .unwrap_or(config.reticulum.flush_interval_secs);
 
         // Determine storage path
         let storage_path = self
@@ -483,6 +501,7 @@ impl ReticulumNodeBuilder {
             interfaces,
             self.corrupt_every,
             self.events_enabled,
+            flush_interval_secs,
         );
         if share_instance {
             node.set_share_instance(instance_name);
@@ -579,6 +598,56 @@ mod tests {
     fn test_builder_enable_transport_explicit_override() {
         let builder = ReticulumNodeBuilder::new().enable_transport(false);
         assert_eq!(builder.enable_transport_explicit, Some(false));
+    }
+
+    #[test]
+    fn test_builder_flush_interval_explicit_override() {
+        let builder = ReticulumNodeBuilder::new().flush_interval_secs(120);
+        assert_eq!(builder.flush_interval_secs_explicit, Some(120));
+    }
+
+    #[test]
+    fn test_builder_flush_interval_defaults_from_config() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let node = ReticulumNodeBuilder::new()
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        assert_eq!(
+            node.flush_interval_secs,
+            crate::config::DEFAULT_FLUSH_INTERVAL_SECS,
+            "default config should keep the 3600 s flush interval"
+        );
+    }
+
+    #[test]
+    fn test_builder_flush_interval_config_value_used() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.reticulum.flush_interval_secs = 900;
+        let node = ReticulumNodeBuilder::new()
+            .config(config)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        assert_eq!(node.flush_interval_secs, 900);
+    }
+
+    #[test]
+    fn test_builder_flush_interval_explicit_overrides_config() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.reticulum.flush_interval_secs = 900;
+        let node = ReticulumNodeBuilder::new()
+            .config(config)
+            .flush_interval_secs(60)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        assert_eq!(
+            node.flush_interval_secs, 60,
+            "explicit flush_interval_secs should override config value"
+        );
     }
 
     #[test]

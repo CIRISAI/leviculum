@@ -95,12 +95,6 @@ pub(crate) type StdNodeCore = NodeCore<rand_core::OsRng, SystemClock, Storage>;
 /// Not yet tuned, chosen empirically during initial development.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// Interval between periodic storage flushes (seconds).
-/// Crash protection only, normal shutdown calls flush() via signal handler.
-/// Lost data from a crash is recovered via fresh announces.
-/// Hardcoded, see E12 for making this configurable.
-const FLUSH_INTERVAL_SECS: u64 = 3600;
-
 /// Maximum packets per interface in the retry queue.
 /// Sized to absorb announce-burst fan-out from transit peers; observed
 /// peak >500 packets in a single event-loop tick on transit-active lnsd.
@@ -222,6 +216,10 @@ pub struct ReticulumNode {
     action_dispatch_tx: mpsc::Sender<TickOutput>,
     /// Fault injection: corrupt ~1 byte per N bytes on TCP write
     corrupt_every: Option<u64>,
+    /// Interval between periodic storage flushes (seconds).
+    /// Crash protection only, normal shutdown calls flush() via signal handler.
+    /// Lost data from a crash is recovered via fresh announces.
+    flush_interval_secs: u64,
     /// Peer count from AutoInterface orchestrator (if configured)
     auto_peer_count_rx: Option<watch::Receiver<usize>>,
     /// Shared instance name (if enabled). When Some, the daemon listens on
@@ -254,6 +252,7 @@ impl ReticulumNode {
         interfaces: Vec<InterfaceConfig>,
         corrupt_every: Option<u64>,
         events_enabled: bool,
+        flush_interval_secs: u64,
     ) -> Self {
         // When events are disabled (daemon-mode), no channel is constructed
         // at all — neither sender nor receiver. The event loop's
@@ -278,6 +277,7 @@ impl ReticulumNode {
             runner_handle: None,
             action_dispatch_tx,
             corrupt_every,
+            flush_interval_secs,
             auto_peer_count_rx: None,
             share_instance_name: None,
             connect_instance_name: None,
@@ -389,6 +389,7 @@ impl ReticulumNode {
         let event_tx = self.event_tx.clone();
         let iface_stats_map = Arc::clone(&self.iface_stats_map);
         let iface_online_map = Arc::clone(&self.iface_online_map);
+        let flush_interval_secs = self.flush_interval_secs;
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -404,6 +405,7 @@ impl ReticulumNode {
                 },
                 iface_stats_map,
                 iface_online_map,
+                flush_interval_secs,
             )
             .await;
         });
@@ -1450,6 +1452,7 @@ async fn run_event_loop(
     channels: EventLoopChannels,
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
+    flush_interval_secs: u64,
 ) {
     let event_tx = channels.event_tx;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
@@ -1457,7 +1460,7 @@ async fn run_event_loop(
     let mut reconnect_rx = channels.reconnect_rx;
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
-    let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(FLUSH_INTERVAL_SECS);
+    let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
     let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
     // Track which per-interface queues have already emitted the
     // depth-high warning so we don't spam once the queue is deep.
@@ -1701,7 +1704,7 @@ async fn run_event_loop(
                     let mut core = inner.lock().unwrap();
                     core.storage_mut().flush();
                 }
-                next_flush = tokio::time::Instant::now() + Duration::from_secs(FLUSH_INTERVAL_SECS);
+                next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
             }
         }
     }
