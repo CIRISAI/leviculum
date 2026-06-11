@@ -89,10 +89,22 @@ fn connect_local(abstract_name: &str) -> Result<std::net::TcpStream, io::Error> 
 
 /// Map an abstract instance name to a TCP loopback address (Windows).
 ///
-/// Python-RNS uses a fixed default port when AF_UNIX is unavailable:
-/// `local_interface_port` 37428 for the shared instance. Match it for the
-/// default instance so we interop with a Windows `rnsd`; derive a stable port
-/// (FNV-1a, deterministic across builds so independent peers agree) otherwise.
+/// Python-RNS, when AF_UNIX is unavailable, binds fixed ports — 37428
+/// (`local_interface_port`) for the shared instance and 37429
+/// (`local_control_port`) for RPC — and, critically, does **not** derive a
+/// port from `instance_name` on the AF_INET path (instance_name only varies
+/// the AF_UNIX socket name; see Reticulum.py). A Windows `rnsd` runs multiple
+/// instances by setting `shared_instance_port`/`instance_control_port`
+/// explicitly, not by hashing the name.
+///
+/// So for the **default** instance we match 37428/37429 and interop cleanly
+/// with a Windows `rnsd`. For a **non-default** instance name we derive a
+/// stable FNV-1a port: this lets independent *leviculum* peers on one host
+/// agree without config, which is what our multi-instance test isolation
+/// needs. It is deliberately a leviculum-local convention — it does **not**
+/// match Python's port for the same name, so cross-stack multi-instance on a
+/// single Windows host requires matching explicit ports on both sides. The
+/// default-instance path (the real drop-in surface) is unaffected.
 #[cfg(windows)]
 pub(crate) fn loopback_addr(abstract_name: &str) -> std::net::SocketAddr {
     use std::net::{Ipv4Addr, SocketAddr};

@@ -38,8 +38,19 @@ pub(crate) struct TcpClientConfig {
     pub corrupt_every: Option<u64>,
     pub reconnect_interval: Duration,
     pub max_reconnect_tries: Option<u64>,
+    /// Upper bound on a single connect attempt. A connect that does not
+    /// complete within this window is abandoned and counted as a failed
+    /// attempt, so reconnect accounting (and give-up) stays responsive even
+    /// when the OS does not refuse promptly. Platforms differ here: a refused
+    /// loopback connect returns instantly on Linux but stalls on SYN-retransmit
+    /// for ~1s+ on Windows, and a black-holed peer never refuses at all. The
+    /// interface owns this carrier-medium quirk so the driver need not.
+    pub connect_timeout: Duration,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
 }
+
+/// Default per-attempt connect timeout for reconnecting TCP clients.
+pub(crate) const DEFAULT_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Fast non-cryptographic PRNG (xorshift64). Seeded from OsRng once per task.
 struct Xorshift64(u64);
@@ -257,6 +268,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             config.corrupt_every,
             config.reconnect_interval,
             config.max_reconnect_tries,
+            config.connect_timeout,
             task_counters,
             config.reconnect_notify,
         )
@@ -296,13 +308,27 @@ async fn tcp_client_reconnect_task(
     corrupt_every: Option<u64>,
     reconnect_interval: Duration,
     max_reconnect_tries: Option<u64>,
+    connect_timeout: Duration,
     counters: Arc<InterfaceCounters>,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
 ) {
     let mut attempt = 0u64;
     let mut has_connected_before = false;
     loop {
-        match tokio::net::TcpStream::connect(addr).await {
+        // Bound each attempt: a connect that does not resolve within
+        // `connect_timeout` (Windows SYN-retransmit to a closed loopback port,
+        // a black-holed peer that never sends RST) is abandoned and counted,
+        // keeping give-up deterministic across platforms.
+        let connect_result =
+            match tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect(addr)).await
+            {
+                Ok(res) => res,
+                Err(_elapsed) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "connect attempt timed out",
+                )),
+            };
+        match connect_result {
             Ok(stream) => {
                 stream.set_nodelay(true).ok();
                 let is_reconnect = has_connected_before;
@@ -589,6 +615,7 @@ mod tests {
             name: "test_reconnect".to_string(),
             addr,
             buffer_size: 32,
+            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(200),
             max_reconnect_tries: Some(10),
@@ -658,6 +685,11 @@ mod tests {
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(100),
             max_reconnect_tries: Some(2),
+            // Short, explicit bound so give-up is deterministic regardless of
+            // how long the OS takes to refuse a dead loopback port (instant on
+            // Linux, ~1s+ SYN-retransmit on Windows). 2 tries × (≤300ms connect
+            // + 100ms interval) stays well under the 3s test budget everywhere.
+            connect_timeout: Duration::from_millis(300),
             reconnect_notify: None,
         });
 
