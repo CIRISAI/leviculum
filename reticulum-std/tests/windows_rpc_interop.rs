@@ -80,40 +80,57 @@ async fn rnstatus_against_windows_rust_daemon_over_tcp() {
     )
     .expect("write python config");
 
+    // Drive the RPC the same way rnstatus does — RNS.Reticulum() connects to the
+    // shared instance, then get_interface_stats() does the multiprocessing RPC to
+    // 127.0.0.1:37429 — but WITHOUT rnstatus's bare `try:` that swallows the
+    // exception. On failure this prints the full traceback (ConnectionReset vs
+    // AuthenticationError vs framing), which is the root-cause signal. On success
+    // it prints the stats keys; STATS_OK requires the transport_id our daemon
+    // serves, proving the TCP-loopback RPC speaks Python's wire format.
+    let probe = cfg.join("probe.py");
+    std::fs::write(
+        &probe,
+        r#"import sys, traceback, RNS
+cfg = sys.argv[1]
+try:
+    r = RNS.Reticulum(configdir=cfg, loglevel=7)
+    print("CONNECTED_SHARED", r.is_connected_to_shared_instance, flush=True)
+    stats = r.get_interface_stats()
+    keys = sorted(stats.keys()) if isinstance(stats, dict) else None
+    print("STATS_KEYS", keys, flush=True)
+    if isinstance(stats, dict) and "transport_id" in stats:
+        print("STATS_OK", flush=True)
+    else:
+        print("STATS_MISSING_TRANSPORT_ID", flush=True)
+        sys.exit(4)
+except Exception:
+    traceback.print_exc()
+    sys.exit(3)
+"#,
+    )
+    .expect("write probe.py");
+
     // On Windows the interpreter is `python` (pip installs rns into it in CI).
     let output = tokio::process::Command::new("python")
-        .args(["-m", "RNS.Utilities.rnstatus", "--config"])
+        .arg(&probe)
         .arg(&cfg)
         .output()
         .await
-        .expect("spawn python rnstatus");
+        .expect("spawn python probe");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
+    eprintln!("=== probe exit {:?} ===", output.status.code());
+    eprintln!("=== probe STDOUT ===\n{stdout}");
+    eprintln!("=== probe STDERR ===\n{stderr}");
+
     let _ = std::fs::remove_dir_all(&cfg);
 
-    // Always surface rnstatus output: an exit-0-but-empty run means it fell
-    // back to spawning its own instance instead of reaching our daemon, which
-    // is exactly the failure we need to see.
-    eprintln!("=== rnstatus exit {:?} ===", output.status.code());
-    eprintln!("=== rnstatus STDOUT ===\n{stdout}");
-    eprintln!("=== rnstatus STDERR ===\n{stderr}");
-
     assert!(
-        output.status.success(),
-        "rnstatus exited with code {:?}",
+        stdout.contains("STATS_OK"),
+        "Python get_interface_stats() over the TCP-loopback RPC must return our \
+         daemon's transport_id (exit {:?})",
         output.status.code()
-    );
-
-    // Python parsed our pickle/HMAC RPC reply and formatted the transport
-    // instance — the definitive cross-stack interop assertion.
-    assert!(
-        stdout.contains("Transport Instance"),
-        "rnstatus should show the transport instance, got:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("Uptime"),
-        "rnstatus should show uptime, got:\n{stdout}"
     );
 }
