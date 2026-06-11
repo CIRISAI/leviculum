@@ -150,13 +150,28 @@ async fn test_rnprobe_reports_correct_hops() {
     let config_dir = create_probe_config_dir(&instance_name, &identity_bytes);
 
     // Phase 6: Run rnprobe
+    //
+    // rnprobe issues exactly ONE path request (rnprobe.py:80) then waits in a
+    // `has_path()` loop up to `-t` seconds; it does not re-issue the request. So
+    // `-t` bounds path *resolution*, not just the probe RTT. The daemon answers a
+    // local-client path request immediately with a targeted, retry-queued
+    // SendPacket (transport.rs branch 2a), and every hop of the round-trip is
+    // lossless (backpressured ingress) or retried (directed egress) — verified by
+    // a 2-core full-suite run (worse contention than CI) with zero drops. The
+    // single failure seen was the daemon's single-worker runtime being CPU-starved
+    // on a 2-core CI box long enough to push that one resolution past 15s — a
+    // delay it always recovers from (~1s once scheduled), never a drop. Give
+    // resolution the same bounded headroom the daemon-side path-learn wait already
+    // uses (25s) so transient CI scheduling jitter cannot fail a correct exchange.
+    // This is not masking a protocol bug: a real drop/stall would still fail here,
+    // just with more headroom to distinguish jitter from breakage.
     let config_str = config_dir.to_str().expect("config dir must be valid UTF-8");
     let (argv, pythonpath) = crate::common::rns_utility("rnprobe");
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .arg("--config")
         .arg(config_str)
-        .args(["-n", "1", "-t", "15"])
+        .args(["-n", "1", "-t", "30"])
         .args(["rnstransport.probe", &py_probe_hex]);
     if let Some(pp) = pythonpath {
         cmd.env("PYTHONPATH", pp);
