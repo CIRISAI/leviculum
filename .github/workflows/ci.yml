@@ -146,11 +146,12 @@ jobs:
         run: |
           cargo test -p reticulum-core --lib
           cargo test -p reticulum-std --lib
-      # Real Windows daemon ↔ Python rnstatus interop over the TCP-loopback RPC
-      # (37429). The Unix rnsd_interop suite covers AF_UNIX; this is its Windows
-      # twin and the authoritative check that the TCP-loopback IPC/RPC actually
-      # speaks the Python wire format — not just that the port compiles.
-      - name: windows RPC interop (rnstatus over TCP loopback)
+      # Real Windows daemon ↔ Python-RNS interop over the TCP-loopback RPC
+      # (37429): drives RNS.Reticulum().get_interface_stats() against an
+      # in-process Rust daemon. The Unix rnsd_interop suite covers AF_UNIX; this
+      # is its Windows twin and the authoritative check that the TCP-loopback
+      # IPC/RPC actually speaks the Python wire format — not just that it compiles.
+      - name: windows RPC interop (Python-RNS over TCP loopback)
         run: cargo test -p reticulum-std --test windows_rpc_interop -- --nocapture
 
   # ─── embedded: no_std core cross-build for MCU targets ──────────────

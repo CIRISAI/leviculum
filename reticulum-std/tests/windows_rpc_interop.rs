@@ -3,11 +3,17 @@
 //! On Unix this surface is covered by the `rnsd_interop` crate's
 //! `rpc_interop_tests` (Python tools vs the Rust daemon over an AF_UNIX
 //! abstract socket). On Windows the shared-instance RPC speaks the *same*
-//! pickle/umsgpack + HMAC wire format but over **TCP loopback**
+//! umsgpack/pickle + HMAC wire format but over **TCP loopback**
 //! (`127.0.0.1:37429`), mirroring Python-RNS's AF_INET fallback. This test
-//! proves that path end-to-end by running the real `rnstatus` against an
-//! in-process Rust daemon — catching any Windows-specific framing, auth, or
+//! proves that path end-to-end by driving real Python-RNS
+//! (`RNS.Reticulum().get_interface_stats()`) against an in-process Rust daemon
+//! — catching any Windows-specific multiprocessing AF_INET framing, auth, or
 //! socket-setup regression that the pure build/lib-test jobs cannot.
+//!
+//! It probes the RPC directly rather than scraping `rnstatus` text: `rnstatus`
+//! filters the shared-instance interface out of its display, so with no other
+//! interfaces it prints nothing even when the RPC succeeds. `get_interface_stats`
+//! returns the daemon's `transport_id`, which is the unambiguous interop signal.
 //!
 //! It uses the **default** instance (ports 37428/37429 — the Python-compatible
 //! values), so it is a single serial test function: two instances would
@@ -19,10 +25,12 @@ use std::time::Duration;
 use reticulum_core::Identity;
 use reticulum_std::driver::ReticulumNodeBuilder;
 
-/// `rnstatus --config <dir>` must succeed against a Windows Rust daemon whose
-/// shared-instance RPC is served over TCP loopback.
+/// Real Python-RNS must complete a `get_interface_stats()` RPC against a
+/// Windows Rust daemon whose shared-instance RPC is served over TCP loopback —
+/// proving the multiprocessing AF_INET auth + framing interoperate, returning
+/// our `transport_id`.
 #[tokio::test]
-async fn rnstatus_against_windows_rust_daemon_over_tcp() {
+async fn python_rns_rpc_interop_over_tcp_loopback() {
     // Generate the identity up front so we can write the matching
     // `transport_identity` for Python: the RPC authkey is SHA-256(prv), so both
     // sides must hold the same 64 private-key bytes to complete the handshake.
