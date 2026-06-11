@@ -118,6 +118,30 @@ jobs:
           cargo test -p reticulum-core --lib
           cargo test -p reticulum-std --lib
 
+  # ─── windows: the crates CIRISEdge's pyo3 wheel consumes ────────────
+  # reticulum-core + reticulum-std must build on windows-x86_64 so edge/lens can
+  # ship Windows wheels (issue #10). The Unix IPC (LocalInterface) and the
+  # Python-tool RPC use TCP loopback on Windows, mirroring Python-RNS's AF_INET
+  # fallback (ports 37428/37429); name_to_index uses iphlpapi. CARGO_BUILD_TARGET
+  # overrides the workspace's musl default for the native MSVC target.
+  windows:
+    name: test windows-x86_64 (msvc)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build (core + std)
+        run: |
+          cargo build -p reticulum-core
+          cargo build -p reticulum-std
+      - name: cargo test (core + std libs)
+        run: |
+          cargo test -p reticulum-core --lib
+          cargo test -p reticulum-std --lib
+
   # ─── embedded: no_std core cross-build for MCU targets ──────────────
   # Leviculum's analog of edge's mobile cross-compile rigor: reticulum-core is
   # no_std and must keep building for the firmware targets. --target overrides

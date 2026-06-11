@@ -1,3 +1,4 @@
+#![cfg(unix)] // Unix-socket + Python-daemon integration; not built on Windows
 //! Interoperability tests with Python Reticulum.
 //!
 //! These tests verify that our Rust implementation correctly interoperates

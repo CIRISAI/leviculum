@@ -16,12 +16,24 @@ pub(crate) mod pickle;
 
 use std::sync::{Arc, Mutex};
 
-use tokio::net::UnixListener;
+// RPC transport. Python `multiprocessing.connection` runs over Unix sockets on
+// Unix and over TCP loopback (AF_INET, default local_control_port 37429) on
+// Windows; we mirror that so `rnstatus`/`rnpath` interop on each platform. The
+// framing + HMAC auth (connection.rs) are transport-agnostic.
+#[cfg(windows)]
+use tokio::net::TcpListener as RpcListener;
+#[cfg(windows)]
+use tokio::net::TcpStream as RpcStream;
+#[cfg(unix)]
+use tokio::net::UnixListener as RpcListener;
+#[cfg(unix)]
+use tokio::net::UnixStream as RpcStream;
 
-/// Bind a Unix listener for the RPC socket.
+/// Bind the RPC listener for the given abstract name.
 ///
-/// On Linux, uses abstract sockets. On other Unix systems,
-/// falls back to filesystem sockets in the temp directory.
+/// On Linux, uses abstract Unix sockets; on other Unix systems, filesystem
+/// sockets in the temp directory.
+#[cfg(unix)]
 fn bind_rpc_listener(
     abstract_name: &str,
 ) -> Result<std::os::unix::net::UnixListener, std::io::Error> {
@@ -41,8 +53,14 @@ fn bind_rpc_listener(
     }
 }
 
+/// Windows: bind the RPC listener on TCP loopback (Python-RNS AF_INET fallback).
+#[cfg(windows)]
+fn bind_rpc_listener(abstract_name: &str) -> Result<std::net::TcpListener, std::io::Error> {
+    std::net::TcpListener::bind(crate::interfaces::local::loopback_addr(abstract_name))
+}
+
 /// Connect to an RPC socket by abstract name.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn connect_rpc(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, std::io::Error> {
     #[cfg(target_os = "linux")]
     {
@@ -83,7 +101,7 @@ pub(crate) fn spawn_rpc_server(
 
     let std_listener = bind_rpc_listener(&abstract_name)?;
     std_listener.set_nonblocking(true)?;
-    let listener = UnixListener::from_std(std_listener)?;
+    let listener = RpcListener::from_std(std_listener)?;
 
     tracing::info!("RPC server listening on socket {}", abstract_name);
 
@@ -104,7 +122,7 @@ pub(crate) fn spawn_rpc_server(
 
 /// Accept loop: spawns a task per connection.
 async fn rpc_accept_loop(
-    listener: UnixListener,
+    listener: RpcListener,
     core: Arc<Mutex<StdNodeCore>>,
     authkey: [u8; 32],
     start_time: std::time::Instant,
@@ -142,7 +160,7 @@ async fn rpc_accept_loop(
 
 /// Handle a single RPC connection: handshake -> read -> dispatch -> write -> close.
 async fn handle_rpc_connection(
-    mut stream: tokio::net::UnixStream,
+    mut stream: RpcStream,
     core: &Arc<Mutex<StdNodeCore>>,
     authkey: &[u8; 32],
     start_time: std::time::Instant,
@@ -177,9 +195,11 @@ async fn handle_rpc_connection(
     Ok(())
 }
 
-// Client-side functions (for integration tests)
+// Client-side functions (for integration tests). Unix-only: the RPC round-trip
+// tests exercise the Unix-socket transport; Windows uses TCP loopback and is
+// covered by the platform-agnostic codec/handshake unit tests.
 /// Connect to the RPC server, perform handshake, send request, receive response.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn rpc_client_call(
     abstract_name: &str,
     authkey: &[u8; 32],
@@ -205,7 +225,7 @@ pub(crate) async fn rpc_client_call(
     Ok(response)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::interfaces::InterfaceStatsMap;

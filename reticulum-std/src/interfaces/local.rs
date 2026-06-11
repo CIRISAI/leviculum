@@ -16,15 +16,29 @@ use reticulum_core::constants::MTU;
 use reticulum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use reticulum_core::transport::InterfaceId;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
 
-/// Bind a Unix listener to the given abstract name.
+// Platform IPC transport. Unix domain sockets on Unix; TCP loopback on Windows,
+// matching Python-RNS, which falls back to 127.0.0.1 (AF_INET) when AF_UNIX is
+// unavailable (default local_interface_port 37428 / local_control_port 37429).
+// `UnixStream`/`TcpStream` are symmetric (both halves impl AsyncRead/AsyncWrite
+// and `into_split()`), so the I/O code below is unchanged across platforms.
+#[cfg(windows)]
+use tokio::net::TcpListener as LocalListener;
+#[cfg(windows)]
+use tokio::net::TcpStream as LocalStream;
+#[cfg(unix)]
+use tokio::net::UnixListener as LocalListener;
+#[cfg(unix)]
+use tokio::net::UnixStream as LocalStream;
+
+/// Bind a local listener for the given abstract instance name.
 ///
-/// On Linux, uses abstract sockets (`\0name`). On other Unix systems,
-/// falls back to filesystem sockets in the temp directory.
+/// On Linux, uses abstract Unix sockets (`\0name`); on other Unix systems,
+/// filesystem sockets in the temp directory.
+#[cfg(unix)]
 fn bind_local_listener(abstract_name: &str) -> Result<std::os::unix::net::UnixListener, io::Error> {
     #[cfg(target_os = "linux")]
     {
@@ -43,10 +57,14 @@ fn bind_local_listener(abstract_name: &str) -> Result<std::os::unix::net::UnixLi
     }
 }
 
-/// Connect to a Unix socket by abstract name.
-///
-/// On Linux, uses abstract sockets. On other Unix systems,
-/// falls back to filesystem sockets in the temp directory.
+/// Windows: bind a TCP loopback listener, matching Python-RNS's AF_INET fallback.
+#[cfg(windows)]
+fn bind_local_listener(abstract_name: &str) -> Result<std::net::TcpListener, io::Error> {
+    std::net::TcpListener::bind(loopback_addr(abstract_name))
+}
+
+/// Connect to a local shared instance by abstract name.
+#[cfg(unix)]
 fn connect_local(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, io::Error> {
     #[cfg(target_os = "linux")]
     {
@@ -61,6 +79,40 @@ fn connect_local(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, 
             std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
         std::os::unix::net::UnixStream::connect(&path)
     }
+}
+
+/// Windows: connect to the TCP loopback shared instance.
+#[cfg(windows)]
+fn connect_local(abstract_name: &str) -> Result<std::net::TcpStream, io::Error> {
+    std::net::TcpStream::connect(loopback_addr(abstract_name))
+}
+
+/// Map an abstract instance name to a TCP loopback address (Windows).
+///
+/// Python-RNS uses a fixed default port when AF_UNIX is unavailable:
+/// `local_interface_port` 37428 for the shared instance. Match it for the
+/// default instance so we interop with a Windows `rnsd`; derive a stable port
+/// (FNV-1a, deterministic across builds so independent peers agree) otherwise.
+#[cfg(windows)]
+pub(crate) fn loopback_addr(abstract_name: &str) -> std::net::SocketAddr {
+    use std::net::{Ipv4Addr, SocketAddr};
+    let port: u16 = match abstract_name {
+        "rns/default" => 37428,
+        "rns/default/rpc" => 37429,
+        other => name_to_port(other),
+    };
+    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
+/// Stable FNV-1a hash of a name into the unprivileged 37430..=65534 range.
+#[cfg(windows)]
+pub(crate) fn name_to_port(name: &str) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    37430 + (h % (65535 - 37430)) as u16
 }
 
 /// Default channel buffer size for local interfaces.
@@ -94,7 +146,7 @@ pub(crate) fn spawn_local_server(
 
     let std_listener = bind_local_listener(&abstract_name)?;
     std_listener.set_nonblocking(true)?;
-    let listener = tokio::net::UnixListener::from_std(std_listener)?;
+    let listener = LocalListener::from_std(std_listener)?;
 
     tracing::info!("Local server listening on socket {}", abstract_name);
 
@@ -139,7 +191,7 @@ pub(crate) fn spawn_local_server(
 fn spawn_local_interface_from_stream(
     id: InterfaceId,
     name: String,
-    stream: UnixStream,
+    stream: LocalStream,
     buffer_size: usize,
 ) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
@@ -189,7 +241,7 @@ pub(crate) fn spawn_local_client(
 
     let std_stream = connect_local(&abstract_name)?;
     std_stream.set_nonblocking(true)?;
-    let stream = tokio::net::UnixStream::from_std(std_stream)?;
+    let stream = LocalStream::from_std(std_stream)?;
 
     let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
@@ -225,7 +277,7 @@ pub(crate) fn spawn_local_client(
 /// interface task. Uses poll_read_ready + try_read for edge-triggered reads.
 async fn local_interface_task(
     name: String,
-    stream: UnixStream,
+    stream: LocalStream,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
@@ -297,7 +349,7 @@ async fn local_interface_task(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::time::Duration;
