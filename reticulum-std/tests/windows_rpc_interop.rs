@@ -26,6 +26,13 @@ async fn rnstatus_against_windows_rust_daemon_over_tcp() {
     // Generate the identity up front so we can write the matching
     // `transport_identity` for Python: the RPC authkey is SHA-256(prv), so both
     // sides must hold the same 64 private-key bytes to complete the handshake.
+    // Surface the daemon's own tracing (RPC/local bind success or failure) on
+    // stderr so a failing run is diagnosable without a second iteration.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+
     let identity = Identity::generate(&mut rand_core::OsRng);
     let identity_bytes = identity
         .private_key_bytes()
@@ -45,7 +52,7 @@ async fn rnstatus_against_windows_rust_daemon_over_tcp() {
     node.start().await.expect("start Rust node");
 
     // Let the local + RPC listeners bind before the client connects.
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // Python config dir. `share_instance = Yes` makes rnstatus try to bind the
     // shared instance, fail (our daemon holds the port), and fall back to
@@ -67,7 +74,7 @@ async fn rnstatus_against_windows_rust_daemon_over_tcp() {
          \x20 shared_instance_type = tcp\n\
          \n\
          [logging]\n\
-         \x20 loglevel = 4\n\
+         \x20 loglevel = 7\n\
          \n\
          [interfaces]\n",
     )
@@ -86,11 +93,18 @@ async fn rnstatus_against_windows_rust_daemon_over_tcp() {
 
     let _ = std::fs::remove_dir_all(&cfg);
 
-    if !output.status.success() {
-        eprintln!("=== rnstatus STDOUT ===\n{stdout}");
-        eprintln!("=== rnstatus STDERR ===\n{stderr}");
-        panic!("rnstatus exited with code {:?}", output.status.code());
-    }
+    // Always surface rnstatus output: an exit-0-but-empty run means it fell
+    // back to spawning its own instance instead of reaching our daemon, which
+    // is exactly the failure we need to see.
+    eprintln!("=== rnstatus exit {:?} ===", output.status.code());
+    eprintln!("=== rnstatus STDOUT ===\n{stdout}");
+    eprintln!("=== rnstatus STDERR ===\n{stderr}");
+
+    assert!(
+        output.status.success(),
+        "rnstatus exited with code {:?}",
+        output.status.code()
+    );
 
     // Python parsed our pickle/HMAC RPC reply and formatted the transport
     // instance — the definitive cross-stack interop assertion.
