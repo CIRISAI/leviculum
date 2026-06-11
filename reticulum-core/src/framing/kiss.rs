@@ -119,6 +119,11 @@ pub enum KissDeframeResult {
     NeedMore,
     /// Complete frame with command byte and payload
     Frame { command: u8, payload: Vec<u8> },
+    /// Frame ended without a command byte ever being set.
+    ///
+    /// This indicates an internal state machine bug, not malformed input:
+    /// `process_byte` only finalizes frames whose command byte was seen.
+    MissingCommand,
 }
 
 /// KISS deframer state machine
@@ -235,10 +240,14 @@ impl KissDeframer {
 
     /// Finalize a complete frame
     fn finalize_frame(&mut self) -> KissDeframeResult {
-        // command is guaranteed to be Some by the caller
-        KissDeframeResult::Frame {
-            command: self.command.unwrap_or(0),
-            payload: self.buffer.clone(),
+        match self.command {
+            Some(command) => KissDeframeResult::Frame {
+                command,
+                payload: self.buffer.clone(),
+            },
+            // Unreachable via process_byte (which guards on command.is_some());
+            // report instead of fabricating a command-0 data frame.
+            None => KissDeframeResult::MissingCommand,
         }
     }
 }
@@ -639,6 +648,21 @@ mod tests {
             }
             _ => panic!("Expected Frame"),
         }
+    }
+
+    #[test]
+    fn test_finalize_without_command_is_not_silent() {
+        // Drive the deframer into the internally-impossible state of an open
+        // frame with no command byte (only reachable via a state machine bug;
+        // process_byte guards finalization on command.is_some()).
+        let mut deframer = KissDeframer::with_max_payload(508);
+        deframer.in_frame = true;
+        deframer.buffer.extend_from_slice(&[0x41, 0x42]);
+
+        let result = deframer.finalize_frame();
+        // Must be reported as malformed, not silently fabricated as a
+        // command-0 data frame.
+        assert_eq!(result, KissDeframeResult::MissingCommand);
     }
 
     // --- Python interop vectors ---
