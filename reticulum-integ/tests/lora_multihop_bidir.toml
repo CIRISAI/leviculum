@@ -7,6 +7,8 @@
 #
 # Timeout: 60s + 120s path x2 + 300s transfer x2 = 900s budget.
 
+profile = "rnode_quad"
+
 [test]
 name = "lora_multihop_bidir"
 description = "Bidirectional lncp push through frequency-isolated 2-hop LoRa relay"

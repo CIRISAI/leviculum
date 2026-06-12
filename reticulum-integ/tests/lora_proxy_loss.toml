@@ -7,6 +7,8 @@
 #   cargo build --release --bin lnsd --features serial
 #   cargo build --release --bin lora-proxy
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_proxy_loss"
 description = "Proxy drops 2 data frames, nodes still discover each other"

@@ -16,6 +16,8 @@
 #   RX: "RX split part" followed by "RX ... bytes" (reassembled)
 #   TX: "TX split ... bytes" followed by "TX done"
 
+profile = "rnode_lnode_pair"
+
 [test]
 name = "lora_lnode_split"
 description = "Bidirectional split LoRa packets between T114 and RNode"

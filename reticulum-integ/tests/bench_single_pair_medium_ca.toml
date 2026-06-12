@@ -1,3 +1,5 @@
+profile = "rnode_lnode_pair"
+
 [test]
 name = "bench_single_pair_medium_ca"
 description = "Single-pair probe throughput (SF7/BW125) with CSMA/CA on"

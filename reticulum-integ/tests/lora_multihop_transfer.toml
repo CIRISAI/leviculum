@@ -10,6 +10,8 @@
 # 2-hop LoRa round-trip is ~10s per data part cycle; 480s transfer
 # timeout needed because first run timed out at 300s (80% complete).
 
+profile = "rnode_quad"
+
 [test]
 name = "lora_multihop_transfer"
 description = "lncp push through frequency-isolated 2-hop LoRa relay"

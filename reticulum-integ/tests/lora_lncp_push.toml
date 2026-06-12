@@ -1,3 +1,5 @@
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_push"
 description = "lncp push 1KB over direct LoRa"

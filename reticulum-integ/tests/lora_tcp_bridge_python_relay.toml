@@ -4,6 +4,8 @@
 # Requires two RNode devices at /dev/ttyACM0 and /dev/ttyACM1.
 # Build lnsd with: cargo build --release --bin lnsd --features serial
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_tcp_bridge_python_relay"
 description = "LoRa-to-TCP bridge via Python relay, bidirectional probe"

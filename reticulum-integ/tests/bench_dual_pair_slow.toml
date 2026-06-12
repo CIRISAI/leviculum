@@ -1,3 +1,5 @@
+profile = "dual_pair_mixed"
+
 [test]
 name = "bench_dual_pair_slow"
 description = "Dual-pair probe throughput under contention (SF10/BW125/CR4/8)"

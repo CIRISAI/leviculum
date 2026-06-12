@@ -4,6 +4,8 @@
 # has never been tested over LoRa. If enforcement is broken,
 # this test will fail with 0% delivery.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_ratchet_enforced"
 description = "Ratchet enforcement over direct LoRa (issue #19)"

@@ -10,7 +10,7 @@
 # Radio config matches firmware default (RadioConfig::eu_medium in
 # reticulum-nrf::lora).
 
-profile = "lora_lnode_lncp_bidir"
+profile = "lnode_pair"
 
 [test]
 name = "lora_lnode_lncp_bidir"

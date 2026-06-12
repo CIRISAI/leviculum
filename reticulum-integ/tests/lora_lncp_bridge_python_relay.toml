@@ -1,3 +1,5 @@
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_bridge_python_relay"
 description = "lncp push over LoRa-to-TCP bridge with Python relay"

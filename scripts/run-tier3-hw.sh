@@ -47,6 +47,10 @@ if [ -f "$(cd "$REPO_DIR" && git rev-parse --git-dir)/leviculum-ci-vm-mode-marke
 fi
 
 LOG="$LOG_DIR/nightly-hw-$(date +%Y%m%d-%H%M%S)-$$.log"
+# Side-channel for structured SCENARIO_SKIPPED lines from the integ
+# runner's device-count preflight (see require_runner! in executor.rs).
+SKIP_LOG="$LOG_DIR/nightly-hw-skips-$$.log"
+: > "$SKIP_LOG"
 
 # Always log to both stdout (for interactive feedback) and the per-run
 # log (for forensic).  exec the redirection so every subsequent command
@@ -224,8 +228,12 @@ run_group() {
     log "[CI_HW] running ${#fns[@]} tests for profile=$profile: ${fns[*]}"
     # All tests of this profile in one cargo invocation: cheaper than
     # spawning a fresh test binary per test.  --test-threads=1 keeps
-    # the integ-lock contract intact.
+    # the integ-lock contract intact.  LEVICULUM_SKIP_LOG collects
+    # structured SCENARIO_SKIPPED lines (device-count preflight) —
+    # libtest swallows captured output of green tests, so the in-test
+    # eprintln alone would be invisible here.
     CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
+      LEVICULUM_SKIP_LOG="$SKIP_LOG" \
       cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}"
 }
 
@@ -270,12 +278,22 @@ for profile in $(printf '%s\n' "${!PROFILE_BUCKETS[@]}" | sort); do
     fi
 done
 
+# Device-count skips are neither green nor red — surface them loudly
+# in the summary and the results line. A non-empty skip list with the
+# 4th RNode back in the rig means a profile/registration gap, not noise.
+SKIPPED=0
+if [[ -s "$SKIP_LOG" ]]; then
+    SKIPPED=$(grep -c '^SCENARIO_SKIPPED' "$SKIP_LOG" || true)
+    log "[CI_HW] $SKIPPED scenario(s) skipped on device-count preflight:"
+    while IFS= read -r line; do log "[CI_HW]   $line"; done < "$SKIP_LOG"
+fi
+
 if [[ $RC -eq 0 ]]; then
-    log "[CI_HW] tier3 GREEN"
-    echo "$(date -Iseconds) tier3 GREEN $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 GREEN (skipped=$SKIPPED)"
+    echo "$(date -Iseconds) tier3 GREEN skipped=$SKIPPED $LOG" >> "$RESULTS"
 else
-    log "[CI_HW] tier3 RED"
-    echo "$(date -Iseconds) tier3 RED $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 RED (skipped=$SKIPPED)"
+    echo "$(date -Iseconds) tier3 RED skipped=$SKIPPED $LOG" >> "$RESULTS"
     # One bundle per tier-3 run, not per failing profile group;
     # per-profile RED log lines remain informational only.
     bash "$REPO_DIR/scripts/_emit-auto-bug-bundle.sh" tier3-hw "$LOG" || true

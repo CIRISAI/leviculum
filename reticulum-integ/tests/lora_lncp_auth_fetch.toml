@@ -3,6 +3,8 @@
 # fetch requests from alpha's identity. Verifies that authenticated
 # fetch works end-to-end over LoRa.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_auth_fetch"
 description = "lncp fetch with identity auth over direct LoRa"

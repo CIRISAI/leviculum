@@ -5,6 +5,8 @@
 # Build lnsd with: cargo build --release --bin lnsd --features serial
 # Build lns with: cargo build --release --bin lns
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_tcp_bridge_python_selftest"
 description = "Diagnostic: selftest through Python LoRa relay with long timeout"

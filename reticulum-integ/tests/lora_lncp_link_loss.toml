@@ -6,6 +6,8 @@
 # Note: link establishment under loss is tested separately in lora_lncp_link_retry
 # (dropped link requests) and lora_lncp_proof_retry (dropped proofs).
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_link_loss"
 description = "lncp push over LoRa with max_size-bounded proxy dropping 2 data frames"

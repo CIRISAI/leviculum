@@ -7,6 +7,8 @@
 #
 # Requires two RNode devices at /dev/ttyACM0 and /dev/ttyACM1.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_rpc_after_selftest"
 description = "Verify rnprobe works after selftest on same node"

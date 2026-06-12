@@ -11,6 +11,8 @@
 #
 # Timeout: 60s + 120s path + 480s transfer = 660s budget. 900s overall.
 
+profile = "rnode_quad"
+
 [test]
 name = "lora_multihop_link_loss"
 description = "5KB lncp push through 2-hop LoRa relay with 3 dropped frames on Channel A"
@@ -28,6 +30,7 @@ txpower = 17
 [nodes.alpha]
 type = "rust"
 respond_to_probes = true
+rnode = true
 rnode_proxy = true
 
 [nodes.relay]

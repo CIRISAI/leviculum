@@ -7,6 +7,8 @@
 #
 # Requires 3 RNode devices at /dev/ttyACM0, /dev/ttyACM1, /dev/ttyACM2.
 
+profile = "rnode_trio"
+
 [test]
 name = "lora_3node_bidir"
 description = "lncp bidirectional 2KB over LoRa between alpha and gamma (3-node mesh)"

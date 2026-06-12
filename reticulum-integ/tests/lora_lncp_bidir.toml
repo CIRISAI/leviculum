@@ -1,7 +1,7 @@
 # Sequential bidirectional transfer: a→b then b→a (not simultaneous).
 # Tests that both directions work on the same LoRa link.
 
-profile = "lora_lncp_bidir"
+profile = "rnode_pair"
 
 [test]
 name = "lora_lncp_bidir"

@@ -2,6 +2,8 @@
 # Selftest establishes a link, exchanges ratchet-encrypted single packets.
 # Verifies that ratchet key propagation and decryption work over LoRa.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_ratchet_basic"
 description = "Ratchet-encrypted single packets over direct LoRa"

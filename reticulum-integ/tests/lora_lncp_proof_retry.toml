@@ -11,6 +11,8 @@
 # beta ignores duplicate request, link times out. With proof re-send,
 # beta detects the duplicate request and re-sends the cached proof.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_proof_retry"
 description = "lncp push over LoRa after 2 dropped proofs recovered by proof re-send on E34 retry"

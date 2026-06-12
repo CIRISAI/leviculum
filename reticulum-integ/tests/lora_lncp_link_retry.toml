@@ -9,6 +9,8 @@
 # Without E34 retry, this test would fail (link request dropped → no
 # proof → link timeout). With retry, the 3rd attempt succeeds.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_link_retry"
 description = "lncp push over LoRa after 2 dropped link requests recovered by E34 retry"

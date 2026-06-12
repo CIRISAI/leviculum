@@ -7,6 +7,8 @@
 #
 # Requires 3 RNode devices at /dev/ttyACM0, /dev/ttyACM1, /dev/ttyACM2.
 
+profile = "rnode_trio"
+
 [test]
 name = "lora_3node_transfer"
 description = "lncp push 1KB over LoRa with 3rd node present (shared medium)"

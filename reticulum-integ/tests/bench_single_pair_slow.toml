@@ -1,3 +1,5 @@
+profile = "rnode_lnode_pair"
+
 [test]
 name = "bench_single_pair_slow"
 description = "Single-pair probe throughput baseline (SF10/BW125/CR4/8)"

@@ -13,6 +13,8 @@
 # Build lnsd with: cargo build --release --bin lnsd --features serial
 # Build lns with: cargo build --release --bin lns
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_late_announce_6node"
 description = "Late announce forwarding over LoRa after 5-min idle, 6 nodes"

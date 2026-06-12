@@ -1,3 +1,5 @@
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_fetch_from_python"
 description = "lncp fetch 1KB over direct LoRa (Rust fetcher, Python listener)"

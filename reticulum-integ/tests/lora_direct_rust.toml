@@ -2,6 +2,8 @@
 # Requires two RNode devices at /dev/ttyACM0 and /dev/ttyACM1.
 # Build lnsd with: cargo build --release --bin lnsd --features serial
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_direct_rust"
 description = "Two Rust nodes, direct LoRa link via RNode, probe each other"

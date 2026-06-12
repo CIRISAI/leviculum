@@ -1,3 +1,5 @@
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_push_to_python"
 description = "lncp push 1KB over direct LoRa (Rust sender, Python receiver)"

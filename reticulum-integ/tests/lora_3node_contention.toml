@@ -9,6 +9,8 @@
 #
 # Requires 3 RNode devices at /dev/ttyACM0, /dev/ttyACM1, /dev/ttyACM2.
 
+profile = "rnode_trio"
+
 [test]
 name = "lora_3node_contention"
 description = "lncp push 2KB over LoRa after 3rd node restart and re-convergence"

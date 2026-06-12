@@ -3,6 +3,8 @@
 # If the RNode receives the relayed announce, serial delivery works.
 # Devices are auto-discovered by USB vendor ID and CMD_DETECT probe.
 
+profile = "rnode_lnode_pair"
+
 [test]
 name = "lora_lnode_serial_relay"
 description = "Verify lnsd announce is delivered via serial to T114 and relayed to LoRa"

@@ -1,6 +1,8 @@
 # Baseline file size sweep over direct LoRa (no proxy).
 # Tests transfer correctness and timing across a range of sizes.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_size_sweep"
 description = "lncp push multiple file sizes over direct LoRa"

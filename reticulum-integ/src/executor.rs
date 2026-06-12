@@ -2456,19 +2456,43 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Create a TestRunner, skipping (return) if RNodes are missing.
+    /// Create a TestRunner, skipping (return) if devices are missing.
     /// Panics on any other error from TestRunner::new().
+    ///
+    /// The skip is LOUD and structured: one `SCENARIO_SKIPPED` line with
+    /// the runner's `reason=...` payload. run-tier3-hw.sh tallies these
+    /// lines into the run summary, so a device shortfall is neither a
+    /// silent green nor a red. Plugging the missing device back
+    /// re-enables the scenario with zero config changes (discovery is
+    /// per-run).
     macro_rules! require_runner {
-        ($scenario:expr) => {
-            match TestRunner::new($scenario) {
+        ($scenario:expr) => {{
+            let scenario = $scenario;
+            let scenario_name = scenario.test.name.clone();
+            match TestRunner::new(scenario) {
                 Ok(r) => r,
                 Err(RunnerError::InsufficientRNodes(ref msg)) => {
-                    eprintln!("[skip] {msg}");
+                    let line = format!("SCENARIO_SKIPPED scenario={scenario_name} {msg}");
+                    eprintln!("{line}");
+                    // libtest swallows captured output of green tests, so
+                    // the eprintln alone would make this skip silent again.
+                    // run-tier3-hw.sh sets LEVICULUM_SKIP_LOG and tallies
+                    // this file into the run summary.
+                    if let Ok(path) = std::env::var("LEVICULUM_SKIP_LOG") {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                        {
+                            let _ = writeln!(f, "{line}");
+                        }
+                    }
                     return;
                 }
                 Err(e) => panic!("TestRunner::new failed: {e}"),
             }
-        };
+        }};
     }
 
     /// Regression guard for the integ-lock release-on-panic invariant.

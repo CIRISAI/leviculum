@@ -7,6 +7,8 @@
 # All 4 nodes share 869.525 MHz / 62.5 kHz / SF7.
 # Requires 4 RNode devices at /dev/ttyACM0..3.
 
+profile = "rnode_quad"
+
 [test]
 name = "lora_4node_contention_mixed"
 description = "Simultaneous Rust lncp + Python rncp transfers on shared LoRa medium"

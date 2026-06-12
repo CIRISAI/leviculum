@@ -1,3 +1,5 @@
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_auth"
 description = "lncp push with identity auth over LoRa"

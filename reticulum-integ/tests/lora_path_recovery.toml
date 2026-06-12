@@ -18,6 +18,8 @@
 # never establishes, no REQ packets are sent anyway. count=999 ensures
 # ALL link proofs are dropped during Phase 2 (not just the first few).
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_path_recovery"
 description = "Path state recovery after link proof loss over LoRa"

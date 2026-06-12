@@ -6,6 +6,8 @@
 # Same topology: 4 Python nodes on same frequency, 2KB each.
 # But transfers run sequentially — no RF contention between them.
 
+profile = "rnode_quad"
+
 [test]
 name = "lora_4node_sequential_python"
 description = "Two sequential 2KB Python rncp transfers on shared LoRa medium"

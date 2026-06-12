@@ -2,6 +2,8 @@
 # Requires one RNode (ESP32) and one T114 with LNode firmware.
 # Devices are auto-discovered by USB vendor ID and CMD_DETECT probe.
 
+profile = "rnode_lnode_pair"
+
 [test]
 name = "lora_lnode_probe"
 description = "RNode and T114 LNode exchange announces and probes over LoRa"

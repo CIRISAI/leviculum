@@ -5,6 +5,8 @@
 # Build lnsd with: cargo build --release --bin lnsd --features serial
 # Build lns with: cargo build --release --bin lns
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_tcp_bridge_rust_relay"
 description = "LoRa-to-TCP bridge via Rust relay, selftest link+channel"

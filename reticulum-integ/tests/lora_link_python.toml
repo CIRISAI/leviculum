@@ -4,6 +4,8 @@
 # Build lnsd with: cargo build --release --bin lnsd --features serial
 # Build lns with: cargo build --release --bin lns
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_link_python"
 description = "Python↔Python link and channel messages over LoRa via selftest"

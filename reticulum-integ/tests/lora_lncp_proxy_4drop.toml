@@ -1,6 +1,8 @@
 # LoRa transfer with proxy dropping 4 data frames.
 # 10KB file produces ~22 parts — dropping 4 tests multi-retransmit recovery.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_proxy_4drop"
 description = "lncp push 10KB over LoRa with proxy dropping 4 data frames"

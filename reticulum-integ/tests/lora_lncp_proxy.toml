@@ -1,3 +1,5 @@
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_proxy"
 description = "lncp push over LoRa with proxy dropping 2 data frames"

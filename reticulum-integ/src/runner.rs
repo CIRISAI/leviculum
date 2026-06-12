@@ -1101,6 +1101,19 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
             .sum::<usize>();
     let needed_lnodes = scenario.nodes.values().filter(|n| n.serial).count();
 
+    // A proxy node without `rnode = true` would evade the device count
+    // below and only fail later in spawn_proxies with a confusing
+    // "no device assigned" (the topology-level validation runs in
+    // generate_node_configs, which is too late on this path). Fail
+    // clearly before counting.
+    for (name, node) in &scenario.nodes {
+        if node.rnode_proxy && !node.rnode {
+            return Err(RunnerError::ProxyError(format!(
+                "node '{name}': rnode_proxy requires `rnode = true` in the scenario TOML"
+            )));
+        }
+    }
+
     // Kill stale containers from previous runs that may hold USB devices.
     cleanup_stale_containers();
 
@@ -1110,10 +1123,12 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
 
     let discovered = get_discovered_devices();
 
-    // Pre-check: enough hardware available?
+    // Pre-check: enough hardware available? Message is structured —
+    // require_runner! relays it verbatim on a SCENARIO_SKIPPED line that
+    // run-tier3-hw.sh tallies into the run summary.
     if discovered.rnodes.len() < needed_rnodes || discovered.lnodes.len() < needed_lnodes {
         return Err(RunnerError::InsufficientRNodes(format!(
-            "needs {} RNode(s) and {} LNode(s), found {} RNode(s) and {} LNode(s)",
+            "reason=insufficient_devices required_rnodes={} required_lnodes={} found_rnodes={} found_lnodes={}",
             needed_rnodes,
             needed_lnodes,
             discovered.rnodes.len(),
@@ -1165,17 +1180,23 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
     for node in scenario.nodes.values() {
         if let Some(ref port) = node.serial_path {
             check_device_accessible(port).map_err(|reason| {
-                RunnerError::InsufficientRNodes(format!("Serial device {port}: {reason}"))
+                RunnerError::InsufficientRNodes(format!(
+                    "reason=device_inaccessible device={port} detail=\"{reason}\""
+                ))
             })?;
         }
         if let Some(ref port) = node.debug_serial_path {
             check_device_accessible(port).map_err(|reason| {
-                RunnerError::InsufficientRNodes(format!("Debug serial {port}: {reason}"))
+                RunnerError::InsufficientRNodes(format!(
+                    "reason=device_inaccessible device={port} detail=\"{reason}\""
+                ))
             })?;
         }
         if let Some(ref port) = node.rnode_path {
             check_device_accessible(port).map_err(|reason| {
-                RunnerError::InsufficientRNodes(format!("RNode device {port}: {reason}"))
+                RunnerError::InsufficientRNodes(format!(
+                    "reason=device_inaccessible device={port} detail=\"{reason}\""
+                ))
             })?;
         }
     }

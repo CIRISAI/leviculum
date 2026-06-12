@@ -9,6 +9,8 @@
 #
 # Requires 4 RNode devices at /dev/ttyACM0..3.
 
+profile = "rnode_quad"
+
 [test]
 name = "lora_4node_contention_rust"
 description = "Two simultaneous 10KB Rust transfers on shared LoRa medium"

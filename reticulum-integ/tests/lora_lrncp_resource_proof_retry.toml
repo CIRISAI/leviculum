@@ -12,6 +12,8 @@
 # With CacheRequest, alpha sends a CacheRequest after each proof timeout,
 # beta re-sends the cached proof, transfer completes.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lrncp_resource_proof_retry"
 description = "lncp push over LoRa after 2 dropped resource proofs recovered by CacheRequest"

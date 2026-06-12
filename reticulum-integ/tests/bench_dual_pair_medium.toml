@@ -1,3 +1,5 @@
+profile = "dual_pair_mixed"
+
 [test]
 name = "bench_dual_pair_medium"
 description = "Dual-pair probe throughput under contention (SF7/BW125)"

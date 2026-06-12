@@ -6,6 +6,8 @@
 # Extra timeout: 6s rotation sleep + re-announce propagation over
 # LoRa needs more margin than TCP-only rotation tests.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_ratchet_rotation"
 description = "Ratchet key rotation over direct LoRa"

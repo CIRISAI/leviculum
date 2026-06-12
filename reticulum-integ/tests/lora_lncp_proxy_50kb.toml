@@ -9,6 +9,8 @@
 # At 62.5kHz SF7 (2734 bps): ~240s without drops, ~300s with 6 drops
 # and retransmit overhead. 480s transfer timeout gives comfortable margin.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_lncp_proxy_50kb"
 description = "lncp push 50KB over LoRa with proxy dropping 6 data frames"

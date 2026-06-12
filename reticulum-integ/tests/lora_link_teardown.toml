@@ -11,6 +11,8 @@
 # establishes without stale state interference. Fresh ephemeral keys,
 # new link_id, full discovery→link→data→close cycle again.
 
+profile = "rnode_pair"
+
 [test]
 name = "lora_link_teardown"
 description = "Link close and re-establishment over direct LoRa"
