@@ -266,7 +266,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             {
                 if let Some(dest) = self.destinations.get_mut(&hash) {
                     if let Err(e) = dest.load_ratchets_signed(&serialized) {
-                        tracing::warn!(
+                        crate::tracing::warn!(
                             "Failed to load persisted ratchet keys for <{}>: {}",
                             hash,
                             e
@@ -305,14 +305,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let identity_bytes = match self.transport.identity().private_key_bytes() {
             Ok(bytes) => bytes,
             Err(e) => {
-                tracing::warn!("Cannot create probe destination: {e}");
+                crate::tracing::warn!("Cannot create probe destination: {e}");
                 return;
             }
         };
         let probe_identity = match Identity::from_private_key_bytes(&identity_bytes) {
             Ok(id) => id,
             Err(e) => {
-                tracing::warn!("Cannot create probe destination: {e}");
+                crate::tracing::warn!("Cannot create probe destination: {e}");
                 return;
             }
         };
@@ -325,7 +325,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         ) {
             Ok(d) => d,
             Err(e) => {
-                tracing::warn!("Cannot create probe destination: {e}");
+                crate::tracing::warn!("Cannot create probe destination: {e}");
                 return;
             }
         };
@@ -339,8 +339,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
         self.next_mgmt_announce_ms = Some(now_ms + MGMT_ANNOUNCE_INITIAL_DELAY_MS);
 
-        tracing::info!("Probe responder at <{}> active", hash);
-        tracing::info!(
+        crate::tracing::info!("Probe responder at <{}> active", hash);
+        crate::tracing::info!(
             "[IDENTITY] probe_destination={} aspect=rnstransport.probe",
             hash
         );
@@ -855,7 +855,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 if let Some(link) = self.links.get_mut(link_id) {
                     link.clear_outgoing_resource();
                 }
-                tracing::debug!("Failed to build resource ADV packet: {e}");
+                crate::tracing::debug!("Failed to build resource ADV packet: {e}");
                 return Err(ResourceError::InvalidRequest);
             }
         }
@@ -979,7 +979,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> crate::transport::TickOutput {
         // Process through transport layer
         if let Err(e) = self.transport.process_incoming(iface.0, data) {
-            tracing::trace!(
+            crate::tracing::trace!(
                 "Failed to process incoming packet on {}: {}",
                 self.transport.iface_name(iface.0),
                 e
@@ -1013,7 +1013,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let packet = match dest.announce(None, &mut self.rng, now_ms) {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!("Management announce failed for <{}>: {}", dest_hash, e);
+                    crate::tracing::warn!("Management announce failed for <{}>: {}", dest_hash, e);
                     continue;
                 }
             };
@@ -1026,7 +1026,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         .storage_mut()
                         .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
                     self.transport.send_on_all_interfaces(&buf[..len]);
-                    tracing::debug!("Management announce sent for <{}>", dest_hash);
+                    crate::tracing::debug!("Management announce sent for <{}>", dest_hash);
 
                     // Sender self-remember for management destinations
                     if let Some(rp) = ratchet_pub {
@@ -1050,7 +1050,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     }
                 }
                 Err(_) => {
-                    tracing::warn!("Management announce pack failed for <{}>", dest_hash);
+                    crate::tracing::warn!("Management announce pack failed for <{}>", dest_hash);
                 }
             }
         }
@@ -1199,7 +1199,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let lost_paths = self.transport.remove_paths_for_interface(iface_idx);
 
         // Log before removing the name so the message still shows the human-readable name
-        tracing::debug!(
+        crate::tracing::debug!(
             "Interface {} went down, removed {} paths",
             self.transport.iface_name(iface_idx),
             lost_paths.len()
@@ -1276,7 +1276,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        crate::tracing::warn!(
                             "Failed to re-announce <{}> on new interface: {:?}",
                             HexShort(dest_hash.as_bytes()),
                             e,
@@ -1300,7 +1300,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
             if let Some(cached_raw) = self.transport.storage().get_announce_cache(hash).cloned() {
                 if !cached_raw.is_empty() {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         "Re-announcing cached local-client dest <{}> on interface recovery",
                         HexShort(hash),
                     );
@@ -1388,7 +1388,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .transport
             .request_path(dest_hash.as_bytes(), None, &tag)
         {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Failed to build path request for <{}>: {}",
                 HexShort(dest_hash.as_bytes()),
                 e
@@ -1544,7 +1544,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 interface_index,
                 raw_hash,
             } => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "node: PacketReceived dest=<{}> type={:?} ctx={:?} iface={}",
                     HexShort(&destination_hash),
                     packet.flags.packet_type,
@@ -1568,7 +1568,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     if let Some(original_hash) = raw_hash {
                         let repacked_hash = packet_hash(&raw);
                         if original_hash != repacked_hash {
-                            tracing::warn!(
+                            crate::tracing::warn!(
                                 original = %HexFmt(&original_hash),
                                 repacked = %HexFmt(&repacked_hash),
                                 ptype = ?packet.flags.packet_type,
@@ -1588,7 +1588,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             match dest.decrypt(packet.data.as_slice()) {
                                 Ok(data) => data,
                                 Err(_) => {
-                                    tracing::trace!(
+                                    crate::tracing::trace!(
                                         dest = %HexShort(destination_hash.as_ref()),
                                         "Dropped packet, decryption failed"
                                     );
@@ -1600,7 +1600,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             packet.data.as_slice().to_vec()
                         }
                     } else {
-                        tracing::trace!(
+                        crate::tracing::trace!(
                             dest = %HexShort(destination_hash.as_ref()),
                             "Dropped packet, no destination registered"
                         );
@@ -1642,7 +1642,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 identity,
                                 Some(interface_index),
                             ) {
-                                tracing::warn!("failed to send auto-proof for PROVE_ALL: {}", e);
+                                crate::tracing::warn!(
+                                    "failed to send auto-proof for PROVE_ALL: {}",
+                                    e
+                                );
                             }
                         }
                     }
@@ -1718,7 +1721,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 {
                                     entry.raw_packet = fresh_raw;
                                     entry.hops = 0; // Local destination
-                                    tracing::debug!(
+                                    crate::tracing::debug!(
                                         "Fresh path response generated for <{}>",
                                         HexShort(&destination_hash),
                                     );
@@ -1726,7 +1729,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(
+                            crate::tracing::warn!(
                                 "Failed to generate fresh path response for <{}>: {:?}",
                                 HexShort(&destination_hash),
                                 e,
