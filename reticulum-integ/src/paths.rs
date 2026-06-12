@@ -223,15 +223,40 @@ pub fn describe_binary(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// Restore `key` to exactly its pre-test state: prior-present → set
+    /// back, prior-absent → remove. The CI tiers run this suite in one
+    /// process with `CARGO_TARGET_DIR` set for the whole process
+    /// (scripts/run-tier2.sh); a test that leaves the var deleted
+    /// redirects every later test in the same process to the repo-local
+    /// target dir — the 2026-06-11 tier2 RED (basic_probe_lifecycle
+    /// StaleBinary).
+    fn restore_env(key: &str, prior: Option<std::ffi::OsString>) {
+        // SAFETY: the suite runs single-threaded (--test-threads=1 in all
+        // CI tiers and the documented local invocation), so no other
+        // thread observes the mutation.
+        match &prior {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        assert_eq!(
+            std::env::var_os(key),
+            prior,
+            "{key} must be back to its pre-test state"
+        );
+    }
+
     #[test]
     fn target_dir_respects_env_var() {
         let repo = Path::new("/tmp/fake-repo");
-        // SAFETY: test is single-threaded by the serial impl of the integ
-        // harness; Cargo tests in this crate do not modify this env var.
+        let prior = std::env::var_os("CARGO_TARGET_DIR");
+        // SAFETY: single-threaded suite (--test-threads=1 in all CI
+        // tiers); this test is itself a modifier of the var, so the prior
+        // value is restored exactly via restore_env below.
         unsafe { std::env::set_var("CARGO_TARGET_DIR", "/tmp/other-target") };
         assert_eq!(target_dir(repo), PathBuf::from("/tmp/other-target"));
         unsafe { std::env::remove_var("CARGO_TARGET_DIR") };
         assert_eq!(target_dir(repo), PathBuf::from("/tmp/fake-repo/target"));
+        restore_env("CARGO_TARGET_DIR", prior);
     }
 
     #[test]
@@ -287,11 +312,16 @@ mod tests {
 
     #[test]
     fn freshness_skipped_when_env_set() {
+        let prior = std::env::var_os("LEVICULUM_SKIP_FRESHNESS_CHECK");
+        // SAFETY: single-threaded suite (--test-threads=1 in all CI
+        // tiers); the prior value is restored exactly via restore_env
+        // below — deleting it would clobber a developer's intentional
+        // skip flag for subsequent tests in the same process.
         unsafe { std::env::set_var("LEVICULUM_SKIP_FRESHNESS_CHECK", "1") };
         // Passing a nonexistent path should still succeed under the skip
         // env var, because the function returns before touching the fs.
         let result = check_binary_freshness(&[Path::new("/nonexistent/path")], Path::new("/tmp"));
-        unsafe { std::env::remove_var("LEVICULUM_SKIP_FRESHNESS_CHECK") };
+        restore_env("LEVICULUM_SKIP_FRESHNESS_CHECK", prior);
         assert!(result.is_ok());
     }
 }
