@@ -1869,7 +1869,7 @@ fn find_two_available_ports() -> Result<(u16, u16), HarnessError> {
 /// bindable on 127.0.0.1, retrying past any external occupant. Returns
 /// `Err(SpawnFailed)` only if the entire range is exhausted (extremely
 /// unlikely in practice).
-fn pick_free_tcp_port() -> Result<u16, HarnessError> {
+pub fn pick_free_tcp_port() -> Result<u16, HarnessError> {
     for _ in 0..(PORT_RANGE_END - PORT_RANGE_BASE) {
         let candidate = next_port_candidate();
         if let Ok(listener) = TcpListener::bind(("127.0.0.1", candidate)) {

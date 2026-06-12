@@ -1183,6 +1183,9 @@ impl ReticulumNode {
     /// Drop every path whose `next_hop` matches the supplied transport
     /// identity hash.
     ///
+    /// Local cache surgery only, mirroring the rnsd RPC drop-all-via
+    /// semantics: no wire-level invalidation is emitted.
+    ///
     /// Returns the count of paths removed. Useful when a transport
     /// peer is known to be down: the caller bulk-evicts every path
     /// routed via that peer in a single call rather than iterating

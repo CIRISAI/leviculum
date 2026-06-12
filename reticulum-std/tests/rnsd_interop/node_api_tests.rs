@@ -407,3 +407,123 @@ async fn test_node_builder_creates_node_without_interfaces() {
         "Identity hash should be 16 bytes"
     );
 }
+
+/// PR #61 accessor coverage: the path/rate-table accessors against a
+/// real relayed path (rnsd announces, a Rust relay forwards, this node
+/// learns a 2-hop entry with next_hop set).
+///
+/// Asserts: path_table_entries() reflects the learned path,
+/// get_path_clone() finds it, remove_path() evicts it (idempotency on
+/// the second call), a re-announce re-learns it, and
+/// drop_all_paths_via(next_hop) bulk-evicts with a matching count.
+/// now_ms() and rate_table_entries() are exercised along the way.
+#[tokio::test]
+async fn test_path_table_accessor_lifecycle() {
+    let _evlog = init_event_log();
+    let daemon = TestDaemon::start().await.expect("Failed to start daemon");
+
+    // Rust relay bridging daemon <-> node, so the node's path to the
+    // daemon's destination is RELAYED (next_hop = relay identity).
+    let relay_port = crate::harness::pick_free_tcp_port().expect("free port");
+    let _storage_r = crate::common::temp_storage("test_path_table_accessor_lifecycle", "relay");
+    let mut relay = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_client(daemon.rns_addr())
+        .add_tcp_server(([127, 0, 0, 1], relay_port).into())
+        .storage_path(_storage_r.path().to_path_buf())
+        .build()
+        .await
+        .expect("Failed to build relay");
+    relay.start().await.expect("Failed to start relay");
+
+    let _storage_n = crate::common::temp_storage("test_path_table_accessor_lifecycle", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .add_tcp_client(([127, 0, 0, 1], relay_port).into())
+        .storage_path(_storage_n.path().to_path_buf())
+        .build()
+        .await
+        .expect("Failed to build node");
+    node.start().await.expect("Failed to start node");
+    node.wait_for_interfaces_ready(Duration::from_secs(5))
+        .await
+        .expect("node interfaces ready");
+
+    let t0 = node.now_ms();
+
+    let dest = daemon
+        .register_destination("accessor_test", &["lifecycle"])
+        .await
+        .expect("Failed to register");
+    daemon
+        .announce_destination(&dest.hash, b"accessor test")
+        .await
+        .expect("Failed to announce");
+
+    let dest_hash = crate::common::parse_dest_hash(&dest.hash);
+    let learned = wait_for(|| node.has_path(&dest_hash), Duration::from_secs(20)).await;
+    assert!(learned, "node should learn the relayed path within 20s");
+
+    // path_table_entries() reflects the learned path.
+    let entries = node.path_table_entries();
+    let entry = entries
+        .iter()
+        .find(|e| e.hash == *dest_hash.as_bytes())
+        .expect("path_table_entries must contain the learned destination");
+    assert!(entry.hops >= 2, "relayed path must be >= 2 hops");
+    let via_bytes = entry
+        .next_hop
+        .expect("relayed path must carry a next_hop (the relay)");
+
+    // get_path_clone() finds the same entry.
+    let clone = node
+        .get_path_clone(&dest_hash)
+        .expect("get_path_clone must find the learned path");
+    assert_eq!(clone.hops, entry.hops);
+    assert_eq!(clone.next_hop, entry.next_hop);
+
+    // now_ms() is live and monotonic across the learn phase.
+    assert!(node.now_ms() >= t0, "now_ms must not go backwards");
+
+    // rate_table_entries() is callable and consistent (announce rate
+    // tracking may or may not have an entry for a single announce).
+    let _rates = node.rate_table_entries();
+
+    // remove_path(): evicts, reports eviction, idempotent second call.
+    assert!(node.remove_path(&dest_hash), "first remove_path -> true");
+    assert!(!node.has_path(&dest_hash), "path gone after remove_path");
+    assert!(node.get_path_clone(&dest_hash).is_none());
+    assert!(!node.remove_path(&dest_hash), "second remove_path -> false");
+
+    // A re-announce re-learns the path (local cache surgery only).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    daemon
+        .announce_destination(&dest.hash, b"accessor test again")
+        .await
+        .expect("Failed to re-announce");
+    let relearned = wait_for(|| node.has_path(&dest_hash), Duration::from_secs(20)).await;
+    assert!(relearned, "re-announce must re-learn the evicted path");
+
+    // drop_all_paths_via(): bulk-evicts everything routed via the relay.
+    let via = reticulum_core::DestinationHash::new(via_bytes);
+    let dropped = node.drop_all_paths_via(&via);
+    assert!(dropped >= 1, "must drop at least the re-learned path");
+    assert!(
+        !node.has_path(&dest_hash),
+        "path gone after drop_all_paths_via"
+    );
+
+    node.stop().await.expect("Failed to stop node");
+    relay.stop().await.expect("Failed to stop relay");
+}
+
+/// Poll a condition until true or timeout.
+async fn wait_for<F: Fn() -> bool>(cond: F, budget: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < budget {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    cond()
+}
