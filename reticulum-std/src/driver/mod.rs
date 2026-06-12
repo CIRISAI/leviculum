@@ -79,7 +79,8 @@ use crate::error::Error;
 use crate::interfaces::auto_interface::orchestrator::spawn_auto_interface;
 use crate::interfaces::auto_interface::AutoInterfaceConfig;
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TCP_DEFAULT_BUFFER_SIZE,
+    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig,
+    DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::udp::spawn_udp_interface;
 use crate::interfaces::{
@@ -598,6 +599,7 @@ impl ReticulumNode {
                             corrupt_every: self.corrupt_every,
                             reconnect_interval,
                             max_reconnect_tries: config.max_reconnect_tries,
+                            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
                             reconnect_notify: Some(reconnect_tx.clone()),
                         });
                         tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
