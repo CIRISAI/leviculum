@@ -497,11 +497,33 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::atomic::AtomicUsize;
 
+        // The panic hook is process-global and the std lib suite runs
+        // multi-threaded, so the swapped hook must neither count an
+        // UNRELATED test's panic (false RED here) nor swallow its
+        // report. Both panic sources this regression guards run on
+        // known-named threads — the pre-fix interval panic fires on
+        // THIS test's thread (current-thread runtime inside block_on;
+        // libtest names it after the test), the post-fix counter thread
+        // is named "reticulum-traffic-counter" — so count only those
+        // and delegate everything else to the previous hook. The
+        // previous hook is restored exactly afterwards (Arc round-trip:
+        // our installed closure holds the only other clone). No other
+        // test in this workspace swaps the hook.
         let panics = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&panics);
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |_info| {
-            counter.fetch_add(1, Ordering::SeqCst);
+        type PrevHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
+        let prev_hook: Arc<PrevHook> = Arc::new(std::panic::take_hook());
+        let prev_for_hook = Arc::clone(&prev_hook);
+        std::panic::set_hook(Box::new(move |info| {
+            let thread = std::thread::current();
+            let name = thread.name().unwrap_or("");
+            if name.contains("spawn_traffic_counter_survives")
+                || name.starts_with("reticulum-traffic-counter")
+            {
+                counter.fetch_add(1, Ordering::SeqCst);
+            } else {
+                prev_for_hook(info);
+            }
         }));
 
         // Deliberately NO `.enable_time()` — mirrors the embedder runtime
@@ -520,7 +542,12 @@ mod tests {
             }
         });
 
-        std::panic::set_hook(prev_hook);
+        // Uninstall our hook (drops its Arc clone), then put the
+        // original hook back exactly.
+        drop(std::panic::take_hook());
+        if let Ok(prev) = Arc::try_unwrap(prev_hook) {
+            std::panic::set_hook(prev);
+        }
         assert_eq!(
             panics.load(Ordering::SeqCst),
             0,
