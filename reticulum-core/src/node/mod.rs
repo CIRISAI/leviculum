@@ -177,6 +177,13 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// return value, LinkHandle) resolve through this map. Entries are
     /// dropped when their target link is removed.
     link_id_aliases: BTreeMap<LinkId, LinkId>,
+    /// Reverse of `link_id_aliases` for the event boundary (current id
+    /// → the ORIGINAL id `connect()` returned). Outbound events are
+    /// rewritten to the original id in `process_events_and_actions`,
+    /// so applications can correlate every event — including a
+    /// LinkClosed for a link that never established — with the one id
+    /// they hold. Entries exist only for re-keyed links.
+    link_origin_ids: BTreeMap<LinkId, LinkId>,
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
@@ -225,6 +232,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             pending_requests: BTreeMap::new(),
             link_retry_state: BTreeMap::new(),
             link_id_aliases: BTreeMap::new(),
+            link_origin_ids: BTreeMap::new(),
             max_incoming_resource_size,
         }
     }
@@ -1316,7 +1324,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Collect all actions, events, and next deadline
         let actions = self.transport.drain_actions();
-        let events = core::mem::take(&mut self.events);
+        let mut events = core::mem::take(&mut self.events);
+        // Rewrite re-keyed link ids back to the caller-visible original
+        // (Codeberg #66) — see `link_origin_ids`.
+        if !self.link_origin_ids.is_empty() {
+            for event in events.iter_mut() {
+                if let Some(link_id) = event.link_id_mut() {
+                    if let Some(origin) = self.link_origin_ids.get(link_id) {
+                        *link_id = *origin;
+                    }
+                }
+            }
+        }
         let next_deadline_ms = self.next_deadline();
 
         crate::transport::TickOutput {
@@ -2376,6 +2395,41 @@ mod tests {
         (node, dest_hash, link_id)
     }
 
+    // Codeberg #66 regression guard (caught by rnsd_interop in the first
+    // tier2 after the fresh-keys fix): retries re-key the link, but the
+    // application only holds the id `connect()` returned — every event,
+    // including the final LinkClosed of a link that never established,
+    // must carry that ORIGINAL id.
+    #[test]
+    fn test_link_closed_after_retries_carries_original_id() {
+        use crate::constants::{LINK_PENDING_TIMEOUT_MS, LINK_REQUEST_MAX_RETRIES};
+
+        let (mut node, _dest_hash, original_link_id) = setup_pending_link(false);
+
+        let mut final_output = node.handle_timeout();
+        for _attempt in 0..=(LINK_REQUEST_MAX_RETRIES as usize) {
+            let now = node.transport().clock().now_ms();
+            node.transport()
+                .clock()
+                .set(now + LINK_PENDING_TIMEOUT_MS + 1);
+            final_output = node.handle_timeout();
+        }
+
+        let closed_id = final_output.events.iter().find_map(|e| match e {
+            NodeEvent::LinkClosed {
+                link_id,
+                reason: LinkCloseReason::Timeout,
+                ..
+            } => Some(*link_id),
+            _ => None,
+        });
+        assert_eq!(
+            closed_id,
+            Some(original_link_id),
+            "LinkClosed must carry the id connect() returned, not the re-keyed wire id"
+        );
+    }
+
     #[test]
     fn test_pending_link_timeout_triggers_path_recovery() {
         use crate::constants::{LINK_PENDING_TIMEOUT_MS, LINK_REQUEST_MAX_RETRIES};
@@ -2386,11 +2440,11 @@ mod tests {
         // Path should exist before timeout
         assert!(node.has_path(&dest_hash));
 
-        // Exhaust all link request retries. Each timeout resends the
-        // link request WITH THE SAME KEYS (link_management.rs
-        // check_timeouts) — which makes the retry bytes identical and
-        // therefore dead through any transport node's dedup; see
-        // Codeberg #66. The final timeout emits LinkClosed.
+        // Exhaust all link request retries. Each timeout retries with
+        // FRESH ephemeral keys and a re-keyed link id (Codeberg #66,
+        // link_management.rs check_timeouts). The final timeout emits
+        // LinkClosed — carrying the original caller-visible id, see
+        // test_link_closed_after_retries_carries_original_id.
         let mut final_output = node.handle_timeout(); // no-op, not timed out yet
         for _attempt in 0..=(LINK_REQUEST_MAX_RETRIES as usize) {
             let now = node.transport().clock().now_ms();

@@ -338,7 +338,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.link_retry_state.remove(link_id);
         self.transport.unregister_destination(link_id.as_bytes());
         // Drop caller-visible aliases that pointed at this link
-        // (Codeberg #66 retry rekeying).
+        // (Codeberg #66 retry rekeying). The origin-id entry is NOT
+        // dropped here: emit_link_closed consumes it after removal
+        // (every close path emits per its invariant).
         self.link_id_aliases.retain(|_, target| target != link_id);
     }
 
@@ -2293,6 +2295,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             }
                         }
                         self.link_id_aliases.insert(link_id, new_link_id);
+                        // Event boundary: outbound events for this link
+                        // report the ORIGINAL caller-visible id.
+                        let origin = self.link_origin_ids.remove(&link_id).unwrap_or(link_id);
+                        self.link_origin_ids.insert(new_link_id, origin);
 
                         // Route the retried request
                         let was_routed = self
@@ -2877,11 +2883,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         is_initiator: bool,
         destination_hash: DestinationHash,
     ) {
+        // Translate a re-keyed wire id back to the caller-visible
+        // original and consume the mapping — the close is the last
+        // event for this link (Codeberg #66). Registries may hold
+        // either id (receipts register with the resolved wire id,
+        // requests with whatever the caller passed), so clean up both.
+        let wire_id = link_id;
+        let link_id = self.link_origin_ids.remove(&wire_id).unwrap_or(wire_id);
+
         // Clean up all receipt entries for this link
-        self.receipt_tracker.remove_for_link(&link_id);
+        self.receipt_tracker.remove_for_link(&wire_id);
+        if wire_id != link_id {
+            self.receipt_tracker.remove_for_link(&link_id);
+        }
 
         // Clean up pending requests for this link (no timeout events. LinkClosed suffices)
-        self.pending_requests.retain(|_, pr| pr.link_id != link_id);
+        self.pending_requests
+            .retain(|_, pr| pr.link_id != wire_id && pr.link_id != link_id);
 
         // Path recovery for locally-initiated links that never activated
         // (Python Transport.py:472-494)

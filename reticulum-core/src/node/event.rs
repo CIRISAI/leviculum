@@ -328,6 +328,46 @@ pub enum NodeEvent {
 }
 
 impl NodeEvent {
+    /// Mutable access to the event's link id, if it carries one.
+    ///
+    /// Codeberg #66: link-establishment retries re-key a link's wire id;
+    /// the event drain rewrites ids back to the caller-visible original
+    /// so applications can correlate every event with the id they got
+    /// from `connect()`. Exhaustive match (no wildcard) so a new variant
+    /// forces an explicit decision here.
+    pub(crate) fn link_id_mut(&mut self) -> Option<&mut crate::link::LinkId> {
+        match self {
+            NodeEvent::LinkRequest { link_id, .. }
+            | NodeEvent::LinkEstablished { link_id, .. }
+            | NodeEvent::MessageReceived { link_id, .. }
+            | NodeEvent::LinkDataReceived { link_id, .. }
+            | NodeEvent::LinkStale { link_id, .. }
+            | NodeEvent::LinkRecovered { link_id, .. }
+            | NodeEvent::ChannelRetransmit { link_id, .. }
+            | NodeEvent::LinkIdentified { link_id, .. }
+            | NodeEvent::LinkClosed { link_id, .. }
+            | NodeEvent::LinkProofRequested { link_id, .. }
+            | NodeEvent::LinkDeliveryConfirmed { link_id, .. }
+            | NodeEvent::ResourceAdvertised { link_id, .. }
+            | NodeEvent::ResourceTransferStarted { link_id, .. }
+            | NodeEvent::ResourceProgress { link_id, .. }
+            | NodeEvent::ResourceCompleted { link_id, .. }
+            | NodeEvent::ResourceFailed { link_id, .. }
+            | NodeEvent::RequestReceived { link_id, .. }
+            | NodeEvent::ResponseReceived { link_id, .. }
+            | NodeEvent::RequestTimedOut { link_id, .. } => Some(link_id),
+            NodeEvent::AnnounceReceived { .. }
+            | NodeEvent::PathFound { .. }
+            | NodeEvent::PathRequestReceived { .. }
+            | NodeEvent::PathLost { .. }
+            | NodeEvent::PacketReceived { .. }
+            | NodeEvent::PacketDeliveryConfirmed { .. }
+            | NodeEvent::DeliveryFailed { .. }
+            | NodeEvent::PacketProofRequested { .. }
+            | NodeEvent::InterfaceDown(_) => None,
+        }
+    }
+
     /// Stable string identifier for the event variant.
     ///
     /// Used as a scalar token in structured tracing fields where a full
