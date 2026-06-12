@@ -1,4 +1,19 @@
 #!/bin/bash
+# Tier-2 runner (on demand since 2026-06-12; the nightly stays scheduled).
+#
+# Skip-guards: a run silently no-ops if tier2 was already GREEN today or
+# if there are no commits today. For an INTENTIONAL repeat run (e.g.
+# re-validating after an environment change), bypass both guards with
+# either:
+#     bash scripts/run-tier2.sh --force
+#     LEVICULUM_TIER2_FORCE=1 systemctl --user start leviculum-ci-tier2.service
+# (for the systemd form, set the env var via
+#  `systemctl --user set-environment LEVICULUM_TIER2_FORCE=1`, and
+#  unset-environment afterwards).
+FORCE=0
+if [ "${1:-}" = "--force" ] || [ "${LEVICULUM_TIER2_FORCE:-0}" = "1" ]; then
+    FORCE=1
+fi
 LOG_DIR=~/.local/state/leviculum-ci
 mkdir -p "$LOG_DIR"
 # Per-execution log: timestamp + PID guarantees no overlap if two
@@ -20,14 +35,18 @@ fi
 # Rotate logs
 find "$LOG_DIR" -name 'tier*.log' -mtime +14 -delete 2>/dev/null || true
 
-# Skip if already ran successfully today
-if grep -q "$(date +%Y-%m-%d).*tier2 GREEN" "$RESULTS" 2>/dev/null; then
-    exit 0
-fi
+if [ "$FORCE" = "1" ]; then
+    echo "$(date -Iseconds) tier2 FORCED (skip-guards bypassed)" >> "$RESULTS"
+else
+    # Skip if already ran successfully today
+    if grep -q "$(date +%Y-%m-%d).*tier2 GREEN" "$RESULTS" 2>/dev/null; then
+        exit 0
+    fi
 
-# Skip if no commits today
-if [ -z "$(git log --since=midnight --oneline 2>/dev/null)" ]; then
-    exit 0
+    # Skip if no commits today
+    if [ -z "$(git log --since=midnight --oneline 2>/dev/null)" ]; then
+        exit 0
+    fi
 fi
 
 MARKER="$LOG_DIR/lock-contention"
