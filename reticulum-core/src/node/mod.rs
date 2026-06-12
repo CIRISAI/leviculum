@@ -1971,6 +1971,58 @@ mod tests {
         assert!(has_iface_down, "should emit InterfaceDown event");
     }
 
+    // Codeberg #63 minimal test: culling is per-interface — taking one
+    // interface down removes exactly its paths and leaves entries
+    // learned on other interfaces untouched.
+    #[test]
+    fn test_handle_interface_down_leaves_other_interfaces_untouched() {
+        use crate::transport::InterfaceId;
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().enable_transport(true).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+
+        let announce_on = |node: &mut NodeCore<OsRng, MockClock, MemoryStorage>,
+                               iface: usize,
+                               aspect: &str|
+         -> DestinationHash {
+            let identity = Identity::generate(&mut OsRng);
+            let mut dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &[aspect],
+            )
+            .unwrap();
+            let hash = *dest.hash();
+            let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+            let mut buf = [0u8; crate::constants::MTU];
+            let len = announce_packet.pack(&mut buf).unwrap();
+            let _ = node.handle_packet(InterfaceId(iface), &buf[..len]);
+            hash
+        };
+
+        let dest_iface0 = announce_on(&mut node, 0, "downiface");
+        let dest_iface1 = announce_on(&mut node, 1, "upiface");
+        assert!(node.has_path(&dest_iface0));
+        assert!(node.has_path(&dest_iface1));
+
+        let _ = node.handle_interface_down(InterfaceId(0));
+
+        assert!(
+            !node.has_path(&dest_iface0),
+            "path learned on the downed interface must be culled"
+        );
+        assert!(
+            node.has_path(&dest_iface1),
+            "path learned on another interface must survive"
+        );
+    }
+
     #[test]
     fn test_handle_interface_down_no_paths() {
         use crate::transport::InterfaceId;

@@ -9927,11 +9927,15 @@ mod tests {
         // generation counter, not random-blob identity (both injected
         // announces carry fresh random bytes here).
         //
-        // This pins CURRENT behaviour, which matches the Python predicate
-        // (vendored Transport.py: not-expired + newer emission → replace,
-        // regardless of hop count).  The #63 deviation is therefore NOT in
-        // this comparison; the intended-behaviour twin below stays ignored
-        // until the fix direction for #63 is decided.
+        // This pins behaviour that matches the Python predicate (vendored
+        // Transport.py: not-expired + newer emission → replace, regardless
+        // of hop count) — and which the corrected #63 timeline showed to
+        // be CORRECT rerouting: in the scenario the "fresh" 1-hop entry
+        // belonged to an already-dead (silently blocked) link that the
+        // node had not yet detected, and the 2-hop relay path rightly
+        // took over. The #63 fix therefore landed in TCP liveness
+        // detection + interface-death path culling, NOT here; this
+        // predicate is not the bug and has no intended-behaviour twin.
         #[test]
         fn test_fresh_direct_path_flips_to_worse_path_on_newer_emission() {
             use crate::destination::{Destination, DestinationType, Direction};
@@ -9988,51 +9992,6 @@ mod tests {
                 "current behaviour: newer-emission worse-hop announce flips the path"
             );
             assert_eq!(transport.path(&dest_hash).unwrap().interface_index, 1);
-        }
-
-        // Codeberg #63 intended-behaviour twin of the test above. Ignored
-        // until the fix direction is decided (reviewer call): a worse-hop
-        // announce should NOT displace a fresh, responsive direct path,
-        // even with a newer emission timestamp. Enabling this as-is would
-        // deviate from the Python predicate — the decision may instead
-        // land in announce-retry cadence or interface-death path removal
-        // (#63) / tunnel restore (#64), leaving this comparison untouched.
-        #[test]
-        #[ignore = "Codeberg #63: intended behaviour, fix direction undecided"]
-        fn test_fresh_direct_path_survives_worse_path_announce_intended() {
-            use crate::destination::{Destination, DestinationType, Direction};
-
-            let mut transport = make_transport_enabled();
-            let _idx0 = transport.register_interface(Box::new(MockInterface::new("direct", 1)));
-            let _idx1 = transport.register_interface(Box::new(MockInterface::new("relay", 2)));
-
-            let identity = Identity::generate(&mut OsRng);
-            let dest = Destination::new(
-                Some(identity),
-                Direction::In,
-                DestinationType::Single,
-                "testapp",
-                &["recovery"],
-            )
-            .unwrap();
-            let dest_hash = dest.hash().into_bytes();
-
-            let t0 = transport.clock.now_ms();
-            let direct = make_announce_raw_for_dest(&dest, 0, t0);
-            transport.process_incoming(0, &direct).unwrap();
-            assert_eq!(transport.hops_to(&dest_hash), Some(1));
-
-            transport.clock.advance(15_000);
-            let t1 = transport.clock.now_ms();
-            let newer_emission = make_announce_raw_for_dest(&dest, 1, t1);
-            transport.process_incoming(1, &newer_emission).unwrap();
-
-            assert_eq!(
-                transport.hops_to(&dest_hash),
-                Some(1),
-                "intended: a fresh responsive direct path survives a newer worse-hop announce"
-            );
-            assert_eq!(transport.path(&dest_hash).unwrap().interface_index, 0);
         }
 
         #[test]

@@ -29,6 +29,37 @@ use super::InterfaceHandle;
 /// Must be large enough to absorb short bursts during reconnection.
 pub(crate) const TCP_DEFAULT_BUFFER_SIZE: usize = 256;
 
+/// TCP liveness parity with Python Reticulum (Codeberg #63).
+///
+/// Values mirror TCPInterface.py:84-87 / set_timeouts_linux():
+/// TCP_USER_TIMEOUT 24 s, SO_KEEPALIVE with idle 5 s / interval 2 s /
+/// 12 probes. A silently-dead link (e.g. an iptables-dropped path with
+/// no FIN/RST) then surfaces as a read/write error within ~24 s, the
+/// driver marks the interface offline, `handle_interface_down` culls
+/// its path entries, and the reconnect loop takes over — without these
+/// options the kernel defaults let such a connection linger for many
+/// minutes. No config surface yet, by design (reference parity).
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(24);
+const TCP_PROBE_AFTER: Duration = Duration::from_secs(5);
+const TCP_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const TCP_PROBES: u32 = 12;
+
+/// Apply the liveness options above to a TCP socket (std or tokio).
+/// Best-effort by contract at the call sites: a socket that cannot take
+/// the options still works, it just falls back to kernel default
+/// dead-peer detection.
+fn apply_liveness_options<S: std::os::fd::AsFd>(stream: &S) -> io::Result<()> {
+    use socket2::{SockRef, TcpKeepalive};
+    let sock = SockRef::from(stream);
+    let keepalive = TcpKeepalive::new()
+        .with_time(TCP_PROBE_AFTER)
+        .with_interval(TCP_PROBE_INTERVAL)
+        .with_retries(TCP_PROBES);
+    sock.set_tcp_keepalive(&keepalive)?;
+    sock.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
+    Ok(())
+}
+
 /// Process-global gate for fault injection (`--corrupt-every`).
 /// Default `true` so existing invocations are unaffected.
 static CORRUPT_ACTIVE: AtomicBool = AtomicBool::new(true);
@@ -182,6 +213,7 @@ pub(crate) fn spawn_tcp_interface<A: ToSocketAddrs>(
     let std_stream = std::net::TcpStream::connect_timeout(&addr, connect_timeout)?;
     std_stream.set_nonblocking(true)?;
     std_stream.set_nodelay(true)?;
+    apply_liveness_options(&std_stream).ok();
     let stream = tokio::net::TcpStream::from_std(std_stream)?;
 
     Ok(spawn_tcp_interface_from_stream(
@@ -225,6 +257,7 @@ pub(crate) fn spawn_tcp_server(
                             let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
                             let name = format!("tcp_server/{}", peer_addr);
                             stream.set_nodelay(true).ok();
+                            apply_liveness_options(&stream).ok();
                             let mut handle = spawn_tcp_interface_from_stream(
                                 id, name.clone(), stream, buffer_size, corrupt_every,
                             );
@@ -333,6 +366,7 @@ async fn tcp_client_reconnect_task(
         match tokio::net::TcpStream::connect(addr).await {
             Ok(stream) => {
                 stream.set_nodelay(true).ok();
+                apply_liveness_options(&stream).ok();
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
                 attempt = 0;
