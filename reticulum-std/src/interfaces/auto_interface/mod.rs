@@ -207,6 +207,7 @@ fn is_link_local_v6(addr: &Ipv6Addr) -> bool {
 
 /// Get the OS interface index for a NIC name.
 /// Returns 0 on failure.
+#[cfg(unix)]
 fn name_to_index(name: &str) -> u32 {
     use std::ffi::CString;
     let Ok(c_name) = CString::new(name) else {
@@ -215,6 +216,25 @@ fn name_to_index(name: &str) -> u32 {
     // SAFETY: if_nametoindex is a standard POSIX function that takes a
     // null-terminated string and returns the interface index (or 0 on error).
     unsafe { libc::if_nametoindex(c_name.as_ptr()) }
+}
+
+/// Get the OS interface index for a NIC name. Returns 0 on failure.
+///
+/// Windows exposes the same `if_nametoindex` C function from `iphlpapi` (same
+/// signature and 0-on-error contract as the POSIX one used above).
+#[cfg(windows)]
+fn name_to_index(name: &str) -> u32 {
+    use std::ffi::CString;
+    let Ok(c_name) = CString::new(name) else {
+        return 0;
+    };
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn if_nametoindex(interface_name: *const std::os::raw::c_char) -> u32;
+    }
+    // SAFETY: same contract as POSIX `if_nametoindex` — null-terminated input,
+    // returns the interface index or 0 on error.
+    unsafe { if_nametoindex(c_name.as_ptr()) }
 }
 
 // Multicast address derivation
