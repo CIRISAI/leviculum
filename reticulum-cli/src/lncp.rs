@@ -92,11 +92,12 @@ struct Args {
     #[arg(short = 'i')]
     identity: Option<PathBuf>,
 
-    // --- Flags accepted but not yet implemented ---
-    /// Disable transfer progress output
+    /// Fully silent: no progress output and no log output at all
+    /// (equivalent to -qq)
     #[arg(short = 'S', long)]
     silent: bool,
 
+    // --- Flags accepted but not yet implemented ---
     /// Disable automatic compression
     #[arg(short = 'C', long = "no-compress")]
     no_compress: bool,
@@ -122,19 +123,35 @@ struct Args {
     allowed: Vec<String>,
 }
 
-#[tokio::main]
-async fn main() {
-    let args = Args::parse();
-
-    // RUST_LOG env takes precedence; otherwise use -v/-q flags.
-    // Default is "warn" (not "info"), lncp is a user tool, not a daemon.
-    let default_filter = match (args.verbose as i8) - (args.quiet as i8) {
+/// Map -v/-q/--silent to (log filter, progress suppression).
+///
+/// Stacked quietness mirrors Python rncp:
+///   (none)  : progress on, logs at "warn" (lncp is a user tool, not a
+///             daemon — hence not "info")
+///   -q      : progress off, errors only ("error" logs)
+///   -qq     : fully silent — progress off AND the log filter off;
+///             identical to --silent
+///   -v/-vv/… raise the log level as before.
+fn output_levels(verbose: u8, quiet: u8, silent: bool) -> (&'static str, bool) {
+    if silent || quiet >= 2 {
+        return ("off", true);
+    }
+    let filter = match (verbose as i8) - (quiet as i8) {
         3.. => "trace",
         2 => "debug",
         1 => "info",
         0 => "warn",
         _ => "error",
     };
+    (filter, quiet >= 1)
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+
+    // RUST_LOG env takes precedence; otherwise use -v/-q flags.
+    let (default_filter, _) = output_levels(args.verbose, args.quiet, args.silent);
     tracing_subscriber::fmt()
         .compact()
         .with_env_filter(
@@ -177,9 +194,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| daemon_connect_error(&instance_name, &e, args.verbose))?;
     let mut events = node.take_event_receiver().ok_or("no event receiver")?;
 
-    // quiet: u8 (count) from CLI, converted to bool for now.
-    // TODO(Codeberg): differentiate -q / -qq levels in the future.
-    let quiet_bool = args.quiet > 0 || args.silent;
+    let (_, progress_quiet) = output_levels(args.verbose, args.quiet, args.silent);
 
     // Validate flag combinations
     if args.allow_fetch && !args.listen {
@@ -210,7 +225,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &allowed_identities,
             args.announce_interval,
             args.verbose,
-            quiet_bool,
+            progress_quiet,
             args.allow_fetch,
             args.jail.clone(),
             args.phy_rates,
@@ -235,7 +250,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             args.overwrite,
             args.timeout,
             args.verbose,
-            quiet_bool,
+            progress_quiet,
             args.no_compress,
             Some(&identity),
             args.phy_rates,
@@ -260,7 +275,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &dest,
             args.timeout,
             args.verbose,
-            quiet_bool,
+            progress_quiet,
             args.no_compress,
             Some(&identity),
             args.phy_rates,
@@ -378,5 +393,24 @@ mod tests {
     fn test_parse_identity_hashes_invalid_hex() {
         let result = parse_identity_hashes(&["zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_string()]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_output_levels_quietness_mapping() {
+        // default: progress on, warn logs
+        assert_eq!(output_levels(0, 0, false), ("warn", false));
+        // -q: progress off, errors only
+        assert_eq!(output_levels(0, 1, false), ("error", true));
+        // -qq: fully silent
+        assert_eq!(output_levels(0, 2, false), ("off", true));
+        // --silent ≡ -qq, regardless of -v
+        assert_eq!(output_levels(0, 0, true), ("off", true));
+        assert_eq!(output_levels(2, 0, true), ("off", true));
+        // verbosity unchanged
+        assert_eq!(output_levels(1, 0, false), ("info", false));
+        assert_eq!(output_levels(2, 0, false), ("debug", false));
+        assert_eq!(output_levels(3, 0, false), ("trace", false));
+        // -v -q cancel out for the filter; one -q still mutes progress
+        assert_eq!(output_levels(1, 1, false), ("warn", true));
     }
 }
