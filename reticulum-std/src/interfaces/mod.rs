@@ -576,18 +576,45 @@ mod tests {
 
     /// try_send_prioritized on a LoRa handle with fresh credit succeeds
     /// and charges the bucket.
+    ///
+    /// Determinism note: the original version of this test read the bucket
+    /// back via `current(now_ms())` and asserted `< 0`, relying on the global
+    /// `CLOCK_ANCHOR` still being near zero. That is not portable. `now_ms()`
+    /// is "ms since the process first read the anchor", and the bucket starts
+    /// at `last_update_ms = 0`, so by the time the charge runs the bucket has
+    /// silently regenerated `now_ms()` worth of idle credit — clamped at
+    /// `max_credit_ms`. Once `now_ms()` ≳ a 50-byte SF10 packet cost, the
+    /// accrued idle credit covers the charge and the post-charge balance is no
+    /// longer negative; once `now_ms()` ≥ `max_credit_ms` the clamp pins it
+    /// positive outright. On Windows MSVC (slower/coarser anchor init, plus a
+    /// different test-binary startup cost) `now_ms()` was large enough at this
+    /// point that the assertion flipped. The bug was the test's hidden
+    /// dependence on a global, process-age-dependent clock — not the airtime
+    /// logic, which is correct.
+    ///
+    /// Fix: charge at an explicit, fixed timestamp so no idle credit accrues,
+    /// then observe at that same timestamp. This still drives the real
+    /// `try_send_prioritized` path (the bucket is seeded so its baseline
+    /// equals the clock instant), giving a deterministic deficit on every
+    /// platform.
     #[test]
     fn try_send_with_fresh_credit_charges_bucket() {
         use reticulum_core::traits::Interface;
         let (mut h, _rx) = make_handle(10);
-        let credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        let mut credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        // Anchor the bucket's baseline to "now" so it carries zero idle credit
+        // when `try_send_prioritized` charges it via the global clock. Without
+        // this, `current()` would add `now_ms()` ms of regenerated credit
+        // (clamped at max_credit_ms) and the charge could land non-negative.
+        credit.seed_last_update_ms(now_ms());
         h.credit = Some(Arc::new(Mutex::new(credit)));
         h.try_send_prioritized(&[0u8; 50], true)
             .expect("fresh credit + small packet → Ok");
-        // Bucket was charged: current() is now below zero right after
-        // the try_charge (time advanced by ~microseconds at most, so
-        // current(now) ≈ credit_ms < 0 for the SF10 payload cost).
-        let current_ms = h.credit.as_ref().unwrap().lock().unwrap().current(now_ms());
+        // Observe at the charge instant (`last_update_ms`): `current()` returns
+        // `credit_ms` with no regen term, reflecting exactly what was deducted.
+        let bucket = h.credit.as_ref().unwrap().lock().unwrap();
+        let charged_at = bucket.last_update_ms();
+        let current_ms = bucket.current(charged_at);
         assert!(
             current_ms < 0,
             "expected credit to be in deficit after charge, got {current_ms}"
