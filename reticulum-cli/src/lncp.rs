@@ -97,7 +97,6 @@ struct Args {
     #[arg(short = 'S', long)]
     silent: bool,
 
-    // --- Flags accepted but not yet implemented ---
     /// Disable automatic compression
     #[arg(short = 'C', long = "no-compress")]
     no_compress: bool,

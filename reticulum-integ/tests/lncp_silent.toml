@@ -1,0 +1,42 @@
+# lncp -S/--silent end-to-end: a fully-silenced sender must still
+# complete a transfer (the flag mutes progress and logs, nothing else).
+# Integ assertion for the batch-5 quietness levels (-S ≡ -qq); the
+# level mapping itself is unit-tested in lncp.rs (output_levels).
+
+[test]
+name = "lncp_silent"
+description = "lncp push with -S (fully silent) completes over TCP"
+timeout_secs = 300
+
+[nodes.alpha]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bravo]
+type = "rust"
+respond_to_probes = true
+
+[links]
+alpha-bravo = "tcp"
+
+[[steps]]
+action = "sleep"
+duration_secs = 5
+
+[[steps]]
+action = "wait_for_path"
+on = "alpha"
+destination = "bravo.probe"
+timeout_secs = 60
+
+[[steps]]
+action = "file_transfer"
+sender = "alpha"
+receiver = "bravo"
+sender_tool = "lncp"
+receiver_tool = "lncp"
+sender_flags = "-S"
+file_sizes = [4096]
+direction = "a_to_b"
+repeats = 1
+timeout_secs = 120

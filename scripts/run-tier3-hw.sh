@@ -18,11 +18,12 @@
 # Always-restore on EXIT (clean, fail, SIGINT alike) puts the helper back
 # in the all-on default state via `ssh hamster restore-default`.
 #
-# Source-of-truth note: the schneckenschreck VM does NOT see USB
-# disconnects after a hub-port flip (libvirt USB-passthrough cache).
-# `/dev/serial/by-id/...` symlinks persist stale.  This wrapper trusts
-# `ssh hamster status` exclusively and emits the authoritative state
-# into the per-test log as `[CI_HW] hamster_status=...`.
+# Source-of-truth note: since the remove-event fix the VM DOES see USB
+# disconnects after a hub-port flip and the `/dev/serial/by-id/...`
+# symlinks come and go correctly. `ssh hamster status` remains the
+# authoritative view of hub-port POWER state (the VM only sees
+# enumeration), and is still emitted into the per-test log as
+# `[CI_HW] hamster_status=...`.
 
 set -euo pipefail
 
@@ -86,8 +87,9 @@ if ! ssh hamster status >/dev/null 2>&1; then
     cat <<'EOF'
 ERROR: ssh hamster status failed; cannot orchestrate hardware.
 
-Either install Stage 1 on hamster (scripts/install-usbhub-helper.sh +
-authorized_keys line in place per Stage-1 stop-report) or fall back to
+Either install the usbhub-helper on hamster
+(scripts/install-usbhub-helper.sh; needs the authorized_keys entry and
+the RSHTECH board registry — see the helper's --help) or fall back to
 run-tier3.sh (no-hardware mode).
 
 Aborting.
