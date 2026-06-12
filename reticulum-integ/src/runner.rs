@@ -767,29 +767,32 @@ impl TestRunner {
 
 /// A discovered LNode (T114) with its two CDC-ACM ports.
 #[derive(Debug, Clone)]
-struct LNodeDevice {
+pub struct LNodeDevice {
     /// Debug log port (USB interface 00)
-    debug_port: String,
+    pub debug_port: String,
     /// Reticulum serial data port (USB interface 02)
-    data_port: String,
+    pub data_port: String,
     /// USB serial number for deterministic ordering
-    usb_serial: String,
+    pub usb_serial: String,
 }
 
 /// Result of scanning all connected USB serial devices.
 #[derive(Debug, Clone)]
-struct DiscoveredDevices {
+pub struct DiscoveredDevices {
     /// T114 LNode devices, sorted by USB serial number
-    lnodes: Vec<LNodeDevice>,
+    pub lnodes: Vec<LNodeDevice>,
     /// Candidate RNode device paths (confirmed by CMD_DETECT), sorted
-    rnodes: Vec<String>,
+    pub rnodes: Vec<String>,
 }
 
 /// Cached discovery result. CMD_DETECT probing is expensive (up to 6s per
 /// candidate with retries), so we run it once per process and reuse.
 static DISCOVERED: std::sync::OnceLock<DiscoveredDevices> = std::sync::OnceLock::new();
 
-fn get_discovered_devices() -> &'static DiscoveredDevices {
+/// Public for hardware-bound integration tests (e.g. the #65 LNode
+/// instrumentation check) that need the LNode debug ports without a
+/// scenario runner.
+pub fn get_discovered_devices() -> &'static DiscoveredDevices {
     DISCOVERED.get_or_init(discover_devices)
 }
 

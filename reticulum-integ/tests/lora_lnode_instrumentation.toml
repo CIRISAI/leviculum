@@ -1,0 +1,6 @@
+# Profile mapping for the hardware-bound `lora_lnode_instrumentation`
+# test (tests/lnode_instrumentation.rs) — NOT a scenario descriptor.
+# run-tier3-hw.sh resolves the power profile per test fn name from
+# <fn-name>.toml; the test listens on both LNode debug ports, so both
+# LNodes must be powered.
+profile = "lnode_pair"
