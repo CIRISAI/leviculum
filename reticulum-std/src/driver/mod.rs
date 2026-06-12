@@ -425,6 +425,28 @@ pub struct ReticulumNode {
     /// [`wait_for_interface_ready`](Self::wait_for_interface_ready)
     /// and [`wait_for_interfaces_ready`](Self::wait_for_interfaces_ready).
     iface_ready_map: crate::interfaces::InterfaceReadyMap,
+    /// Dedicated, time-enabled runtime that hosts the event loop and every
+    /// interface task. Owning our own runtime means the node works regardless
+    /// of how the *embedding* application built its runtime — e.g. a PyO3 host
+    /// that constructed a current-thread runtime without `enable_time()`, which
+    /// previously panicked the timer-driven event loop (`sleep_until`) and the
+    /// interface timers. Torn down via `shutdown_background()` in `Drop` so the
+    /// runtime is never dropped blocking inside a host async context.
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Drop for ReticulumNode {
+    fn drop(&mut self) {
+        // Tear the node's runtime down without blocking. Dropping a tokio
+        // `Runtime` directly performs a blocking shutdown, which panics if the
+        // drop happens inside another runtime's async context (e.g. the PyO3
+        // host dropping the node from one of its own tasks).
+        // `shutdown_background` aborts the event loop + interface tasks and
+        // returns immediately.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 impl ReticulumNode {
@@ -483,6 +505,7 @@ impl ReticulumNode {
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             iface_online_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
+            runtime: None,
         }
     }
 
@@ -494,6 +517,30 @@ impl ReticulumNode {
         if self.runner_handle.is_some() {
             return Err(Error::Config("node already running".to_string()));
         }
+
+        // Build a dedicated, time-enabled runtime to host the event loop and
+        // all interface tasks. Entering it here routes every `tokio::spawn`
+        // performed by the rest of `start()` — and transitively the child tasks
+        // those spawn — onto this runtime, so the timer-driven event loop and
+        // interface timers work even when the *embedding* runtime was built
+        // without `enable_time()` (the PyO3/edge case that panicked at
+        // `sleep_until`). `start()`'s body is synchronous up to the spawns, so
+        // holding the enter guard across it (no await) is sound.
+        //
+        // Single worker thread: the node's work is async-I/O bound (network +
+        // light per-packet crypto), so one cooperatively-scheduled worker is
+        // sufficient, and it keeps the node from adding `num_cpus` threads on
+        // top of an embedding host's own runtime — that oversubscription, plus
+        // the genuine parallelism a multi-worker pool introduced between the
+        // event loop and the public API, is the kind of thing that surfaces
+        // latent ordering races in a cohabiting host.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("reticulum-node")
+            .build()
+            .map_err(|e| Error::Config(format!("failed to build node runtime: {e}")))?;
+        let enter_guard = runtime.enter();
 
         // Shared monotonic counter for interface IDs.
         // Initialized at interfaces.len() so static and dynamic IDs never collide.
@@ -508,8 +555,20 @@ impl ReticulumNode {
         // to re-announce destinations on the recovered link.
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<InterfaceId>(16);
 
-        // Initialize interfaces, the driver owns them, NOT NodeCore
-        let registry = self.initialize_interfaces(&next_id, &new_iface_tx, &reconnect_tx)?;
+        // Initialize interfaces, the driver owns them, NOT NodeCore.
+        // Interface init is the one fallible step after the runtime exists
+        // (e.g. a TCPServerInterface bind failure). On error, tear the runtime
+        // down with shutdown_background() before propagating — a bare `?` would
+        // drop the live Runtime here, and a blocking Runtime drop inside the
+        // caller's async context panics, masking the real interface error.
+        let registry = match self.initialize_interfaces(&next_id, &new_iface_tx, &reconnect_tx) {
+            Ok(registry) => registry,
+            Err(e) => {
+                drop(enter_guard);
+                runtime.shutdown_background();
+                return Err(e);
+            }
+        };
 
         {
             let mut core = self.inner.lock().unwrap();
@@ -620,6 +679,11 @@ impl ReticulumNode {
         });
 
         self.runner_handle = Some(runner_handle);
+
+        // Release the runtime context now that all tasks are spawned, then keep
+        // the runtime alive in the node so its worker thread keeps driving them.
+        drop(enter_guard);
+        self.runtime = Some(runtime);
 
         Ok(())
     }
@@ -1012,6 +1076,14 @@ impl ReticulumNode {
 
         // Persist state to disk
         self.save_persistent_state();
+
+        // Tear down the node's runtime (non-blocking) now that the event loop
+        // has exited. Clearing it means a subsequent start() builds a fresh
+        // runtime instead of overwriting (and blocking-dropping) a live one in
+        // this async context.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
 
         tracing::info!("ReticulumNode stopped");
         Ok(())
@@ -2539,6 +2611,73 @@ mod tests {
                 other => panic!("expected data #{i}, got {other:?}"),
             }
         }
+    }
+
+    /// Regression: the node's timer-driven event loop (`sleep_until`) and
+    /// interface timers must work even when the *embedding* runtime was built
+    /// without `enable_time()` — the PyO3/edge case that previously panicked
+    /// the event-loop task on its first poll. The node owns its own
+    /// time-enabled, single-worker runtime, so `start()` is independent of how
+    /// the host configured its runtime.
+    #[test]
+    fn event_loop_survives_host_runtime_without_time_driver() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(true)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync");
+
+        // Host runtime deliberately WITHOUT enable_time() (IO only) — mirrors an
+        // embedder that built its runtime without timers.
+        let host = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("host runtime");
+        host.block_on(async {
+            node.start().await.expect("start");
+            // Let the event loop tick on the node's own runtime. OS sleep — the
+            // host runtime has no timer to drive a tokio sleep.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            // Pre-fix the event loop panicked on its first `sleep_until` poll,
+            // so its JoinHandle resolved to a JoinError and stop() returned Err.
+            node.stop()
+                .await
+                .expect("stop — event loop must not have panicked");
+        });
+    }
+
+    /// Regression for the runtime-cleanup-on-error path: when interface init
+    /// fails *after* the node runtime is built, start() must return the error —
+    /// not panic by blocking-dropping the Runtime inside the host's async
+    /// context.
+    #[test]
+    fn start_surfaces_interface_init_error_without_panicking() {
+        // Occupy a port so the node's TCP server bind fails during init.
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let busy: std::net::SocketAddr = occupied.local_addr().expect("local_addr");
+
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(true)
+            .add_tcp_server(busy)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync");
+
+        let host = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("host runtime");
+        host.block_on(async {
+            // Pre-fix this panicked (blocking Runtime drop in async context);
+            // post-fix it returns the bind error cleanly.
+            let result = node.start().await;
+            assert!(
+                result.is_err(),
+                "start() should surface the TCP bind failure, got {result:?}"
+            );
+        });
     }
 
     #[test]
