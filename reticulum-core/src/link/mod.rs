@@ -730,7 +730,7 @@ impl Link {
 
         // Store RTT (convert to microseconds for internal storage)
         self.rtt_us = Some((rtt_seconds * 1_000_000.0) as u64);
-        tracing::debug!(
+        crate::tracing::debug!(
             rtt_ms = (rtt_seconds * 1000.0) as u64,
             "link: handshake RTT measured"
         );

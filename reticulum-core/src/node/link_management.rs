@@ -92,7 +92,7 @@ impl ReceiptTracker {
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
 
-        tracing::debug!(
+        crate::tracing::debug!(
             hash = %HexFmt(&full_hash),
             truncated = %HexFmt(&truncated_hash),
             link = %HexFmt(link_id.as_bytes()),
@@ -230,7 +230,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         let link_id = *link.id();
         if let Err(e) = link.set_destination_keys(dest_signing_key) {
-            tracing::debug!(%e, "set_destination_keys failed");
+            crate::tracing::debug!(%e, "set_destination_keys failed");
         }
         link.set_phase(LinkPhase::PendingOutgoing {
             created_at_ms: now_ms,
@@ -319,7 +319,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
         if let Some(iface_idx) = attached {
             if let Err(e) = self.transport.send_on_interface(iface_idx, &proof) {
-                tracing::debug!(%e, "send_on_interface failed");
+                crate::tracing::debug!(%e, "send_on_interface failed");
             }
         } else {
             self.transport.send_on_all_interfaces(&proof);
@@ -492,13 +492,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Route via attached interface
         if let Some(iface_idx) = attached_iface {
             if let Err(e) = self.transport.send_on_interface(iface_idx, &packet_bytes) {
-                tracing::debug!(%e, "send_on_interface failed");
+                crate::tracing::debug!(%e, "send_on_interface failed");
             }
         } else if let Err(e) = self
             .transport
             .send_to_destination(dest_hash.as_bytes(), &packet_bytes)
         {
-            tracing::warn!(%e, "send_to_destination failed — packet lost");
+            crate::tracing::warn!(%e, "send_to_destination failed — packet lost");
         }
 
         Ok(self.process_events_and_actions())
@@ -563,7 +563,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .map(|d| d.accepts_links())
             .unwrap_or(false);
         if !accepts {
-            tracing::trace!(
+            crate::tracing::trace!(
                 dest = %HexShort(dest_hash.as_bytes()),
                 "Link request ignored, destination does not accept links"
             );
@@ -581,22 +581,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 if let Some(proof) = link.cached_proof() {
                     let proof = proof.to_vec();
                     if let Some(iface_idx) = link.attached_interface() {
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             link = %HexShort(link_id.as_bytes()),
                             "Re-sending proof for duplicate link request"
                         );
                         if let Err(e) = self.transport.send_on_interface(iface_idx, &proof) {
-                            tracing::debug!(%e, "proof re-send failed");
+                            crate::tracing::debug!(%e, "proof re-send failed");
                         }
                     } else {
-                        tracing::warn!(
+                        crate::tracing::warn!(
                             link = %HexShort(link_id.as_bytes()),
                             "Cannot re-send proof: no attached interface"
                         );
                     }
                 }
             } else {
-                tracing::trace!(
+                crate::tracing::trace!(
                     link = %HexShort(link_id.as_bytes()),
                     "Link request ignored, link already exists"
                 );
@@ -616,7 +616,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             &mut self.rng,
             iface_hw_mtu,
         ) else {
-            tracing::warn!(
+            crate::tracing::warn!(
                 link = %HexShort(link_id.as_bytes()),
                 "Dropped malformed link request, failed to parse"
             );
@@ -643,7 +643,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Removed when the link is cleaned up (close, timeout, reject).
         self.transport.register_destination(*link_id.as_bytes());
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "Incoming link request <{}> for <{}> accepted on {}",
             HexShort(link_id.as_bytes()),
             HexShort(dest_hash.as_bytes()),
@@ -663,7 +663,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let link_id = LinkId::new(packet.destination_hash);
         let proof_data = packet.data.as_slice();
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "handle_link_proof: link=<{}> context={:?} proof_len={} iface={}",
             HexShort(link_id.as_bytes()),
             packet.context,
@@ -683,7 +683,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         let Some(link) = self.links.get_mut(&link_id) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "handle_link_proof: link <{}> not found in self.links ({} links tracked)",
                 HexShort(link_id.as_bytes()),
                 self.links.len(),
@@ -693,7 +693,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Must be a pending outgoing link
         if !matches!(link.phase(), LinkPhase::PendingOutgoing { .. }) {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "handle_link_proof: link <{}> phase={:?}, expected PendingOutgoing",
                 HexShort(link_id.as_bytes()),
                 link.phase(),
@@ -701,7 +701,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
         if link.state() != LinkState::Pending || !link.is_initiator() {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "handle_link_proof: link <{}> state={:?} initiator={}, expected Pending+initiator",
                 HexShort(link_id.as_bytes()),
                 link.state(),
@@ -715,7 +715,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Process the proof
         if link.process_proof(proof_data).is_err() {
-            tracing::debug!(
+            crate::tracing::debug!(
                 "handle_link_proof: link <{}> proof verification failed, closing",
                 HexShort(link_id.as_bytes())
             );
@@ -754,7 +754,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.update_keepalive_from_rtt(rtt_seconds_actual);
         link.mark_established(now_secs);
 
-        tracing::debug!(
+        crate::tracing::debug!(
             "Link <{}> established with RTT {}ms",
             HexShort(link_id.as_bytes()),
             measured_rtt_ms
@@ -777,7 +777,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.route_link_packet(&link_id, &rtt_packet);
             }
             Err(e) => {
-                tracing::warn!(
+                crate::tracing::warn!(
                     "handle_link_proof: link <{}> established but build_rtt_packet failed: {:?}",
                     HexShort(link_id.as_bytes()),
                     e,
@@ -795,7 +795,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Handle a data proof packet (PROVE_ALL response)
     fn handle_data_proof(&mut self, link_id: &LinkId, proof_data: &[u8]) {
         if proof_data.len() != PROOF_DATA_SIZE {
-            tracing::debug!(
+            crate::tracing::debug!(
                 len = proof_data.len(),
                 expected = PROOF_DATA_SIZE,
                 "link_mgr: data proof wrong size"
@@ -809,7 +809,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         let mut truncated = [0u8; TRUNCATED_HASHBYTES];
         truncated.copy_from_slice(&proof_hash[..TRUNCATED_HASHBYTES]);
-        tracing::debug!(
+        crate::tracing::debug!(
             proof_hash = %HexFmt(&proof_hash),
             truncated = %HexFmt(&truncated),
             link = %HexFmt(link_id.as_bytes()),
@@ -821,7 +821,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some((receipt_link_id, receipt_full_hash)) =
             self.receipt_tracker.lookup_receipt(&truncated)
         else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 receipts = self.receipt_tracker.len(),
                 "link_mgr: data proof — no matching receipt"
             );
@@ -829,7 +829,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
 
         if receipt_link_id != *link_id {
-            tracing::debug!("link_mgr: data proof — link_id mismatch");
+            crate::tracing::debug!("link_mgr: data proof — link_id mismatch");
             return;
         }
 
@@ -847,7 +847,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // Event only fires when the receipt still exists, a valid proof for
             // an already-expired/removed receipt is silently dropped.
             if let Some(sequence) = self.receipt_tracker.confirm_delivery(&truncated) {
-                tracing::debug!(
+                crate::tracing::debug!(
                     receipts = self.receipt_tracker.len(),
                     "link_mgr: data proof validated — delivered"
                 );
@@ -866,7 +866,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
         } else {
-            tracing::debug!("link_mgr: data proof — signature validation failed");
+            crate::tracing::debug!("link_mgr: data proof — signature validation failed");
         }
     }
 
@@ -881,7 +881,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.try_recover_stale(&link_id, now_secs);
 
         if !self.links.contains_key(&link_id) {
-            tracing::trace!(
+            crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 "Link data packet for unknown link, ignoring"
             );
@@ -944,7 +944,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link.update_keepalive_from_rtt(rtt_secs);
             link.mark_established(now_secs);
             link.set_phase(LinkPhase::Established);
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Link <{}> established (responder), RTT {:.3}s",
                 HexShort(link_id.as_bytes()),
                 rtt_secs
@@ -979,7 +979,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
         let encrypted_data = packet.data.as_slice();
         if link.process_close(encrypted_data).is_ok() {
-            tracing::debug!("Link <{}> closed by peer", HexShort(link_id.as_bytes()));
+            crate::tracing::debug!("Link <{}> closed by peer", HexShort(link_id.as_bytes()));
             let is_initiator = link.is_initiator();
             let destination_hash = *link.destination_hash();
             self.remove_link(&link_id);
@@ -1002,14 +1002,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         now_secs: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
-            tracing::trace!(
+            crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 "Channel packet for unknown link, ignoring"
             );
             return;
         };
         if link.state() != LinkState::Active {
-            tracing::trace!(
+            crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 "Channel packet for non-active link, ignoring"
             );
@@ -1025,7 +1025,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let decrypted_len = match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => len,
             Err(_) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     "Channel packet decryption failed"
                 );
@@ -1051,7 +1051,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
             match channel.receive(&plaintext, full_packet_hash) {
                 Ok(ReceiveOutcome::Delivered(envelope)) => {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         seq = envelope.sequence,
                         msgtype = envelope.msgtype,
                         len = envelope.data.len(),
@@ -1078,7 +1078,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     }
                 }
                 Ok(ReceiveOutcome::Buffered) => {
-                    tracing::debug!("link_mgr: channel message buffered (out-of-order)");
+                    crate::tracing::debug!("link_mgr: channel message buffered (out-of-order)");
                     // No proof, sender will retransmit the gap-filling packet
                 }
                 Ok(ReceiveOutcome::DuplicateBuffered) => {
@@ -1088,7 +1088,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     rx_ring_full = true;
                 }
                 Err(e) => {
-                    tracing::debug!(?e, "link_mgr: channel receive failed");
+                    crate::tracing::debug!(?e, "link_mgr: channel receive failed");
                 }
             };
 
@@ -1133,7 +1133,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(signing_key) = link.proof_signing_key() {
             match link.build_data_proof_packet_with_signing_key(full_packet_hash, signing_key) {
                 Ok(proof) => {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         hash = %HexFmt(full_packet_hash),
                         link = %HexFmt(link_id.as_bytes()),
                         proof_len = proof.len(),
@@ -1142,7 +1142,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     Some(proof)
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    crate::tracing::warn!(
                         hash = %HexFmt(full_packet_hash),
                         link = %HexFmt(link_id.as_bytes()),
                         error = %e,
@@ -1152,7 +1152,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
         } else {
-            tracing::warn!(
+            crate::tracing::warn!(
                 link = %HexFmt(link_id.as_bytes()),
                 "link_mgr: channel proof skipped — no signing key"
             );
@@ -1165,7 +1165,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.rx_ring_full_count += 1;
         let elapsed = now_ms.saturating_sub(self.rx_ring_full_last_log_ms);
         if self.rx_ring_full_last_log_ms == 0 || elapsed >= 5000 {
-            tracing::warn!(
+            crate::tracing::warn!(
                 "link_mgr: channel rx_ring full — {} messages dropped in last {}s (cap={})",
                 self.rx_ring_full_count,
                 elapsed / 1000,
@@ -1185,14 +1185,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         now_secs: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
-            tracing::trace!(
+            crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 "Data packet for unknown link, ignoring"
             );
             return;
         };
         if link.state() != LinkState::Active {
-            tracing::trace!(
+            crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 "Data packet for non-active link, ignoring"
             );
@@ -1237,7 +1237,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
             Err(_) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     "Plain data packet decryption failed"
                 );
@@ -1257,7 +1257,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Only responders accept identify (Python: `if not self.initiator`)
         if link.is_initiator() {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "LinkIdentify rejected: we are initiator"
             );
@@ -1278,7 +1278,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => len,
             Err(_) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     "LinkIdentify decryption failed"
                 );
@@ -1288,7 +1288,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Validate length: exactly 128 bytes (64 public_key + 64 signature)
         if plaintext_len != 128 {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 len = plaintext_len,
                 "LinkIdentify rejected: wrong plaintext length"
@@ -1309,7 +1309,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let identity = match crate::identity::Identity::from_public_key_bytes(public_key) {
             Ok(id) => id,
             Err(e) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     %e,
                     "LinkIdentify rejected: invalid public key"
@@ -1322,14 +1322,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         match identity.verify(&signed_data, signature) {
             Ok(true) => {}
             Ok(false) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     "LinkIdentify rejected: invalid signature"
                 );
                 return;
             }
             Err(e) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     %e,
                     "LinkIdentify rejected: verification error"
@@ -1340,7 +1340,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Store identity on link and emit event
         let identity_hash = *identity.hash();
-        tracing::debug!(
+        crate::tracing::debug!(
             link = %HexShort(link_id.as_bytes()),
             identity = %HexShort(&identity_hash),
             "Link peer identified"
@@ -1389,7 +1389,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => len,
             Err(_) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     "Request packet decryption failed"
                 );
@@ -1404,28 +1404,28 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Parse msgpack
         let mut pos = 0;
         let Some(3) = read_fixarray_len(plaintext, &mut pos) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid array header"
             );
             return;
         };
         let Some(requested_at) = read_float64(plaintext, &mut pos) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid timestamp"
             );
             return;
         };
         let Some(path_hash_bytes) = read_msgpack_bin(plaintext, &mut pos) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid path_hash"
             );
             return;
         };
         if path_hash_bytes.len() != crate::constants::TRUNCATED_HASHBYTES {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 len = path_hash_bytes.len(),
                 "Request: path_hash wrong length"
@@ -1436,7 +1436,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         path_hash.copy_from_slice(path_hash_bytes);
 
         let Some(data_raw) = read_msgpack_raw_value(plaintext, &mut pos) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid data value"
             );
@@ -1452,7 +1452,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Look up handler
         let Some(handler) = self.request_handlers.get(&path_hash) else {
-            tracing::trace!(
+            crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 path_hash = %HexShort(&path_hash),
                 "Request: no handler for path_hash, dropping"
@@ -1463,7 +1463,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Verify destination matches
         let link = self.links.get(&link_id).expect("link checked above");
         if handler.destination_hash != *link.destination_hash() {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Request: destination mismatch, dropping"
             );
@@ -1474,7 +1474,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let path = handler.path.clone();
         match &handler.policy {
             super::request::RequestPolicy::AllowNone => {
-                tracing::trace!(
+                crate::tracing::trace!(
                     link = %HexShort(link_id.as_bytes()),
                     "Request: AllowNone policy, dropping"
                 );
@@ -1489,7 +1489,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     .map(|id| list.contains(id.hash()))
                     .unwrap_or(false);
                 if !allowed {
-                    tracing::debug!(
+                    crate::tracing::debug!(
                         link = %HexShort(link_id.as_bytes()),
                         "Request: identity not in allow list, dropping"
                     );
@@ -1539,7 +1539,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => len,
             Err(_) => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     "Response packet decryption failed"
                 );
@@ -1551,21 +1551,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Parse msgpack
         let mut pos = 0;
         let Some(2) = read_fixarray_len(plaintext, &mut pos) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Response: invalid array header"
             );
             return;
         };
         let Some(request_id_bytes) = read_msgpack_bin(plaintext, &mut pos) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Response: invalid request_id"
             );
             return;
         };
         if request_id_bytes.len() != crate::constants::TRUNCATED_HASHBYTES {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 len = request_id_bytes.len(),
                 "Response: request_id wrong length"
@@ -1576,7 +1576,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id.copy_from_slice(request_id_bytes);
 
         let Some(response_data) = read_msgpack_raw_value(plaintext, &mut pos) else {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Response: invalid response data"
             );
@@ -1585,7 +1585,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Remove pending request
         if self.pending_requests.remove(&request_id).is_none() {
-            tracing::trace!(
+            crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 request_id = %HexShort(&request_id),
                 "Response: no pending request found, ignoring"
@@ -1609,7 +1609,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         let data = packet.data.as_slice();
         if data.len() != 32 {
-            tracing::debug!(
+            crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 len = data.len(),
                 "CacheRequest with invalid length"
@@ -1622,7 +1622,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let proof_bytes = match link.get_cached_resource_proof(&requested_hash) {
             Some(bytes) => bytes.clone(),
             None => {
-                tracing::debug!(
+                crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     hash = %HexShort(&requested_hash),
                     "CacheRequest for unknown hash"
@@ -1632,7 +1632,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
 
         link.record_outbound(now_secs);
-        tracing::debug!(
+        crate::tracing::debug!(
             link = %HexShort(link_id.as_bytes()),
             "Re-sending cached resource proof"
         );
@@ -1686,7 +1686,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link.record_inbound(now_secs);
             self.events
                 .push(NodeEvent::LinkRecovered { link_id: *link_id });
-            tracing::debug!(link = %HexFmt(link_id.as_bytes()), "link_mgr: recovered from stale");
+            crate::tracing::debug!(link = %HexFmt(link_id.as_bytes()), "link_mgr: recovered from stale");
             true
         } else {
             false
@@ -1717,7 +1717,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Already have an incoming resource or pending ADV, ignore
         if link.has_incoming_resource() || link.has_pending_resource() {
-            tracing::debug!("Resource ADV on link with active resource, ignoring");
+            crate::tracing::debug!("Resource ADV on link with active resource, ignoring");
             return;
         }
 
@@ -1727,7 +1727,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => len,
             Err(_) => {
-                tracing::debug!("Resource ADV decryption failed");
+                crate::tracing::debug!("Resource ADV decryption failed");
                 return;
             }
         };
@@ -1737,7 +1737,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let adv = match ResourceAdvertisement::unpack(&plaintext) {
             Ok(adv) => adv,
             Err(_) => {
-                tracing::debug!("Resource ADV parse failed");
+                crate::tracing::debug!("Resource ADV parse failed");
                 return;
             }
         };
@@ -1778,12 +1778,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 });
                             }
                             Err(e) => {
-                                tracing::debug!("Failed to build REQ packet: {e}");
+                                crate::tracing::debug!("Failed to build REQ packet: {e}");
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("Failed to create IncomingResource: {e}");
+                        crate::tracing::debug!("Failed to create IncomingResource: {e}");
                     }
                 }
             }
@@ -1798,7 +1798,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
             ResourceStrategy::AcceptNone => {
-                tracing::trace!("Resource ADV rejected (strategy=AcceptNone)");
+                crate::tracing::trace!("Resource ADV rejected (strategy=AcceptNone)");
             }
         }
 
@@ -1832,7 +1832,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => len,
             Err(_) => {
-                tracing::debug!("Resource REQ decryption failed");
+                crate::tracing::debug!("Resource REQ decryption failed");
                 return;
             }
         };
@@ -1840,7 +1840,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Forward to outgoing resource
         if link.outgoing_resource().is_none() {
-            tracing::debug!("Resource REQ but no outgoing resource");
+            crate::tracing::debug!("Resource REQ but no outgoing resource");
             return;
         }
 
@@ -1888,7 +1888,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     pkts
                 }
                 Err(e) => {
-                    tracing::debug!("Resource handle_request failed: {e}");
+                    crate::tracing::debug!("Resource handle_request failed: {e}");
                     return;
                 }
             }
@@ -1932,7 +1932,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut incoming = match link.take_incoming_resource() {
             Some(r) => r,
             None => {
-                tracing::debug!("Resource data but no incoming resource");
+                crate::tracing::debug!("Resource data but no incoming resource");
                 return;
             }
         };
@@ -1974,7 +1974,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         self.route_link_packet(&link_id, &pkt);
                     }
                     Err(e) => {
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             "Resource REQ packet build failed on link {}: {:?}",
                             link_id,
                             e
@@ -2003,7 +2003,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 }
                             }
                             Err(e) => {
-                                tracing::debug!("Failed to build resource proof: {e}");
+                                crate::tracing::debug!("Failed to build resource proof: {e}");
                             }
                         }
 
@@ -2023,7 +2023,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         });
                     }
                     Err(e) => {
-                        tracing::debug!("Resource assembly failed: {e}");
+                        crate::tracing::debug!("Resource assembly failed: {e}");
                         self.events.push(NodeEvent::ResourceFailed {
                             link_id,
                             resource_hash,
@@ -2035,7 +2035,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
             ResourcePartResult::InvalidPart => {
                 link.set_incoming_resource(incoming);
-                tracing::trace!("Received resource part with no matching hash");
+                crate::tracing::trace!("Received resource part with no matching hash");
             }
         }
 
@@ -2069,7 +2069,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let len = match link.decrypt(encrypted_data, &mut plaintext) {
             Ok(len) => len,
             Err(_) => {
-                tracing::debug!("Resource HMU decryption failed");
+                crate::tracing::debug!("Resource HMU decryption failed");
                 return;
             }
         };
@@ -2079,7 +2079,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut incoming = match link.take_incoming_resource() {
             Some(r) => r,
             None => {
-                tracing::debug!("Resource HMU but no incoming resource");
+                crate::tracing::debug!("Resource HMU but no incoming resource");
                 return;
             }
         };
@@ -2102,7 +2102,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link.set_incoming_resource(incoming);
             }
             Err(e) => {
-                tracing::debug!("Resource HMU processing failed: {e}");
+                crate::tracing::debug!("Resource HMU processing failed: {e}");
                 link.set_incoming_resource(incoming);
             }
         }
@@ -2150,7 +2150,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut res = match link.take_outgoing_resource() {
             Some(r) => r,
             None => {
-                tracing::debug!("Resource proof but no outgoing resource");
+                crate::tracing::debug!("Resource proof but no outgoing resource");
                 return;
             }
         };
@@ -2176,7 +2176,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
             Err(e) => {
                 let resource_hash = *res.resource_hash();
-                tracing::debug!("Resource proof validation failed: {e}");
+                crate::tracing::debug!("Resource proof validation failed: {e}");
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,
@@ -2218,7 +2218,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 if let Some(retry) = self.link_retry_state.get_mut(&link_id) {
                     if retry.remaining > 0 {
                         retry.remaining -= 1;
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             "Link <{}> establishment timed out, resending request ({} retries left)",
                             HexShort(link_id.as_bytes()),
                             retry.remaining
@@ -2259,7 +2259,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
 
             // No retries left (or not initiator): original behavior
-            tracing::debug!(
+            crate::tracing::debug!(
                 "Link <{}> establishment timed out (no retries left)",
                 HexShort(link_id.as_bytes())
             );
@@ -2284,7 +2284,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(link) = self.links.get_mut(link_id) {
             if link.is_initiator() && !link.rtt_confirmed() {
                 link.confirm_rtt();
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Link <{}> RTT confirmed by inbound traffic",
                     HexShort(link_id.as_bytes())
                 );
@@ -2326,7 +2326,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 match link.build_rtt_packet(rtt_secs, &mut self.rng) {
                     Ok(packet) => {
                         link.record_rtt_sent(now_ms);
-                        tracing::debug!(
+                        crate::tracing::debug!(
                             "Resending RTT on link <{}> (attempt {}/{})",
                             HexShort(link_id.as_bytes()),
                             link.rtt_send_count(),
@@ -2335,7 +2335,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         self.route_link_packet(&link_id, &packet);
                     }
                     Err(e) => {
-                        tracing::warn!("RTT retry build failed: {:?}", e);
+                        crate::tracing::warn!("RTT retry build failed: {:?}", e);
                     }
                 }
             }
@@ -2360,7 +2360,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .collect();
 
         for link_id in exhausted {
-            tracing::warn!(
+            crate::tracing::warn!(
                 "RTT delivery failed after {} attempts on link <{}>",
                 RTT_RETRY_MAX_ATTEMPTS + 1,
                 HexShort(link_id.as_bytes()),
@@ -2392,7 +2392,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         for link_id in need_keepalive {
             if let Some(link) = self.links.get_mut(&link_id) {
                 if let Ok(packet) = link.build_keepalive_packet() {
-                    tracing::trace!("Sent keepalive on link <{}>", HexShort(link_id.as_bytes()));
+                    crate::tracing::trace!(
+                        "Sent keepalive on link <{}>",
+                        HexShort(link_id.as_bytes())
+                    );
                     link.record_keepalive_sent(now_secs);
                     self.route_link_packet(&link_id, &packet);
                 }
@@ -2412,7 +2415,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         for link_id in newly_stale {
             if let Some(link) = self.links.get_mut(&link_id) {
-                tracing::debug!(
+                crate::tracing::debug!(
                     "Link <{}> marked stale, no activity",
                     HexShort(link_id.as_bytes())
                 );
@@ -2443,7 +2446,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // link borrow dropped here
 
             if let Some((is_initiator, destination_hash, close_packet)) = close_info {
-                tracing::debug!("Closing stale link <{}>", HexShort(link_id.as_bytes()));
+                crate::tracing::debug!("Closing stale link <{}>", HexShort(link_id.as_bytes()));
                 // Route close packet BEFORE removing link from map
                 if let Some(ref pkt) = close_packet {
                     self.route_link_packet(&link_id, pkt);
@@ -2490,7 +2493,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         data,
                         tries,
                     } => {
-                        tracing::debug!(seq = sequence, "link_mgr: queuing channel retransmit");
+                        crate::tracing::debug!(
+                            seq = sequence,
+                            "link_mgr: queuing channel retransmit"
+                        );
                         // Build retransmission packet
                         let packet = if let Some(link) = self.links.get(&link_id) {
                             link.build_data_packet_with_context(
@@ -2520,7 +2526,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     }
                     ChannelAction::TearDownLink => {
-                        tracing::debug!("link_mgr: channel teardown — closing link");
+                        crate::tracing::debug!("link_mgr: channel teardown — closing link");
                         let (is_initiator, destination_hash) = self
                             .links
                             .get(&link_id)
@@ -2803,7 +2809,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(link) = self.links.get(link_id) {
             if let Some(iface_idx) = link.attached_interface() {
                 if let Err(e) = self.transport.send_on_interface(iface_idx, data) {
-                    tracing::debug!(%e, "send_on_interface failed");
+                    crate::tracing::debug!(%e, "send_on_interface failed");
                 }
             } else {
                 let dest_hash = *link.destination_hash();
@@ -2811,7 +2817,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     .transport
                     .send_to_destination(dest_hash.as_bytes(), data)
                 {
-                    tracing::warn!(%e, "send_to_destination failed — packet lost");
+                    crate::tracing::warn!(%e, "send_to_destination failed — packet lost");
                 }
             }
         }
@@ -2847,7 +2853,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             tag[..8].copy_from_slice(&now.to_be_bytes());
             tag[8..16].copy_from_slice(&dest_hash[..8]);
             if let Err(e) = self.transport.request_path(&dest_hash, None, &tag) {
-                tracing::debug!(%e, "path request failed (best-effort)");
+                crate::tracing::debug!(%e, "path request failed (best-effort)");
             }
         }
 
@@ -2868,7 +2874,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 Some(buf)
             }
             Err(e) => {
-                tracing::warn!(?e, "repack_packet failed — dropping packet");
+                crate::tracing::warn!(?e, "repack_packet failed — dropping packet");
                 None
             }
         }
