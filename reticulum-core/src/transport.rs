@@ -1197,13 +1197,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     HexShort(&packet.destination_hash),
                     self.iface_name(interface_index)
                 );
-            } else {
-                tracing::trace!(
-                    "Dropped duplicate packet for <{}> on {}",
-                    HexShort(&packet.destination_hash),
-                    self.iface_name(interface_index)
-                );
             }
+            // Structured at DEBUG: a dedup drop is load-bearing forensic
+            // signal — identical link-request retries dying here was
+            // invisible at scenario verbosity for the whole #66 analysis
+            // (the old trace! line). Covers the LRPROOF case too.
+            tracing::debug!(
+                event = "DEDUP_DROP",
+                dst = %HexShort(&packet.destination_hash),
+                iface = %self.iface_name(interface_index),
+                r#type = ?packet.flags.packet_type,
+                context = ?packet.context,
+            );
             self.stats.packets_dropped += 1;
             return Ok(());
         }

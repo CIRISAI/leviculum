@@ -149,6 +149,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PKT_FORWARD",
         required_keys: &["dst", "hops", "iface_in", "iface_out", "next_hop", "type"],
     },
+    // Codeberg #66 observability: duplicate-hash drop in
+    // process_incoming. Deliberately its own event name (not
+    // PKT_DROP reason=duplicate): PKT_DROP's schema is
+    // forwarding-specific (iface_in/iface_out pairing), and the
+    // #66 failure class must be greppable by name alone.
+    EventSchema {
+        name: "DEDUP_DROP",
+        required_keys: &["dst", "iface", "type", "context"],
+    },
     // Codeberg #50 Bug-A forensic instrumentation.  Emitted by
     // `reticulum-integ/src/runner.rs::silence_unused_lnode` at function
     // entry and at every exit branch; lets jl/jldiff diff between
