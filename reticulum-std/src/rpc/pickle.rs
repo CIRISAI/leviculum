@@ -1,12 +1,43 @@
-//! Pickle serialization for RPC request/response dicts
+//! RPC request/response serialization (pickle + msgpack).
 //!
-//! Uses `serde_pickle` to parse Python pickle dicts into typed Rust enums
-//! and serialize response dicts back to pickle bytes.
+//! RNS migrated its shared-instance RPC codec from Python `pickle` to
+//! `RNS.vendor.umsgpack` (standard msgpack). To interoperate with both legacy
+//! (pickle) and current (msgpack, RNS 1.3.x+) Python-RNS peers, requests are
+//! decoded by sniffing the leading byte, and the response is encoded back in
+//! the same codec the request arrived in.
+//!
+//! Internally, requests parse into the typed [`RpcRequest`] enum and handlers
+//! build responses as a `serde_pickle::Value` tree (a convenient tagged value
+//! model); for msgpack peers that tree is transcoded to `rmpv::Value`.
 
 use serde_pickle::value::{HashableValue, Value};
 use std::collections::BTreeMap;
 
 use super::error::RpcError;
+
+/// Which wire codec a peer speaks for shared-instance RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Codec {
+    /// Python `pickle` — legacy RNS. The request stream begins with the `0x80`
+    /// PROTO opcode (protocol >= 2, which every modern pickle uses).
+    Pickle,
+    /// msgpack (`RNS.vendor.umsgpack`) — RNS 1.3.x and later.
+    Msgpack,
+}
+
+/// Sniff the request codec from the leading byte.
+///
+/// Every modern pickle stream (protocol >= 2) begins with the `0x80` PROTO
+/// opcode. A msgpack RPC request is a *non-empty* map, whose header is
+/// `0x81..=0x8f` (fixmap) or `0xde`/`0xdf` (map16/map32) — never `0x80`, which
+/// is an empty map (no RPC request is empty). So a leading `0x80` unambiguously
+/// means pickle.
+fn detect_codec(data: &[u8]) -> Codec {
+    match data.first() {
+        Some(0x80) => Codec::Pickle,
+        _ => Codec::Msgpack,
+    }
+}
 
 /// Parsed RPC request.
 ///
@@ -74,11 +105,22 @@ pub(crate) enum RpcRequest {
     },
 }
 
-/// Parse an RPC request from pickle bytes.
-pub(crate) fn parse_request(data: &[u8]) -> Result<RpcRequest, RpcError> {
-    let value: Value = serde_pickle::value_from_slice(data, Default::default())
-        .map_err(|e| RpcError::Pickle(format!("deserialize: {}", e)))?;
+/// Parse an RPC request, auto-detecting pickle vs msgpack.
+///
+/// Returns the typed request together with the codec it arrived in, so the
+/// caller can encode the response to match (see [`serialize_response`]).
+pub(crate) fn parse_request(data: &[u8]) -> Result<(RpcRequest, Codec), RpcError> {
+    let codec = detect_codec(data);
+    let value = match codec {
+        Codec::Pickle => serde_pickle::value_from_slice(data, Default::default())
+            .map_err(|e| RpcError::Pickle(format!("deserialize: {}", e)))?,
+        Codec::Msgpack => msgpack_to_value(data)?,
+    };
+    Ok((request_from_value(value)?, codec))
+}
 
+/// Dispatch a decoded request dict (codec-agnostic) into a typed [`RpcRequest`].
+fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
     let dict = match value {
         Value::Dict(d) => d,
         _ => return Err(RpcError::InvalidFormat("expected dict".into())),
@@ -190,10 +232,142 @@ pub(crate) fn parse_request(data: &[u8]) -> Result<RpcRequest, RpcError> {
     Err(RpcError::InvalidFormat("unrecognized request".into()))
 }
 
-/// Serialize an RPC response value to pickle bytes.
-pub(crate) fn serialize_response(value: &Value) -> Result<Vec<u8>, RpcError> {
-    serde_pickle::value_to_vec(value, Default::default())
-        .map_err(|e| RpcError::Pickle(format!("serialize: {}", e)))
+/// Serialize an RPC response value in the given codec.
+pub(crate) fn serialize_response(value: &Value, codec: Codec) -> Result<Vec<u8>, RpcError> {
+    match codec {
+        Codec::Pickle => serde_pickle::value_to_vec(value, Default::default())
+            .map_err(|e| RpcError::Pickle(format!("serialize: {}", e))),
+        Codec::Msgpack => {
+            let mv = value_to_rmpv(value)?;
+            let mut buf = Vec::new();
+            rmpv::encode::write_value(&mut buf, &mv)
+                .map_err(|e| RpcError::InvalidFormat(format!("msgpack encode: {}", e)))?;
+            Ok(buf)
+        }
+    }
+}
+
+// Codec transcoding: handlers and the request dispatcher both work in terms of
+// `serde_pickle::Value`; these bridge that model to/from `rmpv::Value` so the
+// msgpack path reuses the exact same request parsing and response builders.
+
+/// Decode msgpack bytes into the shared `serde_pickle::Value` tree.
+fn msgpack_to_value(data: &[u8]) -> Result<Value, RpcError> {
+    let mv = rmpv::decode::read_value(&mut &data[..])
+        .map_err(|e| RpcError::InvalidFormat(format!("msgpack decode: {}", e)))?;
+    rmpv_to_value(&mv)
+}
+
+fn rmpv_to_value(v: &rmpv::Value) -> Result<Value, RpcError> {
+    use rmpv::Value as M;
+    Ok(match v {
+        M::Nil => Value::None,
+        M::Boolean(b) => Value::Bool(*b),
+        M::Integer(i) => {
+            if let Some(n) = i.as_i64() {
+                Value::I64(n)
+            } else if let Some(n) = i.as_u64() {
+                Value::I64(n as i64)
+            } else {
+                return Err(RpcError::InvalidFormat(
+                    "msgpack integer out of range".into(),
+                ));
+            }
+        }
+        M::F32(f) => Value::F64(*f as f64),
+        M::F64(f) => Value::F64(*f),
+        M::String(s) => Value::String(
+            s.as_str()
+                .ok_or_else(|| RpcError::InvalidFormat("non-utf8 msgpack string".into()))?
+                .to_string(),
+        ),
+        M::Binary(b) => Value::Bytes(b.clone()),
+        M::Array(a) => Value::List(a.iter().map(rmpv_to_value).collect::<Result<_, _>>()?),
+        M::Map(m) => {
+            let mut dict = BTreeMap::new();
+            for (k, val) in m {
+                dict.insert(rmpv_to_hashable(k)?, rmpv_to_value(val)?);
+            }
+            Value::Dict(dict)
+        }
+        M::Ext(..) => {
+            return Err(RpcError::InvalidFormat(
+                "unexpected msgpack ext type".into(),
+            ))
+        }
+    })
+}
+
+fn rmpv_to_hashable(v: &rmpv::Value) -> Result<HashableValue, RpcError> {
+    use rmpv::Value as M;
+    Ok(match v {
+        M::String(s) => HashableValue::String(
+            s.as_str()
+                .ok_or_else(|| RpcError::InvalidFormat("non-utf8 msgpack key".into()))?
+                .to_string(),
+        ),
+        M::Binary(b) => HashableValue::Bytes(b.clone()),
+        M::Boolean(b) => HashableValue::Bool(*b),
+        M::Integer(i) => {
+            HashableValue::I64(i.as_i64().ok_or_else(|| {
+                RpcError::InvalidFormat("msgpack integer key out of range".into())
+            })?)
+        }
+        _ => {
+            return Err(RpcError::InvalidFormat(
+                "unsupported msgpack map key".into(),
+            ))
+        }
+    })
+}
+
+/// Transcode a `serde_pickle::Value` response tree into `rmpv::Value`.
+///
+/// Preserves the str-vs-bytes distinction RNS relies on: pickle strings become
+/// msgpack `str` and pickle bytes become msgpack `bin`, so umsgpack decodes
+/// them back to `str`/`bytes` respectively.
+fn value_to_rmpv(v: &Value) -> Result<rmpv::Value, RpcError> {
+    use rmpv::Value as M;
+    Ok(match v {
+        Value::None => M::Nil,
+        Value::Bool(b) => M::Boolean(*b),
+        Value::I64(n) => M::Integer((*n).into()),
+        Value::F64(f) => M::F64(*f),
+        Value::String(s) => M::String(s.clone().into()),
+        Value::Bytes(b) => M::Binary(b.clone()),
+        Value::List(items) | Value::Tuple(items) => {
+            M::Array(items.iter().map(value_to_rmpv).collect::<Result<_, _>>()?)
+        }
+        Value::Dict(d) => {
+            let mut pairs = Vec::with_capacity(d.len());
+            for (k, val) in d {
+                pairs.push((hashable_to_rmpv(k)?, value_to_rmpv(val)?));
+            }
+            M::Map(pairs)
+        }
+        other => {
+            return Err(RpcError::InvalidFormat(format!(
+                "cannot msgpack-encode response value: {:?}",
+                other
+            )))
+        }
+    })
+}
+
+fn hashable_to_rmpv(v: &HashableValue) -> Result<rmpv::Value, RpcError> {
+    use rmpv::Value as M;
+    Ok(match v {
+        HashableValue::String(s) => M::String(s.clone().into()),
+        HashableValue::Bytes(b) => M::Binary(b.clone()),
+        HashableValue::Bool(b) => M::Boolean(*b),
+        HashableValue::I64(n) => M::Integer((*n).into()),
+        other => {
+            return Err(RpcError::InvalidFormat(format!(
+                "unsupported msgpack map key: {:?}",
+                other
+            )))
+        }
+    })
 }
 
 // Pickle dict helpers
@@ -297,14 +471,14 @@ mod tests {
     #[test]
     fn test_parse_get_interface_stats() {
         let data = build_get_request("interface_stats");
-        let req = parse_request(&data).unwrap();
+        let req = parse_request(&data).unwrap().0;
         assert!(matches!(req, RpcRequest::GetInterfaceStats));
     }
 
     #[test]
     fn test_parse_get_link_count() {
         let data = build_get_request("link_count");
-        let req = parse_request(&data).unwrap();
+        let req = parse_request(&data).unwrap().0;
         assert!(matches!(req, RpcRequest::GetLinkCount));
     }
 
@@ -315,7 +489,7 @@ mod tests {
             (pickle_str_key("max_hops"), pickle_int(5)),
         ]);
         let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
-        let req = parse_request(&data).unwrap();
+        let req = parse_request(&data).unwrap().0;
         match req {
             RpcRequest::GetPathTable { max_hops } => assert_eq!(max_hops, Some(5)),
             other => panic!("expected GetPathTable, got {:?}", other),
@@ -326,7 +500,7 @@ mod tests {
     fn test_parse_get_next_hop() {
         let hash = vec![0xAB; 16];
         let data = build_get_request_with_bytes("next_hop", "destination_hash", &hash);
-        let req = parse_request(&data).unwrap();
+        let req = parse_request(&data).unwrap().0;
         match req {
             RpcRequest::GetNextHop { destination_hash } => assert_eq!(destination_hash, hash),
             other => panic!("expected GetNextHop, got {:?}", other),
@@ -341,7 +515,7 @@ mod tests {
             (pickle_str_key("destination_hash"), pickle_bytes(&hash)),
         ]);
         let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
-        let req = parse_request(&data).unwrap();
+        let req = parse_request(&data).unwrap().0;
         match req {
             RpcRequest::DropPath { destination_hash } => assert_eq!(destination_hash, hash),
             other => panic!("expected DropPath, got {:?}", other),
@@ -357,7 +531,7 @@ mod tests {
             (pickle_str_key("reason"), pickle_str("testing")),
         ]);
         let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
-        let req = parse_request(&data).unwrap();
+        let req = parse_request(&data).unwrap().0;
         match req {
             RpcRequest::BlackholeIdentity {
                 identity_hash,
@@ -386,7 +560,7 @@ mod tests {
             (pickle_str_key("transport_uptime"), pickle_float(123.456)),
             (pickle_str_key("interfaces"), pickle_list(vec![])),
         ]);
-        let bytes = serialize_response(&response).unwrap();
+        let bytes = serialize_response(&response, Codec::Pickle).unwrap();
         let parsed: Value = serde_pickle::value_from_slice(&bytes, Default::default()).unwrap();
         match parsed {
             Value::Dict(d) => {
@@ -395,5 +569,106 @@ mod tests {
             }
             _ => panic!("expected dict"),
         }
+    }
+
+    // msgpack codec (RNS 1.3.x) — mirrors `RNS.vendor.umsgpack`.
+
+    /// Build a msgpack `{"get": <command>}` request the way RNS does.
+    fn msgpack_get_request(command: &str) -> Vec<u8> {
+        let v = rmpv::Value::Map(vec![(rmpv::Value::from("get"), rmpv::Value::from(command))]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &v).unwrap();
+        buf
+    }
+
+    #[test]
+    fn test_detect_codec_pickle_vs_msgpack() {
+        // Pickle protocol-2 stream begins with the 0x80 PROTO opcode.
+        assert_eq!(
+            detect_codec(&build_get_request("interface_stats")),
+            Codec::Pickle
+        );
+        // msgpack fixmap-with-1-entry begins with 0x81.
+        let mp = msgpack_get_request("interface_stats");
+        assert_eq!(mp[0], 0x81);
+        assert_eq!(detect_codec(&mp), Codec::Msgpack);
+    }
+
+    #[test]
+    fn test_parse_msgpack_get_request() {
+        let data = msgpack_get_request("interface_stats");
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        assert!(matches!(req, RpcRequest::GetInterfaceStats));
+    }
+
+    #[test]
+    fn test_parse_msgpack_path_table_with_max_hops() {
+        // Mirrors RNS 1.3.x: {"get": "path_table", "max_hops": 5}
+        let v = rmpv::Value::Map(vec![
+            (rmpv::Value::from("get"), rmpv::Value::from("path_table")),
+            (rmpv::Value::from("max_hops"), rmpv::Value::from(5i64)),
+        ]);
+        let mut data = Vec::new();
+        rmpv::encode::write_value(&mut data, &v).unwrap();
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        assert!(matches!(
+            req,
+            RpcRequest::GetPathTable { max_hops: Some(5) }
+        ));
+    }
+
+    #[test]
+    fn test_parse_msgpack_bin_field_maps_to_bytes() {
+        // destination_hash arrives as a msgpack bin -> Value::Bytes
+        let hash = vec![0xABu8; 16];
+        let v = rmpv::Value::Map(vec![
+            (rmpv::Value::from("get"), rmpv::Value::from("next_hop")),
+            (
+                rmpv::Value::from("destination_hash"),
+                rmpv::Value::Binary(hash.clone()),
+            ),
+        ]);
+        let mut data = Vec::new();
+        rmpv::encode::write_value(&mut data, &v).unwrap();
+        let (req, _) = parse_request(&data).unwrap();
+        match req {
+            RpcRequest::GetNextHop { destination_hash } => assert_eq!(destination_hash, hash),
+            other => panic!("expected GetNextHop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_serialize_response_msgpack_round_trip() {
+        // str must encode as msgpack `str` and bytes as msgpack `bin` so that
+        // umsgpack decodes them back to Python str/bytes respectively.
+        let response = pickle_dict(vec![
+            (pickle_str_key("transport_id"), pickle_bytes(&[0x42; 16])),
+            (pickle_str_key("transport_uptime"), pickle_float(123.456)),
+            (pickle_str_key("name"), pickle_str("iface0")),
+            (pickle_str_key("interfaces"), pickle_list(vec![])),
+        ]);
+        let bytes = serialize_response(&response, Codec::Msgpack).unwrap();
+
+        let decoded = rmpv::decode::read_value(&mut &bytes[..]).unwrap();
+        let map = match decoded {
+            rmpv::Value::Map(m) => m,
+            other => panic!("expected map, got {:?}", other),
+        };
+        let get = |k: &str| {
+            map.iter()
+                .find(|(key, _)| key.as_str() == Some(k))
+                .map(|(_, v)| v)
+        };
+        assert!(
+            matches!(get("transport_id"), Some(rmpv::Value::Binary(_))),
+            "bytes must encode as msgpack bin"
+        );
+        assert!(
+            matches!(get("name"), Some(rmpv::Value::String(_))),
+            "str must encode as msgpack str"
+        );
+        assert!(matches!(get("interfaces"), Some(rmpv::Value::Array(_))));
     }
 }

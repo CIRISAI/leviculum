@@ -126,9 +126,9 @@ async fn handle_rpc_connection(
     server_handshake(&mut stream, authkey).await?;
 
     let request_bytes = read_message(&mut stream).await?;
-    let request = parse_request(&request_bytes)?;
+    let (request, codec) = parse_request(&request_bytes)?;
 
-    tracing::debug!("RPC request: {:?}", request);
+    tracing::debug!("RPC request: {:?} ({:?})", request, codec);
 
     let response_bytes = {
         let mut core = core.lock().unwrap();
@@ -143,6 +143,7 @@ async fn handle_rpc_connection(
             iface_stats_map,
             iface_online_map,
             peer_count,
+            codec,
         )?
     };
 

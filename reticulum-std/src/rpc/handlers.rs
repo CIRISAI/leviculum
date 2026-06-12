@@ -18,6 +18,7 @@ pub(super) fn handle_request(
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
     auto_peer_count: usize,
+    codec: Codec,
 ) -> Result<Vec<u8>, RpcError> {
     let response = match request {
         // Full implementations
@@ -77,7 +78,7 @@ pub(super) fn handle_request(
         RpcRequest::DestinationDataUnretain { .. } => pickle_bool(true),
     };
 
-    serialize_response(&response)
+    serialize_response(&response, codec)
 }
 
 // Interface Stats (rnstatus)
