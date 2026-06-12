@@ -4,7 +4,6 @@
 *.deb
 reticulum-nrf/target/
 reticulum-nrf/Cargo.lock
-rust_out
 **/*.rs.bk
 
 # Generated headers (cbindgen)

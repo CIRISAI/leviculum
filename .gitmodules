@@ -5,9 +5,6 @@
 [submodule "vendor/RNode_Firmware"]
 	path = vendor/RNode_Firmware
 	url = https://github.com/markqvist/RNode_Firmware.git
-[submodule "vendor/Heltec_nRF52"]
-	path = vendor/Heltec_nRF52
-	url = https://github.com/HelTecAutomation/Heltec_nRF52.git
 [submodule "vendor/LXMF"]
 	path = vendor/LXMF
 	url = https://github.com/markqvist/LXMF.git
