@@ -66,6 +66,7 @@ async fn main(spawner: Spawner) {
     let serial = reticulum_nrf::usb::init(&spawner, p.USBD, vbus, &t114::CONFIG);
 
     log_critical!("leviculum T114 booting");
+    log_critical!("[PANIC_COUNT] total={}", reticulum_nrf::panic_count());
     reticulum_nrf::log_irq_priorities();
 
     if let Some(pm) = hardfault_pm {
@@ -138,6 +139,7 @@ async fn main(spawner: Spawner) {
     let initial_path_len = node.path_count();
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
     spawner.must_spawn(boot_log_repeater(initial_path_len));
+    spawner.must_spawn(reticulum_nrf::heap_watermark_task());
 
     if !identity_loaded {
         use reticulum_core::identity_store::IdentityStore;

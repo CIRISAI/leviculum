@@ -77,6 +77,7 @@ async fn main(spawner: Spawner) {
     let serial = reticulum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
 
     log_critical!("leviculum RAK4631 booting");
+    log_critical!("[PANIC_COUNT] total={}", reticulum_nrf::panic_count());
     reticulum_nrf::log_irq_priorities();
 
     if let Some(pm) = hardfault_pm {
@@ -175,6 +176,7 @@ async fn main(spawner: Spawner) {
     let initial_path_len = node.path_count();
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
     spawner.must_spawn(boot_log_repeater(initial_path_len));
+    spawner.must_spawn(reticulum_nrf::heap_watermark_task());
     spawner.must_spawn(diag_mem_log());
 
     if !identity_loaded {

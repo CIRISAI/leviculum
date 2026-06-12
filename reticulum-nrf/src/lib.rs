@@ -177,6 +177,87 @@ pub fn heap_stats() -> (usize, usize) {
     (HEAP.used(), HEAP.free())
 }
 
+/// High-watermark of heap usage since boot (bytes). Updated by
+/// [`heap_watermark_task`]; resets with every boot — the periodic
+/// `[HEAP]` log lines (which land in the persistent tail) carry the
+/// history across resets. Codeberg #65 instrumentation.
+static HEAP_WATERMARK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Sample the heap, update the high-watermark, and return
+/// `(used, free, watermark)`.
+pub fn heap_watermark_sample() -> (usize, usize, usize) {
+    let (used, free) = heap_stats();
+    let watermark = HEAP_WATERMARK
+        .fetch_max(used, core::sync::atomic::Ordering::Relaxed)
+        .max(used);
+    (used, free, watermark)
+}
+
+/// Periodic heap telemetry (Codeberg #65): one `[HEAP]` line every 30 s
+/// into the normal log path, which feeds both the USB debug capture and
+/// the persistent tail in `.uninit` — so an OOM panic's post-mortem boot
+/// replays the heap trajectory leading up to it. Strictly additive: the
+/// cadence is coarse and the sampling is two atomic loads; the alloc
+/// path itself is untouched.
+#[embassy_executor::task]
+pub async fn heap_watermark_task() {
+    loop {
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(30)).await;
+        let (used, free, watermark) = heap_watermark_sample();
+        crate::log::log_fmt(
+            "[HEAP] ",
+            format_args!("used={used} free={free} watermark={watermark} size={HEAP_SIZE}"),
+        );
+    }
+}
+
+/// Persistent panic counter (Codeberg #65): lives in `.uninit` next to
+/// the post-mortems and — unlike them — is NOT cleared by the boot-time
+/// read, so it accumulates across panic/HardFault soft-reset cycles
+/// until power loss. Cold boots start at 0 via the magic check.
+#[repr(C)]
+struct PanicCountRaw {
+    magic: u32,
+    count: u32,
+}
+
+const PANIC_COUNT_MAGIC: u32 = 0xC01D_FACE;
+
+#[link_section = ".uninit"]
+static mut PANIC_COUNT: core::mem::MaybeUninit<PanicCountRaw> = core::mem::MaybeUninit::uninit();
+
+/// Increment the persistent panic counter and return the new value.
+/// Called on every panic and HardFault path before the soft-reset.
+/// Volatile raw-pointer access only — runs in fault context.
+fn bump_panic_count() -> u32 {
+    unsafe {
+        let p = core::ptr::addr_of_mut!(PANIC_COUNT).cast::<PanicCountRaw>();
+        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
+        let prev = if magic == PANIC_COUNT_MAGIC {
+            core::ptr::read_volatile(core::ptr::addr_of!((*p).count))
+        } else {
+            0
+        };
+        let next = prev.wrapping_add(1);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).count), next);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), PANIC_COUNT_MAGIC);
+        next
+    }
+}
+
+/// Read the persistent panic counter WITHOUT clearing it (boot banner,
+/// debug captures). 0 on cold boot or never-panicked.
+pub fn panic_count() -> u32 {
+    unsafe {
+        let p = core::ptr::addr_of!(PANIC_COUNT).cast::<PanicCountRaw>();
+        if core::ptr::read_volatile(core::ptr::addr_of!((*p).magic)) == PANIC_COUNT_MAGIC {
+            core::ptr::read_volatile(core::ptr::addr_of!((*p).count))
+        } else {
+            0
+        }
+    }
+}
+
 /// Returns approximate unused stack bytes (in 4-byte units, summed).
 /// Requires `paint_stack()` to have been called at boot.
 ///
@@ -357,6 +438,8 @@ mod panic_handler {
 
     #[panic_handler]
     fn panic(info: &PanicInfo) -> ! {
+        // Codeberg #65: count every panic across soft-reset cycles.
+        super::bump_panic_count();
         // Capture the panic message into `.uninit` so the next boot can
         // log it. LOG_CHANNEL is unusable here — the executor is dead
         // and would never drain it.
@@ -486,6 +569,8 @@ pub fn take_hardfault_postmortem() -> Option<HardfaultPostMortem> {
 #[cfg(not(test))]
 #[cortex_m_rt::exception]
 unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
+    // Codeberg #65: count every HardFault across soft-reset cycles.
+    bump_panic_count();
     // Save register snapshot first — even if the LED arming is absent
     // (unlikely on a configured board), the post-mortem is the
     // diagnostic of record.
