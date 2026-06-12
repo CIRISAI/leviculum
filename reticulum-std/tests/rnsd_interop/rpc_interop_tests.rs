@@ -199,9 +199,24 @@ async fn test_rnstatus_json_against_rust_daemon() {
         );
     }
 
-    // Parse as JSON and verify structure
-    let json: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("rnstatus --json should return valid JSON");
+    // Parse as JSON and verify structure.
+    //
+    // If this fails with empty stdout / EOF, the most likely cause is that our
+    // daemon emitted a `bytes`-typed value at a position rnstatus.py's shallow
+    // bytes->hexrep conversion loop does not reach (it only descends one level
+    // into the top-level `interfaces` list). `json.dumps` then raises
+    // "Object of type bytes is not JSON serializable", producing no stdout.
+    // We surface stdout/stderr so that mode is diagnosable in CI rather than a
+    // bare "EOF while parsing" with no context.
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "rnstatus --json should return valid JSON, but failed to parse: {e}\n\
+             === STDOUT (len {}) ===\n{}\n=== STDERR ===\n{}",
+            stdout.len(),
+            stdout,
+            stderr
+        )
+    });
 
     assert!(
         json.get("interfaces").is_some(),
