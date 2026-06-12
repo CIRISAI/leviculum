@@ -168,6 +168,15 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// Cleanup: removed on (a) successful proof, (b) all retries exhausted,
     /// (c) remove_link() when the link is torn down.
     link_retry_state: BTreeMap<LinkId, link_management::LinkRetryState>,
+    /// Caller-visible link-id aliases (old id → current id).
+    ///
+    /// Codeberg #66: a link-establishment retry regenerates the
+    /// ephemeral keys, which changes the wire link id. The `links` map
+    /// is keyed by the CURRENT wire id (inbound proof/data lookups stay
+    /// natural), and ids previously handed to callers (`connect()`
+    /// return value, LinkHandle) resolve through this map. Entries are
+    /// dropped when their target link is removed.
+    link_id_aliases: BTreeMap<LinkId, LinkId>,
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
@@ -215,6 +224,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             request_handlers: BTreeMap::new(),
             pending_requests: BTreeMap::new(),
             link_retry_state: BTreeMap::new(),
+            link_id_aliases: BTreeMap::new(),
             max_incoming_resource_size,
         }
     }
@@ -2366,6 +2376,201 @@ mod tests {
             )
         });
         assert!(has_closed, "should emit LinkClosed with Timeout");
+    }
+
+    // Codeberg #66 mvr: initiator behind a transport node, first
+    // LinkRequest forward lost. Before the fresh-keys fix, every retry
+    // re-sent identical bytes and died in the transport node's
+    // duplicate-hash dedup (DEDUP_DROP), so a single lost first frame
+    // made the link unestablishable. Intended behaviour: each retry
+    // carries fresh ephemeral keys → new packet hash → the transport
+    // node forwards it → the link establishes.
+    #[test]
+    fn test_link_retry_through_transport_node_establishes() {
+        use crate::constants::{LINK_PENDING_TIMEOUT_MS, MTU};
+        use crate::transport::InterfaceId;
+
+        // Responder B with a link-accepting destination.
+        let resp_identity = Identity::generate(&mut OsRng);
+        let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut responder = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let mut resp_dest = Destination::new(
+            Some(resp_identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["retry"],
+        )
+        .unwrap();
+        resp_dest.set_accepts_links(true);
+        resp_dest.set_proof_strategy(ProofStrategy::All);
+        let dest_hash = *resp_dest.hash();
+        let announce_packet = resp_dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        responder.register_destination(resp_dest);
+        let mut buf = [0u8; MTU];
+        let len = announce_packet.pack(&mut buf).unwrap();
+        let announce_raw = buf[..len].to_vec();
+
+        // Transport node T: learns B's path on iface 1 (direct).
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut transport_node = NodeCoreBuilder::new().enable_transport(true).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+        let _ = transport_node.handle_packet(InterfaceId(1), &announce_raw);
+        assert!(transport_node.has_path(&dest_hash));
+
+        // Initiator A (non-transport): connect broadcasts the request.
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let (caller_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let first_request = extract_broadcast_data(&output);
+
+        // T forwards the first request toward B — and the forward is LOST.
+        let output = transport_node.handle_packet(InterfaceId(0), &first_request);
+        assert_eq!(
+            extract_all_action_data(&output).len(),
+            1,
+            "transport node must forward the first link request"
+        );
+        // (dropped: never delivered to B)
+
+        // A times out and retries.
+        let now = initiator.transport().clock().now_ms();
+        initiator
+            .transport()
+            .clock()
+            .set(now + LINK_PENDING_TIMEOUT_MS + 1);
+        let output = initiator.handle_timeout();
+        let retry_request = extract_broadcast_data(&output);
+
+        // Intended (#66): the retry carries fresh keys, so its bytes and
+        // packet hash differ and the transport node forwards it instead
+        // of dedup-dropping it.
+        assert_ne!(
+            first_request, retry_request,
+            "retry must carry fresh bytes (new ephemeral keys), not an identical re-send"
+        );
+        let output = transport_node.handle_packet(InterfaceId(0), &retry_request);
+        let forwarded = extract_all_action_data(&output);
+        assert_eq!(
+            forwarded.len(),
+            1,
+            "transport node must forward the fresh-keys retry (dedup must not eat it)"
+        );
+
+        // Deliver to B, accept, and walk the proof back A ← T ← B.
+        let output = responder.handle_packet(InterfaceId(0), &forwarded[0]);
+        let resp_link_id = extract_link_request_link_id(&output);
+        let output = responder.accept_link(&resp_link_id).unwrap();
+        let proof_data = extract_broadcast_data(&output);
+        let output = transport_node.handle_packet(InterfaceId(1), &proof_data);
+        let to_initiator = extract_all_action_data(&output);
+        assert_eq!(to_initiator.len(), 1, "proof must route back through T");
+        let output = initiator.handle_packet(InterfaceId(0), &to_initiator[0]);
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })),
+            "link must establish via the retried request"
+        );
+
+        // The caller-visible handle id from connect() must still resolve
+        // (rebound to the retried link).
+        assert!(
+            initiator.link(&caller_link_id).is_some(),
+            "original link id from connect() must still resolve after a retry rebind"
+        );
+    }
+
+    // Codeberg #66 responder side: a stale PendingIncoming from a
+    // superseded request expires via its own timeout without touching
+    // the link established by the retry.
+    #[test]
+    fn test_responder_stale_pending_from_superseded_retry_expires() {
+        use crate::constants::{LINK_PENDING_TIMEOUT_MS, MTU};
+        use crate::transport::InterfaceId;
+
+        let resp_identity = Identity::generate(&mut OsRng);
+        let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut responder = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let mut resp_dest = Destination::new(
+            Some(resp_identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["retry"],
+        )
+        .unwrap();
+        resp_dest.set_accepts_links(true);
+        resp_dest.set_proof_strategy(ProofStrategy::All);
+        let dest_hash = *resp_dest.hash();
+        let announce_packet = resp_dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        responder.register_destination(resp_dest);
+        let mut buf = [0u8; MTU];
+        let len = announce_packet.pack(&mut buf).unwrap();
+        let _ = announce_packet;
+        let _announce_raw = buf[..len].to_vec();
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let (_caller_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let first_request = extract_broadcast_data(&output);
+
+        // First request DOES reach B; B's proof is lost.
+        let output = responder.handle_packet(InterfaceId(0), &first_request);
+        let first_pending = extract_link_request_link_id(&output);
+        let _lost_proof = responder.accept_link(&first_pending).unwrap();
+        assert_eq!(responder.pending_link_count(), 1);
+
+        // A times out, retries with fresh keys; retry reaches B.
+        let now = initiator.transport().clock().now_ms();
+        initiator
+            .transport()
+            .clock()
+            .set(now + LINK_PENDING_TIMEOUT_MS + 1);
+        let output = initiator.handle_timeout();
+        let retry_request = extract_broadcast_data(&output);
+        assert_ne!(first_request, retry_request);
+        let output = responder.handle_packet(InterfaceId(0), &retry_request);
+        let second_pending = extract_link_request_link_id(&output);
+        assert_ne!(first_pending, second_pending, "fresh keys ⇒ new link id");
+        let output = responder.accept_link(&second_pending).unwrap();
+        let proof_data = extract_broadcast_data(&output);
+
+        // Establish the retried link end-to-end.
+        let output = initiator.handle_packet(InterfaceId(0), &proof_data);
+        assert!(output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })));
+        let rtt_data = extract_broadcast_data(&output);
+        let output = responder.handle_packet(InterfaceId(0), &rtt_data);
+        assert!(output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })));
+
+        // The stale first pending expires on its own timeout; the
+        // established retried link survives.
+        let now = responder.transport().clock().now_ms();
+        responder
+            .transport()
+            .clock()
+            .set(now + LINK_PENDING_TIMEOUT_MS * 4 + 1);
+        let _ = responder.handle_timeout();
+        assert!(
+            responder.link(&second_pending).is_some(),
+            "established link must survive stale-pending expiry"
+        );
+        assert!(
+            responder.link(&first_pending).is_none(),
+            "superseded pending must be gone after its timeout"
+        );
     }
 
     #[test]

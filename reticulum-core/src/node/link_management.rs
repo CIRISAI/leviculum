@@ -337,6 +337,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.links.remove(link_id);
         self.link_retry_state.remove(link_id);
         self.transport.unregister_destination(link_id.as_bytes());
+        // Drop caller-visible aliases that pointed at this link
+        // (Codeberg #66 retry rekeying).
+        self.link_id_aliases.retain(|_, target| target != link_id);
+    }
+
+    /// Resolve a possibly-stale caller-visible link id to the current
+    /// wire id. Establishment retries regenerate the ephemeral keys and
+    /// re-key the link (Codeberg #66); ids handed out before a retry
+    /// resolve through `link_id_aliases`.
+    fn resolve_link_id(&self, link_id: &LinkId) -> LinkId {
+        self.link_id_aliases
+            .get(link_id)
+            .copied()
+            .unwrap_or(*link_id)
     }
 
     /// Reject an incoming link request
@@ -346,6 +360,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Close a link gracefully
     pub fn close_link(&mut self, link_id: &LinkId) -> crate::transport::TickOutput {
+        let link_id = &self.resolve_link_id(link_id);
         if let Some(link) = self.links.get_mut(link_id) {
             let is_initiator = link.is_initiator();
             let destination_hash = *link.destination_hash();
@@ -370,12 +385,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Get a link by ID
     pub fn link(&self, link_id: &LinkId) -> Option<&crate::link::Link> {
-        self.links.get(link_id)
+        self.links.get(&self.resolve_link_id(link_id))
     }
 
     /// Get a mutable reference to a link by ID
     pub fn link_mut(&mut self, link_id: &LinkId) -> Option<&mut crate::link::Link> {
-        self.links.get_mut(link_id)
+        let resolved = self.resolve_link_id(link_id);
+        self.links.get_mut(&resolved)
     }
 
     /// Get the number of active links
@@ -433,6 +449,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: &LinkId,
         data: &[u8],
     ) -> Result<crate::transport::TickOutput, send::SendError> {
+        let link_id = &self.resolve_link_id(link_id);
         let link = self.links.get(link_id).ok_or(send::SendError::NoLink)?;
 
         let attached_iface = link.attached_interface();
@@ -517,6 +534,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Get link statistics
     pub fn link_stats(&self, link_id: &LinkId) -> Option<LinkStats> {
+        let link_id = &self.resolve_link_id(link_id);
         self.links.get(link_id)?;
         let ch = self.links.get(link_id).and_then(|l| l.channel());
         Some(LinkStats::new(
@@ -2213,45 +2231,76 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
             // Link request retry: if this is an initiator link and
             // retries remain, resend the link request and reset the timeout.
-            // The same link_id is reused so the caller's watch is unaffected.
+            //
+            // Codeberg #66: the retry regenerates the ephemeral keys
+            // before resending. An identical re-send dies in the FIRST
+            // transport node's duplicate-hash dedup (DEDUP_DROP), making
+            // a request lost on any later hop unrecoverable. Fresh keys
+            // give the retry new bytes and a new link id — on the wire
+            // indistinguishable from a Python application retrying with
+            // a new RNS.Link (Python itself never retries internally).
+            // The link is re-keyed in `links` under the new id; ids
+            // already handed to callers resolve via `link_id_aliases`.
             if is_initiator {
-                if let Some(retry) = self.link_retry_state.get_mut(&link_id) {
-                    if retry.remaining > 0 {
-                        retry.remaining -= 1;
-                        tracing::debug!(
-                            "Link <{}> establishment timed out, resending request ({} retries left)",
-                            HexShort(link_id.as_bytes()),
-                            retry.remaining
-                        );
-                        // Rebuild and resend the link request with the same keys.
-                        // Reset the PendingOutgoing timestamp so the timeout restarts.
-                        let now_ms = self.transport.clock().now_ms();
-                        if let Some(link) = self.links.get_mut(&link_id) {
-                            let dest_hash_bytes = *destination_hash.as_bytes();
-                            let (next_hop, hops) =
-                                if let Some(path) = self.transport.path(&dest_hash_bytes) {
-                                    if path.needs_relay() {
-                                        (path.next_hop, path.hops)
-                                    } else {
-                                        (None, path.hops)
-                                    }
+                let retries_left = self
+                    .link_retry_state
+                    .get(&link_id)
+                    .map(|r| r.remaining)
+                    .unwrap_or(0);
+                if retries_left > 0 {
+                    let now_ms = self.transport.clock().now_ms();
+                    if let Some(mut link) = self.links.remove(&link_id) {
+                        let dest_hash_bytes = *destination_hash.as_bytes();
+                        let (next_hop, hops) =
+                            if let Some(path) = self.transport.path(&dest_hash_bytes) {
+                                if path.needs_relay() {
+                                    (path.next_hop, path.hops)
                                 } else {
-                                    (None, 1)
-                                };
-                            let hw_mtu = self.transport.next_hop_interface_hw_mtu(&dest_hash_bytes);
-                            let packet = link
-                                .build_link_request_packet_with_transport(next_hop, hops, hw_mtu);
-                            link.set_phase(LinkPhase::PendingOutgoing {
-                                created_at_ms: now_ms,
-                            });
-                            // Route the retried request
-                            let was_routed = self
-                                .transport
-                                .send_to_destination(&dest_hash_bytes, &packet)
-                                .is_ok();
-                            if !was_routed {
-                                self.transport.send_on_all_interfaces(&packet);
+                                    (None, path.hops)
+                                }
+                            } else {
+                                (None, 1)
+                            };
+                        let hw_mtu = self.transport.next_hop_interface_hw_mtu(&dest_hash_bytes);
+                        link.regenerate_ephemeral_keys(&mut self.rng);
+                        let packet =
+                            link.build_link_request_packet_with_transport(next_hop, hops, hw_mtu);
+                        let new_link_id = *link.id();
+                        link.set_phase(LinkPhase::PendingOutgoing {
+                            created_at_ms: now_ms,
+                        });
+                        tracing::debug!(
+                            "Link <{}> establishment timed out, retrying with fresh keys as <{}> ({} retries left)",
+                            HexShort(link_id.as_bytes()),
+                            HexShort(new_link_id.as_bytes()),
+                            retries_left - 1
+                        );
+                        self.links.insert(new_link_id, link);
+
+                        // Keep the insert↔register pairing (see remove_link)
+                        // across the re-key.
+                        self.transport.unregister_destination(link_id.as_bytes());
+                        self.transport.register_destination(*new_link_id.as_bytes());
+
+                        // Rebind retry bookkeeping and caller-visible ids.
+                        if let Some(mut retry) = self.link_retry_state.remove(&link_id) {
+                            retry.remaining -= 1;
+                            self.link_retry_state.insert(new_link_id, retry);
+                        }
+                        for target in self.link_id_aliases.values_mut() {
+                            if *target == link_id {
+                                *target = new_link_id;
                             }
+                        }
+                        self.link_id_aliases.insert(link_id, new_link_id);
+
+                        // Route the retried request
+                        let was_routed = self
+                            .transport
+                            .send_to_destination(&dest_hash_bytes, &packet)
+                            .is_ok();
+                        if !was_routed {
+                            self.transport.send_on_all_interfaces(&packet);
                         }
                         continue;
                     }

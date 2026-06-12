@@ -1697,6 +1697,27 @@ impl Link {
     /// If `next_hop` is Some, uses HEADER_2 with transport routing regardless of hop count,
     /// because the presence of transport_id in an announce indicates the packet must be
     /// routed through that transport node.
+    /// Regenerate the initiator's ephemeral X25519/Ed25519 keys.
+    ///
+    /// Codeberg #66: a link-establishment retry must carry fresh keys so
+    /// its bytes (and packet hash) differ from the lost first request —
+    /// identical re-sends die in every transport node's duplicate-hash
+    /// dedup (ours and Python's alike). The caller must rebuild the link
+    /// request afterwards; `build_link_request_packet*` then derives and
+    /// sets the new link id. Only meaningful on a pending initiator link.
+    pub fn regenerate_ephemeral_keys(&mut self, rng: &mut impl CryptoRngCore) {
+        debug_assert!(self.initiator, "key regeneration is initiator-side only");
+        let ephemeral_private = x25519_dalek::StaticSecret::random_from_rng(&mut *rng);
+        self.ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_private);
+        self.ephemeral_private = Some(ephemeral_private);
+
+        let mut ed25519_seed = [0u8; 32];
+        rng.fill_bytes(&mut ed25519_seed);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&ed25519_seed);
+        self.verifying_key = signing_key.verifying_key();
+        self.signing_key = Some(signing_key);
+    }
+
     pub fn build_link_request_packet_with_transport(
         &mut self,
         next_hop: Option<[u8; TRUNCATED_HASHBYTES]>,
