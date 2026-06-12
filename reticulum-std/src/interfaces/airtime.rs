@@ -116,6 +116,22 @@ impl AirtimeCredit {
         self.threshold_ms = -per_packet;
         self.max_credit_ms = 2 * per_packet;
     }
+
+    /// Wall-clock timestamp (ms) of the most recent charge. Used by tests to
+    /// observe the bucket at the exact instant of a charge, with no regen term.
+    #[cfg(test)]
+    pub(crate) fn last_update_ms(&self) -> u64 {
+        self.last_update_ms
+    }
+
+    /// Re-anchor the bucket's regen baseline to `now_ms` without changing the
+    /// stored credit. Lets tests align a fresh bucket to the global clock so it
+    /// carries zero idle credit when subsequently charged, making the post-
+    /// charge balance deterministic independent of process age. Test-only.
+    #[cfg(test)]
+    pub(crate) fn seed_last_update_ms(&mut self, now_ms: u64) {
+        self.last_update_ms = now_ms;
+    }
 }
 
 #[cfg(test)]
