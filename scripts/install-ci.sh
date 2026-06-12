@@ -71,7 +71,6 @@ echo "[install-ci] cargo target dir: ~/.cache/leviculum-ci-target"
 SYSTEMD_USER_DIR=~/.config/systemd/user
 mkdir -p "$SYSTEMD_USER_DIR"
 for unit in scripts/systemd/leviculum-ci-tier2.service \
-            scripts/systemd/leviculum-ci-tier2.timer \
             scripts/systemd/leviculum-ci-nightly.service \
             scripts/systemd/leviculum-ci-nightly.timer; do
     sed "s|%h/coding/libreticulum|$REPO_DIR|g" "$unit" \
@@ -82,9 +81,14 @@ echo "[install-ci] systemd user units installed in $SYSTEMD_USER_DIR (path: $REP
 # 7. Reload systemd
 systemctl --user daemon-reload
 
-# 8. Enable timers
-systemctl --user enable --now leviculum-ci-tier2.timer leviculum-ci-nightly.timer
-echo "[install-ci] timers enabled"
+# 8. Enable timers.  Tier 2 is ON-DEMAND (Lew, 2026-06-12): only the
+#    nightly stays scheduled.  Start tier2 manually when needed:
+#      systemctl --user start leviculum-ci-tier2.service
+#    Upgrade path: drop a previously-installed tier2 timer.
+systemctl --user disable --now leviculum-ci-tier2.timer 2>/dev/null || true
+rm -f "$SYSTEMD_USER_DIR/leviculum-ci-tier2.timer"
+systemctl --user enable --now leviculum-ci-nightly.timer
+echo "[install-ci] nightly timer enabled; tier2 is on-demand"
 
 # 9. LoRa hardware probe (warning only)
 if ! ls /dev/ttyACM* >/dev/null 2>&1; then

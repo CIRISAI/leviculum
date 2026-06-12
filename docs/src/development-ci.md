@@ -11,7 +11,7 @@ external runners.
 |------|------|---------|--------|------------|
 | 0 | `fast` | pre-push hook | ~3 min | fmt + clippy + workspace lib tests |
 | 1 | `standard` | post-commit (background) | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop |
-| 2 | `extensive` | systemd timer 12:30 + 18:30 daily | ~30-90 min | Tier 1 + integ Docker tests |
+| 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + integ Docker tests |
 | 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LoRa hardware tests |
 
 Each tier runs everything from the lower tiers as well, so a green
@@ -167,7 +167,7 @@ pid, started time, cwd, optionally the test-name filter. Example:
 [leviculum] Wait for it to finish or stop that process, then retry.
 ```
 
-Scheduled Tier 2 / Tier 3 runs that collide with a manual test
+On-demand Tier 2 / scheduled Tier 3 runs that collide with a manual test
 drop a marker file at `~/.local/state/leviculum-ci/lock-contention`;
 the runner scripts observe the marker, classify the run as SKIPPED
 (not RED), send a `normal` (not `critical`) notification, and delete

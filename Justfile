@@ -57,7 +57,8 @@ build-integ-bins:
 # enforces per-group serialization, because the embedded #[serial(docker)]
 # groups can still overlap resource usage with unit tests in the same
 # binary on a multi-CPU harness.
-# Tier 2 (~30-90 min, 12:30 + 18:30 daily): Tier 1 + Docker integ suite.
+# Tier 2 (~30-90 min, on demand: `systemctl --user start
+# leviculum-ci-tier2.service`): Tier 1 + Docker integ suite.
 extensive: standard build-integ-bins
     cargo test -p reticulum-integ -- --test-threads=1
 
