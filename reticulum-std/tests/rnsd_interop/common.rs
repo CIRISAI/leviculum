@@ -19,6 +19,38 @@ pub fn init_tracing() {
     reticulum_std::test_support::tracing_setup::init_tracing_with_event_log();
 }
 
+/// Resolve how to invoke an RNS CLI utility (`rnstatus`, `rnpath`, `rnprobe`).
+///
+/// Prefers the vendored Reticulum checkout when it is present (version-pinned,
+/// PYTHONPATH-isolated). Falls back to the pip-installed package via the module
+/// runner (`python3 -m RNS.Utilities.<tool>`) when the submodule is absent —
+/// the vendored submodule was stripped to make the repo resolvable as a cargo
+/// git dependency, so released RNS is the default interop target now and CI
+/// supplies it via `pip install rns`.
+///
+/// Returns the argv prefix (program + leading args, before `--config`) and the
+/// optional `PYTHONPATH` to set (only needed for the vendored checkout; `None`
+/// when relying on the pip-installed package already importable on `sys.path`).
+pub fn rns_utility(tool: &str) -> (Vec<String>, Option<String>) {
+    const VENDOR_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/Reticulum");
+    let script = format!("{VENDOR_ROOT}/RNS/Utilities/{tool}.py");
+    if std::path::Path::new(&script).exists() {
+        (
+            vec!["python3".to_string(), script],
+            Some(VENDOR_ROOT.to_string()),
+        )
+    } else {
+        (
+            vec![
+                "python3".to_string(),
+                "-m".to_string(),
+                format!("RNS.Utilities.{tool}"),
+            ],
+            None,
+        )
+    }
+}
+
 use reticulum_core::constants::{MTU, TRUNCATED_HASHBYTES};
 use reticulum_core::crypto::truncated_hash;
 use reticulum_core::identity::Identity;
