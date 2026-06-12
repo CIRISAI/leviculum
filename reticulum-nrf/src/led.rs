@@ -54,11 +54,7 @@ pub async fn rx_blink_task(mut led: Output<'static>) {
 }
 
 /// Convenience wrapper invoked from the bin file.
-pub fn init(
-    spawner: &Spawner,
-    tx_led: Output<'static>,
-    rx_led: Output<'static>,
-) {
+pub fn init(spawner: &Spawner, tx_led: Output<'static>, rx_led: Output<'static>) {
     spawner.must_spawn(tx_blink_task(tx_led));
     spawner.must_spawn(rx_blink_task(rx_led));
 }

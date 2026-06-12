@@ -119,10 +119,10 @@ pub async fn battery_task(
     adc.sample(&mut buf).await;
     let pack_mv_first = raw_to_battery_mv(buf[0]);
     let cell_count = classify_cell_count(pack_mv_first);
-    crate::log::log_fmt("[BAT] ", format_args!(
-        "init pack_mv={} cells={}S",
-        pack_mv_first, cell_count
-    ));
+    crate::log::log_fmt(
+        "[BAT] ",
+        format_args!("init pack_mv={} cells={}S", pack_mv_first, cell_count),
+    );
 
     let sender = BATTERY_STATE.sender();
 

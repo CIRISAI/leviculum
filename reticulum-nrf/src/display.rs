@@ -79,7 +79,7 @@ async fn classify(twim: &mut Twim<'_>, addr: u8) -> DetectedKind {
     }
     match r {
         0x00 | 0x08 => DetectedKind::Sh1106,
-        0x03 | 0x04 | 0x05 | 0x06 | 0x07 => DetectedKind::Ssd1306,
+        0x03..=0x07 => DetectedKind::Ssd1306,
         _ => DetectedKind::None,
     }
 }
@@ -102,7 +102,10 @@ async fn detect(twim: &mut Twim<'_>) -> Detected {
             return Detected { kind, addr };
         }
     }
-    Detected { kind: DetectedKind::None, addr: 0 }
+    Detected {
+        kind: DetectedKind::None,
+        addr: 0,
+    }
 }
 
 /// Format the identity hash as 10 hex chars (5 bytes).
@@ -143,9 +146,10 @@ pub async fn display_task(
     Timer::after(Duration::from_millis(500)).await;
 
     let detected = detect(&mut twim).await;
-    crate::log::log_fmt("[DISP] ", format_args!(
-        "OLED probe: {:?} at 0x{:02X}", detected.kind, detected.addr
-    ));
+    crate::log::log_fmt(
+        "[DISP] ",
+        format_args!("OLED probe: {:?} at 0x{:02X}", detected.kind, detected.addr),
+    );
 
     let mut display = match detected.kind {
         DetectedKind::Ssd1306 => {
@@ -160,15 +164,17 @@ pub async fn display_task(
             d
         }
         DetectedKind::Sh1106 => {
-            crate::log::log_fmt("[DISP] ", format_args!(
-                "SH1106 detected — not rendered (driver pending)"
-            ));
+            crate::log::log_fmt(
+                "[DISP] ",
+                format_args!("SH1106 detected — not rendered (driver pending)"),
+            );
             return;
         }
         DetectedKind::None => {
-            crate::log::log_fmt("[DISP] ", format_args!(
-                "no OLED found on TWISPI0 — display task exiting"
-            ));
+            crate::log::log_fmt(
+                "[DISP] ",
+                format_args!("no OLED found on TWISPI0 — display task exiting"),
+            );
             return;
         }
     };
@@ -182,9 +188,13 @@ pub async fn display_task(
     // Receivers for shared baseboard state — held outside the loop so the
     // last value survives between producer updates.
     #[cfg(feature = "gnss")]
-    let mut gnss_rx = crate::baseboard::GNSS_FIX.receiver().expect("gnss watch capacity");
+    let mut gnss_rx = crate::baseboard::GNSS_FIX
+        .receiver()
+        .expect("gnss watch capacity");
     #[cfg(feature = "battery")]
-    let mut bat_rx = crate::baseboard::BATTERY_STATE.receiver().expect("battery watch capacity");
+    let mut bat_rx = crate::baseboard::BATTERY_STATE
+        .receiver()
+        .expect("battery watch capacity");
 
     // Display power state, controlled by `crate::button` via DISPLAY_ON_REQ.
     // We seed the watch to `true` so the button task can read the current
@@ -341,7 +351,15 @@ pub async fn display_task(
         }
 
         let key = FrameKey {
-            rx, tx, sat, valid, lat_e5, lon_e5, bat_pct, bat_dv, heartbeat,
+            rx,
+            tx,
+            sat,
+            valid,
+            lat_e5,
+            lon_e5,
+            bat_pct,
+            bat_dv,
+            heartbeat,
         };
         if last_key.as_ref() == Some(&key) {
             // Nothing meaningful changed since last render and the

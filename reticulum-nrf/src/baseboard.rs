@@ -38,7 +38,12 @@ pub struct GnssFix {
 #[cfg(feature = "gnss")]
 impl GnssFix {
     pub const fn empty() -> Self {
-        Self { valid: false, sat_in_use: 0, latitude: None, longitude: None }
+        Self {
+            valid: false,
+            sat_in_use: 0,
+            latitude: None,
+            longitude: None,
+        }
     }
 }
 
@@ -67,7 +72,11 @@ pub struct BatteryState {
 #[cfg(feature = "battery")]
 impl BatteryState {
     pub const fn empty() -> Self {
-        Self { voltage_mv: 0, percent: 0, cell_count: 1 }
+        Self {
+            voltage_mv: 0,
+            percent: 0,
+            cell_count: 1,
+        }
     }
 }
 

@@ -114,10 +114,13 @@ pub async fn gnss_task(
                 // Heartbeat log every 5 s with cumulative counters. Keeps the
                 // debug log readable but proves the GNSS pipe is alive.
                 if last_health_log.elapsed().as_secs() >= 5 {
-                    crate::log::log_fmt("[GNSS] ", format_args!(
-                        "bytes={} sentences={} valid={} sat={}",
-                        bytes_total, sentences_seen, latest.valid, latest.sat_in_use
-                    ));
+                    crate::log::log_fmt(
+                        "[GNSS] ",
+                        format_args!(
+                            "bytes={} sentences={} valid={} sat={}",
+                            bytes_total, sentences_seen, latest.valid, latest.sat_in_use
+                        ),
+                    );
                     last_health_log = embassy_time::Instant::now();
                 }
             }

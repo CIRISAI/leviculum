@@ -65,7 +65,10 @@ pub async fn button_task(button_pin: Peri<'static, AnyPin>) {
             // Display off + < 2 s → ignore (pocket-press protection).
             crate::log::log_fmt(
                 "[BTN] ",
-                format_args!("short press ignored (display off, {} ms)", duration.as_millis()),
+                format_args!(
+                    "short press ignored (display off, {} ms)",
+                    duration.as_millis()
+                ),
             );
             continue;
         };

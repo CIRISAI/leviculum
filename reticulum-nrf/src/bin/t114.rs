@@ -52,9 +52,15 @@ async fn main(spawner: Spawner) {
     let persistent_log = reticulum_nrf::log::take_persistent_log();
 
     // SAFETY: called once before any complex work or concurrent tasks
-    unsafe { reticulum_nrf::paint_stack(); }
+    unsafe {
+        reticulum_nrf::paint_stack();
+    }
 
-    reticulum_nrf::set_panic_led(t114::PANIC_LED_PORT, t114::PANIC_LED_PIN, t114::PANIC_LED_ACTIVE_LOW);
+    reticulum_nrf::set_panic_led(
+        t114::PANIC_LED_PORT,
+        t114::PANIC_LED_PIN,
+        t114::PANIC_LED_ACTIVE_LOW,
+    );
     reticulum_nrf::set_irq_priorities();
     let vbus = reticulum_nrf::init_vbus();
     let serial = reticulum_nrf::usb::init(&spawner, p.USBD, vbus, &t114::CONFIG);
@@ -87,7 +93,9 @@ async fn main(spawner: Spawner) {
                 continue;
             }
             let raw = &snap.bytes[start..end];
-            let trimmed = core::str::from_utf8(raw).unwrap_or("<non-utf8>").trim_end_matches(['\r','\n']);
+            let trimmed = core::str::from_utf8(raw)
+                .unwrap_or("<non-utf8>")
+                .trim_end_matches(['\r', '\n']);
             if !trimmed.is_empty() {
                 log_critical!("[PERSISTENT_LOG] {}", trimmed);
             }
@@ -177,7 +185,8 @@ async fn main(spawner: Spawner) {
         p.P0_20.into(),
         spim::Frequency::M4,
         t114::CONFIG.lora_tcxo_voltage_reg,
-    ).await;
+    )
+    .await;
     info!("SX1262 ready");
 
     let radio_cfg = reticulum_nrf::lora::RadioConfig::eu_medium();
@@ -188,10 +197,27 @@ async fn main(spawner: Spawner) {
     // Softdevice::enable headroom for our config (att_mtu=256, …).
     let identity_hash = *node.identity().hash();
     reticulum_nrf::ble::init(
-        &spawner, identity_hash, vbus,
-        p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31,
-        p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23,
-        p.PPI_CH24, p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+        &spawner,
+        identity_hash,
+        vbus,
+        p.RTC0,
+        p.TIMER0,
+        p.TEMP,
+        p.PPI_CH19,
+        p.PPI_CH30,
+        p.PPI_CH31,
+        p.PPI_CH17,
+        p.PPI_CH18,
+        p.PPI_CH20,
+        p.PPI_CH21,
+        p.PPI_CH22,
+        p.PPI_CH23,
+        p.PPI_CH24,
+        p.PPI_CH25,
+        p.PPI_CH26,
+        p.PPI_CH27,
+        p.PPI_CH28,
+        p.PPI_CH29,
         p.RNG,
     );
     let ble_channels = reticulum_nrf::ble::channels();

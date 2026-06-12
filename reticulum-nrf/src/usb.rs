@@ -14,7 +14,7 @@ use embassy_time::Duration;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
-use embassy_nrf::{Peri, peripherals, usb};
+use embassy_nrf::{peripherals, usb, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::with_timeout;
@@ -317,7 +317,8 @@ async fn retic_serial_task(
                                             break;
                                         }
                                     }
-                                    if ack_ok && !frame_buf.is_empty() && frame_buf.len() % 64 == 0 {
+                                    if ack_ok && !frame_buf.is_empty() && frame_buf.len() % 64 == 0
+                                    {
                                         let _ = cdc.write_packet(&[]).await;
                                     }
                                 } else {
@@ -353,10 +354,21 @@ async fn retic_serial_task(
                     let n = data.len().min(8);
                     let mut p8 = [0u8; 8];
                     p8[..n].copy_from_slice(&data[..n]);
-                    crate::log::log_fmt("[T114_SERIAL_TX] ", format_args!(
-                        "pkt_hash8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} len={}",
-                        p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], data.len()
-                    ));
+                    crate::log::log_fmt(
+                        "[T114_SERIAL_TX] ",
+                        format_args!(
+                            "pkt_hash8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} len={}",
+                            p8[0],
+                            p8[1],
+                            p8[2],
+                            p8[3],
+                            p8[4],
+                            p8[5],
+                            p8[6],
+                            p8[7],
+                            data.len()
+                        ),
+                    );
                     log_u32("SER: TX", data.len() as u32);
                     frame(&data, &mut frame_buf);
                     log_u32("SER: HDLC framed", frame_buf.len() as u32);

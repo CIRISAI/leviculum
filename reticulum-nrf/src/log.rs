@@ -54,6 +54,12 @@ pub struct LogRing {
 // One producer (log_fmt, called from any task), one consumer (debug_writer_task).
 unsafe impl Sync for LogRing {}
 
+impl Default for LogRing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LogRing {
     pub const fn new() -> Self {
         Self {
@@ -87,8 +93,8 @@ impl LogRing {
         let mut rp = self.read_pos.load(Ordering::Relaxed);
         let avail = wp.wrapping_sub(rp);
         let to_read = avail.min(out.len());
-        for i in 0..to_read {
-            out[i] = buf[rp % LOG_RING_SIZE];
+        for slot in out.iter_mut().take(to_read) {
+            *slot = buf[rp % LOG_RING_SIZE];
             rp = rp.wrapping_add(1);
         }
         self.read_pos.store(rp, Ordering::Release);
@@ -107,7 +113,10 @@ pub static LOG_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// and a trailing CRLF. Returns the slice of valid bytes.
 fn fmt_into<'a>(buf: &'a mut [u8; 1024], prefix: &str, args: core::fmt::Arguments) -> &'a [u8] {
     let mut len = 0usize;
-    struct BufWriter<'a> { buf: &'a mut [u8], len: &'a mut usize }
+    struct BufWriter<'a> {
+        buf: &'a mut [u8],
+        len: &'a mut usize,
+    }
     impl core::fmt::Write for BufWriter<'_> {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
             let remaining = self.buf.len() - *self.len;
@@ -117,7 +126,10 @@ fn fmt_into<'a>(buf: &'a mut [u8; 1024], prefix: &str, args: core::fmt::Argument
             Ok(())
         }
     }
-    let mut w = BufWriter { buf: buf.as_mut_slice(), len: &mut len };
+    let mut w = BufWriter {
+        buf: buf.as_mut_slice(),
+        len: &mut len,
+    };
     let _ = core::fmt::Write::write_str(&mut w, prefix);
     let _ = core::fmt::Write::write_fmt(&mut w, args);
     let _ = core::fmt::Write::write_str(&mut w, "\r\n");
@@ -214,7 +226,10 @@ impl PersistentTailMirror {
                 for i in 0..PERSISTENT_TAIL_SIZE {
                     core::ptr::write_volatile(buf_ptr.add(i), 0);
                 }
-                core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), PERSISTENT_TAIL_MAGIC);
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!((*p).magic),
+                    PERSISTENT_TAIL_MAGIC,
+                );
             }
             let mut wp = core::ptr::read_volatile(core::ptr::addr_of!((*p).write_pos)) as usize;
             let buf_ptr = core::ptr::addr_of_mut!((*p).buf).cast::<u8>();
@@ -250,8 +265,8 @@ pub fn take_persistent_log() -> Option<PersistentLogSnapshot> {
         } else {
             (0usize, wp)
         };
-        for i in 0..len {
-            out[i] = core::ptr::read_volatile(buf_ptr.add((start + i) % PERSISTENT_TAIL_SIZE));
+        for (i, slot) in out.iter_mut().enumerate().take(len) {
+            *slot = core::ptr::read_volatile(buf_ptr.add((start + i) % PERSISTENT_TAIL_SIZE));
         }
         // Clear so subsequent calls return None.
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), 0);
@@ -312,7 +327,10 @@ impl tracing_core::Subscriber for TracingSubscriber {
         let mut buf = [0u8; 1024];
         let mut len = 0usize;
 
-        struct BufWriter<'a> { buf: &'a mut [u8], len: &'a mut usize }
+        struct BufWriter<'a> {
+            buf: &'a mut [u8],
+            len: &'a mut usize,
+        }
         impl core::fmt::Write for BufWriter<'_> {
             fn write_str(&mut self, s: &str) -> core::fmt::Result {
                 let remaining = self.buf.len() - *self.len;
@@ -324,15 +342,24 @@ impl tracing_core::Subscriber for TracingSubscriber {
         }
 
         {
-            let mut w = BufWriter { buf: &mut buf, len: &mut len };
+            let mut w = BufWriter {
+                buf: &mut buf,
+                len: &mut len,
+            };
             let _ = core::fmt::Write::write_fmt(
                 &mut w,
                 format_args!("[{}] {}: ", level, metadata.target()),
             );
         }
-        event.record(&mut TracingVisitor { buf: &mut buf, len: &mut len });
+        event.record(&mut TracingVisitor {
+            buf: &mut buf,
+            len: &mut len,
+        });
         {
-            let mut w = BufWriter { buf: &mut buf, len: &mut len };
+            let mut w = BufWriter {
+                buf: &mut buf,
+                len: &mut len,
+            };
             let _ = core::fmt::Write::write_str(&mut w, "\r\n");
         }
 
@@ -350,7 +377,10 @@ struct TracingVisitor<'a> {
 
 impl tracing_core::field::Visit for TracingVisitor<'_> {
     fn record_debug(&mut self, field: &tracing_core::field::Field, value: &dyn core::fmt::Debug) {
-        struct BufWriter<'a> { buf: &'a mut [u8], len: &'a mut usize }
+        struct BufWriter<'a> {
+            buf: &'a mut [u8],
+            len: &'a mut usize,
+        }
         impl core::fmt::Write for BufWriter<'_> {
             fn write_str(&mut self, s: &str) -> core::fmt::Result {
                 let remaining = self.buf.len() - *self.len;
@@ -360,14 +390,15 @@ impl tracing_core::field::Visit for TracingVisitor<'_> {
                 Ok(())
             }
         }
-        let mut w = BufWriter { buf: self.buf, len: self.len };
+        let mut w = BufWriter {
+            buf: self.buf,
+            len: self.len,
+        };
         if field.name() == "message" {
             let _ = core::fmt::Write::write_fmt(&mut w, format_args!("{:?}", value));
         } else {
-            let _ = core::fmt::Write::write_fmt(
-                &mut w,
-                format_args!(" {}={:?}", field.name(), value),
-            );
+            let _ =
+                core::fmt::Write::write_fmt(&mut w, format_args!(" {}={:?}", field.name(), value));
         }
     }
 }

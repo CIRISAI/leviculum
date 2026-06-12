@@ -50,7 +50,11 @@ bind_interrupts!(pub struct Irqs {
 
 #[nrf_softdevice::gatt_service(uuid = "37145b00-442d-4a94-917f-8f42c5da28e3")]
 pub struct ReticulumService {
-    #[characteristic(uuid = "37145b00-442d-4a94-917f-8f42c5da28e5", write, write_without_response)]
+    #[characteristic(
+        uuid = "37145b00-442d-4a94-917f-8f42c5da28e5",
+        write,
+        write_without_response
+    )]
     rx: heapless_v8::Vec<u8, 251>,
 
     #[characteristic(uuid = "37145b00-442d-4a94-917f-8f42c5da28e4", read, notify)]
@@ -92,12 +96,22 @@ impl BleInterface {
 }
 
 impl Interface for BleInterface {
-    fn id(&self) -> InterfaceId { InterfaceId(2) }
-    fn name(&self) -> &str { "ble" }
-    fn mtu(&self) -> usize { 564 }
-    fn is_online(&self) -> bool { true }
+    fn id(&self) -> InterfaceId {
+        InterfaceId(2)
+    }
+    fn name(&self) -> &str {
+        "ble"
+    }
+    fn mtu(&self) -> usize {
+        564
+    }
+    fn is_online(&self) -> bool {
+        true
+    }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.sender.try_send(data.to_vec()).map_err(|_| InterfaceError::BufferFull)
+        self.sender
+            .try_send(data.to_vec())
+            .map_err(|_| InterfaceError::BufferFull)
     }
 }
 
@@ -117,12 +131,15 @@ async fn softdevice_task(sd: &'static Softdevice, vbus: &'static SoftwareVbusDet
 // Same UUID as the GATT service: 37145b00-442d-4a94-917f-8f42c5da28e3,
 // reversed to LE: e3 28 da c5 42 8f 7f 91 94 4a 2d 44 00 5b 14 37
 const RETICULUM_SVC_UUID_LE: [u8; 16] = [
-    0xe3, 0x28, 0xda, 0xc5, 0x42, 0x8f, 0x7f, 0x91,
-    0x94, 0x4a, 0x2d, 0x44, 0x00, 0x5b, 0x14, 0x37,
+    0xe3, 0x28, 0xda, 0xc5, 0x42, 0x8f, 0x7f, 0x91, 0x94, 0x4a, 0x2d, 0x44, 0x00, 0x5b, 0x14, 0x37,
 ];
 
 #[embassy_executor::task]
-async fn ble_task(sd: &'static Softdevice, server: &'static ReticulumServer, identity_hash: [u8; 16]) {
+async fn ble_task(
+    sd: &'static Softdevice,
+    server: &'static ReticulumServer,
+    identity_hash: [u8; 16],
+) {
     // Publish the identity characteristic value so a connecting peer can
     // read it before exchanging frames over rx/tx.
     let _ = server.reticulum_service.identity_set(&identity_hash);
@@ -191,47 +208,48 @@ async fn gatt_events(
 
     let tx_handle = server.reticulum_service.tx_value_handle;
 
-    let inbound = gatt_server::run(conn, server, |evt| match evt {
-        ReticulumServerEvent::ReticulumService(service_evt) => match service_evt {
-            ReticulumServiceEvent::RxWrite(data) => {
-                if !handshake_done.get() && data.len() == 16 {
-                    // Identity handshake — peer's first write is its 16-byte identity.
-                    crate::log::log_fmt("[BLE ] ", format_args!(
+    let inbound = gatt_server::run(conn, server, |evt| {
+        let ReticulumServerEvent::ReticulumService(service_evt) = evt;
+        // tx is notify-only; CCCD writes from the peer would also land in
+        // this event stream, but the macro variant naming depends on
+        // whether `notify` was declared. Any variant other than RxWrite
+        // is a no-op for us, hence `if let`.
+        if let ReticulumServiceEvent::RxWrite(data) = service_evt {
+            if !handshake_done.get() && data.len() == 16 {
+                // Identity handshake — peer's first write is its 16-byte identity.
+                crate::log::log_fmt(
+                    "[BLE ] ",
+                    format_args!(
                         "peer id: {:02x}{:02x}{:02x}{:02x}",
                         data[0], data[1], data[2], data[3]
-                    ));
-                    handshake_done.set(true);
-                    last_keepalive.set(Instant::now());
-                } else if data.len() < FRAGMENT_HEADER_SIZE {
-                    // Single-byte keepalive (0x00); nothing to defragment.
-                } else {
-                    let now = Instant::now().as_millis();
-                    let mut d = defrag.replace(BleDefragmenter::new());
-                    let result = d.process(&data, now);
-                    defrag.set(d);
-                    match result {
-                        DefragResult::Complete(packet) => {
-                            crate::info!("BLE: RX {}B", packet.len());
-                            // try_send: if the consumer is slow and the 4-deep
-                            // channel is full, drop the packet rather than block
-                            // here (we're in a sync closure, can't await).
-                            let _ = incoming_tx.try_send(packet);
-                        }
-                        DefragResult::NeedMore => {}
-                        DefragResult::Error => {
-                            let mut d = defrag.replace(BleDefragmenter::new());
-                            d.reset();
-                            defrag.set(d);
-                        }
+                    ),
+                );
+                handshake_done.set(true);
+                last_keepalive.set(Instant::now());
+            } else if data.len() < FRAGMENT_HEADER_SIZE {
+                // Single-byte keepalive (0x00); nothing to defragment.
+            } else {
+                let now = Instant::now().as_millis();
+                let mut d = defrag.replace(BleDefragmenter::new());
+                let result = d.process(&data, now);
+                defrag.set(d);
+                match result {
+                    DefragResult::Complete(packet) => {
+                        crate::info!("BLE: RX {}B", packet.len());
+                        // try_send: if the consumer is slow and the 4-deep
+                        // channel is full, drop the packet rather than block
+                        // here (we're in a sync closure, can't await).
+                        let _ = incoming_tx.try_send(packet);
+                    }
+                    DefragResult::NeedMore => {}
+                    DefragResult::Error => {
+                        let mut d = defrag.replace(BleDefragmenter::new());
+                        d.reset();
+                        defrag.set(d);
                     }
                 }
             }
-            // tx is notify-only; CCCD writes from the peer would land here,
-            // but the macro variant naming depends on whether `notify` was
-            // declared. For our purposes any unhandled variant is a no-op.
-            #[allow(unreachable_patterns)]
-            _ => {}
-        },
+        }
     });
 
     let outbound = async {

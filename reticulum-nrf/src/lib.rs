@@ -128,10 +128,10 @@ pub mod battery;
 pub mod button;
 #[cfg(feature = "display")]
 pub mod display;
-#[cfg(feature = "display")]
-pub mod led;
 #[cfg(feature = "gnss")]
 pub mod gnss;
+#[cfg(feature = "display")]
+pub mod led;
 
 /// Install the tracing subscriber that routes `reticulum-core` log events
 /// to the CDC-ACM debug port via LOG_CHANNEL.
@@ -306,8 +306,7 @@ struct PanicPmRaw {
 const PANIC_PM_MAGIC: u32 = 0xBADD_CAFE;
 
 #[link_section = ".uninit"]
-static mut PANIC_PM: core::mem::MaybeUninit<PanicPmRaw> =
-    core::mem::MaybeUninit::uninit();
+static mut PANIC_PM: core::mem::MaybeUninit<PanicPmRaw> = core::mem::MaybeUninit::uninit();
 
 /// Read and clear the panic message captured before the last soft-reset.
 /// Returns `Some(_)` exactly once after a panic, `None` otherwise.
@@ -322,8 +321,8 @@ pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
         let len = raw_len.min(PANIC_MSG_MAX);
         let mut bytes = [0u8; PANIC_MSG_MAX];
         let src = core::ptr::addr_of!((*p).bytes).cast::<u8>();
-        for i in 0..len {
-            bytes[i] = core::ptr::read_volatile(src.add(i));
+        for (i, slot) in bytes.iter_mut().enumerate().take(len) {
+            *slot = core::ptr::read_volatile(src.add(i));
         }
         // Clear magic so subsequent boots don't re-log.
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), 0);
@@ -365,17 +364,14 @@ mod panic_handler {
             let p = core::ptr::addr_of_mut!(super::PANIC_PM).cast::<super::PanicPmRaw>();
             let buf_ptr = core::ptr::addr_of_mut!((*p).bytes).cast::<u8>();
             let buf_slice = core::slice::from_raw_parts_mut(buf_ptr, super::PANIC_MSG_MAX);
-            let mut writer = ByteWriter { buf: buf_slice, pos: 0 };
+            let mut writer = ByteWriter {
+                buf: buf_slice,
+                pos: 0,
+            };
             let _ = core::fmt::write(&mut writer, format_args!("{}", info));
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!((*p).len),
-                writer.pos as u32,
-            );
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).len), writer.pos as u32);
             // Magic last — partial write must not appear valid.
-            core::ptr::write_volatile(
-                core::ptr::addr_of_mut!((*p).magic),
-                super::PANIC_PM_MAGIC,
-            );
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), super::PANIC_PM_MAGIC);
         }
 
         if !super::PANIC_LED_ARMED.load(Ordering::Relaxed) {
@@ -395,7 +391,11 @@ mod panic_handler {
         let outset = port_base + 0x508;
         let outclr = port_base + 0x50C;
         // (set_on, set_off): write to OUTCLR to drive low, OUTSET to drive high
-        let (reg_on, reg_off) = if active_low { (outclr, outset) } else { (outset, outclr) };
+        let (reg_on, reg_off) = if active_low {
+            (outclr, outset)
+        } else {
+            (outset, outclr)
+        };
 
         unsafe {
             core::ptr::write_volatile(dirset as *mut u32, pin_mask);
@@ -462,13 +462,13 @@ pub fn take_hardfault_postmortem() -> Option<HardfaultPostMortem> {
         }
         let pm = HardfaultPostMortem {
             magic: 0,
-            pc:   core::ptr::read_volatile(core::ptr::addr_of!((*p).pc)),
-            lr:   core::ptr::read_volatile(core::ptr::addr_of!((*p).lr)),
-            r0:   core::ptr::read_volatile(core::ptr::addr_of!((*p).r0)),
-            r1:   core::ptr::read_volatile(core::ptr::addr_of!((*p).r1)),
-            r2:   core::ptr::read_volatile(core::ptr::addr_of!((*p).r2)),
-            r3:   core::ptr::read_volatile(core::ptr::addr_of!((*p).r3)),
-            r12:  core::ptr::read_volatile(core::ptr::addr_of!((*p).r12)),
+            pc: core::ptr::read_volatile(core::ptr::addr_of!((*p).pc)),
+            lr: core::ptr::read_volatile(core::ptr::addr_of!((*p).lr)),
+            r0: core::ptr::read_volatile(core::ptr::addr_of!((*p).r0)),
+            r1: core::ptr::read_volatile(core::ptr::addr_of!((*p).r1)),
+            r2: core::ptr::read_volatile(core::ptr::addr_of!((*p).r2)),
+            r3: core::ptr::read_volatile(core::ptr::addr_of!((*p).r3)),
+            r12: core::ptr::read_volatile(core::ptr::addr_of!((*p).r12)),
             xpsr: core::ptr::read_volatile(core::ptr::addr_of!((*p).xpsr)),
         };
         // Invalidate so we don't re-log on subsequent boots.
@@ -490,13 +490,13 @@ unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
     // (unlikely on a configured board), the post-mortem is the
     // diagnostic of record.
     let p = core::ptr::addr_of_mut!(HARDFAULT_PM).cast::<HardfaultPostMortem>();
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).pc),   ef.pc());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).lr),   ef.lr());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r0),   ef.r0());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r1),   ef.r1());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r2),   ef.r2());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r3),   ef.r3());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r12),  ef.r12());
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).pc), ef.pc());
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).lr), ef.lr());
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r0), ef.r0());
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r1), ef.r1());
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r2), ef.r2());
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r3), ef.r3());
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r12), ef.r12());
     core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).xpsr), ef.xpsr());
     // Magic last so a partial write can't masquerade as a valid PM.
     core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), HARDFAULT_PM_MAGIC);
@@ -515,7 +515,11 @@ unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
     let dirset = port_base + 0x518;
     let outset = port_base + 0x508;
     let outclr = port_base + 0x50C;
-    let (reg_on, reg_off) = if active_low { (outclr, outset) } else { (outset, outclr) };
+    let (reg_on, reg_off) = if active_low {
+        (outclr, outset)
+    } else {
+        (outset, outclr)
+    };
 
     core::ptr::write_volatile(dirset as *mut u32, pin_mask);
 

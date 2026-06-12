@@ -54,9 +54,15 @@ async fn main(spawner: Spawner) {
     let persistent_log = reticulum_nrf::log::take_persistent_log();
 
     // SAFETY: called once before any complex work or concurrent tasks
-    unsafe { reticulum_nrf::paint_stack(); }
+    unsafe {
+        reticulum_nrf::paint_stack();
+    }
 
-    reticulum_nrf::set_panic_led(rak4631::PANIC_LED_PORT, rak4631::PANIC_LED_PIN, rak4631::PANIC_LED_ACTIVE_LOW);
+    reticulum_nrf::set_panic_led(
+        rak4631::PANIC_LED_PORT,
+        rak4631::PANIC_LED_PIN,
+        rak4631::PANIC_LED_ACTIVE_LOW,
+    );
     // Distinct LED for HardFault — blue (P1.04) so it's visually
     // distinct from the green panic LED. Diagnostic for the executor-
     // hang investigation.
@@ -105,7 +111,9 @@ async fn main(spawner: Spawner) {
                 continue;
             }
             let raw = &snap.bytes[start..end];
-            let trimmed = core::str::from_utf8(raw).unwrap_or("<non-utf8>").trim_end_matches(['\r','\n']);
+            let trimmed = core::str::from_utf8(raw)
+                .unwrap_or("<non-utf8>")
+                .trim_end_matches(['\r', '\n']);
             if !trimmed.is_empty() {
                 log_critical!("[PERSISTENT_LOG] {}", trimmed);
             }
@@ -207,16 +215,17 @@ async fn main(spawner: Spawner) {
     // lora::init signature). Pin map is RAK4631-module-internal.
     let lora = reticulum_nrf::lora::init(
         p.SPI2,
-        p.P1_11.into(),  // SCK
-        p.P1_12.into(),  // MOSI
-        p.P1_13.into(),  // MISO
-        p.P1_10.into(),  // NSS / CS
-        p.P1_06.into(),  // RESET
-        p.P1_14.into(),  // BUSY
-        p.P1_15.into(),  // DIO1
+        p.P1_11.into(), // SCK
+        p.P1_12.into(), // MOSI
+        p.P1_13.into(), // MISO
+        p.P1_10.into(), // NSS / CS
+        p.P1_06.into(), // RESET
+        p.P1_14.into(), // BUSY
+        p.P1_15.into(), // DIO1
         spim::Frequency::M4,
         rak4631::CONFIG.lora_tcxo_voltage_reg,
-    ).await;
+    )
+    .await;
     info!("SX1262 ready");
 
     let radio_cfg = reticulum_nrf::lora::RadioConfig::eu_medium();
@@ -226,10 +235,27 @@ async fn main(spawner: Spawner) {
     // BLE — same Columba v2.2 service the T114 exposes.
     let identity_hash = *node.identity().hash();
     reticulum_nrf::ble::init(
-        &spawner, identity_hash, vbus,
-        p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31,
-        p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23,
-        p.PPI_CH24, p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+        &spawner,
+        identity_hash,
+        vbus,
+        p.RTC0,
+        p.TIMER0,
+        p.TEMP,
+        p.PPI_CH19,
+        p.PPI_CH30,
+        p.PPI_CH31,
+        p.PPI_CH17,
+        p.PPI_CH18,
+        p.PPI_CH20,
+        p.PPI_CH21,
+        p.PPI_CH22,
+        p.PPI_CH23,
+        p.PPI_CH24,
+        p.PPI_CH25,
+        p.PPI_CH26,
+        p.PPI_CH27,
+        p.PPI_CH28,
+        p.PPI_CH29,
         p.RNG,
     );
     let ble_channels = reticulum_nrf::ble::channels();
@@ -251,9 +277,9 @@ async fn main(spawner: Spawner) {
         reticulum_nrf::gnss::init(
             &spawner,
             p.UARTE0,
-            p.P0_15.into(),  // RX from ZOE-M8Q TX
-            p.P0_16.into(),  // TX to ZOE-M8Q RX
-            p.P0_17.into(),  // PPS (configured but unused)
+            p.P0_15.into(), // RX from ZOE-M8Q TX
+            p.P0_16.into(), // TX to ZOE-M8Q RX
+            p.P0_17.into(), // PPS (configured but unused)
         );
         info!("gnss task spawned");
     }
@@ -342,7 +368,10 @@ async fn main(spawner: Spawner) {
                             Action::SendPacket { iface, data } => {
                                 info!("ACT SendPacket iface={} len={}", iface.0, data.len());
                             }
-                            Action::Broadcast { exclude_iface, data } => {
+                            Action::Broadcast {
+                                exclude_iface,
+                                data,
+                            } => {
                                 let excl = exclude_iface.map(|i| i.0 as i16).unwrap_or(-1);
                                 info!("ACT Broadcast excl={} len={}", excl, data.len());
                             }
@@ -375,7 +404,10 @@ async fn diag_mem_log() {
         Timer::after(Duration::from_secs(5)).await;
         let stack = reticulum_nrf::stack_free();
         let (hu, hf) = reticulum_nrf::heap_stats();
-        info!("[DIAG_MEM] stack_free={} heap_used={} heap_free={}", stack, hu, hf);
+        info!(
+            "[DIAG_MEM] stack_free={} heap_used={} heap_free={}",
+            stack, hu, hf
+        );
     }
 }
 

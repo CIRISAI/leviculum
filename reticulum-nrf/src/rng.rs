@@ -24,14 +24,25 @@ use rand_core::{CryptoRng, RngCore};
 pub struct RawHwRng;
 
 const RNG_BASE: u32 = 0x4000_D000;
+// Register table mirrors the nRF52840 reference manual offsets; the
+// explicit `+ 0x000` keeps the offset column symmetric and greppable.
+#[allow(clippy::identity_op)]
 const RNG_TASKS_START: *mut u32 = (RNG_BASE + 0x000) as *mut u32;
 const RNG_TASKS_STOP: *mut u32 = (RNG_BASE + 0x004) as *mut u32;
 const RNG_EVENTS_VALRDY: *mut u32 = (RNG_BASE + 0x100) as *mut u32;
 const RNG_VALUE: *const u32 = (RNG_BASE + 0x508) as *const u32;
 const RNG_CONFIG: *mut u32 = (RNG_BASE + 0x504) as *mut u32;
 
+impl Default for RawHwRng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RawHwRng {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Direct hardware register read — safe ONLY pre-`Softdevice::enable`.
     /// Used as the fallback when the SD syscall returns INVALID_STATE
@@ -58,15 +69,15 @@ impl RawHwRng {
     fn try_syscall_chunk(buf: *mut u8, len: u8) -> Option<()> {
         let mut retries = 0u32;
         loop {
-            let ret = unsafe {
-                nrf_softdevice_s140::sd_rand_application_vector_get(buf, len)
-            };
+            let ret = unsafe { nrf_softdevice_s140::sd_rand_application_vector_get(buf, len) };
             match ret {
-                0 => return Some(()),                    // NRF_SUCCESS
-                8 => return None,                        // NRF_ERROR_INVALID_STATE — SD not enabled
+                0 => return Some(()), // NRF_SUCCESS
+                8 => return None,     // NRF_ERROR_INVALID_STATE — SD not enabled
                 _ => {
                     retries += 1;
-                    if retries > 10_000 { return None; }
+                    if retries > 10_000 {
+                        return None;
+                    }
                     cortex_m::asm::nop();
                 }
             }
@@ -74,7 +85,9 @@ impl RawHwRng {
     }
 
     fn fill(dest: &mut [u8]) {
-        if dest.is_empty() { return; }
+        if dest.is_empty() {
+            return;
+        }
         let mut offset = 0usize;
         while offset < dest.len() {
             let chunk_len = (dest.len() - offset).min(u8::MAX as usize);
@@ -108,7 +121,9 @@ impl RngCore for RawHwRng {
         u64::from_le_bytes(buf)
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) { Self::fill(dest); }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        Self::fill(dest);
+    }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
         Self::fill(dest);
