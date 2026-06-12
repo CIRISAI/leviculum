@@ -15,7 +15,7 @@ The protocol core (`reticulum-core`) compiles as `no_std` with only `alloc`, so 
 
 ## Status
 
-Leviculum is in active development. The protocol implementation is functionally complete: routing, path discovery, link establishment, encrypted channels, segmented file transfer, forward secrecy ratchets, and LoRa radio support all work and are tested against Python Reticulum on real hardware. It is not yet production-ready.
+Leviculum is in active development. The protocol implementation is functionally complete: routing, path discovery, link establishment, encrypted channels, file transfer, forward secrecy ratchets, and LoRa radio support all work and are tested against Python Reticulum on real hardware. (One caveat: sending files larger than one megabyte as multiple segments is not implemented yet — Codeberg #27; receiving multi-segment transfers works.) It is not yet production-ready.
 
 ## Getting started
 

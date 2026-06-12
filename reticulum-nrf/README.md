@@ -59,3 +59,9 @@ After the next plug-in, `/dev/leviculum-debug` and `/dev/leviculum-transport` po
 ```
 picocom /dev/leviculum-debug -b 115200
 ```
+
+## Build profiles
+
+The debug profile does not fit the nRF52840 flash (the image overflows
+FLASH by several hundred KB at link time) — always build and flash with
+`--release`; all `just flash-*` recipes already do.

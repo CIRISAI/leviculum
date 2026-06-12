@@ -24,19 +24,19 @@ lns -- Reticulum network utility
 
 ### lns status
 
-Show status of the Reticulum network. Connects to the running daemon via shared instance and displays transport information. Equivalent to Python's **rnstatus**.
+**Not yet implemented** (stub, prints "Not implemented yet" — tracked as Codeberg #22). Will show status of the Reticulum network by connecting to the running daemon via shared instance, equivalent to Python's **rnstatus**.
 
 ### lns path [*destination*]
 
-Show or request paths to destinations. Without an argument, lists all known paths. With a destination hash (hex), requests a path to that destination. Equivalent to Python's **rnpath**.
+**Not yet implemented** (stub — tracked as Codeberg #22). Will show or request paths to destinations: without an argument, list all known paths; with a destination hash (hex), request a path to that destination. Equivalent to Python's **rnpath**.
 
 ### lns probe *destination*
 
-Probe a destination by sending a probe packet and measuring round-trip time. Equivalent to Python's **rnprobe**.
+**Not yet implemented** (stub — tracked as Codeberg #22). Will probe a destination by sending a probe packet and measuring round-trip time, equivalent to Python's **rnprobe**.
 
 ### lns interfaces
 
-Show information about configured network interfaces.
+**Not yet implemented** (stub — tracked as Codeberg #22). Will show information about configured network interfaces.
 
 ### lns identity generate [**-o** *file*]
 

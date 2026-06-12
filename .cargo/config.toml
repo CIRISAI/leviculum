@@ -11,6 +11,9 @@
 # MUST be built against glibc. During `cargo check --workspace` the
 # FFI crate rides the workspace musl default as staticlib-only; that
 # is harmless for CI coverage and does not produce a shippable .so.
+# The "dropping unsupported crate type `cdylib`" warning during
+# workspace checks is therefore EXPECTED — leave it; Cargo has no
+# target-conditional crate-type to silence it properly.
 [build]
 target = "x86_64-unknown-linux-musl"
 

@@ -359,7 +359,7 @@ pub extern "C" fn lns_error_string(code: c_int) -> *const c_char {
     msg.as_ptr() as *const c_char
 }
 
-// TODO: Add more FFI functions for:
+// TODO(#29): Add more FFI functions for:
 // - Reticulum instance management
 // - Destination creation and management
 // - Link establishment

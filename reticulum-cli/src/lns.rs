@@ -1159,19 +1159,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("================");
             println!();
             println!("Status: Not implemented yet");
-            // TODO: Connect to running daemon and show status
+            // TODO(#22): Connect to running daemon and show status
         }
 
         Commands::Path { destination } => {
             if let Some(dest) = destination {
                 println!("Requesting path to: {dest}");
-                // TODO: Request path via daemon
+                // TODO(#22): Request path via daemon
             } else {
                 println!("Known paths:");
                 println!("============");
                 println!();
                 println!("No paths (not implemented yet)");
-                // TODO: List known paths from daemon
+                // TODO(#22): List known paths from daemon
             }
         }
 
@@ -1215,7 +1215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Probe { destination } => {
             println!("Probing destination: {destination}");
             println!("Not implemented yet");
-            // TODO: Send probe packet via daemon
+            // TODO(#22): Send probe packet via daemon
         }
 
         Commands::Interfaces => {
@@ -1223,7 +1223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("==========");
             println!();
             println!("No interfaces (not implemented yet)");
-            // TODO: Show interface information from daemon
+            // TODO(#22): Show interface information from daemon
         }
 
         Commands::Selftest {
