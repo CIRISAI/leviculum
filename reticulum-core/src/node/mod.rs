@@ -370,13 +370,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Announce a registered destination on all interfaces
     ///
     /// Builds the announce packet and broadcasts it. The announce is queued
-    /// as a Broadcast action, dispatched by the next [`handle_timeout()`] or
-    /// [`handle_packet()`] call.
+    /// as a Broadcast action, dispatched by the next [`NodeCore::handle_timeout()`] or
+    /// [`NodeCore::handle_packet()`] call.
     ///
     /// # Deferred dispatch
     ///
     /// This method queues I/O actions internally. The actions are not executed
-    /// until the driver calls [`handle_packet()`] or [`handle_timeout()`],
+    /// until the driver calls [`NodeCore::handle_packet()`] or [`NodeCore::handle_timeout()`],
     /// which drain all pending actions. Callers must ensure the event loop
     /// runs promptly after calling this method.
     ///
@@ -1052,7 +1052,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Run periodic maintenance (sans-I/O)
     ///
-    /// The driver should call this when the deadline from [`next_deadline`]
+    /// The driver should call this when the deadline from [`NodeCore::next_deadline`]
     /// expires, or on a regular interval. Handles path expiry, announce
     /// rebroadcasts, keepalives, stale link detection, receipt timeouts,
     /// and channel retransmissions.
@@ -1083,7 +1083,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Compute the earliest deadline across all timers
     ///
     /// Returns `None` if there are no pending deadlines. The driver should
-    /// call [`handle_timeout`] when this deadline expires (or sooner).
+    /// call [`NodeCore::handle_timeout`] when this deadline expires (or sooner).
     ///
     /// The returned value is an absolute timestamp in milliseconds
     /// (same timebase as the `Clock` trait).
@@ -1986,8 +1986,8 @@ mod tests {
         );
 
         let announce_on = |node: &mut NodeCore<OsRng, MockClock, MemoryStorage>,
-                               iface: usize,
-                               aspect: &str|
+                           iface: usize,
+                           aspect: &str|
          -> DestinationHash {
             let identity = Identity::generate(&mut OsRng);
             let mut dest = Destination::new(

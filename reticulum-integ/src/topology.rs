@@ -119,7 +119,7 @@ pub struct NodeDef {
     #[serde(default)]
     pub rnode_proxy: bool,
     /// TCP server port for local tool access (e.g., selftest).
-    /// Generates a standalone TCPServerInterface, independent of [links].
+    /// Generates a standalone TCPServerInterface, independent of `[links]`.
     #[serde(default)]
     pub listen_port: Option<u16>,
     /// Multiple RNode interfaces with per-interface radio parameters.
@@ -546,7 +546,7 @@ pub fn default_auto_group_id(test_name: &str) -> String {
     format!("test_{test_name}")
 }
 
-/// Parse all links and return a map: node_name -> Vec<InterfaceEntry>.
+/// Parse all links and return a map: node_name -> `Vec<InterfaceEntry>`.
 ///
 /// TCP links: for key "X-Y" (X < Y alphabetically), X gets the server role
 /// and Y gets the client role. Each server node gets a unique port starting

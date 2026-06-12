@@ -412,7 +412,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Return all local links as RPC-exportable rows.
     ///
-    /// One entry per [`crate::link::Link`] currently in [`Self::links`],
+    /// One entry per [`crate::link::Link`] currently in the `links` map,
     /// regardless of state — the `state` field on the returned struct
     /// disambiguates `pending` / `handshake` / `active` / `stale` / `closed`.
     /// Backs the `link_table` shared-instance RPC (`lns diag` v2).

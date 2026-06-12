@@ -11,9 +11,9 @@ pub enum SendError {
     NoLink,
     /// Link failed
     LinkFailed,
-    /// Send path is occupied, try later (mirrors [`ChannelError::Busy`])
+    /// Send path is occupied, try later (mirrors [`crate::link::channel::ChannelError::Busy`])
     Busy,
-    /// Channel is pacing sends, retry at the given time (mirrors [`ChannelError::PacingDelay`])
+    /// Channel is pacing sends, retry at the given time (mirrors [`crate::link::channel::ChannelError::PacingDelay`])
     PacingDelay { ready_at_ms: u64 },
     /// Encryption failed (identity not found in known_identities, or crypto error)
     EncryptionFailed,

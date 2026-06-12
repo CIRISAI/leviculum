@@ -164,7 +164,7 @@ pub(crate) type InterfaceOnlineMap = Arc<std::sync::Mutex<std::collections::BTre
 /// Per-interface readiness signal.
 ///
 /// Created by each interface spawn function and shared with the
-/// driver via the [`InterfaceReadyMap`].  Owners of an `Arc<ReadySignal>`
+/// driver via the `InterfaceReadyMap`.  Owners of an `Arc<ReadySignal>`
 /// can:
 ///
 /// - Call [`signal_ready`](Self::signal_ready) once the interface has

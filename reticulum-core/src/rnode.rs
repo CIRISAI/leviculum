@@ -122,7 +122,7 @@ pub const CMD_INT_DATA: [u8; 12] = [
 // Error command and codes
 // ---------------------------------------------------------------------------
 
-/// Error report from device (0x90, same value as CMD_INT_DATA[5] and PLATFORM_AVR;
+/// Error report from device (0x90, same value as `CMD_INT_DATA[5]` and PLATFORM_AVR;
 /// disambiguated by protocol context: command byte vs payload byte)
 pub const CMD_ERROR: u8 = 0x90;
 

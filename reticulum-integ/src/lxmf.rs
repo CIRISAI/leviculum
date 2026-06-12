@@ -55,7 +55,7 @@ pub struct LxmfHelper {
 impl LxmfHelper {
     /// Spawn a new helper process inside `container`.
     ///
-    /// `display_name` is passed as argv[1] to lxmf_node.py and shown
+    /// `display_name` is passed as `argv[1]` to lxmf_node.py and shown
     /// in announces. `log_path` receives a tee of the helper's stdout
     /// (every line, EVENT or not). Stderr is sent to a sibling file
     /// with `.stderr.log` appended.

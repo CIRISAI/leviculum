@@ -1,6 +1,6 @@
-//! Resource protocol for reliable transfer of large data over a [`Link`](crate::Link).
+//! Resource protocol for reliable transfer of large data over a [`Link`](crate::link::Link).
 //!
-//! While [`Channel`](crate::Channel) handles small messages (up to ~400 bytes
+//! While [`Channel`](crate::link::channel::Channel) handles small messages (up to ~400 bytes
 //! per envelope), resources transfer kilobytes to megabytes by segmenting data
 //! into parts and using a sliding window for throughput.
 //!

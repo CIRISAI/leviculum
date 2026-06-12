@@ -188,9 +188,9 @@ pub enum LinkError {
     NotFound,
     /// Unsupported link encryption mode signaled by the peer
     UnsupportedMode,
-    /// Send path is occupied, try later (mirrors [`ChannelError::Busy`])
+    /// Send path is occupied, try later (mirrors [`crate::link::channel::ChannelError::Busy`])
     Busy,
-    /// Channel is pacing sends, retry at the given time (mirrors [`ChannelError::PacingDelay`])
+    /// Channel is pacing sends, retry at the given time (mirrors [`crate::link::channel::ChannelError::PacingDelay`])
     PacingDelay { ready_at_ms: u64 },
     /// Destination not registered on this node
     DestinationNotRegistered,

@@ -346,7 +346,7 @@ fn init_inner(dump_target: DumpTarget, extra_schemas: &'static [EventSchema]) ->
 
 /// Build the layer used by `tracing_setup::init_tracing_with_event_log`.
 /// One global layer per process; the active-handles list it owns is
-/// shared with every [`EventLogHandle`] via [`active_list`].
+/// shared with every [`EventLogHandle`] via `active_list`.
 pub fn layer() -> EventLogLayer {
     EventLogLayer {
         active: Arc::clone(active_list()),

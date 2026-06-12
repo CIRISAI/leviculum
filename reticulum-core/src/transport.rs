@@ -182,7 +182,7 @@ impl core::fmt::Debug for TickOutput {
 // Action Dispatch (protocol logic for drivers)
 /// Dispatch actions to interfaces (protocol logic)
 ///
-/// Routes each [`Action`] to the correct interface(s) via [`Interface::try_send()`].
+/// Routes each [`Action`] to the correct interface(s) via [`crate::traits::Interface::try_send()`].
 /// This is protocol knowledge, broadcast-exclusion, interface selection, that
 /// belongs in core so every driver (tokio, Embassy, bare-metal) gets it for free.
 ///
