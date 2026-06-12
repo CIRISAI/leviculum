@@ -9,7 +9,7 @@ external runners.
 
 | Tier | Name | Trigger | Budget | Test scope |
 |------|------|---------|--------|------------|
-| 0 | `fast` | pre-push hook | ~3 min | fmt + clippy + workspace lib tests |
+| 0 | `fast` | pre-push hook | ~3 min | fmt + clippy (host + nrf firmware workspace, both BSPs) + rustdoc gate + workspace lib tests |
 | 1 | `standard` | post-commit (background) | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop |
 | 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + integ Docker tests |
 | 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LoRa hardware tests |

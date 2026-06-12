@@ -26,8 +26,23 @@ spawn-coder:
     @echo "[spawn-coder] bundle promoted to bridge: /tmp/leviculum/instructions.md"
     @echo "[spawn-coder] source: /tmp/leviculum/auto-bug/instructions.md (left in place for re-promotion)"
 
-# Tier 0 (~3 min, runs on every git push): fmt + clippy + workspace lib tests.
-fast: mvr
+# Lint the embedded firmware workspace. reticulum-nrf is its OWN cargo
+# workspace — `--workspace` invocations in the repo root never reach it,
+# which let 11 clippy findings accumulate unseen (audit 2026-06-11).
+# Both BSP feature sets; clippy subsumes `cargo check` diagnostics.
+# First run compiles the embedded deps into reticulum-nrf/target
+# (minutes); warm runs are seconds.
+lint-nrf:
+    cd reticulum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
+    cd reticulum-nrf && cargo clippy --features bsp-t114 -- -D warnings
+
+# Rustdoc gate: broken intra-doc links fail instead of warning.
+doc-gate:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+# Tier 0 (~3 min, runs on every git push): fmt + clippy (host + nrf)
+# + rustdoc gate + workspace lib tests.
+fast: mvr lint-nrf doc-gate
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     cargo test --workspace --lib --exclude reticulum-integ
