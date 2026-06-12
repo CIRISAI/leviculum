@@ -128,19 +128,39 @@ impl InterfaceCounters {
     }
 }
 
-/// Spawn a background task that samples interface byte counters every second
+/// Spawn a background worker that samples interface byte counters every second
 /// and updates cached speeds. Mirrors Python's `Transport.count_traffic_loop()`.
+///
+/// Runs on a dedicated OS thread rather than a `tokio::spawn`d task: the work
+/// is purely synchronous (atomic loads + a `std::sync::Mutex`), and using
+/// `std::thread::sleep` instead of `tokio::time::interval` removes any
+/// dependency on the host runtime's time driver. That dependency was a bug —
+/// an embedder runtime built without `enable_time()` made `interval()` panic
+/// on first poll, killing the counter. A library housekeeping task must not
+/// assume how the host wired its runtime.
+///
+/// The thread holds only a `Weak` reference to the stats map, so it
+/// self-terminates within ~1 s of the owning node dropping its last strong
+/// reference (the driver retains `self.iface_stats_map`) — no leaked thread
+/// per node.
 pub(crate) fn spawn_traffic_counter(iface_stats_map: InterfaceStatsMap) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-            let map = iface_stats_map.lock().unwrap();
-            for counters in map.values() {
+    let stats = Arc::downgrade(&iface_stats_map);
+    drop(iface_stats_map); // don't keep the map alive ourselves
+    let spawned = std::thread::Builder::new()
+        .name("reticulum-traffic-counter".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let Some(map) = stats.upgrade() else {
+                break; // owning node dropped — nothing left to sample
+            };
+            for counters in map.lock().unwrap().values() {
                 counters.update_speed();
             }
-        }
-    });
+        });
+    if let Err(e) = spawned {
+        // Speed reporting is observability-only; degrade rather than abort.
+        tracing::warn!("traffic-counter thread not spawned: {e}");
+    }
 }
 
 /// Shared map of interface counters, keyed by interface ID index.
@@ -460,6 +480,52 @@ mod tests {
     fn interface_handle_defaults_to_no_credit() {
         let (h, _rx) = make_handle(7);
         assert!(h.credit.is_none());
+    }
+
+    /// Regression: `spawn_traffic_counter` must not panic when the host
+    /// runtime lacks a time driver.
+    ///
+    /// The old implementation built `tokio::time::interval` inside a
+    /// `tokio::spawn`; under an embedder runtime built without
+    /// `enable_time()` (e.g. a `new_current_thread().build()` with no time
+    /// feature), the first poll panicked with "timers are disabled". The
+    /// panic fired the embedder's panic hook and killed the counter task.
+    /// A library housekeeping task must tolerate any host runtime, so this
+    /// builds exactly that runtime and asserts zero panics escape.
+    #[test]
+    fn spawn_traffic_counter_survives_runtime_without_time_driver() {
+        use std::collections::BTreeMap;
+        use std::sync::atomic::AtomicUsize;
+
+        let panics = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&panics);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |_info| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Deliberately NO `.enable_time()` — mirrors the embedder runtime
+        // that surfaced the bug. (`#[tokio::test]` would enable_all and hide
+        // it.)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let map: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        rt.block_on(async move {
+            spawn_traffic_counter(Arc::clone(&map));
+            // Pump the scheduler so any spawned task is polled at least once;
+            // the pre-fix `interval` panics on that first poll.
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        });
+
+        std::panic::set_hook(prev_hook);
+        assert_eq!(
+            panics.load(Ordering::SeqCst),
+            0,
+            "spawn_traffic_counter panicked under a runtime without the time driver"
+        );
     }
 
     #[test]
