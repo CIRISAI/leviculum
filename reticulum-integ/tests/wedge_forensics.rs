@@ -73,14 +73,15 @@ fn capture_script_creates_tagged_directory() {
 }
 
 #[test]
-#[should_panic(expected = "timed out after 1s")]
+#[should_panic(expected = "wedge: worker still active after 1s")]
 fn timeout_invokes_capture_script() {
     // run_with_timeout's Timeout branch calls capture_wedge_forensics
     // before panicking.  We can't easily assert the call happened from
     // here (the panic kills the test before any post-action), but this
     // test verifies the integration compiles and the timeout still
     // fires its panic message correctly even with the capture call
-    // wired in.
+    // wired in.  The 60s sleeper cannot finish inside the 50ms grace
+    // window, so the wedge branch (not wrapper-tight) is deterministic.
     reticulum_integ::timeout::run_with_timeout("forensics-sentinel", 1, || {
         std::thread::sleep(std::time::Duration::from_secs(60));
     });
