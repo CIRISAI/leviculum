@@ -1,0 +1,91 @@
+# PR #62 integ coverage: bounded connect attempts against a black-holed
+# peer. block_link installs a silent iptables DROP (no RST), so bravo's
+# established connection dies via keepalive (~24 s) and every reconnect
+# attempt then hits the per-attempt connect_timeout (5 s default)
+# instead of hanging on kernel SYN retransmit. Assertions are
+# system-level: the daemon stays responsive DURING the black-hole
+# phase (rnstatus exec), and the reconnect loop survives it and
+# recovers promptly after restore (path re-learned, probe green).
+# The per-attempt timeout value itself is unit-pinned in tcp.rs.
+
+[test]
+name = "tcp_blackhole_giveup"
+description = "TCP client reconnect stays bounded and healthy against a black-holed peer"
+timeout_secs = 300
+
+[nodes.alice]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bravo]
+type = "rust"
+respond_to_probes = true
+
+[links]
+bravo-alice = "tcp"
+
+[[steps]]
+action = "wait_for_path"
+on = "bravo"
+destination = "alice.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "rnprobe"
+from = "bravo"
+to = "alice.probe"
+expect_hops = 1
+expect_result = "success"
+
+# Black-hole both directions: silent DROP, no FIN/RST.
+[[steps]]
+action = "block_link"
+from = "bravo"
+to = "alice"
+
+[[steps]]
+action = "block_link"
+from = "alice"
+to = "bravo"
+
+# Keepalive detection (~24-29 s) + reconnect interval (5 s) + at least
+# one FULL timed-out connect attempt (5 s) + margin — the timed-out
+# attempt must demonstrably occur inside the block window.
+[[steps]]
+action = "sleep"
+duration_secs = 55
+
+# Daemon must be responsive while its TCP client is black-holed:
+# a wedged reconnect loop (pre-#62 unbounded connect) blocked nothing
+# globally, but rnstatus proves the IPC/event loop is alive mid-block.
+[[steps]]
+action = "exec"
+on = "bravo"
+command = "rnstatus --config /root/.reticulum"
+expect_exit_code = 0
+
+[[steps]]
+action = "restore_link"
+from = "bravo"
+to = "alice"
+
+[[steps]]
+action = "restore_link"
+from = "alice"
+to = "bravo"
+
+# Reconnect loop must come back from the black-hole phase: the next
+# bounded attempt succeeds, Branch-6 re-announce fires, path returns.
+[[steps]]
+action = "wait_for_path"
+on = "bravo"
+destination = "alice.probe"
+timeout_secs = 60
+
+[[steps]]
+action = "rnprobe"
+from = "bravo"
+to = "alice.probe"
+expect_hops = 1
+expect_result = "success"
+timeout_secs = 30

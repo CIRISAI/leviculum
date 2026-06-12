@@ -4338,6 +4338,21 @@ mod tests {
 
     #[test]
     #[serial(docker)]
+    fn tcp_blackhole_giveup() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/tcp_blackhole_giveup.toml"
+        ))
+        .expect("tcp_blackhole_giveup.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+        let mut runner = require_runner!(scenario);
+
+        run_test(&mut runner).expect("test failed");
+    }
+
+    #[test]
+    #[serial(docker)]
     fn lncp_silent() {
         let toml_str = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
