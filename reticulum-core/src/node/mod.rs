@@ -2324,8 +2324,11 @@ mod tests {
         // Path should exist before timeout
         assert!(node.has_path(&dest_hash));
 
-        // Exhaust all link request retries. Each timeout triggers a
-        // retry with fresh keys; the final timeout emits LinkClosed.
+        // Exhaust all link request retries. Each timeout resends the
+        // link request WITH THE SAME KEYS (link_management.rs
+        // check_timeouts) — which makes the retry bytes identical and
+        // therefore dead through any transport node's dedup; see
+        // Codeberg #66. The final timeout emits LinkClosed.
         let mut final_output = node.handle_timeout(); // no-op, not timed out yet
         for _attempt in 0..=(LINK_REQUEST_MAX_RETRIES as usize) {
             let now = node.transport().clock().now_ms();
