@@ -593,6 +593,14 @@ mod tests {
     /// connection but never speaks (e.g. a daemon that errored handling the
     /// request and sent no response). It should fail with a `TimedOut` error
     /// within the [`RPC_CLIENT_TIMEOUT`] window.
+    ///
+    /// Linux-only: the mute-peer listener is built directly on an abstract
+    /// Unix socket (`std::os::linux::net::SocketAddrExt`), which is a
+    /// Linux-specific API. macOS/BSD use the filesystem-socket fallback path
+    /// and would need a different listener construction; the timeout logic
+    /// under test is platform-independent, so gating this to Linux loses no
+    /// coverage of the behaviour that matters.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_rpc_client_call_times_out_on_mute_peer() {
         use std::os::linux::net::SocketAddrExt;
