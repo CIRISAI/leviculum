@@ -1,0 +1,221 @@
+# GitHub Actions CI for Leviculum.
+#
+# Mirrors the CIRIS "substrate sisters" CI *pattern* (CIRISEdge / CIRISPersist /
+# CIRISVerify): GitHub Actions on push+PR, dtolnay/rust-toolchain +
+# Swatinem/rust-cache, a clippy+fmt `-D warnings` gate, cargo-deny license/
+# advisory audit, and a real multi-platform matrix.
+#
+# It is NOT a copy of CIRISEdge's ci.yml: edge is a single PyO3/UniFFI/mobile-
+# wheel crate, whereas Leviculum is a Rust workspace (core/std/ffi/cli/proxy/
+# integ + an embedded nrf target) that ships lnsd/lns/lncp + a no_std core and
+# defaults to a musl target. The jobs below are populated with Leviculum's own
+# surfaces, reusing the build/test commands validated in .woodpecker/ci.yml.
+#
+# The `cross-check` job is a pre-flight for CIRISEdge: edge consumes
+# reticulum-core/std as Rust source crates, so it recompiles them for every one
+# of its targets (android ABIs, iOS, …). Checking reticulum-core on those
+# targets HERE catches a Leviculum change that breaks an Edge target before
+# Edge's much heavier NDK/maturin pipeline hits it.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── lint: clippy + fmt (rejection gate) ────────────────────────────
+  lint:
+    name: clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # musl-gcc: the workspace defaults to x86_64-unknown-linux-musl
+      # (.cargo/config.toml), so every cargo invocation needs the musl linker.
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      # -D warnings is scoped to clippy (not a global RUSTFLAGS) so upstream
+      # dependency warnings don't fail the gate — only our own code does.
+      # --workspace (lib + bins of every member) matches the existing
+      # .woodpecker gate; the test harness uses intentional patterns
+      # (shared #[path] module include, Drop-managed child processes) that
+      # --all-targets would flag, so it is deliberately not used here.
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace -- -D warnings
+
+  # ─── test-linux: workspace unit tests (musl) ────────────────────────
+  test-linux:
+    name: test linux-x86_64 (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test -p reticulum-core --lib
+        run: cargo test -p reticulum-core --lib
+      - name: cargo test -p reticulum-std --lib
+        run: cargo test -p reticulum-std --lib
+
+  # ─── interop: real Python-RNS CLI tools vs the Rust daemon ──────────
+  # Pins Python to 3.10 (oldest supported runtime — mobile platforms) via uv,
+  # so CI exercises the version floor. RNS is installed from PyPI (the vendored
+  # Reticulum submodule was removed in a7e1102).
+  interop:
+    name: rnsd interop (RNS 1.3.x, py3.10)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools curl ca-certificates
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: install RNS (PyPI) on Python 3.10 via uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv python install 3.10
+          uv venv --python 3.10 /opt/rnsvenv
+          VIRTUAL_ENV=/opt/rnsvenv uv pip install rns
+          echo "/opt/rnsvenv/bin" >> "$GITHUB_PATH"   # harness spawns `python3`
+      - name: cargo test -p reticulum-std --test rnsd_interop
+        run: cargo test -p reticulum-std --test rnsd_interop
+
+  # ─── macos: exercise the non-Linux filesystem-socket path ───────────
+  # Leviculum falls back to filesystem sockets on non-Linux (rpc/mod.rs,
+  # commits b461e0c/4a0934c). CARGO_BUILD_TARGET overrides the musl default
+  # so cargo builds for the native Apple-silicon target.
+  macos:
+    name: test darwin-aarch64
+    runs-on: macos-14
+    env:
+      CARGO_BUILD_TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false   # avoid the rustup-init shim cache-poison on macOS
+      - name: cargo test (core + std libs)
+        run: |
+          cargo test -p reticulum-core --lib
+          cargo test -p reticulum-std --lib
+
+  # ─── windows: the crates CIRISEdge's pyo3 wheel consumes ────────────
+  # reticulum-core + reticulum-std must build on windows-x86_64 so edge/lens can
+  # ship Windows wheels (issue #10). The Unix IPC (LocalInterface) and the
+  # Python-tool RPC use TCP loopback on Windows, mirroring Python-RNS's AF_INET
+  # fallback (ports 37428/37429); name_to_index uses iphlpapi. CARGO_BUILD_TARGET
+  # overrides the workspace's musl default for the native MSVC target.
+  windows:
+    name: test windows-x86_64 (msvc)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install Python-RNS (PyPI)
+        run: pip install rns
+      - name: cargo build (core + std)
+        run: |
+          cargo build -p reticulum-core
+          cargo build -p reticulum-std
+      - name: cargo test (core + std libs)
+        run: |
+          cargo test -p reticulum-core --lib
+          cargo test -p reticulum-std --lib
+      # Real Windows daemon ↔ Python-RNS interop over the TCP-loopback RPC
+      # (37429): drives RNS.Reticulum().get_interface_stats() against an
+      # in-process Rust daemon. The Unix rnsd_interop suite covers AF_UNIX; this
+      # is its Windows twin and the authoritative check that the TCP-loopback
+      # IPC/RPC actually speaks the Python wire format — not just that it compiles.
+      - name: windows RPC interop (Python-RNS over TCP loopback)
+        run: cargo test -p reticulum-std --test windows_rpc_interop -- --nocapture
+
+  # ─── embedded: no_std core cross-build for MCU targets ──────────────
+  # Leviculum's analog of edge's mobile cross-compile rigor: reticulum-core is
+  # no_std and must keep building for the firmware targets. --target overrides
+  # the musl default.
+  #
+  # thumbv7em (nrf52, Cortex-M4) has atomic CAS, so it builds with the default
+  # feature set (tracing on). thumbv6m (rp2040, Cortex-M0/M0+) lacks atomic CAS,
+  # which tracing-core requires — so it builds with `--no-default-features`,
+  # which disables core's optional `tracing` feature (the level macros become
+  # no-ops via the shim in lib.rs). Closes Leviculum #6.
+  embedded:
+    name: build reticulum-core (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: thumbv7em-none-eabihf, args: "" }
+          - { target: thumbv6m-none-eabi, args: "--no-default-features" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: embedded-${{ matrix.target }}
+      - name: cargo build -p reticulum-core --target ${{ matrix.target }}
+        run: cargo build -p reticulum-core --target ${{ matrix.target }} ${{ matrix.args }}
+
+  # ─── cross-check: pre-flight reticulum-core on CIRISEdge's targets ──
+  # `cargo check` (no link → no NDK/linker needed) on the targets edge
+  # cross-compiles leviculum-core for. A Leviculum change that breaks one of
+  # these surfaces fails here, not in Edge's heavier NDK/maturin pipeline.
+  cross-check:
+    name: cross-check core (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android
+          - x86_64-linux-android
+          - armv7-linux-androideabi
+          - aarch64-apple-ios
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-check-${{ matrix.target }}
+      - name: cargo check -p reticulum-core --target ${{ matrix.target }}
+        run: cargo check -p reticulum-core --target ${{ matrix.target }}
+
+  # ─── license-audit: cargo-deny (licenses + advisories) ──────────────
+  # Same gate the substrate sisters run. Leviculum is AGPL-3.0-or-later; this
+  # flags incompatible dependency licenses and RUSTSEC advisories.
+  license-audit:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
