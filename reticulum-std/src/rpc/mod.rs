@@ -16,7 +16,18 @@ pub(crate) mod pickle;
 
 use std::sync::{Arc, Mutex};
 
-use tokio::net::UnixListener;
+// RPC transport. Python `multiprocessing.connection` runs over Unix sockets on
+// Unix and over TCP loopback (AF_INET, default local_control_port 37429) on
+// Windows; we mirror that so `rnstatus`/`rnpath` interop on each platform. The
+// framing + HMAC auth (connection.rs) are transport-agnostic.
+#[cfg(windows)]
+use tokio::net::TcpListener as RpcListener;
+#[cfg(windows)]
+use tokio::net::TcpStream as RpcStream;
+#[cfg(unix)]
+use tokio::net::UnixListener as RpcListener;
+#[cfg(unix)]
+use tokio::net::UnixStream as RpcStream;
 use tokio::sync::watch;
 
 use crate::driver::StdNodeCore;
@@ -25,6 +36,60 @@ use connection::{read_message, server_handshake, write_message};
 use error::RpcError;
 use handlers::handle_request;
 use pickle::parse_request;
+
+/// Bind the RPC listener for the given abstract name.
+///
+/// On Linux, uses abstract Unix sockets; on other Unix systems, filesystem
+/// sockets in the temp directory.
+#[cfg(unix)]
+fn bind_rpc_listener(
+    abstract_name: &str,
+) -> Result<std::os::unix::net::UnixListener, std::io::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::linux::net::SocketAddrExt;
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        std::os::unix::net::UnixListener::bind_addr(&addr)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let path =
+            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::net::UnixListener::bind(&path)
+    }
+}
+
+/// Windows: bind the RPC listener on TCP loopback (Python-RNS AF_INET fallback).
+#[cfg(windows)]
+fn bind_rpc_listener(abstract_name: &str) -> Result<std::net::TcpListener, std::io::Error> {
+    std::net::TcpListener::bind(crate::interfaces::local::loopback_addr(abstract_name))
+}
+
+/// Connect to an RPC socket by abstract name.
+#[cfg(unix)]
+fn connect_rpc(abstract_name: &str) -> Result<std::os::unix::net::UnixStream, std::io::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::linux::net::SocketAddrExt;
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        std::os::unix::net::UnixStream::connect_addr(&addr)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let path =
+            std::env::temp_dir().join(format!("leviculum-{}", abstract_name.replace('/', "-")));
+        std::os::unix::net::UnixStream::connect(&path)
+    }
+}
+
+/// Windows: connect to the TCP loopback RPC socket.
+#[cfg(windows)]
+fn connect_rpc(abstract_name: &str) -> Result<std::net::TcpStream, std::io::Error> {
+    std::net::TcpStream::connect(crate::interfaces::local::loopback_addr(abstract_name))
+}
 
 /// Spawn the RPC server on abstract Unix socket `\0rns/{instance_name}/rpc`.
 ///
@@ -42,17 +107,11 @@ pub(crate) fn spawn_rpc_server(
 ) -> Result<(), std::io::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
 
-    use std::os::linux::net::SocketAddrExt;
-    let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let std_listener = std::os::unix::net::UnixListener::bind_addr(&addr)?;
+    let std_listener = bind_rpc_listener(&abstract_name)?;
     std_listener.set_nonblocking(true)?;
-    let listener = UnixListener::from_std(std_listener)?;
+    let listener = RpcListener::from_std(std_listener)?;
 
-    tracing::info!(
-        "RPC server listening on abstract socket \\0{}",
-        abstract_name
-    );
+    tracing::info!("RPC server listening on socket {}", abstract_name);
 
     tokio::spawn(async move {
         rpc_accept_loop(
@@ -73,7 +132,7 @@ pub(crate) fn spawn_rpc_server(
 /// Accept loop: spawns a task per connection.
 #[allow(clippy::too_many_arguments)]
 async fn rpc_accept_loop(
-    listener: UnixListener,
+    listener: RpcListener,
     core: Arc<Mutex<StdNodeCore>>,
     authkey: [u8; 32],
     start_time: std::time::Instant,
@@ -115,7 +174,7 @@ async fn rpc_accept_loop(
 /// Handle a single RPC connection: handshake -> read -> dispatch -> write -> close.
 #[allow(clippy::too_many_arguments)]
 async fn handle_rpc_connection(
-    mut stream: tokio::net::UnixStream,
+    mut stream: RpcStream,
     core: &Arc<Mutex<StdNodeCore>>,
     authkey: &[u8; 32],
     start_time: std::time::Instant,
@@ -172,18 +231,12 @@ pub(crate) async fn rpc_client_call(
     authkey: &[u8; 32],
     request: &serde_pickle::value::Value,
 ) -> Result<serde_pickle::value::Value, RpcError> {
-    use std::os::linux::net::SocketAddrExt;
-    use tokio::net::UnixStream;
-
-    let addr = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-
-    // `connect_addr` on an abstract socket either succeeds immediately or
-    // fails immediately (ECONNREFUSED if nothing is listening) — it does not
-    // block, so it stays outside the timeout.
-    let std_stream = std::os::unix::net::UnixStream::connect_addr(&addr)?;
+    // `connect_rpc` either succeeds quickly or fails fast (ECONNREFUSED /
+    // connection refused if nothing is listening) on the loopback transports we
+    // use, so it stays outside the request/response timeout below.
+    let std_stream = connect_rpc(abstract_name)?;
     std_stream.set_nonblocking(true)?;
-    let mut stream = UnixStream::from_std(std_stream)?;
+    let mut stream = RpcStream::from_std(std_stream)?;
 
     let request_bytes = serde_pickle::value_to_vec(request, Default::default())
         .map_err(|e| RpcError::Pickle(format!("serialize request: {}", e)))?;
@@ -328,7 +381,7 @@ fn pickle_hashable_key_string(h: &serde_pickle::value::HashableValue) -> String 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::interfaces::InterfaceStatsMap;
