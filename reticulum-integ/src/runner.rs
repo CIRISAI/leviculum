@@ -967,6 +967,49 @@ fn probe_rnode_once(path: &str, settle_ms: u64) -> Result<bool, String> {
 
 /// Check that a device file exists, can be opened, and is not held by another process.
 /// Returns Ok(()) if accessible, Err(reason) if not.
+/// Kill any OTHER process holding `path` open before a scenario uses it.
+///
+/// serialport-rs opens with `TIOCEXCL`, so a board still held by a leaked
+/// process cannot be opened and every scenario needing it is skipped
+/// (2026-06-13 nightly: 11 `device_inaccessible` skips; the holder was a
+/// wedged `reticulum_integ` process from an earlier profile group whose
+/// serial-reader thread blocked after a profile power-cut and kept the
+/// process — and the fd — alive). Profile power-switching is the
+/// aggravator: a board powered off mid-open wedges the reader.
+///
+/// Best-effort: logs every kill, never fails the run, and NEVER targets
+/// our own process (killing it would abort the run). A self-held fd is
+/// logged loudly as a distinct diagnostic instead of being silently
+/// swallowed into a device-busy skip.
+fn reclaim_serial_port(path: &str) {
+    let own = std::process::id();
+    let out = match Command::new("lsof").args(["-t", path]).output() {
+        Ok(o) => o,
+        Err(_) => return, // lsof absent — best-effort, nothing to do
+    };
+    let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect();
+    for pid in pids {
+        if pid == own {
+            eprintln!(
+                "[reclaim] WARNING: this test process ({own}) itself holds {path} \
+                 (leaked fd) — cannot reclaim by killing; the runner is leaking a \
+                 serial handle, investigate rather than skip"
+            );
+            continue;
+        }
+        eprintln!("[reclaim] {path} held by leaked pid {pid}; terminating");
+        let _ = Command::new("kill").arg(pid.to_string()).output();
+        thread::sleep(Duration::from_millis(300));
+        // Force: a holder wedged in a blocking serial read ignores SIGTERM.
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+    }
+    // Give the kernel a moment to release the fd before the open retry.
+    thread::sleep(Duration::from_millis(100));
+}
+
 fn check_device_accessible(path: &str) -> Result<(), String> {
     if !std::path::Path::new(path).exists() {
         return Err("does not exist".into());
@@ -1179,23 +1222,16 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
         }
     }
 
-    // Verify assigned devices are accessible
+    // Reclaim then verify each assigned device. Reclaim kills any leaked
+    // process holding the port (a prior profile group's wedged test
+    // process, a leaked native daemon/proxy) so a single stuck holder
+    // cannot skip every later scenario that needs the board.
     for node in scenario.nodes.values() {
-        if let Some(ref port) = node.serial_path {
-            check_device_accessible(port).map_err(|reason| {
-                RunnerError::InsufficientRNodes(format!(
-                    "reason=device_inaccessible device={port} detail=\"{reason}\""
-                ))
-            })?;
-        }
-        if let Some(ref port) = node.debug_serial_path {
-            check_device_accessible(port).map_err(|reason| {
-                RunnerError::InsufficientRNodes(format!(
-                    "reason=device_inaccessible device={port} detail=\"{reason}\""
-                ))
-            })?;
-        }
-        if let Some(ref port) = node.rnode_path {
+        for port in [&node.serial_path, &node.debug_serial_path, &node.rnode_path]
+            .into_iter()
+            .flatten()
+        {
+            reclaim_serial_port(port);
             check_device_accessible(port).map_err(|reason| {
                 RunnerError::InsufficientRNodes(format!(
                     "reason=device_inaccessible device={port} detail=\"{reason}\""
@@ -1346,13 +1382,52 @@ type ProxySpawnResult = (
     BTreeMap<String, PathBuf>,
 );
 
+/// RAII guard for spawned lora-proxy children. `std::process::Child::drop`
+/// does NOT kill the process, so any early return from `spawn_proxies`
+/// before success would leak native proxies that hold `/dev/ttyACM*`
+/// (2026-06-13 nightly root: the `fs::read_link` error path returned via
+/// `?` and dropped the children Vec without killing). The guard kills
+/// every child on drop unless `disarm`ed once the proxies are handed to
+/// the caller, so ALL error paths are covered, not just the one we knew.
+struct ProxyChildGuard {
+    children: Vec<Child>,
+}
+
+impl ProxyChildGuard {
+    fn new() -> Self {
+        ProxyChildGuard {
+            children: Vec::new(),
+        }
+    }
+    fn push(&mut self, child: Child) {
+        self.children.push(child);
+    }
+    /// Hand the children to the caller; the guard no longer kills them.
+    fn disarm(mut self) -> Vec<Child> {
+        std::mem::take(&mut self.children)
+    }
+}
+
+impl Drop for ProxyChildGuard {
+    fn drop(&mut self) {
+        for mut c in self.children.drain(..) {
+            eprintln!(
+                "[cleanup] killing leaked lora-proxy child pid {} (spawn_proxies error path)",
+                c.id()
+            );
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 fn spawn_proxies(
     scenario: &TestScenario,
     run_id: u32,
     target_dir: &std::path::Path,
 ) -> Result<ProxySpawnResult, RunnerError> {
     let proxy_bin = crate::paths::release_bin(target_dir, "lora-proxy");
-    let mut children = Vec::new();
+    let mut children = ProxyChildGuard::new();
     let mut sockets = BTreeMap::new();
     let mut devices = BTreeMap::new();
 
@@ -1407,11 +1482,7 @@ fn spawn_proxies(
                 break;
             }
             if Instant::now() >= deadline {
-                // Kill all proxies we've started so far.
-                for mut c in children {
-                    let _ = c.kill();
-                    let _ = c.wait();
-                }
+                // ProxyChildGuard kills every spawned child on drop.
                 return Err(RunnerError::ProxyError(format!(
                     "proxy for node '{name}' did not create PTY at {} within 5s",
                     pty_path.display()
@@ -1430,7 +1501,7 @@ fn spawn_proxies(
         devices.insert(name.clone(), real_pty);
     }
 
-    Ok((children, sockets, devices))
+    Ok((children.disarm(), sockets, devices))
 }
 
 impl Drop for TestRunner {
@@ -1453,6 +1524,58 @@ impl Drop for TestRunner {
 mod tests {
     use super::*;
     use crate::topology::parse_scenario;
+
+    /// Root-2 regression (2026-06-13 nightly): a leaked process holding a
+    /// board's serial port blocked every later scenario needing it.
+    /// `reclaim_serial_port` must kill the holder so the port is free.
+    /// Hardware-free: a regular temp file stands in for the device — lsof
+    /// reports holders of regular files exactly as for /dev/ttyACM*.
+    #[test]
+    fn reclaim_serial_port_kills_leaked_holder() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dev = tmp.path().join("fake-ttyACM0");
+        std::fs::write(&dev, b"x").expect("write fake device");
+        let dev_str = dev.to_str().unwrap();
+
+        // Holder: open the file read-only on fd 9 and sleep, so it shows
+        // up in lsof exactly like a process holding a serial port.
+        let mut holder = Command::new("sh")
+            .args(["-c", &format!("exec 9< '{dev_str}'; sleep 30")])
+            .spawn()
+            .expect("spawn holder");
+
+        let lsof_holds = |path: &str| -> bool {
+            Command::new("lsof")
+                .args(["-t", path])
+                .output()
+                .map(|o| !o.stdout.iter().all(u8::is_ascii_whitespace))
+                .unwrap_or(false)
+        };
+
+        // Wait until lsof actually sees the holder (open + exec race).
+        let mut held = false;
+        for _ in 0..50 {
+            if lsof_holds(dev_str) {
+                held = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            held,
+            "precondition: holder must hold the file (is lsof installed?)"
+        );
+
+        // Unit under test: the holder is freed.
+        reclaim_serial_port(dev_str);
+        assert!(
+            !lsof_holds(dev_str),
+            "reclaim_serial_port must free the port (holder still present)"
+        );
+
+        let _ = holder.kill();
+        let _ = holder.wait();
+    }
 
     #[test]
     fn container_name_format() {
