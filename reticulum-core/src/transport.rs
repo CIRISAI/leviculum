@@ -6175,6 +6175,92 @@ mod tests {
             );
         }
 
+        /// MVR for the non_transport_no_relay integ flake.
+        ///
+        /// A NON-TRANSPORT node (`enable_transport = false`) that receives a
+        /// path request from a network peer (`from_local = false`) for a
+        /// REMOTE destination it does not host must NOT relay path discovery:
+        /// it must not re-originate the request onto its other interfaces and
+        /// must not record a `discovery_path_request`. If it did, it would
+        /// relay the eventual path_response back to the requester, and the
+        /// race on whether the re-originated request reaches an answering
+        /// target is the source of the intermittent failure.
+        ///
+        /// Python parity: Transport.py `path_request` only re-originates when
+        /// `should_search_for_unknown`, which requires `transport_enabled()`
+        /// (and `attached_interface.mode in DISCOVER_PATHS_FOR`). A
+        /// non-transport node never re-originates.
+        ///
+        /// In the current code Block 3 of `handle_path_request` is already
+        /// nested inside `if self.config.enable_transport`, so this asserts
+        /// the property holds. If it ever regresses (the gate removed), this
+        /// test goes red.
+        #[test]
+        fn test_non_transport_does_not_reoriginate_peer_path_request() {
+            let mut transport = test_transport(); // enable_transport = false
+            // Two NETWORK interfaces (neither is a local client). The request
+            // arrives on if0; a re-origination would Broadcast excluding if0,
+            // reaching if1.
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("peer", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("other", 2)));
+
+            // A remote destination this node does not host and has no path to.
+            let remote_dest = [0x42; TRUNCATED_HASHBYTES];
+            let tag = [0xCC; TRUNCATED_HASHBYTES];
+
+            // 48-byte transport-style request, as a peer transport node sends:
+            // dest_hash(16) + transport_id(16) + tag(16).
+            let mut data = Vec::new();
+            data.extend_from_slice(&remote_dest);
+            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]); // peer transport_id
+            data.extend_from_slice(&tag);
+
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: crate::destination::DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: transport.path_request_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            };
+
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).unwrap();
+            transport.process_incoming(0, &buf[..len]).unwrap();
+
+            // No re-origination: no Broadcast and no SendPacket for the request.
+            let actions = transport.drain_actions();
+            assert!(
+                actions
+                    .iter()
+                    .all(|a| !matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
+                "non-transport node must not re-originate a peer path request, got: {actions:?}"
+            );
+
+            // And no discovery state recorded for the remote destination.
+            assert!(
+                transport
+                    .storage()
+                    .get_discovery_path_request(&remote_dest)
+                    .is_none(),
+                "non-transport node must not record a discovery_path_request"
+            );
+            assert!(
+                transport
+                    .storage()
+                    .discovery_path_request_dest_hashes()
+                    .is_empty(),
+                "non-transport node must not record any discovery_path_request"
+            );
+        }
+
         #[test]
         fn test_path_request_local_dest_emits_event() {
             let mut transport = make_transport_enabled();
