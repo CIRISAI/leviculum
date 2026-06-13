@@ -63,7 +63,17 @@ standard: fast
 # would also try to build reticulum-nrf firmware on the host. Runs on
 # the same CARGO_TARGET_DIR as the enclosing `cargo test`, so the
 # runner's CARGO_TARGET_DIR-aware path resolver finds them.
+#
+# Touch the bin-crate sources first so cargo always relinks and stamps a
+# fresh mtime: after a repo-sync pulls newer commits without changing
+# source mtimes, cargo would otherwise skip the relink and leave
+# binaries that check_binary_freshness rejects (2026-06-13 nightly).
+# Every tier that mounts binaries depends on this target, so the
+# guarantee holds for tier1/tier2 the same way run-tier3-hw.sh enforces
+# it for the hardware nightly. Deleting the binary does NOT work: cargo
+# re-hardlinks it from deps/ without relinking, keeping the old mtime.
 build-integ-bins:
+    find reticulum-cli/src reticulum-proxy/src -name '*.rs' -exec touch {} +
     cargo build --release --bin lnsd --bin lns --bin lncp --bin lora-proxy
 
 # Default cargo test runs non-ignored tests and skips ignored ones.
