@@ -621,6 +621,55 @@ mod tests {
         );
     }
 
+    /// Empirical proof that the pre-fix observation was clock-fragile and that
+    /// the seed fixes it. Reproduces both the old and the new observation at an
+    /// explicit large clock value instead of relying on process age, so the
+    /// flip is demonstrated deterministically.
+    ///
+    /// A 50-byte SF10 packet costs 887 ms of airtime. A fresh bucket left at
+    /// `last_update_ms = 0` banks `now_ms()` worth of idle credit, so once the
+    /// clock passes 887 ms the post-charge balance is no longer negative and
+    /// the old `< 0` assertion would have failed.
+    #[test]
+    fn pre_fix_observation_is_clock_fragile_seed_fixes_it() {
+        use reticulum_core::rnode::airtime_ms;
+
+        let cost = airtime_ms(50, 125_000, 10, 8) as i64;
+        // A clock past the 50-byte packet cost: the regime the old test
+        // silently entered the later it ran in the suite.
+        let large_now = cost as u64 + 1;
+
+        // Old path: fresh bucket (last_update_ms = 0), charge via the clock,
+        // then re-read current() the way the original test did.
+        let mut old_bucket = AirtimeCredit::new(125_000, 10, 8, 500);
+        old_bucket
+            .try_charge(50, large_now)
+            .expect("charge succeeds");
+        let old_observed = old_bucket.current(large_now);
+        assert!(
+            old_observed >= 0,
+            "pre-fix observation should go non-negative under a large clock \
+             (the latent flake), got {old_observed}"
+        );
+
+        // New path: seed the baseline to the clock so no idle credit accrues.
+        // Same large clock now yields a deterministic deficit.
+        let mut new_bucket = AirtimeCredit::new(125_000, 10, 8, 500);
+        new_bucket.seed_last_update_ms(large_now);
+        new_bucket
+            .try_charge(50, large_now)
+            .expect("charge succeeds");
+        let charged_at = new_bucket.last_update_ms();
+        let new_observed = new_bucket.current(charged_at);
+        assert!(
+            new_observed < 0,
+            "seeded observation should be a deterministic deficit at any clock \
+             value, got {new_observed}"
+        );
+        // The deficit is exactly the packet cost: no regen, no clock leakage.
+        assert_eq!(new_observed, -cost);
+    }
+
     /// LoRa handle with a fresh credit bucket at `now_ms` > 0 reports
     /// the interface as ready (the bucket has already regenerated past
     /// the small packet's cost thanks to the wall-clock baseline).
