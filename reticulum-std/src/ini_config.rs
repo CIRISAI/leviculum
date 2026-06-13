@@ -119,6 +119,14 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         interfaces.insert(name, iface);
     }
 
+    // RNS 1.3.x semantic: shared_instance_type = tcp disables AF_UNIX and
+    // therefore overrides any configured shared_instance_socket path (tcp
+    // wins on conflict). Applied here, post-parse, so it holds for any key
+    // ordering in the file.
+    if reticulum.shared_instance_type.as_deref() == Some("tcp") {
+        reticulum.shared_instance_socket = None;
+    }
+
     // Filter out unsupported interface types
     let supported: HashMap<String, InterfaceConfig> = interfaces
         .into_iter()
@@ -153,6 +161,19 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         "instance_name" => {
             config.instance_name = value.trim().to_string();
         }
+        "shared_instance_type" => {
+            // Upstream only honours tcp/unix (lowercased); other values
+            // are tolerated but not stored. The tcp-overrides-socket rule
+            // is applied after the full parse (see parse_ini), so it holds
+            // regardless of key order.
+            let v = value.trim().to_ascii_lowercase();
+            if v == "tcp" || v == "unix" {
+                config.shared_instance_type = Some(v);
+            }
+        }
+        "shared_instance_socket" => {
+            config.shared_instance_socket = Some(value.trim().to_string());
+        }
         "respond_to_probes" => {
             config.respond_to_probes = parse_bool(value);
         }
@@ -164,7 +185,12 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
                 config.flush_interval_secs = v;
             }
         }
-        _ => {} // Ignore unknown keys (shared_instance_port, etc.)
+        // Tolerate (accept without error) RNS 1.2.2..1.3.5 reticulum-level
+        // keys we don't implement: blackhole_update_interval, default_ar_*,
+        // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control
+        // tuning knobs, shared_instance_port, etc. An unknown key must never
+        // make lnsd reject a config a current rnsd would accept.
+        _ => {}
     }
 }
 
@@ -535,6 +561,117 @@ mod tests {
     fn test_instance_name_defaults_to_default() {
         let config = parse_ini("[reticulum]\n").unwrap();
         assert_eq!(config.reticulum.instance_name, "default");
+    }
+
+    #[test]
+    fn test_shared_instance_type_tcp_overrides_socket_path() {
+        // RNS 1.3.x semantic: shared_instance_type = tcp wins over a
+        // configured shared_instance_socket path (tcp disables AF_UNIX),
+        // regardless of key order in the file.
+        let config = parse_ini(
+            r#"
+[reticulum]
+  share_instance = Yes
+  shared_instance_socket = /run/reticulum/custom.sock
+  shared_instance_type = tcp
+"#,
+        )
+        .unwrap();
+        assert!(config.reticulum.shared_instance);
+        assert_eq!(config.reticulum.shared_instance_type, Some("tcp".into()));
+        assert_eq!(
+            config.reticulum.shared_instance_socket, None,
+            "tcp must override (clear) a configured socket path"
+        );
+    }
+
+    #[test]
+    fn test_shared_instance_socket_kept_when_type_unix() {
+        let config = parse_ini(
+            r#"
+[reticulum]
+  shared_instance_socket = /run/reticulum/custom.sock
+  shared_instance_type = unix
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.reticulum.shared_instance_type, Some("unix".into()));
+        assert_eq!(
+            config.reticulum.shared_instance_socket,
+            Some("/run/reticulum/custom.sock".into())
+        );
+    }
+
+    #[test]
+    fn test_shared_instance_socket_kept_when_type_absent() {
+        let config = parse_ini(
+            r#"
+[reticulum]
+  shared_instance_socket = /run/reticulum/custom.sock
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.reticulum.shared_instance_type, None);
+        assert_eq!(
+            config.reticulum.shared_instance_socket,
+            Some("/run/reticulum/custom.sock".into())
+        );
+    }
+
+    #[test]
+    fn test_shared_instance_type_invalid_value_ignored() {
+        // Mirror upstream: only tcp/unix are accepted; anything else is
+        // tolerated but not stored.
+        let config = parse_ini("[reticulum]\n  shared_instance_type = bogus\n").unwrap();
+        assert_eq!(config.reticulum.shared_instance_type, None);
+    }
+
+    #[test]
+    fn test_tolerate_all_rns_13x_new_keys() {
+        // A config carrying every new 1.2.2..1.3.5 key (reticulum-level,
+        // logging section, and per-interface) must parse without error.
+        // None of these features are implemented; they are tolerate-only.
+        let config = parse_ini(
+            r#"
+[reticulum]
+  enable_transport = True
+  blackhole_update_interval = 3600
+  default_ar_target = 0.5
+  default_ar_penalty = 2.0
+  default_ar_grace = 60
+  ic_max_held_announces = 10
+  ic_burst_hold = 5.0
+  ic_burst_freq_new = 3.5
+  ic_burst_freq = 12.0
+  ic_pr_burst_freq_new = 3.5
+  ic_pr_burst_freq = 12.0
+  ec_pr_freq = 1.0
+  egress_control = True
+  ic_new_time = 2.0
+  ic_burst_penalty = 5.0
+  ic_held_release_interval = 60
+
+[logging]
+  logtimestamps = True
+
+[interfaces]
+  [[Tolerant TCP]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_port = 4242
+    egress_control = True
+    ic_pr_burst_freq_new = 3.5
+    ic_pr_burst_freq = 12.0
+    ec_pr_freq = 1.0
+"#,
+        )
+        .unwrap();
+
+        // Known keys still take effect; the new keys are ignored cleanly.
+        assert!(config.reticulum.enable_transport);
+        let iface = config.interfaces.get("Tolerant TCP").expect("iface");
+        assert_eq!(iface.interface_type, "TCPServerInterface");
+        assert_eq!(iface.listen_port, Some(4242));
     }
 
     #[test]

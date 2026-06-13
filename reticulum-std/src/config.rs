@@ -37,6 +37,20 @@ pub struct ReticulumConfig {
     /// The abstract socket path will be `\0rns/{instance_name}`.
     #[serde(default = "default_instance_name")]
     pub instance_name: String,
+    /// Shared-instance transport type from the RNS config (`unix` or `tcp`).
+    ///
+    /// `None` means unset (Python defaults to AF_UNIX where available).
+    /// Parsed for rnsd drop-in compatibility; lnsd currently only serves
+    /// the abstract AF_UNIX socket keyed by `instance_name`. When set to
+    /// `tcp` it overrides (clears) `shared_instance_socket` per RNS 1.3.x.
+    #[serde(default)]
+    pub shared_instance_type: Option<String>,
+    /// Explicit AF_UNIX socket path for the shared instance (RNS 1.3.x).
+    ///
+    /// Parsed for rnsd config compatibility. Ignored (cleared) when
+    /// `shared_instance_type = tcp`, since tcp disables AF_UNIX upstream.
+    #[serde(default)]
+    pub shared_instance_socket: Option<String>,
     /// Respond to rnprobe requests
     ///
     /// When enabled, creates a probe destination (`rnstransport.probe`) with
@@ -81,6 +95,8 @@ impl Default for ReticulumConfig {
             use_implicit_proof: true,
             shared_instance: false,
             instance_name: default_instance_name(),
+            shared_instance_type: None,
+            shared_instance_socket: None,
             respond_to_probes: false,
             remote_management_enabled: false,
             storage_path: None,
@@ -346,6 +362,65 @@ mod tests {
     }
 
     // Mirror Python-Reticulum's RNS/Reticulum.py:230-237 lookup order.
+
+    // Integ-level load: drive Config::load against a real on-disk INI file
+    // carrying every RNS 1.2.2..1.3.5 new key plus the tcp-override case.
+    // Exercises the full extension/`[[`-detection path, not just parse_ini.
+    #[test]
+    fn load_rns_13x_config_from_disk_tolerates_and_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            r#"
+[reticulum]
+  enable_transport = True
+  share_instance = Yes
+  blackhole_update_interval = 3600
+  default_ar_target = 0.5
+  default_ar_penalty = 2.0
+  default_ar_grace = 60
+  ic_max_held_announces = 10
+  ic_burst_hold = 5.0
+  ic_burst_freq_new = 3.5
+  ic_burst_freq = 12.0
+  ic_pr_burst_freq_new = 3.5
+  ic_pr_burst_freq = 12.0
+  ec_pr_freq = 1.0
+  egress_control = True
+  ic_new_time = 2.0
+  ic_burst_penalty = 5.0
+  ic_held_release_interval = 60
+  shared_instance_socket = /run/reticulum/custom.sock
+  shared_instance_type = tcp
+
+[logging]
+  logtimestamps = True
+
+[interfaces]
+  [[Tolerant TCP]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_port = 4242
+    egress_control = True
+    ic_pr_burst_freq_new = 3.5
+    ic_pr_burst_freq = 12.0
+    ec_pr_freq = 1.0
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&path).expect("config with all new keys must load");
+        assert!(config.reticulum.enable_transport);
+        assert!(config.reticulum.shared_instance);
+        // tcp overrides the configured socket path.
+        assert_eq!(config.reticulum.shared_instance_type, Some("tcp".into()));
+        assert_eq!(config.reticulum.shared_instance_socket, None);
+        // Known interface semantics still hold; new keys ignored cleanly.
+        let iface = config.interfaces.get("Tolerant TCP").expect("iface");
+        assert_eq!(iface.interface_type, "TCPServerInterface");
+        assert_eq!(iface.listen_port, Some(4242));
+    }
 
     #[test]
     fn resolve_prefers_system_dir_when_config_present() {
