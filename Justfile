@@ -40,9 +40,26 @@ lint-nrf:
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+# Tracing-shim gate (PR #57): reticulum-core must pass the SAME suite with
+# tracing OFF as with it on. The `tracing` feature is default-on; with it
+# off the level macros become no-ops via the `crate::tracing` shim in
+# lib.rs. Running the full suite in that config proves the shim changed no
+# core logic (a bare `tracing::x!` that slipped past the shim would either
+# fail to compile here or, worse, only on M0 — see m0-build-gate).
+core-no-tracing:
+    cargo test -p reticulum-core --no-default-features
+
+# Cortex-M0 gate (PR #57): reticulum-core must cross-compile for thumbv6m
+# (atomic-less MCU, e.g. rp2040) with tracing off. tracing-core's CAS-based
+# callsite registry does not compile there, so the default build FAILS on
+# M0; --no-default-features must succeed. Keeps M0 support from rotting.
+m0-build-gate:
+    rustup target add thumbv6m-none-eabi
+    cargo build -p reticulum-core --target thumbv6m-none-eabi --no-default-features
+
 # Tier 0 (~3 min, runs on every git push): fmt + clippy (host + nrf)
-# + rustdoc gate + workspace lib tests.
-fast: mvr lint-nrf doc-gate
+# + rustdoc gate + tracing-shim + M0 gates + workspace lib tests.
+fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     cargo test --workspace --lib --exclude reticulum-integ
