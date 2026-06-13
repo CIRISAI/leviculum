@@ -6198,9 +6198,9 @@ mod tests {
         #[test]
         fn test_non_transport_does_not_reoriginate_peer_path_request() {
             let mut transport = test_transport(); // enable_transport = false
-            // Two NETWORK interfaces (neither is a local client). The request
-            // arrives on if0; a re-origination would Broadcast excluding if0,
-            // reaching if1.
+                                                  // Two NETWORK interfaces (neither is a local client). The request
+                                                  // arrives on if0; a re-origination would Broadcast excluding if0,
+                                                  // reaching if1.
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("peer", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("other", 2)));
 
