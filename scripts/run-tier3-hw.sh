@@ -240,12 +240,16 @@ setup_profile() {
     for key in $exclude; do
         warn_if_fd_held "$key"
     done
-    # Helper API: enable-only takes one comma-separated list.
-    local active_csv
-    active_csv=$(echo "$required" | tr ' ' ',')
-    if [[ -n "$active_csv" ]]; then
-        # shellcheck disable=SC2029  # local expansion of $active_csv is intentional
-        ssh hamster enable-only "$active_csv"
+    # Helper API: `enable-only <b>...` takes SPACE-SEPARATED board args,
+    # one per board. The old comma-joined single arg
+    # ("t-beam-1,t-beam-2") was rejected as an unknown board, so power
+    # isolation silently no-op'd on the 2026-06-13 nightly (fail-safe:
+    # all boards stayed on, but the intended RF isolation never happened).
+    # $required is intentionally unquoted so each board becomes its own
+    # ssh argument.
+    if [[ -n "$required" ]]; then
+        # shellcheck disable=SC2029,SC2086  # word-split $required: one arg per board
+        ssh hamster enable-only $required
     fi
     # Authoritative state from hamster — the VM-side enumeration is
     # not trustworthy after a libvirt-cached disable.
