@@ -18,7 +18,7 @@ mod cp;
 mod diag;
 mod selftest;
 
-use reticulum_std::driver::{LinkHandle, PacketSender, ReticulumNodeBuilder};
+use reticulum_std::driver::{EventReceiver, LinkHandle, PacketSender, ReticulumNodeBuilder};
 use reticulum_std::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, NodeEvent,
 };
@@ -1007,10 +1007,7 @@ async fn try_send(
 }
 
 /// Event loop task: reads NodeEvents and prints them, updating shared state.
-async fn event_loop(
-    mut event_rx: tokio::sync::mpsc::Receiver<NodeEvent>,
-    state: Arc<Mutex<SessionState>>,
-) {
+async fn event_loop(mut event_rx: EventReceiver, state: Arc<Mutex<SessionState>>) {
     use tokio::io::AsyncWriteExt;
     let mut stdout = tokio::io::stdout();
 

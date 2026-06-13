@@ -923,11 +923,11 @@ pub async fn setup_rust_destination(
 // =========================================================================
 
 use reticulum_core::node::NodeEvent;
-use tokio::sync::mpsc;
+use reticulum_std::EventReceiver;
 
 /// Generic event-loop helper: drain events until `predicate` returns `Some(T)` or timeout.
 pub async fn wait_for_event<T>(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     timeout: Duration,
     mut predicate: impl FnMut(NodeEvent) -> Option<T>,
 ) -> Option<T> {
@@ -951,7 +951,7 @@ pub async fn wait_for_event<T>(
 /// Wait for a `LinkDataReceived` or `MessageReceived` event for a specific link ID.
 /// Drains other events while waiting.
 pub async fn wait_for_data_event(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     link_id: &LinkId,
     timeout: Duration,
 ) -> Option<Vec<u8>> {
@@ -969,7 +969,7 @@ pub async fn wait_for_data_event(
 /// Wait for a `LinkClosed` event for a specific link ID.
 /// Drains other events while waiting.
 pub async fn wait_for_link_closed_event(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     link_id: &LinkId,
     timeout: Duration,
 ) -> bool {
@@ -985,7 +985,7 @@ pub async fn wait_for_link_closed_event(
 /// Wait for a `LinkEstablished` event for a specific link ID.
 /// Drains other events while waiting.
 pub async fn wait_for_link_established(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     link_id: &LinkId,
     timeout: Duration,
 ) -> bool {
@@ -1001,7 +1001,7 @@ pub async fn wait_for_link_established(
 /// Wait for a `LinkRequest` event, returning the link_id and destination_hash.
 /// Drains other events while waiting.
 pub async fn wait_for_link_request_event(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     timeout: Duration,
 ) -> Option<(LinkId, DestinationHash)> {
     wait_for_event(event_rx, timeout, |event| match event {
@@ -1018,7 +1018,7 @@ pub async fn wait_for_link_request_event(
 /// Wait for a `LinkEstablished` event with `is_initiator == false`.
 /// Drains other events while waiting.
 pub async fn wait_for_responder_established(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     link_id: &LinkId,
     timeout: Duration,
 ) -> bool {
@@ -1040,7 +1040,7 @@ pub async fn wait_for_responder_established(
 /// Wait for a `LinkIdentified` event for a specific link ID.
 /// Returns the identity hash. Drains other events while waiting.
 pub async fn wait_for_link_identified(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     link_id: &LinkId,
     timeout: Duration,
 ) -> Option<[u8; reticulum_core::constants::TRUNCATED_HASHBYTES]> {
@@ -1058,7 +1058,7 @@ pub async fn wait_for_link_identified(
 /// Drain `event_rx` for `LinkDeliveryConfirmed` events until `expected_count` are
 /// collected or `timeout` expires. Returns the count received.
 pub async fn wait_for_delivery_confirmations(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     expected_count: usize,
     timeout: Duration,
 ) -> usize {
@@ -1083,7 +1083,7 @@ pub async fn wait_for_delivery_confirmations(
 /// Wait for a `ResourceCompleted` event on the receiver side.
 /// Returns `(data, metadata)` on success, or `None` on timeout.
 pub async fn wait_for_resource_completed(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     link_id: &LinkId,
     timeout: Duration,
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
@@ -1104,7 +1104,7 @@ pub async fn wait_for_resource_completed(
 /// Wait for a `ResourceCompleted` event on the sender side.
 /// Returns `true` if the sender-side completion was received before timeout.
 pub async fn wait_for_resource_sender_completed(
-    event_rx: &mut mpsc::Receiver<NodeEvent>,
+    event_rx: &mut EventReceiver,
     link_id: &LinkId,
     timeout: Duration,
 ) -> bool {
@@ -1343,7 +1343,7 @@ pub async fn build_rust_node(
     daemon: &crate::harness::TestDaemon,
 ) -> (
     reticulum_std::driver::ReticulumNode,
-    tokio::sync::mpsc::Receiver<reticulum_core::node::NodeEvent>,
+    EventReceiver,
     tempfile::TempDir,
 ) {
     let storage = temp_storage("build_rust_node", "node");

@@ -325,6 +325,39 @@ pub enum NodeEvent {
     // Interface Events
     /// An interface went offline
     InterfaceDown(usize),
+
+    // Control-plane backpressure signalling (Codeberg #71)
+    /// One or more control-plane events were dropped because the bounded
+    /// control channel was full.
+    ///
+    /// The std driver splits node events into a lossless-by-default control
+    /// plane and a droppable data plane. When the control channel overflows,
+    /// the lost events cannot be recovered, but the loss is never silent:
+    /// the driver counts the drops and emits this single marker as soon as
+    /// the control channel has room again. `dropped_count` is the number of
+    /// control events lost since the previous marker. The marker itself is
+    /// only enqueued when there is room, so it is never dropped.
+    ControlPlaneOverflow {
+        /// Number of control-plane events dropped since the last marker.
+        dropped_count: u64,
+    },
+}
+
+/// Delivery plane a [`NodeEvent`] belongs to.
+///
+/// The std driver (Codeberg #71) carries events on two independent bounded
+/// channels: a [`Control`](EventClass::Control) plane that is lossless until
+/// its channel overflows (and surfaces any overflow via
+/// [`NodeEvent::ControlPlaneOverflow`]), and a [`Data`](EventClass::Data)
+/// plane that drops silently under load as normal backpressure. Embedded
+/// (core-only) builds never construct the channels; this classification is
+/// the single source of truth they share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventClass {
+    /// Never dropped silently. Discovery- and lifecycle-critical events.
+    Control,
+    /// May be dropped under load (backpressure). Bulk data delivery.
+    Data,
 }
 
 impl NodeEvent {
@@ -364,7 +397,84 @@ impl NodeEvent {
             | NodeEvent::PacketDeliveryConfirmed { .. }
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::PacketProofRequested { .. }
+            | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::InterfaceDown(_) => None,
+        }
+    }
+
+    /// Classify this event for the split control/data event channels
+    /// (Codeberg #71).
+    ///
+    /// The rule, by volume rather than by importance:
+    ///
+    /// * CONTROL — the low-volume mesh, lifecycle, and outcome events: at most
+    ///   one per link, transfer, or request, and discovery- or
+    ///   control-critical. These are never silently dropped, so the control
+    ///   plane must stay low-volume to keep that guarantee meaningful.
+    /// * DATA — the high-volume or payload-bearing events (per-packet,
+    ///   per-chunk, stream-volume). Their loss under extreme load is
+    ///   backpressure, not data loss: reliability of the actual data is owned
+    ///   by the lower layers (link acks, resource retransmit, channel
+    ///   sequencing), not by this notification channel.
+    ///
+    /// The match is exhaustive (no wildcard) so adding a `NodeEvent` variant
+    /// forces an explicit decision here rather than defaulting silently.
+    pub fn event_class(&self) -> EventClass {
+        match self {
+            // Path discovery — losing one stalls discovery (the #71 bug).
+            NodeEvent::AnnounceReceived { .. }
+            | NodeEvent::PathFound { .. }
+            | NodeEvent::PathRequestReceived { .. }
+            | NodeEvent::PathLost { .. } => EventClass::Control,
+
+            // High-volume / payload-bearing — droppable under load
+            // (backpressure is the point; lower layers own reliability).
+            // Single-packet delivery and its confirmations, link-borne stream
+            // payloads and their per-packet confirmation, the per-chunk
+            // resource progress tick, and the disposable retransmit notice.
+            NodeEvent::PacketReceived { .. }
+            | NodeEvent::PacketDeliveryConfirmed { .. }
+            | NodeEvent::DeliveryFailed { .. }
+            | NodeEvent::MessageReceived { .. }
+            | NodeEvent::LinkDataReceived { .. }
+            | NodeEvent::LinkDeliveryConfirmed { .. }
+            | NodeEvent::ChannelRetransmit { .. }
+            | NodeEvent::ResourceProgress { .. } => EventClass::Data,
+
+            // Link lifecycle and identity — at most one per link, must not be
+            // lost or links wedge.
+            NodeEvent::LinkRequest { .. }
+            | NodeEvent::LinkEstablished { .. }
+            | NodeEvent::LinkStale { .. }
+            | NodeEvent::LinkRecovered { .. }
+            | NodeEvent::LinkIdentified { .. }
+            | NodeEvent::LinkClosed { .. } => EventClass::Control,
+
+            // Proof decisions — require an application call to make progress.
+            NodeEvent::PacketProofRequested { .. } | NodeEvent::LinkProofRequested { .. } => {
+                EventClass::Control
+            }
+
+            // Resource transfers — advertise/started gate the transfer,
+            // completed/failed carry the outcome. One per transfer (or
+            // per segment) and control-critical: a dropped completion loses
+            // the outcome. The high-volume per-chunk progress tick is DATA
+            // (classified above).
+            NodeEvent::ResourceAdvertised { .. }
+            | NodeEvent::ResourceTransferStarted { .. }
+            | NodeEvent::ResourceCompleted { .. }
+            | NodeEvent::ResourceFailed { .. } => EventClass::Control,
+
+            // Request/response — RequestReceived needs a reply, the rest carry
+            // correlation state. One per request. CONTROL.
+            NodeEvent::RequestReceived { .. }
+            | NodeEvent::ResponseReceived { .. }
+            | NodeEvent::RequestTimedOut { .. } => EventClass::Control,
+
+            // Interface lifecycle and the overflow marker itself.
+            NodeEvent::InterfaceDown(_) | NodeEvent::ControlPlaneOverflow { .. } => {
+                EventClass::Control
+            }
         }
     }
 
@@ -405,6 +515,7 @@ impl NodeEvent {
             NodeEvent::ResponseReceived { .. } => "ResponseReceived",
             NodeEvent::RequestTimedOut { .. } => "RequestTimedOut",
             NodeEvent::InterfaceDown(_) => "InterfaceDown",
+            NodeEvent::ControlPlaneOverflow { .. } => "ControlPlaneOverflow",
         }
     }
 }

@@ -47,6 +47,10 @@ pub struct ReticulumNodeBuilder {
     instance_name_explicit: Option<String>,
     /// Explicit flush_interval_secs override (takes priority over config value)
     flush_interval_secs_explicit: Option<u64>,
+    /// Explicit control-channel capacity override (takes priority over config)
+    control_channel_capacity_explicit: Option<usize>,
+    /// Explicit data-channel capacity override (takes priority over config)
+    data_channel_capacity_explicit: Option<usize>,
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
@@ -77,6 +81,8 @@ impl ReticulumNodeBuilder {
             share_instance_explicit: None,
             instance_name_explicit: None,
             flush_interval_secs_explicit: None,
+            control_channel_capacity_explicit: None,
+            data_channel_capacity_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
         }
@@ -392,6 +398,32 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Set the capacity of the lossless control-plane event channel
+    /// (Codeberg #71).
+    ///
+    /// Control events (announces, paths, link/resource lifecycle) are
+    /// delivered losslessly until this bounded channel fills; overflow is
+    /// then surfaced via `NodeEvent::ControlPlaneOverflow`. If not called,
+    /// the loaded config value is used (default:
+    /// [`DEFAULT_CONTROL_CHANNEL_CAPACITY`](crate::config::DEFAULT_CONTROL_CHANNEL_CAPACITY)).
+    /// Servers under heavy announce load should raise it.
+    pub fn control_channel_capacity(mut self, capacity: usize) -> Self {
+        self.control_channel_capacity_explicit = Some(capacity);
+        self
+    }
+
+    /// Set the capacity of the droppable data-plane event channel
+    /// (Codeberg #71).
+    ///
+    /// Data events (single-packet delivery and confirmations) drop silently
+    /// when this bounded channel is full — normal backpressure. If not
+    /// called, the loaded config value is used (default:
+    /// [`DEFAULT_DATA_CHANNEL_CAPACITY`](crate::config::DEFAULT_DATA_CHANNEL_CAPACITY)).
+    pub fn data_channel_capacity(mut self, capacity: usize) -> Self {
+        self.data_channel_capacity_explicit = Some(capacity);
+        self
+    }
+
     /// Set path expiry duration in seconds.
     ///
     /// Paths not refreshed within this duration will be removed.
@@ -439,6 +471,15 @@ impl ReticulumNodeBuilder {
         let flush_interval_secs = self
             .flush_interval_secs_explicit
             .unwrap_or(config.reticulum.flush_interval_secs);
+
+        // Apply event-channel capacities: explicit override > config value
+        // (Codeberg #71).
+        let control_channel_capacity = self
+            .control_channel_capacity_explicit
+            .unwrap_or(config.reticulum.control_channel_capacity);
+        let data_channel_capacity = self
+            .data_channel_capacity_explicit
+            .unwrap_or(config.reticulum.data_channel_capacity);
 
         // Determine storage path
         let storage_path = self
@@ -502,6 +543,8 @@ impl ReticulumNodeBuilder {
             self.corrupt_every,
             self.events_enabled,
             flush_interval_secs,
+            control_channel_capacity,
+            data_channel_capacity,
         );
         if share_instance {
             node.set_share_instance(instance_name);
@@ -604,6 +647,46 @@ mod tests {
     fn test_builder_flush_interval_explicit_override() {
         let builder = ReticulumNodeBuilder::new().flush_interval_secs(120);
         assert_eq!(builder.flush_interval_secs_explicit, Some(120));
+    }
+
+    #[test]
+    fn test_builder_channel_capacity_explicit_override() {
+        let builder = ReticulumNodeBuilder::new()
+            .control_channel_capacity(1024)
+            .data_channel_capacity(512);
+        assert_eq!(builder.control_channel_capacity_explicit, Some(1024));
+        assert_eq!(builder.data_channel_capacity_explicit, Some(512));
+    }
+
+    #[test]
+    fn test_builder_channel_capacity_defaults_from_config() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let node = ReticulumNodeBuilder::new()
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        assert_eq!(
+            node.control_channel_capacity,
+            crate::config::DEFAULT_CONTROL_CHANNEL_CAPACITY,
+            "default config should use the conservative control capacity"
+        );
+    }
+
+    #[test]
+    fn test_builder_channel_capacity_explicit_overrides_config() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.reticulum.control_channel_capacity = 64;
+        let node = ReticulumNodeBuilder::new()
+            .config(config)
+            .control_channel_capacity(2048)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        assert_eq!(
+            node.control_channel_capacity, 2048,
+            "explicit control capacity should override config value"
+        );
     }
 
     #[test]

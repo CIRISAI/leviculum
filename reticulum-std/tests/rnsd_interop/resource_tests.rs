@@ -19,11 +19,10 @@
 
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use reticulum_std::EventReceiver;
 
 use reticulum_core::identity::Identity;
 use reticulum_core::link::LinkId;
-use reticulum_core::node::NodeEvent;
 use reticulum_core::resource::ResourceStrategy;
 use reticulum_core::{Destination, DestinationType, Direction};
 use reticulum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
@@ -70,7 +69,7 @@ async fn setup_link(
     accept_resources: bool,
 ) -> (
     ReticulumNode,
-    mpsc::Receiver<NodeEvent>,
+    EventReceiver,
     TestDaemon,
     TestDaemon,
     LinkId,

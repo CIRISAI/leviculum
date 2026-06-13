@@ -213,10 +213,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "REVERSE_ADD",
         required_keys: &["in_iface", "out_iface", "pkt_hash"],
     },
-    // Silent-drop observability for the NodeEvent application channel.
-    // Emission at reticulum-std/src/driver/mod.rs in the event_tx.try_send
-    // loop; dropped_event_type carries NodeEvent::variant_name() so a
-    // saturating queue is greppable per-event-type.
+    // Drop observability for the NodeEvent application channels (Codeberg
+    // #71). Emitted by `EventSink` in reticulum-std/src/driver/mod.rs.
+    // EVENT_CHANNEL_FULL now fires only for the lossless control plane (a
+    // dropped event that will be surfaced via ControlPlaneOverflow); data
+    // drops are silent backpressure. dropped_event_type carries
+    // NodeEvent::variant_name() so saturation is greppable per-event-type.
     EventSchema {
         name: "EVENT_CHANNEL_FULL",
         required_keys: &["queue_capacity", "dropped_event_type"],
@@ -224,6 +226,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "EVENT_CHANNEL_CLOSED",
         required_keys: &["dropped_event_type"],
+    },
+    // Control-plane overflow marker delivery: how many control events were
+    // dropped since the last marker. Pairs with NodeEvent::ControlPlaneOverflow.
+    EventSchema {
+        name: "CONTROL_PLANE_OVERFLOW",
+        required_keys: &["dropped_count"],
     },
 ];
 

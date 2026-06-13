@@ -14,7 +14,7 @@ use std::time::Instant;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
-use reticulum_std::driver::{LinkHandle, PacketSender, ReticulumNodeBuilder};
+use reticulum_std::driver::{EventReceiver, LinkHandle, PacketSender, ReticulumNodeBuilder};
 use reticulum_std::interfaces::{disable_fault_injection, enable_fault_injection};
 use reticulum_std::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, NodeEvent,
@@ -335,7 +335,7 @@ fn compute_sp_verdict(stats: &SelftestStats, warnings: &[String]) -> Verdict {
 
 // Event Tasks
 async fn event_task_a(
-    mut event_rx: tokio::sync::mpsc::Receiver<NodeEvent>,
+    mut event_rx: EventReceiver,
     state: Arc<SharedState>,
     dest_hash_b: DestinationHash,
     link_id_a: Arc<Mutex<Option<LinkId>>>,
@@ -392,7 +392,7 @@ async fn event_task_a(
 }
 
 async fn event_task_b(
-    mut event_rx: tokio::sync::mpsc::Receiver<NodeEvent>,
+    mut event_rx: EventReceiver,
     state: Arc<SharedState>,
     dest_hash_a: DestinationHash,
     start_time: Instant,

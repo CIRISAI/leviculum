@@ -3,12 +3,8 @@
 //! High-level entry point that wires together configuration, storage,
 //! core NodeCore, and the async runtime (via `ReticulumNode`).
 
-use reticulum_core::node::NodeEvent;
-
-use tokio::sync::mpsc;
-
 use crate::config::Config;
-use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
+use crate::driver::{EventReceiver, ReticulumNode, ReticulumNodeBuilder};
 use crate::error::Result;
 
 /// Main Reticulum instance
@@ -111,7 +107,7 @@ impl Reticulum {
     }
 
     /// Take the event receiver (can only be called once)
-    pub fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
+    pub fn take_event_receiver(&mut self) -> Option<EventReceiver> {
         self.node.take_event_receiver()
     }
 }

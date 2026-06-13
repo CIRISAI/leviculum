@@ -8,9 +8,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
-
-use reticulum_std::driver::ReticulumNode;
+use reticulum_std::driver::{EventReceiver, ReticulumNode};
 use reticulum_std::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, NodeEvent,
 };
@@ -55,7 +53,7 @@ pub fn load_or_generate_identity(path: &Path) -> Result<Identity, Box<dyn std::e
 /// Shared between run_send() (push) and run_fetch() (pull).
 async fn establish_link(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut EventReceiver,
     destination: &str,
     identity: Option<&Identity>,
     verbose: u8,
@@ -139,7 +137,7 @@ async fn establish_link(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_send(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut EventReceiver,
     file_path: &str,
     destination: &str,
     timeout_secs: Option<f64>,
@@ -239,7 +237,7 @@ pub async fn run_send(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_listen(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut EventReceiver,
     identity: Identity,
     save_dir: Option<PathBuf>,
     overwrite: bool,
@@ -582,7 +580,7 @@ fn encode_msgpack_string(s: &str) -> Vec<u8> {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_fetch(
     node: &ReticulumNode,
-    events: &mut mpsc::Receiver<NodeEvent>,
+    events: &mut EventReceiver,
     remote_path: &str,
     destination: &str,
     save_dir: Option<PathBuf>,
@@ -905,9 +903,9 @@ mod tests {
     /// Create two connected ReticulumNode instances for testing.
     async fn setup_connected_nodes() -> (
         reticulum_std::driver::ReticulumNode,
-        mpsc::Receiver<NodeEvent>,
+        EventReceiver,
         reticulum_std::driver::ReticulumNode,
-        mpsc::Receiver<NodeEvent>,
+        EventReceiver,
         tempfile::TempDir,
     ) {
         let port = find_available_port();

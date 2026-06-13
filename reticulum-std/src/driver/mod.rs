@@ -62,13 +62,16 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::mpsc::{
+    self,
+    error::{TryRecvError, TrySendError},
+};
 use tokio::sync::watch;
 
 use crate::interfaces::IncomingPacket;
 use reticulum_core::constants::TRUNCATED_HASHBYTES;
 use reticulum_core::link::LinkId;
-use reticulum_core::node::{NodeCore, NodeEvent};
+use reticulum_core::node::{EventClass, NodeCore, NodeEvent};
 use reticulum_core::traits::{InterfaceError, Storage as StorageTrait};
 use reticulum_core::transport::{InterfaceId, TickOutput};
 use reticulum_core::{Destination, DestinationHash};
@@ -91,10 +94,12 @@ use crate::storage::Storage;
 /// Type alias for the concrete NodeCore used by std platforms
 pub(crate) type StdNodeCore = NodeCore<rand_core::OsRng, SystemClock, Storage>;
 
-/// Event channel capacity for NodeEvent delivery to the application.
-/// Must be large enough that slow consumers don't block the event loop.
-/// Not yet tuned, chosen empirically during initial development.
-const EVENT_CHANNEL_CAPACITY: usize = 256;
+/// Capacity of the internal action-dispatch channel that carries
+/// `TickOutput`s produced outside the event loop (connect, send_on_link,
+/// close_link, announce) into it. Each such call produces exactly one
+/// `TickOutput` and the loop drains them every iteration, so this only
+/// backs up if the loop is already blocked.
+const ACTION_DISPATCH_CAPACITY: usize = 256;
 
 /// Maximum packets per interface in the retry queue.
 /// Sized to absorb announce-burst fan-out from transit peers; observed
@@ -106,6 +111,177 @@ const RETRY_QUEUE_CAP: usize = 1024;
 /// to flag that first-order backpressure may be mis-tuned. Held at
 /// 12.5 % of `RETRY_QUEUE_CAP` so the warn fires well before drops do.
 const RETRY_QUEUE_DEPTH_WARN: usize = 128;
+
+/// Sender half of the split control/data node-event channels (Codeberg #71).
+///
+/// Lives in the event loop only (single owner, so `&mut self` is enough for
+/// the dropped-counter — no atomics needed). [`emit`](EventSink::emit)
+/// classifies each [`NodeEvent`] with [`NodeEvent::event_class`] and routes
+/// it:
+///
+/// * **Control** plane — lossless by default. When the bounded control
+///   channel is full the event is dropped but counted, and the loss is made
+///   visible by delivering one [`NodeEvent::ControlPlaneOverflow`] as soon as
+///   the channel has room (see [`flush_overflow`](EventSink::flush_overflow)).
+///   The marker itself is only enqueued when there is room, so it is never
+///   lost.
+/// * **Data** plane — droppable. A full data channel drops silently; that is
+///   the intended backpressure.
+struct EventSink {
+    /// Lossless-by-default control plane.
+    control_tx: mpsc::Sender<NodeEvent>,
+    /// Droppable data plane (backpressure).
+    data_tx: mpsc::Sender<NodeEvent>,
+    /// Configured control-channel capacity, for the overflow warn log.
+    control_capacity: usize,
+    /// Control events dropped since the last `ControlPlaneOverflow` marker
+    /// was delivered. Surfaced (and reset) by `flush_overflow` once the
+    /// control channel has room.
+    control_dropped: u64,
+}
+
+impl EventSink {
+    /// Route one event to the control or data plane by its class.
+    fn emit(&mut self, event: NodeEvent) {
+        match event.event_class() {
+            EventClass::Control => self.emit_control(event),
+            EventClass::Data => self.emit_data(event),
+        }
+    }
+
+    /// Deliver a control-plane event losslessly, or count it as dropped and
+    /// surface the loss via `ControlPlaneOverflow`.
+    ///
+    /// The real event is tried first so a freed slot is never starved by the
+    /// overflow marker; only when the event lands (proving the channel has
+    /// room) do we try to flush any pending overflow marker behind it.
+    fn emit_control(&mut self, event: NodeEvent) {
+        match self.control_tx.try_send(event) {
+            Ok(()) => self.flush_overflow(),
+            Err(TrySendError::Full(ev)) => {
+                self.control_dropped += 1;
+                tracing::warn!(
+                    event = "EVENT_CHANNEL_FULL",
+                    queue_capacity = self.control_capacity,
+                    dropped_event_type = ev.variant_name(),
+                    pending_dropped = self.control_dropped,
+                    "control event dropped, will surface via ControlPlaneOverflow"
+                );
+            }
+            Err(TrySendError::Closed(ev)) => {
+                tracing::warn!(
+                    event = "EVENT_CHANNEL_CLOSED",
+                    dropped_event_type = ev.variant_name(),
+                    "control channel closed (receiver dropped), dropping event"
+                );
+            }
+        }
+    }
+
+    /// If control events were previously dropped, try to deliver one
+    /// `ControlPlaneOverflow` marker reporting the count. It is only enqueued
+    /// when the channel has room, so the marker is never itself dropped; the
+    /// counter is reset only on a successful send.
+    fn flush_overflow(&mut self) {
+        if self.control_dropped == 0 {
+            return;
+        }
+        let dropped_count = self.control_dropped;
+        match self
+            .control_tx
+            .try_send(NodeEvent::ControlPlaneOverflow { dropped_count })
+        {
+            Ok(()) => {
+                tracing::warn!(
+                    event = "CONTROL_PLANE_OVERFLOW",
+                    dropped_count,
+                    "surfaced dropped control events via ControlPlaneOverflow"
+                );
+                self.control_dropped = 0;
+            }
+            // Still full: keep the count and try again on the next emit.
+            Err(TrySendError::Full(_)) => {}
+            // Receiver gone: nothing can observe the marker anyway.
+            Err(TrySendError::Closed(_)) => self.control_dropped = 0,
+        }
+    }
+
+    /// Deliver a data-plane event, dropping silently when full (backpressure).
+    fn emit_data(&mut self, event: NodeEvent) {
+        match self.data_tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(ev)) => {
+                // Silent by design: data-plane drops are normal backpressure.
+                tracing::trace!(
+                    dropped_event_type = ev.variant_name(),
+                    "data event dropped (backpressure)"
+                );
+            }
+            Err(TrySendError::Closed(ev)) => {
+                tracing::warn!(
+                    event = "EVENT_CHANNEL_CLOSED",
+                    dropped_event_type = ev.variant_name(),
+                    "data channel closed (receiver dropped), dropping event"
+                );
+            }
+        }
+    }
+}
+
+/// Receiver half handed to the application by
+/// [`ReticulumNode::take_event_receiver`] (Codeberg #71).
+///
+/// Merges the split control/data channels into a single stream, draining the
+/// control plane with strict priority over the data plane so a flood of data
+/// events can never starve discovery- or lifecycle-critical control events.
+pub struct EventReceiver {
+    /// Lossless-by-default control plane (drained first).
+    control: mpsc::Receiver<NodeEvent>,
+    /// Droppable data plane.
+    data: mpsc::Receiver<NodeEvent>,
+}
+
+impl EventReceiver {
+    /// Receive the next event, control plane first.
+    ///
+    /// Returns `None` only once both planes are closed and drained. Drop-safe
+    /// for use in `tokio::select!`: a buffered control event is returned
+    /// synchronously, otherwise both channels are awaited with the control
+    /// plane biased, and `tokio::sync::mpsc::Receiver::recv` is cancel-safe.
+    pub async fn recv(&mut self) -> Option<NodeEvent> {
+        // Strict priority: return any already-buffered control event first.
+        match self.control.try_recv() {
+            Ok(ev) => return Some(ev),
+            Err(TryRecvError::Empty) => {}
+            // Control closed and drained: serve the data plane to completion.
+            Err(TryRecvError::Disconnected) => return self.data.recv().await,
+        }
+        // Nothing buffered on control; wait on both, control biased so a
+        // control event that races in still wins.
+        tokio::select! {
+            biased;
+            ev = self.control.recv() => match ev {
+                Some(e) => Some(e),
+                None => self.data.recv().await, // control closed
+            },
+            ev = self.data.recv() => match ev {
+                Some(e) => Some(e),
+                None => self.control.recv().await, // data closed
+            },
+        }
+    }
+
+    /// Non-blocking receive, control plane first. Mirrors
+    /// [`tokio::sync::mpsc::Receiver::try_recv`].
+    pub fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError> {
+        match self.control.try_recv() {
+            Ok(ev) => Ok(ev),
+            Err(TryRecvError::Empty) => self.data.try_recv(),
+            // Control closed: fall back to whatever the data plane reports.
+            Err(TryRecvError::Disconnected) => self.data.try_recv(),
+        }
+    }
+}
 
 /// Build an IfacConfig from interface configuration, if IFAC params are present.
 fn build_ifac_config(config: &InterfaceConfig) -> Option<reticulum_core::ifac::IfacConfig> {
@@ -132,11 +308,11 @@ fn build_ifac_config(config: &InterfaceConfig) -> Option<reticulum_core::ifac::I
 
 /// Channels consumed by the event loop.
 struct EventLoopChannels {
-    /// Application event sender. `None` when the node was built with
-    /// `without_events()`; in that case `dispatch_output` skips
+    /// Split control/data application event sink. `None` when the node was
+    /// built with `without_events()`; in that case `dispatch_output` skips
     /// event-forwarding and `output.events` falls out of scope, exactly
     /// like the `reticulum-nrf` daemon binaries.
-    event_tx: Option<mpsc::Sender<NodeEvent>>,
+    event_sink: Option<EventSink>,
     action_dispatch_rx: mpsc::Receiver<TickOutput>,
     new_interface_rx: mpsc::Receiver<InterfaceHandle>,
     reconnect_rx: mpsc::Receiver<InterfaceId>,
@@ -200,14 +376,19 @@ pub struct ReticulumNode {
     inner: Arc<Mutex<StdNodeCore>>,
     /// Interface configurations
     interfaces: Vec<InterfaceConfig>,
-    /// Event sender for the runner. `None` when built with
-    /// `without_events()` (daemon-mode); the loop then never forwards
-    /// `NodeEvent`s.
-    event_tx: Option<mpsc::Sender<NodeEvent>>,
-    /// Event receiver for consuming events. `None` either because the
+    /// Control-plane event sender, cloned into the runner's `EventSink`.
+    /// `None` when built with `without_events()` (daemon-mode); the loop
+    /// then never forwards `NodeEvent`s. Kept here so the channel stays open.
+    control_tx: Option<mpsc::Sender<NodeEvent>>,
+    /// Data-plane event sender, cloned into the runner's `EventSink`.
+    data_tx: Option<mpsc::Sender<NodeEvent>>,
+    /// Capacity of the control channel, needed to build the runner's
+    /// `EventSink` (used for the overflow warn log).
+    control_channel_capacity: usize,
+    /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
-    event_rx: Option<mpsc::Receiver<NodeEvent>>,
+    event_rx: Option<EventReceiver>,
     /// Shutdown sender
     shutdown_tx: Option<watch::Sender<bool>>,
     /// Runner task handle
@@ -254,17 +435,31 @@ impl ReticulumNode {
         corrupt_every: Option<u64>,
         events_enabled: bool,
         flush_interval_secs: u64,
+        control_channel_capacity: usize,
+        data_channel_capacity: usize,
     ) -> Self {
-        // When events are disabled (daemon-mode), no channel is constructed
-        // at all — neither sender nor receiver. The event loop's
+        // When events are disabled (daemon-mode), no channels are constructed
+        // at all — neither senders nor receiver. The event loop's
         // `dispatch_output` then skips its event-forwarding branch and
         // `output.events` falls out of scope unread, mirroring the NRF
         // daemon binaries.
-        let (event_tx, event_rx) = if events_enabled {
-            let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-            (Some(tx), Some(rx))
+        //
+        // Codeberg #71: the single bounded channel is split into a lossless
+        // control plane and a droppable data plane, merged back for the
+        // application by `EventReceiver`.
+        let (control_tx, data_tx, event_rx) = if events_enabled {
+            let (control_tx, control_rx) = mpsc::channel(control_channel_capacity);
+            let (data_tx, data_rx) = mpsc::channel(data_channel_capacity);
+            (
+                Some(control_tx),
+                Some(data_tx),
+                Some(EventReceiver {
+                    control: control_rx,
+                    data: data_rx,
+                }),
+            )
         } else {
-            (None, None)
+            (None, None, None)
         };
         // Create dummy channel; real one is created in start()
         let (action_dispatch_tx, _) = mpsc::channel(1);
@@ -272,7 +467,9 @@ impl ReticulumNode {
         Self {
             inner: Arc::new(Mutex::new(core)),
             interfaces,
-            event_tx,
+            control_tx,
+            data_tx,
+            control_channel_capacity,
             event_rx,
             shutdown_tx: None,
             runner_handle: None,
@@ -382,12 +579,23 @@ impl ReticulumNode {
         // produces exactly one TickOutput, and the event loop drains them on
         // every iteration, so the queue only backs up if the event loop is
         // blocked (which also stalls all other I/O).
-        let (action_dispatch_tx, action_dispatch_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (action_dispatch_tx, action_dispatch_rx) = mpsc::channel(ACTION_DISPATCH_CAPACITY);
         self.action_dispatch_tx = action_dispatch_tx;
 
-        // Clone handles for the runner
+        // Clone handles for the runner. The event loop owns a single
+        // `EventSink` built from clones of both plane senders; it is the only
+        // writer, so the dropped-counter needs no synchronisation.
         let inner = Arc::clone(&self.inner);
-        let event_tx = self.event_tx.clone();
+        let event_sink = match (self.control_tx.clone(), self.data_tx.clone()) {
+            (Some(control_tx), Some(data_tx)) => Some(EventSink {
+                control_tx,
+                data_tx,
+                control_capacity: self.control_channel_capacity,
+                control_dropped: 0,
+            }),
+            // `without_events()` leaves both senders None.
+            _ => None,
+        };
         let iface_stats_map = Arc::clone(&self.iface_stats_map);
         let iface_online_map = Arc::clone(&self.iface_online_map);
         let flush_interval_secs = self.flush_interval_secs;
@@ -398,7 +606,7 @@ impl ReticulumNode {
                 inner,
                 registry,
                 EventLoopChannels {
-                    event_tx,
+                    event_sink,
                     action_dispatch_rx,
                     new_interface_rx: new_iface_rx,
                     reconnect_rx,
@@ -912,7 +1120,12 @@ impl ReticulumNode {
     /// Take the event receiver
     ///
     /// This allows consuming node events directly. Can only be called once.
-    pub fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
+    ///
+    /// The returned [`EventReceiver`] merges the split control/data planes
+    /// (Codeberg #71), draining control events with strict priority over data
+    /// events. Use [`EventReceiver::recv`] exactly like a
+    /// `tokio::sync::mpsc::Receiver`.
+    pub fn take_event_receiver(&mut self) -> Option<EventReceiver> {
         self.event_rx.take()
     }
 
@@ -1529,7 +1742,7 @@ async fn run_event_loop(
     iface_online_map: InterfaceOnlineMap,
     flush_interval_secs: u64,
 ) {
-    let event_tx = channels.event_tx;
+    let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
     let mut new_interface_rx = channels.new_interface_rx;
     let mut reconnect_rx = channels.reconnect_rx;
@@ -1620,7 +1833,7 @@ async fn run_event_loop(
                         dispatch_output(
                             output,
                             &mut registry,
-                            event_tx.as_ref(),
+                            event_sink.as_mut(),
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                         );
@@ -1634,7 +1847,7 @@ async fn run_event_loop(
                         dispatch_output(
                             output,
                             &mut registry,
-                            event_tx.as_ref(),
+                            event_sink.as_mut(),
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                         );
@@ -1663,7 +1876,7 @@ async fn run_event_loop(
                 dispatch_output(
                     output,
                     &mut registry,
-                    event_tx.as_ref(),
+                    event_sink.as_mut(),
                     &inner,
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                 );
@@ -1681,7 +1894,7 @@ async fn run_event_loop(
                 dispatch_output(
                     output,
                     &mut registry,
-                    event_tx.as_ref(),
+                    event_sink.as_mut(),
                     &inner,
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                 );
@@ -1748,7 +1961,7 @@ async fn run_event_loop(
                         let mut core = inner.lock().unwrap();
                         core.handle_interface_up(iface_idx)
                     };
-                    dispatch_output(output, &mut registry, event_tx.as_ref(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs);
+                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs);
                 }
             }
 
@@ -1769,7 +1982,7 @@ async fn run_event_loop(
                     let mut core = inner.lock().unwrap();
                     core.handle_interface_up(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_tx.as_ref(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs);
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs);
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
@@ -1787,7 +2000,7 @@ async fn run_event_loop(
 
 /// Dispatch a TickOutput: drain retry queues, route Actions to interfaces, forward Events.
 ///
-/// `event_tx` is `None` when the node was built with `without_events()`;
+/// `event_sink` is `None` when the node was built with `without_events()`;
 /// in that case, `output.events` is dropped at the end of this function
 /// without being forwarded — identical to the NRF daemon path, where
 /// the events vector simply falls out of scope.
@@ -1795,7 +2008,7 @@ async fn run_event_loop(
 fn dispatch_output(
     output: TickOutput,
     registry: &mut InterfaceRegistry,
-    event_tx: Option<&mpsc::Sender<NodeEvent>>,
+    event_sink: Option<&mut EventSink>,
     inner: &Arc<Mutex<StdNodeCore>>,
     retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
     retry_queue_warned: &mut std::collections::BTreeSet<usize>,
@@ -1871,35 +2084,18 @@ fn dispatch_output(
     // airtime.
     push_interface_state(registry, inner);
 
-    // Forward events to application (best effort, drop if full).
-    // When event_tx is None (daemon-mode, built via `without_events()`),
+    // Forward events to the application via the split-plane EventSink:
+    // control events lossless-by-default (overflow surfaced via
+    // ControlPlaneOverflow), data events droppable under load (Codeberg #71).
+    // When event_sink is None (daemon-mode, built via `without_events()`),
     // events are dropped here without forwarding — the events vector
     // simply falls out of scope at the end of this function.
-    if let Some(event_tx) = event_tx {
+    if let Some(event_sink) = event_sink {
         for event in output.events {
             if let NodeEvent::LinkEstablished { link_id, .. } = &event {
                 tracing::debug!("Link established: {:?}", link_id);
             }
-            match event_tx.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(ev)) => {
-                    let dropped_event_type = ev.variant_name();
-                    tracing::warn!(
-                        event = "EVENT_CHANNEL_FULL",
-                        queue_capacity = EVENT_CHANNEL_CAPACITY,
-                        dropped_event_type = dropped_event_type,
-                        "Event channel full, dropping event"
-                    );
-                }
-                Err(TrySendError::Closed(ev)) => {
-                    let dropped_event_type = ev.variant_name();
-                    tracing::warn!(
-                        event = "EVENT_CHANNEL_CLOSED",
-                        dropped_event_type = dropped_event_type,
-                        "Event channel closed (receiver dropped), dropping event"
-                    );
-                }
-            }
+            event_sink.emit(event);
         }
     }
 }
@@ -2070,7 +2266,10 @@ mod tests {
             .build_sync()
             .expect("build_sync failed");
 
-        assert!(node.event_tx.is_some(), "default build must keep events on");
+        assert!(
+            node.control_tx.is_some() && node.data_tx.is_some(),
+            "default build must keep both event planes on"
+        );
         assert!(
             node.take_event_receiver().is_some(),
             "default build must hand out a receiver"
@@ -2094,8 +2293,8 @@ mod tests {
             .expect("build_sync failed");
 
         assert!(
-            node.event_tx.is_none(),
-            "daemon-mode build must not have an event sender"
+            node.control_tx.is_none() && node.data_tx.is_none(),
+            "daemon-mode build must not have event senders"
         );
         assert!(
             node.take_event_receiver().is_none(),
@@ -2150,6 +2349,196 @@ mod tests {
             &mut retry_queue_max_depth,
             &ifac_configs,
         );
+    }
+
+    /// Build a connected control/data sink + merged receiver for the
+    /// split-channel tests (Codeberg #71).
+    fn sink_and_receiver(control_cap: usize, data_cap: usize) -> (EventSink, EventReceiver) {
+        let (control_tx, control_rx) = mpsc::channel(control_cap);
+        let (data_tx, data_rx) = mpsc::channel(data_cap);
+        (
+            EventSink {
+                control_tx,
+                data_tx,
+                control_capacity: control_cap,
+                control_dropped: 0,
+            },
+            EventReceiver {
+                control: control_rx,
+                data: data_rx,
+            },
+        )
+    }
+
+    fn path_found(i: usize) -> NodeEvent {
+        NodeEvent::PathFound {
+            destination_hash: reticulum_core::DestinationHash::new([0xAB; 16]),
+            hops: (i % 256) as u8,
+            interface_index: i,
+        }
+    }
+
+    /// Adapted from emoore's PR #71 repro
+    /// (`control_plane_burst_lossless_to_draining_consumer`). Their unbounded
+    /// channel accepted a burst of `EVENT_CHANNEL_CAPACITY * 4`; our bounded
+    /// control plane is lossless *up to its configured capacity*. So we burst
+    /// exactly capacity control events into an empty channel and require all
+    /// of them, in order, at a draining consumer — the property the old single
+    /// bounded `try_send` channel violated by silently dropping once full.
+    #[tokio::test]
+    async fn control_plane_burst_lossless_to_draining_consumer() {
+        let cap = crate::config::DEFAULT_CONTROL_CHANNEL_CAPACITY;
+        // Tiny data plane to prove the control plane is independent of it.
+        let (mut sink, mut rx) = sink_and_receiver(cap, 16);
+
+        for i in 0..cap {
+            sink.emit(path_found(i));
+        }
+
+        for i in 0..cap {
+            match rx.recv().await {
+                Some(NodeEvent::PathFound {
+                    hops,
+                    interface_index,
+                    ..
+                }) => {
+                    assert_eq!(
+                        interface_index, i,
+                        "control events must arrive in order with none dropped"
+                    );
+                    assert_eq!(hops, (i % 256) as u8, "event payload must be intact");
+                }
+                other => panic!("expected PathFound #{i}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The property emoore's unbounded channel broke: the DATA plane must stay
+    /// bounded and drop under load rather than grow without limit. Emitting
+    /// far more data events than the data capacity, with no concurrent drain,
+    /// must leave at most `data_cap` buffered.
+    #[tokio::test]
+    async fn data_plane_stays_bounded_and_drops_under_load() {
+        let data_cap = 8;
+        let (mut sink, mut rx) = sink_and_receiver(16, data_cap);
+
+        let burst = data_cap * 8;
+        for i in 0..burst {
+            sink.emit(NodeEvent::PacketReceived {
+                destination: reticulum_core::DestinationHash::new([0x11; 16]),
+                data: vec![i as u8],
+                interface_index: i,
+            });
+        }
+
+        let mut count = 0;
+        while let Ok(ev) = rx.try_recv() {
+            assert!(
+                matches!(ev, NodeEvent::PacketReceived { .. }),
+                "only data events expected"
+            );
+            count += 1;
+        }
+        assert_eq!(
+            count, data_cap,
+            "data plane must be bounded at its capacity (backpressure preserved)"
+        );
+    }
+
+    /// Overflowing the bounded control channel must be VISIBLE: the dropped
+    /// events are counted and surfaced as a single
+    /// `ControlPlaneOverflow {{ dropped_count }}` once the channel has room.
+    /// The marker itself is never lost, and the counter resets after delivery.
+    #[tokio::test]
+    async fn control_overflow_delivers_visible_marker() {
+        let cap = 4;
+        let (mut sink, mut rx) = sink_and_receiver(cap, 4);
+
+        // Fill the control channel to capacity (all delivered)...
+        for i in 0..cap {
+            sink.emit(path_found(i));
+        }
+        // ...then emit three more that cannot fit: dropped and counted.
+        let dropped = 3usize;
+        for i in 0..dropped {
+            sink.emit(path_found(100 + i));
+        }
+
+        // Drain everything currently buffered so the channel has headroom for
+        // both the next real event and the overflow marker behind it.
+        for _ in 0..cap {
+            assert!(matches!(rx.try_recv(), Ok(NodeEvent::PathFound { .. })));
+        }
+
+        // One more control event lands AND carries the overflow marker behind
+        // it (emit_control flushes the marker once an event proves there's room).
+        sink.emit(path_found(200));
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(NodeEvent::PathFound {
+                    interface_index: 200,
+                    ..
+                })
+            ),
+            "the real event is delivered first"
+        );
+        match rx.try_recv() {
+            Ok(NodeEvent::ControlPlaneOverflow { dropped_count }) => {
+                assert_eq!(
+                    dropped_count, dropped as u64,
+                    "marker must report exactly the number of dropped control events"
+                );
+            }
+            other => panic!("expected ControlPlaneOverflow {{{dropped}}}, got {other:?}"),
+        }
+
+        // Counter reset: no spurious second marker.
+        sink.emit(path_found(201));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(NodeEvent::PathFound {
+                interface_index: 201,
+                ..
+            })
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "no second overflow marker after the count was reset"
+        );
+    }
+
+    /// Strict priority: a backlog of data events must never delay a control
+    /// event. With both planes non-empty, `recv` returns control first.
+    #[tokio::test]
+    async fn control_plane_drained_before_data_plane() {
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+        // Queue data first, then a single control event.
+        for i in 0..4 {
+            sink.emit(NodeEvent::PacketReceived {
+                destination: reticulum_core::DestinationHash::new([0x22; 16]),
+                data: vec![i as u8],
+                interface_index: i,
+            });
+        }
+        sink.emit(path_found(7));
+
+        // Despite arriving last, the control event is delivered first.
+        match rx.recv().await {
+            Some(NodeEvent::PathFound {
+                interface_index: 7, ..
+            }) => {}
+            other => panic!("control event must come first, got {other:?}"),
+        }
+        // Then the data backlog follows.
+        for i in 0..4 {
+            match rx.recv().await {
+                Some(NodeEvent::PacketReceived {
+                    interface_index, ..
+                }) => assert_eq!(interface_index, i),
+                other => panic!("expected data #{i}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

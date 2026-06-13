@@ -48,7 +48,7 @@ pub mod request;
 mod send;
 
 pub use builder::NodeCoreBuilder;
-pub use event::{DeliveryError, NodeEvent};
+pub use event::{DeliveryError, EventClass, NodeEvent};
 pub use request::{RequestError, RequestPolicy};
 pub use send::SendError;
 

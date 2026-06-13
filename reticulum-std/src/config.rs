@@ -71,13 +71,51 @@ pub struct ReticulumConfig {
     /// different interval. Default: 3600 (one hour).
     #[serde(default = "default_flush_interval_secs")]
     pub flush_interval_secs: u64,
+    /// Capacity of the lossless control-plane event channel (Codeberg #71).
+    ///
+    /// Control events (announces, paths, link/resource lifecycle) are
+    /// delivered losslessly until this bounded channel fills, after which
+    /// drops are counted and surfaced via `NodeEvent::ControlPlaneOverflow`.
+    /// The default is conservative for small std platforms; servers under
+    /// heavy announce load should raise it. Library default, platform tunes.
+    #[serde(default = "default_control_channel_capacity")]
+    pub control_channel_capacity: usize,
+    /// Capacity of the droppable data-plane event channel (Codeberg #71).
+    ///
+    /// Data events (single-packet delivery and its confirmations) drop
+    /// silently when this bounded channel is full — normal backpressure.
+    /// Kept conservative so a slow consumer cannot grow driver memory on
+    /// small std platforms; servers may raise it.
+    #[serde(default = "default_data_channel_capacity")]
+    pub data_channel_capacity: usize,
 }
 
 /// Default interval between periodic storage flushes (seconds)
 pub const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 3600;
 
+/// Default capacity of the lossless control-plane event channel.
+///
+/// Conservative figure safe for small std platforms. Matches the previously
+/// shipped single-channel capacity so existing control-plane headroom is
+/// preserved; servers override larger via config or builder.
+pub const DEFAULT_CONTROL_CHANNEL_CAPACITY: usize = 256;
+
+/// Default capacity of the droppable data-plane event channel.
+///
+/// Half the control default: data drops are normal backpressure, so the
+/// data plane is sized to bound memory rather than to avoid drops.
+pub const DEFAULT_DATA_CHANNEL_CAPACITY: usize = 128;
+
 fn default_flush_interval_secs() -> u64 {
     DEFAULT_FLUSH_INTERVAL_SECS
+}
+
+fn default_control_channel_capacity() -> usize {
+    DEFAULT_CONTROL_CHANNEL_CAPACITY
+}
+
+fn default_data_channel_capacity() -> usize {
+    DEFAULT_DATA_CHANNEL_CAPACITY
 }
 
 fn default_true() -> bool {
@@ -101,6 +139,8 @@ impl Default for ReticulumConfig {
             remote_management_enabled: false,
             storage_path: None,
             flush_interval_secs: DEFAULT_FLUSH_INTERVAL_SECS,
+            control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
+            data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
         }
     }
 }
@@ -331,6 +371,29 @@ mod tests {
             config.reticulum.flush_interval_secs, DEFAULT_FLUSH_INTERVAL_SECS,
             "missing flush_interval_secs should default to 3600"
         );
+    }
+
+    #[test]
+    fn test_channel_capacities_default_when_missing_from_toml() {
+        let toml_str = "[reticulum]\nuse_implicit_proof = true\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.reticulum.control_channel_capacity, DEFAULT_CONTROL_CHANNEL_CAPACITY,
+            "missing control_channel_capacity should default"
+        );
+        assert_eq!(
+            config.reticulum.data_channel_capacity, DEFAULT_DATA_CHANNEL_CAPACITY,
+            "missing data_channel_capacity should default"
+        );
+    }
+
+    #[test]
+    fn test_channel_capacities_explicit_in_toml() {
+        let toml_str =
+            "[reticulum]\ncontrol_channel_capacity = 1000\ndata_channel_capacity = 500\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.reticulum.control_channel_capacity, 1000);
+        assert_eq!(config.reticulum.data_channel_capacity, 500);
     }
 
     #[test]

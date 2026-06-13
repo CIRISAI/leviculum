@@ -91,7 +91,7 @@ async fn setup_python_dest(
 async fn setup_rust_dest_for_receiving(
     daemon: &TestDaemon,
     rust_node: &reticulum_std::driver::ReticulumNode,
-    _event_rx: &mut tokio::sync::mpsc::Receiver<NodeEvent>,
+    _event_rx: &mut reticulum_std::EventReceiver,
     app_name: &str,
     aspects: &[&str],
     app_data: &[u8],
