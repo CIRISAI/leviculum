@@ -2680,6 +2680,33 @@ mod tests {
         });
     }
 
+    /// Regression for the `Drop` teardown path: dropping a started node from
+    /// *inside* another runtime's async context must not panic. emoore's
+    /// other tests exercise the `stop()` teardown; this one drops the node
+    /// without calling `stop()`, so the node's owned `Runtime` is torn down by
+    /// the `Drop` impl. A blocking `Runtime` drop inside an async context
+    /// panics; the `Drop` impl uses `shutdown_background()` to avoid it.
+    #[test]
+    fn node_drops_cleanly_within_host_runtime_async_context() {
+        let host = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("host runtime");
+        host.block_on(async {
+            let td = tempfile::tempdir().expect("tempdir");
+            let mut node = ReticulumNodeBuilder::new()
+                .enable_transport(true)
+                .storage_path(td.path().to_path_buf())
+                .build_sync()
+                .expect("build_sync");
+            node.start().await.expect("start");
+            // Drop the live node (and its owned runtime) here, inside the host
+            // runtime's async context. Pre-fix the blocking Runtime drop panicked;
+            // post-fix `Drop`'s shutdown_background() returns without blocking.
+            drop(node);
+        });
+    }
+
     #[test]
     fn test_reticulum_node_builder_creates_node() {
         let td = tempfile::tempdir().expect("tempdir");
