@@ -120,6 +120,107 @@ pub struct TestRunner {
     /// Long-running LXMF helper processes spawned via `lxmf_start` steps,
     /// keyed by node name. Shutdown happens in `down()` before compose down.
     lxmf_helpers: Mutex<BTreeMap<String, Arc<LxmfHelper>>>,
+    /// Background debug serial capture threads with their shutdown signal.
+    /// Started in `up()`, joined in `stop_debug_captures()` so each scenario
+    /// releases its serial ports before the next test in the same process.
+    debug_captures: Option<DebugCaptures>,
+}
+
+/// Lifecycle handle for the background debug serial capture threads.
+///
+/// Each reader thread owns its `serialport` handle for life and exits only
+/// when `stop` is set, dropping the handle and releasing the port. Without
+/// this, a leaked thread keeps the port open across scenarios in the same
+/// `--test-threads=1` process, making the next LNode test skip
+/// `device_inaccessible` (it cannot reclaim a port held by its own pid).
+struct DebugCaptures {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+impl DebugCaptures {
+    /// Signal every reader thread to stop and join it, releasing all ports.
+    fn stop(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for handle in self.handles {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Open `port`, assert DTR/RTS (CDC-ACM only sends when DTR is asserted), and
+/// spawn a reader thread that appends serial output to `log_path` until `stop`
+/// is set. On a read error the loop reconnects, but never after shutdown. The
+/// thread owns the serial handle for life and drops it on exit, releasing the
+/// port. Returns the join handle, or `None` if the log file or port could not
+/// be opened.
+fn spawn_debug_capture(
+    port: String,
+    log_path: PathBuf,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> Option<thread::JoinHandle<()>> {
+    let mut file = match fs::File::create(&log_path) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("[debug-capture] cannot create {}: {e}", log_path.display());
+            return None;
+        }
+    };
+    // Short read timeout so the thread polls the shutdown flag promptly.
+    let mut serial = match serialport::new(&port, 115_200)
+        .timeout(Duration::from_millis(250))
+        .open()
+    {
+        Ok(serial) => serial,
+        Err(e) => {
+            eprintln!("[debug-capture] FAILED to open {port}: {e}");
+            return None;
+        }
+    };
+    let _ = serial.write_data_terminal_ready(true);
+    let _ = serial.write_request_to_send(true);
+    eprintln!("[debug-capture] {port} → {}", log_path.display());
+
+    let handle = thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut buf = [0u8; 1024];
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            match serial.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    let _ = file.write_all(&buf[..n]);
+                    let _ = file.flush();
+                }
+                Ok(_) => {}
+                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(_) => {
+                    // Port lost. Never reopen after shutdown; check the flag
+                    // before and after the backoff sleep so stop wins the race.
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(500));
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match serialport::new(&port, 115_200)
+                        .timeout(Duration::from_millis(250))
+                        .open()
+                    {
+                        Ok(mut new_serial) => {
+                            let _ = new_serial.write_data_terminal_ready(true);
+                            serial = new_serial;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        // `serial` dropped here, releasing the port.
+    });
+    Some(handle)
 }
 
 impl TestRunner {
@@ -217,6 +318,7 @@ impl TestRunner {
             proxy_sockets,
             dmesg_process: None,
             lxmf_helpers: Mutex::new(BTreeMap::new()),
+            debug_captures: None,
         })
     }
 
@@ -430,6 +532,11 @@ impl TestRunner {
         // would hang on container teardown, blocking the runner.
         self.lxmf_kill_all();
 
+        // Release serial ports before anything else: the capture threads are
+        // started at the top of `up()` (even before containers), so they must
+        // be joined on every teardown path, including the early return below.
+        self.stop_debug_captures();
+
         if !self.is_up {
             self.kill_proxies();
             return Ok(());
@@ -545,75 +652,32 @@ impl TestRunner {
         let _ = fs::create_dir_all(&logs_dir);
         let ts = Self::utc_timestamp();
 
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handles = Vec::new();
         for (name, node) in &self.scenario.nodes {
             if let Some(ref port) = node.debug_serial_path {
                 let log_path = logs_dir.join(format!(
                     "{}_{}_debug_{}.log",
                     self.scenario.test.name, name, ts
                 ));
-                let port = port.clone();
-
-                match fs::File::create(&log_path) {
-                    Ok(mut file) => {
-                        // Open port with serialport to assert DTR (CDC-ACM
-                        // only sends when DTR is asserted), then hand off to
-                        // a background reader thread.
-                        match serialport::new(&port, 115_200)
-                            .timeout(Duration::from_secs(2))
-                            .open()
-                        {
-                            Ok(mut serial) => {
-                                let _ = serial.write_data_terminal_ready(true);
-                                let _ = serial.write_request_to_send(true);
-                                eprintln!("[debug-capture] {port} → {}", log_path.display());
-                                // Spawn reader thread with reconnection
-                                let port_path = port.clone();
-                                let _ = thread::spawn(move || {
-                                    use std::io::{Read, Write};
-                                    let mut buf = [0u8; 1024];
-                                    loop {
-                                        match serial.read(&mut buf) {
-                                            Ok(n) if n > 0 => {
-                                                let _ = file.write_all(&buf[..n]);
-                                                let _ = file.flush();
-                                            }
-                                            Ok(_) => {}
-                                            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                                                continue
-                                            }
-                                            Err(_) => {
-                                                // Port lost, try to reconnect
-                                                thread::sleep(Duration::from_secs(1));
-                                                match serialport::new(&port_path, 115_200)
-                                                    .timeout(Duration::from_secs(2))
-                                                    .open()
-                                                {
-                                                    Ok(mut new_serial) => {
-                                                        let _ = new_serial
-                                                            .write_data_terminal_ready(true);
-                                                        serial = new_serial;
-                                                    }
-                                                    Err(_) => break,
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                eprintln!("[debug-capture] FAILED to open {port}: {e}");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[debug-capture] cannot create {}: {e}", log_path.display());
-                    }
+                if let Some(handle) = spawn_debug_capture(port.clone(), log_path, Arc::clone(&stop))
+                {
+                    handles.push(handle);
                 }
             }
         }
+        self.debug_captures = Some(DebugCaptures { stop, handles });
     }
 
-    // Debug capture threads stop automatically when the serial port closes.
+    /// Stop all background debug serial captures and join their threads,
+    /// releasing every serial port before the next scenario runs in the same
+    /// process. Idempotent: a no-op if captures were never started or already
+    /// stopped.
+    fn stop_debug_captures(&mut self) {
+        if let Some(captures) = self.debug_captures.take() {
+            captures.stop();
+        }
+    }
 
     /// Stop the background dmesg logger (if running).
     fn stop_dmesg_logger(&mut self) {
@@ -1510,9 +1574,11 @@ impl Drop for TestRunner {
             // Best-effort teardown on panic or early return.
             let _ = self.down();
         }
-        // Ensure helpers and proxies are killed even if down() wasn't called.
+        // Ensure helpers, proxies, and capture threads are released even if
+        // down() wasn't called (e.g. up() failed before is_up was set).
         self.lxmf_kill_all();
         self.kill_proxies();
+        self.stop_debug_captures();
     }
 }
 
@@ -1575,6 +1641,105 @@ mod tests {
 
         let _ = holder.kill();
         let _ = holder.wait();
+    }
+
+    /// Lifecycle regression (2026-06-13): the debug capture thread used to be
+    /// detached with no shutdown path, so it held its serial port for the life
+    /// of the process and reopened it on read error. Across a `--test-threads=1`
+    /// profile group that leaked port blocked every later LNode scenario with
+    /// `device_inaccessible`. The fix gives the threads a stop flag + join.
+    ///
+    /// Hardware-free: a Linux pty pair stands in for the board. serialport-rs
+    /// opens the slave exclusively (TIOCEXCL), so while the capture thread holds
+    /// it a fresh open returns EBUSY; once the thread stops and drops the handle
+    /// the port becomes openable again. Pre-fix (thread ignores the flag) the
+    /// port stays held and this assertion fails; post-fix it is released.
+    #[test]
+    fn debug_capture_releases_port_on_stop() {
+        use std::ffi::CStr;
+        use std::sync::atomic::AtomicBool;
+
+        // Create a pty pair; the slave is the stand-in "debug serial device".
+        let mut master: libc::c_int = 0;
+        let mut slave: libc::c_int = 0;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed (no pty available?)");
+        let mut namebuf = [0 as libc::c_char; 256];
+        let rc = unsafe { libc::ttyname_r(slave, namebuf.as_mut_ptr(), namebuf.len()) };
+        assert_eq!(rc, 0, "ttyname_r failed");
+        let pty = unsafe { CStr::from_ptr(namebuf.as_ptr()) }
+            .to_str()
+            .expect("pts path not UTF-8")
+            .to_string();
+        // Close the slave fd but keep the master open so the pty stays alive;
+        // the capture thread reopens the slave by path.
+        unsafe {
+            libc::close(slave);
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_path = tmp.path().join("debug.log");
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let try_open = |path: &str| {
+            serialport::new(path, 115_200)
+                .timeout(Duration::from_millis(250))
+                .open()
+        };
+
+        let handle = spawn_debug_capture(pty.clone(), log_path, Arc::clone(&stop))
+            .expect("spawn_debug_capture should open the pty");
+
+        // Precondition: the capture thread holds the port exclusively, so a
+        // fresh open from this thread must fail. Allow for the open + TIOCEXCL
+        // race by polling briefly.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut held = false;
+        while Instant::now() < deadline {
+            if try_open(&pty).is_err() {
+                held = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            held,
+            "precondition: capture thread should hold the port exclusively"
+        );
+
+        // Teardown: signal stop, exactly as `stop_debug_captures` does. Poll
+        // for release with a bounded deadline rather than joining first, so the
+        // pre-fix case (thread ignores the flag, never exits) fails cleanly
+        // here instead of hanging on a join that never returns.
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut released = false;
+        while Instant::now() < deadline {
+            if try_open(&pty).is_ok() {
+                released = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            released,
+            "port not released after stop: capture thread did not exit"
+        );
+
+        // The thread has exited; the join must return promptly.
+        let _ = handle.join();
+
+        unsafe {
+            libc::close(master);
+        }
     }
 
     #[test]
