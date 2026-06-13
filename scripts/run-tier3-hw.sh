@@ -102,9 +102,43 @@ log "[CI_HW] hamster helper reachable"
 # Mirrors the `build-integ-bins` Just target.  `just nightly` would do
 # this transitively, but we drive cargo directly per-group so no Just
 # dependency chain runs.
+#
+# Fresh-binary guarantee (2026-06-13 nightly: 12 setup aborts).
+# cargo decides "up to date" by source mtime. After _repo-sync.sh pulls
+# newer commits whose checked-out files keep their old mtimes, cargo can
+# skip the relink ("Finished in 0.07s") so the binary mtime stays old —
+# while `check_binary_freshness` (paths.rs) compares that mtime against
+# the git COMMIT time of the last production-source change. The two
+# truths diverge and every binary-mounting test aborts in setup.
+#
+# Robustness: TOUCH the bin-crate sources so cargo recompiles the final
+# crates and relinks, stamping a fresh mtime on every binary. (Deleting
+# only the top-level binary does NOT work: cargo re-hardlinks it from
+# target/release/deps without relinking, preserving the old mtime —
+# verified 2026-06-13.) Touching every .rs under the two bin crates is
+# robust regardless of which file is a given bin's entry point. Then
+# PRE-FLIGHT with the EXACT same check the tests run
+# (`reticulum-integ check-freshness`, one source of truth) and abort the
+# whole run on a single clear failure rather than letting N scenarios
+# die one by one.
+CACHE_TARGET=~/.cache/leviculum-ci-target
 log "[CI_HW] building integ binaries (lnsd / lns / lncp / lora-proxy)"
-CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
+RELEASE_DIR="$CACHE_TARGET/x86_64-unknown-linux-musl/release"
+find "$REPO_DIR/reticulum-cli/src" "$REPO_DIR/reticulum-proxy/src" \
+  -name '*.rs' -exec touch {} +
+CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
   cargo build --release --bin lnsd --bin lns --bin lncp --bin lora-proxy
+
+# Build the preflight checker itself, then run it. It resolves the same
+# binaries via the same paths:: code TestRunner::new uses, so it cannot
+# drift from the per-test assertion.
+CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
+  cargo build --release --bin reticulum-integ -p reticulum-integ
+if ! CARGO_TARGET_DIR="$CACHE_TARGET" "$RELEASE_DIR/reticulum-integ" check-freshness; then
+    log "[CI_HW] FATAL: integ binaries still stale after forced rebuild — aborting run"
+    echo "$(date -Iseconds) tier3 RED stale-binaries-preflight $LOG" >> "$RESULTS"
+    exit 1
+fi
 
 # --- TOML helpers (python3 + tomllib) ---
 
