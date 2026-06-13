@@ -1252,6 +1252,12 @@ fn execute_wait_for_path(
                 return Ok(());
             }
             ("no_path", true) => {
+                // The assertion is unchanged: a resolved path is still a
+                // failure. We only capture forensics first, because this
+                // branch is NOT a timeout and so the wedge-capture script
+                // never fires here. Without this dump a rare nightly
+                // no_path failure leaves no record of HOW the path arrived.
+                dump_no_path_forensics(runner, index, on, destination, &hash, &output);
                 return Err(StepError::StepFailed {
                     step_index: index,
                     action: "wait_for_path".into(),
@@ -1323,6 +1329,131 @@ fn has_known_path_line(logs: &str, hash: &str) -> bool {
         }
     }
     false
+}
+
+/// Substrings (case-insensitive) that mark a log line as evidence of HOW a
+/// path was installed: an announce that carried it, a path_response, or the
+/// table insertion itself. Used to build the focused extract for the
+/// requesting node in the no_path forensic dump.
+const PATH_INSTALL_MARKERS: &[&str] = &[
+    "path_table_entry",
+    "pathfound",
+    "received announce",
+    "path_response",
+    "path response",
+    "adding path",
+    "path to <",
+    "is now ",
+    "[path_add]",
+];
+
+/// Return the lines in `logs` that mention `hash` (case-insensitive) AND
+/// carry a [`PATH_INSTALL_MARKERS`] substring. These are the focused
+/// evidence of how a path to `hash` was installed (announce, path_response,
+/// or table insert) and on which interface.
+fn extract_path_install_lines<'a>(logs: &'a str, hash: &str) -> Vec<&'a str> {
+    let needle = hash.to_ascii_lowercase();
+    logs.lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains(&needle) && PATH_INSTALL_MARKERS.iter().any(|m| lower.contains(m))
+        })
+        .collect()
+}
+
+/// Capture full forensics when a `no_path` step unexpectedly resolves a path.
+///
+/// This runs ONLY on the failing branch, so green runs are never touched.
+/// Writes a durable, never-overwritten file under `logs/` holding every
+/// node's docker logs plus a focused extract of the path-install lines for
+/// the requesting node and the resolved hash, so the next nightly failure
+/// finally shows how the requester learned the path. Best-effort: any IO
+/// failure is reported to stdout but never shadows the assertion failure.
+fn dump_no_path_forensics(
+    runner: &TestRunner,
+    index: usize,
+    on: &str,
+    destination: &str,
+    hash: &str,
+    rnpath_output: &std::process::Output,
+) {
+    let test_name = runner.scenario().test.name.clone();
+    let logs_dir = TestRunner::logs_dir();
+    if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+        println!("  NO_PATH forensics: cannot create logs dir {logs_dir:?}: {e}");
+        return;
+    }
+    let path = logs_dir.join(format!(
+        "{test_name}_NO_PATH_FAIL_{}.log",
+        TestRunner::utc_timestamp()
+    ));
+
+    let mut buf = String::new();
+    buf.push_str("=== NO_PATH FAILURE FORENSICS ===\n");
+    buf.push_str(&format!("test: {test_name}\n"));
+    buf.push_str(&format!("step_index: {index}\n"));
+    buf.push_str(&format!("on (requesting node): {on}\n"));
+    buf.push_str(&format!("destination: {destination}\n"));
+    buf.push_str(&format!("resolved hash: {hash}\n"));
+    buf.push_str(&format!(
+        "rnpath status (reported success): {}\n",
+        rnpath_output.status
+    ));
+    buf.push_str("--- rnpath stdout ---\n");
+    buf.push_str(&String::from_utf8_lossy(&rnpath_output.stdout));
+    buf.push_str("\n--- rnpath stderr ---\n");
+    buf.push_str(&String::from_utf8_lossy(&rnpath_output.stderr));
+    buf.push('\n');
+
+    // Focused extract: HOW did the requesting node learn this hash, and on
+    // which interface? Scan the requester's own log for path-install lines
+    // mentioning the hash.
+    buf.push_str(&format!(
+        "\n=== FOCUSED EXTRACT (requester '{on}', hash {hash}) ===\n"
+    ));
+    match runner.docker_logs(on) {
+        Ok(out) => {
+            let combined = alloc_combined_logs(&out.stdout, &out.stderr);
+            let hits = extract_path_install_lines(&combined, hash);
+            if hits.is_empty() {
+                buf.push_str(
+                    "(no path-install marker line found for this hash on the requester; \
+                     full requester log is included in the per-node dump below)\n",
+                );
+            } else {
+                for line in hits {
+                    buf.push_str(line);
+                    buf.push('\n');
+                }
+            }
+        }
+        Err(e) => {
+            buf.push_str(&format!("(docker logs failed for requester '{on}': {e})\n"));
+        }
+    }
+
+    // Full per-node docker logs for every node in the scenario.
+    let nodes: Vec<String> = runner.scenario().nodes.keys().cloned().collect();
+    for node in &nodes {
+        buf.push_str(&format!("\n========== DOCKER LOGS: {node} ==========\n"));
+        match runner.docker_logs(node) {
+            Ok(out) => {
+                buf.push_str(&alloc_combined_logs(&out.stdout, &out.stderr));
+                buf.push('\n');
+            }
+            Err(e) => {
+                buf.push_str(&format!("(docker logs failed for '{node}': {e})\n"));
+            }
+        }
+    }
+
+    match std::fs::write(&path, &buf) {
+        Ok(()) => println!("  NO_PATH forensics written: {}", path.display()),
+        Err(e) => println!(
+            "  NO_PATH forensics: failed to write {}: {e}",
+            path.display()
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2520,6 +2651,38 @@ mod tests {
         let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
         let _runner = require_runner!(scenario);
         panic!("deliberate panic for lock-release regression test");
+    }
+
+    #[test]
+    fn extract_path_install_lines_picks_marker_lines_for_hash() {
+        let hash = "a1b2c3d4e5f6";
+        let logs = "\
+unrelated startup line\n\
+[ANNOUNCE] received announce for a1b2c3d4e5f6 via TCPInterface[middle]\n\
+[PATH_ADD] a1b2c3d4e5f6 ok=true iface=TCPInterface[middle]\n\
+received announce for deadbeef via AutoInterface\n\
+some path_response for A1B2C3D4E5F6 on TCPInterface[bob]\n\
+plain mention of a1b2c3d4e5f6 with no marker keyword\n";
+        let lines = extract_path_install_lines(logs, hash);
+        // Three lines mention the hash AND carry a marker; case-insensitive
+        // on both the hash and the marker.
+        assert_eq!(lines.len(), 3, "got: {lines:?}");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("received announce for a1b2c3d4e5f6")));
+        assert!(lines.iter().any(|l| l.contains("[PATH_ADD]")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("path_response for A1B2C3D4E5F6")));
+        // The other-hash announce and the marker-less mention are excluded.
+        assert!(!lines.iter().any(|l| l.contains("deadbeef")));
+        assert!(!lines.iter().any(|l| l.contains("no marker keyword")));
+    }
+
+    #[test]
+    fn extract_path_install_lines_empty_when_no_match() {
+        let logs = "nothing here\nrandom line about cafebabe\n";
+        assert!(extract_path_install_lines(logs, "a1b2c3d4e5f6").is_empty());
     }
 
     #[test]

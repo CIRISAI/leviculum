@@ -419,12 +419,12 @@ impl TestRunner {
     }
 
     /// Return the path to the shared logs directory.
-    fn logs_dir() -> PathBuf {
+    pub(crate) fn logs_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("logs")
     }
 
     /// UTC timestamp formatted for filenames: `2026-03-20T03-12-00`.
-    fn utc_timestamp() -> String {
+    pub(crate) fn utc_timestamp() -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
