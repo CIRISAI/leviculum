@@ -20,6 +20,10 @@ use std::sync::{Arc, Mutex};
 // Unix and over TCP loopback (AF_INET, default local_control_port 37429) on
 // Windows; we mirror that so `rnstatus`/`rnpath` interop on each platform. The
 // framing + HMAC auth (connection.rs) are transport-agnostic.
+//
+// Platform support: Linux (abstract Unix sockets) is the tested path, exercised
+// by our CI. The macOS/BSD filesystem-socket and Windows TCP-loopback fallbacks
+// are community-supported and are not exercised by our CI.
 #[cfg(windows)]
 use tokio::net::TcpListener as RpcListener;
 #[cfg(windows)]

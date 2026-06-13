@@ -130,6 +130,14 @@ Python CLI → Unix socket → RPC server (multiprocessing.connection, pickle)
   → pickle response → CLI
 ```
 
+### IPC platform support
+
+The shared-instance data channel and the RPC control channel use abstract
+Unix sockets on Linux, filesystem Unix sockets on macOS/BSD, and TCP loopback
+on Windows (mirroring Python-RNS's AF_INET fallback). Linux is the tested path
+and is the one exercised by our CI; macOS/Windows IPC is community-supported
+and not exercised by our CI.
+
 ## Storage Trait
 
 Type-safe methods organized by collection:

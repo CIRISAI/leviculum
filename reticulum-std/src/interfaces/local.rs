@@ -25,6 +25,10 @@ use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, O
 // unavailable (default local_interface_port 37428 / local_control_port 37429).
 // `UnixStream`/`TcpStream` are symmetric (both halves impl AsyncRead/AsyncWrite
 // and `into_split()`), so the I/O code below is unchanged across platforms.
+//
+// Platform support: Linux (abstract Unix sockets) is the tested path, exercised
+// by our CI. The macOS/BSD filesystem-socket and Windows TCP-loopback fallbacks
+// below are community-supported and are not exercised by our CI.
 #[cfg(windows)]
 use tokio::net::TcpListener as LocalListener;
 #[cfg(windows)]
