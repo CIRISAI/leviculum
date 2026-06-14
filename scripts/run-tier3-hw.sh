@@ -231,9 +231,9 @@ notify_flash_failed() {
 }
 
 # Resolve an LNode's debug ttyACM via udev properties. Each LNode exposes
-# two CDC-ACM interfaces; interface 02 is the debug console (interface 00
-# is the HDLC data link). Match ID_VENDOR_ID=1209, the board's product id
-# and ID_USB_INTERFACE_NUM=02. The /dev/leviculum-*-debug by-serial
+# two CDC-ACM interfaces; interface 00 is the ASCII text debug console
+# (interface 02 is the binary HDLC data link). Match ID_VENDOR_ID=1209, the
+# board's product id and ID_USB_INTERFACE_NUM=00. The /dev/leviculum-*-debug by-serial
 # symlinks an earlier version assumed do NOT exist on the rig, and serials
 # are volatile, so we resolve dynamically rather than hardcode either.
 # Echoes the matching /dev/ttyACM* on success; returns 1 if none found.
@@ -246,7 +246,7 @@ resolve_lnode_debug_port() {
         props=$(udevadm info -q property -n "$dev" 2>/dev/null) || continue
         grep -q '^ID_VENDOR_ID=1209$'       <<<"$props" || continue
         grep -q "^ID_MODEL_ID=${pid}\$"     <<<"$props" || continue
-        grep -q '^ID_USB_INTERFACE_NUM=02$' <<<"$props" || continue
+        grep -q '^ID_USB_INTERFACE_NUM=00$' <<<"$props" || continue
         echo "$dev"
         return 0
     done
@@ -314,7 +314,7 @@ verify_lnode_banner() {
     esac
     local port
     if ! port=$(resolve_lnode_debug_port "$pid"); then
-        log "[CI_HW] WARN: $board debug serial (VID 1209 PID $pid intf 02) not found; cannot verify firmware sha"
+        log "[CI_HW] WARN: $board debug serial (VID 1209 PID $pid intf 00) not found; cannot verify firmware sha"
         return 0
     fi
     log "[CI_HW] $board debug serial resolved to $port"
