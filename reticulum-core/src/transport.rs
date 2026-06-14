@@ -2181,6 +2181,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 },
             );
 
+            // Diagnostic: remaining_hops is frozen to the path's hop count at
+            // link-request forward time. If the returning LRPROOF later arrives
+            // with packet.hops != remaining_hops it is dropped at the
+            // "hop count mismatch (remaining_hops)" site below. Logging both
+            // values here makes the freeze point observable when bisecting an
+            // LRPROOF drop (Bug: LRPROOF hop-mismatch).
+            crate::tracing::debug!(
+                event = "LINK_ENTRY_SET",
+                dst = %HexShort(&dest_hash),
+                remaining_hops = path_hops,
+                packet_hops = packet.hops,
+                recv = %self.iface_name(interface_index),
+                next_hop = %self.iface_name(target_iface),
+                "froze remaining_hops=path_hops for forwarded link request"
+            );
+
             // Populate reverse table at forwarding time
             self.storage.set_reverse(
                 truncated_hash,

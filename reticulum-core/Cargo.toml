@@ -36,3 +36,5 @@ serde_json = "1.0"
 hex = "0.4"
 # OsRng is needed for tests (only available with getrandom feature)
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Capture structured tracing output in mvr tests to prove the exact drop reason.
+tracing-subscriber.workspace = true

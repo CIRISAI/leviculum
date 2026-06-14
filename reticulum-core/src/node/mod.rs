@@ -44,6 +44,11 @@
 mod builder;
 mod event;
 mod link_management;
+// Gated on `tracing`: the mvr captures structured tracing output to prove the
+// exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
+// (absent under `--no-default-features`, e.g. the core-no-tracing CI gate).
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_lrproof;
 pub mod request;
 mod send;
 
