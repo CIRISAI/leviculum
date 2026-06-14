@@ -192,6 +192,123 @@ print(d.get('profile', 'default'))
 PY
 }
 
+# --- LNode auto-flash (Teil A) ---
+#
+# Flash the attached LNodes (T114 + Pocket-V2) from the current tree
+# BEFORE any LoRa scenario runs, so the host code under test runs against
+# firmware built from the SAME commit. Without this we would test current
+# host code against whatever stale firmware happens to be on the boards,
+# which makes every LNode result meaningless.
+#
+# The flash mechanic already exists (just flash / just flash-rak4631);
+# both use the 1200-baud touch reset in reticulum-nrf/src/usb.rs, so no
+# manual button press is needed on a board already running our firmware.
+#
+# Non-fatal by contract: a board that is not touch-flashable (stuck in
+# stock app firmware with no touch handler, USB timeout, no bootloader)
+# must NOT abort the whole run. We WARN, fire a desktop notification
+# asking for the physical RESET double-tap, and continue; the LNode
+# profiles then skip visibly via the device-count preflight.
+
+LNODE_USB_IDS=( "1209:0001" "1209:0002" )   # T114, Pocket-V2
+
+# True only when every expected LNode USB ID is currently enumerated.
+lnodes_enumerated() {
+    local id
+    for id in "${LNODE_USB_IDS[@]}"; do
+        lsusb -d "$id" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
+# Desktop notification for a flash failure that needs a manual RESET
+# double-tap. Routed through hamster because the rig's display lives
+# there (same channel run-tier3.sh notifies on). Best-effort.
+notify_flash_failed() {
+    local board="$1"
+    ssh hamster "notify-send -u critical 'Leviculum CI' 'LNode flash FAILED ($board): physical RESET double-tap needed'" \
+        2>/dev/null || log "[CI_HW] WARN: notify-send for $board flash failure did not reach hamster"
+}
+
+# Read the firmware [FW_BUILD] banner back over the debug serial and check
+# its git_sha against the expected HEAD sha. Defense-in-depth: a silent
+# touch-flash that did not actually take (board re-enumerated but old
+# firmware still resident) is caught here. Non-fatal — WARN only.
+verify_lnode_banner() {
+    local board="$1" expect_sha="$2"
+    local dev_key sym_prefix
+    case "$board" in
+        t114)    dev_key=t114;      sym_prefix=/dev/leviculum-debug ;;
+        rak4631) dev_key=pocket-v2; sym_prefix=/dev/leviculum-rak-debug ;;
+        *)       return 0 ;;
+    esac
+    local serial; serial=$(device_serial "$dev_key")
+    local port="$sym_prefix"
+    [[ -n "$serial" && -e "${sym_prefix}-${serial}" ]] && port="${sym_prefix}-${serial}"
+    if [[ ! -e "$port" ]]; then
+        log "[CI_HW] WARN: $board debug serial ($port) absent; cannot verify firmware sha"
+        return 0
+    fi
+    # The banner is logged via log_critical! at boot and held in the
+    # firmware ring buffer; opening the port asserts DTR and drains it.
+    # Read a short window and take the most recent [FW_BUILD] line.
+    local banner
+    banner=$(timeout 8 cat "$port" 2>/dev/null | tr -d '\r' | grep -a 'FW_BUILD' | tail -1 || true)
+    if [[ -z "$banner" ]]; then
+        log "[CI_HW] WARN: $board no [FW_BUILD] banner seen on $port within window"
+        return 0
+    fi
+    log "[CI_HW] $board banner: $banner"
+    if [[ "$banner" == *"git_sha=$expect_sha"* ]]; then
+        log "[CI_HW] $board firmware sha matches HEAD ($expect_sha)"
+    else
+        log "[CI_HW] WARN: LNode firmware sha mismatch ($board): expected $expect_sha, banner='$banner'"
+    fi
+}
+
+flash_lnodes() {
+    local head_sha; head_sha=$(cd "$REPO_DIR" && git rev-parse --short HEAD)
+    log "[CI_HW] flashing LNodes from HEAD $head_sha"
+
+    # T114 fleet, then Pocket-V2 fleet. Each just-target builds the
+    # embedded firmware (cargo run) and touch-flashes every attached board
+    # of that kind. A failing fleet warns + notifies but does not abort.
+    if ( cd "$REPO_DIR" && just flash ); then
+        log "[CI_HW] T114 flash invocation completed"
+    else
+        log "[CI_HW] WARN: LNode flash failed (t114)"
+        notify_flash_failed t114
+    fi
+    if ( cd "$REPO_DIR" && just flash-rak4631 ); then
+        log "[CI_HW] Pocket-V2 flash invocation completed"
+    else
+        log "[CI_HW] WARN: LNode flash failed (rak4631)"
+        notify_flash_failed rak4631
+    fi
+
+    # Settle: LNodes re-enumerate as fresh ttyACM after the touch reset.
+    # Bounded poll until both expected USB IDs are back (or 30 s timeout)
+    # so the first scenario does not open a half-enumerated port.
+    log "[CI_HW] waiting for LNodes to re-enumerate (USB IDs ${LNODE_USB_IDS[*]})"
+    local waited=0
+    while ! lnodes_enumerated; do
+        if (( waited >= 30 )); then
+            log "[CI_HW] WARN: LNodes not fully re-enumerated after ${waited}s; proceeding (profiles gate on device-count)"
+            break
+        fi
+        sleep 2
+        waited=$(( waited + 2 ))
+    done
+    if lnodes_enumerated; then
+        log "[CI_HW] LNodes re-enumerated after ${waited}s"
+        # Give udev a beat to (re)create the by-serial debug symlinks.
+        sleep 2
+        verify_lnode_banner t114    "$head_sha"
+        verify_lnode_banner rak4631 "$head_sha"
+    fi
+    return 0
+}
+
 # --- Test discovery ---
 
 # Returns one test fn-name (last `::` segment) per line.  Smoke pattern
@@ -277,7 +394,12 @@ run_group() {
       cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}"
 }
 
-# --- Discover, group, run ---
+# --- Flash LNodes from HEAD, then discover, group, run ---
+
+# Additive step: bring the attached LNodes to the tested commit before any
+# profile group runs. Smoke runs flash too — a smoke pass against stale
+# firmware is just as misleading as a full one.
+flash_lnodes
 
 mapfile -t ALL_FNS < <(discover_tests)
 if [[ ${#ALL_FNS[@]} -eq 0 ]]; then

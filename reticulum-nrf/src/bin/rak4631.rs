@@ -77,6 +77,11 @@ async fn main(spawner: Spawner) {
     let serial = reticulum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
 
     log_critical!("leviculum RAK4631 booting");
+    log_critical!(
+        "[FW_BUILD] git_sha={} dirty={}",
+        env!("LEVICULUM_GIT_SHA"),
+        env!("LEVICULUM_GIT_DIRTY")
+    );
     log_critical!("[PANIC_COUNT] total={}", reticulum_nrf::panic_count());
     reticulum_nrf::log_irq_priorities();
 
