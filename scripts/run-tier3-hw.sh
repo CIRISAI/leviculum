@@ -230,30 +230,98 @@ notify_flash_failed() {
         2>/dev/null || log "[CI_HW] WARN: notify-send for $board flash failure did not reach hamster"
 }
 
+# Resolve an LNode's debug ttyACM via udev properties. Each LNode exposes
+# two CDC-ACM interfaces; interface 02 is the debug console (interface 00
+# is the HDLC data link). Match ID_VENDOR_ID=1209, the board's product id
+# and ID_USB_INTERFACE_NUM=02. The /dev/leviculum-*-debug by-serial
+# symlinks an earlier version assumed do NOT exist on the rig, and serials
+# are volatile, so we resolve dynamically rather than hardcode either.
+# Echoes the matching /dev/ttyACM* on success; returns 1 if none found.
+resolve_lnode_debug_port() {
+    local pid="$1"   # 0001 (t114) | 0002 (rak4631 / Pocket-V2)
+    local dev props
+    set +f
+    for dev in /dev/ttyACM*; do
+        [[ -e "$dev" ]] || continue
+        props=$(udevadm info -q property -n "$dev" 2>/dev/null) || continue
+        grep -q '^ID_VENDOR_ID=1209$'       <<<"$props" || continue
+        grep -q "^ID_MODEL_ID=${pid}\$"     <<<"$props" || continue
+        grep -q '^ID_USB_INTERFACE_NUM=02$' <<<"$props" || continue
+        echo "$dev"
+        return 0
+    done
+    return 1
+}
+
+# Read the periodic firmware [FW_BUILD] banner from a CDC-ACM debug port,
+# returning the last such line seen within <secs> (empty if none). DTR+RTS
+# are asserted on open because CDC-ACM transmits only with DTR raised.
+# Pure stdlib (termios/fcntl) so no pyserial install is required on the rig.
+read_fw_build_banner() {
+    local port="$1" secs="$2"
+    python3 - "$port" "$secs" <<'PY'
+import sys, os, time, fcntl, termios, struct, select
+port, secs = sys.argv[1], float(sys.argv[2])
+try:
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+except OSError:
+    sys.exit(0)
+try:
+    iflag, oflag, cflag, lflag, ispeed, ospeed, cc = termios.tcgetattr(fd)
+    iflag = oflag = lflag = 0
+    cflag = termios.CLOCAL | termios.CREAD | termios.CS8
+    ispeed = ospeed = termios.B115200
+    termios.tcsetattr(fd, termios.TCSANOW,
+                      [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
+    dtr = getattr(termios, 'TIOCM_DTR', 0x002)
+    rts = getattr(termios, 'TIOCM_RTS', 0x004)
+    fcntl.ioctl(fd, termios.TIOCMBIS, struct.pack('I', dtr | rts))
+    deadline = time.monotonic() + secs
+    buf, last = b'', ''
+    while time.monotonic() < deadline:
+        r, _, _ = select.select([fd], [], [], deadline - time.monotonic())
+        if not r:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            continue
+        buf += chunk
+        while b'\n' in buf:
+            line, buf = buf.split(b'\n', 1)
+            text = line.decode('utf-8', 'replace').replace('\r', '').strip()
+            if 'FW_BUILD' in text:
+                last = text
+    print(last)
+finally:
+    os.close(fd)
+PY
+}
+
 # Read the firmware [FW_BUILD] banner back over the debug serial and check
 # its git_sha against the expected HEAD sha. Defense-in-depth: a silent
 # touch-flash that did not actually take (board re-enumerated but old
 # firmware still resident) is caught here. Non-fatal — WARN only.
 verify_lnode_banner() {
     local board="$1" expect_sha="$2"
-    local dev_key sym_prefix
+    local pid
     case "$board" in
-        t114)    dev_key=t114;      sym_prefix=/dev/leviculum-debug ;;
-        rak4631) dev_key=pocket-v2; sym_prefix=/dev/leviculum-rak-debug ;;
+        t114)    pid=0001 ;;
+        rak4631) pid=0002 ;;
         *)       return 0 ;;
     esac
-    local serial; serial=$(device_serial "$dev_key")
-    local port="$sym_prefix"
-    [[ -n "$serial" && -e "${sym_prefix}-${serial}" ]] && port="${sym_prefix}-${serial}"
-    if [[ ! -e "$port" ]]; then
-        log "[CI_HW] WARN: $board debug serial ($port) absent; cannot verify firmware sha"
+    local port
+    if ! port=$(resolve_lnode_debug_port "$pid"); then
+        log "[CI_HW] WARN: $board debug serial (VID 1209 PID $pid intf 02) not found; cannot verify firmware sha"
         return 0
     fi
-    # The banner is logged via log_critical! at boot and held in the
-    # firmware ring buffer; opening the port asserts DTR and drains it.
-    # Read a short window and take the most recent [FW_BUILD] line.
+    log "[CI_HW] $board debug serial resolved to $port"
+    # The firmware re-emits the banner every ~5 s, so an 8 s window always
+    # catches at least one even though the boot-time banner is long gone.
     local banner
-    banner=$(timeout 8 cat "$port" 2>/dev/null | tr -d '\r' | grep -a 'FW_BUILD' | tail -1 || true)
+    banner=$(read_fw_build_banner "$port" 8)
     if [[ -z "$banner" ]]; then
         log "[CI_HW] WARN: $board no [FW_BUILD] banner seen on $port within window"
         return 0
@@ -301,7 +369,8 @@ flash_lnodes() {
     done
     if lnodes_enumerated; then
         log "[CI_HW] LNodes re-enumerated after ${waited}s"
-        # Give udev a beat to (re)create the by-serial debug symlinks.
+        # Give udev a beat to settle the fresh ttyACM nodes + properties
+        # before resolve_lnode_debug_port iterates them.
         sleep 2
         verify_lnode_banner t114    "$head_sha"
         verify_lnode_banner rak4631 "$head_sha"

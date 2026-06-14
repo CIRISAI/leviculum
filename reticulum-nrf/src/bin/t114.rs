@@ -144,6 +144,7 @@ async fn main(spawner: Spawner) {
     let initial_path_len = node.path_count();
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
     spawner.must_spawn(boot_log_repeater(initial_path_len));
+    spawner.must_spawn(fw_build_banner());
     spawner.must_spawn(reticulum_nrf::heap_watermark_task());
 
     if !identity_loaded {
@@ -311,5 +312,22 @@ async fn boot_log_repeater(initial_len: usize) {
     for _ in 0..6 {
         Timer::after(Duration::from_secs(10)).await;
         info!("[BOOT] path_table_initial_len={}", initial_len);
+    }
+}
+
+/// Re-emit the firmware build banner periodically so a debug-serial
+/// reader can verify the running git_sha at any time, not only inside the
+/// short boot window. The CI auto-flash verify reads this back. Uses the
+/// embassy time driver (same timing infra the other periodic tasks use);
+/// no SD-reserved peripheral is touched directly.
+#[embassy_executor::task]
+async fn fw_build_banner() {
+    loop {
+        Timer::after(Duration::from_secs(5)).await;
+        log_critical!(
+            "[FW_BUILD] git_sha={} dirty={}",
+            env!("LEVICULUM_GIT_SHA"),
+            env!("LEVICULUM_GIT_DIRTY")
+        );
     }
 }
