@@ -1,29 +1,27 @@
 #!/bin/bash
-# run-tier3-hw.sh — Tier-3 nightly runner with hub-power orchestration.
+# run-tier3-hw.sh — Tier-3 nightly runner, all boards always powered.
 #
-# Wraps the existing `just nightly` cargo invocation with per-profile
-# USB-hub power switching via `ssh hamster...`.  Tests are
-# grouped by their `profile = "..."` field in
-# `reticulum-integ/tests/<fn-name>.toml`; tests without an explicit
-# profile fall back to `default` (= all devices on).
+# Wraps the per-profile cargo invocation. Tests are grouped by their
+# `profile = "..."` field in `reticulum-integ/tests/<fn-name>.toml`;
+# tests without an explicit profile fall back to `default`.
 #
 # Usage:
 #   bash scripts/run-tier3-hw.sh                    # full nightly (~2-6 h)
 #   bash scripts/run-tier3-hw.sh --smoke <pattern>  # subset matching pattern
 #
 # The `--smoke <pattern>` form passes `<pattern>` as positional cargo-test
-# filters; same per-group orchestration, smaller test set.  Used by Lew
-# for ad-hoc verification and by acceptance check 4.
+# filters; same per-group handling, smaller test set. Used by Lew for
+# ad-hoc verification and by acceptance check 4.
 #
-# Always-restore on EXIT (clean, fail, SIGINT alike) puts the helper back
-# in the all-on default state via `ssh hamster restore-default`.
-#
-# Source-of-truth note: since the remove-event fix the VM DOES see USB
-# disconnects after a hub-port flip and the `/dev/serial/by-id/...`
-# symlinks come and go correctly. `ssh hamster status` remains the
-# authoritative view of hub-port POWER state (the VM only sees
-# enumeration), and is still emitted into the per-test log as
-# `[CI_HW] hamster_status=...`.
+# NO USB-hub power switching. Every attached board stays powered on and
+# passed through to the VM for the entire run. RF isolation of the
+# non-participating LNodes is done by the Rust test itself, which serially
+# pushes `radio_silent` to every discovered LNode the scenario did not
+# bind (silence_unused_lnode in runner.rs). This replaces the old
+# per-profile `uhubctl`/usbhub-helper power cycling, which correlated with
+# hamster hardware-watchdog freezes (proven 2026-06-15) and is gone for
+# good. The profile `required`/`exclude` lists now only document which
+# boards participate vs. get silenced; they no longer touch power.
 
 set -euo pipefail
 
@@ -60,9 +58,8 @@ exec > >(tee -a "$LOG") 2>&1
 
 log() { echo "$@"; }
 
-# Restore hub state on any exit path so manual interventions or scheduled
-# runs leave the rig in a predictable state for the next operator.
-trap 'log "[CI_HW] EXIT trap: restoring default hub state"; ssh hamster restore-default || log "[CI_HW] WARN: restore-default failed"' EXIT
+# No EXIT trap to restore hub state: with all boards permanently powered
+# on there is nothing to switch back, so no restore is needed.
 
 # --- Argument parsing ---
 
@@ -81,22 +78,10 @@ else
     log "[CI_HW] mode=full-nightly"
 fi
 
-# --- Pre-step: hamster helper reachable? ---
-
-if ! ssh hamster status >/dev/null 2>&1; then
-    cat <<'EOF'
-ERROR: ssh hamster status failed; cannot orchestrate hardware.
-
-Either install the usbhub-helper on hamster
-(scripts/install-usbhub-helper.sh; needs the authorized_keys entry and
-the RSHTECH board registry — see the helper's --help) or fall back to
-run-tier3.sh (no-hardware mode).
-
-Aborting.
-EOF
-    exit 1
-fi
-log "[CI_HW] hamster helper reachable"
+# No hub-helper reachability gate: the run no longer orchestrates USB
+# power, so the usbhub-helper is not required. The only remaining use of
+# `ssh hamster` is the best-effort flash-failure desktop notification,
+# which already tolerates an unreachable host.
 
 # --- Build the binaries the integ runner mounts into Docker ---
 # Mirrors the `build-integ-bins` Just target.  `just nightly` would do
@@ -419,29 +404,19 @@ setup_profile() {
     local required exclude
     required=$(profile_required "$profile")
     exclude=$(profile_exclude "$profile")
-    log "[CI_HW] ----- profile=$profile required=$required excluded=$exclude -----"
-    # Q6 warnings for any process still holding a stale FD against an
-    # excluded device.  Tier-3 wins (proceed regardless), per Q6 policy.
+    # `required` = boards that participate (active); `exclude` = boards to
+    # be silenced. No power is switched here: all boards stay on and the
+    # Rust test silences every discovered LNode it does not bind
+    # (silence_unused_lnode). This log line is the forensic record of
+    # which boards the profile expects active vs. silenced.
+    log "[CI_HW] ----- profile=$profile active=$required silenced=$exclude -----"
+    # Q6 warnings for any process still holding a stale FD against a
+    # to-be-silenced device.  Tier-3 wins (proceed regardless), per Q6
+    # policy.
     local key
     for key in $exclude; do
         warn_if_fd_held "$key"
     done
-    # Helper API: `enable-only <b>...` takes SPACE-SEPARATED board args,
-    # one per board. The old comma-joined single arg
-    # ("t-beam-1,t-beam-2") was rejected as an unknown board, so power
-    # isolation silently no-op'd on the 2026-06-13 nightly (fail-safe:
-    # all boards stayed on, but the intended RF isolation never happened).
-    # $required is intentionally unquoted so each board becomes its own
-    # ssh argument.
-    if [[ -n "$required" ]]; then
-        # shellcheck disable=SC2029,SC2086  # word-split $required: one arg per board
-        ssh hamster enable-only $required
-    fi
-    # Authoritative state from hamster — the VM-side enumeration is
-    # not trustworthy after a libvirt-cached disable.
-    local actual
-    actual=$(ssh hamster status)
-    log "[CI_HW] hamster_status=$actual"
 }
 
 # --- Per-group cargo invocation ---
@@ -477,10 +452,10 @@ if [[ ${#ALL_FNS[@]} -eq 0 ]]; then
 fi
 log "[CI_HW] discovered ${#ALL_FNS[@]} tests"
 
-# Bucket fn-names by their resolved profile.  Sorting by profile name
-# minimises hub-power cycling between groups (each transition costs
-# ~2-3 s).  Within a profile the cargo --test-threads=1 order is
-# deterministic.
+# Bucket fn-names by their resolved profile.  Grouping by profile keeps
+# the per-profile setup/log lines together and runs each profile's tests
+# in one cargo invocation.  Within a profile the cargo --test-threads=1
+# order is deterministic.
 declare -A PROFILE_BUCKETS=()
 for fn in "${ALL_FNS[@]}"; do
     profile=$(test_profile_for "$fn")

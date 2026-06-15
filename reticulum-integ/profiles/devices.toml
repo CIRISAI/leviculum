@@ -1,74 +1,78 @@
 # devices.toml — single source of truth for the embedded hardware
-# attached to schneckenschreck via the hamster USB hub chain.  Used by
-# scripts/run-tier3-hw.sh to orchestrate hub-port power around LoRa
-# hardware tests.
+# attached to schneckenschreck.  Used by scripts/run-tier3-hw.sh to log,
+# per profile, which boards a LoRa hardware test expects active vs.
+# silenced.
 #
-# Topology (since 2026-05-11): RSHTECH tree rooted at 1-3, with
-# sub-chips 1-3.3 and 1-3.3.4.  Sockets below use the helper's
-# `hub:port` notation; verify with `ssh hamster usbhub-helper status`.
-# All hub operations happen on hamster via `ssh hamster usbhub-helper ...`.
+# NO USB POWER SWITCHING. Every board stays permanently powered on and
+# passed through to the VM. RF isolation of non-participating LNodes is
+# done by the Rust test (silence_unused_lnode pushes radio_silent over
+# serial). The old per-port power cycling correlated with hamster
+# hardware-watchdog freezes (2026-06-15) and was removed.
 #
-# `ppps = false` means per-port-power-switching did not actually cut
-# power to the device.  Observed for heltec-v4 on the OLD TerraMaster
-# tree (no battery installed; mechanism never explained); the helper
-# refuses `disable heltec-v4`.  NOT yet re-verified on the RSHTECH
-# tree — re-test before relying on heltec power isolation.
+# `hub`/`port` and `ppps` are INFORMATIONAL ONLY now (physical topology
+# record); nothing reads or acts on them. `vid_pid` and `serial` remain
+# the authoritative identity used to recognise each board.
 
 # ----- Device map -----
-# Serials follow the usbhub-helper registry (authoritative):
+# Serials are the board identities (formerly the usbhub-helper registry):
 #   t-beam-1 = 5896000022, t-beam-2 = 5896004228.
 
 [devices.t-beam-1]
-hub      = "1-3.3"
-port     = 2
-ppps     = true
+hub      = "1-3.3"      # informational only
+port     = 2            # informational only
+ppps     = true         # informational only
 firmware = "rnode"
 vid_pid  = "1a86:55d4"
 serial   = "5896000022"
 
 [devices.t-beam-2]
-hub      = "1-3"
-port     = 4
-ppps     = true
+hub      = "1-3"        # informational only
+port     = 4            # informational only
+ppps     = true         # informational only
 firmware = "rnode"
 vid_pid  = "1a86:55d4"
 serial   = "5896004228"
 
 [devices.pocket-v2]
-hub      = "1-3.3.4"
-port     = 2
-ppps     = true
+hub      = "1-3.3.4"    # informational only
+port     = 2            # informational only
+ppps     = true         # informational only
 firmware = "lnode"
 vid_pid  = "1209:0002"
 serial   = "ABFAB3F1807E459B"
 
 [devices.heltec-v4]
-hub      = "1-3.3"
-port     = 3
-ppps     = false
+hub      = "1-3.3"      # informational only
+port     = 3            # informational only
+ppps     = false        # informational only
 firmware = "rnode"
 vid_pid  = "303a:1001"
 serial   = "44:1B:F6:69:77:24"
 
 [devices.t114]
-hub      = "1-3.3.4"
-port     = 4
-ppps     = true
+hub      = "1-3.3.4"    # informational only
+port     = 4            # informational only
+ppps     = true         # informational only
 firmware = "lnode"
 vid_pid  = "1209:0001"
 serial   = "DEC9947DAD9D2869"
 
 # ----- Profiles -----
 #
-# Each profile lists the device-keys that must be on (`required`) and
-# the keys that must be off (`exclude`) for the test.  Devices not in
-# either list are left in their pre-test state.  `heltec_v4` is treated
-# specially (because it could not be turned off per-port on the old
-# tree, see above):
-#   "ignore"       — heltec-v4 may stay on; tests must tolerate it
-#   "must-be-on"   — heltec-v4 must remain on (no special action needed)
+# Each profile lists the device-keys that participate in the test
+# (`required` = active) and the keys that do NOT participate (`exclude`).
+# Since all boards are always powered, `exclude` no longer cuts power; it
+# documents the LNodes the test expects to be silenced (the Rust test
+# silences every discovered LNode it does not bind, regardless of this
+# list). RNodes need no silencing (dumb modems, no stack), so RNode keys
+# in `exclude` are documentation only.
 #
-# `default` is the all-on fall-back assigned to every test that lacks an
+# `heltec_v4` is INFORMATIONAL ONLY now (it never cut power even on the
+# old tree); both "ignore" and "must-be-on" simply record intent:
+#   "ignore"       — heltec-v4 may be on; tests must tolerate it
+#   "must-be-on"   — the scenario relies on heltec-v4 being present
+#
+# `default` is the fall-back assigned to every test that lacks an
 # explicit `profile = "..."` field in its descriptor.
 #
 # Generic profiles are named after the hardware SET a scenario needs,
