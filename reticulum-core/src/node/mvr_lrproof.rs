@@ -456,3 +456,104 @@ fn lrproof_symmetric_single_hop_relay_establishes() {
         "the symmetric path must NOT drop the proof.\n--- logs ---\n{logs}"
     );
 }
+
+// ----------------------------------------------------------------------------
+// Data path: an established asymmetric link must also CARRY data.
+// ----------------------------------------------------------------------------
+
+/// Pack a minimal LINK data packet addressed to `link_id` with the given
+/// pre-receipt hop count (the relay increments hops by 1 on receipt).
+fn build_link_data_packet(link_id: &LinkId, hops: u8) -> Vec<u8> {
+    use crate::packet::{
+        HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
+    };
+
+    let packet = Packet {
+        flags: PacketFlags {
+            ifac_flag: false,
+            header_type: HeaderType::Type1,
+            context_flag: false,
+            transport_type: TransportType::Broadcast,
+            dest_type: DestinationType::Link,
+            packet_type: PacketType::Data,
+        },
+        hops,
+        transport_id: None,
+        destination_hash: *link_id.as_bytes(),
+        context: PacketContext::None,
+        data: PacketData::Owned(std::vec![0xAA; 16]),
+    };
+    let mut buf = [0u8; crate::constants::MTU];
+    let len = packet.pack(&mut buf).unwrap();
+    buf[..len].to_vec()
+}
+
+/// After the link establishes over the asymmetric path, a data packet returning
+/// from the destination side reaches relay `A` with `hops=2` while the frozen
+/// `remaining_hops=1`. Before the data-path fix the relay dropped it at the
+/// "Dropped data packet, hop count mismatch (remaining_hops)" check, so the
+/// established link could not carry any traffic. The relay must now forward it.
+#[test]
+fn lrproof_link_carries_data_despite_hop_asymmetry() {
+    let ((a_data_drop_delta, a_forwarded_data), logs) = with_captured_logs(|| {
+        let (mut responder, dest_hash, signing_key, announce_raw) = make_responder();
+        let mut relay_a = make_transport_node();
+        let mut relay_g = make_transport_node();
+        let mut initiator = make_initiator();
+
+        let a_local = add_iface(&mut relay_a, "A_local_initiator", true);
+        let a_mesh = add_iface(&mut relay_a, "A_mesh", false);
+        let g_from_a = add_iface(&mut relay_g, "G_from_A", false);
+        let g_to_r = add_iface(&mut relay_g, "G_to_R", false);
+        let r_iface = add_iface(&mut responder, "R_mesh", false);
+        let i_iface = add_iface(&mut initiator, "I_to_A", false);
+
+        let _ = relay_a.handle_packet(InterfaceId(a_mesh), &announce_raw);
+        let _ = relay_g.handle_packet(InterfaceId(g_to_r), &announce_raw);
+
+        // Establish the link over the asymmetric path (works after the LRPROOF fix).
+        let (init_link, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let request = one_packet(&out);
+        let out = relay_a.handle_packet(InterfaceId(a_local), &request);
+        let a_forwarded = one_packet(&out);
+        let out = relay_g.handle_packet(InterfaceId(g_from_a), &a_forwarded);
+        let g_forwarded = one_packet(&out);
+        let out = responder.handle_packet(InterfaceId(r_iface), &g_forwarded);
+        let resp_link = link_request_link_id(&out);
+        let out = responder.accept_link(&resp_link).unwrap();
+        let proof = one_packet(&out);
+        let out = relay_g.handle_packet(InterfaceId(g_to_r), &proof);
+        let g_proof = one_packet(&out);
+        let out = relay_a.handle_packet(InterfaceId(a_mesh), &g_proof);
+        for pkt in action_data(&out) {
+            let _ = initiator.handle_packet(InterfaceId(i_iface), &pkt);
+        }
+        assert!(
+            initiator.active_link_count() == 1,
+            "precondition: the link must be established before sending data"
+        );
+
+        // Data returns from the destination side: arrives at A on a_mesh
+        // (next_hop side). Crafted hops=1 becomes hops=2 after the receipt
+        // increment, mismatching the frozen remaining_hops=1.
+        let data_pkt = build_link_data_packet(&init_link, 1);
+        let dropped_before = relay_a.transport().stats().packets_dropped;
+        let out = relay_a.handle_packet(InterfaceId(a_mesh), &data_pkt);
+        let drop_delta = relay_a.transport().stats().packets_dropped - dropped_before;
+        let forwarded = !action_data(&out).is_empty();
+        (drop_delta, forwarded)
+    });
+
+    assert_eq!(
+        a_data_drop_delta, 0,
+        "A must NOT drop the asymmetric link data packet.\n--- logs ---\n{logs}"
+    );
+    assert!(
+        a_forwarded_data,
+        "A must forward the link data packet toward the initiator.\n--- logs ---\n{logs}"
+    );
+    assert!(
+        !logs.contains("Dropped data packet, hop count mismatch"),
+        "link data must NOT be dropped for a hop mismatch anymore.\n--- logs ---\n{logs}"
+    );
+}

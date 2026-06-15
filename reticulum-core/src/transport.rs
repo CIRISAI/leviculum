@@ -2750,24 +2750,33 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Check link table for validated links
             if let Some(link_entry) = self.storage.get_link_entry(&dest_hash).cloned() {
                 if link_entry.validated {
+                    // Direction by interface only. A link established over an
+                    // asymmetric path carries data whose hop count differs from
+                    // the relay's frozen counts; dropping it would break the link
+                    // (priority 1). Mirror the LRPROOF forwarding fix: log the
+                    // mismatch, forward anyway. Interface gate stays; loops stay
+                    // bounded by the global max_hops drop. Deviation from Python
+                    // (Transport.py:1594).
                     let target_iface = if interface_index == link_entry.next_hop_interface_index {
-                        // From destination side: check remaining_hops
+                        // From destination side.
                         if packet.hops != link_entry.remaining_hops {
                             crate::tracing::trace!(
                                 dest = %HexShort(&dest_hash),
-                                "Dropped data packet, hop count mismatch (remaining_hops)"
+                                packet_hops = packet.hops,
+                                remaining_hops = link_entry.remaining_hops,
+                                "Link data hop asymmetry, forwarding anyway (remaining_hops)"
                             );
-                            return Ok(());
                         }
                         link_entry.received_interface_index
                     } else if interface_index == link_entry.received_interface_index {
-                        // From initiator side: check taken hops
+                        // From initiator side.
                         if packet.hops != link_entry.hops {
                             crate::tracing::trace!(
                                 dest = %HexShort(&dest_hash),
-                                "Dropped data packet, hop count mismatch (taken hops)"
+                                packet_hops = packet.hops,
+                                entry_hops = link_entry.hops,
+                                "Link data hop asymmetry, forwarding anyway (taken hops)"
                             );
-                            return Ok(());
                         }
                         link_entry.next_hop_interface_index
                     } else {
@@ -8268,7 +8277,10 @@ mod tests {
         }
 
         #[test]
-        fn test_link_data_wrong_hops_dropped() {
+        fn test_link_data_wrong_hops_forwarded() {
+            // A link established over an asymmetric path carries data whose hop
+            // count differs from the relay's frozen counts. The hop mismatch is
+            // no longer a drop; direction is decided by the interface alone.
             let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
@@ -8290,15 +8302,16 @@ mod tests {
                 },
             );
 
-            // Data from dest side (if1): hops should match remaining_hops=3
-            let pkt = build_link_data_packet(link_id, 99); // wrong hops
+            // Data from dest side (if1): receipt hops=2 != remaining_hops=3, but
+            // it is forwarded anyway toward the received interface.
+            let pkt = build_link_data_packet(link_id, 1);
             let mut buf = [0u8; 500];
             let len = pkt.pack(&mut buf).unwrap();
             transport.process_incoming(1, &buf[..len]).unwrap();
             assert_eq!(
                 transport.stats().packets_forwarded,
-                0,
-                "Wrong hops should be dropped"
+                1,
+                "hop mismatch must be forwarded, not dropped"
             );
         }
 
@@ -11066,12 +11079,15 @@ mod tests {
         // Deferred hash caching for link-table & LRPROOF
         #[test]
         fn test_link_table_data_deferred_hash_allows_retry() {
-            // Shared-medium scenario: a link-table DATA packet arrives on the wrong
-            // interface first (hop check fails), then on the correct interface.
-            // The dedup hash must NOT be cached on failure, allowing the retry.
+            // A link-table DATA packet that is dropped (unknown link direction:
+            // arrives on an interface that is neither the next-hop nor the
+            // received interface) must NOT cache the dedup hash, so a later
+            // arrival on a known interface still forwards. (Hop mismatch is no
+            // longer a drop reason; the unknown-direction drop remains.)
             let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let _idx2 = transport.register_interface(Box::new(MockInterface::new("if2", 3)));
 
             let link_id = [0xAA; TRUNCATED_HASHBYTES];
             let now = transport.clock.now_ms();
@@ -11090,25 +11106,24 @@ mod tests {
                 },
             );
 
-            // Build DATA packet: wire hops=1, receipt-incremented to 2 (matches hops for initiator side)
             let pkt = build_link_data_packet(link_id, 1);
             let mut buf = [0u8; 500];
             let len = pkt.pack(&mut buf).unwrap();
 
-            // Step 1: arrives on if1 (destination side), receipt hops=2 != remaining_hops=3 → dropped
-            transport.process_incoming(1, &buf[..len]).unwrap();
+            // Step 1: arrives on if2 (unknown direction) → dropped, hash not cached.
+            transport.process_incoming(2, &buf[..len]).unwrap();
             assert_eq!(transport.stats().packets_forwarded, 0);
             assert!(
                 transport.storage().packet_hash_count() == 0,
-                "Hash must NOT be cached when link-table hop check fails"
+                "Hash must NOT be cached when the link packet is dropped"
             );
 
-            // Step 2: same packet arrives on if0 (initiator side), receipt hops=2 == hops=2 → forwarded
+            // Step 2: same packet arrives on if0 (received side) → forwarded.
             transport.process_incoming(0, &buf[..len]).unwrap();
             assert_eq!(
                 transport.stats().packets_forwarded,
                 1,
-                "Retry on correct interface should succeed"
+                "Retry on a known interface should succeed"
             );
             assert!(
                 transport.storage().packet_hash_count() > 0,
