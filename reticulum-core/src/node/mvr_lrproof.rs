@@ -26,19 +26,16 @@
 //! 1-hop path" from Hypothesis 1. The harness controls per-packet delivery so
 //! the asymmetry is deterministic instead of race-dependent.
 //!
-//! Three tests:
-//!   * `lrproof_hop_mismatch_drops_proof_characterization` — GREEN now:
-//!     deterministically triggers the drop and proves the exact cause from the
-//!     structured logs (the reproduction artifact; stays green so the default
-//!     suite is unaffected).
-//!   * `lrproof_link_should_establish_despite_hop_asymmetry` — `#[ignore]`d,
-//!     RED on master: asserts the desired post-fix behaviour (link establishes)
-//!     and fails with the captured "Dropped LRPROOF, hop count mismatch" as the
-//!     proven cause. Un-ignore in the same commit that lands the fix.
-//!   * `lrproof_symmetric_single_hop_relay_establishes` — GREEN control:
-//!     identical relay code, symmetric 1-hop path, link establishes. Proves
-//!     the drop is the hop asymmetry, not the relay path itself, and that a
-//!     clean single-relay topology does NOT trip the check.
+//! Three tests (all GREEN after the fix):
+//!   * `lrproof_hop_mismatch_relay_forwards_despite_asymmetry` — relay level:
+//!     deterministically drives the asymmetric return path and proves A now
+//!     FORWARDS the proof (zero drops) and logs the asymmetry as a warning
+//!     instead of dropping. Repurposed from the pre-fix characterization.
+//!   * `lrproof_link_should_establish_despite_hop_asymmetry` — regression guard:
+//!     the initiator establishes the link despite the hop asymmetry. Before the
+//!     fix A dropped the proof at "hop count mismatch (remaining_hops)".
+//!   * `lrproof_symmetric_single_hop_relay_establishes` — control: symmetric
+//!     1-hop path, link establishes. Unaffected by the fix (no drops added).
 //!
 //! Note on node count: the acceptance sketch suggested 1-2 nodes, but a proof
 //! cannot arrive with `hops=2` against a frozen `remaining_hops=1` unless a
@@ -234,8 +231,6 @@ struct ScenarioOutcome {
     a_forwarded_proof: bool,
     /// Did the initiator establish the link?
     initiator_established: bool,
-    /// Initiator's active link count after the round trip.
-    initiator_active_links: usize,
     /// Captured structured tracing for the whole run.
     logs: String,
 }
@@ -260,7 +255,6 @@ fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
     let mut a_drop_delta = 0;
     let mut a_forwarded_proof = false;
     let mut initiator_established = false;
-    let mut initiator_active_links = 0;
 
     let ((), logs) = with_captured_logs(|| {
         let (mut responder, dest_hash, signing_key, announce_raw) = make_responder();
@@ -324,47 +318,41 @@ fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
                 initiator_established = true;
             }
         }
-        initiator_active_links = initiator.active_link_count();
     });
 
     ScenarioOutcome {
         a_drop_delta,
         a_forwarded_proof,
         initiator_established,
-        initiator_active_links,
         logs,
     }
 }
 
 // ----------------------------------------------------------------------------
-// GREEN characterization: the reproduction artifact (stays green).
+// Relay-level: proof is forwarded despite the hop asymmetry (post-fix).
 // ----------------------------------------------------------------------------
 
-/// Deterministically reproduce the field drop and prove the exact cause.
-/// This characterizes current (buggy) behaviour and stays green, so the
-/// default suite is unaffected while the reproduction is fully recorded.
+/// Post-fix relay behaviour: the asymmetric returning LRPROOF is forwarded, not
+/// dropped. Repurposed from the pre-fix characterization (which asserted the
+/// drop). Asserts at the RELAY level (A forwards, zero drops, hop asymmetry is
+/// logged as a warning), complementing the guard test below which asserts the
+/// initiator establishes.
 #[test]
-fn lrproof_hop_mismatch_drops_proof_characterization() {
+fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
     let o = run_asymmetric_return_path_scenario();
 
     assert_eq!(
-        o.a_drop_delta, 1,
-        "A must drop exactly the returning LRPROOF.\n--- logs ---\n{}",
+        o.a_drop_delta, 0,
+        "A must NOT drop the asymmetric LRPROOF.\n--- logs ---\n{}",
         o.logs
     );
     assert!(
-        !o.a_forwarded_proof,
-        "A must NOT forward the dropped proof onward.\n--- logs ---\n{}",
+        o.a_forwarded_proof,
+        "A must forward the proof onward despite the hop asymmetry.\n--- logs ---\n{}",
         o.logs
     );
-    assert!(
-        !o.initiator_established,
-        "link must NOT establish (proof never reached initiator).\n--- logs ---\n{}",
-        o.logs
-    );
-    assert_eq!(o.initiator_active_links, 0, "initiator has zero links");
 
-    // Prove the EXACT cause from the structured logs.
+    // Prove the freeze still happens and the asymmetry is now a warning, not a drop.
     assert!(
         o.logs
             .contains("froze remaining_hops=path_hops for forwarded link request"),
@@ -373,13 +361,18 @@ fn lrproof_hop_mismatch_drops_proof_characterization() {
     );
     assert!(
         o.logs
-            .contains("Dropped LRPROOF, hop count mismatch (remaining_hops)"),
-        "the drop must be the remaining_hops mismatch.\n--- logs ---\n{}",
+            .contains("LRPROOF hop asymmetry, forwarding anyway (remaining_hops)"),
+        "the asymmetry must be logged as a forward, not a drop.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert!(
+        !o.logs.contains("Dropped LRPROOF, hop count mismatch"),
+        "the proof must NOT be dropped for a hop mismatch anymore.\n--- logs ---\n{}",
         o.logs
     );
     assert!(
         o.logs.contains("packet_hops=2") && o.logs.contains("remaining_hops=1"),
-        "proof must arrive at hops=2 against the frozen remaining_hops=1.\n--- logs ---\n{}",
+        "proof must still arrive at hops=2 against the frozen remaining_hops=1.\n--- logs ---\n{}",
         o.logs
     );
 }
@@ -388,12 +381,10 @@ fn lrproof_hop_mismatch_drops_proof_characterization() {
 // RED regression guard: desired post-fix behaviour (currently fails).
 // ----------------------------------------------------------------------------
 
-/// The link SHOULD establish despite the hop asymmetry. Red on master: A drops
-/// the proof at the "hop count mismatch (remaining_hops)" check, so the
-/// initiator never establishes. Un-ignore in the same commit that lands the fix
-/// so this becomes a regression guard.
+/// The link establishes despite the hop asymmetry. Regression guard for the fix:
+/// before it, A dropped the proof at the "hop count mismatch (remaining_hops)"
+/// check, so the initiator never established.
 #[test]
-#[ignore = "LRPROOF hop-mismatch reproduction — red on master until the fix lands"]
 fn lrproof_link_should_establish_despite_hop_asymmetry() {
     let o = run_asymmetric_return_path_scenario();
     assert!(

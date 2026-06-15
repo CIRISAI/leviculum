@@ -2391,31 +2391,34 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         link_entry.hops,
                     );
                 }
-                // Determine direction with hop count validation
+                // Determine direction by interface. A valid LRPROOF that returns
+                // over an alternate path with a different hop count must still be
+                // forwarded: dropping it kills a legitimate link (priority 1, max
+                // delivery). The hop mismatch is logged, not dropped. Direction
+                // (interface gate), Ed25519 signature and size are still enforced
+                // below; loops stay bounded by the global max_hops drop. This is a
+                // deliberate deviation from Python's relay (Transport.py:2112),
+                // which drops on hop mismatch.
                 let target_iface = if interface_index == link_entry.next_hop_interface_index {
-                    // From destination side: check remaining_hops
+                    // From destination side.
                     if packet.hops != link_entry.remaining_hops {
-                        crate::tracing::debug!(
+                        crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
                             remaining_hops = link_entry.remaining_hops,
-                            "Dropped LRPROOF, hop count mismatch (remaining_hops)"
+                            "LRPROOF hop asymmetry, forwarding anyway (remaining_hops)"
                         );
-                        self.stats.packets_dropped += 1;
-                        return Ok(());
                     }
                     link_entry.received_interface_index
                 } else if interface_index == link_entry.received_interface_index {
-                    // From initiator side: check taken hops
+                    // From initiator side.
                     if packet.hops != link_entry.hops {
-                        crate::tracing::debug!(
+                        crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
                             entry_hops = link_entry.hops,
-                            "Dropped LRPROOF, hop count mismatch (taken hops)"
+                            "LRPROOF hop asymmetry, forwarding anyway (taken hops)"
                         );
-                        self.stats.packets_dropped += 1;
-                        return Ok(());
                     }
                     link_entry.next_hop_interface_index
                 } else {
