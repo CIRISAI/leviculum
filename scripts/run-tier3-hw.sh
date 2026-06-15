@@ -197,10 +197,15 @@ PY
 
 LNODE_USB_IDS=( "1209:0001" "1209:0002" )   # T114, Pocket-V2
 
-# True only when every expected LNode USB ID is currently enumerated.
-lnodes_enumerated() {
+# True if a single USB ID is currently enumerated.
+lnode_present() {
+    lsusb -d "$1" >/dev/null 2>&1
+}
+
+# True only when every USB ID passed as an argument is currently enumerated.
+ids_enumerated() {
     local id
-    for id in "${LNODE_USB_IDS[@]}"; do
+    for id in "$@"; do
         lsusb -d "$id" >/dev/null 2>&1 || return 1
     done
     return 0
@@ -323,28 +328,56 @@ flash_lnodes() {
     local head_sha; head_sha=$(cd "$REPO_DIR" && git rev-parse --short HEAD)
     log "[CI_HW] flashing LNodes from HEAD $head_sha"
 
-    # T114 fleet, then Pocket-V2 fleet. Each just-target builds the
-    # embedded firmware (cargo run) and touch-flashes every attached board
-    # of that kind. A failing fleet warns + notifies but does not abort.
-    if ( cd "$REPO_DIR" && just flash ); then
-        log "[CI_HW] T114 flash invocation completed"
+    # Flash only the boards currently enumerated. A board physically removed
+    # from the rig (Pocket-V2 unplugged → 1209:0002 absent) must NOT stall
+    # the flash waiting for a UF2 drive that will never appear; skip it.
+    #
+    # UF2_TIMEOUT=120 (vs the uf2-runner.sh default of 30) on the VM flash
+    # path: the libvirt USB-attach chain (1200-baud touch → nRF52 UF2
+    # bootloader → udev → virsh attach → VM enumeration → /dev/sda) has
+    # highly variable latency (~6 s typical, >30 s on a stalling run). The
+    # desktop-flash default on hamster keeps 30.
+    #
+    # T114 fleet, then Pocket-V2 fleet. Each just-target builds the embedded
+    # firmware (cargo run) and touch-flashes every attached board of that
+    # kind. A failing fleet warns + notifies but does not abort.
+    local flashed_ids=()
+
+    if lnode_present 1209:0001; then
+        if ( cd "$REPO_DIR" && UF2_TIMEOUT=120 just flash ); then
+            log "[CI_HW] T114 flash invocation completed"
+        else
+            log "[CI_HW] WARN: LNode flash failed (t114)"
+            notify_flash_failed t114
+        fi
+        flashed_ids+=( "1209:0001" )
     else
-        log "[CI_HW] WARN: LNode flash failed (t114)"
-        notify_flash_failed t114
+        log "[CI_HW] t114 (1209:0001) not enumerated; skipping flash"
     fi
-    if ( cd "$REPO_DIR" && just flash-rak4631 ); then
-        log "[CI_HW] Pocket-V2 flash invocation completed"
+
+    if lnode_present 1209:0002; then
+        if ( cd "$REPO_DIR" && UF2_TIMEOUT=120 just flash-rak4631 ); then
+            log "[CI_HW] Pocket-V2 flash invocation completed"
+        else
+            log "[CI_HW] WARN: LNode flash failed (rak4631)"
+            notify_flash_failed rak4631
+        fi
+        flashed_ids+=( "1209:0002" )
     else
-        log "[CI_HW] WARN: LNode flash failed (rak4631)"
-        notify_flash_failed rak4631
+        log "[CI_HW] rak4631/Pocket-V2 (1209:0002) not enumerated; skipping flash"
+    fi
+
+    if (( ${#flashed_ids[@]} == 0 )); then
+        log "[CI_HW] WARN: no LNodes enumerated; nothing flashed"
+        return 0
     fi
 
     # Settle: LNodes re-enumerate as fresh ttyACM after the touch reset.
-    # Bounded poll until both expected USB IDs are back (or 30 s timeout)
-    # so the first scenario does not open a half-enumerated port.
-    log "[CI_HW] waiting for LNodes to re-enumerate (USB IDs ${LNODE_USB_IDS[*]})"
+    # Bounded poll until the boards we actually flashed are back (or 30 s
+    # timeout) so the first scenario does not open a half-enumerated port.
+    log "[CI_HW] waiting for LNodes to re-enumerate (USB IDs ${flashed_ids[*]})"
     local waited=0
-    while ! lnodes_enumerated; do
+    while ! ids_enumerated "${flashed_ids[@]}"; do
         if (( waited >= 30 )); then
             log "[CI_HW] WARN: LNodes not fully re-enumerated after ${waited}s; proceeding (profiles gate on device-count)"
             break
@@ -352,13 +385,18 @@ flash_lnodes() {
         sleep 2
         waited=$(( waited + 2 ))
     done
-    if lnodes_enumerated; then
+    if ids_enumerated "${flashed_ids[@]}"; then
         log "[CI_HW] LNodes re-enumerated after ${waited}s"
         # Give udev a beat to settle the fresh ttyACM nodes + properties
         # before resolve_lnode_debug_port iterates them.
         sleep 2
-        verify_lnode_banner t114    "$head_sha"
-        verify_lnode_banner rak4631 "$head_sha"
+        local id
+        for id in "${flashed_ids[@]}"; do
+            case "$id" in
+                1209:0001) verify_lnode_banner t114    "$head_sha" ;;
+                1209:0002) verify_lnode_banner rak4631 "$head_sha" ;;
+            esac
+        done
     fi
     return 0
 }
