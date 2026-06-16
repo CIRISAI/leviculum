@@ -37,6 +37,7 @@ mod opcode {
     pub const GET_PACKET_STATUS: u8 = 0x14;
     pub const SET_CAD_PARAMS: u8 = 0x88;
     pub const SET_CAD: u8 = 0xC5;
+    pub const SET_STOP_RX_TIMER_ON_PREAMBLE: u8 = 0x9F;
 }
 
 /// SX1262 register addresses (datasheet §15, key register table)
@@ -400,7 +401,16 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // Private network sync word (matches RNode)
         self.write_register(reg::LORA_SYNC_WORD, &[0x14, 0x24])
             .await?;
-        self.apply_tx_clamp_workaround().await
+        self.apply_tx_clamp_workaround().await?;
+        // StopRxTimerOnPreambleDetect: the SetRx hardware timeout only bounds the
+        // preamble wait. Once a preamble is detected the timer stops and RX runs
+        // to packet completion regardless of length. Without this a slow-SF
+        // packet whose airtime exceeds the 500ms idle-loop timeout (e.g. SF10
+        // path requests ~887ms, announces ~2590ms) is aborted mid-packet, so
+        // the LNode receives almost nothing at slow spreading factors.
+        // Persistent setting, re-asserted on every reconfig via this path.
+        self.write_command(opcode::SET_STOP_RX_TIMER_ON_PREAMBLE, &[0x01])
+            .await
     }
 
     // TX
