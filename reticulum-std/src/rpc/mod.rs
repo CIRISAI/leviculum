@@ -769,4 +769,144 @@ mod tests {
             );
         }
     }
+
+    // destination_data lifecycle RPC end-to-end (leviculum#12).
+    //
+    // Drives `{"destination_data": "used"|"retain"|"unretain",
+    // "destination_hash": <16 bytes>}` against a real spawned RPC
+    // server and asserts the daemon answers `True` for a known
+    // destination (one we've populated via `remember_identity`) and
+    // `False` for an unknown one. Mirrors the Python-RNS shared-
+    // instance contract from RNS/Reticulum.py:1249-1289 and
+    // RNS/Identity.py:268-295.
+
+    fn destination_data_request(op: &str, hash: &[u8]) -> Value {
+        pickle_dict(vec![
+            (pickle_str_key("destination_data"), pickle_str(op)),
+            (
+                pickle_str_key("destination_hash"),
+                Value::Bytes(hash.to_vec()),
+            ),
+        ])
+    }
+
+    async fn spawn_destination_data_server(
+        tag: &str,
+    ) -> (String, [u8; 32], Arc<Mutex<StdNodeCore>>) {
+        let core = make_test_core(true);
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+
+        let instance_name = format!("rpctest_dd_{tag}_{}", std::process::id());
+        let abstract_name = format!("rns/{instance_name}/rpc");
+
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            empty_online_map(),
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (abstract_name, authkey, core)
+    }
+
+    #[tokio::test]
+    async fn test_rpc_destination_data_unknown_returns_false() {
+        let (abstract_name, authkey, _core) = spawn_destination_data_server("unknown").await;
+
+        // Never `remember_identity`-ed — the daemon should report this
+        // destination as unknown.
+        let hash = vec![0x77u8; 16];
+        for op in ["used", "retain", "unretain"] {
+            let req = destination_data_request(op, &hash);
+            let resp = rpc_client_call(&abstract_name, &authkey, &req)
+                .await
+                .unwrap_or_else(|e| panic!("op={op} call failed: {e}"));
+            assert_eq!(
+                resp,
+                Value::Bool(false),
+                "op={op} on unknown destination should yield False, got {resp:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rpc_destination_data_known_returns_true() {
+        let (abstract_name, authkey, core) = spawn_destination_data_server("known").await;
+
+        // Populate the known-identities map for `hash` so the daemon
+        // sees this destination as known.
+        let identity = reticulum_core::Identity::generate(&mut rand_core::OsRng);
+        let hash_bytes = [0x99u8; 16];
+        let dest_hash = reticulum_core::DestinationHash::new(hash_bytes);
+        {
+            let mut c = core.lock().unwrap();
+            c.remember_identity(dest_hash, identity);
+        }
+
+        let hash = hash_bytes.to_vec();
+        for op in ["used", "retain", "unretain"] {
+            let req = destination_data_request(op, &hash);
+            let resp = rpc_client_call(&abstract_name, &authkey, &req)
+                .await
+                .unwrap_or_else(|e| panic!("op={op} call failed: {e}"));
+            assert_eq!(
+                resp,
+                Value::Bool(true),
+                "op={op} on known destination should yield True, got {resp:?}"
+            );
+        }
+    }
+
+    /// msgpack-codec mirror of the known-destination case — exercises
+    /// the exact wire shape Python-RNS sends (`mp.packb({...})`).
+    #[tokio::test]
+    async fn test_rpc_destination_data_msgpack_round_trip() {
+        let (abstract_name, authkey, core) = spawn_destination_data_server("msgpack").await;
+
+        let identity = reticulum_core::Identity::generate(&mut rand_core::OsRng);
+        let hash_bytes = [0x55u8; 16];
+        let dest_hash = reticulum_core::DestinationHash::new(hash_bytes);
+        {
+            let mut c = core.lock().unwrap();
+            c.remember_identity(dest_hash, identity);
+        }
+
+        // Build the msgpack request directly, the same way
+        // RNS.vendor.umsgpack would.
+        let mp_request = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from("destination_data"),
+                rmpv::Value::from("used"),
+            ),
+            (
+                rmpv::Value::from("destination_hash"),
+                rmpv::Value::Binary(hash_bytes.to_vec()),
+            ),
+        ]);
+        let mut request_bytes = Vec::new();
+        rmpv::encode::write_value(&mut request_bytes, &mp_request).unwrap();
+
+        // Drive the same connection/handshake path `rpc_client_call`
+        // uses, but with raw bytes so the request stays in msgpack.
+        let std_stream = connect_rpc(&abstract_name).unwrap();
+        std_stream.set_nonblocking(true).unwrap();
+        let mut stream = RpcStream::from_std(std_stream).unwrap();
+        connection::client_handshake(&mut stream, &authkey)
+            .await
+            .unwrap();
+        write_message(&mut stream, &request_bytes).await.unwrap();
+        let response_bytes = read_message(&mut stream).await.unwrap();
+        let response = rmpv::decode::read_value(&mut &response_bytes[..]).unwrap();
+
+        assert_eq!(
+            response,
+            rmpv::Value::Boolean(true),
+            "msgpack destination_data:used on a known destination should yield True"
+        );
+    }
 }
