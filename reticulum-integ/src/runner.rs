@@ -1246,6 +1246,47 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
         )));
     }
 
+    // Resolve the ordered list of LNodes to bind to serial nodes.
+    //
+    // LEVICULUM_REQUIRED_LNODE_SERIALS (set by run-tier3-hw.sh from the
+    // active profile's required LNode boards) selects LNodes by USB-serial
+    // identity instead of discovery sort order. Without it (manual dev
+    // runs) we fall back to the sorted discovery order. Binding by sort
+    // order mis-assigned the receiver to whichever LNode sorted first
+    // (Pocket-V2 ABFAB3F1807E459B before T114 DEC9947DAD9D2869), silencing
+    // the profile's required board as "unused".
+    let required_lnode_serials: Vec<String> = std::env::var("LEVICULUM_REQUIRED_LNODE_SERIALS")
+        .ok()
+        .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
+        .unwrap_or_default();
+
+    let assign_lnodes: Vec<LNodeDevice> = if required_lnode_serials.is_empty() {
+        discovered.lnodes.clone()
+    } else {
+        let mut v = Vec::new();
+        for serial in &required_lnode_serials {
+            match discovered.lnodes.iter().find(|l| &l.usb_serial == serial) {
+                Some(l) => v.push(l.clone()),
+                None => {
+                    return Err(RunnerError::InsufficientRNodes(format!(
+                        "reason=required_lnode_not_found serial={} found_lnodes={}",
+                        serial,
+                        discovered.lnodes.len()
+                    )));
+                }
+            }
+        }
+        v
+    };
+
+    if assign_lnodes.len() < needed_lnodes {
+        return Err(RunnerError::InsufficientRNodes(format!(
+            "reason=required_lnodes_too_few bindable_lnodes={} needed_lnodes={}",
+            assign_lnodes.len(),
+            needed_lnodes
+        )));
+    }
+
     // Assign discovered devices to nodes
     let mut rnode_idx: usize = 0;
     let mut lnode_idx: usize = 0;
@@ -1253,12 +1294,12 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
     for (name, node) in scenario.nodes.iter_mut() {
         // Assign LNode (serial + debug)
         if node.serial {
-            let lnode = &discovered.lnodes[lnode_idx];
+            let lnode = &assign_lnodes[lnode_idx];
             node.serial_path = Some(lnode.data_port.clone());
             node.debug_serial_path = Some(lnode.debug_port.clone());
             eprintln!(
-                "[discovery] node '{}' -> LNode {} (data={}, debug={})",
-                name, lnode_idx, lnode.data_port, lnode.debug_port
+                "[discovery] node '{}' -> LNode {} serial={} (data={}, debug={})",
+                name, lnode_idx, lnode.usb_serial, lnode.data_port, lnode.debug_port
             );
             lnode_idx += 1;
         }
@@ -1312,8 +1353,15 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
     // CAD actually sees the benchmark traffic) and makes it a polite
     // neighbour.
     if let Some(ref radio) = scenario.radio {
-        for lnode in discovered.lnodes.iter().skip(lnode_idx) {
-            silence_unused_lnode(&lnode.data_port, &lnode.usb_serial, radio);
+        let assigned: std::collections::HashSet<&str> = assign_lnodes
+            .iter()
+            .take(lnode_idx)
+            .map(|l| l.usb_serial.as_str())
+            .collect();
+        for lnode in discovered.lnodes.iter() {
+            if !assigned.contains(lnode.usb_serial.as_str()) {
+                silence_unused_lnode(&lnode.data_port, &lnode.usb_serial, radio);
+            }
         }
     }
 

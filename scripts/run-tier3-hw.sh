@@ -148,6 +148,29 @@ print(' '.join(d['profiles'][profile].get('exclude', [])))
 PY
 }
 
+# Fetch the USB serials of a profile's required LNode boards
+# (required device-keys whose firmware="lnode"), space-separated. Empty
+# when the profile needs no specific LNode. Drives the runner's
+# identity-stable LNode binding via LEVICULUM_REQUIRED_LNODE_SERIALS.
+profile_required_lnode_serials() {
+    local profile="$1"
+    python3 - "$DEVICES_TOML" "$profile" <<'PY'
+import sys, tomllib
+path, profile = sys.argv[1], sys.argv[2]
+d = tomllib.load(open(path, 'rb'))
+devices = d.get('devices', {})
+required = d['profiles'][profile].get('required', [])
+serials = []
+for key in required:
+    dev = devices.get(key, {})
+    if dev.get('firmware') == 'lnode':
+        serial = dev.get('serial', '')
+        if serial:
+            serials.append(serial)
+print(' '.join(serials))
+PY
+}
+
 # Fetch a device's serial.  Empty string if device-key not in table.
 device_serial() {
     local key="$1"
@@ -465,6 +488,17 @@ run_group() {
     local fns=( "$@" )
     setup_profile "$profile"
     log "[CI_HW] running ${#fns[@]} tests for profile=$profile: ${fns[*]}"
+    # Bind LNodes by profile identity, not discovery sort order. The
+    # runner reads LEVICULUM_REQUIRED_LNODE_SERIALS and assigns serial
+    # nodes to the LNodes whose USB serial is in this set (silencing the
+    # rest regardless of sort position). Empty when the profile needs no
+    # specific LNode (RNode-only profiles), in which case the runner keeps
+    # its sorted-discovery fallback.
+    local required_lnode_serials
+    required_lnode_serials=$(profile_required_lnode_serials "$profile")
+    if [[ -n "$required_lnode_serials" ]]; then
+        log "[CI_HW] required LNode serials for profile=$profile: $required_lnode_serials"
+    fi
     # All tests of this profile in one cargo invocation: cheaper than
     # spawning a fresh test binary per test.  --test-threads=1 keeps
     # the integ-lock contract intact.  LEVICULUM_SKIP_LOG collects
@@ -473,6 +507,7 @@ run_group() {
     # eprintln alone would be invisible here.
     CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
       LEVICULUM_SKIP_LOG="$SKIP_LOG" \
+      LEVICULUM_REQUIRED_LNODE_SERIALS="$required_lnode_serials" \
       cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}"
 }
 
