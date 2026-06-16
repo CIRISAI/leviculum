@@ -8,6 +8,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
+use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::{AnyPin, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
@@ -596,16 +597,47 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             continue;
         }
 
-        // Queue empty, timeout stale split reassembly buffers and RX.
+        // Queue empty: timeout stale split reassembly buffers, then stay in
+        // continuous RX until either a packet arrives or the daemon hands us
+        // something to send. rx_once with timeout_ms==0 arms SetRx in single
+        // mode (no HW timeout), so the radio listens with no re-arm gap. The
+        // fixed-window loop re-armed every 500ms; at slow SF a long preamble
+        // (~197ms at SF10) almost always fell into a re-arm gap and was never
+        // detected. select yields to TX the instant the daemon has data, so
+        // continuous RX does not starve path responses or announces.
         reassembler.check_timeout(rx_timeout_count, 10);
-        rx_once(
-            &mut radio,
-            &mut rx_buf,
-            500,
-            &mut reassembler,
-            &incoming_tx,
-            &mut rx_timeout_count,
+        match select(
+            rx_once(
+                &mut radio,
+                &mut rx_buf,
+                0,
+                &mut reassembler,
+                &incoming_tx,
+                &mut rx_timeout_count,
+            ),
+            outgoing_rx.receive(),
         )
-        .await;
+        .await
+        {
+            // RX finished (packet delivered or single-mode wait elapsed). Loop
+            // re-arms RX immediately; the only gap is this brief re-arm, taken
+            // right after a reception.
+            Either::First(()) => {}
+            // The daemon has outgoing data. The RX future was dropped while the
+            // radio was in continuous RX, so force standby before the CSMA/TX
+            // path drives SetTx; the dropped RX leaves no half-state. A packet
+            // racing this switch may be lost (rare, acceptable). radio_silent
+            // still drops outgoing instead of transmitting.
+            Either::Second(data) => {
+                let _ = radio.set_standby_rc().await;
+                if config.radio_silent {
+                    drop(data);
+                } else {
+                    pending_tx = Some(data);
+                    csma_attempt = 0;
+                    csma_cw = CSMA_CW_INITIAL;
+                }
+            }
+        }
     }
 }
