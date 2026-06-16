@@ -1,0 +1,68 @@
+# LNode<->LNode lncp bidirectional file transfer over LoRa at SF10.
+#
+# Regression test for the #23 firmware fix (post-TX RX window). Before the
+# fix a busy SX1262 sender starved its own RX after each TX, so a sustained
+# bidirectional transfer at SF10 collapsed to asymmetric reception and the
+# link died with rtt_retry_exhausted. With the fix in, the transfer
+# completes with symmetric reception.
+#
+# Both nodes are LNodes (SX1262, our firmware). The transfer is large
+# enough that a regression reintroducing the TX/RX starvation (or the SF10
+# deafness) leaves it unable to complete, so the file_transfer success
+# assertion is the regression signal.
+#
+# Radio config is SF10 / BW125000 / CR8 / CSMA on (the slow, contended
+# profile that exposes the starvation). Timeouts carry margin so a PASS is
+# never cut short by SF10 airtime.
+
+profile = "lnode_pair"
+
+[test]
+name = "lora_lnode_lncp_bidir_slow"
+description = "lncp bidirectional 4KB between two LNodes over direct LoRa at SF10"
+timeout_secs = 900
+rust_log = "reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+
+[radio]
+# Matches bench_single_pair_slow_ca: slow spreading factor, CSMA/CA on.
+frequency = 869525000
+bandwidth = 125000
+sf = 10
+cr = 8
+txpower = 17
+csma_enabled = true
+
+[nodes.alpha]
+type = "rust"
+respond_to_probes = true
+serial = true
+
+[nodes.beta]
+type = "rust"
+respond_to_probes = true
+serial = true
+
+# Warm up: wait for announces to propagate
+[[steps]]
+action = "sleep"
+duration_secs = 25
+
+[[steps]]
+action = "wait_for_path"
+on = "alpha"
+destination = "beta.probe"
+timeout_secs = 300
+
+[[steps]]
+action = "file_transfer"
+sender = "alpha"
+receiver = "beta"
+sender_tool = "lncp"
+receiver_tool = "lncp"
+# 4KB is the HW-proven-completing payload at SF10 (8KB exceeds the SF10 time
+# budget). Still ~20+ frames each way, enough to exercise the busy-sender
+# starvation so a regression of the #23 fix fails to complete.
+file_sizes = [4096]
+direction = "both"
+repeats = 1
+timeout_secs = 600

@@ -4081,6 +4081,28 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     }
 
     #[test]
+    #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
+    #[serial(lora)]
+    fn lora_lnode_lncp_bidir_slow() {
+        // SF10 LNode<->LNode bidirectional transfer: regression gate for the
+        // #23 post-TX RX window fix. A regression that restarves the SX1262
+        // RX after TX fails to complete the transfer. SF10 airtime is much
+        // slower than SF7, so the per-test budget is the full TOML timeout.
+        crate::timeout::run_with_timeout("lora_lnode_lncp_bidir_slow", 900, || {
+            let toml_str = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/lora_lnode_lncp_bidir_slow.toml"
+            ))
+            .expect("lora_lnode_lncp_bidir_slow.toml not found");
+            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+            let mut runner = require_runner!(scenario);
+
+            run_test(&mut runner).expect("test failed");
+        });
+    }
+
+    #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
     fn lora_lncp_bridge() {
