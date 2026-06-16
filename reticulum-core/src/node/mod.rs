@@ -47,6 +47,8 @@ mod link_management;
 // Gated on `tracing`: the mvr captures structured tracing output to prove the
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
 // (absent under `--no-default-features`, e.g. the core-no-tracing CI gate).
+#[cfg(test)]
+mod mvr_link_rekey_alias;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof;
 pub mod request;
@@ -577,6 +579,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::link::LinkError;
         use crate::packet::PacketContext;
 
+        // Resolve a possibly-stale caller-visible id to the current wire id:
+        // a #66 establishment retry re-keys the link, so a caller holding the
+        // original id must be routed through `link_id_aliases` (mirrors
+        // link()/link_mut()). The resolved id binds both the lookup AND the
+        // signature below: the responder knows the link under the new id.
+        let link_id = &self.resolve_link_id(link_id);
+
         // Verify link exists, is active, and we are initiator
         let link = self.links.get(link_id).ok_or(LinkError::NotFound)?;
         if !link.is_initiator() {
@@ -663,6 +672,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::resource::msgpack::{
             write_bin, write_fixarray_header, write_float64, write_nil,
         };
+
+        // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
+        // link) so the lookup, the pending-request bookkeeping, and the route
+        // all use the current wire id consistently.
+        let link_id = &self.resolve_link_id(link_id);
 
         // Verify link exists and is active
         let link = self
@@ -751,6 +765,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::packet::PacketContext;
         use crate::resource::msgpack::{write_bin, write_fixarray_header};
 
+        // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
+        // link) so the lookup and the route both use the current wire id.
+        let link_id = &self.resolve_link_id(link_id);
+
         // Verify link exists and is active
         let link = self
             .links
@@ -817,6 +835,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::resource::ResourceError;
 
         let now_ms = self.transport.clock().now_ms();
+
+        // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
+        // link) so every links.get/get_mut and the route use the wire id.
+        let link_id = &self.resolve_link_id(link_id);
 
         let link = self
             .links
@@ -1358,7 +1380,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Get the remote identity for a link, if the peer has identified.
     pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<&Identity> {
-        self.links.get(link_id)?.remote_identity()
+        // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
+        // link), mirroring link()/link_mut().
+        self.links
+            .get(&self.resolve_link_id(link_id))?
+            .remote_identity()
     }
 
     /// Get the transport configuration

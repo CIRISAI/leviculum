@@ -348,7 +348,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// wire id. Establishment retries regenerate the ephemeral keys and
     /// re-key the link (Codeberg #66); ids handed out before a retry
     /// resolve through `link_id_aliases`.
-    fn resolve_link_id(&self, link_id: &LinkId) -> LinkId {
+    pub(crate) fn resolve_link_id(&self, link_id: &LinkId) -> LinkId {
         self.link_id_aliases
             .get(link_id)
             .copied()
