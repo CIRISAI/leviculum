@@ -21,6 +21,7 @@ use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 pub use crate::error::{Error as ApiError, Result};
 pub use crate::{Destination, DestinationHash, DestinationType, Direction, LinkHandle, LinkId};
+pub use reticulum_core::resource::ResourceStrategy;
 pub use reticulum_core::{Identity, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
@@ -253,6 +254,39 @@ impl Node {
         self.inner
             .send_response(link_id, request_id, response_data)
             .await
+    }
+
+    /// Send a resource over an established link, returning the resource hash.
+    /// `metadata`, if present, must be msgpack-encoded by the caller.
+    pub async fn send_resource(
+        &self,
+        link_id: &LinkId,
+        data: &[u8],
+        metadata: Option<&[u8]>,
+        auto_compress: bool,
+    ) -> Result<[u8; 32]> {
+        self.inner
+            .send_resource(link_id, data, metadata, auto_compress)
+            .await
+    }
+
+    /// Set the acceptance strategy for incoming resources on a link.
+    pub fn set_resource_strategy(
+        &self,
+        link_id: &LinkId,
+        strategy: ResourceStrategy,
+    ) -> Result<()> {
+        self.inner.set_resource_strategy(link_id, strategy)
+    }
+
+    /// Accept a pending resource advertised on a link (for the AcceptApp strategy).
+    pub async fn accept_resource(&self, link_id: &LinkId) -> Result<()> {
+        self.inner.accept_resource(link_id).await
+    }
+
+    /// Reject a pending resource advertised on a link.
+    pub async fn reject_resource(&self, link_id: &LinkId) -> Result<()> {
+        self.inner.reject_resource(link_id).await
     }
 
     /// Access the underlying engine node.

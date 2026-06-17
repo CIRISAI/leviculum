@@ -42,6 +42,16 @@ pub const LEV_EVENT_REQUEST_RECEIVED: c_int = 9;
 pub const LEV_EVENT_RESPONSE_RECEIVED: c_int = 10;
 /// A sent request timed out without a response.
 pub const LEV_EVENT_REQUEST_TIMEOUT: c_int = 11;
+/// An incoming resource was advertised (accept or reject it).
+pub const LEV_EVENT_RESOURCE_ADVERTISED: c_int = 12;
+/// A resource transfer started.
+pub const LEV_EVENT_RESOURCE_STARTED: c_int = 13;
+/// Resource transfer progress (`lev_event_progress`).
+pub const LEV_EVENT_RESOURCE_PROGRESS: c_int = 14;
+/// A resource transfer completed (receiver gets data and metadata).
+pub const LEV_EVENT_RESOURCE_COMPLETED: c_int = 15;
+/// A resource transfer failed.
+pub const LEV_EVENT_RESOURCE_FAILED: c_int = 16;
 
 /// One projected event, fully self-owned (all payloads deep-copied out of the
 /// `NodeEvent`), so it outlives the queue slot and is valid until
@@ -52,8 +62,11 @@ pub struct lev_event_t {
     link_id: Option<[u8; 16]>,
     dest_hash: Option<[u8; 16]>,
     request_id: Option<[u8; 16]>,
+    resource_hash: Option<[u8; 32]>,
     path: Option<String>,
     data: Vec<u8>,
+    metadata: Option<Vec<u8>>,
+    progress: f64,
     dropped_count: u64,
 }
 
@@ -65,8 +78,11 @@ impl lev_event_t {
             link_id: None,
             dest_hash: None,
             request_id: None,
+            resource_hash: None,
             path: None,
             data: Vec::new(),
+            metadata: None,
+            progress: 0.0,
             dropped_count: 0,
         }
     }
@@ -165,8 +181,64 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.request_id = Some(request_id);
             e
         }
+        NodeEvent::ResourceAdvertised {
+            link_id,
+            resource_hash,
+            ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_ADVERTISED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.resource_hash = Some(resource_hash);
+            e
+        }
+        NodeEvent::ResourceTransferStarted {
+            link_id,
+            resource_hash,
+            ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_STARTED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.resource_hash = Some(resource_hash);
+            e
+        }
+        NodeEvent::ResourceProgress {
+            link_id,
+            resource_hash,
+            progress,
+            ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_PROGRESS, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.resource_hash = Some(resource_hash);
+            e.progress = progress as f64;
+            e
+        }
+        NodeEvent::ResourceCompleted {
+            link_id,
+            resource_hash,
+            data,
+            metadata,
+            ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_COMPLETED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.resource_hash = Some(resource_hash);
+            e.data = data;
+            e.metadata = metadata;
+            e
+        }
+        NodeEvent::ResourceFailed {
+            link_id,
+            resource_hash,
+            ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_FAILED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.resource_hash = Some(resource_hash);
+            e
+        }
         // Other variants keep their class so the cap policy is right, but carry
-        // no typed fields yet; phase e replaces this with real projection.
+        // no typed fields yet.
         _ => lev_event_t::bare(LEV_EVENT_OTHER, is_control),
     }
 }
@@ -429,6 +501,69 @@ pub unsafe extern "C" fn lev_event_data(
             None => return LEV_ERR_NULL_PTR,
         };
         write_out(&e.data, buf, cap, out_len)
+    })
+}
+
+/// Write the event's resource hash (32 bytes) into `buf`, read(2) style.
+/// `LEV_ERR_INVALID_ARG` if the event has no resource hash.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_resource_hash(
+    ev: *const lev_event_t,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match &e.resource_hash {
+            Some(h) => write_out(h, buf, cap, out_len),
+            None => LEV_ERR_INVALID_ARG,
+        }
+    })
+}
+
+/// Write the event's metadata (msgpack bytes) into `buf`, read(2) style.
+/// `LEV_ERR_INVALID_ARG` if the event has no metadata.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_metadata(
+    ev: *const lev_event_t,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match &e.metadata {
+            Some(m) => write_out(m, buf, cap, out_len),
+            None => LEV_ERR_INVALID_ARG,
+        }
+    })
+}
+
+/// Write the transfer progress (0.0..1.0) of a resource event into `*out`.
+/// `LEV_ERR_INVALID_ARG` for non-resource events.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_progress(ev: *const lev_event_t, out: *mut f64) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if e.ty != LEV_EVENT_RESOURCE_PROGRESS {
+            set_last_error("event has no progress");
+            return LEV_ERR_INVALID_ARG;
+        }
+        *out = e.progress;
+        LEV_OK
     })
 }
 

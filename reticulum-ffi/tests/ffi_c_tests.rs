@@ -100,3 +100,8 @@ fn c_phase_c_acceptance() {
 fn c_phase_d_acceptance() {
     compile_and_run("examples/c/phase_d.c", "phase_d_c");
 }
+
+#[test]
+fn c_phase_e_acceptance() {
+    compile_and_run("examples/c/phase_e.c", "phase_e_c");
+}

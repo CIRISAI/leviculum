@@ -27,6 +27,7 @@ mod link;
 mod log;
 mod node;
 mod request;
+mod resource;
 
 pub use destination::*;
 pub use error::*;
@@ -36,6 +37,7 @@ pub use link::*;
 pub use log::*;
 pub use node::*;
 pub use request::*;
+pub use resource::*;
 
 /// Runs process-global setup exactly once.
 static INIT: Once = Once::new();
