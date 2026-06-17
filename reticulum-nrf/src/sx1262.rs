@@ -269,13 +269,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.wait_busy_ms(500).await
     }
 
-    /// Full initialization sequence (SX1262 + TCXO + DCDC).
+    /// Full initialization sequence (SX1262 + TCXO + LDO regulator).
     /// Order follows the datasheet init summary (§9.2.1, §13).
     /// Call after reset().
     pub async fn init_radio(&mut self, freq_hz: u32) -> Result<ChipStatus, Error> {
         self.set_standby_rc().await?;
-        self.write_command(opcode::SET_REGULATOR_MODE, &[0x01])
-            .await?; // DCDC
+        self.write_command(opcode::SET_REGULATOR_MODE, &[0x00])
+            .await?; // LDO: RNode firmware sx126x.cpp begin() never calls
+                     // OP_REGULATOR_MODE, leaving the SX1262 at its LDO default.
         self.write_command(opcode::SET_DIO2_AS_RF_SWITCH, &[0x01])
             .await?;
         self.clear_device_errors().await?;
