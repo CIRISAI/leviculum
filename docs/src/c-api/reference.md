@@ -1,0 +1,408 @@
+# C API: Reference
+
+Every public function and constant of `leviculum.h`, grouped by area. The
+header `reticulum-ffi/leviculum.h` is generated from the Rust source and is the
+canonical statement of the exact prototypes; this reference is kept in sync
+with it and adds semantics. For the model behind these signatures (handles,
+the read(2) buffer convention, out-parameters, the event fd, threading), read
+the [Overview](overview.md) first.
+
+Conventions used below:
+
+- Functions return `int`: `LEV_OK` (0) on success, a negative `LEV_ERR_*` on
+  failure; constructors return `NULL` on failure. After any failure,
+  `lev_last_error()` holds a detail string.
+- A `(uint8_t *buf, uintptr_t cap, uintptr_t *out_len)` triple is read(2)
+  style: `buf == NULL` or too-small `cap` returns `LEV_ERR_BUFFER_TOO_SMALL`
+  with `*out_len` set to the required size.
+- `timeout_ms` is a deadline in milliseconds; negative means wait forever; on
+  expiry the call returns `LEV_ERR_TIMEOUT`.
+
+## Opaque types
+
+| Type | Created by | Freed by | Thread-safety |
+| --- | --- | --- | --- |
+| `leviculum_t` | `lev_builder_build` | `lev_free` | thread-safe; events single-consumer |
+| `lev_builder_t` | `lev_builder_new` | `lev_builder_free` | one thread |
+| `lev_identity_t` | `lev_identity_generate`, `lev_identity_from_private_key`, `lev_identity_from_public_key`, `lev_identity_load_file`, `lev_link_remote_identity` | `lev_identity_free` | one thread |
+| `lev_destination_t` | `lev_destination_new` | `lev_destination_free` | one thread |
+| `lev_link_t` | `lev_connect`, `lev_connect_with_key`, `lev_accept_link` | `lev_link_free` | thread-safe |
+| `lev_event_t` | `lev_next_event`, `lev_wait_event` | `lev_event_free` | one thread |
+
+## Initialisation and logging
+
+```c
+int lev_init(void);
+int lev_log_set_level(int level);
+int lev_log_set_callback(lev_log_callback cb, void *user);
+typedef void (*lev_log_callback)(int level, const char *message, void *user);
+```
+
+- `lev_init` runs one-time process setup (logging subscriber, panic hook) once,
+  through an internal `Once`. Idempotent and thread-safe. Optional: other
+  entry points run it lazily.
+- `lev_log_set_level` sets the global verbosity to one of the `LEV_LOG_*`
+  constants. Returns `LEV_ERR_INVALID_ARG` for an out-of-range level.
+- `lev_log_set_callback` routes log records to `cb` (with `user` passed back
+  unchanged), or restores the stderr default when `cb` is `NULL`. The callback
+  may run on any internal worker thread, receives a NUL-terminated message
+  valid only for the call, and must not call back into any `lev_*` function.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `LEV_LOG_OFF` | 0 | no logging (default) |
+| `LEV_LOG_ERROR` | 1 | errors only |
+| `LEV_LOG_WARN` | 2 | warnings and above |
+| `LEV_LOG_INFO` | 3 | info and above |
+| `LEV_LOG_DEBUG` | 4 | debug and above |
+| `LEV_LOG_TRACE` | 5 | everything |
+
+## Versioning
+
+```c
+const char *lev_version_string(void);
+uint32_t    lev_version_number(void);
+```
+
+- `lev_version_string` returns the version (for example `"0.6.3"`) as a static,
+  never-freed string.
+- `lev_version_number` packs it as `(major << 16) | (minor << 8) | patch`, a
+  host-byte-order integer for in-process comparison only.
+
+## Errors
+
+```c
+const char *lev_strerror(int code);
+const char *lev_last_error(void);
+```
+
+- `lev_strerror` returns a static message for a `LEV_ERR_*` code; safe any
+  time, never freed.
+- `lev_last_error` returns the thread-local detail string for the most recent
+  failing call on the calling thread, or `NULL` if there is none. Owned by the
+  library, valid until the next failing call on the same thread, never freed.
+
+### Error codes
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `LEV_OK` | 0 | success |
+| `LEV_ERR_NULL_PTR` | -1 | a required pointer argument was NULL |
+| `LEV_ERR_INVALID_ARG` | -2 | malformed argument (bad length, unparseable string) |
+| `LEV_ERR_BUFFER_TOO_SMALL` | -3 | caller buffer too small; `*out_len` holds the needed size |
+| `LEV_ERR_NOT_RUNNING` | -4 | the node event loop is not running |
+| `LEV_ERR_IO` | -5 | an I/O or storage error |
+| `LEV_ERR_CONFIG` | -6 | a configuration error |
+| `LEV_ERR_CRYPTO` | -7 | a cryptographic operation failed |
+| `LEV_ERR_NO_PATH` | -8 | no path to the destination is known |
+| `LEV_ERR_LINK` | -9 | a link operation failed (closed, inactive, handshake) |
+| `LEV_ERR_SEND` | -10 | a send failed (no route, payload too large) |
+| `LEV_ERR_RESOURCE` | -11 | a resource transfer operation failed |
+| `LEV_ERR_REQUEST` | -12 | a request or response operation failed |
+| `LEV_ERR_TIMEOUT` | -13 | the operation timed out |
+| `LEV_ERR_AGAIN` | -14 | non-fatal backpressure; retry later |
+| `LEV_ERR_UNKNOWN_DEST` | -15 | no cached identity for the destination |
+| `LEV_ERR_PANIC` | -127 | a panic was caught at the FFI boundary |
+
+## Identity
+
+```c
+struct lev_identity_t *lev_identity_generate(void);
+struct lev_identity_t *lev_identity_from_private_key(const uint8_t *key, uintptr_t len);
+struct lev_identity_t *lev_identity_from_public_key(const uint8_t *key, uintptr_t len);
+struct lev_identity_t *lev_identity_load_file(const char *path);
+int  lev_identity_save_file(const struct lev_identity_t *id, const char *path);
+void lev_identity_free(struct lev_identity_t *id);
+int  lev_identity_hash(const struct lev_identity_t *id, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_identity_public_key(const struct lev_identity_t *id, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_identity_private_key(const struct lev_identity_t *id, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_identity_has_private_keys(const struct lev_identity_t *id);
+```
+
+- `lev_identity_generate` makes a new random full identity; `NULL` on failure.
+- `lev_identity_from_private_key` / `lev_identity_from_public_key` build an
+  identity from a 64-byte combined key (`len` must equal `LEV_IDENTITY_KEY_LEN`);
+  the public-key variant yields a public-only identity. `NULL` on failure.
+- `lev_identity_load_file` reads the raw 64-byte private key file (the
+  Python-Reticulum format); `NULL` if missing, wrong size, or invalid.
+- `lev_identity_save_file` writes the private key to `path` atomically;
+  `LEV_ERR_CRYPTO` if the identity is public-only.
+- `lev_identity_hash` writes the 16-byte identity hash; `_public_key` and
+  `_private_key` write the 64-byte combined keys (`_private_key` returns
+  `LEV_ERR_CRYPTO` for a public-only identity). All read(2) style.
+- `lev_identity_has_private_keys` returns 1 for a full identity, 0 otherwise
+  (and 0 on `NULL`).
+
+Every returned `lev_identity_t` is owned by the caller and freed with
+`lev_identity_free`.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `LEV_ADDR_LEN` | 16 | destination, link, and identity hash length |
+| `LEV_IDENTITY_KEY_LEN` | 64 | combined key length (public or private) |
+| `LEV_X25519_KEY_LEN` | 32 | encryption half, bytes 0..32 |
+| `LEV_SIGNING_KEY_LEN` | 32 | Ed25519 signing half, bytes 32..64 |
+
+## Node lifecycle and builder
+
+```c
+struct lev_builder_t *lev_builder_new(void);
+void lev_builder_free(struct lev_builder_t *b);
+int  lev_builder_identity(struct lev_builder_t *b, const struct lev_identity_t *id);
+int  lev_builder_storage_path(struct lev_builder_t *b, const char *path);
+int  lev_builder_add_tcp_client(struct lev_builder_t *b, const char *addr);
+int  lev_builder_add_tcp_server(struct lev_builder_t *b, const char *addr);
+int  lev_builder_add_udp(struct lev_builder_t *b, const char *listen_addr, const char *forward_addr);
+int  lev_builder_add_auto_interface(struct lev_builder_t *b);
+int  lev_builder_enable_transport(struct lev_builder_t *b, int enabled);
+int  lev_builder_event_capacity(struct lev_builder_t *b, uintptr_t control_cap, uintptr_t data_cap);
+struct leviculum_t *lev_builder_build(struct lev_builder_t *b);
+
+int  lev_start(struct leviculum_t *node);
+int  lev_stop(struct leviculum_t *node);
+int  lev_is_running(const struct leviculum_t *node);
+int  lev_identity_hash_self(const struct leviculum_t *node, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+void lev_free(struct leviculum_t *node);
+```
+
+- `lev_builder_new` allocates a builder; `lev_builder_free` releases it
+  (`lev_builder_free(NULL)` is a no-op).
+- The setters configure the node: `_identity` pins a (cloned) identity,
+  `_storage_path` sets the state directory, the `_add_*` calls add interfaces
+  (TCP addresses are `host:port`), `_enable_transport` toggles relay mode, and
+  `_event_capacity` sets the event-queue sizes (control and data planes; a 0
+  keeps the current default). Each setter returns `LEV_ERR_INVALID_ARG` if the
+  builder was already consumed.
+- `lev_builder_build` produces a `leviculum_t` and empties the builder; you
+  still call `lev_builder_free` on the empty handle. `NULL` on failure.
+- `lev_start` spawns the event loop and brings up interfaces; `lev_stop`
+  persists state and tears it down; a stopped node can be started again.
+  `lev_start` on a running node returns `LEV_ERR_CONFIG`.
+- `lev_is_running` returns 1 while the loop runs (0 on `NULL`).
+- `lev_identity_hash_self` writes the node's own 16-byte identity hash.
+- `lev_free` stops a running node and releases it (`lev_free(NULL)` is a
+  no-op). Call it, and the other blocking calls, from a plain OS thread.
+
+The event-side functions on a node (`lev_event_fd`, `lev_next_event`,
+`lev_wait_event`) are documented under [Events](#events).
+
+## Destinations and announce
+
+```c
+struct lev_destination_t *lev_destination_new(const struct lev_identity_t *identity,
+                                              int direction, int dest_type,
+                                              const char *app_name,
+                                              const char *const *aspects, uintptr_t n_aspects);
+void lev_destination_free(struct lev_destination_t *dest);
+int  lev_destination_hash(const struct lev_destination_t *dest, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_register_destination(const struct leviculum_t *node, struct lev_destination_t *dest);
+int  lev_announce(const struct leviculum_t *node, const uint8_t *dest_hash,
+                  const uint8_t *app_data, uintptr_t app_data_len, int timeout_ms);
+int  lev_send_datagram(const struct leviculum_t *node, const uint8_t *dest_hash,
+                       const uint8_t *data, uintptr_t data_len, uint8_t *out_hash, int timeout_ms);
+```
+
+- `lev_destination_new` builds a destination from an identity (may be `NULL`;
+  required for some types, forbidden for `LEV_DEST_PLAIN`), a direction, a type,
+  an `app_name`, and an array of `n_aspects` NUL-terminated aspect strings.
+  `NULL` on failure.
+- `lev_destination_hash` writes the 16-byte hash; read it before registering.
+  Returns `LEV_ERR_INVALID_ARG` once the destination has been consumed.
+- `lev_register_destination` registers the destination on the node so it can be
+  announced and accept links and packets. It consumes the destination (the
+  handle is emptied; still free it). `LEV_ERR_INVALID_ARG` if already
+  registered.
+- `lev_announce` broadcasts a registered destination (by 16-byte hash) on all
+  interfaces, with optional `app_data`.
+- `lev_send_datagram` sends one unreliable packet to a destination and writes
+  the 16-byte packet hash into `out_hash`. A path must be known
+  (`LEV_ERR_NO_PATH` otherwise).
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `LEV_DIRECTION_IN` | 0 | incoming: receives announces, links, packets |
+| `LEV_DIRECTION_OUT` | 1 | outgoing: a source address for sending |
+| `LEV_DEST_SINGLE` | 0 | point-to-point, ephemeral encryption |
+| `LEV_DEST_GROUP` | 1 | shared-key broadcast |
+| `LEV_DEST_PLAIN` | 2 | unencrypted |
+
+## Paths, connect, and links
+
+```c
+int lev_has_path(const struct leviculum_t *node, const uint8_t *dest_hash);
+int lev_hops_to(const struct leviculum_t *node, const uint8_t *dest_hash, uint8_t *out);
+int lev_request_path(const struct leviculum_t *node, const uint8_t *dest_hash, int timeout_ms);
+
+int lev_connect(const struct leviculum_t *node, const uint8_t *dest_hash,
+                int timeout_ms, struct lev_link_t **out);
+int lev_connect_with_key(const struct leviculum_t *node, const uint8_t *dest_hash,
+                         const uint8_t *signing_key, int timeout_ms, struct lev_link_t **out);
+int lev_accept_link(const struct leviculum_t *node, const uint8_t *link_id,
+                    int timeout_ms, struct lev_link_t **out);
+
+int  lev_link_send(const struct lev_link_t *link, const uint8_t *data, uintptr_t len, int timeout_ms);
+int  lev_link_try_send(const struct lev_link_t *link, const uint8_t *data, uintptr_t len);
+int  lev_link_id(const struct lev_link_t *link, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_link_is_closed(const struct lev_link_t *link);
+int  lev_link_identify(const struct leviculum_t *node, const uint8_t *link_id,
+                       const struct lev_identity_t *identity, int timeout_ms);
+struct lev_identity_t *lev_link_remote_identity(const struct leviculum_t *node, const uint8_t *link_id);
+int  lev_close_link(struct lev_link_t *link, int timeout_ms);
+void lev_link_free(struct lev_link_t *link);
+```
+
+- `lev_has_path` returns 1 if a path to the destination is known, else 0
+  (negative on a NULL argument). `lev_hops_to` writes the hop count into `*out`
+  or returns `LEV_ERR_NO_PATH`. `lev_request_path` asks the network for a path;
+  the result arrives as an event and `lev_has_path` then returns 1.
+- `lev_connect` opens a link by destination hash, resolving the peer's signing
+  key from the identity cached by an announce; `*out` receives the link.
+  Returns `LEV_ERR_UNKNOWN_DEST` if no identity is cached and `LEV_ERR_NO_PATH`
+  if no path is known (it does not auto-request one).
+- `lev_connect_with_key` is the same with an explicit 32-byte Ed25519 signing
+  key, for out-of-band peers.
+- `lev_accept_link` accepts an incoming link request (16-byte link id from a
+  `LEV_EVENT_LINK_REQUEST` event); `*out` receives the link.
+- `lev_link_send` sends data, retrying backpressure up to the deadline (then
+  `LEV_ERR_TIMEOUT`); `lev_link_try_send` never blocks and returns
+  `LEV_ERR_AGAIN` under backpressure. Inbound data arrives as
+  `LEV_EVENT_LINK_DATA`.
+- `lev_link_id` writes the 16-byte link id. `lev_link_is_closed` returns 1 if
+  closed (0 on `NULL`).
+- `lev_link_identify` proves an identity to the peer (who sees
+  `LEV_EVENT_LINK_IDENTIFIED`); `lev_link_remote_identity` returns the peer's
+  identity as a new handle the caller frees, or `NULL` if the peer has not
+  identified.
+- `lev_close_link` closes gracefully (idempotent); `lev_link_free` releases the
+  handle, closing an open link first.
+
+## Request and response
+
+```c
+int lev_register_request_handler(const struct leviculum_t *node, const uint8_t *dest_hash,
+                                 const char *path, int policy,
+                                 const uint8_t *allow_identity_hashes, uintptr_t n_ids);
+int lev_send_request(const struct leviculum_t *node, const uint8_t *link_id, const char *path,
+                     const uint8_t *data, uintptr_t data_len,
+                     int response_timeout_ms, uint8_t *out_request_id);
+int lev_send_response(const struct leviculum_t *node, const uint8_t *link_id,
+                      const uint8_t *request_id, const uint8_t *data, uintptr_t data_len, int timeout_ms);
+```
+
+- `lev_register_request_handler` registers a handler for `path` on a local
+  destination. For `LEV_REQUEST_POLICY_ALLOW_LIST`, `allow_identity_hashes` is
+  `n_ids * 16` bytes of identity hashes; otherwise pass `NULL, 0`. Registering
+  overwrites a previous handler for the same destination and path; there is no
+  unregister.
+- `lev_send_request` sends a request on an established link to `path` and writes
+  the 16-byte request id into `out_request_id`. `data` is the msgpack-encoded
+  payload (`NULL, 0` for none); `response_timeout_ms` is the request-response
+  deadline. The response (`LEV_EVENT_RESPONSE_RECEIVED`) or a timeout
+  (`LEV_EVENT_REQUEST_TIMEOUT`) arrives as an event.
+- `lev_send_response` replies to a received request (link id and request id from
+  the `LEV_EVENT_REQUEST_RECEIVED` event); `data` must be one valid
+  msgpack-encoded value.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `LEV_REQUEST_POLICY_ALLOW_NONE` | 0 | drop all requests |
+| `LEV_REQUEST_POLICY_ALLOW_ALL` | 1 | allow any identity |
+| `LEV_REQUEST_POLICY_ALLOW_LIST` | 2 | allow only listed identity hashes |
+
+## Resource transfer
+
+```c
+int lev_send_resource(const struct leviculum_t *node, const uint8_t *link_id,
+                      const uint8_t *data, uintptr_t data_len,
+                      const uint8_t *metadata, uintptr_t metadata_len,
+                      int auto_compress, uint8_t *out_hash, int timeout_ms);
+int lev_set_resource_strategy(const struct leviculum_t *node, const uint8_t *link_id, int strategy);
+int lev_accept_resource(const struct leviculum_t *node, const uint8_t *link_id, int timeout_ms);
+int lev_reject_resource(const struct leviculum_t *node, const uint8_t *link_id, int timeout_ms);
+```
+
+- `lev_send_resource` sends bulk data over a link and writes the 32-byte
+  resource hash into `out_hash`. `metadata`, if present, must be
+  msgpack-encoded; `auto_compress` is 0 or 1. The call blocks only for the
+  initial dispatch; progress and completion arrive as events.
+- `lev_set_resource_strategy` sets how incoming resources on a link are handled
+  (one of the `LEV_RESOURCE_*` constants).
+- `lev_accept_resource` / `lev_reject_resource` answer a
+  `LEV_EVENT_RESOURCE_ADVERTISED` event under the AcceptApp strategy.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `LEV_RESOURCE_ACCEPT_NONE` | 0 | reject all incoming resources |
+| `LEV_RESOURCE_ACCEPT_ALL` | 1 | accept all automatically |
+| `LEV_RESOURCE_ACCEPT_APP` | 2 | advertise to the app to accept or reject |
+| `LEV_RESOURCE_HASH_LEN` | 32 | resource hash length |
+
+## Events
+
+```c
+int  lev_event_fd(const struct leviculum_t *node);
+int  lev_next_event(struct leviculum_t *node, struct lev_event_t **out);
+int  lev_wait_event(struct leviculum_t *node, struct lev_event_t **out, int timeout_ms);
+void lev_event_free(struct lev_event_t *ev);
+
+int  lev_event_type(const struct lev_event_t *ev);
+int  lev_event_link_id(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_event_dest_hash(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_event_request_id(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_event_resource_hash(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_event_path(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_event_data(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_event_metadata(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_event_progress(const struct lev_event_t *ev, double *out);
+int  lev_event_dropped_count(const struct lev_event_t *ev, uint64_t *out);
+```
+
+- `lev_event_fd` returns the readable fd to add to a `poll`/`epoll`/`select`
+  loop. The library owns it and closes it in `lev_free`; never close it.
+- `lev_next_event` dequeues without blocking: on success `*out` is an event
+  handle, or `NULL` when the queue is empty. `lev_wait_event` blocks up to
+  `timeout_ms` (negative forever); `*out` is `NULL` if the timeout elapses.
+  Both are single-consumer for a node. Free each event with `lev_event_free`.
+- `lev_event_type` returns the event's `LEV_EVENT_*` type (0 on `NULL`).
+- The accessors read a field of the event, read(2) style for the byte fields:
+  `_link_id`, `_dest_hash`, `_request_id` (16 bytes each), `_resource_hash`
+  (32 bytes), `_path` (UTF-8 bytes, not NUL-terminated), `_data` (the primary
+  payload, possibly empty), `_metadata` (msgpack bytes). `_progress` writes a
+  `double` in `0.0..1.0` for resource-progress events; `_dropped_count` writes
+  the count of a `LEV_EVENT_CONTROL_OVERFLOW` event. An accessor that does not
+  apply to the event type returns `LEV_ERR_INVALID_ARG`.
+
+### Event types
+
+| Constant | Value | Fields available |
+| --- | --- | --- |
+| `LEV_EVENT_OTHER` | 0 | catch-all for events without a typed projection |
+| `LEV_EVENT_ANNOUNCE_RECEIVED` | 1 | dest_hash, data (app_data) |
+| `LEV_EVENT_PATH_FOUND` | 2 | dest_hash |
+| `LEV_EVENT_LINK_REQUEST` | 3 | link_id, dest_hash |
+| `LEV_EVENT_LINK_ESTABLISHED` | 4 | link_id |
+| `LEV_EVENT_LINK_CLOSED` | 5 | link_id |
+| `LEV_EVENT_LINK_DATA` | 6 | link_id, data |
+| `LEV_EVENT_PACKET_RECEIVED` | 7 | dest_hash, data |
+| `LEV_EVENT_CONTROL_OVERFLOW` | 8 | dropped_count |
+| `LEV_EVENT_REQUEST_RECEIVED` | 9 | link_id, request_id, path, data |
+| `LEV_EVENT_RESPONSE_RECEIVED` | 10 | link_id, request_id, data |
+| `LEV_EVENT_REQUEST_TIMEOUT` | 11 | link_id, request_id |
+| `LEV_EVENT_RESOURCE_ADVERTISED` | 12 | link_id, resource_hash |
+| `LEV_EVENT_RESOURCE_STARTED` | 13 | link_id, resource_hash |
+| `LEV_EVENT_RESOURCE_PROGRESS` | 14 | link_id, resource_hash, progress |
+| `LEV_EVENT_RESOURCE_COMPLETED` | 15 | link_id, resource_hash, data, metadata |
+| `LEV_EVENT_RESOURCE_FAILED` | 16 | link_id, resource_hash |
+| `LEV_EVENT_LINK_IDENTIFIED` | 17 | link_id, data (16-byte identity hash) |
+
+## Helpers
+
+```c
+int lev_hex_encode(const uint8_t *data, uintptr_t len, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int lev_hex_decode(const uint8_t *hex, uintptr_t hex_len, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+```
+
+- `lev_hex_encode` writes `2 * len` lowercase hex bytes (not NUL-terminated),
+  read(2) style.
+- `lev_hex_decode` writes `hex_len / 2` bytes; `LEV_ERR_INVALID_ARG` on an odd
+  length or a non-hex digit.

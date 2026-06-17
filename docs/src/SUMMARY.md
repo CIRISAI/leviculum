@@ -8,6 +8,12 @@
 - [Configuration](guide/configuration.md)
 - [lnsd Quickstart](lnsd-quickstart.md)
 
+# C API
+
+- [Overview and Concepts](c-api/overview.md)
+- [How-To: Building Applications](c-api/howto.md)
+- [API Reference](c-api/reference.md)
+
 # Architecture
 
 - [Overview](architecture.md)
