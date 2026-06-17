@@ -161,6 +161,20 @@ static void test_node_lifecycle(void) {
     CHECK(lev_start(node) == LEV_OK);
     CHECK(lev_is_running(node) == 1);
 
+    /* Event fd is valid; with no peer the queue drains cleanly. */
+    CHECK(lev_event_fd(node) >= 0);
+    lev_event_t *ev = NULL;
+    CHECK(lev_next_event(node, &ev) == LEV_OK);
+    if (ev) {
+        lev_event_free(ev);
+    }
+    ev = NULL;
+    CHECK(lev_wait_event(node, &ev, 20) == LEV_OK); /* OK with NULL on timeout */
+    if (ev) {
+        lev_event_free(ev);
+    }
+    CHECK(lev_event_fd(NULL) < 0);
+
     uint8_t self_hash[LEV_ADDR_LEN];
     size_t hl = sizeof(self_hash);
     CHECK(lev_identity_hash_self(node, self_hash, sizeof(self_hash), &hl) ==

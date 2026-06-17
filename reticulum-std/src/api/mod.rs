@@ -147,6 +147,14 @@ impl Node {
         self.inner.identity_hash()
     }
 
+    /// Take the engine event receiver, once.
+    ///
+    /// The C FFI bridge owns this to drain events onto its pollable fd. Returns
+    /// `None` if already taken or if the node was built without events.
+    pub fn take_event_receiver(&mut self) -> Option<crate::driver::EventReceiver> {
+        self.inner.take_event_receiver()
+    }
+
     /// Access the underlying engine node.
     ///
     /// Escape hatch while the facade is incomplete: later phases re-project the

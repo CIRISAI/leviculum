@@ -20,11 +20,13 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Once;
 
 mod error;
+mod events;
 mod identity;
 mod log;
 mod node;
 
 pub use error::*;
+pub use events::*;
 pub use identity::*;
 pub use log::*;
 pub use node::*;

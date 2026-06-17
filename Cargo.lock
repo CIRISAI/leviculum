@@ -1071,6 +1071,7 @@ name = "reticulum-ffi"
 version = "0.6.3"
 dependencies = [
  "cbindgen",
+ "libc",
  "reticulum-std",
  "tokio",
  "tracing",

@@ -9,12 +9,20 @@ use std::ffi::CStr;
 use std::net::SocketAddr;
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use reticulum_std::api::{Node, NodeBuilder};
 
 use crate::error::*;
+use crate::events::{lev_event_t, EventBridge};
 use crate::guard;
 use crate::identity::lev_identity_t;
+
+/// Default lossless control-plane queue capacity for the event bridge.
+const DEFAULT_CONTROL_CAP: usize = 512;
+/// Default droppable data-plane queue capacity for the event bridge.
+const DEFAULT_DATA_CAP: usize = 256;
 
 /// Opaque node configuration handle.
 ///
@@ -24,10 +32,12 @@ pub struct lev_builder_t {
     inner: Option<NodeBuilder>,
 }
 
-/// Opaque node handle: owns the hidden runtime and the engine node.
+/// Opaque node handle: owns the hidden runtime, the engine node, and the event
+/// bridge that drains engine events onto a pollable fd.
 pub struct leviculum_t {
     rt: tokio::runtime::Runtime,
     node: Node,
+    events: Arc<EventBridge>,
 }
 
 /// Borrow a C string as `&str`, or `None` if NULL or not valid UTF-8.
@@ -211,14 +221,18 @@ pub unsafe extern "C" fn lev_builder_build(b: *mut lev_builder_t) -> *mut levicu
                 return std::ptr::null_mut();
             }
         };
-        let node = match nb.build() {
+        let mut node = match nb.build() {
             Ok(n) => n,
             Err(e) => {
                 map_error(&e);
                 return std::ptr::null_mut();
             }
         };
-        let rt = match tokio::runtime::Builder::new_current_thread()
+        // Multi-thread with one worker so the event-bridge task drains
+        // continuously on its own thread; block_on for the async methods still
+        // runs on the calling C thread.
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()
         {
@@ -228,7 +242,19 @@ pub unsafe extern "C" fn lev_builder_build(b: *mut lev_builder_t) -> *mut levicu
                 return std::ptr::null_mut();
             }
         };
-        Box::into_raw(Box::new(leviculum_t { rt, node }))
+        let events = match EventBridge::new(DEFAULT_CONTROL_CAP, DEFAULT_DATA_CAP) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                set_last_error(format!("failed to create event fd: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        // The engine event channels exist from build (not start), so the
+        // receiver is taken now and the bridge survives stop/start cycles.
+        if let Some(rx) = node.take_event_receiver() {
+            rt.spawn(crate::events::run_bridge(rx, Arc::clone(&events)));
+        }
+        Box::into_raw(Box::new(leviculum_t { rt, node, events }))
     })
 }
 
@@ -285,6 +311,97 @@ pub unsafe extern "C" fn lev_identity_hash_self(
             None => return LEV_ERR_NULL_PTR,
         };
         crate::write_out(&h.node.identity_hash(), buf, cap, out_len)
+    })
+}
+
+/// Return the readable event fd to add to the app's `poll`/`epoll`/`select`
+/// loop. The fd is owned by the library and closed by `lev_free`; the app must
+/// never close it. Returns a negative error code on a NULL node.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_fd(node: *const leviculum_t) -> c_int {
+    guard(LEV_ERR_PANIC, || match node.as_ref() {
+        Some(h) => h.events.fd(),
+        None => LEV_ERR_NULL_PTR,
+    })
+}
+
+/// Dequeue the next event without blocking. On success `*out` is the event
+/// handle (free it with `lev_event_free`) or NULL when the queue is empty.
+#[no_mangle]
+pub unsafe extern "C" fn lev_next_event(
+    node: *mut leviculum_t,
+    out: *mut *mut lev_event_t,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        *out = match h.events.next() {
+            Some(ev) => Box::into_raw(ev),
+            None => std::ptr::null_mut(),
+        };
+        LEV_OK
+    })
+}
+
+/// Block up to `timeout_ms` for the next event (negative means forever). On
+/// success `*out` is the event handle, or NULL if the timeout elapsed first.
+///
+/// Single-consumer: do not call concurrently with `lev_next_event` on the same
+/// node.
+#[no_mangle]
+pub unsafe extern "C" fn lev_wait_event(
+    node: *mut leviculum_t,
+    out: *mut *mut lev_event_t,
+    timeout_ms: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        let fd = h.events.fd();
+        let deadline = if timeout_ms < 0 {
+            None
+        } else {
+            Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
+        };
+        loop {
+            if let Some(ev) = h.events.next() {
+                *out = Box::into_raw(ev);
+                return LEV_OK;
+            }
+            // Poll in bounded slices so an infinite wait still rechecks state.
+            let slice_ms: c_int = match deadline {
+                None => 250,
+                Some(d) => {
+                    let now = Instant::now();
+                    if now >= d {
+                        *out = std::ptr::null_mut();
+                        return LEV_OK;
+                    }
+                    (d - now).as_millis().min(250) as c_int
+                }
+            };
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: single valid pollfd for the lifetime of the call.
+            unsafe {
+                libc::poll(&mut pfd as *mut libc::pollfd, 1, slice_ms);
+            }
+            // Loop back: re-check the queue (the poll may be spurious or the
+            // slice may have expired).
+        }
     })
 }
 
