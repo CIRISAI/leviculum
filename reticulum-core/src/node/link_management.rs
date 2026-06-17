@@ -779,6 +779,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             HexShort(link_id.as_bytes()),
             measured_rtt_ms
         );
+        crate::tracing::debug!(
+            target: "reticulum_core::link",
+            "LINK_ESTAB link={} rtt_ms={} keepalive_s={} stale_s={} inactivity_timeout_ms={} hops={} initiator=true",
+            HexShort(link_id.as_bytes()),
+            link.rtt_ms(),
+            link.keepalive_secs(),
+            link.stale_time_secs(),
+            link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
+            link.hops(),
+        );
 
         // For the RTT packet, use at least the default to avoid sending
         // 0.0 which would corrupt the responder's channel window tier and
@@ -910,6 +920,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         self.try_confirm_rtt(&link_id);
 
+        // Any non-keepalive inbound link packet resets the inactivity watchdog
+        // (the per-context handlers below call record_inbound). Keepalive echoes
+        // are logged separately as kind=keepalive_resp; handshake RTT and close
+        // packets are not link activity.
+        if !matches!(
+            packet.context,
+            PacketContext::Keepalive | PacketContext::Lrrtt | PacketContext::LinkClose
+        ) {
+            crate::tracing::debug!(
+                target: "reticulum_core::link",
+                "LINK_ACTIVITY link={} kind=data t_ms={} ctx={:?}",
+                HexShort(link_id.as_bytes()),
+                now_ms,
+                packet.context,
+            );
+        }
+
         match packet.context {
             PacketContext::Lrrtt => self.handle_rtt_packet(link_id, packet, now_secs),
             PacketContext::Keepalive => self.handle_keepalive_packet(link_id, packet, now_secs),
@@ -969,6 +996,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 HexShort(link_id.as_bytes()),
                 rtt_secs
             );
+            crate::tracing::debug!(
+                target: "reticulum_core::link",
+                "LINK_ESTAB link={} rtt_ms={} keepalive_s={} stale_s={} inactivity_timeout_ms={} hops={} initiator=false",
+                HexShort(link_id.as_bytes()),
+                link.rtt_ms(),
+                link.keepalive_secs(),
+                link.stale_time_secs(),
+                link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
+                link.hops(),
+            );
             self.events.push(NodeEvent::LinkEstablished {
                 link_id,
                 is_initiator: false,
@@ -984,6 +1021,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.record_inbound(now_secs);
         let data = packet.data.as_slice();
         if let Ok(should_echo) = link.process_keepalive(data) {
+            // Initiator side: a valid responder echo (should_echo == false) reset
+            // the watchdog. process_keepalive() already bumped keepalives_acked.
+            if !should_echo {
+                crate::tracing::debug!(
+                    target: "reticulum_core::link",
+                    "LINK_ACTIVITY link={} kind=keepalive_resp t_ms={} keepalives_sent={} keepalives_acked={}",
+                    HexShort(link_id.as_bytes()),
+                    now_secs.saturating_mul(MS_PER_SECOND),
+                    link.keepalives_sent(),
+                    link.keepalives_acked(),
+                );
+            }
             if should_echo {
                 if let Ok(echo_packet) = link.build_keepalive_packet() {
                     self.route_link_packet(&link_id, &echo_packet);
@@ -2318,6 +2367,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 "Link <{}> establishment timed out (no retries left)",
                 HexShort(link_id.as_bytes())
             );
+            if let Some(l) = self.links.get(&link_id) {
+                crate::tracing::debug!(
+                    target: "reticulum_core::link",
+                    "LINK_DIED link={} reason=other detail=handshake_timeout elapsed_since_activity_ms={} threshold_ms={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
+                    HexShort(link_id.as_bytes()),
+                    now_ms.saturating_sub(l.last_inbound_secs().saturating_mul(MS_PER_SECOND)),
+                    l.establishment_timeout_ms(),
+                    l.rtt_ms(),
+                    l.keepalives_sent(),
+                    l.keepalives_acked(),
+                );
+            }
             self.remove_link(&link_id);
             self.emit_link_closed(
                 link_id,
@@ -2423,7 +2484,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let (is_initiator, destination_hash) = self
                 .links
                 .get(&link_id)
-                .map(|l| (l.is_initiator(), *l.destination_hash()))
+                .map(|l| {
+                    crate::tracing::debug!(
+                        target: "reticulum_core::link",
+                        "LINK_DIED link={} reason=other detail=rtt_retry_exhausted elapsed_since_activity_ms={} threshold_ms={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
+                        HexShort(link_id.as_bytes()),
+                        now_ms.saturating_sub(l.last_inbound_secs().saturating_mul(MS_PER_SECOND)),
+                        l.rtt_retry_interval_ms(),
+                        l.rtt_ms(),
+                        l.keepalives_sent(),
+                        l.keepalives_acked(),
+                    );
+                    (l.is_initiator(), *l.destination_hash())
+                })
                 .unwrap_or((true, DestinationHash::new([0; 16])));
             self.remove_link(&link_id);
             self.emit_link_closed(
@@ -2452,6 +2525,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         HexShort(link_id.as_bytes())
                     );
                     link.record_keepalive_sent(now_secs);
+                    crate::tracing::debug!(
+                        target: "reticulum_core::link",
+                        "LINK_KEEPALIVE_TX link={} t_ms={} keepalives_sent={}",
+                        HexShort(link_id.as_bytes()),
+                        now_secs.saturating_mul(MS_PER_SECOND),
+                        link.keepalives_sent(),
+                    );
                     self.route_link_packet(&link_id, &packet);
                 }
             }
@@ -2492,6 +2572,35 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let close_info = if let Some(link) = self.links.get_mut(&link_id) {
                 let is_initiator = link.is_initiator();
                 let destination_hash = *link.destination_hash();
+
+                // Classify the death before tearing the link down. The single
+                // inactivity watchdog (last_inbound) drives both cases; the
+                // keepalive counters distinguish them:
+                //   keepalive_timeout = initiator sent keepalives that went
+                //     unanswered (probed, silence) -> lossy-path margin (case b)
+                //   stale = pure inactivity, no unanswered keepalive probe
+                let sent = link.keepalives_sent();
+                let acked = link.keepalives_acked();
+                let reason = if is_initiator && sent > acked {
+                    "keepalive_timeout"
+                } else {
+                    "stale"
+                };
+                let elapsed_ms = now_secs
+                    .saturating_sub(link.last_inbound_secs())
+                    .saturating_mul(MS_PER_SECOND);
+                crate::tracing::debug!(
+                    target: "reticulum_core::link",
+                    "LINK_DIED link={} reason={} elapsed_since_activity_ms={} threshold_ms={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
+                    HexShort(link_id.as_bytes()),
+                    reason,
+                    elapsed_ms,
+                    link.stale_close_timeout_secs().saturating_mul(MS_PER_SECOND),
+                    link.rtt_ms(),
+                    sent,
+                    acked,
+                );
+
                 let close_packet = link.build_close_packet(&mut self.rng).ok();
                 link.close();
                 Some((is_initiator, destination_hash, close_packet))

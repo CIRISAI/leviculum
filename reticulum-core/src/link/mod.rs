@@ -377,6 +377,12 @@ pub struct Link {
     last_outbound: u64,
     /// Last time we sent a keepalive (timestamp in seconds)
     last_keepalive: u64,
+    /// Count of keepalives sent proactively (initiator), since establishment.
+    /// Diagnostic counter only; not used for any timeout decision.
+    keepalives_sent: u64,
+    /// Count of keepalive responses received (initiator), since establishment.
+    /// Diagnostic counter only; not used for any timeout decision.
+    keepalives_acked: u64,
     /// When the link was established (timestamp in seconds)
     established_at: Option<u64>,
     /// Proof strategy for received data on this link (responder only)
@@ -482,6 +488,8 @@ impl Link {
             last_inbound: 0,
             last_outbound: 0,
             last_keepalive: 0,
+            keepalives_sent: 0,
+            keepalives_acked: 0,
             established_at: None,
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
@@ -589,6 +597,8 @@ impl Link {
             last_inbound: 0,
             last_outbound: 0,
             last_keepalive: 0,
+            keepalives_sent: 0,
+            keepalives_acked: 0,
             established_at: None,
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
@@ -1106,11 +1116,19 @@ impl Link {
             return false;
         }
         let elapsed = current_time_secs.saturating_sub(self.last_inbound);
+        elapsed > self.stale_close_timeout_secs()
+    }
+
+    /// Total inactivity (since last inbound) after which a stale link is closed.
+    ///
+    /// `stale_time + RTT * LINK_KEEPALIVE_TIMEOUT_FACTOR + LINK_STALE_GRACE_SECS`,
+    /// using this link's measured RTT. Pure; shared by `should_close()` and the
+    /// `LINK_DIED`/`LINK_ESTAB` diagnostics.
+    pub fn stale_close_timeout_secs(&self) -> u64 {
         let rtt_secs = self.rtt_secs().unwrap_or(0.0);
-        let timeout = self.stale_time_secs
+        self.stale_time_secs
             + (rtt_secs * LINK_KEEPALIVE_TIMEOUT_FACTOR as f64) as u64
-            + LINK_STALE_GRACE_SECS;
-        elapsed > timeout
+            + LINK_STALE_GRACE_SECS
     }
 
     /// Calculate keepalive interval from RTT (matching Python formula)
@@ -1207,6 +1225,17 @@ impl Link {
     /// Record that we sent a keepalive
     pub fn record_keepalive_sent(&mut self, now_secs: u64) {
         self.last_keepalive = now_secs;
+        self.keepalives_sent = self.keepalives_sent.saturating_add(1);
+    }
+
+    /// Number of proactive keepalives sent since establishment (diagnostic).
+    pub fn keepalives_sent(&self) -> u64 {
+        self.keepalives_sent
+    }
+
+    /// Number of keepalive responses received since establishment (diagnostic).
+    pub fn keepalives_acked(&self) -> u64 {
+        self.keepalives_acked
     }
 
     /// Mark the link as established
@@ -2205,6 +2234,8 @@ impl Link {
             if keepalive_byte != KEEPALIVE_RESPONDER_BYTE {
                 return Err(LinkError::InvalidRtt);
             }
+            // A valid responder echo proves our keepalive round-tripped.
+            self.keepalives_acked = self.keepalives_acked.saturating_add(1);
             // Initiator doesn't echo back
             Ok(false)
         } else {
@@ -3049,6 +3080,51 @@ mod tests {
         assert!(!link.should_close(1020)); // Not past stale_time yet from last_inbound
                                            // Total elapsed needs to be > stale_time + RTT*4 + grace = 20 + 0 + 5 = 25
         assert!(link.should_close(1026));
+    }
+
+    #[test]
+    fn test_stale_close_timeout_secs() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+
+        // stale_time=20s, RTT=0 -> 20 + 0*4 + grace(5) = 25
+        link.set_timing_for_test(10, 20, 1000);
+        assert_eq!(link.stale_close_timeout_secs(), 20 + LINK_STALE_GRACE_SECS);
+
+        // RTT=3s -> 20 + 3*KEEPALIVE_TIMEOUT_FACTOR + grace
+        link.set_rtt_ms(3000);
+        assert_eq!(
+            link.stale_close_timeout_secs(),
+            20 + 3 * LINK_KEEPALIVE_TIMEOUT_FACTOR + LINK_STALE_GRACE_SECS
+        );
+
+        // The threshold must equal the boundary should_close() trips at.
+        link.set_state(LinkState::Stale);
+        let timeout = link.stale_close_timeout_secs();
+        assert!(!link.should_close(1000 + timeout));
+        assert!(link.should_close(1000 + timeout + 1));
+    }
+
+    #[test]
+    fn test_keepalive_counters() {
+        let (mut initiator, mut responder) = setup_active_link_pair();
+
+        // Initiator sends keepalives; responder echoes.
+        initiator.record_keepalive_sent(100);
+        initiator.record_keepalive_sent(200);
+        assert_eq!(initiator.keepalives_sent(), 2);
+        assert_eq!(initiator.keepalives_acked(), 0);
+
+        // Responder receives initiator keepalive, echoes back the responder byte.
+        let init_ka = initiator.build_keepalive_packet().unwrap();
+        let echo = init_ka.last().copied().unwrap();
+        assert!(responder.process_keepalive(&[echo]).unwrap()); // responder echoes
+
+        // Initiator processes the responder echo -> ack counter increments.
+        let resp_ka = responder.build_keepalive_packet().unwrap();
+        let resp_byte = resp_ka.last().copied().unwrap();
+        assert!(!initiator.process_keepalive(&[resp_byte]).unwrap()); // initiator does not echo
+        assert_eq!(initiator.keepalives_acked(), 1);
     }
 
     fn setup_active_link_pair() -> (Link, Link) {
