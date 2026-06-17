@@ -19,12 +19,14 @@ use std::os::raw::{c_char, c_int};
 use std::panic::AssertUnwindSafe;
 use std::sync::Once;
 
+mod destination;
 mod error;
 mod events;
 mod identity;
 mod log;
 mod node;
 
+pub use destination::*;
 pub use error::*;
 pub use events::*;
 pub use identity::*;

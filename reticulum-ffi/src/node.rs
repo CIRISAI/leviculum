@@ -40,6 +40,18 @@ pub struct leviculum_t {
     events: Arc<EventBridge>,
 }
 
+impl leviculum_t {
+    /// Borrow the facade node (for sibling modules like destinations).
+    pub(crate) fn node(&self) -> &Node {
+        &self.node
+    }
+
+    /// Borrow the hidden runtime to drive async engine calls.
+    pub(crate) fn runtime(&self) -> &tokio::runtime::Runtime {
+        &self.rt
+    }
+}
+
 /// Borrow a C string as `&str`, or `None` if NULL or not valid UTF-8.
 unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {

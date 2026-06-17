@@ -85,3 +85,8 @@ fn compile_and_run(source: &str, bin_name: &str) {
 fn c_phase_a_acceptance() {
     compile_and_run("examples/c/phase_a.c", "phase_a_c");
 }
+
+#[test]
+fn c_phase_b_acceptance() {
+    compile_and_run("examples/c/phase_b.c", "phase_b_c");
+}

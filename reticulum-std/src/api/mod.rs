@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 pub use crate::error::{Error as ApiError, Result};
+pub use crate::{Destination, DestinationHash, DestinationType, Direction};
 pub use reticulum_core::Identity;
 
 /// Generate a new random identity using the system RNG.
@@ -155,6 +156,23 @@ impl Node {
         self.inner.take_event_receiver()
     }
 
+    /// Register a local destination so the node can announce it and accept
+    /// links or packets for it.
+    pub fn register_destination(&self, destination: Destination) {
+        self.inner.register_destination(destination);
+    }
+
+    /// Announce a registered destination on all interfaces.
+    ///
+    /// `app_data` is optional application payload carried in the announce.
+    pub async fn announce(
+        &self,
+        dest_hash: &DestinationHash,
+        app_data: Option<&[u8]>,
+    ) -> Result<()> {
+        self.inner.announce_destination(dest_hash, app_data).await
+    }
+
     /// Access the underlying engine node.
     ///
     /// Escape hatch while the facade is incomplete: later phases re-project the
@@ -186,6 +204,34 @@ mod tests {
         let id = generate_identity();
         assert!(id.has_private_keys());
         assert_eq!(id.hash().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn register_and_announce_single_destination() {
+        let id = generate_identity();
+        let mut node = NodeBuilder::new()
+            .identity(id.clone())
+            .storage_path(std::env::temp_dir().join("leviculum-api-test-announce"))
+            .enable_transport(false)
+            .build()
+            .expect("build node");
+        node.start().await.expect("start node");
+
+        let dest = Destination::new(
+            Some(id),
+            Direction::In,
+            DestinationType::Single,
+            "leviculum-test",
+            &["api"],
+        )
+        .expect("build destination");
+        let dh = *dest.hash();
+        node.register_destination(dest);
+        // With no interfaces the announce reaches nobody, but the action path
+        // must succeed.
+        node.announce(&dh, Some(b"hi")).await.expect("announce");
+
+        node.stop().await.expect("stop node");
     }
 
     #[tokio::test]
