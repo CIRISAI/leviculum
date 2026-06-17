@@ -81,8 +81,40 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.dropped_count = dropped_count;
             e
         }
+        NodeEvent::LinkRequest {
+            link_id,
+            destination_hash,
+            ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_REQUEST, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.dest_hash = Some(*destination_hash.as_bytes());
+            e
+        }
+        NodeEvent::LinkEstablished { link_id, .. } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_ESTABLISHED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e
+        }
+        NodeEvent::LinkClosed { link_id, .. } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_CLOSED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e
+        }
+        NodeEvent::LinkDataReceived { link_id, data } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_DATA, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.data = data;
+            e
+        }
+        NodeEvent::MessageReceived { link_id, data, .. } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_DATA, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.data = data;
+            e
+        }
         // Other variants keep their class so the cap policy is right, but carry
-        // no typed fields yet; phases c to e replace this with real projection.
+        // no typed fields yet; phases d and e replace this with real projection.
         _ => lev_event_t::bare(LEV_EVENT_OTHER, is_control),
     }
 }

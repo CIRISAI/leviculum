@@ -39,6 +39,8 @@ pub const LEV_ERR_REQUEST: c_int = -12;
 pub const LEV_ERR_TIMEOUT: c_int = -13;
 /// Non-fatal backpressure; retry later (mirrors EAGAIN).
 pub const LEV_ERR_AGAIN: c_int = -14;
+/// No cached identity for the destination; wait for an announce or request a path.
+pub const LEV_ERR_UNKNOWN_DEST: c_int = -15;
 /// A panic was caught at the FFI boundary and converted to an error.
 pub const LEV_ERR_PANIC: c_int = -127;
 
@@ -119,6 +121,7 @@ pub extern "C" fn lev_strerror(code: c_int) -> *const c_char {
         LEV_ERR_REQUEST => b"request error\0",
         LEV_ERR_TIMEOUT => b"timed out\0",
         LEV_ERR_AGAIN => b"resource temporarily unavailable\0",
+        LEV_ERR_UNKNOWN_DEST => b"no cached identity for destination\0",
         LEV_ERR_PANIC => b"panic at FFI boundary\0",
         _ => b"unknown error\0",
     };

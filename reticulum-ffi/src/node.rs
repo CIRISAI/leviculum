@@ -52,6 +52,24 @@ impl leviculum_t {
     }
 }
 
+/// Drive `fut` to completion under a deadline, blocking the calling thread.
+///
+/// Returns `Ok(output)` on completion, or `Err(())` if `timeout_ms >= 0` and
+/// the deadline elapsed first. A negative `timeout_ms` waits forever.
+pub(crate) fn block_on_timeout<F: std::future::Future>(
+    rt: &tokio::runtime::Runtime,
+    fut: F,
+    timeout_ms: c_int,
+) -> Result<F::Output, ()> {
+    if timeout_ms < 0 {
+        Ok(rt.block_on(fut))
+    } else {
+        let dur = Duration::from_millis(timeout_ms as u64);
+        rt.block_on(async { tokio::time::timeout(dur, fut).await })
+            .map_err(|_| ())
+    }
+}
+
 /// Borrow a C string as `&str`, or `None` if NULL or not valid UTF-8.
 unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {

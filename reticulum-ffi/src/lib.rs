@@ -23,6 +23,7 @@ mod destination;
 mod error;
 mod events;
 mod identity;
+mod link;
 mod log;
 mod node;
 
@@ -30,6 +31,7 @@ pub use destination::*;
 pub use error::*;
 pub use events::*;
 pub use identity::*;
+pub use link::*;
 pub use log::*;
 pub use node::*;
 

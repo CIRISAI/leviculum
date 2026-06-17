@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 pub use crate::error::{Error as ApiError, Result};
-pub use crate::{Destination, DestinationHash, DestinationType, Direction};
+pub use crate::{Destination, DestinationHash, DestinationType, Direction, LinkHandle, LinkId};
 pub use reticulum_core::Identity;
 
 /// Generate a new random identity using the system RNG.
@@ -171,6 +171,40 @@ impl Node {
         app_data: Option<&[u8]>,
     ) -> Result<()> {
         self.inner.announce_destination(dest_hash, app_data).await
+    }
+
+    /// Whether a path to the destination is known.
+    pub fn has_path(&self, dest_hash: &DestinationHash) -> bool {
+        self.inner.has_path(dest_hash)
+    }
+
+    /// Hop count to the destination, if a path is known.
+    pub fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8> {
+        self.inner.hops_to(dest_hash)
+    }
+
+    /// The cached identity for a destination, learned from an announce.
+    pub fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity> {
+        self.inner.get_identity(dest_hash)
+    }
+
+    /// Request a path to a destination. The result arrives as a path-found event.
+    pub async fn request_path(&self, dest_hash: &DestinationHash) -> Result<()> {
+        self.inner.request_path(dest_hash).await
+    }
+
+    /// Open a link to a destination, given its Ed25519 signing key.
+    pub async fn connect_with_key(
+        &self,
+        dest_hash: &DestinationHash,
+        signing_key: &[u8; 32],
+    ) -> Result<LinkHandle> {
+        self.inner.connect(dest_hash, signing_key).await
+    }
+
+    /// Accept an incoming link request from a link-request event.
+    pub async fn accept_link(&self, link_id: &LinkId) -> Result<LinkHandle> {
+        self.inner.accept_link(link_id).await
     }
 
     /// Access the underlying engine node.
