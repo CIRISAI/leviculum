@@ -44,6 +44,14 @@ fn compile_and_run(source: &str, bin_name: &str) {
         return;
     }
 
+    // The cdylib carries SONAME libleviculum.so.0 (set in build.rs), so the
+    // runtime loader looks for that name. Cargo names the build output
+    // libleviculum.so, so provide the SONAME symlink next to it.
+    let soname = lib_dir.join("libleviculum.so.0");
+    if !soname.exists() {
+        let _ = std::os::unix::fs::symlink("libleviculum.so", &soname);
+    }
+
     let crate_dir = crate_dir();
     let source = crate_dir.join(source);
     // The generated header lives at the crate root; the example includes

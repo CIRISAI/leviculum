@@ -160,7 +160,15 @@ impl Node {
 
     /// Register a local destination so the node can announce it and accept
     /// links or packets for it.
+    ///
+    /// Incoming destinations are set to accept links, so a registered IN
+    /// destination surfaces `LinkRequest` events the app accepts or ignores.
+    /// Without this the engine silently drops incoming link requests.
     pub fn register_destination(&self, destination: Destination) {
+        let mut destination = destination;
+        if destination.direction() == Direction::In {
+            destination.set_accepts_links(true);
+        }
         self.inner.register_destination(destination);
     }
 

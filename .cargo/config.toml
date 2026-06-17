@@ -44,6 +44,10 @@ lint = "clippy --all"
 build-ffi = "build -p reticulum-ffi --release --target x86_64-unknown-linux-gnu"
 build-ffi-arm64 = "build -p reticulum-ffi --release --target aarch64-unknown-linux-gnu"
 test-ffi = "test -p reticulum-ffi --target x86_64-unknown-linux-gnu"
+# Just the C-API-to-Python-RNS interop suite (spawns scripts/test_daemon.py;
+# skips if Python RNS is unavailable), called out like reticulum-std's
+# test-interop. The Rust suites also run on the musl default via the rlib.
+test-ffi-interop = "test -p reticulum-ffi --test ffi_interop"
 
 # Embedded cross-compilation (requires: rustup target add <target>)
 check-nrf52 = "build -p reticulum-core --target thumbv7em-none-eabihf"

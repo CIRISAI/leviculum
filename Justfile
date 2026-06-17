@@ -66,10 +66,10 @@ fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Runs in background
 # after every commit via the post-commit hook.
-# Tier 1 (~15 min): Tier 0 + core/tests + ffi + proxy + rnsd_interop.
-standard: fast
+# Tier 1 (~15 min): Tier 0 + core/tests + ffi (incl. C-program + Python interop)
+# + proxy + rnsd_interop.
+standard: fast test-ffi
     cargo test -p reticulum-core --tests
-    cargo test -p reticulum-ffi
     cargo test -p reticulum-proxy
     cargo test -p reticulum-std --test rnsd_interop
     cargo test -p reticulum-std --test event_log_subscriber -- --test-threads=1
@@ -114,6 +114,16 @@ nightly: extensive
 # deliberately overrides the workspace musl default — see the comment
 # in .cargo/config.toml. cbindgen regenerates reticulum.h as a side
 # effect of the build.rs.
+# Comprehensive C API test suite on the glibc target: the Rust unit,
+# integration, and Python-interop suites plus the C acceptance programs linked
+# against the real cdylib. Builds the debug glibc cdylib first, because once
+# the crate has an rlib `cargo test` no longer builds the cdylib, and the
+# C-program harness needs libleviculum.so to link and run. The Python interop
+# tests skip cleanly if Python RNS is unavailable.
+test-ffi:
+    cargo build -p reticulum-ffi --target x86_64-unknown-linux-gnu
+    cargo test-ffi
+
 build-ffi:
     cargo build-ffi
 
