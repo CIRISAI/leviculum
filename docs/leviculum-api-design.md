@@ -30,6 +30,16 @@ request/response scope) the brief wins; where a review suggestion sits
 outside the additive-only boundary (driver-internal poison recovery) the
 achievable contract is stated instead.
 
+A third review round (`docs/api-design-review-2.md`) is also folded in: the
+eventfd invariant is made a true per-instant one by doing the counter
+syscalls under the FIFO lock, with the drop policy never evicting a counted
+event (§4); status and value are never multiplexed, value-returning calls use
+out-parameters (§2); multi-payload events get per-field accessors (§4); and a
+set of smaller honesty fixes (double-start maps to `LEV_ERR_CONFIG`, datagram
+needs a known path, the action-timeout outcome is at-most-once with unknown
+dispatch, `lev_init` runs through one `Once`, no request-handler unregister
+in v1, `lev_connect` flagged as new glue).
+
 Implementation status. The function and constant names in sections 4 to 13
 describe the target v1 surface, not what is built today. Currently
 implemented is the early phase-a slice: instance lifecycle, identity,
@@ -125,6 +135,18 @@ negative `LEV_ERR_*` code on failure. Constructors that return a handle
 return `NULL` on failure and set the thread-local last error. The codes are
 emitted as `int` constants (not a C enum) so functions return plain `int`
 and the values are the exact `LEV_*` spelling.
+
+Status and value are never multiplexed into one return. A function that both
+can fail and produces a value returns the `int` status and writes the value
+through an out-parameter, the same read(2) convention the event accessors
+use. So a send that yields a packet or resource hash is
+`int lev_send_datagram(leviculum_t *node, const uint8_t dest[16],
+const uint8_t *data, size_t len, uint8_t out_hash[16])`, not a function that
+returns the hash. Section 10's `-> hash` and `-> request id` notes are
+shorthand for "the value lands in a fixed-size out-parameter"; the only
+functions that return a non-`int` directly are the infallible accessors
+(`lev_version_number`, `lev_strerror`, `lev_last_error`) and the
+handle-returning constructors.
 
 ```c
 #define LEV_OK                  0
@@ -296,22 +318,38 @@ the FIFO's insertion order then keeps control events ahead of later data.
 Losslessness is preserved separately by the per-plane caps below.
 
 Invariant: the eventfd counter always equals the number of events currently
-in the queue.
+in the queue. To make this a true per-instant invariant (not merely an
+eventual one), the eventfd syscall is done inside the FIFO mutex, paired with
+the push or pop, so a counter and a length never disagree while the lock is
+free:
 
-- Bridge, per event: lock, push to the FIFO, unlock, then `write(fd, 1)` to
-  increment the counter.
-- `lev_next_event`: lock, pop one, unlock; if a pop happened, `read(fd)`
-  once to decrement the counter by 1.
+- Bridge, per accepted event: lock, push to the FIFO, `write(fd, 1)` to
+  increment, unlock.
+- `lev_next_event`: lock, pop one; if a pop happened, `read(fd)` once to
+  decrement by 1, unlock.
 
-Because every enqueue increments and every successful dequeue decrements,
-the counter tracks the queue length exactly. Readiness is therefore a pure
-function of queue-non-empty: `poll`/`epoll` report the fd readable iff the
-counter is `> 0` iff at least one event is queued. This kills both failure
-modes the review named:
+Doing the syscalls under the lock has two consequences that close the seams a
+naive lock-then-syscall ordering would leave open:
 
-- No lost wakeup. An event pushed just after the consumer drained to empty
-  increments the counter and re-arms the fd, even if it races in right after
-  the last `read`. The counter, not a one-shot flag, is the signal.
+- The consumer `read` never sees `EAGAIN`. It reads only after a successful
+  pop, when the counter (mutated under the same lock as the FIFO) is provably
+  `>= 1`. There is no producer-push-before-fd-write window for the consumer
+  to race into. The eventfd stays `EFD_NONBLOCK` purely as a belt-and-braces
+  guard; a spurious `EAGAIN` is treated as "nothing to decrement", never an
+  error and never an underflow.
+- No counted event is ever silently evicted (see the overflow policy below),
+  so the counter never runs ahead of the queue and the fd is never readable
+  with an empty queue. The eventfd syscalls are cheap (sub-microsecond,
+  non-blocking) and the critical section is tiny, so holding the lock across
+  them costs nothing at realistic event rates.
+
+Readiness is therefore a pure function of queue-non-empty: `poll`/`epoll`
+report the fd readable iff the counter is `> 0` iff at least one event is
+queued. This kills both failure modes the review named:
+
+- No lost wakeup. An event accepted just after the consumer drained to empty
+  increments the counter under the lock and re-arms the fd. The counter, not
+  a one-shot flag, is the signal.
 - No busy loop. Once the queue is empty the counter is `0` and `poll`
   blocks.
 
@@ -355,10 +393,15 @@ held; an event outlives the queue slot it came from and is valid until
 
 Queue bound and overflow. The FIFO mirrors the engine's split (Codeberg
 #71): control events are lossless up to a high cap, data events are
-droppable under backpressure. The bridge applies the same policy: a full
-data region drops the oldest data event silently (normal backpressure); a
-control overflow is coalesced into a single `LEV_EVENT_CONTROL_OVERFLOW`
-event carrying the dropped count, enqueued as soon as there is room, so loss
+droppable under backpressure. Crucially, the cap is enforced at enqueue, so a
+dropped event is never counted and never writes the fd, keeping the
+counter-equals-length invariant intact (the bridge never evicts an
+already-enqueued, already-counted event, which would otherwise require a
+compensating `read`). When the data region is full the bridge drops the
+incoming data event, exactly as the engine's own data plane does when its
+bounded `try_send` is full; this is normal backpressure. A control overflow
+is coalesced into a single `LEV_EVENT_CONTROL_OVERFLOW` event carrying the
+dropped count, itself enqueued (and counted) only once there is room, so loss
 is always visible and never itself lost. Capacities are configurable on the
 builder (`lev_builder_event_capacity`), defaulting to the engine's control
 and data channel capacities.
@@ -391,6 +434,20 @@ int lev_event_data(const lev_event_t *ev,
                    uint8_t *buf, size_t cap, size_t *out_len);
 ```
 
+A single `lev_event_data` cannot express events that carry more than one
+payload, so the projection adds per-field accessors for those, each read(2)
+style and each returning `LEV_ERR_INVALID_ARG` on an event that lacks the
+field:
+
+- `ResourceCompleted` carries data plus metadata: `lev_event_metadata`
+  reads the metadata, `lev_event_data` the data.
+- `RequestReceived` carries a path string, a request id, and data:
+  `lev_event_path`, `lev_event_request_id` (16 bytes), `lev_event_data`.
+- `ResourceProgress` exposes its progress fraction via `lev_event_progress`.
+
+Settling these accessors now, before the header for phases d and e calcifies,
+is the point: a one-payload event model would have to be widened later.
+
 An accessor that does not apply to the event's type returns
 `LEV_ERR_INVALID_ARG`. The facade `Event` enum collapses the `NodeEvent`
 variants to the v1-relevant set and drops internal fields (raw
@@ -406,9 +463,12 @@ The tokio runtime is created and owned inside `leviculum_t` and never
 exposed. There are two independent runtimes, and the distinction matters for
 the blocking contract:
 
-- The node's own runtime. `ReticulumNode::start` builds a dedicated
-  single-worker runtime and spawns the event loop on it (`driver/mod.rs`).
-  This loop runs on its own worker thread independent of any C thread.
+- The node's own runtime. `ReticulumNode::start` builds a multi-thread
+  runtime with one worker (`new_multi_thread().worker_threads(1)`,
+  `driver/mod.rs`) and spawns the event loop on it. That worker is a real OS
+  thread, so the loop runs independent of any C thread (this is what makes
+  the deadlock-freedom argument below hold; a `new_current_thread` runtime
+  would only advance when blocked on).
 - The FFI runtime. The boundary holds one current-thread runtime used only
   to `block_on` the engine's async methods (`connect`, `announce`, `send`,
   `stop`). `block_on` drives the future on the calling C thread.
@@ -451,6 +511,18 @@ every iteration and runs on its own runtime, see above), so these enqueue
 calls return promptly; the deadline is the backstop, and the genuinely
 unbounded case it tames is `LinkHandle::send`'s retry loop.
 
+What a timeout means for the action. On `LEV_ERR_TIMEOUT` from an
+action-enqueue call, the action may or may not have been dispatched: the
+`block_on(timeout(..))` abandons the future, but the send may have already
+landed on the channel just as the deadline fired. The library does not
+retry, and the C caller cannot tell from the return code alone. The contract
+is therefore at-most-once with an unknown outcome on timeout. For the
+naturally idempotent calls (`lev_announce`, `lev_request_path`) a retry is
+harmless. For `lev_connect` a timeout that did dispatch may still surface a
+later `LinkEstablished` or `LinkClosed` event, which the app should be
+prepared to see; the safe pattern is to treat the link id as tentative until
+its establishment event arrives.
+
 Thread-safety guarantees, documented in the header:
 
 - `leviculum_t` is thread-safe. Its methods may be called concurrently from
@@ -469,6 +541,13 @@ another runtime's worker thread, so `lev_free`, `lev_stop`, and every other
 blocking boundary call must run on a plain OS thread, never on a thread that
 is itself a worker of a host runtime (the PyO3 and future JNI hazard the
 engine comments flag). This is a documented precondition.
+
+The same rule makes the logging callback constraint in §12 load-bearing, not
+mere etiquette: a log record can be emitted from the node's runtime worker,
+so the callback runs on that worker; if it called a blocking `lev_*`
+function, that function's `block_on` would run inside a runtime worker and
+panic. The "a log callback must not call back into `lev_*`" rule in §12 is
+this soundness constraint, cross-referenced here.
 
 ## 6. No panic across the FFI boundary
 
@@ -524,8 +603,15 @@ the default, so this is behaviour-preserving), never `abort`, so
 `catch_unwind` actually catches. This is not merely a tidiness choice: a
 `cdylib` built with `panic = abort` would turn every internal Rust panic
 into a process abort of the host application, which is unacceptable for a
-library. A grep-based test asserts every `#[no_mangle] extern "C"` body goes
-through `guard`, backed by review.
+library.
+
+Enforcement. The `guard` function is the wrapper every boundary body calls,
+but a function can still be forgotten when a new `extern "C"` fn is written.
+v1 backs it with a test that greps the FFI source and fails if any
+`#[no_mangle] extern "C"` body does not go through `guard`. A stronger option
+is a proc-macro attribute that generates the guarded body so it cannot be
+written without it; that is recorded as a later hardening, kept out of v1 to
+avoid the macro-crate weight, with the grep test as the backstop until then.
 
 ## 7. ABI and versioning
 
@@ -544,7 +630,11 @@ uint32_t    lev_version_number(void);    /* (major<<16)|(minor<<8)|patch */
 `lev_version_number` packs the components into one `uint32_t` as
 `(major << 16) | (minor << 8) | patch`. Minor and patch are therefore capped
 at 255; this is documented in the header and is ample for the foreseeable
-series. The string accessor is authoritative and has no cap.
+series. The string accessor is authoritative and has no cap. The packed
+number is a host-byte-order integer meant for in-process comparisons
+(`lev_version_number() >= 0x000603`), not for serialization or
+wire exchange; serialize the string if a version must cross a process or
+host boundary.
 
 All structs are opaque, so adding fields never breaks the ABI. New
 functionality is added as new functions; existing signatures are frozen once
@@ -571,8 +661,12 @@ Flat enums replace the Rust sum types at the boundary:
   variant carries data in Rust (`AllowList(Vec<[u8; 16]>)`), which a flat
   enum cannot, so the allowlist is passed alongside as
   `lev_register_request_handler(node, dest_hash, path, policy, const uint8_t
-  *allow_ids, size_t n_ids)`, where `allow_ids` is `n_ids * 16` bytes and is
-  used only for the `ALLOW_LIST` policy.
+  *allow_identity_hashes, size_t n_ids)`, where `allow_identity_hashes` is
+  `n_ids * 16` bytes of identity hashes (not generic ids) and is read only
+  for the `ALLOW_LIST` policy. There is no unregister in v1: registering a
+  handler for a `(dest_hash, path)` pair overwrites any previous one, and
+  handlers live for the node's lifetime. A C author should not look for a
+  `lev_unregister_request_handler`.
 - Resource strategy: `LEV_RESOURCE_ACCEPT_NONE`, `LEV_RESOURCE_ACCEPT_ALL`,
   `LEV_RESOURCE_ACCEPT_APP`.
 - Destination direction and type, and event types, are likewise flat
@@ -625,6 +719,10 @@ Instance and version:
 - `lev_start`, `lev_stop`, `lev_is_running`, `lev_free`
 - `lev_version_string`, `lev_version_number`
 
+`lev_start` on an already-running node is not a no-op: the engine returns
+`Error::Config("node already running")`, which maps to `LEV_ERR_CONFIG`.
+Check `lev_is_running` first if a double start is possible.
+
 Identity:
 - `lev_identity_generate`, `lev_identity_from_private_key`,
   `lev_identity_from_public_key`, `lev_identity_free`
@@ -661,6 +759,14 @@ Hiding the key split behind `lev_connect` is the resolution of review point
 B3: a C author never extracts bytes `32..64` by hand. The explicit variant
 remains for completeness.
 
+`lev_connect` is NEW facade glue, not a pure re-typing, on par with the file
+IO above. The engine and core `connect` both take the Ed25519 signing key as
+an argument; neither does the lookup. The facade does it: call
+`Storage::get_identity(dest_hash) -> Option<Identity>` (`driver/mod.rs`),
+take bytes `32..64` of its public key as the signing key, then call the
+engine `connect`. It is additive and small, but phase c budgets for it as
+real code rather than a one-liner.
+
 Link send, receive, close:
 - `lev_link_try_send` (non-blocking, `LEV_ERR_AGAIN` on backpressure),
   `lev_link_send` (blocks up to `timeout_ms`)
@@ -670,14 +776,19 @@ Link send, receive, close:
 - receive is via the event stream (`LinkDataReceived`, `MessageReceived`)
 
 Datagram:
-- `lev_send_datagram` (dest hash + bytes, single packet) -> 16-byte packet
-  hash. Unreliable: a `PacketDeliveryConfirmed` event arrives only if the
-  destination returns a proof (proof strategy dependent), so a C app must
-  not block waiting for a confirmation that may never come. Reliable
-  delivery events are a property of links and resources, not datagrams.
+- `lev_send_datagram` (dest hash + bytes, single packet), packet hash into a
+  16-byte out-parameter. Precondition: a path to the destination must already
+  be known (`send_single_packet` requires it, `driver/mod.rs`); if not, it
+  returns `LEV_ERR_NO_PATH`, the same precondition as `lev_connect`, so call
+  `lev_request_path` first. Unreliable: a `PacketDeliveryConfirmed` event
+  arrives only if the destination returns a proof (proof strategy dependent),
+  so a C app must not block waiting for a confirmation that may never come.
+  Reliable delivery events are a property of links and resources, not
+  datagrams.
 
 Request and response:
-- `lev_register_request_handler` (dest hash, path, policy, allow_ids, n_ids)
+- `lev_register_request_handler` (dest hash, path, policy,
+  allow_identity_hashes, n_ids)
 - `lev_send_request` (link, path, optional data, timeout) -> request id
 - `lev_send_response` (link, request id, data)
 - request/response arrival and timeout arrive as events
@@ -751,11 +862,13 @@ so. Pinned down here:
 
 - `lev_init(void)` performs one-time process setup: installs the `tracing`
   subscriber (§12) and a panic hook compatible with the `catch_unwind` guard
-  (§6). It is idempotent and safe to call more than once and from multiple
-  threads; the first call wins. Calling any other `lev_*` function before
-  `lev_init` is allowed (the library lazily runs init), but an app that
-  wants logging configured before the first node should call it explicitly.
-  This restores the global-setup role the old stub's `lns_init` had.
+  (§6). It runs the setup through a single `std::sync::Once`, so it is
+  idempotent and safe from multiple threads; the first call wins. The lazy
+  path taken when another `lev_*` function runs before an explicit `lev_init`
+  goes through the same `Once`, so concurrent first calls cannot race on
+  subscriber or panic-hook installation. An app that wants logging configured
+  before the first node should still call `lev_init` explicitly. This
+  restores the global-setup role the old stub's `lns_init` had.
 - Clock anchor. `build_sync` calls `init_clock_anchor` (`builder.rs`), which
   writes a process-global `static CLOCK_ANCHOR: OnceLock<Instant>`
   (`interfaces/mod.rs`). It is first-writer-wins: the first `build_sync` sets
