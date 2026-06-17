@@ -63,11 +63,11 @@ static void test_identity(void) {
 
     /* Private key round-trip: rebuilding from the private key reproduces the
      * same identity hash. */
-    uint8_t prv[LEV_IDENTITY_PRV_LEN];
+    uint8_t prv[LEV_IDENTITY_KEY_LEN];
     size_t prv_len = sizeof(prv);
     rc = lev_identity_private_key(id, prv, sizeof(prv), &prv_len);
     CHECK(rc == LEV_OK);
-    CHECK(prv_len == LEV_IDENTITY_PRV_LEN);
+    CHECK(prv_len == LEV_IDENTITY_KEY_LEN);
 
     lev_identity_t *id2 = lev_identity_from_private_key(prv, prv_len);
     CHECK(id2 != NULL);
@@ -77,7 +77,7 @@ static void test_identity(void) {
     CHECK(memcmp(hash, hash2, LEV_ADDR_LEN) == 0);
 
     /* Public-only identity has no private keys. */
-    uint8_t pub[LEV_IDENTITY_PUB_LEN];
+    uint8_t pub[LEV_IDENTITY_KEY_LEN];
     size_t pub_len = sizeof(pub);
     CHECK(lev_identity_public_key(id, pub, sizeof(pub), &pub_len) == LEV_OK);
     lev_identity_t *pub_only = lev_identity_from_public_key(pub, pub_len);
@@ -130,6 +130,14 @@ static void test_node_lifecycle(void) {
 
     CHECK(lev_stop(node) == LEV_OK);
     CHECK(lev_is_running(node) == 0);
+
+    /* Restart: stop then start must bring the node back up (the engine
+     * rebuilds its runtime on start). */
+    CHECK(lev_start(node) == LEV_OK);
+    CHECK(lev_is_running(node) == 1);
+    CHECK(lev_stop(node) == LEV_OK);
+    CHECK(lev_is_running(node) == 0);
+
     lev_free(node);
     lev_free(NULL); /* no-op */
 }

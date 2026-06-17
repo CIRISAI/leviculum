@@ -296,9 +296,20 @@ pub unsafe extern "C" fn lev_free(node: *mut leviculum_t) {
         }
         let mut boxed = Box::from_raw(node);
         if boxed.node.is_running() {
-            // Best effort graceful shutdown so state is persisted; ignore errors
-            // since we are tearing down regardless.
-            let _ = boxed.rt.block_on(boxed.node.stop());
+            // Best effort graceful shutdown so state is persisted. If an earlier
+            // caught panic poisoned the core mutex, stop() re-locks it (via
+            // save_persistent_state) and panics again; contain that here so
+            // teardown stays deterministic. Drop then reclaims the runtime and
+            // event loop via shutdown_background, at the cost of the final
+            // flush, which is recovered later from fresh announces.
+            let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                boxed.rt.block_on(boxed.node.stop())
+            }));
+            if stopped.is_err() {
+                set_last_error_static(
+                    c"lev_free: graceful stop panicked on a poisoned node, reclaimed via teardown",
+                );
+            }
         }
         drop(boxed);
     })

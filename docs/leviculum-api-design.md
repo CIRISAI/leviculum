@@ -30,6 +30,15 @@ request/response scope) the brief wins; where a review suggestion sits
 outside the additive-only boundary (driver-internal poison recovery) the
 achievable contract is stated instead.
 
+Implementation status. The function and constant names in sections 4 to 13
+describe the target v1 surface, not what is built today. Currently
+implemented is the early phase-a slice: instance lifecycle, identity,
+version, and the error and panic harness. Everything else, including
+`lev_init` and logging (still phase a), and `lev_connect`,
+`lev_builder_event_capacity`, `LEV_ERR_UNKNOWN_DEST`, and the event
+accessors (later phases), lands with its phase. The document describes the
+destination, not the current position.
+
 ## Scope and non-goals
 
 In scope for v1: instance lifecycle, identity, destinations and announce,
@@ -266,8 +275,25 @@ void lev_event_free(lev_event_t *ev);
 Mechanics. The library owns two things: an internal FIFO of projected
 events guarded by a mutex, and an eventfd created `EFD_SEMAPHORE |
 EFD_NONBLOCK` on Linux (a self-pipe where eventfd is unavailable). A single
-bridge task on the hidden runtime is the only producer; `lev_next_event` is
-the only consumer.
+bridge task is the only producer; `lev_next_event` is the only consumer.
+
+Which runtime hosts the bridge, and surviving restart. The bridge runs on
+the FFI runtime owned by `leviculum_t`, which lives from `lev_builder_build`
+to `lev_free`, not on the node's own runtime, which `start`/`stop` create
+and tear down. The engine's event channels are created in
+`ReticulumNode::new` at build time, not in `start` (`driver/mod.rs`), so the
+`EventReceiver` the bridge owns stays valid across a `stop`/`start` cycle:
+the bridge keeps awaiting `recv`, sees no events while the node is stopped,
+and resumes when `start` brings the loop back. This is why a restart does
+not strand the event fd.
+
+Preserving control priority. The engine splits events into a lossless
+control plane and a droppable data plane, and `EventReceiver::recv` drains
+control with strict priority over data (`driver/mod.rs`). The bridge pulls
+exclusively through `EventReceiver::recv` rather than racing the two
+channels itself, so control-first ordering is preserved into the FIFO, and
+the FIFO's insertion order then keeps control events ahead of later data.
+Losslessness is preserved separately by the per-plane caps below.
 
 Invariant: the eventfd counter always equals the number of events currently
 in the queue.
@@ -412,6 +438,19 @@ compose-with-your-loop philosophy: an app polls and re-tries on
 the `timeout_ms` the boundary enforces, so a congested LoRa link surfaces
 `LEV_ERR_TIMEOUT` instead of hanging.
 
+Where the deadline lives. The facade async methods carry no timeout (only
+`send_request` has a request-response timeout, which is a different thing),
+and the action-enqueue methods just `.await` a bounded channel send
+(`action_dispatch_tx.send(..).await`, `driver/mod.rs`). So the boundary, not
+the facade, enforces every deadline, by driving the future under
+`block_on(tokio::time::timeout(dur, fut))`. Two outcomes are distinguished:
+the FFI deadline expiring maps to `LEV_ERR_TIMEOUT`, while the event loop
+being down (the channel closed) maps to `LEV_ERR_NOT_RUNNING`. In practice
+the action channel only backs up while the loop is mid-iteration (it drains
+every iteration and runs on its own runtime, see above), so these enqueue
+calls return promptly; the deadline is the backstop, and the genuinely
+unbounded case it tames is `LinkHandle::send`'s retry loop.
+
 Thread-safety guarantees, documented in the header:
 
 - `leviculum_t` is thread-safe. Its methods may be called concurrently from
@@ -465,13 +504,27 @@ achievable and stated contract is therefore:
   poisoned state. After a `LEV_ERR_PANIC` from a node call, the only
   supported operation on that node is `lev_free`. Other handles
   (`lev_identity_t`, other nodes) are unaffected.
+- `lev_free` after a poisoning panic still reclaims all memory, but it
+  cannot persist state cleanly: the graceful `stop()` path locks the same
+  poisoned mutex (`save_persistent_state` -> `inner.lock().unwrap()`,
+  `driver/mod.rs`) and would re-panic, so `lev_free` skips the graceful stop
+  on a poisoned node and tears down via `Drop` (`shutdown_background`). The
+  consequence is an honest one: the final storage `flush()` is lost in the
+  panic case, recovered later from fresh announces. No clean shutdown is
+  implied.
 - Output parameters are indeterminate after a caught panic; the caller must
   not read them.
 - The error arm is allocation-free: `set_last_error_static` stores a
-  `&'static` pointer, doing no work that could itself panic.
+  `&'static CStr` (a C string literal), doing no work that could itself
+  panic. The fallible `set_last_error` path that allocates is used only on
+  the non-panic error arms.
 
-The crate keeps `panic = unwind` (never `abort`) so `catch_unwind` actually
-catches. A grep-based test asserts every `#[no_mangle] extern "C"` body goes
+`panic = unwind` is pinned in the workspace release profile (it is already
+the default, so this is behaviour-preserving), never `abort`, so
+`catch_unwind` actually catches. This is not merely a tidiness choice: a
+`cdylib` built with `panic = abort` would turn every internal Rust panic
+into a process abort of the host application, which is unacceptable for a
+library. A grep-based test asserts every `#[no_mangle] extern "C"` body goes
 through `guard`, backed by review.
 
 ## 7. ABI and versioning
@@ -703,12 +756,14 @@ so. Pinned down here:
   `lev_init` is allowed (the library lazily runs init), but an app that
   wants logging configured before the first node should call it explicitly.
   This restores the global-setup role the old stub's `lns_init` had.
-- Clock anchor. `build_sync` calls `init_clock_anchor`
-  (`builder.rs`), a process-global side effect: building a second node
-  re-anchors the monotonic clock reference. Multiple `leviculum_t` in one
-  process are supported, but they share that single clock anchor; an app
-  should treat the anchor as set once at first build. This is documented as
-  a known shared-global, not a per-node property.
+- Clock anchor. `build_sync` calls `init_clock_anchor` (`builder.rs`), which
+  writes a process-global `static CLOCK_ANCHOR: OnceLock<Instant>`
+  (`interfaces/mod.rs`). It is first-writer-wins: the first `build_sync` sets
+  the anchor and every later build is a silent no-op that inherits it. This
+  makes multiple `leviculum_t` in one process trivially safe with respect to
+  the clock: they all share one fixed monotonic reference set at the first
+  build, with no re-anchoring. Documented as a known shared-global that is set
+  once for the process lifetime, not a per-node property.
 - Restart. `lev_stop` clears the node's runtime and `lev_start` rebuilds a
   fresh one (`driver/mod.rs`), so `start` then `stop` then `start` is the
   intended lifecycle. The design supports restart; phase a adds a test that

@@ -6,7 +6,7 @@
 //! failing call on the calling thread. See `docs/leviculum-api-design.md` §2.
 
 use std::cell::RefCell;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
 /// Success.
@@ -42,8 +42,17 @@ pub const LEV_ERR_AGAIN: c_int = -14;
 /// A panic was caught at the FFI boundary and converted to an error.
 pub const LEV_ERR_PANIC: c_int = -127;
 
+/// The thread-local last-error string, either owned (built from a dynamic
+/// detail) or a `&'static` C string literal. The static variant lets the panic
+/// recovery arm record a message without allocating, since allocating inside a
+/// panic handler could itself fail.
+enum LastError {
+    Owned(CString),
+    Static(&'static CStr),
+}
+
 thread_local! {
-    static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
+    static LAST_ERROR: RefCell<Option<LastError>> = const { RefCell::new(None) };
 }
 
 /// Build a `CString` from bytes that may contain interior NULs.
@@ -61,7 +70,15 @@ fn to_cstring_lossy(mut msg: Vec<u8>) -> CString {
 /// Record the detail string for the most recent failure on this thread.
 pub(crate) fn set_last_error(msg: impl Into<Vec<u8>>) {
     let c = to_cstring_lossy(msg.into());
-    LAST_ERROR.with(|e| *e.borrow_mut() = Some(c));
+    LAST_ERROR.with(|e| *e.borrow_mut() = Some(LastError::Owned(c)));
+}
+
+/// Record a `&'static` detail string without allocating.
+///
+/// Used by the panic-recovery arm of the FFI guard, where doing allocation
+/// work that could itself panic must be avoided.
+pub(crate) fn set_last_error_static(msg: &'static CStr) {
+    LAST_ERROR.with(|e| *e.borrow_mut() = Some(LastError::Static(msg)));
 }
 
 /// Map a facade [`reticulum_std::Error`] to a `LEV_ERR_*` code, recording its
@@ -116,7 +133,8 @@ pub extern "C" fn lev_strerror(code: c_int) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn lev_last_error() -> *const c_char {
     LAST_ERROR.with(|e| match &*e.borrow() {
-        Some(c) => c.as_ptr(),
+        Some(LastError::Owned(c)) => c.as_ptr(),
+        Some(LastError::Static(s)) => s.as_ptr(),
         None => std::ptr::null(),
     })
 }

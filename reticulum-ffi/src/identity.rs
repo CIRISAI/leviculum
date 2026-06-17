@@ -12,10 +12,14 @@ use crate::{guard, write_out};
 
 /// Length of a destination or identity hash, in bytes.
 pub const LEV_ADDR_LEN: usize = 16;
-/// Length of the combined public key (X25519 + Ed25519), in bytes.
-pub const LEV_IDENTITY_PUB_LEN: usize = 64;
-/// Length of the combined private key, in bytes.
-pub const LEV_IDENTITY_PRV_LEN: usize = 64;
+/// Length of a combined key, public or private, in bytes. The layout is the
+/// X25519 key in bytes 0..32 then the Ed25519 key in bytes 32..64.
+pub const LEV_IDENTITY_KEY_LEN: usize = 64;
+/// Length of the X25519 (encryption) half, bytes 0..32 of a combined key.
+pub const LEV_X25519_KEY_LEN: usize = 32;
+/// Length of the Ed25519 (signing) half, bytes 32..64 of a combined key. This
+/// is the key a link needs; see `lev_connect`.
+pub const LEV_SIGNING_KEY_LEN: usize = 32;
 
 /// Opaque identity handle.
 pub struct lev_identity_t {
@@ -33,14 +37,14 @@ pub extern "C" fn lev_identity_generate() -> *mut lev_identity_t {
 
 /// Load a full identity from its 64-byte combined private key.
 ///
-/// `len` must equal `LEV_IDENTITY_PRV_LEN`. Returns NULL on failure.
+/// `len` must equal `LEV_IDENTITY_KEY_LEN`. Returns NULL on failure.
 #[no_mangle]
 pub unsafe extern "C" fn lev_identity_from_private_key(
     key: *const u8,
     len: usize,
 ) -> *mut lev_identity_t {
     guard(std::ptr::null_mut(), || {
-        if key.is_null() || len != LEV_IDENTITY_PRV_LEN {
+        if key.is_null() || len != LEV_IDENTITY_KEY_LEN {
             set_last_error("private key must be 64 bytes");
             return std::ptr::null_mut();
         }
@@ -57,14 +61,14 @@ pub unsafe extern "C" fn lev_identity_from_private_key(
 
 /// Load a public-only identity from its 64-byte combined public key.
 ///
-/// `len` must equal `LEV_IDENTITY_PUB_LEN`. Returns NULL on failure.
+/// `len` must equal `LEV_IDENTITY_KEY_LEN`. Returns NULL on failure.
 #[no_mangle]
 pub unsafe extern "C" fn lev_identity_from_public_key(
     key: *const u8,
     len: usize,
 ) -> *mut lev_identity_t {
     guard(std::ptr::null_mut(), || {
-        if key.is_null() || len != LEV_IDENTITY_PUB_LEN {
+        if key.is_null() || len != LEV_IDENTITY_KEY_LEN {
             set_last_error("public key must be 64 bytes");
             return std::ptr::null_mut();
         }

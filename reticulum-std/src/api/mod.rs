@@ -194,5 +194,12 @@ mod tests {
         assert_eq!(node.identity_hash().len(), 16);
         node.stop().await.expect("stop node");
         assert!(!node.is_running());
+
+        // Restart: stop then start brings the node back up (the engine
+        // rebuilds its runtime on start).
+        node.start().await.expect("restart node");
+        assert!(node.is_running());
+        node.stop().await.expect("stop node again");
+        assert!(!node.is_running());
     }
 }

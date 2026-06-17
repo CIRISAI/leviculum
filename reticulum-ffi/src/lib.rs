@@ -35,7 +35,9 @@ pub(crate) fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     match std::panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
-            error::set_last_error("panic in libleviculum");
+            // Allocation-free: a panic handler must not do work that could
+            // itself panic (e.g. allocate after an allocation failure).
+            error::set_last_error_static(c"panic in libleviculum");
             default
         }
     }
