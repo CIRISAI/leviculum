@@ -1,3 +1,8 @@
+# Expected-marginal, non-gating PDR. Same SF10/CR8 mixed SX1262 LNode to SX127x
+# RNode chip interop margin corner as bench_single_pair_slow_ca, run as a dual
+# pair. Excluded from the 100% PDR lab target. SF10/CR5 is the robust mixed chip
+# limit and same chip pairs pass SF10/CR8; both stay gating. Runnable for
+# diagnostics.
 profile = "dual_pair_mixed"
 
 [test]

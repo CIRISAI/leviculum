@@ -4787,6 +4787,14 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
         run_test(&mut runner).expect("test failed");
     }
 
+    // Expected-marginal, non-gating PDR. SF10/CR8 over a mixed SX1262 LNode to
+    // SX127x RNode pair is a characterized chip interop margin corner at the
+    // longest packet. Frequency was refuted by direct FEI (about 275 Hz, 0.32
+    // ppm); the residual is a TX modulation and spectral interop effect.
+    // Excluded from the 100% PDR lab target. SF10/CR5 is the robust mixed chip
+    // limit and same chip pairs (bench_single_pair_slow_ca_rnode_only) pass
+    // SF10/CR8; both stay gating. Runnable for diagnostics; PDR here is
+    // reported but not gating.
     #[test]
     #[ignore]
     #[serial(lora)]
@@ -4857,6 +4865,11 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
         run_test(&mut runner).expect("test failed");
     }
 
+    // Expected-marginal, non-gating PDR. Same SF10/CR8 mixed SX1262 LNode to
+    // SX127x RNode chip interop margin corner as bench_single_pair_slow_ca, run
+    // as a dual pair. Excluded from the 100% PDR lab target. SF10/CR5 is the
+    // robust mixed chip limit and same chip pairs pass SF10/CR8; both stay
+    // gating. Runnable for diagnostics; PDR here is reported but not gating.
     #[test]
     #[ignore]
     #[serial(lora)]

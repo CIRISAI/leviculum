@@ -1,3 +1,8 @@
+# Expected-marginal, non-gating PDR. SF10/CR8 over a mixed SX1262 LNode to
+# SX127x RNode pair is a characterized chip interop margin corner at the longest
+# packet. Excluded from the 100% PDR lab target. SF10/CR5 is the robust mixed
+# chip limit and same chip pairs (bench_single_pair_slow_ca_rnode_only) pass
+# SF10/CR8; both stay gating. Runnable for diagnostics.
 profile = "rnode_lnode_pair"
 
 [test]
