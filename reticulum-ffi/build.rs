@@ -14,4 +14,11 @@ fn main() {
 
     println!("cargo::rerun-if-changed=src");
     println!("cargo::rerun-if-changed=cbindgen.toml");
+
+    // Set the ELF SONAME on the cdylib so consumers link against the versioned
+    // libleviculum.so.0 (the 0.x series soname), matching the install layout in
+    // the Makefile. Applies only when a cdylib is produced (the glibc target);
+    // it is ignored on the musl default, which drops the cdylib. The default
+    // linker for the gnu target is cc, which understands -Wl,-soname.
+    println!("cargo::rustc-cdylib-link-arg=-Wl,-soname,libleviculum.so.0");
 }

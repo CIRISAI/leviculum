@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: leviculum
+Description: Leviculum, a Reticulum network stack, C API
+URL: https://codeberg.org/Lew_Palm/leviculum
+Version: @VERSION@
+Libs: -L${libdir} -lleviculum
+Cflags: -I${includedir}

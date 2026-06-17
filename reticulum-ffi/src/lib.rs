@@ -104,6 +104,93 @@ pub(crate) unsafe fn read_array<const N: usize>(src: *const u8) -> [u8; N] {
     out
 }
 
+/// Encode `data` as lowercase hex into `buf`, read(2) style. Writes `2 * len`
+/// bytes (not NUL-terminated); `*out_len` is set to the required size.
+#[no_mangle]
+pub unsafe extern "C" fn lev_hex_encode(
+    data: *const u8,
+    len: usize,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        if out_len.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if data.is_null() && len > 0 {
+            return LEV_ERR_NULL_PTR;
+        }
+        let needed = len * 2;
+        *out_len = needed;
+        if buf.is_null() || cap < needed {
+            return LEV_ERR_BUFFER_TOO_SMALL;
+        }
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let src = if len == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(data, len)
+        };
+        let out = std::slice::from_raw_parts_mut(buf, needed);
+        for (i, &byte) in src.iter().enumerate() {
+            out[i * 2] = HEX[(byte >> 4) as usize];
+            out[i * 2 + 1] = HEX[(byte & 0x0f) as usize];
+        }
+        LEV_OK
+    })
+}
+
+/// Decode hex (`hex_len` bytes, even) into `buf`, read(2) style. Writes
+/// `hex_len / 2` bytes; `*out_len` is set to the required size.
+/// `LEV_ERR_INVALID_ARG` on an odd length or a non-hex digit.
+#[no_mangle]
+pub unsafe extern "C" fn lev_hex_decode(
+    hex: *const u8,
+    hex_len: usize,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        if out_len.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if hex.is_null() && hex_len > 0 {
+            return LEV_ERR_NULL_PTR;
+        }
+        if !hex_len.is_multiple_of(2) {
+            error::set_last_error("hex length must be even");
+            return LEV_ERR_INVALID_ARG;
+        }
+        let needed = hex_len / 2;
+        *out_len = needed;
+        if buf.is_null() || cap < needed {
+            return LEV_ERR_BUFFER_TOO_SMALL;
+        }
+        fn nibble(c: u8) -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            }
+        }
+        let src = std::slice::from_raw_parts(hex, hex_len);
+        let out = std::slice::from_raw_parts_mut(buf, needed);
+        for i in 0..needed {
+            match (nibble(src[i * 2]), nibble(src[i * 2 + 1])) {
+                (Some(hi), Some(lo)) => out[i] = (hi << 4) | lo,
+                _ => {
+                    error::set_last_error("invalid hex digit");
+                    return LEV_ERR_INVALID_ARG;
+                }
+            }
+        }
+        LEV_OK
+    })
+}
+
 /// Return the library version string, for example `"0.6.3"`.
 ///
 /// Static storage, never freed.

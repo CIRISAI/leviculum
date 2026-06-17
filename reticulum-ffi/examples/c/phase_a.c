@@ -104,6 +104,28 @@ static void test_null_guards(void) {
     CHECK(lev_start(NULL) == LEV_ERR_NULL_PTR);
 }
 
+static void test_hex(void) {
+    const uint8_t bytes[] = {0x00, 0x1f, 0xab, 0xff};
+    uint8_t hex[8];
+    size_t hl = sizeof(hex);
+    CHECK(lev_hex_encode(bytes, 4, hex, sizeof(hex), &hl) == LEV_OK);
+    CHECK(hl == 8 && memcmp(hex, "001fabff", 8) == 0);
+
+    uint8_t back[4];
+    size_t bl = sizeof(back);
+    CHECK(lev_hex_decode(hex, 8, back, sizeof(back), &bl) == LEV_OK);
+    CHECK(bl == 4 && memcmp(back, bytes, 4) == 0);
+
+    /* Size query and error cases. */
+    size_t need = 0;
+    CHECK(lev_hex_encode(bytes, 4, NULL, 0, &need) == LEV_ERR_BUFFER_TOO_SMALL);
+    CHECK(need == 8);
+    CHECK(lev_hex_decode((const uint8_t *)"zz", 2, back, sizeof(back), &bl) ==
+          LEV_ERR_INVALID_ARG);
+    CHECK(lev_hex_decode((const uint8_t *)"abc", 3, back, sizeof(back), &bl) ==
+          LEV_ERR_INVALID_ARG);
+}
+
 static volatile int log_count = 0;
 static int log_last_level = 0;
 
@@ -201,6 +223,7 @@ int main(void) {
     test_error_strings();
     test_identity();
     test_null_guards();
+    test_hex();
     test_logging();
     test_node_lifecycle();
 
