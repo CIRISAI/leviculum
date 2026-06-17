@@ -95,6 +95,29 @@ static void test_identity(void) {
     lev_identity_free(NULL); /* no-op */
 }
 
+static void test_identity_file(void) {
+    lev_identity_t *id = lev_identity_generate();
+    CHECK(id != NULL);
+    const char *path = "/tmp/leviculum-c-identity-file";
+    CHECK(lev_identity_save_file(id, path) == LEV_OK);
+
+    lev_identity_t *loaded = lev_identity_load_file(path);
+    CHECK(loaded != NULL);
+    CHECK(lev_identity_has_private_keys(loaded) == 1);
+
+    uint8_t h1[LEV_ADDR_LEN], h2[LEV_ADDR_LEN];
+    size_t l1 = sizeof(h1), l2 = sizeof(h2);
+    CHECK(lev_identity_hash(id, h1, sizeof(h1), &l1) == LEV_OK);
+    CHECK(lev_identity_hash(loaded, h2, sizeof(h2), &l2) == LEV_OK);
+    CHECK(memcmp(h1, h2, LEV_ADDR_LEN) == 0);
+
+    lev_identity_free(loaded);
+    lev_identity_free(id);
+
+    /* Missing file yields NULL. */
+    CHECK(lev_identity_load_file("/tmp/leviculum-no-such-identity-xyz") == NULL);
+}
+
 static void test_null_guards(void) {
     uint8_t buf[LEV_ADDR_LEN];
     size_t len = sizeof(buf);
@@ -222,6 +245,7 @@ int main(void) {
     test_version();
     test_error_strings();
     test_identity();
+    test_identity_file();
     test_null_guards();
     test_hex();
     test_logging();

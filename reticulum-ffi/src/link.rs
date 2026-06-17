@@ -12,6 +12,7 @@ use reticulum_std::api::{DestinationHash, LinkHandle, LinkId};
 use reticulum_std::{Error, SendError};
 
 use crate::error::*;
+use crate::identity::lev_identity_t;
 use crate::node::{block_on_timeout, leviculum_t};
 use crate::{guard, read_array, write_out, LEV_ADDR_LEN, LEV_SIGNING_KEY_LEN};
 
@@ -309,6 +310,64 @@ pub unsafe extern "C" fn lev_link_id(
             None => return LEV_ERR_NULL_PTR,
         };
         write_out(l.inner.link_id().as_bytes(), buf, cap, out_len)
+    })
+}
+
+/// Prove an identity to the peer on a link (16-byte link id). The peer sees a
+/// `LEV_EVENT_LINK_IDENTIFIED` event and can read it via
+/// `lev_link_remote_identity`. Blocks up to `timeout_ms`.
+#[no_mangle]
+pub unsafe extern "C" fn lev_link_identify(
+    node: *const leviculum_t,
+    link_id: *const u8,
+    identity: *const lev_identity_t,
+    timeout_ms: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let id = match identity.as_ref() {
+            Some(id) => id,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if link_id.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        let lid = LinkId::new(read_array::<LEV_ADDR_LEN>(link_id));
+        match block_on_timeout(
+            h.runtime(),
+            h.node().identify_link(&lid, &id.inner),
+            timeout_ms,
+        ) {
+            Ok(Ok(())) => LEV_OK,
+            Ok(Err(e)) => map_error(&e),
+            Err(()) => LEV_ERR_TIMEOUT,
+        }
+    })
+}
+
+/// Return the peer's identity on a link (16-byte link id) as a new identity
+/// handle the caller frees, or NULL if the peer has not identified.
+#[no_mangle]
+pub unsafe extern "C" fn lev_link_remote_identity(
+    node: *const leviculum_t,
+    link_id: *const u8,
+) -> *mut lev_identity_t {
+    guard(std::ptr::null_mut(), || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return std::ptr::null_mut(),
+        };
+        if link_id.is_null() {
+            return std::ptr::null_mut();
+        }
+        let lid = LinkId::new(read_array::<LEV_ADDR_LEN>(link_id));
+        match h.node().get_remote_identity(&lid) {
+            Some(inner) => Box::into_raw(Box::new(lev_identity_t { inner })),
+            None => std::ptr::null_mut(),
+        }
     })
 }
 

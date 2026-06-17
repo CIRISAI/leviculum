@@ -105,27 +105,29 @@ pub(crate) fn map_error(e: &reticulum_std::Error) -> c_int {
 /// Safe to call at any time. The returned pointer must not be freed.
 #[no_mangle]
 pub extern "C" fn lev_strerror(code: c_int) -> *const c_char {
-    let msg: &'static [u8] = match code {
-        LEV_OK => b"success\0",
-        LEV_ERR_NULL_PTR => b"null pointer\0",
-        LEV_ERR_INVALID_ARG => b"invalid argument\0",
-        LEV_ERR_BUFFER_TOO_SMALL => b"buffer too small\0",
-        LEV_ERR_NOT_RUNNING => b"node event loop is not running\0",
-        LEV_ERR_IO => b"I/O error\0",
-        LEV_ERR_CONFIG => b"configuration error\0",
-        LEV_ERR_CRYPTO => b"cryptographic error\0",
-        LEV_ERR_NO_PATH => b"no path to destination\0",
-        LEV_ERR_LINK => b"link error\0",
-        LEV_ERR_SEND => b"send error\0",
-        LEV_ERR_RESOURCE => b"resource error\0",
-        LEV_ERR_REQUEST => b"request error\0",
-        LEV_ERR_TIMEOUT => b"timed out\0",
-        LEV_ERR_AGAIN => b"resource temporarily unavailable\0",
-        LEV_ERR_UNKNOWN_DEST => b"no cached identity for destination\0",
-        LEV_ERR_PANIC => b"panic at FFI boundary\0",
-        _ => b"unknown error\0",
-    };
-    msg.as_ptr() as *const c_char
+    crate::guard(std::ptr::null(), || {
+        let msg: &'static [u8] = match code {
+            LEV_OK => b"success\0",
+            LEV_ERR_NULL_PTR => b"null pointer\0",
+            LEV_ERR_INVALID_ARG => b"invalid argument\0",
+            LEV_ERR_BUFFER_TOO_SMALL => b"buffer too small\0",
+            LEV_ERR_NOT_RUNNING => b"node event loop is not running\0",
+            LEV_ERR_IO => b"I/O error\0",
+            LEV_ERR_CONFIG => b"configuration error\0",
+            LEV_ERR_CRYPTO => b"cryptographic error\0",
+            LEV_ERR_NO_PATH => b"no path to destination\0",
+            LEV_ERR_LINK => b"link error\0",
+            LEV_ERR_SEND => b"send error\0",
+            LEV_ERR_RESOURCE => b"resource error\0",
+            LEV_ERR_REQUEST => b"request error\0",
+            LEV_ERR_TIMEOUT => b"timed out\0",
+            LEV_ERR_AGAIN => b"resource temporarily unavailable\0",
+            LEV_ERR_UNKNOWN_DEST => b"no cached identity for destination\0",
+            LEV_ERR_PANIC => b"panic at FFI boundary\0",
+            _ => b"unknown error\0",
+        };
+        msg.as_ptr() as *const c_char
+    })
 }
 
 /// Return the thread-local detail string for the most recent failing call on
@@ -135,9 +137,11 @@ pub extern "C" fn lev_strerror(code: c_int) -> *const c_char {
 /// the same thread. The caller must not free it.
 #[no_mangle]
 pub extern "C" fn lev_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| match &*e.borrow() {
-        Some(LastError::Owned(c)) => c.as_ptr(),
-        Some(LastError::Static(s)) => s.as_ptr(),
-        None => std::ptr::null(),
+    crate::guard(std::ptr::null(), || {
+        LAST_ERROR.with(|e| match &*e.borrow() {
+            Some(LastError::Owned(c)) => c.as_ptr(),
+            Some(LastError::Static(s)) => s.as_ptr(),
+            None => std::ptr::null(),
+        })
     })
 }

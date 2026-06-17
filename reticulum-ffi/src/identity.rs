@@ -3,7 +3,8 @@
 //! `lev_identity_t` is an opaque handle around a `reticulum_std::api::Identity`.
 //! Keys cross the boundary read(2) style. See `docs/leviculum-api-design.md`.
 
-use std::os::raw::c_int;
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int};
 
 use reticulum_std::api::Identity;
 
@@ -158,5 +159,79 @@ pub unsafe extern "C" fn lev_identity_has_private_keys(id: *const lev_identity_t
     guard(0, || match id.as_ref() {
         Some(id) if id.inner.has_private_keys() => 1,
         _ => 0,
+    })
+}
+
+/// Borrow a C path string as `&str`, or `None` if NULL or not valid UTF-8.
+unsafe fn path_str<'a>(p: *const c_char) -> Option<&'a str> {
+    if p.is_null() {
+        return None;
+    }
+    CStr::from_ptr(p).to_str().ok()
+}
+
+/// Save the identity's private key to `path` as raw 64 bytes, the format Python
+/// Reticulum uses (`rnsd` and friends read it). Requires private keys.
+/// Written atomically (temp file then rename).
+#[no_mangle]
+pub unsafe extern "C" fn lev_identity_save_file(
+    id: *const lev_identity_t,
+    path: *const c_char,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let id = match id.as_ref() {
+            Some(id) => id,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let path = match path_str(path) {
+            Some(p) => p,
+            None => return LEV_ERR_INVALID_ARG,
+        };
+        let bytes = match id.inner.private_key_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                set_last_error(format!("{e:?}"));
+                return LEV_ERR_CRYPTO;
+            }
+        };
+        let tmp = format!("{path}.tmp");
+        if let Err(e) = std::fs::write(&tmp, bytes) {
+            set_last_error(format!("write {tmp}: {e}"));
+            return LEV_ERR_IO;
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            set_last_error(format!("rename to {path}: {e}"));
+            return LEV_ERR_IO;
+        }
+        LEV_OK
+    })
+}
+
+/// Load a full identity from a raw 64-byte private key file (Python-compatible
+/// format). Returns NULL on failure (missing file, wrong size, or bad keys).
+#[no_mangle]
+pub unsafe extern "C" fn lev_identity_load_file(path: *const c_char) -> *mut lev_identity_t {
+    guard(std::ptr::null_mut(), || {
+        let path = match path_str(path) {
+            Some(p) => p,
+            None => {
+                set_last_error("path must be a valid UTF-8 string");
+                return std::ptr::null_mut();
+            }
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                set_last_error(format!("read {path}: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        match Identity::from_private_key_bytes(&bytes) {
+            Ok(inner) => Box::into_raw(Box::new(lev_identity_t { inner })),
+            Err(e) => {
+                set_last_error(format!("{e:?}"));
+                std::ptr::null_mut()
+            }
+        }
     })
 }

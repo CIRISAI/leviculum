@@ -30,6 +30,8 @@ const DEFAULT_DATA_CAP: usize = 256;
 /// owns and frees the now-empty handle.
 pub struct lev_builder_t {
     inner: Option<NodeBuilder>,
+    control_cap: usize,
+    data_cap: usize,
 }
 
 /// Opaque node handle: owns the hidden runtime, the engine node, and the event
@@ -107,6 +109,8 @@ pub extern "C" fn lev_builder_new() -> *mut lev_builder_t {
         crate::ensure_init();
         Box::into_raw(Box::new(lev_builder_t {
             inner: Some(NodeBuilder::new()),
+            control_cap: DEFAULT_CONTROL_CAP,
+            data_cap: DEFAULT_DATA_CAP,
         }))
     })
 }
@@ -235,6 +239,30 @@ pub unsafe extern "C" fn lev_builder_enable_transport(
     })
 }
 
+/// Set the event-queue capacities for the node's pollable event fd: the
+/// lossless control plane and the droppable data plane. A value of 0 keeps the
+/// current default for that plane.
+#[no_mangle]
+pub unsafe extern "C" fn lev_builder_event_capacity(
+    b: *mut lev_builder_t,
+    control_cap: usize,
+    data_cap: usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let b = match b.as_mut() {
+            Some(b) => b,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if control_cap > 0 {
+            b.control_cap = control_cap;
+        }
+        if data_cap > 0 {
+            b.data_cap = data_cap;
+        }
+        LEV_OK
+    })
+}
+
 /// Build a node from the builder. The builder is emptied but not freed; the
 /// caller still calls `lev_builder_free`. Returns NULL on failure.
 #[no_mangle]
@@ -244,6 +272,7 @@ pub unsafe extern "C" fn lev_builder_build(b: *mut lev_builder_t) -> *mut levicu
             Some(b) => b,
             None => return std::ptr::null_mut(),
         };
+        let (control_cap, data_cap) = (b.control_cap, b.data_cap);
         let nb = match b.inner.take() {
             Some(nb) => nb,
             None => {
@@ -272,7 +301,7 @@ pub unsafe extern "C" fn lev_builder_build(b: *mut lev_builder_t) -> *mut levicu
                 return std::ptr::null_mut();
             }
         };
-        let events = match EventBridge::new(DEFAULT_CONTROL_CAP, DEFAULT_DATA_CAP) {
+        let events = match EventBridge::new(control_cap, data_cap) {
             Ok(b) => Arc::new(b),
             Err(e) => {
                 set_last_error(format!("failed to create event fd: {e}"));

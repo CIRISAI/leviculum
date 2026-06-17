@@ -196,7 +196,9 @@ pub unsafe extern "C" fn lev_hex_decode(
 /// Static storage, never freed.
 #[no_mangle]
 pub extern "C" fn lev_version_string() -> *const c_char {
-    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+    guard(std::ptr::null(), || {
+        concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+    })
 }
 
 /// Return the library version as `(major << 16) | (minor << 8) | patch`.

@@ -209,6 +209,17 @@ impl Node {
         self.inner.accept_link(link_id).await
     }
 
+    /// Prove an identity to the peer on a link. The peer sees a link-identified
+    /// event and can read the identity via [`Node::get_remote_identity`].
+    pub async fn identify_link(&self, link_id: &LinkId, identity: &Identity) -> Result<()> {
+        self.inner.identify_link(link_id, identity).await
+    }
+
+    /// The peer's identity on a link, if they have identified.
+    pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<Identity> {
+        self.inner.get_remote_identity(link_id)
+    }
+
     /// Send one unreliable datagram to a destination, returning the packet hash.
     /// A path to the destination must already be known.
     pub async fn send_datagram(

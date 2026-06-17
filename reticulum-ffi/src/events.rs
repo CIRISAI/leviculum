@@ -52,6 +52,9 @@ pub const LEV_EVENT_RESOURCE_PROGRESS: c_int = 14;
 pub const LEV_EVENT_RESOURCE_COMPLETED: c_int = 15;
 /// A resource transfer failed.
 pub const LEV_EVENT_RESOURCE_FAILED: c_int = 16;
+/// The peer proved an identity on a link; the 16-byte identity hash is the
+/// event payload (`lev_event_data`), and `lev_link_remote_identity` returns it.
+pub const LEV_EVENT_LINK_IDENTIFIED: c_int = 17;
 
 /// One projected event, fully self-owned (all payloads deep-copied out of the
 /// `NodeEvent`), so it outlives the queue slot and is valid until
@@ -125,6 +128,15 @@ fn project(ev: NodeEvent) -> lev_event_t {
         NodeEvent::LinkClosed { link_id, .. } => {
             let mut e = lev_event_t::bare(LEV_EVENT_LINK_CLOSED, is_control);
             e.link_id = Some(*link_id.as_bytes());
+            e
+        }
+        NodeEvent::LinkIdentified {
+            link_id,
+            identity_hash,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_IDENTIFIED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.data = identity_hash.to_vec();
             e
         }
         NodeEvent::LinkDataReceived { link_id, data } => {

@@ -135,6 +135,29 @@ int main(void) {
     CHECK(wait_for(a, LEV_EVENT_LINK_DATA, NULL, rx, &rxl, 50));
     CHECK(rxl == 4 && memcmp(rx, msg, 4) == 0);
 
+    /* B proves an identity on the link; A reads it back by hash. */
+    lev_identity_t *bident = lev_identity_generate();
+    uint8_t bident_hash[LEV_ADDR_LEN];
+    size_t bidl = sizeof(bident_hash);
+    CHECK(lev_identity_hash(bident, bident_hash, sizeof(bident_hash), &bidl) ==
+          LEV_OK);
+    uint8_t lb_id[LEV_ADDR_LEN];
+    size_t lbidl = sizeof(lb_id);
+    CHECK(lev_link_id(lb, lb_id, sizeof(lb_id), &lbidl) == LEV_OK);
+    CHECK(lev_link_identify(b, lb_id, bident, 3000) == LEV_OK);
+
+    CHECK(wait_for(a, LEV_EVENT_LINK_IDENTIFIED, NULL, NULL, NULL, 50));
+    lev_identity_t *remote = lev_link_remote_identity(a, lid);
+    CHECK(remote != NULL);
+    if (remote) {
+        uint8_t rh[LEV_ADDR_LEN];
+        size_t rhl = sizeof(rh);
+        CHECK(lev_identity_hash(remote, rh, sizeof(rh), &rhl) == LEV_OK);
+        CHECK(memcmp(rh, bident_hash, LEV_ADDR_LEN) == 0);
+        lev_identity_free(remote);
+    }
+    lev_identity_free(bident);
+
     /* Tear down. */
     CHECK(lev_close_link(lb, 2000) == LEV_OK);
     lev_link_free(lb);

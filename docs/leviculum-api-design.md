@@ -40,14 +40,16 @@ needs a known path, the action-timeout outcome is at-most-once with unknown
 dispatch, `lev_init` runs through one `Once`, no request-handler unregister
 in v1, `lev_connect` flagged as new glue).
 
-Implementation status. The function and constant names in sections 4 to 13
-describe the target v1 surface, not what is built today. Currently
-implemented is the early phase-a slice: instance lifecycle, identity,
-version, and the error and panic harness. Everything else, including
-`lev_init` and logging (still phase a), and `lev_connect`,
-`lev_builder_event_capacity`, `LEV_ERR_UNKNOWN_DEST`, and the event
-accessors (later phases), lands with its phase. The document describes the
-destination, not the current position.
+Implementation status. The full v1 surface described here is implemented:
+instance lifecycle, identity (including file load and save), version, the
+error and panic harness, logging and init, the event fd bridge and its
+accessors, destinations and announce, paths, connect and links (including
+identify and remote identity), datagram, request and response, resource
+transfer, and the hex helpers. Packaging (SONAME, pkg-config, install
+layout) is in `reticulum-ffi/Makefile` and `leviculum.pc.in`. Each area has
+a two-node C acceptance test under `examples/c/`. Still later, by design:
+the Android per-ABI build, and any surface beyond v1 (LXMF, LXST). The
+no-panic guard is enforced by `tests/guard_coverage.rs`.
 
 ## Scope and non-goals
 
