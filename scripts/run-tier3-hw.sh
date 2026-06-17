@@ -34,6 +34,30 @@ MARKER="$LOG_DIR/lock-contention"
 
 mkdir -p "$LOG_DIR"
 
+# --- Expected-marginal carve-out (Bug 1 disposition, decision A) ---
+#
+# SF10/CR8 mixed-chip SX1262->SX127x is a characterised chip-interop margin at
+# the longest packet (frequency refuted by direct FEI ~275Hz/0.32ppm; the
+# residual is a TX-modulation/spectral interop effect). SF10/CR5 is the robust
+# mixed-chip limit and same-chip pairs pass SF10/CR8; both stay gating.
+#
+# These two benches KEEP RUNNING and stay visible, but a genuine FAILURE of a
+# listed test does NOT flip the tier3 verdict to RED: it is reported separately
+# and counted in the verdict line (expected_marginal=N), so GREEN is never
+# silently carved out. An unexpected PASS is logged loudly so a recovery is
+# noticed. This list is the single source of truth for the mechanism; the
+# documentary comments on the test fns and scenarios (reticulum-integ/src/
+# executor.rs, reticulum-integ/tests/bench_*_slow_ca.toml) reference it.
+EXPECTED_MARGINAL=( bench_single_pair_slow_ca bench_dual_pair_slow_ca )
+
+is_expected_marginal() {
+    local needle="$1" m
+    for m in "${EXPECTED_MARGINAL[@]}"; do
+        [[ "$needle" == "$m" ]] && return 0
+    done
+    return 1
+}
+
 # Repo-sync at head of every run when the install was --vm-mode
 # (worktree-scoped marker inside .git/).  Brings this worktree to
 # origin/master before any test work.  Skipped on developer-machine
@@ -505,10 +529,41 @@ run_group() {
     # structured SCENARIO_SKIPPED lines (device-count preflight) —
     # libtest swallows captured output of green tests, so the in-test
     # eprintln alone would be invisible here.
+    # Capture this group's cargo output so the final verdict can classify
+    # per-test FAILED/ok lines: the EXPECTED_MARGINAL carve-out is per test,
+    # but cargo runs a whole profile group in one invocation. The stream is
+    # still forwarded to stdout (-> main $LOG) by tee; PIPESTATUS[0] preserves
+    # cargo's real exit code through the pipe.
+    local group_log
+    group_log=$(mktemp)
     CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
       LEVICULUM_SKIP_LOG="$SKIP_LOG" \
       LEVICULUM_REQUIRED_LNODE_SERIALS="$required_lnode_serials" \
-      cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}"
+      cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}" \
+      2>&1 | tee "$group_log"
+    local cargo_rc=${PIPESTATUS[0]}
+
+    # Parse libtest per-test result lines. With --test-threads=1 the result is
+    # printed on the running line (`test <path> ... FAILED` / `... ok`). Last
+    # `::` segment = fn-name, matching discover_tests and EXPECTED_MARGINAL.
+    # GROUP_FAILED_COUNT lets the caller tell a parseable test failure apart
+    # from a non-zero cargo exit with no test failure (build/harness error),
+    # which must stay a hard RED and cannot be carved out.
+    GROUP_FAILED_COUNT=0
+    local fn
+    while IFS= read -r fn; do
+        [[ -n "$fn" ]] || continue
+        FAILED_TESTS+=( "$fn" )
+        GROUP_FAILED_COUNT=$(( GROUP_FAILED_COUNT + 1 ))
+    done < <(awk '/^test .* \.\.\. FAILED$/ { print $2 }' "$group_log" \
+             | awk -F'::' '{ print $NF }' | sort -u)
+    while IFS= read -r fn; do
+        [[ -n "$fn" ]] || continue
+        PASSED_TESTS+=( "$fn" )
+    done < <(awk '/^test .* \.\.\. ok$/ { print $2 }' "$group_log" \
+             | awk -F'::' '{ print $NF }' | sort -u)
+    rm -f "$group_log"
+    return "$cargo_rc"
 }
 
 # --- Flash LNodes from HEAD, then discover, group, run ---
@@ -537,12 +592,18 @@ for fn in "${ALL_FNS[@]}"; do
 done
 
 # Process buckets in sorted profile order for predictability.
+# Per-test failure accounting for the EXPECTED_MARGINAL carve-out. run_group
+# appends fn-names to these and sets GROUP_FAILED_COUNT for the group it just
+# ran. Initialised here (set -u) before the first call.
+FAILED_TESTS=()
+PASSED_TESTS=()
+GROUP_FAILED_COUNT=0
+
 RC=0
 for profile in $(printf '%s\n' "${!PROFILE_BUCKETS[@]}" | sort); do
     # shellcheck disable=SC2206
     fns=( ${PROFILE_BUCKETS[$profile]} )
     if ! run_group "$profile" "${fns[@]}"; then
-        RC=1
         if [[ -f "$MARKER" ]]; then
             # Lock-contention path mirrors run-tier3.sh: another cargo
             # held the integ lock when this fired.  Treat as SKIPPED,
@@ -553,7 +614,43 @@ for profile in $(printf '%s\n' "${!PROFILE_BUCKETS[@]}" | sort); do
             echo "$(date -Iseconds) tier3 SKIPPED lock-held $LOG" >> "$RESULTS"
             exit 0
         fi
-        log "[CI_HW] profile=$profile RED — see $LOG"
+        if (( GROUP_FAILED_COUNT == 0 )); then
+            # cargo failed but no per-test FAILED line was parsed: build
+            # error, harness abort or crash. Cannot be carved out — hard RED.
+            RC=1
+            log "[CI_HW] profile=$profile RED — cargo failed with no parseable test failure (build/harness error) — see $LOG"
+        else
+            # Genuine test failure(s); the GREEN/RED decision and the
+            # EXPECTED_MARGINAL carve-out are applied once, after the loop.
+            log "[CI_HW] profile=$profile had ${GROUP_FAILED_COUNT} test failure(s) — classified below"
+        fi
+    fi
+done
+
+# --- Verdict: apply the EXPECTED_MARGINAL carve-out per failed test ---
+#
+# A failed test on EXPECTED_MARGINAL is reported separately and counted, but
+# does NOT flip the verdict to RED. Any other failed test does. Only genuine
+# test FAILURES are absorbed here; device-count skips and lock-skips keep their
+# own separate reporting and never reach this list.
+EXPECTED_MARGINAL_FAILED=0
+for fn in "${FAILED_TESTS[@]:-}"; do
+    [[ -n "$fn" ]] || continue
+    if is_expected_marginal "$fn"; then
+        EXPECTED_MARGINAL_FAILED=$(( EXPECTED_MARGINAL_FAILED + 1 ))
+        log "[CI_HW] EXPECTED_MARGINAL $fn failed as expected (SF10/CR8 mixed-chip)"
+    else
+        RC=1
+    fi
+done
+
+# Loud notice if a carved-out bench unexpectedly PASSED, so a recovery is
+# noticed and the carve-out can be revisited. Excludes the case where the
+# bench was device-count skipped (a skip also exits the test green).
+for m in "${EXPECTED_MARGINAL[@]}"; do
+    if printf '%s\n' "${PASSED_TESTS[@]:-}" | grep -qx "$m" \
+       && ! grep -q "^SCENARIO_SKIPPED scenario=$m " "$SKIP_LOG" 2>/dev/null; then
+        log "[CI_HW] EXPECTED_MARGINAL $m PASSED unexpectedly: revisit carve-out"
     fi
 done
 
@@ -568,11 +665,11 @@ if [[ -s "$SKIP_LOG" ]]; then
 fi
 
 if [[ $RC -eq 0 ]]; then
-    log "[CI_HW] tier3 GREEN (skipped=$SKIPPED)"
-    echo "$(date -Iseconds) tier3 GREEN skipped=$SKIPPED $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 GREEN (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED)"
+    echo "$(date -Iseconds) tier3 GREEN expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED $LOG" >> "$RESULTS"
 else
-    log "[CI_HW] tier3 RED (skipped=$SKIPPED)"
-    echo "$(date -Iseconds) tier3 RED skipped=$SKIPPED $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 RED (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED)"
+    echo "$(date -Iseconds) tier3 RED expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED $LOG" >> "$RESULTS"
     # One bundle per tier-3 run, not per failing profile group;
     # per-profile RED log lines remain informational only.
     bash "$REPO_DIR/scripts/_emit-auto-bug-bundle.sh" tier3-hw "$LOG" || true

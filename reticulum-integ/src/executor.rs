@@ -4794,7 +4794,10 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     // Excluded from the 100% PDR lab target. SF10/CR5 is the robust mixed chip
     // limit and same chip pairs (bench_single_pair_slow_ca_rnode_only) pass
     // SF10/CR8; both stay gating. Runnable for diagnostics; PDR here is
-    // reported but not gating.
+    // reported but not gating. The tier3 gating carve-out is the
+    // EXPECTED_MARGINAL allowlist in scripts/run-tier3-hw.sh, the single source
+    // of truth: a failure of this bench is reported and counted but does not
+    // flip the verdict RED.
     #[test]
     #[ignore]
     #[serial(lora)]
@@ -4870,6 +4873,9 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     // as a dual pair. Excluded from the 100% PDR lab target. SF10/CR5 is the
     // robust mixed chip limit and same chip pairs pass SF10/CR8; both stay
     // gating. Runnable for diagnostics; PDR here is reported but not gating.
+    // The tier3 gating carve-out is the EXPECTED_MARGINAL allowlist in
+    // scripts/run-tier3-hw.sh, the single source of truth: a failure of this
+    // bench is reported and counted but does not flip the verdict RED.
     #[test]
     #[ignore]
     #[serial(lora)]

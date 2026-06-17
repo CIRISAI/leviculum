@@ -2,7 +2,9 @@
 # RNode chip interop margin corner as bench_single_pair_slow_ca, run as a dual
 # pair. Excluded from the 100% PDR lab target. SF10/CR5 is the robust mixed chip
 # limit and same chip pairs pass SF10/CR8; both stay gating. Runnable for
-# diagnostics.
+# diagnostics. The tier3 gating carve-out is the EXPECTED_MARGINAL allowlist in
+# scripts/run-tier3-hw.sh, the single source of truth: a failure here is
+# reported and counted but does not flip the verdict RED.
 profile = "dual_pair_mixed"
 
 [test]
