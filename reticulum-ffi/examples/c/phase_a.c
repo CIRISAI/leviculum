@@ -104,6 +104,45 @@ static void test_null_guards(void) {
     CHECK(lev_start(NULL) == LEV_ERR_NULL_PTR);
 }
 
+static volatile int log_count = 0;
+static int log_last_level = 0;
+
+static void log_cb(int level, const char *msg, void *user) {
+    (void)msg;
+    int *cnt = (int *)user;
+    (*cnt)++;
+    log_last_level = level;
+}
+
+static void test_logging(void) {
+    CHECK(lev_init() == LEV_OK);
+    CHECK(lev_init() == LEV_OK); /* idempotent */
+
+    CHECK(lev_log_set_callback(log_cb, (void *)&log_count) == LEV_OK);
+    CHECK(lev_log_set_level(LEV_LOG_INFO) == LEV_OK);
+    CHECK(lev_log_set_level(9999) == LEV_ERR_INVALID_ARG);
+
+    /* Building and starting a node logs at info on the calling thread, so the
+     * sink must fire at least once. */
+    lev_builder_t *b = lev_builder_new();
+    CHECK(b != NULL);
+    CHECK(lev_builder_storage_path(b, "/tmp/leviculum-c-phase-a-log") == LEV_OK);
+    CHECK(lev_builder_enable_transport(b, 0) == LEV_OK);
+    leviculum_t *node = lev_builder_build(b);
+    lev_builder_free(b);
+    CHECK(node != NULL);
+    CHECK(lev_start(node) == LEV_OK);
+    CHECK(lev_stop(node) == LEV_OK);
+    lev_free(node);
+
+    CHECK(log_count > 0);
+    CHECK(log_last_level >= LEV_LOG_ERROR && log_last_level <= LEV_LOG_INFO);
+
+    /* Detach the sink and silence so later tests do not accumulate. */
+    CHECK(lev_log_set_callback(NULL, NULL) == LEV_OK);
+    CHECK(lev_log_set_level(LEV_LOG_OFF) == LEV_OK);
+}
+
 static void test_node_lifecycle(void) {
     lev_builder_t *b = lev_builder_new();
     CHECK(b != NULL);
@@ -148,6 +187,7 @@ int main(void) {
     test_error_strings();
     test_identity();
     test_null_guards();
+    test_logging();
     test_node_lifecycle();
 
     if (failures == 0) {

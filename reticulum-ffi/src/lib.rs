@@ -17,14 +17,40 @@
 
 use std::os::raw::{c_char, c_int};
 use std::panic::AssertUnwindSafe;
+use std::sync::Once;
 
 mod error;
 mod identity;
+mod log;
 mod node;
 
 pub use error::*;
 pub use identity::*;
+pub use log::*;
 pub use node::*;
+
+/// Runs process-global setup exactly once.
+static INIT: Once = Once::new();
+
+/// Ensure one-time process setup has run: install the logging subscriber and
+/// panic hook. Idempotent and thread-safe; the lazy path taken by other entry
+/// points goes through the same `Once` as the explicit `lev_init`.
+pub(crate) fn ensure_init() {
+    INIT.call_once(log::install);
+}
+
+/// Perform one-time process setup (logging subscriber, panic hook).
+///
+/// Idempotent and safe to call from multiple threads. Optional: other entry
+/// points run it lazily, but call it explicitly to configure logging before
+/// the first node is built.
+#[no_mangle]
+pub extern "C" fn lev_init() -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        ensure_init();
+        LEV_OK
+    })
+}
 
 /// Run an FFI body under `catch_unwind`, converting a panic into `default`.
 ///

@@ -63,6 +63,8 @@ unsafe fn with_builder(b: *mut lev_builder_t, f: impl FnOnce(NodeBuilder) -> Nod
 #[no_mangle]
 pub extern "C" fn lev_builder_new() -> *mut lev_builder_t {
     guard(std::ptr::null_mut(), || {
+        // Install the logging subscriber before any node can emit tracing.
+        crate::ensure_init();
         Box::into_raw(Box::new(lev_builder_t {
             inner: Some(NodeBuilder::new()),
         }))
