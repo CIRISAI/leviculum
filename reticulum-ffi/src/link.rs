@@ -13,7 +13,7 @@ use reticulum_std::{Error, SendError};
 
 use crate::error::*;
 use crate::node::{block_on_timeout, leviculum_t};
-use crate::{guard, write_out, LEV_ADDR_LEN, LEV_SIGNING_KEY_LEN};
+use crate::{guard, read_array, write_out, LEV_ADDR_LEN, LEV_SIGNING_KEY_LEN};
 
 /// Opaque link handle.
 pub struct lev_link_t {
@@ -27,13 +27,6 @@ fn map_link_send_err(e: &Error) -> c_int {
         Error::Send(SendError::Busy) | Error::Send(SendError::PacingDelay { .. }) => LEV_ERR_AGAIN,
         other => map_error(other),
     }
-}
-
-/// Copy a fixed-size byte array out of a C pointer.
-unsafe fn copy_array<const N: usize>(src: *const u8) -> [u8; N] {
-    let mut out = [0u8; N];
-    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), N);
-    out
 }
 
 /// Borrow `(data, len)` as a slice, treating a NULL pointer with length 0 as
@@ -62,7 +55,7 @@ pub unsafe extern "C" fn lev_has_path(node: *const leviculum_t, dest_hash: *cons
         if dest_hash.is_null() {
             return LEV_ERR_NULL_PTR;
         }
-        let dh = DestinationHash::new(copy_array::<LEV_ADDR_LEN>(dest_hash));
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
         i32::from(h.node().has_path(&dh))
     })
 }
@@ -83,7 +76,7 @@ pub unsafe extern "C" fn lev_hops_to(
         if dest_hash.is_null() || out.is_null() {
             return LEV_ERR_NULL_PTR;
         }
-        let dh = DestinationHash::new(copy_array::<LEV_ADDR_LEN>(dest_hash));
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
         match h.node().hops_to(&dh) {
             Some(hops) => {
                 *out = hops;
@@ -110,7 +103,7 @@ pub unsafe extern "C" fn lev_request_path(
         if dest_hash.is_null() {
             return LEV_ERR_NULL_PTR;
         }
-        let dh = DestinationHash::new(copy_array::<LEV_ADDR_LEN>(dest_hash));
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
         match block_on_timeout(h.runtime(), h.node().request_path(&dh), timeout_ms) {
             Ok(Ok(())) => LEV_OK,
             Ok(Err(e)) => map_error(&e),
@@ -162,7 +155,7 @@ pub unsafe extern "C" fn lev_connect(
             return LEV_ERR_NULL_PTR;
         }
         *out = std::ptr::null_mut();
-        let dh = DestinationHash::new(copy_array::<LEV_ADDR_LEN>(dest_hash));
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
         let identity = match h.node().get_identity(&dh) {
             Some(id) => id,
             None => {
@@ -201,12 +194,12 @@ pub unsafe extern "C" fn lev_connect_with_key(
             return LEV_ERR_NULL_PTR;
         }
         *out = std::ptr::null_mut();
-        let dh = DestinationHash::new(copy_array::<LEV_ADDR_LEN>(dest_hash));
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
         if !h.node().has_path(&dh) {
             set_last_error("no path to destination");
             return LEV_ERR_NO_PATH;
         }
-        let key = copy_array::<LEV_SIGNING_KEY_LEN>(signing_key);
+        let key = read_array::<LEV_SIGNING_KEY_LEN>(signing_key);
         finish_connect(h, &dh, &key, timeout_ms, out)
     })
 }
@@ -229,7 +222,7 @@ pub unsafe extern "C" fn lev_accept_link(
             return LEV_ERR_NULL_PTR;
         }
         *out = std::ptr::null_mut();
-        let lid = LinkId::new(copy_array::<LEV_ADDR_LEN>(link_id));
+        let lid = LinkId::new(read_array::<LEV_ADDR_LEN>(link_id));
         let rt = h.runtime().handle().clone();
         match block_on_timeout(h.runtime(), h.node().accept_link(&lid), timeout_ms) {
             Ok(Ok(link)) => {

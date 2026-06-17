@@ -13,8 +13,8 @@ use reticulum_std::api::{Destination, DestinationHash, DestinationType, Directio
 
 use crate::error::*;
 use crate::identity::lev_identity_t;
-use crate::node::leviculum_t;
-use crate::{guard, write_out, LEV_ADDR_LEN};
+use crate::node::{block_on_timeout, leviculum_t};
+use crate::{guard, read_array, write_out, LEV_ADDR_LEN};
 
 /// Incoming destination: receives announces, links, and packets.
 pub const LEV_DIRECTION_IN: c_int = 0;
@@ -225,6 +225,50 @@ pub unsafe extern "C" fn lev_announce(
             Ok(()) => LEV_OK,
             Err(Some(e)) => map_error(&e),
             Err(None) => LEV_ERR_TIMEOUT,
+        }
+    })
+}
+
+/// Send one unreliable datagram (single packet) to a destination (16-byte
+/// hash), writing the 16-byte packet hash into `out_hash`. A path must already
+/// be known (`LEV_ERR_NO_PATH` otherwise). Blocks up to `timeout_ms`.
+#[no_mangle]
+pub unsafe extern "C" fn lev_send_datagram(
+    node: *const leviculum_t,
+    dest_hash: *const u8,
+    data: *const u8,
+    data_len: usize,
+    out_hash: *mut u8,
+    timeout_ms: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if dest_hash.is_null() || out_hash.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if data.is_null() && data_len > 0 {
+            return LEV_ERR_NULL_PTR;
+        }
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
+        if !h.node().has_path(&dh) {
+            set_last_error("no path to destination");
+            return LEV_ERR_NO_PATH;
+        }
+        let slice: &[u8] = if data_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(data, data_len)
+        };
+        match block_on_timeout(h.runtime(), h.node().send_datagram(&dh, slice), timeout_ms) {
+            Ok(Ok(hash)) => {
+                std::ptr::copy_nonoverlapping(hash.as_ptr(), out_hash, LEV_ADDR_LEN);
+                LEV_OK
+            }
+            Ok(Err(e)) => map_error(&e),
+            Err(()) => LEV_ERR_TIMEOUT,
         }
     })
 }

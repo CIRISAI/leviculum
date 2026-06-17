@@ -11,8 +11,9 @@
 //! `docs/leviculum-api-design.md`.
 //!
 //! v1 scope grows in phases: this module currently covers instance lifecycle,
-//! identity, and version. Destinations, announce, paths, links, datagrams,
-//! requests, resources, and the event stream land in later phases.
+//! identity, version, destinations and announce, paths, links, datagrams, and
+//! requests and responses. Resource transfer and packaging land in later
+//! phases. The event stream is consumed by the FFI via the engine receiver.
 
 use std::path::PathBuf;
 
@@ -20,7 +21,7 @@ use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 pub use crate::error::{Error as ApiError, Result};
 pub use crate::{Destination, DestinationHash, DestinationType, Direction, LinkHandle, LinkId};
-pub use reticulum_core::Identity;
+pub use reticulum_core::{Identity, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
 ///
@@ -205,6 +206,53 @@ impl Node {
     /// Accept an incoming link request from a link-request event.
     pub async fn accept_link(&self, link_id: &LinkId) -> Result<LinkHandle> {
         self.inner.accept_link(link_id).await
+    }
+
+    /// Send one unreliable datagram to a destination, returning the packet hash.
+    /// A path to the destination must already be known.
+    pub async fn send_datagram(
+        &self,
+        dest_hash: &DestinationHash,
+        data: &[u8],
+    ) -> Result<[u8; 16]> {
+        self.inner.send_single_packet(dest_hash, data).await
+    }
+
+    /// Register a handler for requests to `path` on a local destination.
+    pub fn register_request_handler(
+        &self,
+        dest_hash: DestinationHash,
+        path: &str,
+        policy: RequestPolicy,
+    ) {
+        self.inner.register_request_handler(dest_hash, path, policy);
+    }
+
+    /// Send a request on an established link, returning the request id. The
+    /// response or a timeout arrives as an event.
+    pub async fn send_request(
+        &self,
+        link_id: &LinkId,
+        path: &str,
+        data: Option<&[u8]>,
+        timeout_ms: Option<u64>,
+    ) -> Result<[u8; 16]> {
+        self.inner
+            .send_request(link_id, path, data, timeout_ms)
+            .await
+    }
+
+    /// Send a response to a received request. `response_data` must be one valid
+    /// msgpack-encoded value.
+    pub async fn send_response(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        response_data: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .send_response(link_id, request_id, response_data)
+            .await
     }
 
     /// Access the underlying engine node.

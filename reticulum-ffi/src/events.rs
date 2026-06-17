@@ -36,6 +36,12 @@ pub const LEV_EVENT_PACKET_RECEIVED: c_int = 7;
 /// Control events were dropped; the count is available via
 /// `lev_event_dropped_count`.
 pub const LEV_EVENT_CONTROL_OVERFLOW: c_int = 8;
+/// A request arrived on a link (respond with `lev_send_response`).
+pub const LEV_EVENT_REQUEST_RECEIVED: c_int = 9;
+/// A response to a sent request arrived.
+pub const LEV_EVENT_RESPONSE_RECEIVED: c_int = 10;
+/// A sent request timed out without a response.
+pub const LEV_EVENT_REQUEST_TIMEOUT: c_int = 11;
 
 /// One projected event, fully self-owned (all payloads deep-copied out of the
 /// `NodeEvent`), so it outlives the queue slot and is valid until
@@ -45,6 +51,8 @@ pub struct lev_event_t {
     is_control: bool,
     link_id: Option<[u8; 16]>,
     dest_hash: Option<[u8; 16]>,
+    request_id: Option<[u8; 16]>,
+    path: Option<String>,
     data: Vec<u8>,
     dropped_count: u64,
 }
@@ -56,6 +64,8 @@ impl lev_event_t {
             is_control,
             link_id: None,
             dest_hash: None,
+            request_id: None,
+            path: None,
             data: Vec::new(),
             dropped_count: 0,
         }
@@ -113,8 +123,50 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.data = data;
             e
         }
+        NodeEvent::PacketReceived {
+            destination, data, ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_PACKET_RECEIVED, is_control);
+            e.dest_hash = Some(*destination.as_bytes());
+            e.data = data;
+            e
+        }
+        NodeEvent::RequestReceived {
+            link_id,
+            request_id,
+            path,
+            data,
+            ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_REQUEST_RECEIVED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.request_id = Some(request_id);
+            e.path = Some(path);
+            e.data = data;
+            e
+        }
+        NodeEvent::ResponseReceived {
+            link_id,
+            request_id,
+            response_data,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_RESPONSE_RECEIVED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.request_id = Some(request_id);
+            e.data = response_data;
+            e
+        }
+        NodeEvent::RequestTimedOut {
+            link_id,
+            request_id,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_REQUEST_TIMEOUT, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.request_id = Some(request_id);
+            e
+        }
         // Other variants keep their class so the cap policy is right, but carry
-        // no typed fields yet; phases d and e replace this with real projection.
+        // no typed fields yet; phase e replaces this with real projection.
         _ => lev_event_t::bare(LEV_EVENT_OTHER, is_control),
     }
 }
@@ -314,6 +366,49 @@ pub unsafe extern "C" fn lev_event_dest_hash(
         };
         match &e.dest_hash {
             Some(h) => write_out(h, buf, cap, out_len),
+            None => LEV_ERR_INVALID_ARG,
+        }
+    })
+}
+
+/// Write the event's request id (16 bytes) into `buf`, read(2) style.
+/// `LEV_ERR_INVALID_ARG` if the event has no request id.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_request_id(
+    ev: *const lev_event_t,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match &e.request_id {
+            Some(id) => write_out(id, buf, cap, out_len),
+            None => LEV_ERR_INVALID_ARG,
+        }
+    })
+}
+
+/// Write the event's request path into `buf` as UTF-8 bytes (not
+/// NUL-terminated), read(2) style. `LEV_ERR_INVALID_ARG` if the event has no
+/// path.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_path(
+    ev: *const lev_event_t,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match &e.path {
+            Some(p) => write_out(p.as_bytes(), buf, cap, out_len),
             None => LEV_ERR_INVALID_ARG,
         }
     })

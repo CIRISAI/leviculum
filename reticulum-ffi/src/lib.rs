@@ -26,6 +26,7 @@ mod identity;
 mod link;
 mod log;
 mod node;
+mod request;
 
 pub use destination::*;
 pub use error::*;
@@ -34,6 +35,7 @@ pub use identity::*;
 pub use link::*;
 pub use log::*;
 pub use node::*;
+pub use request::*;
 
 /// Runs process-global setup exactly once.
 static INIT: Once = Once::new();
@@ -90,6 +92,14 @@ pub(crate) unsafe fn write_out(src: &[u8], buf: *mut u8, cap: usize, out_len: *m
     }
     std::ptr::copy_nonoverlapping(src.as_ptr(), buf, src.len());
     LEV_OK
+}
+
+/// Copy a fixed-size byte array out of a C pointer. The caller must ensure
+/// `src` points to at least `N` readable bytes.
+pub(crate) unsafe fn read_array<const N: usize>(src: *const u8) -> [u8; N] {
+    let mut out = [0u8; N];
+    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), N);
+    out
 }
 
 /// Return the library version string, for example `"0.6.3"`.
