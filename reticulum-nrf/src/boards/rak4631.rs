@@ -36,8 +36,11 @@ pub type LoRaPowerEn = peripherals::P1_05;
 
 /// SX1262 SPI frequency in Hz (4 MHz, matches T114 / Meshtastic).
 pub const LORA_SPI_FREQ_HZ: u32 = 4_000_000;
-/// SX1262 TCXO voltage supplied via DIO3 (volts).
-pub const LORA_TCXO_VOLTAGE: f32 = 1.8;
+/// SX1262 TCXO voltage supplied via DIO3 (volts). RNode firmware drives the
+/// RAK4631 TCXO at 3.3 V (`sx126x.cpp` `enableTCXO`: BOARD_RAK4631 ->
+/// MODE_TCXO_3_3V_6X), unlike the Heltec T114 which it drives at 1.8 V. Match
+/// the RAK reference here so the SX1262 clock is stable over long airtimes.
+pub const LORA_TCXO_VOLTAGE: f32 = 3.3;
 /// SX1262 max TX power (dBm). Same SX1262 die as on T114 → +22 dBm.
 pub const LORA_MAX_POWER_DBM: i8 = 22;
 /// SX1262 uses DIO2 as internal RF switch (no external RXEN/TXEN GPIO).
@@ -126,7 +129,7 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_product: "leviculum RAK4631",
     log_prefix: "RAK",
     identity_flash_page: 0xEC000,
-    lora_tcxo_voltage_reg: 0x02, // 1.8 V
+    lora_tcxo_voltage_reg: 0x07, // 3.3 V (RNode MODE_TCXO_3_3V_6X for BOARD_RAK4631)
     lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
     lora_max_power_dbm: LORA_MAX_POWER_DBM,
 };
