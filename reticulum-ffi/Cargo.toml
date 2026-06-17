@@ -7,20 +7,13 @@ license.workspace = true
 description = "C-API/FFI bindings for reticulum"
 
 [lib]
+# Output libleviculum.so / libleviculum.a so the link flag is -lleviculum.
+name = "leviculum"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-reticulum-core = { path = "../reticulum-core", default-features = true }
 reticulum-std = { path = "../reticulum-std" }
-libc.workspace = true
-tokio.workspace = true
-rand_core.workspace = true
+tokio = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.27"
-
-# reticulum-ffi is a stub/orphaned crate (§9.2 of CLEANUP_NOTES) —
-# dependencies sit in Cargo.toml even though the stub does not import
-# them, in anticipation of the planned redesign.
-[package.metadata.cargo-machete]
-ignored = ["libc", "reticulum-std"]

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let output_file = PathBuf::from(&crate_dir).join("reticulum.h");
+    let output_file = PathBuf::from(&crate_dir).join("leviculum.h");
 
     cbindgen::Builder::new()
         .with_crate(&crate_dir)
@@ -12,6 +12,6 @@ fn main() {
         .expect("Unable to generate bindings")
         .write_to_file(&output_file);
 
-    println!("cargo::rerun-if-changed=src/lib.rs");
+    println!("cargo::rerun-if-changed=src");
     println!("cargo::rerun-if-changed=cbindgen.toml");
 }

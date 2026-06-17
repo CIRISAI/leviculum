@@ -334,23 +334,27 @@ the linker flag is `-lleviculum`.
 
 ## 9. Header generation
 
-Decision: cbindgen generates the canonical `leviculum.h`, the generated
-header is committed, and CI fails if regenerating it produces a diff.
+Decision: cbindgen generates `leviculum.h` from the Rust source on every
+build, and the header is a build artifact, not committed (the repo already
+gitignores `reticulum-ffi/*.h`). The Rust source is the single source of
+truth; packaging installs the freshly generated header.
 
 Rationale. The worst class of C-library bug is a header that disagrees with
 the shipped symbols (wrong argument order, stale signature, a function that
-no longer exists). A single source of truth removes that class entirely.
-cbindgen is already wired (`build.rs`, `cbindgen.toml`). We invest instead
-in making the generated output read like a hand-written header: doc
-comments carry over from Rust, `cbindgen.toml` controls ordering and
-grouping, and the opaque types produce clean forward declarations. The CI
-no-diff check (regenerate, `git diff --exit-code`) guarantees the committed
-header always matches the code.
+no longer exists). Regenerating the header on every build from the same
+crate that produces the symbols removes that class entirely and by
+construction: there is no committed copy that can go stale. This is
+strictly safer than committing the header with a CI no-diff guard, and it
+matches the existing repo convention. cbindgen is already wired
+(`build.rs`, `cbindgen.toml`); we invest in making the output read like a
+hand-written header (doc comments carried over, `cbindgen.toml` controls
+ordering and wrapping, opaque types as clean forward declarations).
 
-If generated ergonomics ever fall short of "feels like a normal C lib",
-the fallback is a hand-curated header guarded by a symbol-match CI check
-(`nm` on the cdylib vs declarations in the header). Recorded as the
-alternative, not chosen for v1.
+The one cost is that someone browsing the repo does not see the header
+without building. That is acceptable for a generated artifact. If a hand
+curated header is ever wanted for ergonomics, the fallback is to commit it
+and guard it with a symbol-match CI check (`nm` on the cdylib vs the
+declarations). Recorded as the alternative, not chosen for v1.
 
 ## 10. The v1 surface
 

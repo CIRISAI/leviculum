@@ -1,97 +1,87 @@
-//! Integration tests that compile and run C test programs
+//! Compiles and runs the C example programs against the real cdylib.
 //!
-//! These tests ensure the C API works correctly from actual C code.
+//! This is the per-phase acceptance test: a C program that links
+//! `libleviculum.so` and exercises the public API end to end. It must be run
+//! against the glibc target that produces a shippable `.so`:
+//!
+//! ```sh
+//! cargo test-ffi            # alias: -p reticulum-ffi --target x86_64-unknown-linux-gnu
+//! ```
+//!
+//! Under the workspace musl default no `.so` is produced (cdylib is
+//! unsupported there), so the test skips with a clear message instead of
+//! failing.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Get the target directory where the library is built
-fn get_target_dir() -> PathBuf {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(manifest_dir)
-        .parent()
-        .unwrap()
-        .join("target")
-        .join(if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        })
+/// Directory holding the built `libleviculum.so`.
+///
+/// The test executable runs from `<target>/<profile>/deps/`, so the cdylib is
+/// one directory up. This is triple- and profile-agnostic.
+fn lib_dir() -> PathBuf {
+    let exe = env::current_exe().expect("current_exe");
+    exe.parent()
+        .and_then(Path::parent)
+        .expect("deps parent")
+        .to_path_buf()
 }
 
-/// Get the FFI crate directory
-fn get_ffi_dir() -> PathBuf {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(manifest_dir)
+fn crate_dir() -> PathBuf {
+    PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+}
+
+/// Compile `source` against the cdylib and run it. Panics on any failure.
+fn compile_and_run(source: &str, bin_name: &str) {
+    let lib_dir = lib_dir();
+    let so = lib_dir.join("libleviculum.so");
+    if !so.exists() {
+        eprintln!(
+            "skipping: {} not found (build the glibc cdylib: `cargo test-ffi`)",
+            so.display()
+        );
+        return;
+    }
+
+    let crate_dir = crate_dir();
+    let source = crate_dir.join(source);
+    // The generated header lives at the crate root; the example includes
+    // "leviculum.h".
+    let header_root = crate_dir.clone();
+    let out_bin = lib_dir.join(bin_name);
+
+    let status = Command::new("cc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&out_bin)
+        .arg(format!("-I{}", header_root.display()))
+        .arg(format!("-L{}", lib_dir.display()))
+        .arg("-lleviculum")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-Werror")
+        .status()
+        .expect("failed to invoke cc");
+    assert!(
+        status.success(),
+        "cc failed to compile {}",
+        source.display()
+    );
+
+    let run = Command::new(&out_bin)
+        .env("LD_LIBRARY_PATH", &lib_dir)
+        .status()
+        .expect("failed to run compiled C test");
+    assert!(
+        run.success(),
+        "C test {} exited with {:?}",
+        bin_name,
+        run.code()
+    );
 }
 
 #[test]
-#[ignore = "FFI crate is outdated — will be redesigned after core stabilizes"]
-fn test_c_identity_bindings() {
-    let ffi_dir = get_ffi_dir();
-    let target_dir = get_target_dir();
-
-    let c_source = ffi_dir.join("c_tests").join("test_identity.c");
-    let header_dir = &ffi_dir;
-    let lib_dir = &target_dir;
-    let output_binary = target_dir.join("test_identity_c");
-
-    // Determine library name based on platform
-    let lib_name = if cfg!(target_os = "windows") {
-        "reticulum_ffi.dll"
-    } else if cfg!(target_os = "macos") {
-        "leviculum_ffi.dylib"
-    } else {
-        "leviculum_ffi.so"
-    };
-
-    let lib_path = lib_dir.join(lib_name);
-
-    // Check that the library exists
-    if !lib_path.exists() {
-        panic!(
-            "Library not found at {:?}. Run `cargo build -p reticulum-ffi` first.",
-            lib_path
-        );
-    }
-
-    // Compile the C test program
-    let compile_status = Command::new("cc")
-        .args([
-            "-o",
-            output_binary.to_str().unwrap(),
-            c_source.to_str().unwrap(),
-            "-I",
-            header_dir.to_str().unwrap(),
-            "-L",
-            lib_dir.to_str().unwrap(),
-            "-lreticulum_ffi",
-            "-Wl,-rpath",
-            lib_dir.to_str().unwrap(),
-        ])
-        .status()
-        .expect("Failed to execute cc compiler");
-
-    if !compile_status.success() {
-        panic!("Failed to compile C test program");
-    }
-
-    // Run the test program
-    let output = Command::new(&output_binary)
-        .env("LD_LIBRARY_PATH", lib_dir)
-        .output()
-        .expect("Failed to run C test program");
-
-    // Print output for debugging
-    println!("{}", String::from_utf8_lossy(&output.stdout));
-    if !output.stderr.is_empty() {
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    assert!(
-        output.status.success(),
-        "C test program failed with exit code: {:?}",
-        output.status.code()
-    );
+fn c_phase_a_acceptance() {
+    compile_and_run("examples/c/phase_a.c", "phase_a_c");
 }
