@@ -261,6 +261,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.transport.send_on_all_interfaces(&packet);
         }
 
+        // Establishment packet-level instrumentation (initiator TX). Pairs with
+        // LINK_REQUEST_RX / LINK_PROOF_TX / LINK_PROOF_RX so a hardware run can
+        // pinpoint which handshake packet is lost on a cold lossy path.
+        crate::tracing::debug!(
+            target: "reticulum_core::link",
+            "LINK_REQUEST_TX link={} dest={} t_ms={} hops={} routed={}",
+            HexShort(link_id.as_bytes()),
+            HexShort(dest_hash.as_bytes()),
+            now_ms,
+            hops,
+            was_routed,
+        );
+
         let output = self.process_events_and_actions();
         (link_id, was_routed, output)
     }
@@ -309,6 +322,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.set_phase(LinkPhase::PendingIncoming {
             proof_sent_at_ms: now_ms,
         });
+
+        // Establishment packet-level instrumentation (responder proof TX).
+        crate::tracing::debug!(
+            target: "reticulum_core::link",
+            "LINK_PROOF_TX link={} dest={} t_ms={} proof_len={}",
+            HexShort(link_id.as_bytes()),
+            HexShort(dest_hash.as_bytes()),
+            now_ms,
+            proof.len(),
+        );
 
         // Route proof on attached interface (matching Python Link.prove())
         let attached = self.links.get(link_id).and_then(|l| l.attached_interface());
@@ -670,6 +693,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.transport.iface_name(interface_index)
         );
 
+        // Establishment packet-level instrumentation (responder request RX).
+        crate::tracing::debug!(
+            target: "reticulum_core::link",
+            "LINK_REQUEST_RX link={} dest={} t_ms={} hops={} iface={}",
+            HexShort(link_id.as_bytes()),
+            HexShort(dest_hash.as_bytes()),
+            self.transport.clock().now_ms(),
+            packet.hops,
+            self.transport.iface_name(interface_index),
+        );
+
         // Emit event directly as NodeEvent
         self.events.push(NodeEvent::LinkRequest {
             link_id,
@@ -696,6 +730,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.handle_data_proof(&link_id, proof_data);
             return;
         }
+
+        // Establishment packet-level instrumentation (initiator proof RX).
+        crate::tracing::debug!(
+            target: "reticulum_core::link",
+            "LINK_PROOF_RX link={} t_ms={} proof_len={} iface={}",
+            HexShort(link_id.as_bytes()),
+            now_ms,
+            proof_data.len(),
+            interface_index,
+        );
 
         if packet.context == PacketContext::ResourcePrf {
             self.handle_resource_proof(link_id, proof_data);

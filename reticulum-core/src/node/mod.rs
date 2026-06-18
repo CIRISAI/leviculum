@@ -47,6 +47,8 @@ mod link_management;
 // Gated on `tracing`: the mvr captures structured tracing output to prove the
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
 // (absent under `--no-default-features`, e.g. the core-no-tracing CI gate).
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_establishment_loss;
 #[cfg(test)]
 mod mvr_link_rekey_alias;
 #[cfg(all(test, feature = "tracing"))]
