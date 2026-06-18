@@ -92,6 +92,38 @@ fn with_captured_logs<R>(body: impl FnOnce() -> R) -> (R, String) {
     (out, logs)
 }
 
+/// The EXACT `RUST_LOG` filter the cold-8node integ run uses
+/// (`reticulum-integ/tests/lora_late_announce_8node.toml`). It enables
+/// `reticulum_core::link=debug` (so `LINK_DIED` and the TX/RX handshake events
+/// are visible) but does NOT enable `reticulum_core::node::link_management`,
+/// where the retry / timeout diagnostics ("retrying with fresh keys",
+/// "establishment timed out (no retries left)") are emitted. Those debug lines
+/// fall through to the `info` catch-all and are dropped.
+const FIELD_RUST_LOG: &str = "reticulum_core::link::channel=debug,reticulum_core::link=debug,\
+     reticulum_core::transport=debug,reticulum_std::interfaces=debug,info";
+
+/// Run `body` with tracing captured through the SAME `EnvFilter` the field run
+/// applied. Used to reproduce the field log shape (death with zero *visible*
+/// retransmits) verbatim, proving it is an observability artifact of the filter
+/// rather than a zero-retransmit code path.
+fn with_field_filtered_logs<R>(body: impl FnOnce() -> R) -> (R, String) {
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(CaptureWriter(buf.clone()))
+        .with_env_filter(EnvFilter::new(FIELD_RUST_LOG))
+        .with_ansi(false)
+        .with_target(true)
+        .finish();
+    let guard = subscriber.set_default();
+    let out = body();
+    drop(guard);
+    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    (out, logs)
+}
+
 // ----------------------------------------------------------------------------
 // Sans-I/O node helpers (direct initiator <-> responder, one mesh hop).
 // ----------------------------------------------------------------------------
@@ -462,5 +494,113 @@ fn establishment_persistent_proof_loss_dies_after_bounded_retries() {
     assert!(
         logs.contains("detail=handshake_timeout"),
         "death must be reported as LINK_DIED detail=handshake_timeout (the field symptom).\n--- logs ---\n{logs}"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// (field log artifact) The cold-8node log shows LINK_DIED with ZERO visible
+// "retrying with fresh keys" lines. That is NOT a zero-retransmit code path: it
+// is the field RUST_LOG filtering out the retry diagnostics' tracing target.
+// ----------------------------------------------------------------------------
+
+/// Drive a 1-hop initiator->responder establishment under PERSISTENT proof loss
+/// until the link reaches the timeout-death path. Same mechanism as
+/// `establishment_persistent_proof_loss_dies_after_bounded_retries`, factored so
+/// the characterisation below can replay the identical run under two different
+/// tracing filters. Returns whether the link died (it always should within the
+/// bounded retry budget). The initiator's `connect()` populates
+/// `link_retry_state` with `max(LINK_REQUEST_MAX_RETRIES, hops)` — the very
+/// budget the field path was hypothesised to bypass; it does not.
+fn drive_persistent_proof_loss_to_death() -> bool {
+    let (mut responder, dest_hash, signing_key) = make_responder();
+    let mut initiator = make_initiator();
+    let r_iface = add_iface(&mut responder, "R_mesh");
+
+    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let request = one_packet(&out);
+
+    // Responder accepts and proves once; that proof (and every retried proof) is
+    // dropped, so loss is persistent and the retry budget is exhausted.
+    let out = responder.handle_packet(InterfaceId(r_iface), &request);
+    let resp_link = link_request_link_id(&out);
+    let _ = responder.accept_link(&resp_link).unwrap();
+
+    for _ in 0..16 {
+        if initiator.link(&link_id).is_none() {
+            break;
+        }
+        let out = tick_past_establishment_timeout(&mut initiator, &link_id);
+        if has_timeout_close(&out) {
+            return true;
+        }
+    }
+    false
+}
+
+/// FIELD REPRODUCTION (characterisation, not a fix). Reproduces the misleading
+/// shape of the cold-8node `exec_a1` log: `LINK_DIED detail=handshake_timeout`
+/// with ZERO "retrying with fresh keys" lines preceding it. The reviewer read
+/// that absence as "retries_left=0, zero retransmits, death at the FIRST
+/// establishment timeout" — i.e. the field link-open path bypassing the retry
+/// budget. This test refutes that reading deterministically:
+///
+///   * CONTROL — under full DEBUG capture the IDENTICAL run visibly retransmits
+///     `max(LINK_REQUEST_MAX_RETRIES, hops)` times (Codeberg #66 fresh keys)
+///     before it dies. The retries DO engage on the `connect()` path.
+///   * FIELD — replayed under the verbatim field `RUST_LOG`, the same run still
+///     retransmits and still dies, yet the captured log contains ONLY the
+///     `LINK_DIED` line (target `reticulum_core::link`, which the filter
+///     enables) and NONE of the retry/no-retries-left diagnostics (target
+///     `reticulum_core::node::link_management`, which the filter drops to
+///     `info`). The "zero retransmit" observation is therefore a tracing-target
+///     artifact, present even though the retransmits happened.
+///
+/// Conclusion locked by this test: the field path (`lns selftest` ->
+/// `Node::connect` -> `NodeCore::connect`) sets the retry budget exactly like
+/// every other caller; the cold-link death is NOT explained by an unpopulated
+/// `link_retry_state`. The retry budget vs. the path's loss rate remains the
+/// lever, as the persistent-loss mvr already characterised.
+#[test]
+fn establishment_field_zero_retransmit_log_is_filter_artifact() {
+    // CONTROL: full debug shows the retransmits explicitly.
+    let (died_full, full_logs) = with_captured_logs(drive_persistent_proof_loss_to_death);
+    assert!(
+        died_full,
+        "control: persistent proof loss must reach the death path.\n--- logs ---\n{full_logs}"
+    );
+    // hops == 1 for this direct link -> budget == max(LINK_REQUEST_MAX_RETRIES, 1).
+    let expected_retransmits = core::cmp::max(LINK_REQUEST_MAX_RETRIES as usize, 1);
+    assert_eq!(
+        full_logs.matches("retrying with fresh keys").count(),
+        expected_retransmits,
+        "control: the run retransmits {expected_retransmits}x under full debug \
+         (the retry budget DID engage on the connect path).\n--- logs ---\n{full_logs}"
+    );
+
+    // FIELD: identical run, captured through the verbatim field RUST_LOG.
+    let (died_field, field_logs) = with_field_filtered_logs(drive_persistent_proof_loss_to_death);
+    assert!(
+        died_field,
+        "field filter: the link must still die (behaviour is identical).\n--- logs ---\n{field_logs}"
+    );
+
+    // The death IS visible (its target is reticulum_core::link) — exactly the one
+    // line the field log surfaced.
+    assert!(
+        field_logs.contains("LINK_DIED") && field_logs.contains("detail=handshake_timeout"),
+        "field filter must still surface LINK_DIED (target reticulum_core::link).\n--- logs ---\n{field_logs}"
+    );
+
+    // ...but the retransmits are INVISIBLE under this filter, reproducing the
+    // field log's "zero retransmits" verbatim even though they happened.
+    assert!(
+        !field_logs.contains("retrying with fresh keys"),
+        "field filter must HIDE the retransmit diagnostics (target \
+         reticulum_core::node::link_management), reproducing the misleading field log.\n\
+         --- field logs ---\n{field_logs}\n--- full logs (same run) ---\n{full_logs}"
+    );
+    assert!(
+        !field_logs.contains("no retries left"),
+        "field filter must also hide the 'no retries left' line (same target).\n--- logs ---\n{field_logs}"
     );
 }
