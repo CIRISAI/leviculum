@@ -160,6 +160,9 @@ struct SharedState {
     link_request_b: Notify,
     link_established_a: Notify,
     link_established_b: Notify,
+    // Link id of the link B actually established (the re-keyed retry that won,
+    // when the first proof was lost). Used to pick the right accepted handle.
+    established_link_b: Mutex<Option<LinkId>>,
     // Phase flag: true during single-packet phase
     single_packet_phase: AtomicBool,
     // Link death detection
@@ -179,6 +182,7 @@ impl SharedState {
             link_request_b: Notify::new(),
             link_established_a: Notify::new(),
             link_established_b: Notify::new(),
+            established_link_b: Mutex::new(None),
             single_packet_phase: AtomicBool::new(false),
             link_dead: AtomicBool::new(false),
             link_dead_elapsed_secs: Mutex::new(None),
@@ -412,7 +416,8 @@ async fn event_task_b(
                 *state.pending_link_b.lock().unwrap() = Some(link_id);
                 state.link_request_b.notify_one();
             }
-            NodeEvent::LinkEstablished { .. } => {
+            NodeEvent::LinkEstablished { link_id, .. } => {
+                *state.established_link_b.lock().unwrap() = Some(link_id);
                 state.link_established_b.notify_one();
             }
             NodeEvent::MessageReceived { data, .. } => {
@@ -803,26 +808,56 @@ pub async fn run_selftest(
             format!("Phase 3 timeout: link request not received by B >{phase3_timeout_secs}s")
         })?;
 
-        let pending_id = state
-            .pending_link_b
-            .lock()
-            .unwrap()
-            .ok_or("no pending link on B")?;
-        let stream_b = node_b.accept_link(&pending_id).await?;
-
-        // Wait for both sides established (same budget)
-        let establish = async {
-            tokio::join!(
-                state.link_established_a.notified(),
-                state.link_established_b.notified()
-            );
+        // Accept link requests in a LOOP until both sides are established (or the
+        // Phase-3 budget elapses). If the responder's first proof is lost on a
+        // cold path, the initiator re-keys and retransmits the LinkRequest with a
+        // fresh id (Codeberg #66); each retry overwrites `pending_link_b` and
+        // fires `link_request_b`. A one-shot acceptor (accept the first id only)
+        // never proofs the re-keyed retries, so establishment deadlocks. Here we
+        // accept each new pending id as it appears. Accepting an id that is no
+        // longer pending (already accepted or established) is a harmless no-op.
+        let accept_loop = async {
+            let mut accepted: Vec<(LinkId, LinkHandle)> = Vec::new();
+            let mut a_done = false;
+            let mut b_done = false;
+            loop {
+                let pending = *state.pending_link_b.lock().unwrap();
+                if let Some(id) = pending {
+                    if !accepted.iter().any(|(seen, _)| *seen == id) {
+                        if let Ok(handle) = node_b.accept_link(&id).await {
+                            accepted.push((id, handle));
+                        }
+                    }
+                }
+                if a_done && b_done {
+                    break;
+                }
+                tokio::select! {
+                    _ = state.link_request_b.notified() => {}
+                    _ = state.link_established_a.notified(), if !a_done => { a_done = true; }
+                    _ = state.link_established_b.notified(), if !b_done => { b_done = true; }
+                }
+            }
+            accepted
         };
-        tokio::time::timeout(
+        let accepted = tokio::time::timeout(
             std::time::Duration::from_secs(phase3_timeout_secs),
-            establish,
+            accept_loop,
         )
         .await
         .map_err(|_| format!("Phase 3 timeout: link establishment >{phase3_timeout_secs}s"))?;
+
+        // Pick the handle for the link B actually established (the winning re-keyed
+        // retry, when an earlier proof was lost).
+        let established_b_id = state
+            .established_link_b
+            .lock()
+            .unwrap()
+            .ok_or("no established link on B")?;
+        let stream_b = accepted
+            .into_iter()
+            .find_map(|(id, handle)| (id == established_b_id).then_some(handle))
+            .ok_or("established B link was never accepted")?;
 
         println!(
             "[selftest] Phase 3: OK — link established in {:.1}s",

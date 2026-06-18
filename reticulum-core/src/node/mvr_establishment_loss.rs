@@ -498,6 +498,149 @@ fn establishment_persistent_proof_loss_dies_after_bounded_retries() {
 }
 
 // ----------------------------------------------------------------------------
+// (harness defect) A ONE-SHOT responder (accept only the FIRST LinkRequest)
+// deadlocks under first-proof-loss + re-key, where a LOOP-accept responder
+// recovers. This is the `lns selftest` Phase-3 acceptor bug (reviewer-confirmed
+// on the LoRa rig: two cold fails, identical `lr_rx=4 proof_tx=1 retransmits=3`).
+// ----------------------------------------------------------------------------
+
+/// HARNESS-DEFECT REPRO. Reproduces the `lns selftest` cold-link establishment
+/// failure DETERMINISTICALLY and proves the fix, contrasting the two responder
+/// acceptance strategies on the IDENTICAL first-proof-loss + re-key scenario:
+///
+///   * ONE-SHOT (the bug): the responder accepts the FIRST LinkRequest and
+///     proves it once; that proof is lost on the cold return path. The initiator
+///     re-keys and retransmits (Codeberg #66), and every re-keyed request DOES
+///     reach the responder (LINK_REQUEST_RX fires for each), but a one-shot
+///     responder never `accept_link`s the new ids, so it emits NO further proof.
+///     The initiator exhausts its retry budget and the link dies with
+///     `handshake_timeout`. The captured log reproduces the field signature
+///     verbatim: multiple `LINK_REQUEST_RX`, exactly one `LINK_PROOF_TX`.
+///
+///   * LOOP-ACCEPT (the fix): same first-proof-loss, but the responder accepts
+///     each re-keyed retry as it arrives. The retry's proof IS delivered and the
+///     link ESTABLISHES — more than one `LINK_PROOF_TX`.
+///
+/// This is the minimal repro of the test-harness defect (`selftest.rs` accepts
+/// `pending_link_b` once) and its loop-accept fix. The core re-key/retransmit and
+/// per-id `accept_link` are correct; only the one-shot acceptance pattern fails.
+#[test]
+fn one_shot_responder_deadlocks_where_loop_accept_recovers() {
+    // hops == 1 for this direct link -> retry budget == max(LINK_REQUEST_MAX_RETRIES, 1).
+    let expected_retransmits = core::cmp::max(LINK_REQUEST_MAX_RETRIES as usize, 1);
+
+    // --- ONE-SHOT responder: the bug. -------------------------------------
+    let (died, one_shot_logs) = with_captured_logs(|| {
+        let (mut responder, dest_hash, signing_key) = make_responder();
+        let mut initiator = make_initiator();
+        let r_iface = add_iface(&mut responder, "R_mesh");
+
+        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let request = one_packet(&out);
+
+        // Responder accepts ONLY the first request; that single proof is dropped.
+        let out = responder.handle_packet(InterfaceId(r_iface), &request);
+        let first_id = link_request_link_id(&out);
+        let _ = responder.accept_link(&first_id).unwrap(); // proof dropped.
+
+        // Drive the initiator's re-key retransmits. Each retransmit is DELIVERED
+        // to the responder (so LINK_REQUEST_RX fires), but the one-shot responder
+        // never accepts the new id -> no further proof -> the budget is exhausted.
+        let mut died = false;
+        for _ in 0..16 {
+            if initiator.link(&link_id).is_none() {
+                break;
+            }
+            let out = tick_past_establishment_timeout(&mut initiator, &link_id);
+            if has_timeout_close(&out) {
+                died = true;
+                break;
+            }
+            // Deliver every outbound packet to the responder; the re-keyed
+            // LinkRequest among them fires LINK_REQUEST_RX (path-request
+            // rebroadcasts are harmless no-ops for the responder).
+            for pkt in action_data(&out) {
+                let _ = responder.handle_packet(InterfaceId(r_iface), &pkt);
+            }
+        }
+        assert_eq!(
+            initiator.active_link_count(),
+            0,
+            "one-shot accept: the link must NOT establish"
+        );
+        died
+    });
+
+    assert!(
+        died,
+        "one-shot accept must deadlock: the re-keyed retries are never proofed, \
+         so establishment dies with handshake_timeout.\n--- logs ---\n{one_shot_logs}"
+    );
+    assert!(
+        one_shot_logs.contains("detail=handshake_timeout"),
+        "one-shot death must be the field symptom LINK_DIED detail=handshake_timeout.\n--- logs ---\n{one_shot_logs}"
+    );
+    // Field signature reproduced: many requests received, exactly one proof sent.
+    let lr_rx = one_shot_logs.matches("LINK_REQUEST_RX").count();
+    let proof_tx = one_shot_logs.matches("LINK_PROOF_TX").count();
+    assert_eq!(
+        lr_rx,
+        1 + expected_retransmits,
+        "the responder must RECEIVE every re-keyed retry (1 initial + {expected_retransmits} \
+         retries), reproducing the field `lr_rx>1`.\n--- logs ---\n{one_shot_logs}"
+    );
+    assert_eq!(
+        proof_tx, 1,
+        "one-shot acceptance proofs EXACTLY ONCE despite the re-keyed retries \
+         (the field `proof_tx=1` signature).\n--- logs ---\n{one_shot_logs}"
+    );
+
+    // --- LOOP-ACCEPT responder: the fix. ----------------------------------
+    let ((), loop_logs) = with_captured_logs(|| {
+        let (mut responder, dest_hash, signing_key) = make_responder();
+        let mut initiator = make_initiator();
+        let r_iface = add_iface(&mut responder, "R_mesh");
+        let i_iface = add_iface(&mut initiator, "I_mesh");
+
+        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let request = one_packet(&out);
+
+        // Responder accepts the first request and proves it; that proof is dropped.
+        let out = responder.handle_packet(InterfaceId(r_iface), &request);
+        let first_id = link_request_link_id(&out);
+        let _ = responder.accept_link(&first_id).unwrap(); // first proof dropped.
+
+        // Initiator re-keys on the establishment timeout. The loop-accept
+        // responder accepts the NEW id; this second proof IS delivered and the
+        // link establishes.
+        let out = tick_past_establishment_timeout(&mut initiator, &link_id);
+        let retried = action_data(&out)
+            .into_iter()
+            .next()
+            .expect("re-keyed LinkRequest");
+        let out = responder.handle_packet(InterfaceId(r_iface), &retried);
+        let retried_id = link_request_link_id(&out);
+        let out = responder.accept_link(&retried_id).unwrap();
+        let proof2 = one_packet(&out);
+
+        let out = initiator.handle_packet(InterfaceId(i_iface), &proof2);
+        assert!(
+            has_link_established(&out),
+            "loop-accept: accepting the re-keyed retry must establish the link"
+        );
+        assert_eq!(initiator.active_link_count(), 1);
+    });
+
+    // The fix proofs MORE THAN ONCE (the re-keyed retry is proofed too) — the
+    // single behavioural difference from the one-shot bug above.
+    assert!(
+        loop_logs.matches("LINK_PROOF_TX").count() >= 2,
+        "loop-accept must emit a proof for the re-keyed retry too (proof_tx>1), \
+         unlike the one-shot bug.\n--- logs ---\n{loop_logs}"
+    );
+}
+
+// ----------------------------------------------------------------------------
 // (field log artifact) The cold-8node log shows LINK_DIED with ZERO visible
 // "retrying with fresh keys" lines. That is NOT a zero-retransmit code path: it
 // is the field RUST_LOG filtering out the retry diagnostics' tracing target.
