@@ -4,7 +4,9 @@
 # limit and same chip pairs pass SF10/CR8; both stay gating. Runnable for
 # diagnostics. The tier3 gating carve-out is the EXPECTED_MARGINAL allowlist in
 # scripts/run-tier3-hw.sh, the single source of truth: a failure here is
-# reported and counted but does not flip the verdict RED.
+# reported and counted but does not flip the verdict RED. The non-`_ca` sibling
+# bench_dual_pair_slow shares this disposition (same SF10/CR8 over the same mixed
+# dual_pair_mixed profile) and is on the same allowlist.
 profile = "dual_pair_mixed"
 
 [test]

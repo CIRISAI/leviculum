@@ -41,14 +41,24 @@ mkdir -p "$LOG_DIR"
 # residual is a TX-modulation/spectral interop effect). SF10/CR5 is the robust
 # mixed-chip limit and same-chip pairs pass SF10/CR8; both stay gating.
 #
-# These two benches KEEP RUNNING and stay visible, but a genuine FAILURE of a
+# All four SF10/CR8 mixed-chip slow benches are listed: the two `_ca` variants
+# (bench_single_pair_slow_ca / bench_dual_pair_slow_ca) and their non-`_ca`
+# siblings (bench_single_pair_slow / bench_dual_pair_slow), which run the same
+# SF10/CR8 over the same mixed profiles (rnode_lnode_pair / dual_pair_mixed) and
+# share the deafness. The same-chip rnode_only SF10/CR8 bench is NOT listed and
+# stays gating.
+#
+# These four benches KEEP RUNNING and stay visible, but a genuine FAILURE of a
 # listed test does NOT flip the tier3 verdict to RED: it is reported separately
 # and counted in the verdict line (expected_marginal=N), so GREEN is never
 # silently carved out. An unexpected PASS is logged loudly so a recovery is
 # noticed. This list is the single source of truth for the mechanism; the
 # documentary comments on the test fns and scenarios (reticulum-integ/src/
-# executor.rs, reticulum-integ/tests/bench_*_slow_ca.toml) reference it.
-EXPECTED_MARGINAL=( bench_single_pair_slow_ca bench_dual_pair_slow_ca )
+# executor.rs, reticulum-integ/tests/bench_*_slow*.toml) reference it.
+EXPECTED_MARGINAL=(
+    bench_single_pair_slow_ca bench_dual_pair_slow_ca
+    bench_single_pair_slow bench_dual_pair_slow
+)
 
 is_expected_marginal() {
     local needle="$1" m

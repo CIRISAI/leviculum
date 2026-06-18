@@ -4717,6 +4717,11 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
         run_test(&mut runner).expect("test failed");
     }
 
+    // Expected-marginal, non-gating PDR. Same SF10/CR8 mixed SX1262 LNode to
+    // SX127x RNode chip interop margin corner as bench_single_pair_slow_ca (same
+    // rnode_lnode_pair profile); shares its disposition. On the EXPECTED_MARGINAL
+    // allowlist in scripts/run-tier3-hw.sh: a failure is reported and counted but
+    // does not flip the tier3 verdict RED. Runnable for diagnostics.
     #[test]
     #[ignore] // Requires RNode + T114 hardware
     #[serial(lora)]
@@ -4759,6 +4764,11 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
         run_test(&mut runner).expect("test failed");
     }
 
+    // Expected-marginal, non-gating PDR. Same SF10/CR8 mixed SX1262 LNode to
+    // SX127x RNode chip interop margin corner as bench_dual_pair_slow_ca (same
+    // dual_pair_mixed profile); shares its disposition. On the EXPECTED_MARGINAL
+    // allowlist in scripts/run-tier3-hw.sh: a failure is reported and counted but
+    // does not flip the tier3 verdict RED. Runnable for diagnostics.
     #[test]
     #[ignore] // Requires 2x RNode + 2x T114 hardware
     #[serial(lora)]
@@ -4797,7 +4807,9 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     // reported but not gating. The tier3 gating carve-out is the
     // EXPECTED_MARGINAL allowlist in scripts/run-tier3-hw.sh, the single source
     // of truth: a failure of this bench is reported and counted but does not
-    // flip the verdict RED.
+    // flip the verdict RED. The non-`_ca` sibling bench_single_pair_slow shares
+    // this disposition (same SF10/CR8 over the same mixed rnode_lnode_pair
+    // profile) and is on the same allowlist.
     #[test]
     #[ignore]
     #[serial(lora)]
@@ -4875,7 +4887,10 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     // gating. Runnable for diagnostics; PDR here is reported but not gating.
     // The tier3 gating carve-out is the EXPECTED_MARGINAL allowlist in
     // scripts/run-tier3-hw.sh, the single source of truth: a failure of this
-    // bench is reported and counted but does not flip the verdict RED.
+    // bench is reported and counted but does not flip the verdict RED. The
+    // non-`_ca` sibling bench_dual_pair_slow shares this disposition (same
+    // SF10/CR8 over the same mixed dual_pair_mixed profile) and is on the same
+    // allowlist.
     #[test]
     #[ignore]
     #[serial(lora)]

@@ -1,3 +1,9 @@
+# Expected-marginal, non-gating PDR. Same SF10/CR8 mixed SX1262 LNode to SX127x
+# RNode chip interop margin corner as bench_single_pair_slow_ca (same
+# rnode_lnode_pair profile); shares its disposition. On the EXPECTED_MARGINAL
+# allowlist in scripts/run-tier3-hw.sh, the single source of truth: a failure
+# here is reported and counted but does not flip the verdict RED. Runnable for
+# diagnostics.
 profile = "rnode_lnode_pair"
 
 [test]

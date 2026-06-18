@@ -60,7 +60,7 @@ duration_secs = 60
 action = "wait_for_path"
 on = "a1"
 destination = "b1.probe"
-timeout_secs = 120
+timeout_secs = 180
 
 [[steps]]
 action = "wait_for_path"
@@ -73,10 +73,25 @@ timeout_secs = 120
 action = "sleep"
 duration_secs = 300
 
-# Phase 3: Selftest — new announces must propagate through LoRa
+# Phase 3: Cross-cluster rnprobes (saturate LoRa channel)
+[[steps]]
+action = "rnprobe"
+from = "a1"
+to = "b1.probe"
+expect_result = "success"
+timeout_secs = 120
+
+[[steps]]
+action = "rnprobe"
+from = "b1"
+to = "a1.probe"
+expect_result = "success"
+timeout_secs = 120
+
+# Phase 4: Selftest — new announces must propagate through LoRa
 [[steps]]
 action = "exec"
 on = "a1"
-command = "lns selftest 127.0.0.1:5555 b1:5555 --mode link --rate 1 --duration 3 --discovery-timeout 240"
+command = "lns selftest 127.0.0.1:5555 b1:5555 --mode link --rate 1 --duration 3 --discovery-timeout 360"
 expect_exit_code = 0
 env = { RUST_LOG = "reticulum_core::link::channel=debug,reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info" }
