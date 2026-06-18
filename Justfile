@@ -124,6 +124,23 @@ test-ffi:
     cargo build -p reticulum-ffi --target x86_64-unknown-linux-gnu
     cargo test-ffi
 
+# Memory- and race-check the C API under sanitizers and Miri. On demand, not in
+# the standard tiers: it needs the nightly toolchain
+# (`rustup toolchain install nightly --component rust-src miri`) and is heavy,
+# since -Zbuild-std rebuilds std and every dependency with instrumentation
+# (several GB of target per sanitizer). AddressSanitizer (+ LeakSanitizer) and
+# ThreadSanitizer run the in-process two-node integration suite, covering the
+# handle lifecycle, the eventfd bridge, and the two-runtime threading. Miri
+# checks the pure unsafe marshalling paths (buffer read(2), handle boxing,
+# char** aspects); it cannot run tokio or real I/O, so node/network tests are
+# excluded by filtering to identity/hex/destination.
+sanitize-ffi:
+    RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration -- --test-threads=1
+    RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit identity
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit hex
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit destination
+
 build-ffi:
     cargo build-ffi
 
