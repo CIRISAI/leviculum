@@ -481,6 +481,29 @@ fn identity_crypto_sign_verify_encrypt_decrypt() {
 }
 
 #[test]
+fn builder_accepts_auto_and_udp_interfaces() {
+    unsafe {
+        let dir = tempfile::tempdir().unwrap();
+        let b = lev_builder_new();
+        let sp = cstr(dir.path().to_str().unwrap());
+        assert_eq!(lev_builder_storage_path(b, sp.as_ptr()), LEV_OK);
+        // The AutoInterface setter is accepted (it needs IPv6 multicast to come
+        // up, so only the configuration step is exercised here).
+        assert_eq!(lev_builder_add_auto_interface(b), LEV_OK);
+        let listen = cstr("127.0.0.1:0");
+        let forward = cstr("127.0.0.1:0");
+        assert_eq!(
+            lev_builder_add_udp(b, listen.as_ptr(), forward.as_ptr()),
+            LEV_OK
+        );
+        let node = lev_builder_build(b);
+        lev_builder_free(b);
+        assert!(!node.is_null(), "build with auto+udp: {}", last_error());
+        lev_free(node);
+    }
+}
+
+#[test]
 fn phase2_radio_setters_validate_args() {
     unsafe {
         let b = lev_builder_new();

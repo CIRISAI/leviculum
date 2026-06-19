@@ -145,6 +145,226 @@ fn announce_then_link_message_both_directions() {
     assert_eq!(seq3, 1, "second channel message is sequence 1");
 }
 
+#[test]
+fn control_overflow_reports_a_dropped_count() {
+    // B's control plane holds a single event; a flood of announces it never
+    // drains overflows it, and the overflow marker carries the dropped count.
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let sp = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, ida.0), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, sp), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_add_tcp_client(b, sp), LEV_OK);
+        assert_eq!(lev_builder_event_capacity(b, 1, 1), LEV_OK);
+    });
+
+    // Several distinct destinations, each announced, so B sees many control
+    // events without B draining any.
+    let dests: Vec<[u8; 16]> = (0..8)
+        .map(|i| register_single_dest(a.0, ida.0, "levtest", &[&format!("ov{i}")]))
+        .collect();
+    for _ in 0..3 {
+        for d in &dests {
+            unsafe { lev_announce(a.0, d.as_ptr(), ptr::null(), 0, 2000) };
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    let ev = wait_event(bnode.0, LEV_EVENT_CONTROL_OVERFLOW, EV)
+        .expect("the flooded control plane should overflow");
+    let mut dropped = 0u64;
+    assert_eq!(
+        unsafe { lev_event_dropped_count(ev.0, &mut dropped) },
+        LEV_OK
+    );
+    assert!(
+        dropped >= 1,
+        "overflow should report at least one dropped event"
+    );
+}
+
+/// `lev_event_progress` applies only to `LEV_EVENT_RESOURCE_PROGRESS`. The
+/// progress event itself is a droppable data-plane event that bursts faster
+/// than a consumer drains over a fast loopback (it is observable on slow links
+/// such as LoRa), so the success path is not exercised in this fast tier; here
+/// we cover the accessor and its type guard against a real completion event.
+#[test]
+fn event_progress_rejects_non_progress_events() {
+    let p = setup_pair();
+    let (lb, la) = establish_link(&p.a, &p.b, &p.dest);
+    let laid = la.id();
+    assert_eq!(
+        unsafe { lev_set_resource_strategy(p.a.0, laid.as_ptr(), LEV_RESOURCE_ACCEPT_ALL) },
+        LEV_OK
+    );
+    let payload: Vec<u8> = (0..300u32).map(|i| i as u8).collect();
+    let lbid = lb.id();
+    let mut rhash = [0u8; 32];
+    assert_eq!(
+        unsafe {
+            lev_send_resource(
+                p.b.0,
+                lbid.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+                ptr::null(),
+                0,
+                1,
+                rhash.as_mut_ptr(),
+                5000,
+            )
+        },
+        LEV_OK
+    );
+    let done = wait_event(p.a.0, LEV_EVENT_RESOURCE_COMPLETED, Duration::from_secs(15))
+        .expect("resource completed");
+    let mut progress = -1.0f64;
+    assert_eq!(
+        unsafe { lev_event_progress(done.0, &mut progress) },
+        LEV_ERR_INVALID_ARG,
+        "progress only applies to RESOURCE_PROGRESS events"
+    );
+    unsafe {
+        assert_eq!(
+            lev_event_progress(done.0, ptr::null_mut()),
+            LEV_ERR_NULL_PTR
+        );
+        assert_eq!(
+            lev_event_progress(ptr::null(), &mut progress),
+            LEV_ERR_NULL_PTR
+        );
+    }
+}
+
+#[test]
+fn udp_interface_carries_announce_and_link() {
+    // A and B over a symmetric UDP loopback pair.
+    let pa = support::free_port();
+    let pb = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let a_listen = cstr(&format!("127.0.0.1:{pa}"));
+    let a_fwd = cstr(&format!("127.0.0.1:{pb}"));
+    let b_listen = cstr(&format!("127.0.0.1:{pb}"));
+    let b_fwd = cstr(&format!("127.0.0.1:{pa}"));
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, ida.0), LEV_OK);
+        assert_eq!(
+            lev_builder_add_udp(b, a_listen.as_ptr(), a_fwd.as_ptr()),
+            LEV_OK
+        );
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(
+            lev_builder_add_udp(b, b_listen.as_ptr(), b_fwd.as_ptr()),
+            LEV_OK
+        );
+    });
+    let dest = register_single_dest(a.0, ida.0, "levtest", &["udp"]);
+    learn(&a, &bnode, &dest);
+    let (lb, _la) = establish_link(&a, &bnode, &dest);
+    let msg = b"over-udp";
+    assert_eq!(
+        unsafe { lev_link_send(lb.0, msg.as_ptr(), msg.len(), 5000) },
+        LEV_OK
+    );
+    let ev = wait_event(a.0, LEV_EVENT_LINK_MESSAGE, EV).expect("A receives over UDP");
+    assert_eq!(event_data(&ev), msg);
+}
+
+#[test]
+fn path_hops_and_request_path() {
+    let p = setup_pair();
+    // B knows a path to A; hops_to reports it.
+    let mut hops = 0u8;
+    assert_eq!(
+        unsafe { lev_hops_to(p.b.0, p.dest.as_ptr(), &mut hops) },
+        LEV_OK
+    );
+    assert!(hops >= 1, "a learned path has at least one hop");
+    // hops_to for an unknown destination reports no path.
+    let unknown = [0xABu8; 16];
+    assert_eq!(
+        unsafe { lev_hops_to(p.b.0, unknown.as_ptr(), &mut hops) },
+        LEV_ERR_NO_PATH
+    );
+    // request_path for a known destination succeeds.
+    assert_eq!(
+        unsafe { lev_request_path(p.b.0, p.dest.as_ptr(), 2000) },
+        LEV_OK,
+        "{}",
+        last_error()
+    );
+}
+
+#[test]
+fn link_is_closed_and_try_send() {
+    let p = setup_pair();
+    let (lb, _la) = establish_link(&p.a, &p.b, &p.dest);
+    // A fresh link is open.
+    assert_eq!(unsafe { lev_link_is_closed(lb.0) }, 0);
+
+    // Non-blocking send succeeds and the peer receives it.
+    let msg = b"try";
+    assert_eq!(
+        unsafe { lev_link_try_send(lb.0, msg.as_ptr(), msg.len()) },
+        LEV_OK
+    );
+    let ev = wait_event(p.a.0, LEV_EVENT_LINK_MESSAGE, EV).expect("A receives try-send");
+    assert_eq!(event_data(&ev), msg);
+
+    // After close the link reports closed.
+    assert_eq!(unsafe { lev_close_link(lb.0, 2000) }, LEV_OK);
+    let mut closed = 0;
+    for _ in 0..50 {
+        if unsafe { lev_link_is_closed(lb.0) } == 1 {
+            closed = 1;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(closed, 1, "link should report closed after lev_close_link");
+}
+
+#[test]
+fn connect_with_key_establishes_link() {
+    let p = setup_pair();
+    // A's Ed25519 signing key is bytes 32..64 of its public key.
+    let pubkey = read2(|b, c, l| unsafe { lev_identity_public_key(p._ida.0, b, c, l) })
+        .expect("A public key");
+    let signing_key = &pubkey[32..64];
+
+    let mut lb: *mut lev_link_t = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            lev_connect_with_key(p.b.0, p.dest.as_ptr(), signing_key.as_ptr(), 6000, &mut lb)
+        },
+        LEV_OK,
+        "{}",
+        last_error()
+    );
+    let lb = Link(lb);
+    let req = wait_event(p.a.0, LEV_EVENT_LINK_REQUEST, EV).expect("link request on A");
+    let lid = event_link_id(&req);
+    drop(req);
+    let mut la: *mut lev_link_t = ptr::null_mut();
+    assert_eq!(
+        unsafe { lev_accept_link(p.a.0, lid.as_ptr(), 5000, &mut la) },
+        LEV_OK
+    );
+    let _la = Link(la);
+    wait_event(p.b.0, LEV_EVENT_LINK_ESTABLISHED, EV).expect("established via out-of-band key");
+    let _ = lb;
+}
+
 /// Learning a path from an announce emits `LEV_EVENT_PATH_FOUND` carrying the
 /// destination hash (the documented event contract behind `lev_request_path`).
 #[test]
@@ -422,6 +642,92 @@ fn resource_transfer_accept_app() {
     let done = wait_event(p.a.0, LEV_EVENT_RESOURCE_COMPLETED, Duration::from_secs(15))
         .expect("resource completed");
     assert_eq!(event_data(&done), payload);
+}
+
+#[test]
+fn reject_resource_is_not_delivered() {
+    let p = setup_pair();
+    let (lb, la) = establish_link(&p.a, &p.b, &p.dest);
+    let laid = la.id();
+    assert_eq!(
+        unsafe { lev_set_resource_strategy(p.a.0, laid.as_ptr(), LEV_RESOURCE_ACCEPT_APP) },
+        LEV_OK
+    );
+    let payload: Vec<u8> = (0..300u32).map(|i| (i * 5 + 3) as u8).collect();
+    let lbid = lb.id();
+    let mut rhash = [0u8; 32];
+    assert_eq!(
+        unsafe {
+            lev_send_resource(
+                p.b.0,
+                lbid.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+                ptr::null(),
+                0,
+                1,
+                rhash.as_mut_ptr(),
+                5000,
+            )
+        },
+        LEV_OK
+    );
+    wait_event(
+        p.a.0,
+        LEV_EVENT_RESOURCE_ADVERTISED,
+        Duration::from_secs(10),
+    )
+    .expect("advertised");
+    // Reject it; the transfer must not complete.
+    assert_eq!(
+        unsafe { lev_reject_resource(p.a.0, laid.as_ptr(), 3000) },
+        LEV_OK
+    );
+    assert!(
+        wait_event(p.a.0, LEV_EVENT_RESOURCE_COMPLETED, Duration::from_secs(2)).is_none(),
+        "a rejected resource must not be delivered"
+    );
+}
+
+#[test]
+fn resource_metadata_round_trips() {
+    let p = setup_pair();
+    let (lb, la) = establish_link(&p.a, &p.b, &p.dest);
+    let laid = la.id();
+    assert_eq!(
+        unsafe { lev_set_resource_strategy(p.a.0, laid.as_ptr(), LEV_RESOURCE_ACCEPT_ALL) },
+        LEV_OK
+    );
+    let payload: Vec<u8> = (0..200u32).map(|i| i as u8).collect();
+    // Metadata is opaque, msgpack-encoded by the caller; a msgpack fixstr "hi".
+    let metadata = [0xA2u8, b'h', b'i'];
+    let lbid = lb.id();
+    let mut rhash = [0u8; 32];
+    assert_eq!(
+        unsafe {
+            lev_send_resource(
+                p.b.0,
+                lbid.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+                metadata.as_ptr(),
+                metadata.len(),
+                1,
+                rhash.as_mut_ptr(),
+                5000,
+            )
+        },
+        LEV_OK,
+        "{}",
+        last_error()
+    );
+    let done = wait_event(p.a.0, LEV_EVENT_RESOURCE_COMPLETED, Duration::from_secs(15))
+        .expect("resource completed");
+    assert_eq!(event_data(&done), payload);
+    // The receiver reads the metadata back via lev_event_metadata.
+    let got =
+        read2(|b, c, l| unsafe { lev_event_metadata(done.0, b, c, l) }).expect("metadata readable");
+    assert_eq!(got, metadata, "metadata round-trips to the receiver");
 }
 
 #[test]
