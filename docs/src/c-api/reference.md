@@ -380,6 +380,8 @@ int  lev_event_data(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, u
 int  lev_event_metadata(const struct lev_event_t *ev, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
 int  lev_event_progress(const struct lev_event_t *ev, double *out);
 int  lev_event_dropped_count(const struct lev_event_t *ev, uint64_t *out);
+int  lev_event_msgtype(const struct lev_event_t *ev, uint16_t *out);
+int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
 ```
 
 - `lev_event_fd` returns the readable fd to add to a `poll`/`epoll`/`select`
@@ -394,8 +396,9 @@ int  lev_event_dropped_count(const struct lev_event_t *ev, uint64_t *out);
   (32 bytes), `_path` (UTF-8 bytes, not NUL-terminated), `_data` (the primary
   payload, possibly empty), `_metadata` (msgpack bytes). `_progress` writes a
   `double` in `0.0..1.0` for resource-progress events; `_dropped_count` writes
-  the count of a `LEV_EVENT_CONTROL_OVERFLOW` event. An accessor that does not
-  apply to the event type returns `LEV_ERR_INVALID_ARG`.
+  the count of a `LEV_EVENT_CONTROL_OVERFLOW` event; `_msgtype` and `_sequence`
+  write the message type and sequence of a `LEV_EVENT_LINK_MESSAGE` event. An
+  accessor that does not apply to the event type returns `LEV_ERR_INVALID_ARG`.
 
 ### Event types
 
@@ -419,6 +422,7 @@ int  lev_event_dropped_count(const struct lev_event_t *ev, uint64_t *out);
 | `LEV_EVENT_RESOURCE_COMPLETED` | 15 | link_id, resource_hash, data, metadata |
 | `LEV_EVENT_RESOURCE_FAILED` | 16 | link_id, resource_hash |
 | `LEV_EVENT_LINK_IDENTIFIED` | 17 | link_id, data (16-byte identity hash) |
+| `LEV_EVENT_LINK_MESSAGE` | 18 | link_id, data, msgtype, sequence (reliable channel) |
 
 ## Helpers
 

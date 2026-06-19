@@ -55,6 +55,11 @@ pub const LEV_EVENT_RESOURCE_FAILED: c_int = 16;
 /// The peer proved an identity on a link; the 16-byte identity hash is the
 /// event payload (`lev_event_data`), and `lev_link_remote_identity` returns it.
 pub const LEV_EVENT_LINK_IDENTIFIED: c_int = 17;
+/// A reliable, sequenced message arrived on a link's channel (the peer used
+/// the channel, as `lev_link_send` does). Distinct from `LEV_EVENT_LINK_DATA`,
+/// which is a raw unsequenced link packet. Carries a message type and a
+/// sequence number via `lev_event_msgtype` and `lev_event_sequence`.
+pub const LEV_EVENT_LINK_MESSAGE: c_int = 18;
 
 /// One projected event, fully self-owned (all payloads deep-copied out of the
 /// `NodeEvent`), so it outlives the queue slot and is valid until
@@ -71,6 +76,8 @@ pub struct lev_event_t {
     metadata: Option<Vec<u8>>,
     progress: f64,
     dropped_count: u64,
+    msgtype: u16,
+    sequence: u16,
 }
 
 impl lev_event_t {
@@ -87,6 +94,8 @@ impl lev_event_t {
             metadata: None,
             progress: 0.0,
             dropped_count: 0,
+            msgtype: 0,
+            sequence: 0,
         }
     }
 }
@@ -145,10 +154,17 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.data = data;
             e
         }
-        NodeEvent::MessageReceived { link_id, data, .. } => {
-            let mut e = lev_event_t::bare(LEV_EVENT_LINK_DATA, is_control);
+        NodeEvent::MessageReceived {
+            link_id,
+            msgtype,
+            sequence,
+            data,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_MESSAGE, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.data = data;
+            e.msgtype = msgtype;
+            e.sequence = sequence;
             e
         }
         NodeEvent::PacketReceived {
@@ -596,6 +612,51 @@ pub unsafe extern "C" fn lev_event_dropped_count(ev: *const lev_event_t, out: *m
             return LEV_ERR_INVALID_ARG;
         }
         *out = e.dropped_count;
+        LEV_OK
+    })
+}
+
+/// Read the message type of a `LEV_EVENT_LINK_MESSAGE` event into `*out`. The
+/// type identifies the channel message kind on the wire (0 is the raw bytes
+/// message that `lev_link_send` uses and that Python's `RawBytesMessage`
+/// carries). `LEV_ERR_INVALID_ARG` for any other event type.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_msgtype(ev: *const lev_event_t, out: *mut u16) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if e.ty != LEV_EVENT_LINK_MESSAGE {
+            set_last_error("event has no message type");
+            return LEV_ERR_INVALID_ARG;
+        }
+        *out = e.msgtype;
+        LEV_OK
+    })
+}
+
+/// Read the sequence number of a `LEV_EVENT_LINK_MESSAGE` event into `*out`.
+/// The channel assigns sequence numbers in send order for reliable, ordered
+/// delivery. `LEV_ERR_INVALID_ARG` for any other event type.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_sequence(ev: *const lev_event_t, out: *mut u16) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if e.ty != LEV_EVENT_LINK_MESSAGE {
+            set_last_error("event has no sequence number");
+            return LEV_ERR_INVALID_ARG;
+        }
+        *out = e.sequence;
         LEV_OK
     })
 }

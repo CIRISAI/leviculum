@@ -35,6 +35,11 @@ impl PyDaemon {
     /// Spawn the daemon and wait for its READY handshake. Returns `None`
     /// (the test should skip) if Python RNS is unavailable or it never readies.
     pub fn start() -> Option<PyDaemon> {
+        Self::start_with_args(&[])
+    }
+
+    /// Like [`start`], with extra daemon flags (e.g. `--echo-channel`).
+    pub fn start_with_args(extra: &[&str]) -> Option<PyDaemon> {
         let rns_port = free_port();
         let cmd_port = free_port();
         let script = daemon_script();
@@ -49,6 +54,7 @@ impl PyDaemon {
             .arg(rns_port.to_string())
             .arg("--cmd-port")
             .arg(cmd_port.to_string())
+            .args(extra)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()

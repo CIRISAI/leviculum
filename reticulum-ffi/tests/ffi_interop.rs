@@ -137,11 +137,66 @@ fn c_links_to_python_and_exchanges_data() {
     }
     assert!(got, "Python did not receive the C link data");
 
-    // Python -> C link data.
+    // Python -> C link data. send_on_link sends a raw RNS.Packet (no channel),
+    // so C sees an unsequenced LINK_DATA, distinct from a channel message.
     let links = py.link_hashes();
     assert!(!links.is_empty(), "Python has no link recorded");
     py.send_on_link(&links[0], &hex::encode(b"from-py"));
     let ev = wait_event(node.0, LEV_EVENT_LINK_DATA, Duration::from_secs(8))
         .expect("C receives Python link data");
     assert_eq!(event_data(&ev), b"from-py");
+}
+
+/// The reliable channel interoperates with Python's `RawBytesMessage`. With
+/// `--echo-channel` the daemon echoes every channel message back over the
+/// channel, so a C `lev_link_send` returns as a sequenced LINK_MESSAGE with
+/// msgtype 0 (the raw-bytes message both sides agree on).
+#[test]
+fn c_channel_message_interops_with_python() {
+    let Some(py) = PyDaemon::start_with_args(&["--echo-channel"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let node = c_node(&py, dir.path(), None);
+    let (phash, _sk) = py.register_destination("interop", &["channel"]);
+    let dest: [u8; 16] = hex::decode(&phash).unwrap().try_into().unwrap();
+
+    let mut learned = false;
+    for _ in 0..30 {
+        py.announce_destination(&phash, "");
+        let _ = wait_event(
+            node.0,
+            LEV_EVENT_ANNOUNCE_RECEIVED,
+            Duration::from_millis(800),
+        );
+        if unsafe { lev_has_path(node.0, dest.as_ptr()) } == 1 {
+            learned = true;
+            break;
+        }
+    }
+    assert!(learned, "C never learned the Python destination");
+
+    let mut lb: *mut lev_link_t = ptr::null_mut();
+    assert_eq!(
+        unsafe { lev_connect(node.0, dest.as_ptr(), 6000, &mut lb) },
+        LEV_OK,
+        "connect: {}",
+        last_error()
+    );
+    let lb = Link(lb);
+    wait_event(node.0, LEV_EVENT_LINK_ESTABLISHED, Duration::from_secs(8))
+        .expect("C link to Python established");
+
+    // C sends a channel message; Python echoes it back over the channel.
+    let msg = b"channel-hi";
+    assert_eq!(
+        unsafe { lev_link_send(lb.0, msg.as_ptr(), msg.len(), 5000) },
+        LEV_OK
+    );
+    let ev = wait_event(node.0, LEV_EVENT_LINK_MESSAGE, Duration::from_secs(8))
+        .expect("C receives Python channel echo");
+    assert_eq!(event_data(&ev), msg);
+    let mut msgtype = 0u16;
+    unsafe { assert_eq!(lev_event_msgtype(ev.0, &mut msgtype), LEV_OK) };
+    assert_eq!(msgtype, 0, "Python RawBytesMessage is msgtype 0");
 }

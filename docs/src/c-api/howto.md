@@ -75,7 +75,7 @@ for (;;) {
         switch (lev_event_type(ev)) {
             case LEV_EVENT_ANNOUNCE_RECEIVED: on_announce(ev); break;
             case LEV_EVENT_LINK_REQUEST:      on_link_request(ev); break;
-            case LEV_EVENT_LINK_DATA:         on_link_data(ev); break;
+            case LEV_EVENT_LINK_MESSAGE:      on_link_message(ev); break;
             /* ... */
         }
         lev_event_free(ev);
@@ -254,20 +254,29 @@ case LEV_EVENT_LINK_REQUEST: {
 
 Send and receive link data. `lev_link_send` blocks up to its deadline,
 retrying backpressure; `lev_link_try_send` returns `LEV_ERR_AGAIN` instead of
-blocking. Inbound data arrives as `LEV_EVENT_LINK_DATA`:
+blocking. It sends over the link's reliable channel (sequenced and
+retransmitted, the same `RawBytesMessage` Python peers use), so the peer sees a
+`LEV_EVENT_LINK_MESSAGE`, with a message type and a sequence number:
 
 ```c
 lev_link_send(link, (const uint8_t *)"hello", 5, 5000);
 
-case LEV_EVENT_LINK_DATA: {
+case LEV_EVENT_LINK_MESSAGE: {
     uint8_t buf[512];
     uintptr_t n = sizeof(buf);
+    uint16_t msgtype = 0, sequence = 0;
     if (lev_event_data(ev, buf, sizeof(buf), &n) == LEV_OK) {
+        lev_event_msgtype(ev, &msgtype);   /* 0 for raw bytes */
+        lev_event_sequence(ev, &sequence); /* per-channel send order */
         /* `n` bytes received */
     }
     break;
 }
 ```
+
+A peer that sends a raw, unsequenced link packet instead of using the channel
+(for example Python's `RNS.Packet(link, data).send()`) arrives as the
+lower-level `LEV_EVENT_LINK_DATA`, which carries only `link_id` and `data`.
 
 Close with `lev_close_link(link, 2000)` and release with `lev_link_free(link)`
 (which also closes an open link). A `LEV_EVENT_LINK_CLOSED` event reports a

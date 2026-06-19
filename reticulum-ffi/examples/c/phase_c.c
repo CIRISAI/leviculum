@@ -130,10 +130,33 @@ int main(void) {
     const char *msg = "ping";
     CHECK(lev_link_send(lb, (const uint8_t *)msg, 4, 5000) == LEV_OK);
 
-    uint8_t rx[64];
-    size_t rxl = sizeof(rx);
-    CHECK(wait_for(a, LEV_EVENT_LINK_DATA, NULL, rx, &rxl, 50));
-    CHECK(rxl == 4 && memcmp(rx, msg, 4) == 0);
+    /* lev_link_send goes through the reliable channel, so the peer sees a
+     * sequenced LINK_MESSAGE, not a raw LINK_DATA packet. Drain it directly to
+     * read the channel metadata (message type and sequence number). */
+    int got_msg = 0;
+    for (int r = 0; r < 50 && !got_msg; r++) {
+        lev_event_t *ev = NULL;
+        if (lev_wait_event(a, &ev, 200) != LEV_OK) {
+            break;
+        }
+        if (!ev) {
+            continue;
+        }
+        if (lev_event_type(ev) == LEV_EVENT_LINK_MESSAGE) {
+            uint8_t rx[64];
+            size_t rxl = sizeof(rx);
+            CHECK(lev_event_data(ev, rx, sizeof(rx), &rxl) == LEV_OK);
+            CHECK(rxl == 4 && memcmp(rx, msg, 4) == 0);
+            uint16_t msgtype = 1, sequence = 9;
+            CHECK(lev_event_msgtype(ev, &msgtype) == LEV_OK);
+            CHECK(lev_event_sequence(ev, &sequence) == LEV_OK);
+            CHECK(msgtype == 0);  /* raw-bytes channel message */
+            CHECK(sequence == 0); /* first message on the channel */
+            got_msg = 1;
+        }
+        lev_event_free(ev);
+    }
+    CHECK(got_msg);
 
     /* B proves an identity on the link; A reads it back by hash. */
     lev_identity_t *bident = lev_identity_generate();

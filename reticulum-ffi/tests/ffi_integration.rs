@@ -103,25 +103,93 @@ fn establish_link(a: &Node, b: &Node, dest: &[u8; 16]) -> (Link, Link) {
 }
 
 #[test]
-fn announce_then_link_data_both_directions() {
+fn announce_then_link_message_both_directions() {
     let p = setup_pair();
     let (lb, la) = establish_link(&p.a, &p.b, &p.dest);
 
+    // lev_link_send goes through the reliable channel, so the peer sees a
+    // sequenced LINK_MESSAGE (msgtype 0, the raw-bytes message) not raw data.
     let ping = b"ping";
     assert_eq!(
         unsafe { lev_link_send(lb.0, ping.as_ptr(), 4, 5000) },
         LEV_OK
     );
-    let ev = wait_event(p.a.0, LEV_EVENT_LINK_DATA, EV).expect("A receives ping");
+    let ev = wait_event(p.a.0, LEV_EVENT_LINK_MESSAGE, EV).expect("A receives ping");
     assert_eq!(event_data(&ev), ping);
+    let mut msgtype = 0u16;
+    let mut sequence = 0u16;
+    unsafe {
+        assert_eq!(lev_event_msgtype(ev.0, &mut msgtype), LEV_OK);
+        assert_eq!(lev_event_sequence(ev.0, &mut sequence), LEV_OK);
+    }
+    assert_eq!(msgtype, 0, "raw-bytes channel message is msgtype 0");
+    assert_eq!(sequence, 0, "first channel message is sequence 0");
 
     let pong = b"pong";
     assert_eq!(
         unsafe { lev_link_send(la.0, pong.as_ptr(), 4, 5000) },
         LEV_OK
     );
-    let ev2 = wait_event(p.b.0, LEV_EVENT_LINK_DATA, EV).expect("B receives pong");
+    let ev2 = wait_event(p.b.0, LEV_EVENT_LINK_MESSAGE, EV).expect("B receives pong");
     assert_eq!(event_data(&ev2), pong);
+
+    // A second message from B advances the sequence on that channel.
+    let pong2 = b"pong2";
+    assert_eq!(
+        unsafe { lev_link_send(la.0, pong2.as_ptr(), 5, 5000) },
+        LEV_OK
+    );
+    let ev3 = wait_event(p.b.0, LEV_EVENT_LINK_MESSAGE, EV).expect("B receives pong2");
+    let mut seq3 = 0u16;
+    unsafe { assert_eq!(lev_event_sequence(ev3.0, &mut seq3), LEV_OK) };
+    assert_eq!(seq3, 1, "second channel message is sequence 1");
+}
+
+/// `lev_event_msgtype`/`_sequence` only apply to LINK_MESSAGE events; other
+/// events reject them with `LEV_ERR_INVALID_ARG`, and NULL pointers are
+/// guarded.
+#[test]
+fn message_metadata_rejected_on_non_message_events() {
+    // Build a fresh pair so B's first announce (before it has a path) is
+    // available as a non-message event to probe.
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let id_ptr = ida.0;
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let server_ptr = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+    });
+    let dest = register_single_dest(a.0, id_ptr, "levtest", &["meta"]);
+
+    let mut ann = None;
+    for _ in 0..50 {
+        unsafe { lev_announce(a.0, dest.as_ptr(), ptr::null(), 0, 2000) };
+        if let Some(ev) = wait_event(
+            bnode.0,
+            LEV_EVENT_ANNOUNCE_RECEIVED,
+            Duration::from_millis(400),
+        ) {
+            ann = Some(ev);
+            break;
+        }
+    }
+    let ann = ann.expect("announce on B");
+    let mut v = 0u16;
+    unsafe {
+        assert_eq!(lev_event_msgtype(ann.0, &mut v), LEV_ERR_INVALID_ARG);
+        assert_eq!(lev_event_sequence(ann.0, &mut v), LEV_ERR_INVALID_ARG);
+        assert_eq!(lev_event_msgtype(ann.0, ptr::null_mut()), LEV_ERR_NULL_PTR);
+        assert_eq!(lev_event_msgtype(ptr::null(), &mut v), LEV_ERR_NULL_PTR);
+    }
+    let _ = (a, bnode);
 }
 
 #[test]

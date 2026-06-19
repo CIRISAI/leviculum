@@ -88,13 +88,24 @@ Deliverable: a C node running over real RNodes, and over the mock-LoRa
 `lora-proxy` (serial over a pty), in the `reticulum-integ` LoRa tier. This is
 the in-mesh hardware test with a C program in the loop.
 
-## Phase 3: reliable streams (Channel/Buffer). Size M to L
+## Phase 3: reliable streams (Channel/Buffer). Size M to L. DONE
+
+Finding on entry: reliable channel send was already exposed. `lev_link_send`
+sends over the link's reliable channel (the `RawBytesMessage`, msgtype 0, both
+Rust and Python use), so no new send method was needed. The real gap was on
+receive: incoming channel messages and raw link packets were both projected as
+`LEV_EVENT_LINK_DATA`, indistinguishable and dropping the message type and
+sequence.
+
+Shipped: a distinct `LEV_EVENT_LINK_MESSAGE` for channel messages with
+`lev_event_msgtype` and `lev_event_sequence` accessors, keeping
+`LEV_EVENT_LINK_DATA` for raw unsequenced link packets; in-process tests
+asserting the sequence advances; a Python interop test against `RawBytesMessage`
+over the channel (daemon `--echo-channel`); the `phase_c.c` metadata reads;
+reference and how-to docs; ASan/LSan/TSan clean.
 
 Many protocols need reliable, sequenced messages over a link, beyond raw
-packets and file-sized resources. The engine already receives channel messages
-(projected today as `LEV_EVENT_LINK_DATA`), but a reliable channel send is not
-exposed by the driver or facade. This phase first adds an additive
-reliable-send method to the driver, then projects it.
+packets and file-sized resources.
 
 FFI surface: `lev_link_send_reliable` (sequenced, retransmitted) plus a
 distinct `LEV_EVENT_LINK_MESSAGE` so channel and raw link data are
