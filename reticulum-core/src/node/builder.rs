@@ -249,6 +249,15 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_link_keepalive_reaches_config() {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let node = NodeCoreBuilder::new()
+            .link_keepalive(Some(7))
+            .build(OsRng, clock, NoStorage);
+        assert_eq!(node.transport_config().link_keepalive_secs, Some(7));
+    }
+
+    #[test]
     fn test_builder_chaining() {
         let identity = Identity::generate(&mut OsRng);
         let clock = MockClock::new(TEST_TIME_MS);

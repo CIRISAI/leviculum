@@ -346,11 +346,13 @@ fn project(ev: NodeEvent) -> lev_event_t {
         NodeEvent::ResourceFailed {
             link_id,
             resource_hash,
+            is_sender,
             ..
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_FAILED, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.resource_hash = Some(resource_hash);
+            e.is_sender = is_sender;
             e
         }
         // Other variants keep their class so the cap policy is right, but carry

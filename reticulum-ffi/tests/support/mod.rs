@@ -7,15 +7,143 @@
 #![allow(dead_code)]
 
 use std::ffi::{CStr, CString};
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use leviculum::*;
 
 pub mod python_daemon;
+
+/// Runtime control for a [`FaultProxy`]: a silent-drop gate and a hard-cut flag.
+struct ProxyCtrl {
+    /// When set, bytes are read from both sides but discarded (sockets stay
+    /// open) so the peers see silence, not a disconnect. Mimics `iptables DROP`.
+    blocked: AtomicBool,
+    /// When set, both connections are shut down and the accept loop stops.
+    closed: AtomicBool,
+}
+
+/// An in-process TCP proxy that bridges a loopback `port` to an `upstream`
+/// port and can inject faults: [`FaultProxy::block`] silently drops traffic in
+/// both directions (peers see silence), [`FaultProxy::cut`] tears the
+/// connection down (peers see EOF). Point a node's TCP client at `port` instead
+/// of the real server to make link/path failures deterministic. Dropping the
+/// proxy cuts it. Modelled on the MVR proxies in `reticulum-std/tests/mvr`,
+/// reimplemented here because that test code lives in another crate.
+pub struct FaultProxy {
+    pub port: u16,
+    ctrl: Arc<ProxyCtrl>,
+    accept: Option<thread::JoinHandle<()>>,
+}
+
+impl FaultProxy {
+    /// Spawn a proxy forwarding loopback `port` to `upstream` (also loopback).
+    pub fn spawn(upstream: u16) -> FaultProxy {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy port");
+        let port = listener.local_addr().expect("local_addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("proxy listener nonblocking");
+        let ctrl = Arc::new(ProxyCtrl {
+            blocked: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+        });
+        let accept_ctrl = ctrl.clone();
+        let accept = thread::spawn(move || {
+            while !accept_ctrl.closed.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        let up = match TcpStream::connect(("127.0.0.1", upstream)) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        let (c2, u2) = (
+                            client.try_clone().expect("clone client"),
+                            up.try_clone().expect("clone upstream"),
+                        );
+                        let ctrl_a = accept_ctrl.clone();
+                        let ctrl_b = accept_ctrl.clone();
+                        thread::spawn(move || pump(client, up, ctrl_a));
+                        thread::spawn(move || pump(u2, c2, ctrl_b));
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        FaultProxy {
+            port,
+            ctrl,
+            accept: Some(accept),
+        }
+    }
+
+    /// Silently drop traffic in both directions (peers see silence).
+    pub fn block(&self) {
+        self.ctrl.blocked.store(true, Ordering::Relaxed);
+    }
+
+    /// Resume forwarding after a [`block`](Self::block).
+    pub fn unblock(&self) {
+        self.ctrl.blocked.store(false, Ordering::Relaxed);
+    }
+
+    /// Tear the connection down (peers see EOF) and stop accepting.
+    pub fn cut(&self) {
+        self.ctrl.closed.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for FaultProxy {
+    fn drop(&mut self) {
+        self.cut();
+        if let Some(h) = self.accept.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Copy `from` -> `to` until EOF, error, or the proxy is cut. While blocked,
+/// bytes are read and discarded so the sender does not stall but the receiver
+/// sees nothing. A short read timeout lets the loop observe the control flags.
+fn pump(mut from: TcpStream, mut to: TcpStream, ctrl: Arc<ProxyCtrl>) {
+    from.set_read_timeout(Some(Duration::from_millis(50))).ok();
+    let mut buf = [0u8; 16384];
+    loop {
+        if ctrl.closed.load(Ordering::Relaxed) {
+            break;
+        }
+        match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if ctrl.blocked.load(Ordering::Relaxed) {
+                    continue;
+                }
+                if to.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = from.shutdown(Shutdown::Both);
+    let _ = to.shutdown(Shutdown::Both);
+}
 
 /// Build a NUL-terminated C string (test input is never NUL-containing).
 pub fn cstr(s: &str) -> CString {
@@ -226,4 +354,55 @@ pub fn event_dest_hash(ev: &Event) -> [u8; 16] {
 /// Read an event's primary payload.
 pub fn event_data(ev: &Event) -> Vec<u8> {
     read2(|b, c, l| unsafe { lev_event_data(ev.0, b, c, l) }).expect("event data")
+}
+
+/// Re-announce A's destination until B has learned a path to it (and thus A's
+/// cached identity). Panics if B never learns the path.
+pub fn learn(a: &Node, b: &Node, dest: &[u8; 16]) {
+    for _ in 0..50 {
+        unsafe { lev_announce(a.0, dest.as_ptr(), ptr::null(), 0, 2000) };
+        let mut ev: *mut lev_event_t = ptr::null_mut();
+        unsafe { lev_wait_event(b.0, &mut ev, 300) };
+        while !ev.is_null() {
+            unsafe {
+                lev_event_free(ev);
+                ev = ptr::null_mut();
+            }
+            if unsafe { lev_next_event(b.0, &mut ev) } != LEV_OK {
+                break;
+            }
+        }
+        if unsafe { lev_has_path(b.0, dest.as_ptr()) } == 1 {
+            return;
+        }
+    }
+    panic!("B never learned a path to A");
+}
+
+/// Connect B to A's destination, accept on A, wait for established on B.
+/// Returns `(b_link, a_link)`.
+pub fn establish_link(a: &Node, b: &Node, dest: &[u8; 16]) -> (Link, Link) {
+    let ev = Duration::from_secs(5);
+    let mut lb: *mut lev_link_t = ptr::null_mut();
+    assert_eq!(
+        unsafe { lev_connect(b.0, dest.as_ptr(), 5000, &mut lb) },
+        LEV_OK,
+        "connect: {}",
+        last_error()
+    );
+    assert!(!lb.is_null());
+
+    let req = wait_event(a.0, LEV_EVENT_LINK_REQUEST, ev).expect("link request on A");
+    let lid = event_link_id(&req);
+    drop(req);
+
+    let mut la: *mut lev_link_t = ptr::null_mut();
+    assert_eq!(
+        unsafe { lev_accept_link(a.0, lid.as_ptr(), 5000, &mut la) },
+        LEV_OK
+    );
+    assert!(!la.is_null());
+
+    wait_event(b.0, LEV_EVENT_LINK_ESTABLISHED, ev).expect("established on B");
+    (Link(lb), Link(la))
 }
