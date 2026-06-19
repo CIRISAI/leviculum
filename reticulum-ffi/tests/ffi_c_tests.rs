@@ -202,3 +202,185 @@ fn c_lnsd_runs_as_daemon() {
         status.code()
     );
 }
+
+/// Wait up to `secs` for a child to exit; on timeout, kill it and return None.
+fn wait_timeout(child: &mut std::process::Child, secs: u64) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(st) = child.try_wait().expect("try_wait") {
+            return Some(st);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// End-to-end test of the `lncp` file-copy tool: a receiver and a sender, two
+/// separate C processes, copy a file over a real link with a resource transfer.
+/// The strongest "the API lets a C developer build real tools" check, since it
+/// exercises the whole stack (identity, announce, path, link, resource) from a
+/// standalone program, not a test harness.
+#[test]
+fn c_lncp_copies_a_file_end_to_end() {
+    let Some(bin) = compile("examples/c/lncp.c", "lncp_c") else {
+        return;
+    };
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_r = dir.path().join("recv");
+    let store_s = dir.path().join("send");
+    std::fs::create_dir_all(&store_r).unwrap();
+    std::fs::create_dir_all(&store_s).unwrap();
+    let in_path = dir.path().join("input.bin");
+    let out_path = dir.path().join("output.bin");
+    // A 64 KiB payload that needs a real multi-part resource transfer.
+    let content: Vec<u8> = (0..65536u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
+    std::fs::write(&in_path, &content).unwrap();
+
+    let mut recv = Command::new(&bin)
+        .args([
+            "recv",
+            store_r.to_str().unwrap(),
+            &addr,
+            out_path.to_str().unwrap(),
+        ])
+        .env("LD_LIBRARY_PATH", lib_dir())
+        .spawn()
+        .expect("spawn recv");
+    // Give the receiver a moment to bind and start announcing.
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    let mut send = Command::new(&bin)
+        .args([
+            "send",
+            store_s.to_str().unwrap(),
+            &addr,
+            in_path.to_str().unwrap(),
+        ])
+        .env("LD_LIBRARY_PATH", lib_dir())
+        .spawn()
+        .expect("spawn send");
+
+    let send_status = wait_timeout(&mut send, 45).expect("sender did not finish in time");
+    assert!(
+        send_status.success(),
+        "sender exited with {:?}",
+        send_status.code()
+    );
+    let recv_status = wait_timeout(&mut recv, 20).expect("receiver did not finish in time");
+    assert!(
+        recv_status.success(),
+        "receiver exited with {:?}",
+        recv_status.code()
+    );
+
+    let copied = std::fs::read(&out_path).expect("output file written");
+    assert_eq!(copied, content, "the copied file must match the original");
+}
+
+/// The same `lncp` tool, but the two clients attach to a running `c-lnsd` over
+/// its shared-instance IPC socket (the way `rncp`/`rnx` attach to a daemon)
+/// instead of bringing up their own interfaces. Proves the file-copy data path
+/// works through the daemon, which relays between its two local clients.
+#[test]
+fn c_lncp_copies_via_shared_instance() {
+    let Some(lncp) = compile("examples/c/lncp.c", "lncp_shared_c") else {
+        return;
+    };
+    let Some(lnsd) = compile("examples/c/lnsd.c", "lncp_shared_lnsd_c") else {
+        return;
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+    let instance = format!("lncp-ipc-{port}");
+
+    // The daemon: shares an instance, no interfaces of its own needed since the
+    // two clients are local.
+    let dconf = dir.path().join("daemon");
+    std::fs::create_dir_all(&dconf).unwrap();
+    std::fs::write(
+        dconf.join("config"),
+        format!(
+            "[reticulum]\n  enable_transport = yes\n  share_instance = yes\n  \
+             instance_name = {instance}\n"
+        ),
+    )
+    .unwrap();
+
+    let in_path = dir.path().join("input.bin");
+    let out_path = dir.path().join("output.bin");
+    let content: Vec<u8> = (0..40000u32)
+        .map(|i| (i.wrapping_mul(40503) >> 11) as u8)
+        .collect();
+    std::fs::write(&in_path, &content).unwrap();
+    let store_r = dir.path().join("recv");
+    let store_s = dir.path().join("send");
+    std::fs::create_dir_all(&store_r).unwrap();
+    std::fs::create_dir_all(&store_s).unwrap();
+
+    let mut daemon = Command::new(&lnsd)
+        .arg("--config")
+        .arg(&dconf)
+        .env("LD_LIBRARY_PATH", lib_dir())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn c-lnsd");
+    // Let the daemon bind its IPC socket before the clients attach.
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    let mut recv = Command::new(&lncp)
+        .args([
+            "recv-shared",
+            store_r.to_str().unwrap(),
+            &instance,
+            out_path.to_str().unwrap(),
+        ])
+        .env("LD_LIBRARY_PATH", lib_dir())
+        .spawn()
+        .expect("spawn recv-shared");
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    let mut send = Command::new(&lncp)
+        .args([
+            "send-shared",
+            store_s.to_str().unwrap(),
+            &instance,
+            in_path.to_str().unwrap(),
+        ])
+        .env("LD_LIBRARY_PATH", lib_dir())
+        .spawn()
+        .expect("spawn send-shared");
+
+    let send_status = wait_timeout(&mut send, 45).expect("sender did not finish in time");
+    let recv_status = wait_timeout(&mut recv, 20).expect("receiver did not finish in time");
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    assert!(
+        send_status.success(),
+        "sender exited with {:?}",
+        send_status.code()
+    );
+    assert!(
+        recv_status.success(),
+        "receiver exited with {:?}",
+        recv_status.code()
+    );
+    let copied = std::fs::read(&out_path).expect("output file written");
+    assert_eq!(copied, content, "the copied file must match the original");
+}

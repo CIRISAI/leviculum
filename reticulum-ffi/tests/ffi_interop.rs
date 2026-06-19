@@ -147,6 +147,90 @@ fn c_links_to_python_and_exchanges_data() {
     assert_eq!(event_data(&ev), b"from-py");
 }
 
+/// A resource (file) sent from the C API is received by the Python reference
+/// implementation, proving the file-copy data path is wire-compatible.
+#[test]
+fn c_sends_resource_received_by_python() {
+    let Some(py) = PyDaemon::start() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let node = c_node(&py, dir.path(), None);
+    let (phash, _sk) = py.register_destination("interop", &["resource"]);
+    // The daemon must accept resources before the link comes up.
+    py.set_resource_strategy(&phash, "accept_all");
+    let dest: [u8; 16] = hex::decode(&phash).unwrap().try_into().unwrap();
+
+    let mut learned = false;
+    for _ in 0..30 {
+        py.announce_destination(&phash, "");
+        let _ = wait_event(
+            node.0,
+            LEV_EVENT_ANNOUNCE_RECEIVED,
+            Duration::from_millis(800),
+        );
+        if unsafe { lev_has_path(node.0, dest.as_ptr()) } == 1 {
+            learned = true;
+            break;
+        }
+    }
+    assert!(learned, "C never learned the Python destination");
+
+    let mut lb: *mut lev_link_t = ptr::null_mut();
+    assert_eq!(
+        unsafe { lev_connect(node.0, dest.as_ptr(), 6000, &mut lb) },
+        LEV_OK,
+        "connect: {}",
+        last_error()
+    );
+    let lb = Link(lb);
+    wait_event(node.0, LEV_EVENT_LINK_ESTABLISHED, Duration::from_secs(8))
+        .expect("C link to Python established");
+    let mut lid = [0u8; 16];
+    let mut ll = 16usize;
+    assert_eq!(
+        unsafe { lev_link_id(lb.0, lid.as_mut_ptr(), 16, &mut ll) },
+        LEV_OK
+    );
+
+    let payload: Vec<u8> = (0..4096u32).map(|i| (i * 31 + 7) as u8).collect();
+    let mut rhash = [0u8; 32];
+    assert_eq!(
+        unsafe {
+            lev_send_resource(
+                node.0,
+                lid.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+                ptr::null(),
+                0,
+                1,
+                rhash.as_mut_ptr(),
+                15000,
+            )
+        },
+        LEV_OK,
+        "send_resource: {}",
+        last_error()
+    );
+
+    // The in-process C node stays alive, so the daemon pulls the whole resource.
+    let want = hex::encode(&payload);
+    let mut got = false;
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(300));
+        if py
+            .received_resources()
+            .iter()
+            .any(|r| r.get("data").and_then(|d| d.as_str()) == Some(want.as_str()))
+        {
+            got = true;
+            break;
+        }
+    }
+    assert!(got, "Python never received the C resource intact");
+}
+
 /// A ratchet-enabled C destination announces a wire-valid path that the Python
 /// reference implementation accepts. RNS validates the announce (including the
 /// ratchet) before installing the path, so a path appearing proves the

@@ -101,6 +101,7 @@ pub struct lev_event_t {
     dropped_count: u64,
     msgtype: u16,
     sequence: u16,
+    is_sender: bool,
 }
 
 impl lev_event_t {
@@ -119,6 +120,7 @@ impl lev_event_t {
             dropped_count: 0,
             msgtype: 0,
             sequence: 0,
+            is_sender: false,
         }
     }
 }
@@ -315,12 +317,14 @@ fn project(ev: NodeEvent) -> lev_event_t {
             link_id,
             resource_hash,
             progress,
+            is_sender,
             ..
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_PROGRESS, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.resource_hash = Some(resource_hash);
             e.progress = progress as f64;
+            e.is_sender = is_sender;
             e
         }
         NodeEvent::ResourceCompleted {
@@ -328,6 +332,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
             resource_hash,
             data,
             metadata,
+            is_sender,
             ..
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_COMPLETED, is_control);
@@ -335,6 +340,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.resource_hash = Some(resource_hash);
             e.data = data;
             e.metadata = metadata;
+            e.is_sender = is_sender;
             e
         }
         NodeEvent::ResourceFailed {
@@ -695,6 +701,22 @@ pub unsafe extern "C" fn lev_event_dropped_count(ev: *const lev_event_t, out: *m
         }
         *out = e.dropped_count;
         LEV_OK
+    })
+}
+
+/// Whether a resource event is for a transfer this node is *sending*. Returns 1
+/// on the sender side of a `LEV_EVENT_RESOURCE_PROGRESS`/`_COMPLETED`/`_FAILED`
+/// event, 0 on the receiver side (and 0 for other events or a NULL pointer).
+///
+/// A sender's `LEV_EVENT_RESOURCE_COMPLETED` is the signal that an outgoing
+/// transfer finished (its data payload is empty); a receiver's carries the
+/// assembled data. Use this to tell the two apart on a node that both sends and
+/// receives resources.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_is_sender(ev: *const lev_event_t) -> c_int {
+    guard(0, || match ev.as_ref() {
+        Some(e) if e.is_sender => 1,
+        _ => 0,
     })
 }
 

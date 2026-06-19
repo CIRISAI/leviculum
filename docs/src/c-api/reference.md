@@ -417,6 +417,7 @@ int  lev_event_progress(const struct lev_event_t *ev, double *out);
 int  lev_event_dropped_count(const struct lev_event_t *ev, uint64_t *out);
 int  lev_event_msgtype(const struct lev_event_t *ev, uint16_t *out);
 int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
+int  lev_event_is_sender(const struct lev_event_t *ev);
 ```
 
 - `lev_event_fd` returns the readable fd to add to a `poll`/`epoll`/`select`
@@ -437,6 +438,11 @@ int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
   the count of a `LEV_EVENT_CONTROL_OVERFLOW` event; `_msgtype` and `_sequence`
   write the message type and sequence of a `LEV_EVENT_LINK_MESSAGE` event. An
   accessor that does not apply to the event type returns `LEV_ERR_INVALID_ARG`.
+- `lev_event_is_sender` returns 1 on the sender side of a resource event
+  (`_PROGRESS`/`_COMPLETED`/`_FAILED`), 0 on the receiver side (or for other
+  events). A sender's `LEV_EVENT_RESOURCE_COMPLETED` (empty data) signals that
+  an outgoing transfer finished; a receiver's carries the data. A node that both
+  sends and receives resources uses this to tell the two apart.
 
 ### Event types
 

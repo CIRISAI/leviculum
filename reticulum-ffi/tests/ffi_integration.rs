@@ -728,6 +728,26 @@ fn resource_metadata_round_trips() {
     let got =
         read2(|b, c, l| unsafe { lev_event_metadata(done.0, b, c, l) }).expect("metadata readable");
     assert_eq!(got, metadata, "metadata round-trips to the receiver");
+    // A's completion is the receiver side.
+    assert_eq!(
+        unsafe { lev_event_is_sender(done.0) },
+        0,
+        "A is the receiver"
+    );
+
+    // B (the sender) also gets a completion, flagged as the sender side, with no
+    // assembled data, so a node that both sends and receives can tell them apart.
+    let bdone = wait_event(p.b.0, LEV_EVENT_RESOURCE_COMPLETED, Duration::from_secs(10))
+        .expect("sender-side completion on B");
+    assert_eq!(
+        unsafe { lev_event_is_sender(bdone.0) },
+        1,
+        "B is the sender"
+    );
+    assert!(
+        event_data(&bdone).is_empty(),
+        "the sender's completion has no data"
+    );
 }
 
 #[test]
@@ -978,7 +998,7 @@ fn app_proof_strategy_requests_and_sends_proof() {
     // a panic or other error.
     let rc = unsafe { lev_send_proof(a.0, dest_a.as_ptr(), phash.as_ptr(), 3000) };
     assert!(
-        rc == LEV_OK || rc == LEV_ERR_SEND,
+        rc == LEV_OK || rc == LEV_ERR_NO_PATH,
         "send_proof returned {rc}: {}",
         last_error()
     );

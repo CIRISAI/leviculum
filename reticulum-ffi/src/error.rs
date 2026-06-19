@@ -86,12 +86,12 @@ pub(crate) fn set_last_error_static(msg: &'static CStr) {
 /// Map a facade [`reticulum_std::Error`] to a `LEV_ERR_*` code, recording its
 /// `Display` text as the thread-local detail string.
 ///
-/// This is not exhaustive over the `LEV_ERR_*` space: `LEV_ERR_NO_PATH`,
-/// `LEV_ERR_CRYPTO`, `LEV_ERR_UNKNOWN_DEST`, `LEV_ERR_BUFFER_TOO_SMALL`,
-/// `LEV_ERR_AGAIN`, and `LEV_ERR_TIMEOUT` are returned directly by the call
-/// sites that detect those conditions, never derived here. A facade `Send`/
-/// `Link` error therefore surfaces as the generic `LEV_ERR_SEND`/`LEV_ERR_LINK`
-/// even when its text mentions a missing path.
+/// This is not exhaustive over the `LEV_ERR_*` space: `LEV_ERR_CRYPTO`,
+/// `LEV_ERR_UNKNOWN_DEST`, `LEV_ERR_BUFFER_TOO_SMALL`, `LEV_ERR_AGAIN`, and
+/// `LEV_ERR_TIMEOUT` are returned directly by the call sites that detect those
+/// conditions, never derived here. A no-path send is mapped to `LEV_ERR_NO_PATH`
+/// (so callers can branch on it); other `Send`/`Link` errors surface as the
+/// generic `LEV_ERR_SEND`/`LEV_ERR_LINK`.
 pub(crate) fn map_error(e: &reticulum_std::Error) -> c_int {
     use reticulum_std::Error;
     set_last_error(e.to_string());
@@ -100,6 +100,8 @@ pub(crate) fn map_error(e: &reticulum_std::Error) -> c_int {
         Error::Config(_) => LEV_ERR_CONFIG,
         Error::Serialization(_) => LEV_ERR_INVALID_ARG,
         Error::NotRunning => LEV_ERR_NOT_RUNNING,
+        // Surface "no path" distinctly so callers can branch on it.
+        Error::Send(reticulum_std::SendError::NoPath) => LEV_ERR_NO_PATH,
         Error::Announce(_) | Error::Send(_) => LEV_ERR_SEND,
         Error::Link(_) => LEV_ERR_LINK,
         Error::Resource(_) => LEV_ERR_RESOURCE,

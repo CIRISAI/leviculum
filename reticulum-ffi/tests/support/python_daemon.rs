@@ -151,6 +151,25 @@ impl PyDaemon {
             .unwrap_or(false)
     }
 
+    /// Set the resource acceptance strategy for one of the daemon's
+    /// destinations (`"accept_all"` / `"accept_none"`); apply before a link is
+    /// established.
+    pub fn set_resource_strategy(&self, dest_hash: &str, strategy: &str) {
+        self.result(
+            "set_resource_strategy",
+            serde_json::json!({ "dest_hash": dest_hash, "strategy": strategy }),
+        );
+    }
+
+    /// The resources the daemon has received, each a JSON object with `data`
+    /// (hex), `metadata`, and `status`.
+    pub fn received_resources(&self) -> Vec<serde_json::Value> {
+        self.result("get_received_resources", serde_json::json!({}))
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Verify an Ed25519 signature with the reference implementation. All
     /// arguments are hex; the public key is the 64-byte identity public key.
     pub fn verify_signature(&self, public_key: &str, message: &str, signature: &str) -> bool {

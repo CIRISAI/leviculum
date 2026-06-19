@@ -132,7 +132,10 @@ lev_builder_connect_shared_instance(b, "leviculum");
 ```
 
 A `NULL` path or name returns `LEV_ERR_INVALID_ARG`. The `daemon.c` example is
-a worked acceptance program for all three calls.
+a worked acceptance program for all three calls. The `lncp.c` file-copy tool
+has both styles: its `recv`/`send` modes bring up their own interface, while its
+`recv-shared`/`send-shared` modes attach to a running `lnsd` by instance name,
+so several tools share one daemon's radio.
 
 ## Radio interfaces (LoRa and serial)
 
@@ -459,7 +462,16 @@ case LEV_EVENT_RESOURCE_PROGRESS: {
 `LEV_EVENT_RESOURCE_COMPLETED` carries the data only on the receiver;
 `LEV_EVENT_RESOURCE_FAILED` reports a transfer that did not finish.
 
-Full program: `reticulum-ffi/examples/c/phase_e.c`.
+`lev_send_resource` returns once the transfer is *initiated*: the receiver then
+pulls the parts part by part. A sending program must keep its node alive and
+running the event loop until the transfer is done, the receiver must keep the
+link it accepted open (freeing a link closes it), and the receiver applies its
+resource strategy on the link before the resource arrives. Exiting the sender
+right after the call returns aborts an in-flight transfer.
+
+Full programs: `reticulum-ffi/examples/c/phase_e.c`, and
+`reticulum-ffi/examples/c/lncp.c`, a complete two-process file-copy tool
+(`lncp send` / `lncp recv`) that exercises the whole stack end to end.
 
 ## Errors and logging
 
