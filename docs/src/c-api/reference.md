@@ -175,6 +175,7 @@ int  lev_builder_add_rnode(struct lev_builder_t *b, const char *port, uint64_t f
 int  lev_builder_add_serial(struct lev_builder_t *b, const char *port, uint32_t speed, uint8_t databits, const char *parity, uint8_t stopbits);
 int  lev_builder_enable_transport(struct lev_builder_t *b, int enabled);
 int  lev_builder_event_capacity(struct lev_builder_t *b, uintptr_t control_cap, uintptr_t data_cap);
+int  lev_builder_link_keepalive(struct lev_builder_t *b, uint64_t secs);
 int  lev_builder_config_file(struct lev_builder_t *b, const char *path);
 int  lev_builder_share_instance(struct lev_builder_t *b, const char *name);
 int  lev_builder_connect_shared_instance(struct lev_builder_t *b, const char *name);
@@ -195,6 +196,12 @@ void lev_free(struct leviculum_t *node);
   `_event_capacity` sets the event-queue sizes (control and data planes; a 0
   keeps the current default). Each setter returns `LEV_ERR_INVALID_ARG` if the
   builder was already consumed.
+- `lev_builder_link_keepalive` overrides the link keepalive interval, in
+  seconds, for every link the node creates; the stale-link timeout scales with
+  it (a link goes stale after twice the keepalive). The value is clamped to the
+  protocol minimum. The default (no call) derives the interval from the link
+  RTT. Useful for slow links, and for making `LEV_EVENT_LINK_STALE` observable
+  quickly. The same knob is the `keepalive_interval` key in a config file.
 - `lev_builder_add_rnode` adds a LoRa interface over an RNode: `port` is the
   serial device, then the required radio settings (`frequency` and `bandwidth`
   in Hz, `spreading_factor`, `coding_rate` denominator, `tx_power` in dBm).

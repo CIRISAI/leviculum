@@ -24,15 +24,24 @@ cc app.c $(pkg-config --cflags --libs leviculum)
 ```
 
 The `pkg-config` call expands to `-lleviculum` plus the include and library
-paths. To build the shared object and the header from source, and install
-them with the SONAME, dev symlinks, and pkg-config file:
+paths. To build from source and install the header, the shared object (with its
+SONAME and dev symlinks), the static archive, and the pkg-config file:
 
 ```sh
-cargo build-ffi              # builds the glibc cdylib + leviculum.h
-make -C reticulum-ffi install PREFIX=/usr/local
+make -C reticulum-ffi install PREFIX=/usr/local   # builds, then installs
 ```
 
-See [Installation](../guide/installation.md) for the full toolchain setup.
+To link Leviculum statically while glibc stays dynamic, pass `--static` so
+pkg-config adds the archive's system dependencies, and force the archive:
+
+```sh
+cc app.c $(pkg-config --cflags leviculum) \
+    -l:libleviculum.a $(pkg-config --static --libs-only-l leviculum | sed 's/-lleviculum//')
+```
+
+See [Installation](../guide/installation.md) for the full toolchain setup. The
+install is verified end to end (dynamic and static, x86_64 and aarch64) by
+`scripts/verify-packaging.sh`.
 
 ## Opaque handles
 
