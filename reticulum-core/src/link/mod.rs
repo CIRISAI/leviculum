@@ -378,6 +378,11 @@ pub struct Link {
     stale_time_secs: u64,
     /// Time of last inbound packet (timestamp in seconds)
     last_inbound: u64,
+    /// Whether any inbound packet has been recorded. Distinguishes "no inbound
+    /// yet" from a genuine `last_inbound` of 0 (a link established in the node's
+    /// first uptime second, where the monotonic clock still reads 0), so the
+    /// latter is not wrongly treated as never-active by stale detection.
+    had_inbound: bool,
     /// Time of last outbound packet (timestamp in seconds)
     last_outbound: u64,
     /// Last time we sent a keepalive (timestamp in seconds)
@@ -486,6 +491,7 @@ impl Link {
             keepalive_override: None,
             stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
             last_inbound: 0,
+            had_inbound: false,
             last_outbound: 0,
             last_keepalive: 0,
             established_at: None,
@@ -594,6 +600,7 @@ impl Link {
             keepalive_override: None,
             stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
             last_inbound: 0,
+            had_inbound: false,
             last_outbound: 0,
             last_keepalive: 0,
             established_at: None,
@@ -1094,7 +1101,7 @@ impl Link {
         if self.state != LinkState::Active {
             return false;
         }
-        if self.last_inbound == 0 {
+        if !self.had_inbound {
             return false; // No inbound recorded yet
         }
         let elapsed = current_time_secs.saturating_sub(self.last_inbound);
@@ -1109,7 +1116,7 @@ impl Link {
         if self.state != LinkState::Stale {
             return false;
         }
-        if self.last_inbound == 0 {
+        if !self.had_inbound {
             return false;
         }
         let elapsed = current_time_secs.saturating_sub(self.last_inbound);
@@ -1232,6 +1239,7 @@ impl Link {
     /// Record an inbound packet timestamp
     pub fn record_inbound(&mut self, now_secs: u64) {
         self.last_inbound = now_secs;
+        self.had_inbound = true;
     }
 
     /// Record an outbound packet timestamp
@@ -1248,6 +1256,7 @@ impl Link {
     pub fn mark_established(&mut self, now_secs: u64) {
         self.established_at = Some(now_secs);
         self.last_inbound = now_secs;
+        self.had_inbound = true;
     }
 
     /// Get the keepalive interval in seconds
@@ -1457,6 +1466,7 @@ impl Link {
         self.keepalive_secs = keepalive_secs;
         self.stale_time_secs = stale_time_secs;
         self.last_inbound = last_inbound;
+        self.had_inbound = true;
     }
 
     #[cfg(test)]
@@ -3052,6 +3062,33 @@ mod tests {
         link.update_keepalive_from_rtt(2.0);
         assert_eq!(link.keepalive_secs(), 360);
         assert_eq!(link.stale_time_secs(), 720);
+    }
+
+    #[test]
+    fn test_link_established_at_clock_zero_can_go_stale() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_state(LinkState::Active);
+        // Establish at clock second 0 (the node's first uptime second): the
+        // monotonic clock starts at 0, so last_inbound is stamped 0.
+        link.mark_established(0);
+
+        // After the stale window of silence the link must be detectable as
+        // stale; a last_inbound of 0 must mean "established at t=0", not
+        // "never had inbound".
+        let now = link.stale_time_secs() + 1;
+        assert!(
+            link.is_stale(now),
+            "a link established at clock second 0 must still go stale"
+        );
+
+        // And from Stale it must still be closable, not wedged open forever.
+        link.set_state(LinkState::Stale);
+        let later = link.stale_time_secs() * 4 + 100;
+        assert!(
+            link.should_close(later),
+            "a stale link established at clock second 0 must still close"
+        );
     }
 
     #[test]
