@@ -1726,6 +1726,32 @@ impl ReticulumNode {
         Ok(packet_hash)
     }
 
+    /// Send a delivery proof for a previously received packet, after a
+    /// `PacketProofRequested` event under `ProofStrategy::App`. Additive: built
+    /// on the core `send_proof`, dispatched like the other send paths.
+    pub async fn send_proof(
+        &self,
+        packet_hash: &[u8; 32],
+        dest_hash: &DestinationHash,
+    ) -> Result<(), Error> {
+        let output = {
+            let mut inner = self.inner.lock().unwrap();
+            inner
+                .send_proof(packet_hash, dest_hash)
+                .map_err(|e| match e {
+                    reticulum_core::transport::TransportError::NoPath => {
+                        Error::Send(reticulum_core::SendError::NoPath)
+                    }
+                    other => Error::Config(format!("proof send failed: {other:?}")),
+                })?
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
+    }
+
     /// Create a PacketSender for a destination
     ///
     /// Returns a self-contained handle for sending single packets.

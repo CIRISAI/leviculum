@@ -241,6 +241,37 @@ fn destination_validation() {
 }
 
 #[test]
+fn destination_set_proof_strategy_validates() {
+    unsafe {
+        let id = Identity::generate();
+        let app = cstr("app");
+        let asp = cstr("p");
+        let asp_ptrs = [asp.as_ptr()];
+        let dest = lev_destination_new(
+            id.0,
+            LEV_DIRECTION_IN,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!dest.is_null());
+        for s in [LEV_PROOF_NONE, LEV_PROOF_APP, LEV_PROOF_ALL] {
+            assert_eq!(lev_destination_set_proof_strategy(dest, s), LEV_OK);
+        }
+        assert_eq!(
+            lev_destination_set_proof_strategy(dest, 99),
+            LEV_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            lev_destination_set_proof_strategy(ptr::null_mut(), LEV_PROOF_APP),
+            LEV_ERR_NULL_PTR
+        );
+        lev_destination_free(dest);
+    }
+}
+
+#[test]
 fn destination_enable_ratchets_validates() {
     unsafe {
         let id = Identity::generate();

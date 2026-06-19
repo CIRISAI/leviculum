@@ -314,6 +314,17 @@ impl Node {
         self.inner.send_single_packet(dest_hash, data).await
     }
 
+    /// Send a delivery proof for a received packet, after a
+    /// `PacketProofRequested` event on a destination with the App proof
+    /// strategy.
+    pub async fn send_proof(
+        &self,
+        dest_hash: &DestinationHash,
+        packet_hash: &[u8; 32],
+    ) -> Result<()> {
+        self.inner.send_proof(packet_hash, dest_hash).await
+    }
+
     /// Register a handler for requests to `path` on a local destination.
     pub fn register_request_handler(
         &self,

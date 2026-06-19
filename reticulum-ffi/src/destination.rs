@@ -10,6 +10,7 @@ use std::os::raw::{c_char, c_int};
 use std::time::Duration;
 
 use reticulum_std::api::{Destination, DestinationHash, DestinationType, Direction};
+use reticulum_std::ProofStrategy;
 
 use crate::error::*;
 use crate::identity::lev_identity_t;
@@ -27,6 +28,22 @@ pub const LEV_DEST_SINGLE: c_int = 0;
 pub const LEV_DEST_GROUP: c_int = 1;
 /// Plain destination: unencrypted.
 pub const LEV_DEST_PLAIN: c_int = 2;
+
+/// Never send delivery proofs (the default).
+pub const LEV_PROOF_NONE: c_int = 0;
+/// Emit a proof-requested event so the app decides per packet.
+pub const LEV_PROOF_APP: c_int = 1;
+/// Automatically prove delivery of every received packet.
+pub const LEV_PROOF_ALL: c_int = 2;
+
+fn proof_strategy_from(s: c_int) -> Option<ProofStrategy> {
+    match s {
+        LEV_PROOF_NONE => Some(ProofStrategy::None),
+        LEV_PROOF_APP => Some(ProofStrategy::App),
+        LEV_PROOF_ALL => Some(ProofStrategy::All),
+        _ => None,
+    }
+}
 
 /// Opaque destination handle. `inner` is taken by
 /// `lev_register_destination`; the caller still frees the empty shell.
@@ -179,6 +196,69 @@ pub unsafe extern "C" fn lev_destination_enable_ratchets(
                 set_last_error(format!("{e:?}"));
                 LEV_ERR_INVALID_ARG
             }
+        }
+    })
+}
+
+/// Set the delivery-proof strategy on a destination before it is registered:
+/// `LEV_PROOF_NONE`, `LEV_PROOF_APP` (emit `LEV_EVENT_PACKET_PROOF_REQUESTED`
+/// so the app calls `lev_send_proof`), or `LEV_PROOF_ALL` (auto-prove every
+/// received packet). `LEV_ERR_INVALID_ARG` on a bad strategy or a registered
+/// destination.
+#[no_mangle]
+pub unsafe extern "C" fn lev_destination_set_proof_strategy(
+    dest: *mut lev_destination_t,
+    strategy: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let d = match dest.as_mut() {
+            Some(d) => d,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let strategy = match proof_strategy_from(strategy) {
+            Some(s) => s,
+            None => {
+                set_last_error("invalid proof strategy");
+                return LEV_ERR_INVALID_ARG;
+            }
+        };
+        match d.inner.as_mut() {
+            Some(inner) => {
+                inner.set_proof_strategy(strategy);
+                LEV_OK
+            }
+            None => {
+                set_last_error("destination already registered");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Send a delivery proof for a received packet, in response to a
+/// `LEV_EVENT_PACKET_PROOF_REQUESTED` event (App strategy). `dest_hash` and
+/// `packet_hash` (32 bytes) come from the event.
+#[no_mangle]
+pub unsafe extern "C" fn lev_send_proof(
+    node: *const leviculum_t,
+    dest_hash: *const u8,
+    packet_hash: *const u8,
+    timeout_ms: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if dest_hash.is_null() || packet_hash.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
+        let ph = read_array::<32>(packet_hash);
+        match block_on_timeout(h.runtime(), h.node().send_proof(&dh, &ph), timeout_ms) {
+            Ok(Ok(())) => LEV_OK,
+            Ok(Err(e)) => map_error(&e),
+            Err(()) => LEV_ERR_TIMEOUT,
         }
     })
 }

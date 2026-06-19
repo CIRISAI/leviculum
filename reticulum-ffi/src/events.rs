@@ -60,6 +60,16 @@ pub const LEV_EVENT_LINK_IDENTIFIED: c_int = 17;
 /// which is a raw unsequenced link packet. Carries a message type and a
 /// sequence number via `lev_event_msgtype` and `lev_event_sequence`.
 pub const LEV_EVENT_LINK_MESSAGE: c_int = 18;
+/// A single packet arrived at a destination with the App proof strategy; the
+/// app may call `lev_send_proof`. `dest_hash` is the destination and the data
+/// payload is the 32-byte packet hash.
+pub const LEV_EVENT_PACKET_PROOF_REQUESTED: c_int = 19;
+/// Data arrived on a link whose destination has the App proof strategy. The
+/// `link_id` is set and the data payload is the 32-byte packet hash.
+pub const LEV_EVENT_LINK_PROOF_REQUESTED: c_int = 20;
+/// A delivery proof confirmed a packet we sent on a link (PROVE_ALL). The
+/// `link_id` is set and the data payload is the 32-byte packet hash.
+pub const LEV_EVENT_LINK_DELIVERY_CONFIRMED: c_int = 21;
 
 /// One projected event, fully self-owned (all payloads deep-copied out of the
 /// `NodeEvent`), so it outlives the queue slot and is valid until
@@ -165,6 +175,33 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.data = data;
             e.msgtype = msgtype;
             e.sequence = sequence;
+            e
+        }
+        NodeEvent::PacketProofRequested {
+            packet_hash,
+            destination_hash,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_PACKET_PROOF_REQUESTED, is_control);
+            e.dest_hash = Some(*destination_hash.as_bytes());
+            e.data = packet_hash.to_vec();
+            e
+        }
+        NodeEvent::LinkProofRequested {
+            link_id,
+            packet_hash,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_PROOF_REQUESTED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.data = packet_hash.to_vec();
+            e
+        }
+        NodeEvent::LinkDeliveryConfirmed {
+            link_id,
+            packet_hash,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_DELIVERY_CONFIRMED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.data = packet_hash.to_vec();
             e
         }
         NodeEvent::PacketReceived {

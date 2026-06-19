@@ -232,6 +232,13 @@ milliseconds); peers, including Python ones, then encrypt to a rotating ratchet
 key. `lev_destination_ratchet_public(node, dh, ...)` reads the current key. See
 `reticulum-ffi/examples/c/ratchet.c`.
 
+For delivery proofs, call `lev_destination_set_proof_strategy(dest, strategy)`
+before registering. `LEV_PROOF_ALL` auto-proves every received packet (Python's
+PROVE_ALL). `LEV_PROOF_APP` raises a `LEV_EVENT_PACKET_PROOF_REQUESTED` event
+whose data is the 32-byte packet hash; the app decides and calls
+`lev_send_proof(node, dest_hash, packet_hash, timeout_ms)`. See
+`reticulum-ffi/examples/c/proof.c`.
+
 Receiving side, in the event loop:
 
 ```c

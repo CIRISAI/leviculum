@@ -125,10 +125,17 @@ Several small, mostly independent items.
   `lev_destination_enable_ratchets` and `lev_destination_ratchet_public`; unit,
   in-process link-over-ratchet, Python ratcheted-announce interop, `ratchet.c`,
   docs, ASan/TSan/Miri clean.
-- 4c, proof strategies and proof-request events. Size M. Project None/App/All
-  and the `...ProofRequested` events for app-decided delivery proofs.
-- 4d, group destination keys. Size M, lowest priority. The group type exists
-  but key handling is not wired; make shared-key broadcast usable.
+- 4c, proof strategies and proof-request events. Size M. DONE.
+  `lev_destination_set_proof_strategy` (None/App/All) and `lev_send_proof`, plus
+  the `PACKET_PROOF_REQUESTED`/`LINK_PROOF_REQUESTED`/`LINK_DELIVERY_CONFIRMED`
+  events; additive facade and driver `send_proof`; unit, in-process App/All
+  tests, `proof.c`, docs, ASan/TSan/Miri clean.
+- 4d, group destination keys. Size M, lowest priority. BLOCKED on the engine.
+  Verified: the core has the Group destination type but no shared-key crypto
+  (no group-key generation/load, no group AES field, no group encrypt/decrypt
+  branch). Wiring it is core work, not an additive FFI projection, so it is out
+  of scope here until the engine implements group keys; then the FFI is a thin
+  add (set/load group key, mark the destination Group).
 
 FFI surface: `lev_identity_sign/verify/encrypt/decrypt`,
 `lev_destination_enable_ratchets`, `lev_destination_set_proof_strategy` plus

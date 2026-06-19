@@ -237,6 +237,8 @@ void lev_destination_free(struct lev_destination_t *dest);
 int  lev_destination_hash(const struct lev_destination_t *dest, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
 int  lev_destination_enable_ratchets(struct lev_destination_t *dest, uint64_t now_ms);
 int  lev_destination_ratchet_public(const struct leviculum_t *node, const uint8_t *dest_hash, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_destination_set_proof_strategy(struct lev_destination_t *dest, int strategy);
+int  lev_send_proof(const struct leviculum_t *node, const uint8_t *dest_hash, const uint8_t *packet_hash, int timeout_ms);
 int  lev_register_destination(const struct leviculum_t *node, struct lev_destination_t *dest);
 int  lev_announce(const struct leviculum_t *node, const uint8_t *dest_hash,
                   const uint8_t *app_data, uintptr_t app_data_len, int timeout_ms);
@@ -257,6 +259,13 @@ int  lev_send_datagram(const struct leviculum_t *node, const uint8_t *dest_hash,
   the current 32-byte ratchet public key of a registered destination (read(2)
   style), or `LEV_ERR_INVALID_ARG` if it has no ratchets. Ratcheted
   destinations interoperate with Python peers.
+- `lev_destination_set_proof_strategy` sets, before registration, how a
+  destination proves delivery of received packets: `LEV_PROOF_NONE` (default,
+  never), `LEV_PROOF_APP` (emit `LEV_EVENT_PACKET_PROOF_REQUESTED` so the app
+  decides, then calls `lev_send_proof`), or `LEV_PROOF_ALL` (auto-prove every
+  packet, Python's PROVE_ALL). `lev_send_proof` sends a delivery proof for the
+  `packet_hash` from a proof-requested event; `LEV_ERR_SEND` if no return path
+  exists.
 - `lev_register_destination` registers the destination on the node so it can be
   announced and accept links and packets. It consumes the destination (the
   handle is emptied; still free it). `LEV_ERR_INVALID_ARG` if already
@@ -447,6 +456,9 @@ int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
 | `LEV_EVENT_RESOURCE_FAILED` | 16 | link_id, resource_hash |
 | `LEV_EVENT_LINK_IDENTIFIED` | 17 | link_id, data (16-byte identity hash) |
 | `LEV_EVENT_LINK_MESSAGE` | 18 | link_id, data, msgtype, sequence (reliable channel) |
+| `LEV_EVENT_PACKET_PROOF_REQUESTED` | 19 | dest_hash, data (32-byte packet hash) |
+| `LEV_EVENT_LINK_PROOF_REQUESTED` | 20 | link_id, data (32-byte packet hash) |
+| `LEV_EVENT_LINK_DELIVERY_CONFIRMED` | 21 | link_id, data (32-byte packet hash) |
 
 ## Helpers
 

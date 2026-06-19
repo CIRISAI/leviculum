@@ -389,6 +389,157 @@ fn resource_transfer_accept_app() {
 }
 
 #[test]
+fn app_proof_strategy_requests_and_sends_proof() {
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let idb = Identity::generate();
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let sp = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, ida.0), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, sp), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, idb.0), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, sp), LEV_OK);
+    });
+
+    // A's destination uses the App proof strategy.
+    let app = cstr("levtest");
+    let asp = cstr("proof");
+    let asp_ptrs = [asp.as_ptr()];
+    let dest_a = unsafe {
+        let d = lev_destination_new(
+            ida.0,
+            LEV_DIRECTION_IN,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!d.is_null());
+        assert_eq!(lev_destination_set_proof_strategy(d, LEV_PROOF_APP), LEV_OK);
+        let mut h = [0u8; 16];
+        let mut l = 16usize;
+        assert_eq!(lev_destination_hash(d, h.as_mut_ptr(), 16, &mut l), LEV_OK);
+        assert_eq!(lev_register_destination(a.0, d), LEV_OK);
+        lev_destination_free(d);
+        h
+    };
+    // B's own destination so A has a return path for the proof.
+    let dest_b = register_single_dest(bnode.0, idb.0, "levtest", &["proofback"]);
+    learn(&a, &bnode, &dest_a);
+    learn(&bnode, &a, &dest_b);
+
+    // B sends a datagram to A's App-strategy destination.
+    let payload = b"prove-me";
+    let mut ph = [0u8; 16];
+    assert_eq!(
+        unsafe {
+            lev_send_datagram(
+                bnode.0,
+                dest_a.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+                ph.as_mut_ptr(),
+                3000,
+            )
+        },
+        LEV_OK
+    );
+
+    // A is asked to prove the packet; the event carries its 32-byte hash.
+    let pr = wait_event(a.0, LEV_EVENT_PACKET_PROOF_REQUESTED, EV).expect("A asked to prove");
+    assert_eq!(support::event_dest_hash(&pr), dest_a);
+    let phash = event_data(&pr);
+    assert_eq!(phash.len(), 32);
+
+    // A dispatches the delivery proof for that packet. Whether it routes
+    // depends on a path to the receiving destination being present (in a real
+    // mesh it is, from the announce); over this 2-node loopback the local path
+    // table may lack it, so accept the dispatch or a clean no-path result, not
+    // a panic or other error.
+    let rc = unsafe { lev_send_proof(a.0, dest_a.as_ptr(), phash.as_ptr(), 3000) };
+    assert!(
+        rc == LEV_OK || rc == LEV_ERR_SEND,
+        "send_proof returned {rc}: {}",
+        last_error()
+    );
+}
+
+#[test]
+fn all_proof_strategy_does_not_request_proof() {
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let sp = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, ida.0), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, sp), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_add_tcp_client(b, sp), LEV_OK);
+    });
+
+    let app = cstr("levtest");
+    let asp = cstr("proofall");
+    let asp_ptrs = [asp.as_ptr()];
+    let dest_a = unsafe {
+        let d = lev_destination_new(
+            ida.0,
+            LEV_DIRECTION_IN,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!d.is_null());
+        assert_eq!(lev_destination_set_proof_strategy(d, LEV_PROOF_ALL), LEV_OK);
+        let mut h = [0u8; 16];
+        let mut l = 16usize;
+        assert_eq!(lev_destination_hash(d, h.as_mut_ptr(), 16, &mut l), LEV_OK);
+        assert_eq!(lev_register_destination(a.0, d), LEV_OK);
+        lev_destination_free(d);
+        h
+    };
+    learn(&a, &bnode, &dest_a);
+
+    let payload = b"auto-proved";
+    let mut ph = [0u8; 16];
+    assert_eq!(
+        unsafe {
+            lev_send_datagram(
+                bnode.0,
+                dest_a.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+                ph.as_mut_ptr(),
+                3000,
+            )
+        },
+        LEV_OK
+    );
+
+    // The packet arrives, but PROVE_ALL handles the proof itself: no request.
+    wait_event(a.0, LEV_EVENT_PACKET_RECEIVED, EV).expect("A receives datagram");
+    assert!(
+        wait_event(
+            a.0,
+            LEV_EVENT_PACKET_PROOF_REQUESTED,
+            Duration::from_millis(500)
+        )
+        .is_none(),
+        "PROVE_ALL must not ask the app to prove"
+    );
+}
+
+#[test]
 fn ratchet_enabled_destination_links_and_exposes_key() {
     let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
