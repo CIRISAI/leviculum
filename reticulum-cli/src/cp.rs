@@ -914,6 +914,26 @@ mod tests {
         path.exists()
     }
 
+    /// Poll until `node` has learned a path to `dest_hash`, up to a bounded
+    /// timeout. This is the deterministic signal a fixed announce-sleep stands
+    /// in for: the listener's one-shot announce has reached the sender, so the
+    /// transfer can proceed instead of racing a wall-clock guess that starves
+    /// under concurrent compile load. Returns true once the path is known.
+    async fn wait_for_node_path(
+        node: &ReticulumNode,
+        dest_hash: &DestinationHash,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if node.has_path(dest_hash) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        node.has_path(dest_hash)
+    }
+
     /// Create two connected ReticulumNode instances for testing.
     async fn setup_connected_nodes() -> (
         reticulum_std::driver::ReticulumNode,
@@ -1182,7 +1202,14 @@ mod tests {
             .map_err(|e| e.to_string())
         });
 
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Deterministic readiness barrier: wait until the listener's one-shot
+        // announce has reached the sender, rather than guessing with a fixed
+        // sleep that under concurrent compile load can lapse before the path is
+        // known.
+        assert!(
+            wait_for_node_path(&sender_node, &dest_hash, Duration::from_secs(10)).await,
+            "sender should learn a path to the listener before sending"
+        );
 
         // timeout_secs = None — no transfer-phase deadline at all.
         let result = run_send(
@@ -1210,8 +1237,12 @@ mod tests {
                 "timeout=None must never produce a timeout error, got: {e}"
             );
         }
+        // The listener persists the received file from its own node task, which
+        // completes after run_send returns on the sender side. Await that task
+        // deterministically instead of racing it (matches the sibling tests).
+        let received = tmp.path().join("received").join("testfile.bin");
         assert!(
-            tmp.path().join("received").join("testfile.bin").exists(),
+            wait_for_path(&received, Duration::from_secs(10)).await,
             "Received file should exist"
         );
 
