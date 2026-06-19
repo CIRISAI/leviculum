@@ -130,12 +130,14 @@ test-ffi:
 # since -Zbuild-std rebuilds std and every dependency with instrumentation
 # (several GB of target per sanitizer). AddressSanitizer (+ LeakSanitizer) and
 # ThreadSanitizer run the in-process two-node integration suite, covering the
-# handle lifecycle, the eventfd bridge, and the two-runtime threading. Miri
+# handle lifecycle, the eventfd bridge, and the two-runtime threading; ASan also
+# runs the property suite, where randomised buffer sizes stress the read(2)
+# protocol for overflows. Miri
 # checks the pure unsafe marshalling paths (buffer read(2), handle boxing,
 # char** aspects); it cannot run tokio or real I/O, so node/network tests are
 # excluded by filtering to identity/hex/destination.
 sanitize-ffi:
-    RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration -- --test-threads=1
+    RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration --test ffi_property -- --test-threads=1
     RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0 suppressions={{justfile_directory()}}/reticulum-ffi/tsan-suppressions.txt" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
     MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit identity
     MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit hex
