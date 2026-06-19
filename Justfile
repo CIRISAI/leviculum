@@ -68,7 +68,7 @@ fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
 # after every commit via the post-commit hook.
 # Tier 1 (~15 min): Tier 0 + core/tests + ffi (incl. C-program + Python interop)
 # + proxy + rnsd_interop.
-standard: fast test-ffi
+standard: fast test-ffi verify-packaging
     cargo test -p reticulum-core --tests
     cargo test -p reticulum-proxy
     cargo test -p reticulum-std --test rnsd_interop
@@ -145,6 +145,14 @@ sanitize-ffi:
 
 build-ffi:
     cargo build-ffi
+
+# Verify libleviculum installs and links like a standard Unix C library: a
+# staged `make install` produces the SONAME symlink chain, header, and
+# pkg-config file, and a consumer compiles, links, and runs against it purely
+# through pkg-config. Catches a renamed export breaking the header, a wrong
+# .pc, a missing soname, or a load failure. Part of Tier 1.
+verify-packaging:
+    bash scripts/verify-packaging.sh
 
 # Same for ARM64. Requires `sudo apt install gcc-aarch64-linux-gnu` and
 # `rustup target add aarch64-unknown-linux-gnu` on the build host.
