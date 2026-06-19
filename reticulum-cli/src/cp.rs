@@ -900,6 +900,23 @@ mod tests {
         listener.local_addr().unwrap().port()
     }
 
+    /// Poll for a path to appear, up to a bounded timeout.
+    ///
+    /// `run_send` returns on sender-side completion, but the listener persists
+    /// the received file from its own spawned task. Without a barrier the
+    /// assertion races that task under parallel test load. Returns true once the
+    /// path exists, false if the timeout elapses first.
+    async fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        path.exists()
+    }
+
     /// Create two connected ReticulumNode instances for testing.
     async fn setup_connected_nodes() -> (
         reticulum_std::driver::ReticulumNode,
@@ -994,9 +1011,11 @@ mod tests {
             result.err()
         );
 
-        // Verify file was saved
+        // Verify file was saved. The listener persists from its own spawned
+        // task, so wait for the file to land before asserting.
+        let received = tmp.path().join("received").join("testfile.bin");
         assert!(
-            tmp.path().join("received").join("testfile.bin").exists(),
+            wait_for_path(&received, Duration::from_secs(10)).await,
             "Received file should exist"
         );
 
@@ -1122,8 +1141,9 @@ mod tests {
             result.err()
         );
 
+        let received = tmp.path().join("received").join("testfile.bin");
         assert!(
-            tmp.path().join("received").join("testfile.bin").exists(),
+            wait_for_path(&received, Duration::from_secs(10)).await,
             "Received file should exist"
         );
 
@@ -1382,9 +1402,13 @@ mod tests {
         .await;
         assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 
-        // Verify file was saved with correct content
+        // Verify file was saved with correct content. The listener persists
+        // the fetched file from its own spawned task, so wait for it to land.
         let saved = save_dir.join("testfile.txt");
-        assert!(saved.exists(), "Fetched file should exist");
+        assert!(
+            wait_for_path(&saved, Duration::from_secs(10)).await,
+            "Fetched file should exist"
+        );
         assert_eq!(
             std::fs::read(&saved).unwrap(),
             b"fetch test content",
