@@ -429,7 +429,7 @@ Event payloads are read through typed accessors, never a transparent union
 (unions over variable-length data are an ABI and lifetime hazard):
 
 ```c
-lev_event_type_t lev_event_type(const lev_event_t *ev);
+int lev_event_type(const lev_event_t *ev);
 int lev_event_link_id(const lev_event_t *ev, uint8_t out[16]);
 int lev_event_dest_hash(const lev_event_t *ev, uint8_t out[16]);
 int lev_event_data(const lev_event_t *ev,

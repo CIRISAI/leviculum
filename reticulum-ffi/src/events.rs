@@ -124,6 +124,13 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.data = announce.app_data().to_vec();
             e
         }
+        NodeEvent::PathFound {
+            destination_hash, ..
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_PATH_FOUND, is_control);
+            e.dest_hash = Some(*destination_hash.as_bytes());
+            e
+        }
         NodeEvent::ControlPlaneOverflow { dropped_count } => {
             let mut e = lev_event_t::bare(LEV_EVENT_CONTROL_OVERFLOW, is_control);
             e.dropped_count = dropped_count;
@@ -611,8 +618,8 @@ pub unsafe extern "C" fn lev_event_metadata(
     })
 }
 
-/// Write the transfer progress (0.0..1.0) of a resource event into `*out`.
-/// `LEV_ERR_INVALID_ARG` for non-resource events.
+/// Write the transfer progress (0.0..1.0) of a `LEV_EVENT_RESOURCE_PROGRESS`
+/// event into `*out`. `LEV_ERR_INVALID_ARG` for any other event type.
 #[no_mangle]
 pub unsafe extern "C" fn lev_event_progress(ev: *const lev_event_t, out: *mut f64) -> c_int {
     guard(LEV_ERR_PANIC, || {

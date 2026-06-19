@@ -26,7 +26,7 @@ Conventions used below:
 | `lev_builder_t` | `lev_builder_new` | `lev_builder_free` | one thread |
 | `lev_identity_t` | `lev_identity_generate`, `lev_identity_from_private_key`, `lev_identity_from_public_key`, `lev_identity_load_file`, `lev_link_remote_identity` | `lev_identity_free` | one thread |
 | `lev_destination_t` | `lev_destination_new` | `lev_destination_free` | one thread |
-| `lev_link_t` | `lev_connect`, `lev_connect_with_key`, `lev_accept_link` | `lev_link_free` | thread-safe |
+| `lev_link_t` | `lev_connect`, `lev_connect_with_key`, `lev_accept_link` | `lev_link_free` | sends thread-safe; do not close/free concurrently with other calls on the same link |
 | `lev_event_t` | `lev_next_event`, `lev_wait_event` | `lev_event_free` | one thread |
 | `lev_path_table_t` | `lev_path_table_snapshot` | `lev_path_table_free` | one thread |
 | `lev_interface_stats_t` | `lev_interface_stats_snapshot` | `lev_interface_stats_free` | one thread |
@@ -423,8 +423,11 @@ int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
   loop. The library owns it and closes it in `lev_free`; never close it.
 - `lev_next_event` dequeues without blocking: on success `*out` is an event
   handle, or `NULL` when the queue is empty. `lev_wait_event` blocks up to
-  `timeout_ms` (negative forever); `*out` is `NULL` if the timeout elapses.
-  Both are single-consumer for a node. Free each event with `lev_event_free`.
+  `timeout_ms` (negative forever); `*out` is `NULL` if the timeout elapses. It
+  wakes promptly when an event arrives (the event fd is the real wake source)
+  and otherwise rechecks at most every 250 ms, so an infinite wait still
+  returns soon after an event lands. Both are single-consumer for a node. Free
+  each event with `lev_event_free`.
 - `lev_event_type` returns the event's `LEV_EVENT_*` type (0 on `NULL`).
 - The accessors read a field of the event, read(2) style for the byte fields:
   `_link_id`, `_dest_hash`, `_request_id` (16 bytes each), `_resource_hash`

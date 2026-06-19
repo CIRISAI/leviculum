@@ -145,6 +145,42 @@ fn announce_then_link_message_both_directions() {
     assert_eq!(seq3, 1, "second channel message is sequence 1");
 }
 
+/// Learning a path from an announce emits `LEV_EVENT_PATH_FOUND` carrying the
+/// destination hash (the documented event contract behind `lev_request_path`).
+#[test]
+fn announce_emits_path_found_event() {
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let id_ptr = ida.0;
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let server_ptr = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+    });
+    let dest = register_single_dest(a.0, id_ptr, "levtest", &["pathfound"]);
+
+    let mut found = false;
+    for _ in 0..50 {
+        unsafe { lev_announce(a.0, dest.as_ptr(), ptr::null(), 0, 2000) };
+        if let Some(ev) = wait_event(bnode.0, LEV_EVENT_PATH_FOUND, Duration::from_millis(400)) {
+            assert_eq!(support::event_dest_hash(&ev), dest);
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "B should emit LEV_EVENT_PATH_FOUND when it learns A's path"
+    );
+}
+
 /// `lev_event_msgtype`/`_sequence` only apply to LINK_MESSAGE events; other
 /// events reject them with `LEV_ERR_INVALID_ARG`, and NULL pointers are
 /// guarded.
