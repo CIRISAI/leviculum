@@ -285,6 +285,113 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add an RNode (LoRa) interface programmatically, the equivalent of an
+    /// `[[RNode]]` config block. The six parameters are the required radio
+    /// settings; optional tuning (airtime limits, flow control, buffer size)
+    /// keeps the driver defaults. Use a config file for the optional knobs.
+    pub fn add_rnode_interface(
+        mut self,
+        port: String,
+        frequency: u64,
+        bandwidth: u32,
+        spreading_factor: u8,
+        coding_rate: u8,
+        tx_power: i8,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            enabled: true,
+            outgoing: true,
+            bitrate: DEFAULT_BITRATE_BPS,
+            target_host: None,
+            target_port: None,
+            listen_ip: None,
+            listen_port: None,
+            forward_ip: None,
+            forward_port: None,
+            port: Some(port),
+            speed: None,
+            databits: None,
+            parity: None,
+            stopbits: None,
+            buffer_size: None,
+            reconnect_interval_secs: None,
+            max_reconnect_tries: None,
+            group_id: None,
+            discovery_scope: None,
+            discovery_port: None,
+            data_port: None,
+            devices: None,
+            ignored_devices: None,
+            multicast_loopback: None,
+            networkname: None,
+            passphrase: None,
+            ifac_size: None,
+            frequency: Some(frequency),
+            bandwidth: Some(bandwidth),
+            spreading_factor: Some(spreading_factor),
+            coding_rate: Some(coding_rate),
+            tx_power: Some(tx_power),
+            flow_control: None,
+            airtime_limit_short: None,
+            airtime_limit_long: None,
+            csma_enabled: None,
+        });
+        self
+    }
+
+    /// Add a serial interface programmatically, the equivalent of a
+    /// `[[Serial]]` config block. KISS framing over a raw serial port.
+    pub fn add_serial_interface(
+        mut self,
+        port: String,
+        speed: u32,
+        databits: u8,
+        parity: String,
+        stopbits: u8,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            enabled: true,
+            outgoing: true,
+            bitrate: DEFAULT_BITRATE_BPS,
+            target_host: None,
+            target_port: None,
+            listen_ip: None,
+            listen_port: None,
+            forward_ip: None,
+            forward_port: None,
+            port: Some(port),
+            speed: Some(speed),
+            databits: Some(databits),
+            parity: Some(parity),
+            stopbits: Some(stopbits),
+            buffer_size: None,
+            reconnect_interval_secs: None,
+            max_reconnect_tries: None,
+            group_id: None,
+            discovery_scope: None,
+            discovery_port: None,
+            data_port: None,
+            devices: None,
+            ignored_devices: None,
+            multicast_loopback: None,
+            networkname: None,
+            passphrase: None,
+            ifac_size: None,
+            frequency: None,
+            bandwidth: None,
+            spreading_factor: None,
+            coding_rate: None,
+            tx_power: None,
+            flow_control: None,
+            airtime_limit_short: None,
+            airtime_limit_long: None,
+            csma_enabled: None,
+        });
+        self
+    }
+
     /// Add an AutoInterface with default configuration
     ///
     /// Zero-configuration LAN discovery via IPv6 multicast.

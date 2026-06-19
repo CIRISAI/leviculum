@@ -228,6 +228,65 @@ pub unsafe extern "C" fn lev_builder_add_auto_interface(b: *mut lev_builder_t) -
     })
 }
 
+/// Add an RNode (LoRa) interface. `port` is the serial device path; the rest
+/// are the required radio settings (frequency in Hz, bandwidth in Hz,
+/// spreading factor, coding rate denominator, tx power in dBm). Returns
+/// `LEV_ERR_INVALID_ARG` on a NULL port.
+#[no_mangle]
+pub unsafe extern "C" fn lev_builder_add_rnode(
+    b: *mut lev_builder_t,
+    port: *const c_char,
+    frequency: u64,
+    bandwidth: u32,
+    spreading_factor: u8,
+    coding_rate: u8,
+    tx_power: i8,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let port = match cstr(port) {
+            Some(p) => p.to_string(),
+            None => return LEV_ERR_INVALID_ARG,
+        };
+        with_builder(b, move |nb| {
+            nb.add_rnode(
+                &port,
+                frequency,
+                bandwidth,
+                spreading_factor,
+                coding_rate,
+                tx_power,
+            )
+        })
+    })
+}
+
+/// Add a serial interface (KISS framing over a raw serial port). `port` is the
+/// device path, `parity` is one of "N", "E", "O". Returns
+/// `LEV_ERR_INVALID_ARG` on a NULL port or parity.
+#[no_mangle]
+pub unsafe extern "C" fn lev_builder_add_serial(
+    b: *mut lev_builder_t,
+    port: *const c_char,
+    speed: u32,
+    databits: u8,
+    parity: *const c_char,
+    stopbits: u8,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let port = match cstr(port) {
+            Some(p) => p.to_string(),
+            None => return LEV_ERR_INVALID_ARG,
+        };
+        let parity = match cstr(parity) {
+            Some(p) => p.to_string(),
+            None => return LEV_ERR_INVALID_ARG,
+        };
+        with_builder(b, move |nb| {
+            nb.add_serial(&port, speed, databits, &parity, stopbits)
+        })
+    })
+}
+
 /// Load interface and node configuration from an INI config file (the format
 /// `rnsd`/`lnsd` use), bringing every interface type, including RNode and
 /// serial, into the node.

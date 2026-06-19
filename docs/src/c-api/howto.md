@@ -134,6 +134,27 @@ lev_builder_connect_shared_instance(b, "leviculum");
 A `NULL` path or name returns `LEV_ERR_INVALID_ARG`. The `daemon.c` example is
 a worked acceptance program for all three calls.
 
+## Radio interfaces (LoRa and serial)
+
+For off-grid mesh, add an RNode (LoRa) or a raw serial interface
+programmatically, no config file needed:
+
+```c
+lev_builder_t *b = lev_builder_new();
+/* RNode: device, frequency Hz, bandwidth Hz, spreading factor, coding rate,
+ * tx power dBm. */
+lev_builder_add_rnode(b, "/dev/ttyUSB0", 867200000, 125000, 8, 5, 0);
+/* Serial: device, speed, data bits, parity ("N"/"E"/"O"), stop bits. */
+lev_builder_add_serial(b, "/dev/ttyACM0", 115200, 8, "N", 1);
+```
+
+The device is opened at `lev_start`, so a wrong path surfaces there, not at the
+setter (which only rejects a NULL path with `LEV_ERR_INVALID_ARG`). A serial
+port is raw KISS with no handshake; an RNode performs the RNode detect and
+config handshake on start. For the optional RNode knobs (airtime limits, flow
+control, buffer size), load a config file instead. The `radio.c` example brings
+a node up over a serial interface.
+
 ## Identities
 
 An identity is a key pair. Generate one, persist it, and reload it next run.

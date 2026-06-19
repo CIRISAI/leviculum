@@ -104,6 +104,48 @@ impl NodeBuilder {
         self
     }
 
+    /// Add an RNode (LoRa) interface programmatically, so a C app reaches LoRa
+    /// without a config file. `port` is the serial device; the rest are the
+    /// required radio settings. Optional tuning stays at driver defaults.
+    pub fn add_rnode(
+        mut self,
+        port: &str,
+        frequency: u64,
+        bandwidth: u32,
+        spreading_factor: u8,
+        coding_rate: u8,
+        tx_power: i8,
+    ) -> Self {
+        self.inner = self.inner.add_rnode_interface(
+            port.to_string(),
+            frequency,
+            bandwidth,
+            spreading_factor,
+            coding_rate,
+            tx_power,
+        );
+        self
+    }
+
+    /// Add a serial interface (KISS framing over a raw serial port).
+    pub fn add_serial(
+        mut self,
+        port: &str,
+        speed: u32,
+        databits: u8,
+        parity: &str,
+        stopbits: u8,
+    ) -> Self {
+        self.inner = self.inner.add_serial_interface(
+            port.to_string(),
+            speed,
+            databits,
+            parity.to_string(),
+            stopbits,
+        );
+        self
+    }
+
     /// Enable or disable transport (relay and routing) mode.
     pub fn enable_transport(mut self, enabled: bool) -> Self {
         self.inner = self.inner.enable_transport(enabled);

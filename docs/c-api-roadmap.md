@@ -66,7 +66,14 @@ enable), `lev_builder_connect_shared_instance`.
 Deliverable: the C `lnsd` example program plus its integration into
 `reticulum-integ` as a `c-api` node, validated in a TCP scenario.
 
-## Phase 2: programmatic radio interfaces (RNode + Serial). Size M
+## Phase 2: programmatic radio interfaces (RNode + Serial). Size M. DONE
+
+Shipped: `lev_builder_add_rnode` and `lev_builder_add_serial` on the facade and
+the C FFI, projecting two additive driver builder methods; NULL-guard unit
+tests; an in-process test bringing a node up over a serial interface backed by
+a pty; the `radio.c` acceptance program; reference and how-to docs. The over-
+the-lora-proxy and real-RNode validation remains for the integ LoRa tier (the
+Phase 1 `c-api` node with an RNode/serial config over the proxy device).
 
 LoRa and off-grid mesh is the signature Reticulum use. Phase 1 already reaches
 it via a config file; this phase adds the ergonomic, programmatic path so a C

@@ -303,6 +303,38 @@ fn phase1_builder_setters_validate_args() {
 }
 
 #[test]
+fn phase2_radio_setters_validate_args() {
+    unsafe {
+        let b = lev_builder_new();
+        // NULL device path / parity is rejected; the builder stays usable.
+        assert_eq!(
+            lev_builder_add_rnode(b, ptr::null(), 867_200_000, 125_000, 8, 5, 0),
+            LEV_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            lev_builder_add_serial(b, ptr::null(), 115_200, 8, cstr("N").as_ptr(), 1),
+            LEV_ERR_INVALID_ARG
+        );
+        let dev = cstr("/dev/null");
+        assert_eq!(
+            lev_builder_add_serial(b, dev.as_ptr(), 115_200, 8, ptr::null(), 1),
+            LEV_ERR_INVALID_ARG
+        );
+        // Valid argument shapes are accepted by the setters (no device opened
+        // until build/start).
+        assert_eq!(
+            lev_builder_add_rnode(b, dev.as_ptr(), 867_200_000, 125_000, 8, 5, 0),
+            LEV_OK
+        );
+        assert_eq!(
+            lev_builder_add_serial(b, dev.as_ptr(), 115_200, 8, cstr("N").as_ptr(), 1),
+            LEV_OK
+        );
+        lev_builder_free(b);
+    }
+}
+
+#[test]
 fn config_file_brings_up_a_node() {
     unsafe {
         let dir = tempfile::tempdir().unwrap();

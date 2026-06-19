@@ -320,6 +320,56 @@ fn resource_transfer_accept_app() {
     assert_eq!(event_data(&done), payload);
 }
 
+/// Open a pseudo-terminal and return (master fd, slave device path). The
+/// master must stay open to keep the pty alive; the node opens the slave path
+/// as a serial port.
+unsafe fn open_pty() -> (i32, String) {
+    let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+    assert!(master >= 0, "posix_openpt failed");
+    assert_eq!(libc::grantpt(master), 0, "grantpt failed");
+    assert_eq!(libc::unlockpt(master), 0, "unlockpt failed");
+    let mut buf = [0 as libc::c_char; 256];
+    assert_eq!(
+        libc::ptsname_r(master, buf.as_mut_ptr(), buf.len()),
+        0,
+        "ptsname_r failed"
+    );
+    let name = std::ffi::CStr::from_ptr(buf.as_ptr())
+        .to_str()
+        .expect("pty name utf-8")
+        .to_string();
+    (master, name)
+}
+
+/// A serial interface is a raw KISS port with no link-up handshake, so it
+/// comes up over a bare pty with nothing on the far end. This proves the
+/// programmatic serial path opens the device and the node runs. (RNode needs
+/// the CMD_DETECT handshake, so it is exercised over the lora-proxy mock in the
+/// LoRa tier, not here.)
+#[test]
+fn serial_interface_comes_up_over_pty() {
+    let (master, slave) = unsafe { open_pty() };
+    let dir = tempfile::tempdir().unwrap();
+    let slave_c = cstr(&slave);
+    let port = slave_c.as_ptr();
+
+    let node = start_node(dir.path(), |b| unsafe {
+        assert_eq!(
+            lev_builder_add_serial(b, port, 115_200, 8, cstr("N").as_ptr(), 1),
+            LEV_OK
+        );
+    });
+    unsafe {
+        assert_eq!(
+            lev_is_running(node.0),
+            1,
+            "node not running with serial iface"
+        );
+    }
+    drop(node);
+    unsafe { libc::close(master) };
+}
+
 #[test]
 fn shared_instance_forwards_announce() {
     // A unique abstract-socket name per run (the namespace is machine-wide).
