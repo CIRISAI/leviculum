@@ -4,7 +4,9 @@ This chapter shows how the functions combine into working programs. It assumes
 the model from the [Overview](overview.md): opaque handles, integer error
 codes, read(2) buffers, and the pollable event fd. Each recipe gives the
 functions involved and a focused snippet; the complete, compiling programs are
-the acceptance tests under `reticulum-ffi/examples/c/`, named per recipe.
+the acceptance tests under `reticulum-ffi/examples/c/`, named per recipe. For a
+single program built end to end from these pieces, see the
+[Tutorial](tutorial.md).
 
 Error checks are abbreviated in the snippets for readability. In real code,
 check every `int` return against `LEV_OK` and report `lev_last_error()` (see

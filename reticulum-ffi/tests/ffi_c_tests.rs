@@ -384,3 +384,89 @@ fn c_lncp_copies_via_shared_instance() {
     let copied = std::fs::read(&out_path).expect("output file written");
     assert_eq!(copied, content, "the copied file must match the original");
 }
+
+/// Poll `path` for up to `secs` for a `destination: <hex>` line and return the
+/// hex. The listener prints it to stderr once it is up and announcing.
+fn read_dest(path: &Path, secs: u64) -> Option<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            if let Some(line) = s.lines().find_map(|l| l.strip_prefix("destination: ")) {
+                return Some(line.trim().to_string());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// End-to-end test of the `levcat` pipe: a listener and a connector, two
+/// separate C processes, pipe a line of text over a real link. Exercises the
+/// tutorial's core pattern (poll on stdin plus the event fd, link send/receive)
+/// from a standalone program. The connector reads the line on stdin, sends it,
+/// hits EOF and closes; the listener writes it to stdout and exits.
+#[test]
+fn c_levcat_pipes_a_line_end_to_end() {
+    let Some(bin) = compile("examples/c/levcat.c", "levcat_c") else {
+        return;
+    };
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_l = dir.path().join("listen");
+    let store_c = dir.path().join("connect");
+    std::fs::create_dir_all(&store_l).unwrap();
+    std::fs::create_dir_all(&store_c).unwrap();
+    let listen_out = dir.path().join("listen.out");
+    let listen_err = dir.path().join("listen.err");
+    let in_path = dir.path().join("input.txt");
+    let payload = "hello over the mesh\n";
+    std::fs::write(&in_path, payload).unwrap();
+
+    // The listener: no stdin, data to a file, status (the destination) to a file.
+    let mut listen = Command::new(&bin)
+        .args(["listen", store_l.to_str().unwrap(), &addr])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&listen_out).unwrap())
+        .stderr(std::fs::File::create(&listen_err).unwrap())
+        .env("LD_LIBRARY_PATH", lib_dir())
+        .spawn()
+        .expect("spawn listen");
+
+    let dest = read_dest(&listen_err, 15).expect("listener never printed its destination");
+
+    // The connector reads the payload from a file on stdin; at EOF it closes.
+    let mut connect = Command::new(&bin)
+        .args(["connect", store_c.to_str().unwrap(), &addr, &dest])
+        .stdin(std::fs::File::open(&in_path).unwrap())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .env("LD_LIBRARY_PATH", lib_dir())
+        .spawn()
+        .expect("spawn connect");
+
+    let connect_status = wait_timeout(&mut connect, 30).expect("connector did not finish in time");
+    assert!(
+        connect_status.success(),
+        "connector exited with {:?}",
+        connect_status.code()
+    );
+    let listen_status = wait_timeout(&mut listen, 20).expect("listener did not finish in time");
+    assert!(
+        listen_status.success(),
+        "listener exited with {:?}",
+        listen_status.code()
+    );
+
+    let got = std::fs::read_to_string(&listen_out).expect("listener stdout");
+    assert!(
+        got.contains("hello over the mesh"),
+        "listener stdout did not carry the piped line: {got:?}"
+    );
+}

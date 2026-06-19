@@ -209,6 +209,7 @@ explicitly to configure logging before the first node. Logging is silent by
 default; raise it with `lev_log_set_level(LEV_LOG_INFO)` and route records with
 `lev_log_set_callback`, or leave the default which writes to stderr.
 
-With these conventions in hand, the [How-To](howto.md) walks through building
-real applications, and the [API Reference](reference.md) documents every
-function.
+With these conventions in hand, the [Tutorial](tutorial.md) builds a complete,
+useful program (`levcat`, a pipe over the mesh) step by step, the
+[How-To](howto.md) is the recipe book for every flow, and the
+[API Reference](reference.md) documents every function.
