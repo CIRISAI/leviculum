@@ -22,9 +22,11 @@ TARGET      ?= x86_64-unknown-linux-gnu
 VERSION       := $(shell sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
 SONAME_MAJOR  := 0
 
-SO     := libleviculum.so
-HEADER := leviculum.h
-BUILT  := ../target/$(TARGET)/release/$(SO)
+SO      := libleviculum.so
+STATIC  := libleviculum.a
+HEADER  := leviculum.h
+BUILT   := ../target/$(TARGET)/release/$(SO)
+BUILT_A := ../target/$(TARGET)/release/$(STATIC)
 
 .PHONY: build install uninstall clean
 
@@ -36,6 +38,7 @@ install: build
 	install -m 0644 "$(BUILT)" "$(DESTDIR)$(LIBDIR)/$(SO).$(VERSION)"
 	ln -sf "$(SO).$(VERSION)" "$(DESTDIR)$(LIBDIR)/$(SO).$(SONAME_MAJOR)"
 	ln -sf "$(SO).$(SONAME_MAJOR)" "$(DESTDIR)$(LIBDIR)/$(SO)"
+	install -m 0644 "$(BUILT_A)" "$(DESTDIR)$(LIBDIR)/$(STATIC)"
 	install -m 0644 "$(HEADER)" "$(DESTDIR)$(INCLUDEDIR)/$(HEADER)"
 	sed -e 's|@PREFIX@|$(PREFIX)|g' \
 	    -e 's|@LIBDIR@|$(LIBDIR)|g' \
@@ -47,6 +50,7 @@ uninstall:
 	rm -f "$(DESTDIR)$(LIBDIR)/$(SO).$(VERSION)" \
 	      "$(DESTDIR)$(LIBDIR)/$(SO).$(SONAME_MAJOR)" \
 	      "$(DESTDIR)$(LIBDIR)/$(SO)" \
+	      "$(DESTDIR)$(LIBDIR)/$(STATIC)" \
 	      "$(DESTDIR)$(INCLUDEDIR)/$(HEADER)" \
 	      "$(DESTDIR)$(PKGCONFIGDIR)/leviculum.pc"
 

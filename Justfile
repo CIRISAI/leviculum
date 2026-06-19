@@ -147,12 +147,19 @@ build-ffi:
     cargo build-ffi
 
 # Verify libleviculum installs and links like a standard Unix C library: a
-# staged `make install` produces the SONAME symlink chain, header, and
-# pkg-config file, and a consumer compiles, links, and runs against it purely
-# through pkg-config. Catches a renamed export breaking the header, a wrong
-# .pc, a missing soname, or a load failure. Part of Tier 1.
+# staged `make install` produces the SONAME symlink chain, header, static
+# archive, and pkg-config file, and a consumer compiles, links, and runs
+# against it purely through pkg-config, both dynamically and statically.
+# Catches a renamed export breaking the header, a wrong .pc, a missing soname,
+# or a load failure. Part of Tier 1.
 verify-packaging:
     bash scripts/verify-packaging.sh
+
+# Same end-to-end packaging check for the aarch64 cross build: cross-compiles
+# the consumer and runs it under qemu. Skips cleanly if the cross toolchain
+# (rustup target + gcc-aarch64-linux-gnu + qemu-user-static) is absent.
+verify-packaging-arm64:
+    bash scripts/verify-packaging.sh aarch64-unknown-linux-gnu
 
 # Same for ARM64. Requires `sudo apt install gcc-aarch64-linux-gnu` and
 # `rustup target add aarch64-unknown-linux-gnu` on the build host.
