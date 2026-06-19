@@ -1,0 +1,59 @@
+# The C daemon (c-lnsd, built on the Leviculum C API) as both endpoints of a
+# multi-hop mesh, with a Rust relay in the middle. Verifies that the C node
+# routes and responds to probes across two hops, and that paths recover after a
+# C endpoint is restarted. Cross-implementation: C endpoints, Rust relay.
+
+[test]
+name = "c_api_restart_recovery"
+description = "c-lnsd endpoints multi-hop through a rust relay, recover after restart"
+timeout_secs = 120
+
+[nodes.alice]
+type = "c-api"
+respond_to_probes = true
+
+[nodes.relay]
+type = "rust"
+respond_to_probes = false
+
+[nodes.bob]
+type = "c-api"
+respond_to_probes = true
+
+[links]
+alice-relay = "tcp"
+relay-bob = "tcp"
+
+[[steps]]
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "rnprobe"
+from = "alice"
+to = "bob.probe"
+expect_hops = 2
+expect_result = "success"
+
+[[steps]]
+action = "restart"
+node = "bob"
+
+[[steps]]
+action = "sleep"
+duration_secs = 20
+
+[[steps]]
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "rnprobe"
+from = "alice"
+to = "bob.probe"
+expect_hops = 2
+expect_result = "success"
