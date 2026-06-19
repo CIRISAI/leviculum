@@ -70,6 +70,19 @@ pub const LEV_EVENT_LINK_PROOF_REQUESTED: c_int = 20;
 /// A delivery proof confirmed a packet we sent on a link (PROVE_ALL). The
 /// `link_id` is set and the data payload is the 32-byte packet hash.
 pub const LEV_EVENT_LINK_DELIVERY_CONFIRMED: c_int = 21;
+/// A link went inactive past its keepalive deadline; `link_id` is set. The link
+/// is not closed yet (see `LEV_EVENT_LINK_RECOVERED` and `LEV_EVENT_LINK_CLOSED`).
+pub const LEV_EVENT_LINK_STALE: c_int = 22;
+/// A stale link resumed carrying traffic; `link_id` is set.
+pub const LEV_EVENT_LINK_RECOVERED: c_int = 23;
+/// A known path to a destination expired; `dest_hash` is set.
+pub const LEV_EVENT_PATH_LOST: c_int = 24;
+/// A delivery proof confirmed a single packet we sent; the data payload is the
+/// 16-byte packet hash (as returned by `lev_send_datagram`).
+pub const LEV_EVENT_PACKET_DELIVERY_CONFIRMED: c_int = 25;
+/// Delivery of a single packet we sent failed; the data payload is the 16-byte
+/// packet hash.
+pub const LEV_EVENT_DELIVERY_FAILED: c_int = 26;
 
 /// One projected event, fully self-owned (all payloads deep-copied out of the
 /// `NodeEvent`), so it outlives the queue slot and is valid until
@@ -208,6 +221,31 @@ fn project(ev: NodeEvent) -> lev_event_t {
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_LINK_DELIVERY_CONFIRMED, is_control);
             e.link_id = Some(*link_id.as_bytes());
+            e.data = packet_hash.to_vec();
+            e
+        }
+        NodeEvent::LinkStale { link_id } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_STALE, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e
+        }
+        NodeEvent::LinkRecovered { link_id } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_RECOVERED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e
+        }
+        NodeEvent::PathLost { destination_hash } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_PATH_LOST, is_control);
+            e.dest_hash = Some(*destination_hash.as_bytes());
+            e
+        }
+        NodeEvent::PacketDeliveryConfirmed { packet_hash } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_PACKET_DELIVERY_CONFIRMED, is_control);
+            e.data = packet_hash.to_vec();
+            e
+        }
+        NodeEvent::DeliveryFailed { packet_hash, .. } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_DELIVERY_FAILED, is_control);
             e.data = packet_hash.to_vec();
             e
         }

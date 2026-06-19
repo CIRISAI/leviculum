@@ -464,6 +464,11 @@ int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
 | `LEV_EVENT_PACKET_PROOF_REQUESTED` | 19 | dest_hash, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_PROOF_REQUESTED` | 20 | link_id, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_DELIVERY_CONFIRMED` | 21 | link_id, data (32-byte packet hash) |
+| `LEV_EVENT_LINK_STALE` | 22 | link_id (link inactive past keepalive) |
+| `LEV_EVENT_LINK_RECOVERED` | 23 | link_id (stale link resumed) |
+| `LEV_EVENT_PATH_LOST` | 24 | dest_hash (path expired) |
+| `LEV_EVENT_PACKET_DELIVERY_CONFIRMED` | 25 | data (16-byte packet hash) |
+| `LEV_EVENT_DELIVERY_FAILED` | 26 | data (16-byte packet hash) |
 
 ## Diagnostics
 
