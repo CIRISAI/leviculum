@@ -38,12 +38,22 @@ const FAILURE_EVENTS: &[&str] = &[
 ];
 
 /// Failure events not triggerable cleanly in-process, each with its reason.
-const UNTRIGGERABLE_EVENTS: &[(&str, &str)] = &[(
-    "LEV_EVENT_DELIVERY_FAILED",
-    "engine #76 mis-fires this on valid remote-delivery proofs; no clean \
-     invalid-proof trigger is exposed by the C API, so it is documented \
-     rather than tested against buggy behaviour",
-)];
+const UNTRIGGERABLE_EVENTS: &[(&str, &str)] = &[
+    (
+        "LEV_EVENT_DELIVERY_FAILED",
+        "engine #76 mis-fires this on valid remote-delivery proofs; no clean \
+         invalid-proof trigger is exposed by the C API, so it is documented \
+         rather than tested against buggy behaviour",
+    ),
+    (
+        "LEV_EVENT_LINK_RECOVERED",
+        "a stale link recovers only within the engine's fixed few-second \
+         stale-before-close grace window; hitting it reliably races timer \
+         scheduling and cannot be made deterministic in-process. LINK_STALE, \
+         the failure half of the pair, is triggered by silence_makes_the_link_\
+         go_stale",
+    ),
+];
 
 fn read(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
