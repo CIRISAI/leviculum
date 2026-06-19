@@ -259,10 +259,9 @@ fn establishment_baseline_no_loss_establishes() {
         let (_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
         let request = one_packet(&out);
 
-        // Responder receives the request, accepts, emits the proof.
+        // Responder receives the request and auto-accepts (Stage 1): the proof
+        // is produced directly by handle_packet, no accept_link call needed.
         let out = responder.handle_packet(InterfaceId(r_iface), &request);
-        let resp_link = link_request_link_id(&out);
-        let out = responder.accept_link(&resp_link).unwrap();
         let proof = one_packet(&out);
 
         // Initiator validates the proof -> link established.
@@ -318,10 +317,8 @@ fn establishment_proof_dropped_once_recovers_via_retransmit() {
         let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
         let request = one_packet(&out);
 
-        // Responder accepts and builds the proof...
+        // Responder auto-accepts (Stage 1) and builds the proof...
         let out = responder.handle_packet(InterfaceId(r_iface), &request);
-        let resp_link = link_request_link_id(&out);
-        let out = responder.accept_link(&resp_link).unwrap();
         let _dropped_proof = one_packet(&out); // DROP: never delivered to initiator.
 
         // Initiator's establishment timer fires -> it must retransmit.
@@ -347,8 +344,6 @@ fn establishment_proof_dropped_once_recovers_via_retransmit() {
         // Responder treats the fresh-keys request as a new link and proves it;
         // this second proof IS delivered -> the link recovers and establishes.
         let out = responder.handle_packet(InterfaceId(r_iface), &retried_request);
-        let resp_link2 = link_request_link_id(&out);
-        let out = responder.accept_link(&resp_link2).unwrap();
         let proof2 = one_packet(&out);
 
         let out = initiator.handle_packet(InterfaceId(i_iface), &proof2);
@@ -406,10 +401,8 @@ fn establishment_link_request_dropped_once_recovers_via_retransmit() {
         );
         let retried_request = retried.into_iter().next().unwrap();
 
-        // This retransmit IS delivered -> the responder proves it -> establishes.
+        // This retransmit IS delivered -> the responder auto-proves it -> establishes.
         let out = responder.handle_packet(InterfaceId(r_iface), &retried_request);
-        let resp_link = link_request_link_id(&out);
-        let out = responder.accept_link(&resp_link).unwrap();
         let proof = one_packet(&out);
 
         let out = initiator.handle_packet(InterfaceId(i_iface), &proof);
@@ -449,10 +442,8 @@ fn establishment_persistent_proof_loss_dies_after_bounded_retries() {
         let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
         let request = one_packet(&out);
 
-        // Responder accepts and proves once; that proof is dropped.
-        let out = responder.handle_packet(InterfaceId(r_iface), &request);
-        let resp_link = link_request_link_id(&out);
-        let _ = responder.accept_link(&resp_link).unwrap(); // proof dropped.
+        // Responder auto-accepts (Stage 1) and proves once; that proof is dropped.
+        let _ = responder.handle_packet(InterfaceId(r_iface), &request); // proof dropped.
 
         let mut died = false;
 
@@ -498,106 +489,48 @@ fn establishment_persistent_proof_loss_dies_after_bounded_retries() {
 }
 
 // ----------------------------------------------------------------------------
-// (harness defect) A ONE-SHOT responder (accept only the FIRST LinkRequest)
-// deadlocks under first-proof-loss + re-key, where a LOOP-accept responder
-// recovers. This is the `lns selftest` Phase-3 acceptor bug (reviewer-confirmed
-// on the LoRa rig: two cold fails, identical `lr_rx=4 proof_tx=1 retransmits=3`).
+// (Stage 1 auto-accept) The `lns selftest` Phase-3 acceptor bug — a ONE-SHOT
+// responder that proved only the FIRST LinkRequest and deadlocked under
+// first-proof-loss + re-key (reviewer-confirmed on the LoRa rig:
+// `lr_rx=4 proof_tx=1 retransmits=3`) — is eliminated at the core. With
+// auto-accept LIVE (Python parity), `handle_link_request` proves EVERY inbound
+// request, so each re-keyed retry is proved automatically with NO accept_link
+// call anywhere. The one-shot acceptance pattern that produced the deadlock is
+// no longer expressible at this layer.
 // ----------------------------------------------------------------------------
 
-/// HARNESS-DEFECT REPRO. Reproduces the `lns selftest` cold-link establishment
-/// failure DETERMINISTICALLY and proves the fix, contrasting the two responder
-/// acceptance strategies on the IDENTICAL first-proof-loss + re-key scenario:
-///
-///   * ONE-SHOT (the bug): the responder accepts the FIRST LinkRequest and
-///     proves it once; that proof is lost on the cold return path. The initiator
-///     re-keys and retransmits (Codeberg #66), and every re-keyed request DOES
-///     reach the responder (LINK_REQUEST_RX fires for each), but a one-shot
-///     responder never `accept_link`s the new ids, so it emits NO further proof.
-///     The initiator exhausts its retry budget and the link dies with
-///     `handshake_timeout`. The captured log reproduces the field signature
-///     verbatim: multiple `LINK_REQUEST_RX`, exactly one `LINK_PROOF_TX`.
-///
-///   * LOOP-ACCEPT (the fix): same first-proof-loss, but the responder accepts
-///     each re-keyed retry as it arrives. The retry's proof IS delivered and the
-///     link ESTABLISHES — more than one `LINK_PROOF_TX`.
-///
-/// This is the minimal repro of the test-harness defect (`selftest.rs` accepts
-/// `pending_link_b` once) and its loop-accept fix. The core re-key/retransmit and
-/// per-id `accept_link` are correct; only the one-shot acceptance pattern fails.
+/// TEST A (auto-accept). A responder destination relying on the DEFAULT
+/// `accepts_links` flag (Stage 1 = true; `set_accepts_links` is never called)
+/// establishes a link with NO `accept_link` call. The first proof is dropped, the
+/// initiator re-keys/retransmits (Codeberg #66), and the stack AUTO-proves the
+/// re-keyed retry too — its proof IS delivered and the link establishes. This is
+/// the auto-accept replacement for the former one-shot/loop-accept characterisation:
+/// the responder now proofs more than once (the re-keyed retry included) without
+/// any application acceptance step.
 #[test]
-fn one_shot_responder_deadlocks_where_loop_accept_recovers() {
-    // hops == 1 for this direct link -> retry budget == max(LINK_REQUEST_MAX_RETRIES, 1).
-    let expected_retransmits = core::cmp::max(LINK_REQUEST_MAX_RETRIES as usize, 1);
-
-    // --- ONE-SHOT responder: the bug. -------------------------------------
-    let (died, one_shot_logs) = with_captured_logs(|| {
-        let (mut responder, dest_hash, signing_key) = make_responder();
-        let mut initiator = make_initiator();
-        let r_iface = add_iface(&mut responder, "R_mesh");
-
-        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
-        let request = one_packet(&out);
-
-        // Responder accepts ONLY the first request; that single proof is dropped.
-        let out = responder.handle_packet(InterfaceId(r_iface), &request);
-        let first_id = link_request_link_id(&out);
-        let _ = responder.accept_link(&first_id).unwrap(); // proof dropped.
-
-        // Drive the initiator's re-key retransmits. Each retransmit is DELIVERED
-        // to the responder (so LINK_REQUEST_RX fires), but the one-shot responder
-        // never accepts the new id -> no further proof -> the budget is exhausted.
-        let mut died = false;
-        for _ in 0..16 {
-            if initiator.link(&link_id).is_none() {
-                break;
-            }
-            let out = tick_past_establishment_timeout(&mut initiator, &link_id);
-            if has_timeout_close(&out) {
-                died = true;
-                break;
-            }
-            // Deliver every outbound packet to the responder; the re-keyed
-            // LinkRequest among them fires LINK_REQUEST_RX (path-request
-            // rebroadcasts are harmless no-ops for the responder).
-            for pkt in action_data(&out) {
-                let _ = responder.handle_packet(InterfaceId(r_iface), &pkt);
-            }
-        }
-        assert_eq!(
-            initiator.active_link_count(),
-            0,
-            "one-shot accept: the link must NOT establish"
+fn auto_accept_default_proves_rekeyed_retry_and_establishes() {
+    let ((), logs) = with_captured_logs(|| {
+        // Responder destination using the DEFAULT accepts_links flag — note that
+        // set_accepts_links is NEVER called here, proving the Python-parity default.
+        let identity = Identity::generate(&mut OsRng);
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut responder = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "mvrapp",
+            &["autoacc"],
+        )
+        .unwrap();
+        assert!(
+            dest.accepts_links(),
+            "Stage 1: a fresh Destination must accept links by default"
         );
-        died
-    });
+        let dest_hash = *dest.hash();
+        responder.register_destination(dest);
 
-    assert!(
-        died,
-        "one-shot accept must deadlock: the re-keyed retries are never proofed, \
-         so establishment dies with handshake_timeout.\n--- logs ---\n{one_shot_logs}"
-    );
-    assert!(
-        one_shot_logs.contains("detail=handshake_timeout"),
-        "one-shot death must be the field symptom LINK_DIED detail=handshake_timeout.\n--- logs ---\n{one_shot_logs}"
-    );
-    // Field signature reproduced: many requests received, exactly one proof sent.
-    let lr_rx = one_shot_logs.matches("LINK_REQUEST_RX").count();
-    let proof_tx = one_shot_logs.matches("LINK_PROOF_TX").count();
-    assert_eq!(
-        lr_rx,
-        1 + expected_retransmits,
-        "the responder must RECEIVE every re-keyed retry (1 initial + {expected_retransmits} \
-         retries), reproducing the field `lr_rx>1`.\n--- logs ---\n{one_shot_logs}"
-    );
-    assert_eq!(
-        proof_tx, 1,
-        "one-shot acceptance proofs EXACTLY ONCE despite the re-keyed retries \
-         (the field `proof_tx=1` signature).\n--- logs ---\n{one_shot_logs}"
-    );
-
-    // --- LOOP-ACCEPT responder: the fix. ----------------------------------
-    let ((), loop_logs) = with_captured_logs(|| {
-        let (mut responder, dest_hash, signing_key) = make_responder();
         let mut initiator = make_initiator();
         let r_iface = add_iface(&mut responder, "R_mesh");
         let i_iface = add_iface(&mut initiator, "I_mesh");
@@ -605,39 +538,86 @@ fn one_shot_responder_deadlocks_where_loop_accept_recovers() {
         let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
         let request = one_packet(&out);
 
-        // Responder accepts the first request and proves it; that proof is dropped.
+        // Auto-accept: handle_packet proves the link inline (no accept_link call).
+        // The event is STILL emitted (additive). This first proof is dropped.
         let out = responder.handle_packet(InterfaceId(r_iface), &request);
-        let first_id = link_request_link_id(&out);
-        let _ = responder.accept_link(&first_id).unwrap(); // first proof dropped.
+        let _ = link_request_link_id(&out); // NodeEvent::LinkRequest still fires.
+        let _dropped_proof = one_packet(&out); // DROP: never delivered to initiator.
 
-        // Initiator re-keys on the establishment timeout. The loop-accept
-        // responder accepts the NEW id; this second proof IS delivered and the
-        // link establishes.
+        // Initiator re-keys on the establishment timeout.
         let out = tick_past_establishment_timeout(&mut initiator, &link_id);
         let retried = action_data(&out)
             .into_iter()
             .next()
             .expect("re-keyed LinkRequest");
+
+        // The re-keyed retry is AUTO-proved too — again with no accept_link call.
         let out = responder.handle_packet(InterfaceId(r_iface), &retried);
-        let retried_id = link_request_link_id(&out);
-        let out = responder.accept_link(&retried_id).unwrap();
         let proof2 = one_packet(&out);
 
+        // Delivered -> the link establishes.
         let out = initiator.handle_packet(InterfaceId(i_iface), &proof2);
         assert!(
             has_link_established(&out),
-            "loop-accept: accepting the re-keyed retry must establish the link"
+            "auto-accept must establish the link via the re-keyed retry, no accept_link"
         );
         assert_eq!(initiator.active_link_count(), 1);
     });
 
-    // The fix proofs MORE THAN ONCE (the re-keyed retry is proofed too) — the
-    // single behavioural difference from the one-shot bug above.
+    // The responder proved BOTH the first request and the re-keyed retry — the
+    // behaviour the former loop-accept fix needed, now automatic.
     assert!(
-        loop_logs.matches("LINK_PROOF_TX").count() >= 2,
-        "loop-accept must emit a proof for the re-keyed retry too (proof_tx>1), \
-         unlike the one-shot bug.\n--- logs ---\n{loop_logs}"
+        logs.matches("LINK_PROOF_TX").count() >= 2,
+        "auto-accept must prove the first request AND the re-keyed retry \
+         (proof_tx >= 2), with no accept_link call.\n--- logs ---\n{logs}"
     );
+}
+
+/// TEST B (OFF switch). A destination with `set_accepts_links(false)` emits NO
+/// proof, fires NO LinkRequest event, and creates NO link on an inbound request —
+/// the gate in `handle_link_request` returns before insert and before auto-prove.
+#[test]
+fn destination_rejecting_links_emits_no_proof_and_no_link() {
+    let identity = Identity::generate(&mut OsRng);
+    let signing_key = identity.ed25519_verifying().to_bytes();
+    let clock = MockClock::new(TEST_TIME_MS);
+    let mut responder = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["noaccept"],
+    )
+    .unwrap();
+    dest.set_accepts_links(false); // OFF switch
+    let dest_hash = *dest.hash();
+    responder.register_destination(dest);
+
+    let mut initiator = make_initiator();
+    let r_iface = add_iface(&mut responder, "R_mesh");
+
+    let (_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let request = one_packet(&out);
+
+    let out = responder.handle_packet(InterfaceId(r_iface), &request);
+
+    assert!(
+        action_data(&out).is_empty(),
+        "a rejecting destination must emit NO establishment proof"
+    );
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkRequest { .. })),
+        "a rejecting destination must not emit a LinkRequest event"
+    );
+    assert_eq!(
+        responder.pending_link_count(),
+        0,
+        "a rejecting destination must not create a link"
+    );
+    assert_eq!(responder.active_link_count(), 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -662,11 +642,9 @@ fn drive_persistent_proof_loss_to_death() -> bool {
     let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
     let request = one_packet(&out);
 
-    // Responder accepts and proves once; that proof (and every retried proof) is
-    // dropped, so loss is persistent and the retry budget is exhausted.
-    let out = responder.handle_packet(InterfaceId(r_iface), &request);
-    let resp_link = link_request_link_id(&out);
-    let _ = responder.accept_link(&resp_link).unwrap();
+    // Responder auto-accepts (Stage 1) and proves once; that proof (and every
+    // retried proof) is dropped, so loss is persistent and the budget is exhausted.
+    let _ = responder.handle_packet(InterfaceId(r_iface), &request);
 
     for _ in 0..16 {
         if initiator.link(&link_id).is_none() {

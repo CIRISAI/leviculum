@@ -205,7 +205,9 @@ async fn establish_responder_link(
             .ok_or_else(|| HarnessError::CommandFailed("No link request received".to_string()))?;
     let link_id = LinkId::new(link_id_bytes);
 
-    // Process the packet via node
+    // Process the packet via node. Auto-accept (Stage 1): handle_packet builds
+    // and routes the establishment proof inline, so the proof action is in this
+    // output (along with the LinkRequest event).
     let output = node.handle_packet(InterfaceId(0), &raw_packet);
 
     // Check for LinkRequest event
@@ -220,12 +222,7 @@ async fn establish_responder_link(
         ));
     }
 
-    // Accept the link
-    let output = node
-        .accept_link(&link_id)
-        .map_err(|e| HarnessError::CommandFailed(format!("Failed to accept link: {:?}", e)))?;
-
-    // Send proof (included in actions)
+    // Send proof (auto-sent inline by handle_packet)
     dispatch_actions(stream, &output).await;
 
     // Wait for RTT
@@ -509,7 +506,8 @@ async fn test_manager_initiator_concurrent_links() {
 ///
 /// Verifies:
 /// - LinkRequest event is emitted when LINK_REQUEST arrives
-/// - accept_link() returns proof packet in actions
+/// - With auto-accept (Stage 1), handle_packet() builds and routes the
+///   establishment proof inline (the proof action is in its output)
 /// - After RTT, LinkEstablished { is_initiator: false } is emitted
 #[tokio::test]
 async fn test_manager_responder_accept_link() {
@@ -559,11 +557,84 @@ async fn test_manager_responder_accept_link() {
         serde_json::from_slice::<serde_json::Value>(&r).unwrap()
     });
 
-    // Establish link as responder
-    let link_id =
-        establish_responder_link(&mut node, &daemon, &mut stream, &mut deframer, dest_hash)
-            .await
-            .expect("Failed to establish responder link");
+    // --- Establish link as responder, inlined to assert on the proof ---
+
+    // Wait for link request
+    let (raw_request, link_id_bytes) = wait_for_link_request(
+        &mut stream,
+        &mut deframer,
+        &dest_hash,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("Should receive link request");
+    let link_id = LinkId::new(link_id_bytes);
+
+    // Auto-accept (Stage 1): handle_packet builds + routes the proof inline.
+    // Its output carries BOTH the LinkRequest event AND the proof action.
+    let output = node.handle_packet(InterfaceId(0), &raw_request);
+
+    // LinkRequest event is still emitted.
+    assert!(
+        output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkRequest { link_id: id, .. } if *id == link_id)),
+        "Should emit LinkRequest event. Events: {:?}",
+        output.events
+    );
+
+    // The establishment proof must be present in handle_packet's output.
+    let proof_present = extract_action_packets(&output).iter().any(|data| {
+        Packet::unpack(data)
+            .map(|pkt| pkt.flags.packet_type == PacketType::Proof)
+            .unwrap_or(false)
+    });
+    assert!(
+        proof_present,
+        "handle_packet should auto-produce the establishment proof in its actions"
+    );
+
+    // accept_link() is now an idempotent no-op (proof already sent); it must
+    // still return Ok without producing a second proof.
+    let accept_output = node
+        .accept_link(&link_id)
+        .expect("accept_link should be Ok (idempotent no-op)");
+    assert!(
+        !extract_action_packets(&accept_output)
+            .iter()
+            .any(|data| Packet::unpack(data)
+                .map(|pkt| pkt.flags.packet_type == PacketType::Proof)
+                .unwrap_or(false)),
+        "accept_link must not emit a second proof after auto-accept"
+    );
+
+    // Send the auto-produced proof on the wire.
+    dispatch_actions(&mut stream, &output).await;
+
+    // Wait for RTT and process it to complete establishment.
+    let rtt_data = wait_for_rtt_packet(
+        &mut stream,
+        &mut deframer,
+        &link_id,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("Should receive RTT");
+
+    let mut rtt_raw = Vec::new();
+    rtt_raw.push(0x0C);
+    rtt_raw.push(0x00);
+    rtt_raw.extend_from_slice(link_id.as_bytes());
+    rtt_raw.push(reticulum_core::packet::PacketContext::Lrrtt as u8);
+    rtt_raw.extend_from_slice(&rtt_data);
+
+    let output = node.handle_packet(InterfaceId(0), &rtt_raw);
+    assert!(
+        has_link_established(&output.events, &link_id, false),
+        "Should emit LinkEstablished {{ is_initiator: false }}. Events: {:?}",
+        output.events
+    );
 
     // Wait for Python task
     let link_response = link_task.await.expect("Link task panicked");
@@ -922,15 +993,10 @@ async fn test_rust_to_rust_via_daemon() {
         "Link IDs should match after transport unwrapping"
     );
 
+    // Auto-accept (Stage 1): handle_packet builds + routes the proof inline.
     let output = node_a.handle_packet(InterfaceId(0), &raw_request);
 
-    // A accepts the link
-    let _ = &output.events; // drain events
-    let output = node_a
-        .accept_link(&link_id_a)
-        .expect("Failed to accept link");
-
-    // Send proof via A's stream
+    // Send proof via A's stream (auto-sent inline by handle_packet)
     dispatch_actions(&mut stream_a, &output).await;
 
     // B receives proof
@@ -1115,9 +1181,8 @@ async fn test_rust_to_rust_multiple_messages() {
     .unwrap();
     let link_id_a = LinkId::new(link_id_a_bytes);
 
-    let _output = node_a.handle_packet(InterfaceId(0), &raw_request);
-
-    let output = node_a.accept_link(&link_id_a).unwrap();
+    // Auto-accept (Stage 1): handle_packet builds + routes the proof inline.
+    let output = node_a.handle_packet(InterfaceId(0), &raw_request);
     dispatch_actions(&mut stream_a, &output).await;
 
     let proof_raw = receive_raw_proof_for_link(

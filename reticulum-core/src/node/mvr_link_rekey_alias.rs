@@ -63,17 +63,6 @@ fn one_packet(output: &TickOutput) -> Vec<u8> {
     data.into_iter().next().unwrap()
 }
 
-fn link_request_link_id(output: &TickOutput) -> LinkId {
-    output
-        .events
-        .iter()
-        .find_map(|e| match e {
-            NodeEvent::LinkRequest { link_id, .. } => Some(*link_id),
-            _ => None,
-        })
-        .expect("expected LinkRequest event")
-}
-
 fn has_link_established(output: &TickOutput) -> bool {
     output
         .events
@@ -130,10 +119,9 @@ fn establish_link_via_rekey() -> (EndpointNode, EndpointNode, LinkId, LinkId) {
     let out = initiator.handle_timeout();
     let retry_request = one_packet(&out);
 
-    // 3. Deliver the retry to the responder, accept, walk the proof back.
+    // 3. Deliver the retry to the responder; it auto-accepts (Stage 1) and the
+    //    proof walks back.
     let out = responder.handle_packet(InterfaceId(0), &retry_request);
-    let resp_link = link_request_link_id(&out);
-    let out = responder.accept_link(&resp_link).unwrap();
     let proof = one_packet(&out);
     let out = initiator.handle_packet(InterfaceId(0), &proof);
     assert!(

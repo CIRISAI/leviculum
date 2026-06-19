@@ -278,18 +278,53 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         (link_id, was_routed, output)
     }
 
-    /// Accept an incoming link request
+    /// Accept an incoming link request.
+    ///
+    /// Since Stage 1 (auto-accept, Python parity), [`Self::handle_link_request`]
+    /// already sends the establishment proof inline when the destination accepts
+    /// links, so by the time a consumer reaches this method the proof is usually
+    /// already on the wire and the link is in `PendingIncoming`. The method is
+    /// kept public so existing consumers that still wait for
+    /// [`NodeEvent::LinkRequest`] and then call `accept_link` keep compiling and
+    /// working; that call is now an idempotent no-op that does NOT re-send a proof.
     ///
     /// Looks up the destination's identity from the registered destination
     /// matching the link's destination hash.
     ///
     /// # Errors
     /// - `LinkError::NotFound` if the link does not exist
+    /// - `LinkError::InvalidState` if the link is an initiator link or not pending
     /// - `LinkError::DestinationNotRegistered` if no identity available
     pub fn accept_link(
         &mut self,
         link_id: &LinkId,
     ) -> Result<crate::transport::TickOutput, LinkError> {
+        let link = self.links.get(link_id).ok_or(LinkError::NotFound)?;
+        if link.is_initiator() {
+            return Err(LinkError::InvalidState);
+        }
+        // Idempotency (Stage 1 auto-accept): handle_link_request already proved
+        // the link and moved it to PendingIncoming. A consumer that still calls
+        // accept_link must NOT put a second proof on the wire — treat it as a
+        // harmless no-op.
+        if matches!(link.phase(), LinkPhase::PendingIncoming { .. }) {
+            return Ok(self.process_events_and_actions());
+        }
+        if link.state() != LinkState::Pending {
+            return Err(LinkError::InvalidState);
+        }
+        self.send_establishment_proof(link_id)?;
+        Ok(self.process_events_and_actions())
+    }
+
+    /// Build and route the link establishment proof for an incoming link.
+    ///
+    /// Reads the destination identity + proof strategy, builds the proof packet
+    /// (`MODE_AES256_CBC`, unchanged wire bytes), caches it, moves the link to
+    /// `PendingIncoming`, and routes the proof on the link's attached interface.
+    /// Shared by the auto-accept path in [`Self::handle_link_request`] and by the
+    /// (now idempotent) public [`Self::accept_link`].
+    fn send_establishment_proof(&mut self, link_id: &LinkId) -> Result<(), LinkError> {
         let dest_hash = self
             .links
             .get(link_id)
@@ -306,12 +341,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
 
         let link = self.links.get_mut(link_id).ok_or(LinkError::NotFound)?;
-        if link.state() != LinkState::Pending {
-            return Err(LinkError::InvalidState);
-        }
-        if link.is_initiator() {
-            return Err(LinkError::InvalidState);
-        }
         link.set_proof_strategy(proof_strategy);
         if let Some(sk) = identity.ed25519_signing_key() {
             link.set_dest_signing_key(sk.clone());
@@ -337,7 +366,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let attached = self.links.get(link_id).and_then(|l| l.attached_interface());
         debug_assert!(
             attached.is_some(),
-            "accept_link: link {:?} has no attached_interface",
+            "send_establishment_proof: link {:?} has no attached_interface",
             link_id
         );
         if let Some(iface_idx) = attached {
@@ -348,7 +377,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.transport.send_on_all_interfaces(&proof);
         }
 
-        Ok(self.process_events_and_actions())
+        Ok(())
     }
 
     /// Remove a link and unregister its ID from local destinations.
@@ -704,7 +733,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.transport.iface_name(interface_index),
         );
 
-        // Emit event directly as NodeEvent
+        // Auto-accept (Stage 1, Python parity): a fresh Destination accepts links
+        // (`accepts` was checked above), so prove the link immediately instead of
+        // waiting for an app `accept_link`. This is purely a TRIGGER change — the
+        // proof bytes are identical (MODE_AES256_CBC via send_establishment_proof).
+        if let Err(e) = self.send_establishment_proof(&link_id) {
+            crate::tracing::debug!(
+                %e,
+                link = %HexShort(link_id.as_bytes()),
+                "auto-accept: establishment proof send failed"
+            );
+        }
+
+        // Keep emitting the event so existing consumers that wait for
+        // NodeEvent::LinkRequest and then call accept_link (now an idempotent
+        // no-op) keep working. Removed in a later stage once consumers migrate.
         self.events.push(NodeEvent::LinkRequest {
             link_id,
             destination_hash: dest_hash,

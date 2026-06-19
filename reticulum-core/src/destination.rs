@@ -317,7 +317,9 @@ impl Destination {
             identity,
             dest_type,
             direction,
-            accepts_links: false,
+            // Python parity: a fresh Destination accepts incoming links. The
+            // OFF switch is `set_accepts_links(false)`.
+            accepts_links: true,
             proof_strategy: ProofStrategy::None,
             // Ratchet fields - not enabled by default
             ratchets: Vec::new(),

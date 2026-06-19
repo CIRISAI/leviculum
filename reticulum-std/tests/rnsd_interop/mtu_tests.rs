@@ -121,12 +121,10 @@ async fn establish_rust_to_rust_link(
 
     assert_eq!(link_id_a, link_id_b, "Link IDs should match");
 
-    let _output = node_a.handle_packet(InterfaceId(0), &raw_request);
+    // Auto-accept (Stage 1): handle_packet builds + routes the proof inline.
+    let output = node_a.handle_packet(InterfaceId(0), &raw_request);
 
-    // A accepts the link
-    let output = node_a
-        .accept_link(&link_id_a)
-        .expect("Failed to accept link");
+    // Send proof (auto-sent inline by handle_packet)
     dispatch_actions(stream_a, &output).await;
 
     // B receives proof
@@ -473,10 +471,10 @@ async fn test_mtu_a3_python_to_rust_tcp_mtu() {
     .expect("Should receive link request");
     let link_id = LinkId::new(link_id_bytes);
 
-    let _output = node.handle_packet(InterfaceId(0), &raw_request);
+    // Auto-accept (Stage 1): handle_packet builds + routes the proof inline.
+    let output = node.handle_packet(InterfaceId(0), &raw_request);
 
-    // Accept the link
-    let output = node.accept_link(&link_id).expect("Failed to accept link");
+    // Send proof (auto-sent inline by handle_packet)
     dispatch_actions(&mut stream, &output).await;
 
     // Wait for RTT

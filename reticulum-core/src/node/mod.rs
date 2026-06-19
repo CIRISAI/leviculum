@@ -2603,10 +2603,8 @@ mod tests {
             "transport node must forward the fresh-keys retry (dedup must not eat it)"
         );
 
-        // Deliver to B, accept, and walk the proof back A ← T ← B.
+        // Deliver to B; it auto-accepts (Stage 1) and the proof walks back A ← T ← B.
         let output = responder.handle_packet(InterfaceId(0), &forwarded[0]);
-        let resp_link_id = extract_link_request_link_id(&output);
-        let output = responder.accept_link(&resp_link_id).unwrap();
         let proof_data = extract_broadcast_data(&output);
         let output = transport_node.handle_packet(InterfaceId(1), &proof_data);
         let to_initiator = extract_all_action_data(&output);
@@ -2663,10 +2661,11 @@ mod tests {
         let (_caller_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
         let first_request = extract_broadcast_data(&output);
 
-        // First request DOES reach B; B's proof is lost.
+        // First request DOES reach B; B auto-accepts (Stage 1) and its proof is lost
+        // (never delivered back to A).
         let output = responder.handle_packet(InterfaceId(0), &first_request);
         let first_pending = extract_link_request_link_id(&output);
-        let _lost_proof = responder.accept_link(&first_pending).unwrap();
+        let _lost_proof = extract_broadcast_data(&output);
         assert_eq!(responder.pending_link_count(), 1);
 
         // A times out, retries with fresh keys; retry reaches B.
@@ -2681,7 +2680,6 @@ mod tests {
         let output = responder.handle_packet(InterfaceId(0), &retry_request);
         let second_pending = extract_link_request_link_id(&output);
         assert_ne!(first_pending, second_pending, "fresh keys ⇒ new link id");
-        let output = responder.accept_link(&second_pending).unwrap();
         let proof_data = extract_broadcast_data(&output);
 
         // Establish the retried link end-to-end.
@@ -2829,12 +2827,10 @@ mod tests {
         let (init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
         let link_req_data = extract_broadcast_data(&output);
 
-        // 4. Responder receives link request → LinkRequest event
+        // 4. Responder receives link request → auto-accepts (Stage 1): the
+        //    LinkRequest event AND the establishment proof land in one output.
         let output = responder.handle_packet(InterfaceId(0), &link_req_data);
         let resp_link_id = extract_link_request_link_id(&output);
-
-        // 5. Responder accepts → proof packet in actions
-        let output = responder.accept_link(&resp_link_id).unwrap();
         let proof_data = extract_broadcast_data(&output);
 
         // 6. Initiator receives proof → LinkEstablished + RTT action
@@ -2901,12 +2897,10 @@ mod tests {
         let (init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
         let link_req_data = extract_broadcast_data(&output);
 
-        // 4. Responder receives link request → LinkRequest event
+        // 4. Responder receives link request → auto-accepts (Stage 1): the
+        //    LinkRequest event AND the establishment proof land in one output.
         let output = responder.handle_packet(InterfaceId(0), &link_req_data);
         let resp_link_id = extract_link_request_link_id(&output);
-
-        // 5. Responder accepts → proof packet in actions
-        let output = responder.accept_link(&resp_link_id).unwrap();
         let proof_data = extract_broadcast_data(&output);
 
         // 6. Initiator receives proof → LinkEstablished + RTT action
@@ -3106,8 +3100,7 @@ mod tests {
         let (link1, _, out1) = init1.connect(hash1, &signing1);
         let data1 = extract_broadcast_data(&out1);
         let out = responder.handle_packet(InterfaceId(0), &data1);
-        let rlid1 = extract_link_request_link_id(&out);
-        let out = responder.accept_link(&rlid1).unwrap();
+        let _rlid1 = extract_link_request_link_id(&out);
         let proof1 = extract_broadcast_data(&out);
         let out = init1.handle_packet(InterfaceId(0), &proof1);
         let rtt1 = extract_broadcast_data(&out);
@@ -3119,8 +3112,7 @@ mod tests {
         let (_link2, _, out2) = init2.connect(hash2, &signing2);
         let data2 = extract_broadcast_data(&out2);
         let out = responder.handle_packet(InterfaceId(0), &data2);
-        let rlid2 = extract_link_request_link_id(&out);
-        let out = responder.accept_link(&rlid2).unwrap();
+        let _rlid2 = extract_link_request_link_id(&out);
         let proof2 = extract_broadcast_data(&out);
         let out = init2.handle_packet(InterfaceId(0), &proof2);
         let rtt2 = extract_broadcast_data(&out);
@@ -3228,8 +3220,7 @@ mod tests {
         let req_data = extract_broadcast_data(&output);
 
         let output = responder.handle_packet(InterfaceId(0), &req_data);
-        let rlid = extract_link_request_link_id(&output);
-        let output = responder.accept_link(&rlid).unwrap();
+        let _rlid = extract_link_request_link_id(&output);
         let proof_data = extract_broadcast_data(&output);
 
         // Feed proof to initiator
@@ -6273,12 +6264,9 @@ mod tests {
         let (init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
         let link_req_data = extract_broadcast_data(&output);
 
-        // Responder receives link request
+        // Responder receives link request → auto-accepts (Stage 1): proof in actions
         let output = responder.handle_packet(InterfaceId(0), &link_req_data);
         let resp_link_id = extract_link_request_link_id(&output);
-
-        // Responder accepts → proof
-        let output = responder.accept_link(&resp_link_id).unwrap();
         let proof_data = extract_broadcast_data(&output);
 
         // Initiator receives proof → Active, emits RTT packet

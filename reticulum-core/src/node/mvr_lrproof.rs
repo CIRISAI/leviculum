@@ -156,17 +156,6 @@ fn one_packet(output: &TickOutput) -> Vec<u8> {
     data.into_iter().next().unwrap()
 }
 
-fn link_request_link_id(output: &TickOutput) -> LinkId {
-    output
-        .events
-        .iter()
-        .find_map(|e| match e {
-            NodeEvent::LinkRequest { link_id, .. } => Some(*link_id),
-            _ => None,
-        })
-        .expect("expected LinkRequest event")
-}
-
 fn has_link_established(output: &TickOutput) -> bool {
     output
         .events
@@ -297,8 +286,7 @@ fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
 
         // 4. R receives the (now 2-hops-taken) request, accepts, sends proof.
         let out = responder.handle_packet(InterfaceId(r_iface), &g_forwarded);
-        let resp_link = link_request_link_id(&out);
-        let out = responder.accept_link(&resp_link).unwrap();
+        // Responder auto-accepts (Stage 1): the proof is in the same output.
         let proof = one_packet(&out);
 
         // 5. Proof returns through G (hop match at G: 1 == 1) -> forwarded.
@@ -430,8 +418,7 @@ fn lrproof_symmetric_single_hop_relay_establishes() {
 
         // 3. Delivered DIRECTLY to R (single hop, no second relay).
         let out = responder.handle_packet(InterfaceId(r_iface), &a_forwarded);
-        let resp_link = link_request_link_id(&out);
-        let out = responder.accept_link(&resp_link).unwrap();
+        // Responder auto-accepts (Stage 1): the proof is in the same output.
         let proof = one_packet(&out);
 
         // 4. Proof returns A <- R single hop: hops=1 == remaining_hops=1 -> forward.
@@ -519,8 +506,7 @@ fn lrproof_link_carries_data_despite_hop_asymmetry() {
         let out = relay_g.handle_packet(InterfaceId(g_from_a), &a_forwarded);
         let g_forwarded = one_packet(&out);
         let out = responder.handle_packet(InterfaceId(r_iface), &g_forwarded);
-        let resp_link = link_request_link_id(&out);
-        let out = responder.accept_link(&resp_link).unwrap();
+        // Responder auto-accepts (Stage 1): the proof is in the same output.
         let proof = one_packet(&out);
         let out = relay_g.handle_packet(InterfaceId(g_to_r), &proof);
         let g_proof = one_packet(&out);
