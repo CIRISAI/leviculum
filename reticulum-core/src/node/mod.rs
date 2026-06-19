@@ -2798,6 +2798,41 @@ mod tests {
             .collect()
     }
 
+    // Core-level coverage for peer-close notification: a responder-initiated
+    // close emits a close packet, and the initiator that receives it surfaces
+    // LinkClosed (so a peer learns of a graceful close promptly, not only via
+    // the stale timeout). This isolates the close handling from interface
+    // routing: it asserts the packet is built and processed correctly, with
+    // delivery done by hand. Whether that packet actually reaches the peer over
+    // a real interface is a separate routing concern this test does not cover,
+    // and one observed to fail intermittently over TCP (responder->initiator
+    // close packets are usually dropped); that delivery race is tracked
+    // separately, not in the close-handling logic this test exercises.
+    #[test]
+    fn responder_close_packet_notifies_initiator() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+
+        let output = pair.responder.close_link(&pair.responder_link_id);
+        let close_packets = extract_all_action_data(&output);
+        assert!(
+            !close_packets.is_empty(),
+            "a responder-initiated close must emit a close packet to the peer"
+        );
+
+        let output = pair
+            .initiator
+            .handle_packet(InterfaceId(0), &close_packets[0]);
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkClosed { .. })),
+            "initiator must be notified of the peer-initiated close"
+        );
+    }
+
     fn establish_nodecore_link_pair_with_strategy(strategy: ProofStrategy) -> NodeCoreLinkPair {
         use crate::transport::InterfaceId;
 
