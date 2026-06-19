@@ -388,6 +388,83 @@ fn resource_transfer_accept_app() {
     assert_eq!(event_data(&done), payload);
 }
 
+#[test]
+fn ratchet_enabled_destination_links_and_exposes_key() {
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let id_ptr = ida.0;
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let server_ptr = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+    });
+
+    // Create an inbound destination with ratchets enabled, then register it.
+    let app = cstr("levtest");
+    let asp = cstr("ratchet");
+    let asp_ptrs = [asp.as_ptr()];
+    let dest_h = unsafe {
+        let dest = lev_destination_new(
+            id_ptr,
+            LEV_DIRECTION_IN,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!dest.is_null());
+        assert_eq!(
+            lev_destination_enable_ratchets(dest, 1_700_000_000_000),
+            LEV_OK
+        );
+        let mut h = [0u8; 16];
+        let mut l = 16usize;
+        assert_eq!(
+            lev_destination_hash(dest, h.as_mut_ptr(), 16, &mut l),
+            LEV_OK
+        );
+        assert_eq!(lev_register_destination(a.0, dest), LEV_OK);
+        lev_destination_free(dest);
+        h
+    };
+
+    // The ratchet public key is exposed (32 bytes, not all zero).
+    let key =
+        read2(|b, c, l| unsafe { lev_destination_ratchet_public(a.0, dest_h.as_ptr(), b, c, l) })
+            .expect("ratchet public key");
+    assert_eq!(key.len(), 32);
+    assert!(key.iter().any(|&x| x != 0));
+
+    // A destination without ratchets reports none.
+    let plain = register_single_dest(a.0, id_ptr, "levtest", &["noratchet"]);
+    let mut nb = [0u8; 32];
+    let mut nl = 32usize;
+    assert_eq!(
+        unsafe {
+            lev_destination_ratchet_public(a.0, plain.as_ptr(), nb.as_mut_ptr(), 32, &mut nl)
+        },
+        LEV_ERR_INVALID_ARG
+    );
+
+    // Ratchets must not break the link: learn, connect, exchange a message.
+    learn(&a, &bnode, &dest_h);
+    let (lb, _la) = establish_link(&a, &bnode, &dest_h);
+    let ping = b"ratchet-ping";
+    assert_eq!(
+        unsafe { lev_link_send(lb.0, ping.as_ptr(), ping.len(), 5000) },
+        LEV_OK
+    );
+    let ev = wait_event(a.0, LEV_EVENT_LINK_MESSAGE, EV).expect("message over ratcheted link");
+    assert_eq!(event_data(&ev), ping);
+}
+
 /// Open a pseudo-terminal and return (master fd, slave device path). The
 /// master must stay open to keep the pty alive; the node opens the slave path
 /// as a serial port.

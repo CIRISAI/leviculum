@@ -147,6 +147,60 @@ fn c_links_to_python_and_exchanges_data() {
     assert_eq!(event_data(&ev), b"from-py");
 }
 
+/// A ratchet-enabled C destination announces a wire-valid path that the Python
+/// reference implementation accepts. RNS validates the announce (including the
+/// ratchet) before installing the path, so a path appearing proves the
+/// ratcheted announce is wire-compatible.
+#[test]
+fn python_accepts_ratcheted_c_announce() {
+    let Some(py) = PyDaemon::start() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let node = c_node(&py, dir.path(), Some(ida.0));
+
+    let app = cstr("interop");
+    let asp = cstr("ratchet");
+    let asp_ptrs = [asp.as_ptr()];
+    let dest = unsafe {
+        let d = lev_destination_new(
+            ida.0,
+            LEV_DIRECTION_IN,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!d.is_null());
+        assert_eq!(
+            lev_destination_enable_ratchets(d, 1_700_000_000_000),
+            LEV_OK
+        );
+        let mut h = [0u8; 16];
+        let mut l = 16usize;
+        assert_eq!(lev_destination_hash(d, h.as_mut_ptr(), 16, &mut l), LEV_OK);
+        assert_eq!(lev_register_destination(node.0, d), LEV_OK);
+        lev_destination_free(d);
+        h
+    };
+    let dest_hex = hex::encode(dest);
+
+    let mut ok = false;
+    for _ in 0..30 {
+        unsafe { lev_announce(node.0, dest.as_ptr(), ptr::null(), 0, 2000) };
+        std::thread::sleep(Duration::from_millis(400));
+        if py.has_path(&dest_hex) {
+            ok = true;
+            break;
+        }
+    }
+    assert!(
+        ok,
+        "Python never accepted a path from the ratcheted C announce"
+    );
+}
+
 /// A signature made by the C API verifies under the Python reference
 /// implementation, proving Ed25519 cross-implementation compatibility for
 /// signed app data and crypto tooling.

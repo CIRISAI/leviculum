@@ -241,6 +241,54 @@ fn destination_validation() {
 }
 
 #[test]
+fn destination_enable_ratchets_validates() {
+    unsafe {
+        let id = Identity::generate();
+        let app = cstr("app");
+        let asp = cstr("r");
+        let asp_ptrs = [asp.as_ptr()];
+
+        // An inbound destination accepts ratchets.
+        let inbound = lev_destination_new(
+            id.0,
+            LEV_DIRECTION_IN,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!inbound.is_null());
+        assert_eq!(
+            lev_destination_enable_ratchets(inbound, 1_700_000_000_000),
+            LEV_OK
+        );
+        lev_destination_free(inbound);
+
+        // An outbound destination cannot ratchet.
+        let outbound = lev_destination_new(
+            id.0,
+            LEV_DIRECTION_OUT,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!outbound.is_null());
+        assert_eq!(
+            lev_destination_enable_ratchets(outbound, 1_700_000_000_000),
+            LEV_ERR_INVALID_ARG
+        );
+        lev_destination_free(outbound);
+
+        // NULL guard.
+        assert_eq!(
+            lev_destination_enable_ratchets(ptr::null_mut(), 0),
+            LEV_ERR_NULL_PTR
+        );
+    }
+}
+
+#[test]
 fn builder_validation() {
     unsafe {
         let b = lev_builder_new();

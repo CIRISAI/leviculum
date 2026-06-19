@@ -138,6 +138,11 @@ fn c_crypto_acceptance() {
     compile_and_run("examples/c/crypto.c", "crypto_c");
 }
 
+#[test]
+fn c_ratchet_acceptance() {
+    compile_and_run("examples/c/ratchet.c", "ratchet_c");
+}
+
 /// The `lnsd.c` example is a real daemon, not a self-terminating acceptance
 /// program: it loads a config, comes up, and runs until signalled. Spawn it,
 /// confirm it stays up, then SIGTERM it and require a clean exit. This is the

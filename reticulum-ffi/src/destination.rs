@@ -152,6 +152,67 @@ pub unsafe extern "C" fn lev_destination_hash(
     })
 }
 
+/// Enable ratchets (forward secrecy) on a destination before it is registered.
+/// `now_ms` is the current time in milliseconds (e.g. `clock_gettime`), used to
+/// seed ratchet rotation. Call before `lev_register_destination`.
+/// `LEV_ERR_INVALID_ARG` for an outbound destination or one already registered.
+#[no_mangle]
+pub unsafe extern "C" fn lev_destination_enable_ratchets(
+    dest: *mut lev_destination_t,
+    now_ms: u64,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let d = match dest.as_mut() {
+            Some(d) => d,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let inner = match d.inner.as_mut() {
+            Some(i) => i,
+            None => {
+                set_last_error("destination already registered");
+                return LEV_ERR_INVALID_ARG;
+            }
+        };
+        match inner.enable_ratchets(&mut rand_core::OsRng, now_ms) {
+            Ok(()) => LEV_OK,
+            Err(e) => {
+                set_last_error(format!("{e:?}"));
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Write the current 32-byte ratchet public key of a registered local
+/// destination into `buf`, read(2) style. `LEV_ERR_INVALID_ARG` if the
+/// destination is unknown or has no ratchets enabled.
+#[no_mangle]
+pub unsafe extern "C" fn lev_destination_ratchet_public(
+    node: *const leviculum_t,
+    dest_hash: *const u8,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if dest_hash.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
+        match h.node().destination_ratchet_public(&dh) {
+            Some(key) => write_out(&key, buf, cap, out_len),
+            None => {
+                set_last_error("destination has no ratchet");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
 /// Register a destination on the node so it can be announced and can accept
 /// links or packets. Consumes the destination (the handle is emptied; still
 /// free it). `LEV_ERR_INVALID_ARG` if already registered.

@@ -121,9 +121,10 @@ Several small, mostly independent items.
 - 4a, identity sign/verify/encrypt/decrypt. Size S. DONE. Re-exposed as
   `lev_identity_sign/_verify/_encrypt/_decrypt`; unit round-trip, Python
   Ed25519 verify interop, `crypto.c`, docs, Miri clean.
-- 4b, ratchets (forward secrecy on destinations). Size M. Core supports
-  `enable_ratchets`, `current_ratchet_public`, signed serialization. For
-  security parity with Python peers that use ratchets.
+- 4b, ratchets (forward secrecy on destinations). Size M. DONE.
+  `lev_destination_enable_ratchets` and `lev_destination_ratchet_public`; unit,
+  in-process link-over-ratchet, Python ratcheted-announce interop, `ratchet.c`,
+  docs, ASan/TSan/Miri clean.
 - 4c, proof strategies and proof-request events. Size M. Project None/App/All
   and the `...ProofRequested` events for app-decided delivery proofs.
 - 4d, group destination keys. Size M, lowest priority. The group type exists

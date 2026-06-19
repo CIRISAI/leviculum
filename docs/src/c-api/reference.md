@@ -235,6 +235,8 @@ struct lev_destination_t *lev_destination_new(const struct lev_identity_t *ident
                                               const char *const *aspects, uintptr_t n_aspects);
 void lev_destination_free(struct lev_destination_t *dest);
 int  lev_destination_hash(const struct lev_destination_t *dest, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_destination_enable_ratchets(struct lev_destination_t *dest, uint64_t now_ms);
+int  lev_destination_ratchet_public(const struct leviculum_t *node, const uint8_t *dest_hash, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
 int  lev_register_destination(const struct leviculum_t *node, struct lev_destination_t *dest);
 int  lev_announce(const struct leviculum_t *node, const uint8_t *dest_hash,
                   const uint8_t *app_data, uintptr_t app_data_len, int timeout_ms);
@@ -248,6 +250,13 @@ int  lev_send_datagram(const struct leviculum_t *node, const uint8_t *dest_hash,
   `NULL` on failure.
 - `lev_destination_hash` writes the 16-byte hash; read it before registering.
   Returns `LEV_ERR_INVALID_ARG` once the destination has been consumed.
+- `lev_destination_enable_ratchets` turns on forward secrecy for an inbound
+  destination before it is registered; `now_ms` is the current time in
+  milliseconds, seeding ratchet rotation. `LEV_ERR_INVALID_ARG` for an outbound
+  destination or one already registered. `lev_destination_ratchet_public` reads
+  the current 32-byte ratchet public key of a registered destination (read(2)
+  style), or `LEV_ERR_INVALID_ARG` if it has no ratchets. Ratcheted
+  destinations interoperate with Python peers.
 - `lev_register_destination` registers the destination on the node so it can be
   announced and accept links and packets. It consumes the destination (the
   handle is emptied; still free it). `LEV_ERR_INVALID_ARG` if already

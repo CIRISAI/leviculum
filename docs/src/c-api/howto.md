@@ -226,6 +226,12 @@ lev_destination_free(dest);             /* free the empty shell */
 lev_announce(node, dh, NULL, 0, 2000);  /* optional app_data, here none */
 ```
 
+For forward secrecy, call `lev_destination_enable_ratchets(dest, now_ms)` on an
+inbound destination before registering it (`now_ms` is the current time in
+milliseconds); peers, including Python ones, then encrypt to a rotating ratchet
+key. `lev_destination_ratchet_public(node, dh, ...)` reads the current key. See
+`reticulum-ffi/examples/c/ratchet.c`.
+
 Receiving side, in the event loop:
 
 ```c

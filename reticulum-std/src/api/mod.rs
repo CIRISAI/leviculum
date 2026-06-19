@@ -263,6 +263,12 @@ impl Node {
         self.inner.hops_to(dest_hash)
     }
 
+    /// The current ratchet public key of a registered local destination, if
+    /// ratchets are enabled on it.
+    pub fn destination_ratchet_public(&self, dest_hash: &DestinationHash) -> Option<[u8; 32]> {
+        self.inner.destination_ratchet_public(dest_hash)
+    }
+
     /// The cached identity for a destination, learned from an announce.
     pub fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity> {
         self.inner.get_identity(dest_hash)
