@@ -49,14 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             Some(event) = events.recv() => {
                 match event {
-                    NodeEvent::LinkRequest { link_id, destination_hash, peer_keys } => {
-                        println!("Connection request from {:02x?}", &destination_hash.as_bytes()[..4]);
-                        println!("  Link ID: {:02x?}", &link_id.as_bytes()[..4]);
-                        println!("  Peer Ed25519 key: {:02x?}...", &peer_keys.ed25519_verifying[..8]);
-                        // In a real application, you would accept the connection here
-                        // by calling node.accept_link(&link_id).await
-                    }
                     NodeEvent::LinkEstablished { link_id, is_initiator } => {
+                        // Incoming links are accepted and proved automatically by
+                        // the core (Python parity). The app just observes this
+                        // event; for an incoming link (is_initiator == false) it can
+                        // obtain a writable handle with node.link_handle(&link_id).
                         println!("Connection established!");
                         println!("  Link ID: {:02x?}", &link_id.as_bytes()[..4]);
                         println!("  We initiated: {}", is_initiator);

@@ -297,23 +297,14 @@ async fn establish_rust_to_rust_link(daemon: &TestDaemon) -> Result<RustToRustLi
         ));
     }
 
-    // A processes the link request. Auto-accept (Stage 1): handle_packet builds
-    // and routes the proof inline, so its output carries BOTH the LinkRequest
-    // event AND the proof action.
+    // A processes the link request. Auto-accept (Python parity): handle_packet
+    // builds and routes the establishment proof inline, so its output carries the
+    // proof action and the link moves to PendingIncoming.
     let output = node_a.handle_packet(InterfaceId(0), &raw_request);
 
-    // Check for LinkRequest event
-    let has_request = output.events.iter().any(|e| {
-        matches!(
-            e,
-            NodeEvent::LinkRequest {
-                link_id: id,
-                ..
-            } if *id == link_id_a
-        )
-    });
-    if !has_request {
-        return Err("A should receive LinkRequest event".to_string());
+    // The responder must have auto-proved the incoming link.
+    if output.actions.is_empty() {
+        return Err("A should auto-prove the incoming link (no proof action)".to_string());
     }
 
     // Send proof via A's stream (auto-sent inline by handle_packet)
@@ -576,18 +567,8 @@ async fn test_link_stale_detection_no_inbound() {
     // Deliver link request to responder
     let output = responder.handle_packet(InterfaceId(0), &link_request_data);
 
-    // Responder gets LinkRequest event
-    let _resp_link_id = output
-        .events
-        .iter()
-        .find_map(|e| match e {
-            NodeEvent::LinkRequest { link_id, .. } => Some(*link_id),
-            _ => None,
-        })
-        .unwrap();
-
-    // Auto-accept (Stage 1): the proof was auto-produced by handle_packet above
-    // (accept_link is now a no-op), so read it from that output.
+    // Auto-accept (Python parity): the proof was auto-produced by handle_packet
+    // above, so read it from that output.
     let proof_data = extract_action_packets(&output).into_iter().next().unwrap();
 
     // Deliver proof to initiator
@@ -710,16 +691,8 @@ async fn test_stale_link_closes_after_timeout() {
     // Deliver link request to responder. Auto-accept (Stage 1): handle_packet
     // builds + routes the proof inline, so the proof is in this output.
     let output = responder.handle_packet(InterfaceId(0), &link_request_data);
-    let _resp_link_id = output
-        .events
-        .iter()
-        .find_map(|e| match e {
-            NodeEvent::LinkRequest { link_id, .. } => Some(*link_id),
-            _ => None,
-        })
-        .unwrap();
 
-    // Proof is auto-produced by handle_packet (accept_link is now a no-op).
+    // Proof is auto-produced by handle_packet (Python parity auto-accept).
     let proof_data = extract_action_packets(&output).into_iter().next().unwrap();
 
     // Deliver proof to initiator
@@ -844,16 +817,8 @@ async fn test_keepalive_resets_stale_timer() {
     // Deliver link request to responder. Auto-accept (Stage 1): handle_packet
     // builds + routes the proof inline, so the proof is in this output.
     let output = responder.handle_packet(InterfaceId(0), &link_request_data);
-    let _resp_link_id = output
-        .events
-        .iter()
-        .find_map(|e| match e {
-            NodeEvent::LinkRequest { link_id, .. } => Some(*link_id),
-            _ => None,
-        })
-        .unwrap();
 
-    // Proof is auto-produced by handle_packet (accept_link is now a no-op).
+    // Proof is auto-produced by handle_packet (Python parity auto-accept).
     let proof_data = extract_action_packets(&output).into_iter().next().unwrap();
 
     // Deliver proof to initiator
@@ -1025,16 +990,16 @@ async fn test_python_initiator_sends_keepalive_rust_echoes() {
     .expect("Should receive link request");
     let link_id = LinkId::new(link_id_bytes);
 
-    // Process link request via node. Auto-accept (Stage 1): handle_packet builds
-    // and routes the proof inline, so its output carries both the LinkRequest
-    // event and the proof action.
+    // Process link request via node. Auto-accept (Python parity): handle_packet
+    // builds and routes the establishment proof inline, so its output carries the
+    // proof action.
     let output = node.handle_packet(InterfaceId(0), &raw_packet);
 
-    // Check for LinkRequest event
-    assert!(output
-        .events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::LinkRequest { link_id: id, .. } if *id == link_id)));
+    // The responder must have auto-proved the incoming link.
+    assert!(
+        !output.actions.is_empty(),
+        "node should auto-prove the incoming link (no proof action)"
+    );
 
     // Send proof via actions (auto-sent inline by handle_packet)
     dispatch_actions(&mut stream, &output).await;

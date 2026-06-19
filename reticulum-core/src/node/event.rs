@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use crate::announce::ReceivedAnnounce;
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::DestinationHash;
-use crate::link::{LinkCloseReason, LinkId, PeerKeys};
+use crate::link::{LinkCloseReason, LinkId};
 
 /// Unified event enum for all node operations
 ///
@@ -80,16 +80,6 @@ pub enum NodeEvent {
     },
 
     // Link Events
-    /// Incoming link request (Link establishment request)
-    LinkRequest {
-        /// The link ID
-        link_id: LinkId,
-        /// The destination that received the request
-        destination_hash: DestinationHash,
-        /// Peer's public keys
-        peer_keys: PeerKeys,
-    },
-
     /// Link established (handshake completed)
     LinkEstablished {
         /// The link ID
@@ -370,8 +360,7 @@ impl NodeEvent {
     /// forces an explicit decision here.
     pub(crate) fn link_id_mut(&mut self) -> Option<&mut crate::link::LinkId> {
         match self {
-            NodeEvent::LinkRequest { link_id, .. }
-            | NodeEvent::LinkEstablished { link_id, .. }
+            NodeEvent::LinkEstablished { link_id, .. }
             | NodeEvent::MessageReceived { link_id, .. }
             | NodeEvent::LinkDataReceived { link_id, .. }
             | NodeEvent::LinkStale { link_id, .. }
@@ -443,8 +432,7 @@ impl NodeEvent {
 
             // Link lifecycle and identity — at most one per link, must not be
             // lost or links wedge.
-            NodeEvent::LinkRequest { .. }
-            | NodeEvent::LinkEstablished { .. }
+            NodeEvent::LinkEstablished { .. }
             | NodeEvent::LinkStale { .. }
             | NodeEvent::LinkRecovered { .. }
             | NodeEvent::LinkIdentified { .. }
@@ -494,7 +482,6 @@ impl NodeEvent {
             NodeEvent::PacketReceived { .. } => "PacketReceived",
             NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",
             NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",
-            NodeEvent::LinkRequest { .. } => "LinkRequest",
             NodeEvent::LinkEstablished { .. } => "LinkEstablished",
             NodeEvent::MessageReceived { .. } => "MessageReceived",
             NodeEvent::LinkDataReceived { .. } => "LinkDataReceived",

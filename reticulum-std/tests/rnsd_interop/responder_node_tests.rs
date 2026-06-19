@@ -1,11 +1,12 @@
 //! Responder Node interop tests: Rust as link responder via high-level API
 //!
-//! These tests verify the full responder path using `ReticulumNode::accept_link()`,
-//! proving that:
+//! These tests verify the full responder path with auto-accepted incoming links
+//! (Python parity), proving that:
 //!
 //! 1. Rust can register a destination, announce it, and have Python learn the path
 //! 2. Python can create a link to the Rust destination through a relay
-//! 3. `ReticulumNode::accept_link()` returns a working `LinkHandle`
+//! 3. `ReticulumNode::link_handle()` yields a working `LinkHandle` for the
+//!    auto-accepted link after its `LinkEstablished` event
 //! 4. `MessageReceived` events are routed to the `LinkHandle` (fixes silent drop)
 //! 5. Bidirectional data exchange works (Python→Rust via raw data, Rust→Python via Channel)
 //!
@@ -27,10 +28,7 @@ use reticulum_core::identity::Identity;
 use reticulum_core::{Destination, DestinationType, Direction};
 use reticulum_std::driver::ReticulumNodeBuilder;
 
-use crate::common::{
-    create_link_raw, wait_for_data_event, wait_for_link_request_event,
-    wait_for_responder_established,
-};
+use crate::common::{create_link_raw, wait_for_data_event, wait_for_responder_established_link};
 use crate::harness::TestDaemon;
 
 /// Test: Rust node as responder accepting incoming links via the high-level API.
@@ -122,29 +120,13 @@ async fn test_rust_node_as_responder() {
         tokio::spawn(async move { create_link_raw(cmd_addr, &dh, &pk, 30).await })
     };
 
-    // Rust waits for LinkRequest event
-    let (req_link_id, req_dest_hash) =
-        wait_for_link_request_event(&mut event_rx, Duration::from_secs(15))
-            .await
-            .expect("Should receive LinkRequest within 15s");
-    eprintln!("Rust received LinkRequest for link {:?}", req_link_id);
-    assert_eq!(
-        req_dest_hash, dest_hash,
-        "LinkRequest destination should match our registered destination"
-    );
-
-    // Accept the link
-    let mut stream = rust_node
-        .accept_link(&req_link_id)
+    // Rust auto-accepts and proves the incoming link; wait for the responder-side
+    // LinkEstablished, then mint a writable handle.
+    let req_link_id = wait_for_responder_established_link(&mut event_rx, Duration::from_secs(15))
         .await
-        .expect("accept_link should succeed");
-    eprintln!("Rust accepted link, got LinkHandle");
-
-    // Wait for LinkEstablished (responder side)
-    assert!(
-        wait_for_responder_established(&mut event_rx, &req_link_id, Duration::from_secs(15)).await,
-        "Should receive LinkEstablished(is_initiator=false) within 15s"
-    );
+        .expect("Rust should establish incoming link within 15s");
+    eprintln!("Rust established incoming link {:?}", req_link_id);
+    let mut stream = rust_node.link_handle(&req_link_id);
 
     // Join the create_link background task, it should have succeeded by now
     let link_hash = create_link_handle

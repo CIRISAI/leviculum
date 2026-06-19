@@ -3,7 +3,7 @@
 //! This provides various utility commands for interacting with Reticulum.
 //! Equivalent to rnstatus, rnpath, etc. in the Python implementation.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -519,7 +519,6 @@ struct AnnounceInfo {
 
 struct SessionState {
     discovered: BTreeMap<String, AnnounceInfo>,
-    pending_requests: VecDeque<(LinkId, DestinationHash)>,
     active_link_id: Option<LinkId>,
     packet_sender: Option<PacketSender>,
     show_announces: bool,
@@ -536,7 +535,6 @@ fn print_help() {
     println!("  /link <hash>     Initiate link to destination (32-char hex)");
     println!("  /target <hash>   Set single-packet destination (32-char hex)");
     println!("  /untarget        Clear single-packet target");
-    println!("  /accept          Accept pending incoming link request");
     println!("  /send <msg>      Send data on active link or to target");
     println!("  /close           Close active link");
     println!("  /announce        Re-announce this destination");
@@ -628,7 +626,6 @@ async fn run_connect(
 
     let state = Arc::new(Mutex::new(SessionState {
         discovered: BTreeMap::new(),
-        pending_requests: VecDeque::new(),
         active_link_id: None,
         packet_sender: None,
         show_announces: false,
@@ -755,47 +752,6 @@ async fn run_connect(
                         }
                         Err(e) => {
                             eprintln!("connect failed: {e}");
-                        }
-                    }
-                }
-
-                "/accept" => {
-                    // Check if we already have an active link
-                    {
-                        let st = state.lock().expect("lock poisoned");
-                        if st.active_link_id.is_some() {
-                            eprintln!("close current link first (/close)");
-                            print_prompt();
-                            continue;
-                        }
-                    }
-
-                    let pending = {
-                        let mut st = state.lock().expect("lock poisoned");
-                        st.pending_requests.pop_front()
-                    };
-
-                    let Some((link_id, dest_hash_req)) = pending else {
-                        eprintln!("no pending link requests");
-                        print_prompt();
-                        continue;
-                    };
-
-                    match node.accept_link(&link_id).await {
-                        Ok(s) => {
-                            {
-                                let mut st = state.lock().expect("lock poisoned");
-                                st.active_link_id = Some(link_id);
-                            }
-                            stream = Some(s);
-                            println!(
-                                "[accepting] link {} from {}",
-                                link_id,
-                                hex_encode(dest_hash_req.as_bytes())
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("accept failed: {e}");
                         }
                     }
                 }
@@ -972,7 +928,7 @@ async fn try_send(
     // Prefer link if active
     if link_alive {
         let Some(s) = stream else {
-            return Err("no active link, use /link or /accept first".to_string());
+            return Err("no active link, use /link first".to_string());
         };
 
         if msg.len() > 458 {
@@ -1059,24 +1015,18 @@ async fn event_loop(mut event_rx: EventReceiver, state: Arc<Mutex<SessionState>>
                 format!("[path] {hash}  {hops} hops")
             }
 
-            NodeEvent::LinkRequest {
-                link_id,
-                destination_hash,
-                peer_keys: _,
-            } => {
-                let hash = hex_encode(destination_hash.as_bytes());
-                {
-                    let mut st = state.lock().expect("lock poisoned");
-                    st.pending_requests.push_back((link_id, destination_hash));
-                }
-                format!("[link-request] from {hash} — use /accept")
-            }
-
             NodeEvent::LinkEstablished {
                 link_id,
                 is_initiator,
             } => {
-                format!("[connected] link {link_id} (initiator: {is_initiator})")
+                // Incoming links are auto-accepted and proved by the core (Python
+                // parity), so a responder just observes this event; there is no
+                // separate request/accept step.
+                if is_initiator {
+                    format!("[connected] link {link_id} (initiator)")
+                } else {
+                    format!("[connected] link {link_id} (incoming, auto-accepted)")
+                }
             }
 
             NodeEvent::LinkDataReceived { link_id: _, data } => {

@@ -162,17 +162,6 @@ fn one_packet(output: &TickOutput) -> Vec<u8> {
     data.into_iter().next().unwrap()
 }
 
-fn link_request_link_id(output: &TickOutput) -> LinkId {
-    output
-        .events
-        .iter()
-        .find_map(|e| match e {
-            NodeEvent::LinkRequest { link_id, .. } => Some(*link_id),
-            _ => None,
-        })
-        .expect("expected LinkRequest event")
-}
-
 fn has_link_established(output: &TickOutput) -> bool {
     output
         .events
@@ -539,9 +528,8 @@ fn auto_accept_default_proves_rekeyed_retry_and_establishes() {
         let request = one_packet(&out);
 
         // Auto-accept: handle_packet proves the link inline (no accept_link call).
-        // The event is STILL emitted (additive). This first proof is dropped.
+        // This first proof is dropped.
         let out = responder.handle_packet(InterfaceId(r_iface), &request);
-        let _ = link_request_link_id(&out); // NodeEvent::LinkRequest still fires.
         let _dropped_proof = one_packet(&out); // DROP: never delivered to initiator.
 
         // Initiator re-keys on the establishment timeout.
@@ -574,8 +562,8 @@ fn auto_accept_default_proves_rekeyed_retry_and_establishes() {
 }
 
 /// TEST B (OFF switch). A destination with `set_accepts_links(false)` emits NO
-/// proof, fires NO LinkRequest event, and creates NO link on an inbound request —
-/// the gate in `handle_link_request` returns before insert and before auto-prove.
+/// proof and creates NO link on an inbound request — the gate in
+/// `handle_link_request` returns before insert and before auto-prove.
 #[test]
 fn destination_rejecting_links_emits_no_proof_and_no_link() {
     let identity = Identity::generate(&mut OsRng);
@@ -605,12 +593,6 @@ fn destination_rejecting_links_emits_no_proof_and_no_link() {
     assert!(
         action_data(&out).is_empty(),
         "a rejecting destination must emit NO establishment proof"
-    );
-    assert!(
-        !out.events
-            .iter()
-            .any(|e| matches!(e, NodeEvent::LinkRequest { .. })),
-        "a rejecting destination must not emit a LinkRequest event"
     );
     assert_eq!(
         responder.pending_link_count(),

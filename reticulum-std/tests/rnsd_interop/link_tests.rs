@@ -845,8 +845,8 @@ async fn test_link_identify_from_python() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // Python creates a link to Rust (blocks until ACTIVE).
-    // Must run concurrently with Rust's accept_link.
+    // Python creates a link to Rust (blocks until ACTIVE). Rust auto-accepts and
+    // proves the incoming link, so this runs concurrently with establishment.
     let create_link_handle = {
         let cmd_addr = daemon.cmd_addr();
         let dh = dest_hash_hex.clone();
@@ -854,19 +854,10 @@ async fn test_link_identify_from_python() {
         tokio::spawn(async move { create_link_raw(cmd_addr, &dh, &pk, 15).await })
     };
 
-    // Rust waits for LinkRequest
-    let (link_id, _) = wait_for_link_request_event(&mut event_rx, Duration::from_secs(10))
+    // Rust auto-accepts and proves the incoming link; wait for it to establish.
+    let link_id = wait_for_responder_established_link(&mut event_rx, Duration::from_secs(10))
         .await
-        .expect("should receive LinkRequest");
-
-    // Accept the link
-    let _stream = rust_node.accept_link(&link_id).await.expect("accept_link");
-
-    // Wait for establishment on Rust side
-    assert!(
-        wait_for_responder_established(&mut event_rx, &link_id, Duration::from_secs(10)).await,
-        "Rust link should be established"
-    );
+        .expect("Rust should establish incoming link");
 
     // Wait for Python's create_link to complete
     let link_hash = create_link_handle

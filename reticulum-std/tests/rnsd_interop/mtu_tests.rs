@@ -45,10 +45,10 @@ use crate::common::{
     connect_to_daemon, generate_test_payload, receive_raw_proof_for_link, send_framed,
     setup_rust_destination, verify_test_payload, wait_for_any_announce_with_route_info,
     wait_for_data_event, wait_for_link_data_packet, wait_for_link_established,
-    wait_for_link_request, wait_for_link_request_event, wait_for_path_on_node, wait_for_rtt_packet,
-    TestClock, DAEMON_TCP_LINK_MDU, DAEMON_TCP_MAX_CHANNEL_PAYLOAD, DAEMON_TCP_NEGOTIATED_MTU,
-    DIRECT_TCP_LINK_MDU, DIRECT_TCP_MAX_CHANNEL_PAYLOAD, TCP_HW_MTU, UDP_HW_MTU, UDP_LINK_MDU,
-    UDP_MAX_CHANNEL_PAYLOAD,
+    wait_for_link_request, wait_for_path_on_node, wait_for_responder_established_link,
+    wait_for_rtt_packet, TestClock, DAEMON_TCP_LINK_MDU, DAEMON_TCP_MAX_CHANNEL_PAYLOAD,
+    DAEMON_TCP_NEGOTIATED_MTU, DIRECT_TCP_LINK_MDU, DIRECT_TCP_MAX_CHANNEL_PAYLOAD, TCP_HW_MTU,
+    UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
 };
 use crate::harness::TestDaemon;
 
@@ -737,24 +737,15 @@ async fn test_mtu_a0_direct_tcp_full_mtu() {
         .expect("B connect failed");
     let link_id_b = link_handle.link_id();
 
-    // A accepts link request
-    let (link_id_a, _) = wait_for_link_request_event(&mut events_a, Duration::from_secs(10))
+    // A's incoming link is auto-accepted and proved; wait for it to establish.
+    let link_id_a = wait_for_responder_established_link(&mut events_a, Duration::from_secs(10))
         .await
-        .expect("A should receive link request");
+        .expect("A should establish incoming link");
 
-    node_a
-        .accept_link(&link_id_a)
-        .await
-        .expect("A accept failed");
-
-    // Wait for both sides to be established
+    // Wait for B side to be established (A already established above).
     assert!(
         wait_for_link_established(&mut events_b, link_id_b, Duration::from_secs(10)).await,
         "B link should be established"
-    );
-    assert!(
-        wait_for_link_established(&mut events_a, &link_id_a, Duration::from_secs(10)).await,
-        "A link should be established"
     );
 
     // Verify negotiated MTU, full TCP HW_MTU, no daemon clamping
@@ -919,8 +910,8 @@ async fn test_mtu_b0_python_to_python_udp_baseline() {
 #[tokio::test]
 async fn test_mtu_b1_rust_to_rust_udp_mtu() {
     use crate::common::{
-        wait_for_data_event, wait_for_link_established, wait_for_link_request_event,
-        wait_for_path_on_node, UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
+        wait_for_data_event, wait_for_link_established, wait_for_path_on_node,
+        wait_for_responder_established_link, UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
     };
     use reticulum_core::identity::Identity;
     use reticulum_std::driver::ReticulumNodeBuilder;
@@ -1001,24 +992,15 @@ async fn test_mtu_b1_rust_to_rust_udp_mtu() {
         .expect("B connect failed");
     let link_id_b = link_handle.link_id();
 
-    // A accepts link request
-    let (link_id_a, _) = wait_for_link_request_event(&mut events_a, Duration::from_secs(10))
+    // A's incoming link is auto-accepted and proved; wait for it to establish.
+    let link_id_a = wait_for_responder_established_link(&mut events_a, Duration::from_secs(10))
         .await
-        .expect("A should receive link request");
+        .expect("A should establish incoming link");
 
-    node_a
-        .accept_link(&link_id_a)
-        .await
-        .expect("A accept failed");
-
-    // Wait for both sides to be established
+    // Wait for B side to be established (A already established above).
     assert!(
         wait_for_link_established(&mut events_b, link_id_b, Duration::from_secs(10)).await,
         "B link should be established"
-    );
-    assert!(
-        wait_for_link_established(&mut events_a, &link_id_a, Duration::from_secs(10)).await,
-        "A link should be established"
     );
 
     // Verify negotiated MTU
@@ -1211,8 +1193,8 @@ async fn test_mtu_b2_rust_to_python_udp() {
 #[tokio::test]
 async fn test_mtu_b3_python_to_rust_udp() {
     use crate::common::{
-        wait_for_link_established, wait_for_link_request_event, DAEMON_UDP_LINK_MDU,
-        DAEMON_UDP_MAX_CHANNEL_PAYLOAD, DAEMON_UDP_NEGOTIATED_MTU,
+        wait_for_responder_established_link, DAEMON_UDP_LINK_MDU, DAEMON_UDP_MAX_CHANNEL_PAYLOAD,
+        DAEMON_UDP_NEGOTIATED_MTU,
     };
     use reticulum_core::identity::Identity;
     use reticulum_std::driver::ReticulumNodeBuilder;
@@ -1314,21 +1296,11 @@ async fn test_mtu_b3_python_to_rust_udp() {
         })
     };
 
-    // Wait for link request on Rust side
-    let (link_id, _dest) = wait_for_link_request_event(&mut events, Duration::from_secs(10))
+    // The incoming link from Python is auto-accepted and proved; wait for it to
+    // establish on the Rust side.
+    let link_id = wait_for_responder_established_link(&mut events, Duration::from_secs(10))
         .await
-        .expect("Rust should receive link request from Python");
-
-    // Accept the link
-    node.accept_link(&link_id)
-        .await
-        .expect("Failed to accept link");
-
-    // Wait for link to be established on Rust side
-    assert!(
-        wait_for_link_established(&mut events, &link_id, Duration::from_secs(10)).await,
-        "Rust link should be established"
-    );
+        .expect("Rust should establish incoming link from Python");
 
     // Wait for the background create_link to complete
     let link_result = daemon_create_link.await.expect("create_link task panicked");
@@ -1703,24 +1675,15 @@ async fn test_mtu_d1_tcp_relay_udp_clamp() {
         .expect("A connect failed");
     let link_id_a = link_handle.link_id();
 
-    // B accepts link request
-    let (link_id_b, _) = wait_for_link_request_event(&mut events_b, Duration::from_secs(10))
+    // B's incoming link is auto-accepted and proved; wait for it to establish.
+    let link_id_b = wait_for_responder_established_link(&mut events_b, Duration::from_secs(10))
         .await
-        .expect("B should receive link request");
+        .expect("B should establish incoming link");
 
-    node_b
-        .accept_link(&link_id_b)
-        .await
-        .expect("B accept failed");
-
-    // Wait for both sides to be established
+    // Wait for A side to be established (B already established above).
     assert!(
         wait_for_link_established(&mut events_a, link_id_a, Duration::from_secs(10)).await,
         "A link should be established"
-    );
-    assert!(
-        wait_for_link_established(&mut events_b, &link_id_b, Duration::from_secs(10)).await,
-        "B link should be established"
     );
 
     // Verify negotiated MTU, clamped to UDP bottleneck
@@ -1880,24 +1843,15 @@ async fn test_mtu_d2_udp_relay_tcp() {
         .expect("A connect failed");
     let link_id_a = link_handle.link_id();
 
-    // B accepts link request
-    let (link_id_b, _) = wait_for_link_request_event(&mut events_b, Duration::from_secs(10))
+    // B's incoming link is auto-accepted and proved; wait for it to establish.
+    let link_id_b = wait_for_responder_established_link(&mut events_b, Duration::from_secs(10))
         .await
-        .expect("B should receive link request");
+        .expect("B should establish incoming link");
 
-    node_b
-        .accept_link(&link_id_b)
-        .await
-        .expect("B accept failed");
-
-    // Wait for both sides to be established
+    // Wait for A side to be established (B already established above).
     assert!(
         wait_for_link_established(&mut events_a, link_id_a, Duration::from_secs(10)).await,
         "A link should be established"
-    );
-    assert!(
-        wait_for_link_established(&mut events_b, &link_id_b, Duration::from_secs(10)).await,
-        "B link should be established"
     );
 
     // Verify negotiated MTU, constrained by A's UDP interface

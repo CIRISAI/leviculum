@@ -434,7 +434,7 @@ pub struct Link {
     remote_identity: Option<Identity>,
     /// Cached proof packet bytes for re-sending on duplicate link requests (responder only).
     ///
-    /// Set in `accept_link()` after `build_proof_packet()` returns.
+    /// Set in `send_establishment_proof()` after `build_proof_packet()` returns.
     /// Read in `handle_link_request()` when a duplicate request arrives for a
     /// link still in `PendingIncoming` phase (retry after a lost proof).
     /// Cleared when the link transitions to Active (in `process_rtt()`).
@@ -819,8 +819,8 @@ impl Link {
 
     /// Store proof bytes for potential re-send on duplicate link requests.
     ///
-    /// Called in `accept_link()` after `build_proof_packet()`. Cleared when
-    /// the link transitions to Active in `process_rtt()`.
+    /// Called in `send_establishment_proof()` after `build_proof_packet()`. Cleared
+    /// when the link transitions to Active in `process_rtt()`.
     pub fn set_cached_proof(&mut self, proof: Vec<u8>) {
         self.cached_proof = Some(proof);
     }

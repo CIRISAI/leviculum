@@ -1163,30 +1163,22 @@ impl ReticulumNode {
         ))
     }
 
-    /// Accept an incoming link request
+    /// Obtain a writable handle for an already-established inbound link.
     ///
-    /// Accepts a link request identified by `link_id` (from a `LinkRequest`
-    /// event) and returns a `LinkHandle` for async read/write operations.
-    /// The link proof packet is queued and dispatched by the event loop.
+    /// Incoming links are accepted and proved automatically by the core (Python
+    /// parity): once a `LinkEstablished` event fires for a link this node did not
+    /// initiate, the link is live. Call this to mint a [`LinkHandle`] for that
+    /// link so the application can send on it. Purely a handle constructor; it has
+    /// no wire side effect (the establishment proof was already sent).
     ///
     /// # Arguments
-    /// * `link_id` - The link ID from the `LinkRequest` event
-    pub async fn accept_link(&self, link_id: &LinkId) -> Result<LinkHandle, Error> {
-        let output = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.accept_link(link_id)?
-        };
-
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-
-        Ok(LinkHandle::new(
+    /// * `link_id` - The link ID from the responder-side `LinkEstablished` event
+    pub fn link_handle(&self, link_id: &LinkId) -> LinkHandle {
+        LinkHandle::new(
             *link_id,
             Arc::clone(&self.inner),
             self.action_dispatch_tx.clone(),
-        ))
+        )
     }
 
     /// Take the event receiver

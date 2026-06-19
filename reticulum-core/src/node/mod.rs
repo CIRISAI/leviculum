@@ -2664,7 +2664,7 @@ mod tests {
         // First request DOES reach B; B auto-accepts (Stage 1) and its proof is lost
         // (never delivered back to A).
         let output = responder.handle_packet(InterfaceId(0), &first_request);
-        let first_pending = extract_link_request_link_id(&output);
+        let first_pending = Link::calculate_link_id(&first_request);
         let _lost_proof = extract_broadcast_data(&output);
         assert_eq!(responder.pending_link_count(), 1);
 
@@ -2678,7 +2678,7 @@ mod tests {
         let retry_request = extract_broadcast_data(&output);
         assert_ne!(first_request, retry_request);
         let output = responder.handle_packet(InterfaceId(0), &retry_request);
-        let second_pending = extract_link_request_link_id(&output);
+        let second_pending = Link::calculate_link_id(&retry_request);
         assert_ne!(first_pending, second_pending, "fresh keys ⇒ new link id");
         let proof_data = extract_broadcast_data(&output);
 
@@ -2776,17 +2776,6 @@ mod tests {
             .expect("expected Broadcast or SendPacket action")
     }
 
-    fn extract_link_request_link_id(output: &crate::transport::TickOutput) -> LinkId {
-        output
-            .events
-            .iter()
-            .find_map(|e| match e {
-                NodeEvent::LinkRequest { link_id, .. } => Some(*link_id),
-                _ => None,
-            })
-            .expect("expected LinkRequest event")
-    }
-
     fn extract_all_action_data(output: &crate::transport::TickOutput) -> Vec<Vec<u8>> {
         output
             .actions
@@ -2830,7 +2819,7 @@ mod tests {
         // 4. Responder receives link request → auto-accepts (Stage 1): the
         //    LinkRequest event AND the establishment proof land in one output.
         let output = responder.handle_packet(InterfaceId(0), &link_req_data);
-        let resp_link_id = extract_link_request_link_id(&output);
+        let resp_link_id = Link::calculate_link_id(&link_req_data);
         let proof_data = extract_broadcast_data(&output);
 
         // 6. Initiator receives proof → LinkEstablished + RTT action
@@ -2900,7 +2889,7 @@ mod tests {
         // 4. Responder receives link request → auto-accepts (Stage 1): the
         //    LinkRequest event AND the establishment proof land in one output.
         let output = responder.handle_packet(InterfaceId(0), &link_req_data);
-        let resp_link_id = extract_link_request_link_id(&output);
+        let resp_link_id = Link::calculate_link_id(&link_req_data);
         let proof_data = extract_broadcast_data(&output);
 
         // 6. Initiator receives proof → LinkEstablished + RTT action
@@ -2971,8 +2960,8 @@ mod tests {
         let (_init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
         let link_req_data = extract_broadcast_data(&output);
 
-        let output = responder.handle_packet(InterfaceId(0), &link_req_data);
-        let resp_link_id = extract_link_request_link_id(&output);
+        let _output = responder.handle_packet(InterfaceId(0), &link_req_data);
+        let resp_link_id = Link::calculate_link_id(&link_req_data);
 
         // Reject instead of accept
         responder.reject_link(&resp_link_id);
@@ -3100,7 +3089,6 @@ mod tests {
         let (link1, _, out1) = init1.connect(hash1, &signing1);
         let data1 = extract_broadcast_data(&out1);
         let out = responder.handle_packet(InterfaceId(0), &data1);
-        let _rlid1 = extract_link_request_link_id(&out);
         let proof1 = extract_broadcast_data(&out);
         let out = init1.handle_packet(InterfaceId(0), &proof1);
         let rtt1 = extract_broadcast_data(&out);
@@ -3112,7 +3100,6 @@ mod tests {
         let (_link2, _, out2) = init2.connect(hash2, &signing2);
         let data2 = extract_broadcast_data(&out2);
         let out = responder.handle_packet(InterfaceId(0), &data2);
-        let _rlid2 = extract_link_request_link_id(&out);
         let proof2 = extract_broadcast_data(&out);
         let out = init2.handle_packet(InterfaceId(0), &proof2);
         let rtt2 = extract_broadcast_data(&out);
@@ -3187,11 +3174,18 @@ mod tests {
 
         let output = responder.handle_packet(InterfaceId(0), &req_data);
 
-        let has_link_request = output
-            .events
-            .iter()
-            .any(|e| matches!(e, NodeEvent::LinkRequest { .. }));
-        assert!(has_link_request, "Expected LinkRequest event");
+        // Auto-accept (Python parity): handle_packet proves the link inline and
+        // creates a pending incoming link. There is no separate request event.
+        let proof_data = extract_broadcast_data(&output);
+        assert!(
+            !proof_data.is_empty(),
+            "responder must send an establishment proof"
+        );
+        assert_eq!(
+            responder.pending_link_count(),
+            1,
+            "responder must create a pending incoming link"
+        );
     }
 
     #[test]
@@ -3220,7 +3214,6 @@ mod tests {
         let req_data = extract_broadcast_data(&output);
 
         let output = responder.handle_packet(InterfaceId(0), &req_data);
-        let _rlid = extract_link_request_link_id(&output);
         let proof_data = extract_broadcast_data(&output);
 
         // Feed proof to initiator
@@ -3518,7 +3511,7 @@ mod tests {
                 "proof_strategy mismatch for {:?}",
                 strategy
             );
-            // Responder always has a dest_signing_key (set during accept_link)
+            // Responder always has a dest_signing_key (set during establishment proof)
             assert!(
                 resp_link.dest_signing_key().is_some(),
                 "dest_signing_key should always be set on responder for {:?}",
@@ -6266,7 +6259,7 @@ mod tests {
 
         // Responder receives link request → auto-accepts (Stage 1): proof in actions
         let output = responder.handle_packet(InterfaceId(0), &link_req_data);
-        let resp_link_id = extract_link_request_link_id(&output);
+        let resp_link_id = Link::calculate_link_id(&link_req_data);
         let proof_data = extract_broadcast_data(&output);
 
         // Initiator receives proof → Active, emits RTT packet

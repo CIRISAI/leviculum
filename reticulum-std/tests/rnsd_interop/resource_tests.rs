@@ -28,8 +28,8 @@ use reticulum_core::{Destination, DestinationType, Direction};
 use reticulum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 use crate::common::{
-    create_link_raw, wait_for_link_request_event, wait_for_resource_completed,
-    wait_for_resource_sender_completed, wait_for_responder_established,
+    create_link_raw, wait_for_resource_completed, wait_for_resource_sender_completed,
+    wait_for_responder_established_link,
 };
 use crate::harness::TestDaemon;
 
@@ -171,25 +171,12 @@ async fn setup_link(
         tokio::spawn(async move { create_link_raw(cmd_addr, &dh, &pk, 30).await })
     };
 
-    // Rust waits for LinkRequest
+    // Rust auto-accepts and proves the incoming link; wait for it to establish.
     let mut event_rx = event_rx;
-    let (req_link_id, req_dest_hash) =
-        wait_for_link_request_event(&mut event_rx, Duration::from_secs(15))
-            .await
-            .expect("Should receive LinkRequest within 15s");
-    assert_eq!(req_dest_hash, dest_hash);
-
-    // Accept the link
-    let _stream = rust_node
-        .accept_link(&req_link_id)
+    let req_link_id = wait_for_responder_established_link(&mut event_rx, Duration::from_secs(15))
         .await
-        .expect("accept_link should succeed");
-
-    // Wait for LinkEstablished
-    assert!(
-        wait_for_responder_established(&mut event_rx, &req_link_id, Duration::from_secs(15)).await,
-        "Should receive LinkEstablished within 15s"
-    );
+        .expect("Rust should establish incoming link within 15s");
+    let _stream = rust_node.link_handle(&req_link_id);
 
     // Join background task to get Python's link hash
     let py_link_hash = create_link_handle

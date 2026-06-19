@@ -205,20 +205,15 @@ async fn establish_responder_link(
             .ok_or_else(|| HarnessError::CommandFailed("No link request received".to_string()))?;
     let link_id = LinkId::new(link_id_bytes);
 
-    // Process the packet via node. Auto-accept (Stage 1): handle_packet builds
-    // and routes the establishment proof inline, so the proof action is in this
-    // output (along with the LinkRequest event).
+    // Process the packet via node. Auto-accept (Python parity): handle_packet
+    // builds and routes the establishment proof inline, so the proof action is in
+    // this output.
     let output = node.handle_packet(InterfaceId(0), &raw_packet);
 
-    // Check for LinkRequest event
-    let request_event = output
-        .events
-        .iter()
-        .find(|e| matches!(e, NodeEvent::LinkRequest { link_id: id, .. } if *id == link_id));
-
-    if request_event.is_none() {
+    // The responder must have auto-proved the incoming link.
+    if output.actions.is_empty() {
         return Err(HarnessError::CommandFailed(
-            "LinkRequest event not received".to_string(),
+            "responder did not auto-prove the incoming link".to_string(),
         ));
     }
 
@@ -510,7 +505,7 @@ async fn test_manager_initiator_concurrent_links() {
 ///   establishment proof inline (the proof action is in its output)
 /// - After RTT, LinkEstablished { is_initiator: false } is emitted
 #[tokio::test]
-async fn test_manager_responder_accept_link() {
+async fn test_manager_responder_auto_accept() {
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
 
     let mut stream = connect_to_daemon(&daemon).await;
@@ -570,19 +565,9 @@ async fn test_manager_responder_accept_link() {
     .expect("Should receive link request");
     let link_id = LinkId::new(link_id_bytes);
 
-    // Auto-accept (Stage 1): handle_packet builds + routes the proof inline.
-    // Its output carries BOTH the LinkRequest event AND the proof action.
+    // Auto-accept (Python parity): handle_packet builds + routes the proof inline,
+    // so its output carries the establishment proof action.
     let output = node.handle_packet(InterfaceId(0), &raw_request);
-
-    // LinkRequest event is still emitted.
-    assert!(
-        output
-            .events
-            .iter()
-            .any(|e| matches!(e, NodeEvent::LinkRequest { link_id: id, .. } if *id == link_id)),
-        "Should emit LinkRequest event. Events: {:?}",
-        output.events
-    );
 
     // The establishment proof must be present in handle_packet's output.
     let proof_present = extract_action_packets(&output).iter().any(|data| {
@@ -593,20 +578,6 @@ async fn test_manager_responder_accept_link() {
     assert!(
         proof_present,
         "handle_packet should auto-produce the establishment proof in its actions"
-    );
-
-    // accept_link() is now an idempotent no-op (proof already sent); it must
-    // still return Ok without producing a second proof.
-    let accept_output = node
-        .accept_link(&link_id)
-        .expect("accept_link should be Ok (idempotent no-op)");
-    assert!(
-        !extract_action_packets(&accept_output)
-            .iter()
-            .any(|data| Packet::unpack(data)
-                .map(|pkt| pkt.flags.packet_type == PacketType::Proof)
-                .unwrap_or(false)),
-        "accept_link must not emit a second proof after auto-accept"
     );
 
     // Send the auto-produced proof on the wire.
@@ -709,14 +680,13 @@ async fn test_manager_responder_reject_link() {
     let (raw_packet, link_id_bytes) = result.unwrap();
     let link_id = LinkId::new(link_id_bytes);
 
-    // Process the packet
+    // Process the packet. Auto-accept (Python parity): handle_packet auto-proves
+    // the incoming link inline.
     let output = node.handle_packet(InterfaceId(0), &raw_packet);
-
-    // Check for LinkRequest event
-    assert!(output
-        .events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::LinkRequest { link_id: id, .. } if *id == link_id)));
+    assert!(
+        !output.actions.is_empty(),
+        "responder should auto-prove the incoming link"
+    );
 
     // Reject the link
     node.reject_link(&link_id);
@@ -1507,10 +1477,6 @@ async fn test_manager_operations_on_unknown_link() {
     let send_result = node.send_on_link(&unknown_link_id, b"test");
     assert!(send_result.is_err());
 
-    // accept_link() on unknown link
-    let accept_result = node.accept_link(&unknown_link_id);
-    assert!(accept_result.is_err());
-
     // close_link() on unknown link should not panic
     let _output = node.close_link(&unknown_link_id);
 
@@ -1565,14 +1531,12 @@ async fn test_manager_responder_timeout() {
 
     let output = node.handle_packet(InterfaceId(0), &raw_packet);
 
-    // Check for LinkRequest event
-    assert!(output
-        .events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::LinkRequest { .. })));
-
-    // Accept the link
-    let _output = node.accept_link(&link_id).unwrap();
+    // Auto-accept (Python parity): handle_packet proves the link inline and moves
+    // it to PendingIncoming.
+    assert!(
+        !output.actions.is_empty(),
+        "responder should auto-prove the incoming link"
+    );
 
     // Verify pending incoming
     assert_eq!(node.pending_link_count(), 1);

@@ -15,7 +15,7 @@ use reticulum_std::{Destination, DestinationType, Direction, Identity, NodeEvent
 
 use crate::common::{
     generate_test_payload, verify_test_payload, wait_for_data_event, wait_for_event,
-    wait_for_link_established, wait_for_link_request_event, wait_for_path_on_node,
+    wait_for_link_established, wait_for_path_on_node, wait_for_responder_established_link,
     CHANNEL_OVERHEAD,
 };
 
@@ -335,24 +335,17 @@ async fn test_auto_link_bidirectional_data() {
         .expect("connect A→B");
     let link_id_a = handle_a.link_id();
 
-    // Node B: wait for link request, accept it
-    let (link_id_b, _dest_hash) =
-        wait_for_link_request_event(&mut events_b, Duration::from_secs(10))
-            .await
-            .expect("B should receive link request");
-    let handle_b = node_b
-        .accept_link(&link_id_b)
+    // Node B: incoming link is auto-accepted and proved by the core; wait for it
+    // to establish, then mint a writable handle.
+    let link_id_b = wait_for_responder_established_link(&mut events_b, Duration::from_secs(10))
         .await
-        .expect("accept link on B");
+        .expect("B should establish incoming link");
+    let handle_b = node_b.link_handle(&link_id_b);
 
-    // Wait for LinkEstablished on both sides
+    // Wait for LinkEstablished on A (B already established above).
     assert!(
         wait_for_link_established(&mut events_a, link_id_a, Duration::from_secs(10)).await,
         "Link should establish on A side"
-    );
-    assert!(
-        wait_for_link_established(&mut events_b, &link_id_b, Duration::from_secs(10)).await,
-        "Link should establish on B side"
     );
 
     // A→B: send 256-byte payload
@@ -472,21 +465,13 @@ async fn test_auto_mtu_negotiation() {
         .expect("connect A→B");
     let link_id_a = handle_a.link_id();
 
-    let (link_id_b, _) = wait_for_link_request_event(&mut events_b, Duration::from_secs(10))
+    let link_id_b = wait_for_responder_established_link(&mut events_b, Duration::from_secs(10))
         .await
-        .expect("B should receive link request");
-    node_b
-        .accept_link(&link_id_b)
-        .await
-        .expect("accept link on B");
+        .expect("B should establish incoming link");
 
     assert!(
         wait_for_link_established(&mut events_a, link_id_a, Duration::from_secs(10)).await,
         "Link should establish on A"
-    );
-    assert!(
-        wait_for_link_established(&mut events_b, &link_id_b, Duration::from_secs(10)).await,
-        "Link should establish on B"
     );
 
     // Verify MTU values
@@ -609,21 +594,13 @@ async fn test_auto_peer_timeout() {
         .expect("connect A→B");
     let link_id_a = handle_a.link_id();
 
-    let (link_id_b, _) = wait_for_link_request_event(&mut events_b, Duration::from_secs(10))
+    let _link_id_b = wait_for_responder_established_link(&mut events_b, Duration::from_secs(10))
         .await
-        .expect("B should receive link request");
-    node_b
-        .accept_link(&link_id_b)
-        .await
-        .expect("accept link on B");
+        .expect("B should establish incoming link");
 
     assert!(
         wait_for_link_established(&mut events_a, link_id_a, Duration::from_secs(10)).await,
         "Link should establish on A"
-    );
-    assert!(
-        wait_for_link_established(&mut events_b, &link_id_b, Duration::from_secs(10)).await,
-        "Link should establish on B"
     );
 
     // Stop Node B, this kills its sockets

@@ -19,7 +19,8 @@ use reticulum_core::{Destination, DestinationType, Direction};
 
 use crate::common::{
     build_announce_raw, extract_signing_key, init_tracing, parse_dest_hash, wait_for_data_event,
-    wait_for_event, wait_for_path_on_node, DAEMON_PROCESS_TIME,
+    wait_for_event, wait_for_path_on_node, wait_for_responder_established_link,
+    DAEMON_PROCESS_TIME,
 };
 use crate::harness::{find_available_ports, TestDaemon};
 
@@ -779,8 +780,7 @@ async fn test_local_client_builder_link_through_daemon() {
     );
 
     // Phase 6: Establish link
-    // connect() sends the link request. We must accept on client B before
-    // Rust A can receive the proof, so handle both sides concurrently.
+    // connect() sends the link request; client B auto-accepts and proves it.
     let mut link_handle = rust_a
         .connect(&dest_hash, &client_b_signing_key)
         .await
@@ -788,30 +788,14 @@ async fn test_local_client_builder_link_through_daemon() {
 
     let link_id = *link_handle.link_id();
 
-    // First: accept the link on client B (must happen before proof can be sent)
-    let client_b_link_event = wait_for_event(
-        &mut client_b_events,
-        Duration::from_secs(15),
-        |event| match event {
-            NodeEvent::LinkRequest {
-                link_id,
-                destination_hash,
-                ..
-            } => Some((link_id, destination_hash)),
-            _ => None,
-        },
-    )
-    .await;
-    assert!(
-        client_b_link_event.is_some(),
-        "Client B should receive LinkRequest"
-    );
-    let (client_b_link_id, _) = client_b_link_event.unwrap();
+    // Client B's incoming link auto-establishes; learn its link_id from the
+    // responder-side LinkEstablished event and mint a writable handle.
+    let client_b_link_id =
+        wait_for_responder_established_link(&mut client_b_events, Duration::from_secs(15))
+            .await
+            .expect("Client B should establish incoming link");
 
-    let client_b_link = client_b
-        .accept_link(&client_b_link_id)
-        .await
-        .expect("accept_link should succeed");
+    let client_b_link = client_b.link_handle(&client_b_link_id);
 
     // Now wait for LinkEstablished on initiator side (Rust A)
     let established =

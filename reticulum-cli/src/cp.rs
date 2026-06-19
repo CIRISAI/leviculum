@@ -306,15 +306,12 @@ pub async fn run_listen(
         tokio::select! {
             event = events.recv() => {
                 match event {
-                    Some(NodeEvent::LinkRequest { link_id, .. }) => {
-                        node.accept_link(&link_id).await?;
-                        if verbose > 0 {
-                            eprintln!("Incoming link request accepted");
-                        }
-                    }
                     Some(NodeEvent::LinkEstablished {
                         link_id, is_initiator: false, ..
                     }) => {
+                        // Incoming links are auto-accepted and proved by the core
+                        // (Python parity); the responder just configures the link
+                        // here, there is no separate accept step.
                         if no_auth {
                             node.set_resource_strategy(
                                 &link_id,

@@ -998,43 +998,25 @@ pub async fn wait_for_link_established(
     .is_some()
 }
 
-/// Wait for a `LinkRequest` event, returning the link_id and destination_hash.
-/// Drains other events while waiting.
-pub async fn wait_for_link_request_event(
+/// Wait for a responder-side `LinkEstablished` event (`is_initiator == false`),
+/// returning the established link_id. Drains other events while waiting.
+///
+/// Incoming links are accepted and proved automatically by the core (Python
+/// parity), so a responder no longer sees a separate request event: it learns
+/// its link_id from this establishment event and then mints a writable handle
+/// with `node.link_handle(&link_id)`.
+pub async fn wait_for_responder_established_link(
     event_rx: &mut EventReceiver,
     timeout: Duration,
-) -> Option<(LinkId, DestinationHash)> {
+) -> Option<LinkId> {
     wait_for_event(event_rx, timeout, |event| match event {
-        NodeEvent::LinkRequest {
-            link_id,
-            destination_hash,
-            ..
-        } => Some((link_id, destination_hash)),
-        _ => None,
-    })
-    .await
-}
-
-/// Wait for a `LinkEstablished` event with `is_initiator == false`.
-/// Drains other events while waiting.
-pub async fn wait_for_responder_established(
-    event_rx: &mut EventReceiver,
-    link_id: &LinkId,
-    timeout: Duration,
-) -> bool {
-    let link_id = *link_id;
-    wait_for_event(event_rx, timeout, move |event| match event {
         NodeEvent::LinkEstablished {
-            link_id: id,
-            is_initiator,
-        } if id == link_id => {
-            assert!(!is_initiator, "Responder should have is_initiator == false");
-            Some(())
-        }
+            link_id,
+            is_initiator: false,
+        } => Some(link_id),
         _ => None,
     })
     .await
-    .is_some()
 }
 
 /// Wait for a `LinkIdentified` event for a specific link ID.
