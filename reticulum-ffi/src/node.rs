@@ -348,6 +348,18 @@ pub unsafe extern "C" fn lev_builder_enable_transport(
     })
 }
 
+/// Override the link keepalive interval, in seconds, for every link this node
+/// creates. The stale-link timeout scales with it (stale at keepalive*2). The
+/// value is clamped to the protocol minimum. Useful for slow links; with a
+/// short value, `LEV_EVENT_LINK_STALE`/`LINK_RECOVERED` become observable in
+/// seconds. A value of 0 is treated as the protocol minimum.
+#[no_mangle]
+pub unsafe extern "C" fn lev_builder_link_keepalive(b: *mut lev_builder_t, secs: u64) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        with_builder(b, move |nb| nb.link_keepalive(secs))
+    })
+}
+
 /// Set the event-queue capacities for the node's pollable event fd: the
 /// lossless control plane and the droppable data plane. A value of 0 keeps the
 /// current default for that plane.

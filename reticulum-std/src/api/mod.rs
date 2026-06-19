@@ -152,6 +152,14 @@ impl NodeBuilder {
         self
     }
 
+    /// Override the link keepalive interval (seconds) for every link. Shrinks
+    /// the stale-link timeout proportionally; useful for slow links and for
+    /// making stale/recovery observable quickly.
+    pub fn link_keepalive(mut self, secs: u64) -> Self {
+        self.inner = self.inner.link_keepalive(secs);
+        self
+    }
+
     /// Load interface and node configuration from an INI config file, the same
     /// format `rnsd`/`lnsd` use. This brings every interface type, including
     /// RNode and serial, into the node, so a C app can adopt the user's

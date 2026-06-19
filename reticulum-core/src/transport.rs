@@ -334,6 +334,12 @@ pub struct TransportConfig {
     pub max_queued_announces: usize,
     /// Maximum random blobs retained per path entry for replay detection. Default: 64.
     pub max_random_blobs: usize,
+    /// Optional link keepalive interval override in seconds. When set, every
+    /// link created by this node uses this interval (clamped to the protocol
+    /// minimum) instead of the RTT-derived default, and the stale-link timeout
+    /// scales with it. `None` keeps the default RTT-driven behaviour. Local
+    /// timing only; does not change wire format or semantics.
+    pub link_keepalive_secs: Option<u64>,
 }
 
 impl Default for TransportConfig {
@@ -348,6 +354,7 @@ impl Default for TransportConfig {
             announce_rate_penalty_ms: ANNOUNCE_RATE_PENALTY_MS,
             max_queued_announces: MAX_QUEUED_ANNOUNCES_PER_INTERFACE,
             max_random_blobs: MAX_RANDOM_BLOBS,
+            link_keepalive_secs: None,
         }
     }
 }

@@ -113,6 +113,14 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Override the link keepalive interval (seconds) for every link this node
+    /// creates. `None` (default) keeps the RTT-derived interval. Useful for
+    /// slow links and for shrinking the stale-link timeout in tests.
+    pub fn link_keepalive(mut self, secs: Option<u64>) -> Self {
+        self.transport_config.link_keepalive_secs = secs;
+        self
+    }
+
     /// Enable probe responder (rnstransport.probe destination with PROVE_ALL).
     ///
     /// When enabled, the node creates a probe destination from its transport

@@ -207,6 +207,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Create new outgoing link
         let mut link = Link::new_outgoing(dest_hash, &mut self.rng);
+        link.set_keepalive_override(self.transport_config().link_keepalive_secs);
         let packet = link.build_link_request_packet_with_transport(next_hop, hops, hw_mtu);
         link.set_hops(hops);
 
@@ -645,6 +646,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Set attached interface from the receiving interface
         link.set_attached_interface(interface_index);
+        link.set_keepalive_override(self.transport_config().link_keepalive_secs);
 
         // Copy the packet's hop count so establishment_timeout_ms() scales correctly
         link.set_hops(packet.hops);

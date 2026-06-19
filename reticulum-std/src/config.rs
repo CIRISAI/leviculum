@@ -88,6 +88,14 @@ pub struct ReticulumConfig {
     /// small std platforms; servers may raise it.
     #[serde(default = "default_data_channel_capacity")]
     pub data_channel_capacity: usize,
+    /// Optional link keepalive interval override in seconds.
+    ///
+    /// When set, every link uses this interval instead of the RTT-derived
+    /// default, and the stale-link timeout scales with it. Useful for slow
+    /// links. Leviculum tuning extension: local timing only, no wire or
+    /// semantic change. `None` (default) keeps RTT-driven behaviour.
+    #[serde(default)]
+    pub keepalive_interval: Option<u64>,
 }
 
 /// Default interval between periodic storage flushes (seconds)
@@ -141,6 +149,7 @@ impl Default for ReticulumConfig {
             flush_interval_secs: DEFAULT_FLUSH_INTERVAL_SECS,
             control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
+            keepalive_interval: None,
         }
     }
 }

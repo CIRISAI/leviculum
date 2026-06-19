@@ -185,6 +185,11 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
                 config.flush_interval_secs = v;
             }
         }
+        "keepalive_interval" => {
+            if let Ok(v) = value.trim().parse() {
+                config.keepalive_interval = Some(v);
+            }
+        }
         // Tolerate (accept without error) RNS 1.2.2..1.3.5 reticulum-level
         // keys we don't implement: blackhole_update_interval, default_ar_*,
         // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control

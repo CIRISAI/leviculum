@@ -51,6 +51,8 @@ pub struct ReticulumNodeBuilder {
     control_channel_capacity_explicit: Option<usize>,
     /// Explicit data-channel capacity override (takes priority over config)
     data_channel_capacity_explicit: Option<usize>,
+    /// Explicit link keepalive override in seconds (takes priority over config)
+    link_keepalive_secs_explicit: Option<u64>,
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
@@ -83,6 +85,7 @@ impl ReticulumNodeBuilder {
             flush_interval_secs_explicit: None,
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
+            link_keepalive_secs_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
         }
@@ -464,6 +467,16 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Override the link keepalive interval (seconds) for every link.
+    ///
+    /// Takes priority over the config `keepalive_interval`. When unset, the
+    /// RTT-derived default is used. Shrinking it also shrinks the stale-link
+    /// timeout, which is what makes stale/recovery testable in seconds.
+    pub fn link_keepalive(mut self, secs: u64) -> Self {
+        self.link_keepalive_secs_explicit = Some(secs);
+        self
+    }
+
     /// Enable or disable shared instance (local IPC socket).
     ///
     /// When enabled, the daemon listens on an abstract Unix socket for
@@ -637,8 +650,15 @@ impl ReticulumNodeBuilder {
             }
             self.core_builder
         };
+        // Apply link keepalive override: explicit > config value.
+        let link_keepalive_secs = self
+            .link_keepalive_secs_explicit
+            .map(Some)
+            .unwrap_or(config.reticulum.keepalive_interval);
+
         let core_builder = core_builder
             .enable_transport(enable_transport)
+            .link_keepalive(link_keepalive_secs)
             .respond_to_probes(config.reticulum.respond_to_probes);
 
         // Build NodeCore (consumes storage, persistent data already loaded)
