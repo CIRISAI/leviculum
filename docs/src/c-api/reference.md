@@ -156,6 +156,9 @@ int  lev_builder_add_udp(struct lev_builder_t *b, const char *listen_addr, const
 int  lev_builder_add_auto_interface(struct lev_builder_t *b);
 int  lev_builder_enable_transport(struct lev_builder_t *b, int enabled);
 int  lev_builder_event_capacity(struct lev_builder_t *b, uintptr_t control_cap, uintptr_t data_cap);
+int  lev_builder_config_file(struct lev_builder_t *b, const char *path);
+int  lev_builder_share_instance(struct lev_builder_t *b, const char *name);
+int  lev_builder_connect_shared_instance(struct lev_builder_t *b, const char *name);
 struct leviculum_t *lev_builder_build(struct lev_builder_t *b);
 
 int  lev_start(struct leviculum_t *node);
@@ -173,6 +176,18 @@ void lev_free(struct leviculum_t *node);
   `_event_capacity` sets the event-queue sizes (control and data planes; a 0
   keeps the current default). Each setter returns `LEV_ERR_INVALID_ARG` if the
   builder was already consumed.
+- `lev_builder_config_file` loads an RNS-style INI config (the same format
+  `rnsd`/`lnsd` read) from `path`; its `[reticulum]` and `[interfaces]`
+  sections add to whatever the builder set programmatically. Loading a config
+  brings up every interface type it names, including RNode and Serial, so a C
+  node reaches LoRa through a config file.
+- `lev_builder_share_instance` makes the node offer a shared instance under
+  `name`: it opens a local IPC endpoint and the `rnstatus`/`rnpath`/`rnprobe`
+  RPC server, so other local programs (and tools) attach to this one stack.
+- `lev_builder_connect_shared_instance` makes the node a client of a shared
+  instance named `name` instead of bringing up its own interfaces, the way
+  `rncp`/`rnx` attach to a running daemon. A `NULL` path or name returns
+  `LEV_ERR_INVALID_ARG`.
 - `lev_builder_build` produces a `leviculum_t` and empties the builder; you
   still call `lev_builder_free` on the empty handle. `NULL` on failure.
 - `lev_start` spawns the event loop and brings up interfaces; `lev_stop`

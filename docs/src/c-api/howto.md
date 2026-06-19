@@ -98,6 +98,42 @@ two drain functions are single-consumer (one thread at a time); and the
 shutdown order is stop reacting to the fd, then `lev_free`. Reading an event's
 fields uses the typed accessors shown in the recipes below.
 
+## Running as or with a daemon
+
+A node need not bring up its own interfaces in code. Three builder calls cover
+the daemon use cases.
+
+Load an RNS-style config (the same INI `rnsd`/`lnsd` read), so interfaces,
+transport, and the shared instance come from a file an operator edits. This is
+also how a C node reaches LoRa without programmatic radio setup, the config
+names an `RNodeInterface` or `SerialInterface` and the stack brings it up.
+
+```c
+lev_builder_t *b = lev_builder_new();
+lev_builder_config_file(b, "/etc/leviculum/config");
+leviculum_t *node = lev_builder_build(b);
+lev_builder_free(b);
+lev_start(node);   /* now a daemon: run the event loop until signalled */
+```
+
+Offer a shared instance, so other local programs and the Reticulum tools
+(`rnstatus`, `rnpath`, `rnprobe`) attach to this one stack instead of each
+opening the radio:
+
+```c
+lev_builder_share_instance(b, "leviculum");   /* opens the IPC + RPC endpoint */
+```
+
+Or attach to a running daemon as a client, the way `rncp`/`rnx` do, instead of
+bringing up interfaces of your own:
+
+```c
+lev_builder_connect_shared_instance(b, "leviculum");
+```
+
+A `NULL` path or name returns `LEV_ERR_INVALID_ARG`. The `daemon.c` example is
+a worked acceptance program for all three calls.
+
 ## Identities
 
 An identity is a key pair. Generate one, persist it, and reload it next run.

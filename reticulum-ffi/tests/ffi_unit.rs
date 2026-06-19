@@ -284,6 +284,54 @@ fn log_level_validation() {
 }
 
 #[test]
+fn phase1_builder_setters_validate_args() {
+    unsafe {
+        let b = lev_builder_new();
+        assert_eq!(lev_builder_config_file(b, ptr::null()), LEV_ERR_INVALID_ARG);
+        assert_eq!(
+            lev_builder_share_instance(b, ptr::null()),
+            LEV_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            lev_builder_connect_shared_instance(b, ptr::null()),
+            LEV_ERR_INVALID_ARG
+        );
+        let name = cstr("levtest");
+        assert_eq!(lev_builder_share_instance(b, name.as_ptr()), LEV_OK);
+        lev_builder_free(b);
+    }
+}
+
+#[test]
+fn config_file_brings_up_a_node() {
+    unsafe {
+        let dir = tempfile::tempdir().unwrap();
+        let port = support::free_port();
+        let cfg = format!(
+            "[reticulum]\n  enable_transport = no\n\n[interfaces]\n  \
+             [[Test TCP Server]]\n    type = TCPServerInterface\n    enabled = yes\n    \
+             listen_ip = 127.0.0.1\n    listen_port = {port}\n    mode = gateway\n"
+        );
+        let cfg_path = dir.path().join("config");
+        std::fs::write(&cfg_path, cfg).unwrap();
+
+        let b = lev_builder_new();
+        let sp = cstr(dir.path().to_str().unwrap());
+        assert_eq!(lev_builder_storage_path(b, sp.as_ptr()), LEV_OK);
+        let cf = cstr(cfg_path.to_str().unwrap());
+        assert_eq!(lev_builder_config_file(b, cf.as_ptr()), LEV_OK);
+
+        let node = lev_builder_build(b);
+        lev_builder_free(b);
+        assert!(!node.is_null(), "build with config_file: {}", last_error());
+        assert_eq!(lev_start(node), LEV_OK, "start: {}", last_error());
+        assert_eq!(lev_is_running(node), 1);
+        assert_eq!(lev_stop(node), LEV_OK);
+        lev_free(node);
+    }
+}
+
+#[test]
 fn node_null_guards_and_free_null() {
     unsafe {
         assert_eq!(lev_start(ptr::null_mut()), LEV_ERR_NULL_PTR);

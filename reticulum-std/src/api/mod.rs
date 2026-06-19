@@ -110,6 +110,34 @@ impl NodeBuilder {
         self
     }
 
+    /// Load interface and node configuration from an INI config file, the same
+    /// format `rnsd`/`lnsd` use. This brings every interface type, including
+    /// RNode and serial, into the node, so a C app can adopt the user's
+    /// existing Reticulum configuration.
+    pub fn config_file(mut self, path: PathBuf) -> Self {
+        self.inner = self.inner.config_file(path);
+        self
+    }
+
+    /// Run as a shared instance under `name`: expose the local IPC socket and
+    /// the RPC server (so `rnstatus`/`rnpath`/`rnprobe` and other tools can use
+    /// this node's transport), in addition to the node's own interfaces.
+    pub fn share_instance(mut self, name: &str) -> Self {
+        self.inner = self
+            .inner
+            .share_instance(true)
+            .instance_name(name.to_string());
+        self
+    }
+
+    /// Connect to a running shared instance `name` instead of bringing up own
+    /// interfaces, routing everything through that daemon. This is how a
+    /// drop-in tool reuses a host's existing Reticulum stack.
+    pub fn connect_to_shared_instance(mut self, name: &str) -> Self {
+        self.inner = self.inner.connect_to_shared_instance(name);
+        self
+    }
+
     /// Build the node without entering an async context.
     ///
     /// The node is created and its identity loaded or generated, but the event

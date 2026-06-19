@@ -31,7 +31,16 @@ it through the additive facade (`reticulum_std::api`) and the thin C FFI
 
 Effort sizes are rough: S = days, M = one to two weeks, L = more.
 
-## Phase 1: run as or with a daemon (config + shared instance). Size S
+## Phase 1: run as or with a daemon (config + shared instance). Size S. DONE
+
+Shipped: `lev_builder_config_file`, `lev_builder_share_instance`,
+`lev_builder_connect_shared_instance` on the facade and the C FFI; unit and
+in-process integration tests (config-file node bring-up, shared-instance
+announce forwarding); the `daemon.c` acceptance program; the `lnsd.c` C daemon
+with a spawn-and-signal lifecycle test; a `c-api` node type in
+`reticulum-integ` (static `c-lnsd` mounted like `lnsd`, driven by the existing
+tools); ASan/LSan/TSan clean (tokio-reactor false positives scoped out);
+reference and how-to docs.
 
 The highest-leverage, lowest-effort phase. The engine already supports all of
 it (`ReticulumNodeBuilder::config_file`, `share_instance`, `instance_name`,

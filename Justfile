@@ -136,7 +136,7 @@ test-ffi:
 # excluded by filtering to identity/hex/destination.
 sanitize-ffi:
     RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration -- --test-threads=1
-    RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
+    RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0 suppressions={{justfile_directory()}}/reticulum-ffi/tsan-suppressions.txt" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
     MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit identity
     MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit hex
     MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit destination
@@ -148,6 +148,18 @@ build-ffi:
 # `rustup target add aarch64-unknown-linux-gnu` on the build host.
 build-ffi-arm64:
     cargo build-ffi-arm64
+
+# Build the C daemon (examples/c/lnsd.c) as a self-contained binary, linking
+# libleviculum.a statically (glibc stays dynamic, matching the debian-slim
+# integ container). Output: target/release/c-lnsd, the binary the
+# reticulum-integ runner mounts for a `c-api` node.
+build-c-lnsd: build-ffi
+    mkdir -p target/release
+    cc reticulum-ffi/examples/c/lnsd.c \
+       target/x86_64-unknown-linux-gnu/release/libleviculum.a \
+       -I reticulum-ffi -O2 -Wall -Wextra -Werror \
+       -lpthread -ldl -lm \
+       -o target/release/c-lnsd
 
 # Build the leviculum .deb package for amd64. Binaries come from the
 # workspace musl target, so the .deb is fully static and runs on

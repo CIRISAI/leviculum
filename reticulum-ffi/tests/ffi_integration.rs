@@ -321,6 +321,47 @@ fn resource_transfer_accept_app() {
 }
 
 #[test]
+fn shared_instance_forwards_announce() {
+    // A unique abstract-socket name per run (the namespace is machine-wide).
+    let name = format!("levtest-{}", support::free_port());
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let id_ptr = ida.0;
+    let name_c = cstr(&name);
+    let name_ptr = name_c.as_ptr();
+
+    // A offers a shared instance (local IPC socket + RPC).
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
+        assert_eq!(lev_builder_share_instance(b, name_ptr), LEV_OK);
+    });
+    // Let A's local server bind before B connects.
+    std::thread::sleep(Duration::from_millis(400));
+    // B is a client of A's shared instance, no interfaces of its own.
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_connect_shared_instance(b, name_ptr), LEV_OK);
+    });
+
+    let dest = register_single_dest(a.0, id_ptr, "shared", &["test"]);
+    let mut seen = false;
+    for _ in 0..40 {
+        unsafe { lev_announce(a.0, dest.as_ptr(), ptr::null(), 0, 2000) };
+        if let Some(ev) = wait_event(
+            bnode.0,
+            LEV_EVENT_ANNOUNCE_RECEIVED,
+            Duration::from_millis(700),
+        ) {
+            if support::event_dest_hash(&ev) == dest {
+                seen = true;
+                break;
+            }
+        }
+    }
+    assert!(seen, "shared-instance client B never saw A's announce");
+}
+
+#[test]
 fn connect_unknown_destination() {
     let d = tempfile::tempdir().unwrap();
     let node = start_node(d.path(), |_b| {});

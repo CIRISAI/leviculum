@@ -265,11 +265,22 @@ impl TestRunner {
             return Err(RunnerError::BinaryNotFound(proxy_path.clone()));
         }
 
+        // The C daemon is required only when a c-api node is in the scenario.
+        // It is a static binary built by `just build-c-lnsd`.
+        let has_c_api = scenario.nodes.values().any(|n| n.node_type == "c-api");
+        let c_lnsd_path = crate::paths::release_bin(&target_dir, "c-lnsd");
+        if has_c_api && !c_lnsd_path.exists() {
+            return Err(RunnerError::BinaryNotFound(c_lnsd_path.clone()));
+        }
+
         // Freshness check: fail loud if any mounted binary predates HEAD.
         // Opt-out via LEVICULUM_SKIP_FRESHNESS_CHECK=1 for local iteration.
         let mut freshness_targets: Vec<&std::path::Path> = vec![&lnsd_path, &lns_path, &lncp_path];
         if has_proxy {
             freshness_targets.push(&proxy_path);
+        }
+        if has_c_api {
+            freshness_targets.push(&c_lnsd_path);
         }
         crate::paths::check_binary_freshness(&freshness_targets, &repo_root)
             .map_err(|e| RunnerError::StaleBinary(e.to_string()))?;

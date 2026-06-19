@@ -228,6 +228,56 @@ pub unsafe extern "C" fn lev_builder_add_auto_interface(b: *mut lev_builder_t) -
     })
 }
 
+/// Load interface and node configuration from an INI config file (the format
+/// `rnsd`/`lnsd` use), bringing every interface type, including RNode and
+/// serial, into the node.
+#[no_mangle]
+pub unsafe extern "C" fn lev_builder_config_file(
+    b: *mut lev_builder_t,
+    path: *const c_char,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let path = match cstr(path) {
+            Some(p) => PathBuf::from(p),
+            None => return LEV_ERR_INVALID_ARG,
+        };
+        with_builder(b, move |nb| nb.config_file(path))
+    })
+}
+
+/// Run as a shared instance under `name`: expose the local IPC socket and the
+/// RPC server so `rnstatus`/`rnpath`/`rnprobe` and other tools can use this
+/// node's transport.
+#[no_mangle]
+pub unsafe extern "C" fn lev_builder_share_instance(
+    b: *mut lev_builder_t,
+    name: *const c_char,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let name = match cstr(name) {
+            Some(s) => s.to_string(),
+            None => return LEV_ERR_INVALID_ARG,
+        };
+        with_builder(b, move |nb| nb.share_instance(&name))
+    })
+}
+
+/// Connect to a running shared instance `name` instead of bringing up own
+/// interfaces, routing everything through that daemon.
+#[no_mangle]
+pub unsafe extern "C" fn lev_builder_connect_shared_instance(
+    b: *mut lev_builder_t,
+    name: *const c_char,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let name = match cstr(name) {
+            Some(s) => s.to_string(),
+            None => return LEV_ERR_INVALID_ARG,
+        };
+        with_builder(b, move |nb| nb.connect_to_shared_instance(&name))
+    })
+}
+
 /// Enable (`1`) or disable (`0`) transport (relay and routing) mode.
 #[no_mangle]
 pub unsafe extern "C" fn lev_builder_enable_transport(
