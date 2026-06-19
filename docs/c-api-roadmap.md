@@ -130,25 +130,43 @@ Several small, mostly independent items.
   the `PACKET_PROOF_REQUESTED`/`LINK_PROOF_REQUESTED`/`LINK_DELIVERY_CONFIRMED`
   events; additive facade and driver `send_proof`; unit, in-process App/All
   tests, `proof.c`, docs, ASan/TSan/Miri clean.
-- 4d, group destination keys. Size M, lowest priority. BLOCKED on the engine.
-  Verified: the core has the Group destination type but no shared-key crypto
-  (no group-key generation/load, no group AES field, no group encrypt/decrypt
-  branch). Wiring it is core work, not an additive FFI projection, so it is out
-  of scope here until the engine implements group keys; then the FFI is a thin
-  add (set/load group key, mark the destination Group).
+- 4d, group destination keys. Size M, lowest priority. BLOCKED on the engine,
+  tracked in Codeberg #75. Verified: the core has the Group destination type
+  but no shared-key crypto (no group-key generation/load, no group AES field,
+  no group encrypt/decrypt branch), a wire-compatibility gap with Python-RNS
+  GROUP destinations. Wiring it is core work, not an additive FFI projection, so
+  it is out of scope here until the engine implements group keys; then the FFI
+  is a thin add (set/load group key, mark the destination Group).
 
 FFI surface: `lev_identity_sign/verify/encrypt/decrypt`,
 `lev_destination_enable_ratchets`, `lev_destination_set_proof_strategy` plus
 proof events, group-key functions.
 
-## Phase 5: diagnostics. Size M, nice to have
+## Phase 5: diagnostics. Size M, nice to have. DONE
 
-So a C `rnstatus`/`rnpath` is buildable. The data exists
-(`transport_stats`, `path_table_entries`, interface stats) but is excluded from
-the curated facade as internal; re-expose it deliberately and read-only.
+A C `rnstatus`/`rnpath` is buildable. The data existed in the engine but was
+excluded from the curated facade as internal; re-exposed deliberately and
+read-only.
 
-FFI surface: `lev_transport_stats`, `lev_path_table` (snapshot),
-`lev_interface_stats`.
+Shipped:
+- `lev_transport_stats` reads the transport counters and the path-table size
+  into out-parameters (struct-free).
+- `lev_path_table_snapshot`/`_count`/`_entry`/`_free`: an owned, frozen
+  snapshot of the path table read by index (hash, hops, next hop, interface,
+  expiry), for an `rnpath` view.
+- `lev_interface_stats_snapshot`/`_count`/`_name`/`_entry`/`_free`: the same
+  snapshot pattern over interfaces (name, online, is-local-client, rx/tx
+  bytes), for the `rnstatus` interface section. An additive driver method joins
+  the core's names and online status with the I/O byte counters.
+
+Design decision taken: the arrays of structured records use the existing
+opaque-handle plus per-index-accessor pattern (as `lev_event_t` does), so the
+boundary stays struct-free and the snapshots are frozen copies, immune to
+mid-read changes in the live tables.
+
+All with additive facade accessors, unit and in-process tests, the `stats.c`
+acceptance program, docs, and ASan/LSan/TSan clean (the three-lock interface
+join has no lock-order issues).
 
 ## Postponed: LXMF (messaging)
 

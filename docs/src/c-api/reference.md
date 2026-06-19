@@ -28,6 +28,8 @@ Conventions used below:
 | `lev_destination_t` | `lev_destination_new` | `lev_destination_free` | one thread |
 | `lev_link_t` | `lev_connect`, `lev_connect_with_key`, `lev_accept_link` | `lev_link_free` | thread-safe |
 | `lev_event_t` | `lev_next_event`, `lev_wait_event` | `lev_event_free` | one thread |
+| `lev_path_table_t` | `lev_path_table_snapshot` | `lev_path_table_free` | one thread |
+| `lev_interface_stats_t` | `lev_interface_stats_snapshot` | `lev_interface_stats_free` | one thread |
 
 ## Initialisation and logging
 
@@ -459,6 +461,52 @@ int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
 | `LEV_EVENT_PACKET_PROOF_REQUESTED` | 19 | dest_hash, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_PROOF_REQUESTED` | 20 | link_id, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_DELIVERY_CONFIRMED` | 21 | link_id, data (32-byte packet hash) |
+
+## Diagnostics
+
+```c
+int lev_transport_stats(const struct leviculum_t *node,
+                        uint64_t *out_packets_sent, uint64_t *out_packets_received,
+                        uint64_t *out_packets_forwarded, uint64_t *out_announces_processed,
+                        uint64_t *out_packets_dropped, uint64_t *out_path_count);
+
+struct lev_path_table_t *lev_path_table_snapshot(const struct leviculum_t *node);
+int  lev_path_table_count(const struct lev_path_table_t *table);
+int  lev_path_table_entry(const struct lev_path_table_t *table, uintptr_t index,
+                          uint8_t *dest_hash, uint8_t *hops, uint8_t *next_hop,
+                          int *has_next_hop, uint64_t *interface_index, uint64_t *expires_ms);
+void lev_path_table_free(struct lev_path_table_t *table);
+
+struct lev_interface_stats_t *lev_interface_stats_snapshot(const struct leviculum_t *node);
+int  lev_interface_stats_count(const struct lev_interface_stats_t *table);
+int  lev_interface_stats_name(const struct lev_interface_stats_t *table, uintptr_t index,
+                              uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_interface_stats_entry(const struct lev_interface_stats_t *table, uintptr_t index,
+                               int *online, int *is_local_client,
+                               uint64_t *rx_bytes, uint64_t *tx_bytes);
+void lev_interface_stats_free(struct lev_interface_stats_t *table);
+```
+
+- `lev_transport_stats` reads the node's transport counters and the current
+  path-table size into the out-parameters, the basis for an `rnstatus`-style
+  view. Any out-pointer may be `NULL` to skip that counter; a `NULL` node
+  returns `LEV_ERR_NULL_PTR`. The values are a point-in-time snapshot.
+- `lev_path_table_snapshot` returns an owned, frozen copy of the path table for
+  an `rnpath`-style view, or `NULL` on a `NULL` node; free it with
+  `lev_path_table_free` (`NULL` is a no-op). Because it is frozen, reads never
+  race a changing table. `lev_path_table_count` gives the number of entries.
+  `lev_path_table_entry` reads one entry by index into the out-parameters:
+  `dest_hash` and `next_hop` (each at least `LEV_ADDR_LEN` bytes when non-NULL),
+  `hops`, `has_next_hop` (1 for a relayed path, 0 for a direct one),
+  `interface_index`, and `expires_ms`. Any out-pointer may be `NULL`;
+  `LEV_ERR_INVALID_ARG` if `index` is out of range.
+- `lev_interface_stats_snapshot` returns an owned, frozen copy of the interface
+  list for an `rnstatus`-style interface view, freed with
+  `lev_interface_stats_free`. `lev_interface_stats_count` gives the number of
+  interfaces. `lev_interface_stats_name` reads the interface name read(2) style
+  (variable length), and `lev_interface_stats_entry` reads the scalar fields
+  (`online`, `is_local_client`, `rx_bytes`, `tx_bytes`) into out-parameters.
+  Both return `LEV_ERR_INVALID_ARG` for an out-of-range index.
 
 ## Helpers
 

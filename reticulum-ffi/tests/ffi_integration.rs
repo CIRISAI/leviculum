@@ -389,6 +389,178 @@ fn resource_transfer_accept_app() {
 }
 
 #[test]
+fn interface_stats_snapshot_lists_the_tcp_interface() {
+    let p = setup_pair();
+
+    // A runs a TCP server interface; it shows in the snapshot with a name, and
+    // its byte counters move once B has exchanged announces with it.
+    let table = unsafe { lev_interface_stats_snapshot(p.a.0) };
+    assert!(!table.is_null());
+    let count = unsafe { lev_interface_stats_count(table) };
+    assert!(count >= 1, "A should have at least one interface");
+
+    let mut any_named = false;
+    let mut any_traffic = false;
+    for i in 0..count as usize {
+        let name = read2(|b, c, l| unsafe { lev_interface_stats_name(table, i, b, c, l) })
+            .expect("interface name");
+        if !name.is_empty() {
+            any_named = true;
+        }
+        let mut online = 0i32;
+        let mut is_local = 0i32;
+        let mut rx = 0u64;
+        let mut tx = 0u64;
+        assert_eq!(
+            unsafe {
+                lev_interface_stats_entry(table, i, &mut online, &mut is_local, &mut rx, &mut tx)
+            },
+            LEV_OK
+        );
+        assert!(online == 0 || online == 1);
+        if rx > 0 || tx > 0 {
+            any_traffic = true;
+        }
+    }
+    assert!(any_named, "an interface should have a name");
+    assert!(any_traffic, "the TCP link carried bytes");
+
+    unsafe { lev_interface_stats_free(table) };
+}
+
+#[test]
+fn path_table_snapshot_lists_the_learned_path() {
+    let p = setup_pair();
+
+    // B learned a path to A's destination during setup; it shows in the
+    // snapshot with its destination hash and a hop count.
+    let table = unsafe { lev_path_table_snapshot(p.b.0) };
+    assert!(!table.is_null());
+    let count = unsafe { lev_path_table_count(table) };
+    assert!(count >= 1, "snapshot should list at least one path");
+
+    let mut found = false;
+    for i in 0..count as usize {
+        let mut dest = [0u8; 16];
+        let mut hops = 0u8;
+        let mut has_next = 0i32;
+        let mut iface = 0u64;
+        let mut expires = 0u64;
+        assert_eq!(
+            unsafe {
+                lev_path_table_entry(
+                    table,
+                    i,
+                    dest.as_mut_ptr(),
+                    &mut hops,
+                    ptr::null_mut(),
+                    &mut has_next,
+                    &mut iface,
+                    &mut expires,
+                )
+            },
+            LEV_OK
+        );
+        if dest == p.dest {
+            assert!(hops >= 1, "a learned path has at least one hop");
+            assert!(has_next == 0 || has_next == 1);
+            found = true;
+        }
+    }
+    assert!(found, "the snapshot should contain A's destination");
+
+    // Reading past the end is rejected.
+    assert_eq!(
+        unsafe {
+            lev_path_table_entry(
+                table,
+                count as usize,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        LEV_ERR_INVALID_ARG
+    );
+    unsafe { lev_path_table_free(table) };
+}
+
+#[test]
+fn transport_stats_reflect_traffic_and_paths() {
+    let p = setup_pair();
+
+    // B learned a path to A during setup.
+    let mut b_paths = 0u64;
+    unsafe {
+        assert_eq!(
+            lev_transport_stats(
+                p.b.0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut b_paths,
+            ),
+            LEV_OK
+        );
+    }
+    assert!(b_paths >= 1, "B should know at least one path to A");
+
+    // B sends a datagram to A; the counters move on both sides.
+    let data = b"stats";
+    let mut ph = [0u8; 16];
+    assert_eq!(
+        unsafe {
+            lev_send_datagram(
+                p.b.0,
+                p.dest.as_ptr(),
+                data.as_ptr(),
+                data.len(),
+                ph.as_mut_ptr(),
+                3000,
+            )
+        },
+        LEV_OK
+    );
+    wait_event(p.a.0, LEV_EVENT_PACKET_RECEIVED, EV).expect("A receives the datagram");
+
+    let mut b_sent = 0u64;
+    let mut a_received = 0u64;
+    unsafe {
+        assert_eq!(
+            lev_transport_stats(
+                p.b.0,
+                &mut b_sent,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            LEV_OK
+        );
+        assert_eq!(
+            lev_transport_stats(
+                p.a.0,
+                ptr::null_mut(),
+                &mut a_received,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            LEV_OK
+        );
+    }
+    assert!(b_sent > 0, "B sent packets");
+    assert!(a_received > 0, "A received packets");
+}
+
+#[test]
 fn app_proof_strategy_requests_and_sends_proof() {
     let port = support::free_port();
     let da = tempfile::tempdir().unwrap();

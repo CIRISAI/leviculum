@@ -20,6 +20,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Once;
 
 mod destination;
+mod diagnostics;
 mod error;
 mod events;
 mod identity;
@@ -30,6 +31,7 @@ mod request;
 mod resource;
 
 pub use destination::*;
+pub use diagnostics::*;
 pub use error::*;
 pub use events::*;
 pub use identity::*;

@@ -513,6 +513,160 @@ fn phase2_radio_setters_validate_args() {
 }
 
 #[test]
+fn transport_stats_guards_and_bare_node() {
+    unsafe {
+        // NULL node is rejected.
+        let mut v = 0u64;
+        assert_eq!(
+            lev_transport_stats(
+                ptr::null(),
+                &mut v,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            LEV_ERR_NULL_PTR
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let b = lev_builder_new();
+        let sp = cstr(dir.path().to_str().unwrap());
+        assert_eq!(lev_builder_storage_path(b, sp.as_ptr()), LEV_OK);
+        assert_eq!(lev_builder_enable_transport(b, 0), LEV_OK);
+        let node = lev_builder_build(b);
+        lev_builder_free(b);
+        assert!(!node.is_null());
+        assert_eq!(lev_start(node), LEV_OK);
+
+        // All out-pointers NULL is allowed (a no-op query).
+        assert_eq!(
+            lev_transport_stats(
+                node,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            LEV_OK
+        );
+
+        // A fresh node has no paths and has not dropped packets.
+        let mut paths = 99u64;
+        let mut dropped = 99u64;
+        assert_eq!(
+            lev_transport_stats(
+                node,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut dropped,
+                &mut paths,
+            ),
+            LEV_OK
+        );
+        assert_eq!(paths, 0);
+        assert_eq!(dropped, 0);
+
+        lev_stop(node);
+        lev_free(node);
+    }
+}
+
+#[test]
+fn path_table_snapshot_guards_and_empty() {
+    unsafe {
+        // NULL node yields a NULL snapshot; NULL/empty handles are safe.
+        assert!(lev_path_table_snapshot(ptr::null()).is_null());
+        assert_eq!(lev_path_table_count(ptr::null()), 0);
+        lev_path_table_free(ptr::null_mut()); // no-op
+
+        let dir = tempfile::tempdir().unwrap();
+        let b = lev_builder_new();
+        let sp = cstr(dir.path().to_str().unwrap());
+        assert_eq!(lev_builder_storage_path(b, sp.as_ptr()), LEV_OK);
+        assert_eq!(lev_builder_enable_transport(b, 0), LEV_OK);
+        let node = lev_builder_build(b);
+        lev_builder_free(b);
+        assert!(!node.is_null());
+        assert_eq!(lev_start(node), LEV_OK);
+
+        // A fresh node has an empty path table.
+        let table = lev_path_table_snapshot(node);
+        assert!(!table.is_null());
+        assert_eq!(lev_path_table_count(table), 0);
+        // Any index is out of range on an empty snapshot.
+        assert_eq!(
+            lev_path_table_entry(
+                table,
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            LEV_ERR_INVALID_ARG
+        );
+        lev_path_table_free(table);
+
+        lev_stop(node);
+        lev_free(node);
+    }
+}
+
+#[test]
+fn interface_stats_snapshot_guards_and_bare_node() {
+    unsafe {
+        assert!(lev_interface_stats_snapshot(ptr::null()).is_null());
+        assert_eq!(lev_interface_stats_count(ptr::null()), 0);
+        lev_interface_stats_free(ptr::null_mut()); // no-op
+
+        let dir = tempfile::tempdir().unwrap();
+        let b = lev_builder_new();
+        let sp = cstr(dir.path().to_str().unwrap());
+        assert_eq!(lev_builder_storage_path(b, sp.as_ptr()), LEV_OK);
+        assert_eq!(lev_builder_enable_transport(b, 0), LEV_OK);
+        let node = lev_builder_build(b);
+        lev_builder_free(b);
+        assert!(!node.is_null());
+        assert_eq!(lev_start(node), LEV_OK);
+
+        // A node with no interfaces has an empty snapshot; any index is out of
+        // range and the scalar reader rejects it.
+        let table = lev_interface_stats_snapshot(node);
+        assert!(!table.is_null());
+        assert_eq!(lev_interface_stats_count(table), 0);
+        let mut online = 0i32;
+        assert_eq!(
+            lev_interface_stats_entry(
+                table,
+                0,
+                &mut online,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            LEV_ERR_INVALID_ARG
+        );
+        let mut nl = 0usize;
+        assert_eq!(
+            lev_interface_stats_name(table, 0, ptr::null_mut(), 0, &mut nl),
+            LEV_ERR_INVALID_ARG
+        );
+        lev_interface_stats_free(table);
+
+        lev_stop(node);
+        lev_free(node);
+    }
+}
+
+#[test]
 fn config_file_brings_up_a_node() {
     unsafe {
         let dir = tempfile::tempdir().unwrap();

@@ -366,6 +366,22 @@ pub enum ReadyState {
     NotStarted,
 }
 
+/// Read-only snapshot of one interface, for diagnostics. Joins the core's name
+/// and online status with the byte counters from the I/O tasks.
+#[derive(Debug, Clone)]
+pub struct InterfaceStatusSnapshot {
+    /// Human-readable interface name.
+    pub name: String,
+    /// Whether this is a local IPC client interface (shared-instance client).
+    pub is_local_client: bool,
+    /// Whether the interface is currently online.
+    pub online: bool,
+    /// Bytes received on this interface.
+    pub rx_bytes: u64,
+    /// Bytes transmitted on this interface.
+    pub tx_bytes: u64,
+}
+
 /// High-level async Reticulum node
 ///
 /// `ReticulumNode` provides an async API for interacting with the Reticulum
@@ -1485,6 +1501,39 @@ impl ReticulumNode {
     /// Get transport statistics (packets sent, received, forwarded, dropped)
     pub fn transport_stats(&self) -> reticulum_core::transport::TransportStats {
         self.inner.lock().unwrap().transport_stats()
+    }
+
+    /// A read-only snapshot of every interface: its name and online status
+    /// from the core, joined with the byte counters tracked by the I/O tasks.
+    /// Additive; built for diagnostics (an `rnstatus`-style interface view).
+    pub fn interface_stats(&self) -> Vec<InterfaceStatusSnapshot> {
+        use std::sync::atomic::Ordering;
+        // Take the core's name/status list first, then release that lock before
+        // touching the byte/online maps, so the three locks never nest.
+        let entries = { self.inner.lock().unwrap().interface_stats() };
+        let bytes = self.iface_stats_map.lock().unwrap();
+        let online = self.iface_online_map.lock().unwrap();
+        entries
+            .into_iter()
+            .map(|e| {
+                let (rx_bytes, tx_bytes) = bytes
+                    .get(&e.id)
+                    .map(|c| {
+                        (
+                            c.rx_bytes.load(Ordering::Relaxed),
+                            c.tx_bytes.load(Ordering::Relaxed),
+                        )
+                    })
+                    .unwrap_or((0, 0));
+                InterfaceStatusSnapshot {
+                    name: e.name,
+                    is_local_client: e.is_local_client,
+                    online: online.get(&e.id).copied().unwrap_or(true),
+                    rx_bytes,
+                    tx_bytes,
+                }
+            })
+            .collect()
     }
 
     /// Get link statistics for a link

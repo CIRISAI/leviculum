@@ -491,6 +491,39 @@ The callback may run on an internal thread and must not call back into any
 `lev_*` function. For hex display of an address, use `lev_hex_encode` and
 `lev_hex_decode`.
 
+## Diagnostics
+
+For an `rnstatus`-style view, `lev_transport_stats` reads the transport
+counters and the path-table size:
+
+```c
+uint64_t sent, received, dropped, paths;
+lev_transport_stats(node, &sent, &received, NULL, NULL, &dropped, &paths);
+```
+
+Any out-pointer may be `NULL` to skip it.
+
+For an `rnpath`-style listing, take a frozen snapshot of the path table, read
+its entries by index, and free it:
+
+```c
+lev_path_table_t *table = lev_path_table_snapshot(node);
+for (int i = 0; i < lev_path_table_count(table); i++) {
+    uint8_t dest[LEV_ADDR_LEN];
+    uint8_t hops;
+    lev_path_table_entry(table, i, dest, &hops, NULL, NULL, NULL, NULL);
+    /* `dest` reachable in `hops` hops */
+}
+lev_path_table_free(table);
+```
+
+The snapshot is a point-in-time copy, so reads never race a changing table.
+
+Interface stats work the same way (`lev_interface_stats_snapshot` /
+`_count` / `_name` / `_entry` / `_free`), giving each interface's name, online
+status, and byte counters for an `rnstatus`-style interface listing. See
+`reticulum-ffi/examples/c/stats.c`.
+
 ## Putting it together
 
 A typical application wires these into one loop: it loads or generates an

@@ -269,6 +269,29 @@ impl Node {
         self.inner.destination_ratchet_public(dest_hash)
     }
 
+    /// A read-only snapshot of the transport counters (packets sent, received,
+    /// forwarded, announces processed, packets dropped).
+    pub fn transport_stats(&self) -> reticulum_core::transport::TransportStats {
+        self.inner.transport_stats()
+    }
+
+    /// The number of known paths in the path table.
+    pub fn path_count(&self) -> usize {
+        self.inner.path_count()
+    }
+
+    /// A point-in-time snapshot of the path table (one entry per known
+    /// destination), for an `rnpath`-style view.
+    pub fn path_table(&self) -> Vec<reticulum_core::transport::PathTableExport> {
+        self.inner.path_table_entries()
+    }
+
+    /// A read-only snapshot of every interface (name, online status, byte
+    /// counters), for an `rnstatus`-style interface view.
+    pub fn interface_stats(&self) -> Vec<crate::driver::InterfaceStatusSnapshot> {
+        self.inner.interface_stats()
+    }
+
     /// The cached identity for a destination, learned from an announce.
     pub fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity> {
         self.inner.get_identity(dest_hash)
