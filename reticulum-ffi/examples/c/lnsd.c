@@ -7,7 +7,7 @@
  * Reticulum tools drive this daemon over `docker exec` or a local socket. This
  * is the C node used as the `c-api` type in the reticulum-integ mesh.
  *
- * Usage: c-lnsd --config <dir>   (default: ./.reticulum)
+ * Usage: c-lnsd [--config <dir>] [-v|-vv|-q|-qq]   (config default: ./.reticulum)
  *
  * Build (static, self-contained), see the `build-c-lnsd` Just recipe:
  *   cargo build-ffi --release
@@ -38,18 +38,31 @@ static void log_sink(int level, const char *msg, void *user) {
 
 int main(int argc, char **argv) {
     const char *config_dir = "./.reticulum";
-    for (int i = 1; i < argc - 1; i++) {
-        if (strcmp(argv[i], "--config") == 0 || strcmp(argv[i], "-c") == 0) {
-            config_dir = argv[i + 1];
+    int level = LEV_LOG_INFO;
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "--config") == 0 || strcmp(argv[i], "-c") == 0) &&
+            i < argc - 1) {
+            config_dir = argv[++i];
+        } else if (strcmp(argv[i], "-v") == 0) {
+            level = LEV_LOG_DEBUG;
+        } else if (strcmp(argv[i], "-vv") == 0) {
+            level = LEV_LOG_TRACE;
+        } else if (strcmp(argv[i], "-q") == 0) {
+            level = LEV_LOG_WARN;
+        } else if (strcmp(argv[i], "-qq") == 0) {
+            level = LEV_LOG_ERROR;
         }
     }
 
     char config_path[1024];
     snprintf(config_path, sizeof(config_path), "%s/config", config_dir);
+    /* Match rnsd/lnsd: state lives under <config>/storage, not <config>. */
+    char storage_path[1024];
+    snprintf(storage_path, sizeof(storage_path), "%s/storage", config_dir);
 
     lev_init();
     lev_log_set_callback(log_sink, NULL);
-    lev_log_set_level(LEV_LOG_INFO);
+    lev_log_set_level(level);
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -59,7 +72,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "c-lnsd: out of memory\n");
         return 1;
     }
-    int rc = lev_builder_storage_path(b, config_dir);
+    int rc = lev_builder_storage_path(b, storage_path);
     if (rc == LEV_OK) {
         rc = lev_builder_config_file(b, config_path);
     }
