@@ -576,13 +576,18 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// was detected (channel busy), false if clear. Blocks until CadDone IRQ.
     /// Exit mode 0x00 leaves the chip in STBY_RC regardless of result.
     pub async fn cad(&mut self, sf: u8) -> Result<bool, Error> {
-        // Datasheet Table 13-81 recommended cadDetPeak values per SF
+        // Datasheet Table 13-81 recommended cadDetPeak values per SF.
+        // cadSymbolNum: 0x02 = 4 symbols, 0x03 = 8 symbols. For sf>=10 the
+        // packet airtime is long (SF10 ~2.7s) and a 4-symbol CAD window usually
+        // misses an in-progress peer transmission, so both nodes transmit and
+        // collide. Listen over 8 symbols at slow SF to span more of the peer's
+        // airtime and detect "busy" reliably. cadDetPeak unchanged.
         let (cad_sym_num, cad_det_peak) = match sf {
             7 | 8 => (0x02, 0x16),
             9 => (0x02, 0x17),
-            10 => (0x02, 0x18),
-            11 => (0x02, 0x19),
-            12 => (0x02, 0x1A),
+            10 => (0x03, 0x18),
+            11 => (0x03, 0x19),
+            12 => (0x03, 0x1A),
             _ => (0x02, 0x16),
         };
         let cad_det_min = 0x0A;
