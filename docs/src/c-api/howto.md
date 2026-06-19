@@ -180,7 +180,28 @@ rarely split it by hand, because `lev_connect` resolves the signing key for
 you (see below). Use `lev_builder_identity(b, id)` to give a node a fixed
 identity, and `lev_identity_free(id)` when done.
 
-Full program: `reticulum-ffi/examples/c/phase_a.c`.
+An identity also signs, verifies, encrypts, and decrypts directly, for crypto
+tooling and signed application data, interoperable with Python peers (Ed25519
+for signatures, X25519+AES for encryption):
+
+```c
+uint8_t sig[64];
+uintptr_t n = sizeof(sig);
+lev_identity_sign(id, msg, msg_len, sig, sizeof(sig), &n);
+int ok = lev_identity_verify(id, msg, msg_len, sig, n);   /* 1 valid, 0 not */
+
+/* Encrypt to a peer's public-only identity; only its private key recovers it. */
+uint8_t ct[512];
+uintptr_t ctl = sizeof(ct);
+lev_identity_encrypt(peer, msg, msg_len, ct, sizeof(ct), &ctl);
+```
+
+Sign, encrypt, and decrypt write read(2) style (a NULL buffer queries the
+length); signing and decryption need the private key and return
+`LEV_ERR_CRYPTO` on a public-only identity, while verify needs only the public
+key.
+
+Full programs: `reticulum-ffi/examples/c/phase_a.c` and `crypto.c`.
 
 ## Announcing and discovering
 

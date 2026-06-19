@@ -117,6 +117,10 @@ int  lev_identity_hash(const struct lev_identity_t *id, uint8_t *buf, uintptr_t 
 int  lev_identity_public_key(const struct lev_identity_t *id, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
 int  lev_identity_private_key(const struct lev_identity_t *id, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
 int  lev_identity_has_private_keys(const struct lev_identity_t *id);
+int  lev_identity_sign(const struct lev_identity_t *id, const uint8_t *msg, uintptr_t msg_len, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_identity_verify(const struct lev_identity_t *id, const uint8_t *msg, uintptr_t msg_len, const uint8_t *sig, uintptr_t sig_len);
+int  lev_identity_encrypt(const struct lev_identity_t *id, const uint8_t *plaintext, uintptr_t plaintext_len, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
+int  lev_identity_decrypt(const struct lev_identity_t *id, const uint8_t *ciphertext, uintptr_t ciphertext_len, uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
 ```
 
 - `lev_identity_generate` makes a new random full identity; `NULL` on failure.
@@ -132,6 +136,17 @@ int  lev_identity_has_private_keys(const struct lev_identity_t *id);
   `LEV_ERR_CRYPTO` for a public-only identity). All read(2) style.
 - `lev_identity_has_private_keys` returns 1 for a full identity, 0 otherwise
   (and 0 on `NULL`).
+- `lev_identity_sign` writes the 64-byte Ed25519 signature of `msg` read(2)
+  style; `LEV_ERR_CRYPTO` if the identity is public-only. `lev_identity_verify`
+  returns 1 if the signature is valid, 0 if not (including a wrong-length
+  signature), and a negative `LEV_ERR_*` on a NULL argument; it needs only the
+  public key.
+- `lev_identity_encrypt` encrypts `plaintext` to the identity's public key
+  (the Reticulum X25519+AES scheme) and writes the ciphertext read(2) style;
+  encryption is randomised, so a length query and the real call differ in bytes
+  but not length. `lev_identity_decrypt` reverses it with the private key and
+  returns `LEV_ERR_CRYPTO` for a public-only identity or a ciphertext that
+  fails to authenticate.
 
 Every returned `lev_identity_t` is owned by the caller and freed with
 `lev_identity_free`.

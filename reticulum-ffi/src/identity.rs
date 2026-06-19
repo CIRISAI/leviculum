@@ -235,3 +235,145 @@ pub unsafe extern "C" fn lev_identity_load_file(path: *const c_char) -> *mut lev
         }
     })
 }
+
+/// Build a slice from a (ptr, len) pair; an empty length yields an empty slice
+/// even for a NULL pointer, otherwise NULL is rejected by the caller.
+unsafe fn bytes<'a>(data: *const u8, len: usize) -> Option<&'a [u8]> {
+    if len == 0 {
+        Some(&[])
+    } else if data.is_null() {
+        None
+    } else {
+        Some(std::slice::from_raw_parts(data, len))
+    }
+}
+
+/// Sign `msg` with the identity's Ed25519 private key. Writes the 64-byte
+/// signature read(2) style (NULL `buf` queries the length). `LEV_ERR_CRYPTO`
+/// if the identity has no private key.
+#[no_mangle]
+pub unsafe extern "C" fn lev_identity_sign(
+    id: *const lev_identity_t,
+    msg: *const u8,
+    msg_len: usize,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let id = match id.as_ref() {
+            Some(id) => id,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let msg = match bytes(msg, msg_len) {
+            Some(m) => m,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match id.inner.sign(msg) {
+            Ok(sig) => write_out(&sig, buf, cap, out_len),
+            Err(e) => {
+                set_last_error(format!("{e:?}"));
+                LEV_ERR_CRYPTO
+            }
+        }
+    })
+}
+
+/// Verify `sig` over `msg` against the identity's Ed25519 public key. Returns 1
+/// if valid, 0 if the signature does not match, and a negative `LEV_ERR_*` on a
+/// NULL argument or a malformed signature.
+#[no_mangle]
+pub unsafe extern "C" fn lev_identity_verify(
+    id: *const lev_identity_t,
+    msg: *const u8,
+    msg_len: usize,
+    sig: *const u8,
+    sig_len: usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let id = match id.as_ref() {
+            Some(id) => id,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let msg = match bytes(msg, msg_len) {
+            Some(m) => m,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let sig = match bytes(sig, sig_len) {
+            Some(s) => s,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match id.inner.verify(msg, sig) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(e) => {
+                set_last_error(format!("{e:?}"));
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Encrypt `plaintext` to the identity's public key (X25519 + AES, the
+/// Reticulum scheme). Writes the ciphertext read(2) style (NULL `buf` queries
+/// the length). Encryption is randomised, so a length query and the real call
+/// produce different bytes of the same length; size from the query, then call
+/// again with a buffer.
+#[no_mangle]
+pub unsafe extern "C" fn lev_identity_encrypt(
+    id: *const lev_identity_t,
+    plaintext: *const u8,
+    plaintext_len: usize,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let id = match id.as_ref() {
+            Some(id) => id,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let plaintext = match bytes(plaintext, plaintext_len) {
+            Some(p) => p,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match id.inner.encrypt(plaintext, &mut rand_core::OsRng) {
+            Ok(ct) => write_out(&ct, buf, cap, out_len),
+            Err(e) => {
+                set_last_error(format!("{e:?}"));
+                LEV_ERR_CRYPTO
+            }
+        }
+    })
+}
+
+/// Decrypt `ciphertext` with the identity's X25519 private key. Writes the
+/// plaintext read(2) style (NULL `buf` queries the length). `LEV_ERR_CRYPTO` if
+/// the identity has no private key or the ciphertext fails to authenticate.
+#[no_mangle]
+pub unsafe extern "C" fn lev_identity_decrypt(
+    id: *const lev_identity_t,
+    ciphertext: *const u8,
+    ciphertext_len: usize,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let id = match id.as_ref() {
+            Some(id) => id,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        let ciphertext = match bytes(ciphertext, ciphertext_len) {
+            Some(c) => c,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match id.inner.decrypt(ciphertext) {
+            Ok(pt) => write_out(&pt, buf, cap, out_len),
+            Err(e) => {
+                set_last_error(format!("{e:?}"));
+                LEV_ERR_CRYPTO
+            }
+        }
+    })
+}

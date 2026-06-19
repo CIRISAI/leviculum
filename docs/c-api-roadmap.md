@@ -118,9 +118,9 @@ the test daemon already uses).
 
 Several small, mostly independent items.
 
-- 4a, identity sign/verify/encrypt/decrypt. Size S. Present in core (four
-  functions), dropped in the v1 cut; re-expose. For crypto tooling and signed
-  `app_data`.
+- 4a, identity sign/verify/encrypt/decrypt. Size S. DONE. Re-exposed as
+  `lev_identity_sign/_verify/_encrypt/_decrypt`; unit round-trip, Python
+  Ed25519 verify interop, `crypto.c`, docs, Miri clean.
 - 4b, ratchets (forward secrecy on destinations). Size M. Core supports
   `enable_ratchets`, `current_ratchet_public`, signed serialization. For
   security parity with Python peers that use ratchets.

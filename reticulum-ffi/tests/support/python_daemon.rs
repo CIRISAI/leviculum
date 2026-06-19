@@ -151,6 +151,22 @@ impl PyDaemon {
             .unwrap_or(false)
     }
 
+    /// Verify an Ed25519 signature with the reference implementation. All
+    /// arguments are hex; the public key is the 64-byte identity public key.
+    pub fn verify_signature(&self, public_key: &str, message: &str, signature: &str) -> bool {
+        self.result(
+            "verify_signature",
+            serde_json::json!({
+                "public_key": public_key,
+                "message": message,
+                "signature": signature,
+            }),
+        )
+        .get("valid")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    }
+
     /// Link hashes currently known to the daemon (hex).
     pub fn link_hashes(&self) -> Vec<String> {
         let r = self.result("get_links", serde_json::json!({}));

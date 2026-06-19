@@ -370,6 +370,17 @@ class TestDaemon:
                 }
             }
 
+        elif method == "verify_signature":
+            # Verify an Ed25519 signature made elsewhere (e.g. the C API) using
+            # the public key. public_key, message and signature are hex.
+            public_key = bytes.fromhex(params.get("public_key", ""))
+            message = bytes.fromhex(params.get("message", ""))
+            signature = bytes.fromhex(params.get("signature", ""))
+            identity = RNS.Identity(create_keys=False)
+            identity.load_public_key(public_key)
+            valid = bool(identity.validate(signature, message))
+            return {"result": {"valid": valid}}
+
         elif method == "register_echo_request_handler":
             # Register an echo request handler on a destination
             dest_hash = params.get("dest_hash")

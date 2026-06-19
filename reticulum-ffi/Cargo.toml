@@ -20,6 +20,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 libc = { workspace = true }
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
 
 [dev-dependencies]
 serde_json = "1"

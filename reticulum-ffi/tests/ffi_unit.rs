@@ -303,6 +303,105 @@ fn phase1_builder_setters_validate_args() {
 }
 
 #[test]
+fn identity_crypto_sign_verify_encrypt_decrypt() {
+    unsafe {
+        let id = Identity::generate();
+        let msg = b"the quick brown fox";
+
+        // Sign, then verify the signature round-trips.
+        let sig = read2(|b, c, l| lev_identity_sign(id.0, msg.as_ptr(), msg.len(), b, c, l))
+            .expect("sign");
+        assert_eq!(sig.len(), 64);
+        assert_eq!(
+            lev_identity_verify(id.0, msg.as_ptr(), msg.len(), sig.as_ptr(), sig.len()),
+            1
+        );
+        // A tampered message or signature does not verify.
+        let bad = b"the quick brown FOX";
+        assert_eq!(
+            lev_identity_verify(id.0, bad.as_ptr(), bad.len(), sig.as_ptr(), sig.len()),
+            0
+        );
+        let mut sig2 = sig.clone();
+        sig2[0] ^= 0xFF;
+        assert_eq!(
+            lev_identity_verify(id.0, msg.as_ptr(), msg.len(), sig2.as_ptr(), sig2.len()),
+            0
+        );
+        // A wrong-length signature simply does not verify (0), never a panic.
+        assert_eq!(
+            lev_identity_verify(id.0, msg.as_ptr(), msg.len(), sig.as_ptr(), 10),
+            0
+        );
+
+        // A public-only identity can verify but cannot sign.
+        let pubkey = read2(|b, c, l| lev_identity_public_key(id.0, b, c, l)).expect("public key");
+        let pub_only = Identity(lev_identity_from_public_key(pubkey.as_ptr(), pubkey.len()));
+        assert!(!pub_only.0.is_null());
+        assert_eq!(
+            lev_identity_verify(pub_only.0, msg.as_ptr(), msg.len(), sig.as_ptr(), sig.len()),
+            1
+        );
+        let mut nl = 0usize;
+        assert_eq!(
+            lev_identity_sign(
+                pub_only.0,
+                msg.as_ptr(),
+                msg.len(),
+                ptr::null_mut(),
+                0,
+                &mut nl
+            ),
+            LEV_ERR_CRYPTO
+        );
+
+        // Encrypt to the public key; only the private-key holder decrypts.
+        let ct =
+            read2(|b, c, l| lev_identity_encrypt(pub_only.0, msg.as_ptr(), msg.len(), b, c, l))
+                .expect("encrypt");
+        assert!(ct.len() >= 96, "ciphertext carries the scheme overhead");
+        let pt = read2(|b, c, l| lev_identity_decrypt(id.0, ct.as_ptr(), ct.len(), b, c, l))
+            .expect("decrypt");
+        assert_eq!(pt, msg);
+        assert_eq!(
+            read2(|b, c, l| lev_identity_decrypt(pub_only.0, ct.as_ptr(), ct.len(), b, c, l))
+                .unwrap_err(),
+            LEV_ERR_CRYPTO
+        );
+        let junk = [0u8; 100];
+        assert_eq!(
+            read2(|b, c, l| lev_identity_decrypt(id.0, junk.as_ptr(), junk.len(), b, c, l))
+                .unwrap_err(),
+            LEV_ERR_CRYPTO
+        );
+
+        // NULL-identity guards.
+        let mut l0 = 0usize;
+        assert_eq!(
+            lev_identity_sign(
+                ptr::null(),
+                msg.as_ptr(),
+                msg.len(),
+                ptr::null_mut(),
+                0,
+                &mut l0
+            ),
+            LEV_ERR_NULL_PTR
+        );
+        assert_eq!(
+            lev_identity_verify(
+                ptr::null(),
+                msg.as_ptr(),
+                msg.len(),
+                sig.as_ptr(),
+                sig.len()
+            ),
+            LEV_ERR_NULL_PTR
+        );
+    }
+}
+
+#[test]
 fn phase2_radio_setters_validate_args() {
     unsafe {
         let b = lev_builder_new();

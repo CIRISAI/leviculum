@@ -147,6 +147,43 @@ fn c_links_to_python_and_exchanges_data() {
     assert_eq!(event_data(&ev), b"from-py");
 }
 
+/// A signature made by the C API verifies under the Python reference
+/// implementation, proving Ed25519 cross-implementation compatibility for
+/// signed app data and crypto tooling.
+#[test]
+fn c_signature_verifies_under_python() {
+    let Some(py) = PyDaemon::start() else {
+        return;
+    };
+    let id = Identity::generate();
+    let message = b"interop-signed-payload";
+
+    let pubkey = support::read2(|b, c, l| unsafe { lev_identity_public_key(id.0, b, c, l) })
+        .expect("public key");
+    let sig = support::read2(|b, c, l| unsafe {
+        lev_identity_sign(id.0, message.as_ptr(), message.len(), b, c, l)
+    })
+    .expect("sign");
+
+    assert!(
+        py.verify_signature(
+            &hex::encode(&pubkey),
+            &hex::encode(message),
+            &hex::encode(&sig)
+        ),
+        "Python rejected a valid C signature"
+    );
+    // A tampered message must not verify.
+    assert!(
+        !py.verify_signature(
+            &hex::encode(&pubkey),
+            &hex::encode(b"interop-signed-payloaX"),
+            &hex::encode(&sig)
+        ),
+        "Python accepted a signature over the wrong message"
+    );
+}
+
 /// The reliable channel interoperates with Python's `RawBytesMessage`. With
 /// `--echo-channel` the daemon echoes every channel message back over the
 /// channel, so a C `lev_link_send` returns as a sequenced LINK_MESSAGE with
