@@ -15,12 +15,16 @@ fn run_with_stdin(args: &[&str], input: &str) -> (String, String, i32) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn jl");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .expect("write stdin");
+    // The child may exit before consuming all of stdin (e.g. it rejects a
+    // malformed --filter argument up front, closing its stdin). A broken pipe
+    // here is therefore expected, not a test failure; surface any other error.
+    if let Err(e) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+        assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "write stdin failed: {e}"
+        );
+    }
     let out = child.wait_with_output().expect("wait jl");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
