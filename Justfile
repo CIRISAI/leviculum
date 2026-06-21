@@ -69,10 +69,10 @@ fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Runs in background
 # after every commit via the post-commit hook.
-# Tier 1 (~15 min): Tier 0 + core/tests + ffi + proxy + rnsd_interop.
-standard: fast
+# Tier 1 (~15 min): Tier 0 + core/tests + ffi (incl. C-program + Python interop)
+# + proxy + rnsd_interop.
+standard: fast test-ffi verify-packaging
     cargo test -p reticulum-core --tests
-    cargo test -p reticulum-ffi
     cargo test -p reticulum-proxy
     cargo test -p reticulum-std --test rnsd_interop
     cargo test -p reticulum-std --test event_log_subscriber -- --test-threads=1
@@ -117,13 +117,69 @@ nightly: extensive
 # deliberately overrides the workspace musl default — see the comment
 # in .cargo/config.toml. cbindgen regenerates reticulum.h as a side
 # effect of the build.rs.
+# Comprehensive C API test suite on the glibc target: the Rust unit,
+# integration, and Python-interop suites plus the C acceptance programs linked
+# against the real cdylib. Builds the debug glibc cdylib first, because once
+# the crate has an rlib `cargo test` no longer builds the cdylib, and the
+# C-program harness needs libleviculum.so to link and run. The Python interop
+# tests skip cleanly if Python RNS is unavailable.
+test-ffi:
+    cargo build -p reticulum-ffi --target x86_64-unknown-linux-gnu
+    cargo test-ffi
+
+# Memory- and race-check the C API under sanitizers and Miri. On demand, not in
+# the standard tiers: it needs the nightly toolchain
+# (`rustup toolchain install nightly --component rust-src miri`) and is heavy,
+# since -Zbuild-std rebuilds std and every dependency with instrumentation
+# (several GB of target per sanitizer). AddressSanitizer (+ LeakSanitizer) and
+# ThreadSanitizer run the in-process two-node integration suite, covering the
+# handle lifecycle, the eventfd bridge, and the two-runtime threading; ASan also
+# runs the property suite, where randomised buffer sizes stress the read(2)
+# protocol for overflows. Miri
+# checks the pure unsafe marshalling paths (buffer read(2), handle boxing,
+# char** aspects); it cannot run tokio or real I/O, so node/network tests are
+# excluded by filtering to identity/hex/destination.
+sanitize-ffi:
+    RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration --test ffi_property -- --test-threads=1
+    RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0 suppressions={{justfile_directory()}}/reticulum-ffi/tsan-suppressions.txt" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit identity
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit hex
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit destination
+
 build-ffi:
     cargo build-ffi
+
+# Verify libleviculum installs and links like a standard Unix C library: a
+# staged `make install` produces the SONAME symlink chain, header, static
+# archive, and pkg-config file, and a consumer compiles, links, and runs
+# against it purely through pkg-config, both dynamically and statically.
+# Catches a renamed export breaking the header, a wrong .pc, a missing soname,
+# or a load failure. Part of Tier 1.
+verify-packaging:
+    bash scripts/verify-packaging.sh
+
+# Same end-to-end packaging check for the aarch64 cross build: cross-compiles
+# the consumer and runs it under qemu. Skips cleanly if the cross toolchain
+# (rustup target + gcc-aarch64-linux-gnu + qemu-user-static) is absent.
+verify-packaging-arm64:
+    bash scripts/verify-packaging.sh aarch64-unknown-linux-gnu
 
 # Same for ARM64. Requires `sudo apt install gcc-aarch64-linux-gnu` and
 # `rustup target add aarch64-unknown-linux-gnu` on the build host.
 build-ffi-arm64:
     cargo build-ffi-arm64
+
+# Build the C daemon (examples/c/lnsd.c) as a self-contained binary, linking
+# libleviculum.a statically (glibc stays dynamic, matching the debian-slim
+# integ container). Output: target/release/c-lnsd, the binary the
+# reticulum-integ runner mounts for a `c-api` node.
+build-c-lnsd: build-ffi
+    mkdir -p target/release
+    cc reticulum-ffi/examples/c/lnsd.c \
+       target/x86_64-unknown-linux-gnu/release/libleviculum.a \
+       -I reticulum-ffi -O2 -Wall -Wextra -Werror \
+       -lpthread -ldl -lm \
+       -o target/release/c-lnsd
 
 # Local .deb production, mirroring .woodpecker/nightly.yml (build-amd64 +
 # build-arm64). Use to build a master .deb by hand for the aarch64 soak

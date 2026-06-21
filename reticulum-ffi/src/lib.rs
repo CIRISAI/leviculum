@@ -1,368 +1,213 @@
-//! C-API/FFI bindings for reticulum
+//! C API for Leviculum.
 //!
-//! This crate provides a C-compatible API for using reticulum from
-//! other programming languages. The API follows these conventions:
+//! A thin, Unix-idiomatic C surface over the curated `reticulum_std::api`
+//! facade. Conventions:
 //!
-//! - All functions are prefixed with `lns_` (reticulum namespace)
-//! - Opaque pointers are used for complex types
-//! - Error codes are returned as integers
-//! - Strings are passed as null-terminated C strings
-//! - Memory allocated by the library must be freed using the corresponding free function
+//! - Every symbol is prefixed `lev_` (functions) or `LEV_` (constants).
+//! - Complex objects are opaque handles with a `_free` counterpart.
+//! - Functions return `int`: `0` success, negative `LEV_ERR_*` on failure.
+//! - Output buffers are caller-owned, read(2) style (`buf` + `cap` + `out_len`).
+//! - No panic ever crosses the boundary; every function runs under [`guard`].
+//!
+//! The design of record is `docs/leviculum-api-design.md`.
 
+#![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 #![warn(unreachable_pub)]
 
-use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
-use std::ptr;
+use std::panic::AssertUnwindSafe;
+use std::sync::Once;
 
-use reticulum_core::constants::TRUNCATED_HASHBYTES;
+mod destination;
+mod diagnostics;
+mod error;
+mod events;
+mod identity;
+mod link;
+mod log;
+mod node;
+mod request;
+mod resource;
 
-// Error codes
-pub const LNS_OK: c_int = 0;
-pub const LNS_ERR_NULL_PTR: c_int = -1;
-pub const LNS_ERR_INVALID_ARG: c_int = -2;
-pub const LNS_ERR_INIT_FAILED: c_int = -3;
-pub const LNS_ERR_NOT_RUNNING: c_int = -4;
-pub const LNS_ERR_ALREADY_RUNNING: c_int = -5;
-pub const LNS_ERR_IO: c_int = -6;
-pub const LNS_ERR_CRYPTO: c_int = -7;
-pub const LNS_ERR_BUFFER_TOO_SMALL: c_int = -8;
+pub use destination::*;
+pub use diagnostics::*;
+pub use error::*;
+pub use events::*;
+pub use identity::*;
+pub use link::*;
+pub use log::*;
+pub use node::*;
+pub use request::*;
+pub use resource::*;
 
-/// Opaque handle to a Reticulum instance
-pub struct LnsReticulum {
-    // Will hold the actual Reticulum instance and runtime
-    _runtime: tokio::runtime::Runtime,
-    // instance: reticulum_std::Reticulum,
+/// Runs process-global setup exactly once.
+static INIT: Once = Once::new();
+
+/// Ensure one-time process setup has run: install the logging subscriber and
+/// panic hook. Idempotent and thread-safe; the lazy path taken by other entry
+/// points goes through the same `Once` as the explicit `lev_init`.
+pub(crate) fn ensure_init() {
+    INIT.call_once(log::install);
 }
 
-/// Opaque handle to an Identity
-pub struct LnsIdentity {
-    inner: reticulum_core::Identity,
-}
-
-/// Opaque handle to a Destination
-pub struct LnsDestination {
-    // Will hold the actual Destination
-    _placeholder: (),
-}
-
-/// Initialize the library (call once at startup)
+/// Perform one-time process setup (logging subscriber, panic hook).
+///
+/// Idempotent and safe to call from multiple threads. Optional: other entry
+/// points run it lazily, but call it explicitly to configure logging before
+/// the first node is built.
 #[no_mangle]
-pub extern "C" fn lns_init() -> c_int {
-    // Initialize logging, etc.
-    LNS_OK
+pub extern "C" fn lev_init() -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        ensure_init();
+        LEV_OK
+    })
 }
 
-/// Get the library version string
-#[no_mangle]
-pub extern "C" fn lns_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.1.0\0";
-    VERSION.as_ptr() as *const c_char
-}
-
-// --- Identity functions ---
-
-/// Create a new random identity
-#[no_mangle]
-pub extern "C" fn lns_identity_new() -> *mut LnsIdentity {
-    let identity = reticulum_core::Identity::generate(&mut rand_core::OsRng);
-    Box::into_raw(Box::new(LnsIdentity { inner: identity }))
-}
-
-/// Free an identity
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_free(identity: *mut LnsIdentity) {
-    if !identity.is_null() {
-        drop(Box::from_raw(identity));
-    }
-}
-
-/// Get the identity hash (16 bytes)
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_hash(
-    identity: *const LnsIdentity,
-    out_hash: *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if identity.is_null() || out_hash.is_null() || out_len.is_null() {
-        return LNS_ERR_NULL_PTR;
-    }
-
-    let identity = &(*identity).inner;
-    let hash = identity.hash();
-
-    if *out_len < TRUNCATED_HASHBYTES {
-        *out_len = TRUNCATED_HASHBYTES;
-        return LNS_ERR_BUFFER_TOO_SMALL;
-    }
-
-    ptr::copy_nonoverlapping(hash.as_ptr(), out_hash, TRUNCATED_HASHBYTES);
-    *out_len = TRUNCATED_HASHBYTES;
-
-    LNS_OK
-}
-
-/// Get the public key bytes (64 bytes)
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_public_key(
-    identity: *const LnsIdentity,
-    out_key: *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if identity.is_null() || out_key.is_null() || out_len.is_null() {
-        return LNS_ERR_NULL_PTR;
-    }
-
-    let identity = &(*identity).inner;
-    let key = identity.public_key_bytes();
-
-    if *out_len < key.len() {
-        *out_len = key.len();
-        return LNS_ERR_BUFFER_TOO_SMALL;
-    }
-
-    ptr::copy_nonoverlapping(key.as_ptr(), out_key, key.len());
-    *out_len = key.len();
-
-    LNS_OK
-}
-
-/// Sign a message
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_sign(
-    identity: *const LnsIdentity,
-    message: *const u8,
-    message_len: usize,
-    out_signature: *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if identity.is_null() || message.is_null() || out_signature.is_null() || out_len.is_null() {
-        return LNS_ERR_NULL_PTR;
-    }
-
-    let identity = &(*identity).inner;
-    let message = std::slice::from_raw_parts(message, message_len);
-
-    match identity.sign(message) {
-        Ok(sig) => {
-            if *out_len < sig.len() {
-                *out_len = sig.len();
-                return LNS_ERR_BUFFER_TOO_SMALL;
-            }
-            ptr::copy_nonoverlapping(sig.as_ptr(), out_signature, sig.len());
-            *out_len = sig.len();
-            LNS_OK
+/// Run an FFI body under `catch_unwind`, converting a panic into `default`.
+///
+/// Unwinding into C is undefined behaviour, so every `extern "C"` function
+/// wraps its body in this guard. `default` is `LEV_ERR_PANIC` for the int
+/// returning functions and a null pointer for constructors.
+pub(crate) fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(_) => {
+            // Allocation-free: a panic handler must not do work that could
+            // itself panic (e.g. allocate after an allocation failure).
+            error::set_last_error_static(c"panic in libleviculum");
+            default
         }
-        Err(_) => LNS_ERR_CRYPTO,
     }
 }
 
-/// Verify a signature
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_verify(
-    identity: *const LnsIdentity,
-    message: *const u8,
-    message_len: usize,
-    signature: *const u8,
-    signature_len: usize,
-) -> c_int {
-    if identity.is_null() || message.is_null() || signature.is_null() {
-        return LNS_ERR_NULL_PTR;
-    }
-
-    let identity = &(*identity).inner;
-    let message = std::slice::from_raw_parts(message, message_len);
-    let signature = std::slice::from_raw_parts(signature, signature_len);
-
-    match identity.verify(message, signature) {
-        Ok(true) => LNS_OK,
-        Ok(false) | Err(_) => LNS_ERR_CRYPTO,
-    }
-}
-
-/// Load identity from private key bytes (64 bytes)
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_from_private_key(
-    key: *const u8,
-    key_len: usize,
-) -> *mut LnsIdentity {
-    if key.is_null() || key_len != 64 {
-        return ptr::null_mut();
-    }
-
-    let key_bytes = std::slice::from_raw_parts(key, key_len);
-
-    match reticulum_core::Identity::from_private_key_bytes(key_bytes) {
-        Ok(identity) => Box::into_raw(Box::new(LnsIdentity { inner: identity })),
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Load identity from public key bytes (64 bytes)
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_from_public_key(
-    key: *const u8,
-    key_len: usize,
-) -> *mut LnsIdentity {
-    if key.is_null() || key_len != 64 {
-        return ptr::null_mut();
-    }
-
-    let key_bytes = std::slice::from_raw_parts(key, key_len);
-
-    match reticulum_core::Identity::from_public_key_bytes(key_bytes) {
-        Ok(identity) => Box::into_raw(Box::new(LnsIdentity { inner: identity })),
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Get the private key bytes (64 bytes)
+/// Copy `src` into a caller-owned buffer, read(2) style.
 ///
-/// Returns LNS_ERR_CRYPTO if identity has no private keys (public-only).
+/// Sets `*out_len` to `src.len()`. If `buf` is NULL or `cap` is too small,
+/// writes nothing and returns `LEV_ERR_BUFFER_TOO_SMALL` (so a NULL buffer is a
+/// valid size query). Returns `LEV_ERR_NULL_PTR` if `out_len` is NULL.
+pub(crate) unsafe fn write_out(src: &[u8], buf: *mut u8, cap: usize, out_len: *mut usize) -> c_int {
+    if out_len.is_null() {
+        return LEV_ERR_NULL_PTR;
+    }
+    *out_len = src.len();
+    if buf.is_null() || cap < src.len() {
+        return LEV_ERR_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(src.as_ptr(), buf, src.len());
+    LEV_OK
+}
+
+/// Copy a fixed-size byte array out of a C pointer. The caller must ensure
+/// `src` points to at least `N` readable bytes.
+pub(crate) unsafe fn read_array<const N: usize>(src: *const u8) -> [u8; N] {
+    let mut out = [0u8; N];
+    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), N);
+    out
+}
+
+/// Encode `data` as lowercase hex into `buf`, read(2) style. Writes `2 * len`
+/// bytes (not NUL-terminated); `*out_len` is set to the required size.
 #[no_mangle]
-pub unsafe extern "C" fn lns_identity_private_key(
-    identity: *const LnsIdentity,
-    out_key: *mut u8,
+pub unsafe extern "C" fn lev_hex_encode(
+    data: *const u8,
+    len: usize,
+    buf: *mut u8,
+    cap: usize,
     out_len: *mut usize,
 ) -> c_int {
-    if identity.is_null() || out_key.is_null() || out_len.is_null() {
-        return LNS_ERR_NULL_PTR;
-    }
-
-    let identity = &(*identity).inner;
-
-    match identity.private_key_bytes() {
-        Ok(key) => {
-            if *out_len < key.len() {
-                *out_len = key.len();
-                return LNS_ERR_BUFFER_TOO_SMALL;
-            }
-            ptr::copy_nonoverlapping(key.as_ptr(), out_key, key.len());
-            *out_len = key.len();
-            LNS_OK
+    guard(LEV_ERR_PANIC, || {
+        if out_len.is_null() {
+            return LEV_ERR_NULL_PTR;
         }
-        Err(_) => LNS_ERR_CRYPTO,
-    }
-}
-
-/// Check if identity has private keys
-///
-/// Returns 1 if identity has private keys, 0 otherwise.
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_has_private_keys(identity: *const LnsIdentity) -> c_int {
-    if identity.is_null() {
-        return 0;
-    }
-    if (*identity).inner.has_private_keys() {
-        1
-    } else {
-        0
-    }
-}
-
-/// Encrypt data for an identity
-///
-/// The ciphertext can only be decrypted by the holder of the identity's private key.
-/// Output format: [ephemeral_pub (32)] [token (variable)]
-///
-/// Returns the ciphertext length, or negative error code.
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_encrypt(
-    identity: *const LnsIdentity,
-    plaintext: *const u8,
-    plaintext_len: usize,
-    out_ciphertext: *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if identity.is_null() || plaintext.is_null() || out_ciphertext.is_null() || out_len.is_null() {
-        return LNS_ERR_NULL_PTR;
-    }
-
-    let identity = &(*identity).inner;
-    let plaintext = std::slice::from_raw_parts(plaintext, plaintext_len);
-
-    let ciphertext = match identity.encrypt(plaintext, &mut rand_core::OsRng) {
-        Ok(c) => c,
-        Err(_) => return LNS_ERR_CRYPTO,
-    };
-
-    if *out_len < ciphertext.len() {
-        *out_len = ciphertext.len();
-        return LNS_ERR_BUFFER_TOO_SMALL;
-    }
-
-    ptr::copy_nonoverlapping(ciphertext.as_ptr(), out_ciphertext, ciphertext.len());
-    *out_len = ciphertext.len();
-    LNS_OK
-}
-
-/// Decrypt data encrypted for this identity
-///
-/// Requires the identity to have private keys.
-///
-/// Returns the plaintext length, or negative error code.
-#[no_mangle]
-pub unsafe extern "C" fn lns_identity_decrypt(
-    identity: *const LnsIdentity,
-    ciphertext: *const u8,
-    ciphertext_len: usize,
-    out_plaintext: *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if identity.is_null() || ciphertext.is_null() || out_plaintext.is_null() || out_len.is_null() {
-        return LNS_ERR_NULL_PTR;
-    }
-
-    let identity = &(*identity).inner;
-    let ciphertext = std::slice::from_raw_parts(ciphertext, ciphertext_len);
-
-    match identity.decrypt(ciphertext) {
-        Ok(plaintext) => {
-            if *out_len < plaintext.len() {
-                *out_len = plaintext.len();
-                return LNS_ERR_BUFFER_TOO_SMALL;
-            }
-            ptr::copy_nonoverlapping(plaintext.as_ptr(), out_plaintext, plaintext.len());
-            *out_len = plaintext.len();
-            LNS_OK
+        if data.is_null() && len > 0 {
+            return LEV_ERR_NULL_PTR;
         }
-        Err(_) => LNS_ERR_CRYPTO,
-    }
+        let needed = len * 2;
+        *out_len = needed;
+        if buf.is_null() || cap < needed {
+            return LEV_ERR_BUFFER_TOO_SMALL;
+        }
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let src = if len == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(data, len)
+        };
+        let out = std::slice::from_raw_parts_mut(buf, needed);
+        for (i, &byte) in src.iter().enumerate() {
+            out[i * 2] = HEX[(byte >> 4) as usize];
+            out[i * 2 + 1] = HEX[(byte & 0x0f) as usize];
+        }
+        LEV_OK
+    })
 }
 
-// --- Utility functions ---
-
-/// Free a string allocated by the library
+/// Decode hex (`hex_len` bytes, even) into `buf`, read(2) style. Writes
+/// `hex_len / 2` bytes; `*out_len` is set to the required size.
+/// `LEV_ERR_INVALID_ARG` on an odd length or a non-hex digit.
 #[no_mangle]
-pub unsafe extern "C" fn lns_string_free(s: *mut c_char) {
-    if !s.is_null() {
-        drop(CString::from_raw(s));
-    }
+pub unsafe extern "C" fn lev_hex_decode(
+    hex: *const u8,
+    hex_len: usize,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        if out_len.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if hex.is_null() && hex_len > 0 {
+            return LEV_ERR_NULL_PTR;
+        }
+        if !hex_len.is_multiple_of(2) {
+            error::set_last_error("hex length must be even");
+            return LEV_ERR_INVALID_ARG;
+        }
+        let needed = hex_len / 2;
+        *out_len = needed;
+        if buf.is_null() || cap < needed {
+            return LEV_ERR_BUFFER_TOO_SMALL;
+        }
+        fn nibble(c: u8) -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            }
+        }
+        let src = std::slice::from_raw_parts(hex, hex_len);
+        let out = std::slice::from_raw_parts_mut(buf, needed);
+        for i in 0..needed {
+            match (nibble(src[i * 2]), nibble(src[i * 2 + 1])) {
+                (Some(hi), Some(lo)) => out[i] = (hi << 4) | lo,
+                _ => {
+                    error::set_last_error("invalid hex digit");
+                    return LEV_ERR_INVALID_ARG;
+                }
+            }
+        }
+        LEV_OK
+    })
 }
 
-/// Get the error message for an error code
+/// Return the library version string, for example `"0.6.3"`.
+///
+/// Static storage, never freed.
 #[no_mangle]
-pub extern "C" fn lns_error_string(code: c_int) -> *const c_char {
-    let msg: &'static [u8] = match code {
-        LNS_OK => b"Success\0",
-        LNS_ERR_NULL_PTR => b"Null pointer\0",
-        LNS_ERR_INVALID_ARG => b"Invalid argument\0",
-        LNS_ERR_INIT_FAILED => b"Initialization failed\0",
-        LNS_ERR_NOT_RUNNING => b"Not running\0",
-        LNS_ERR_ALREADY_RUNNING => b"Already running\0",
-        LNS_ERR_IO => b"I/O error\0",
-        LNS_ERR_CRYPTO => b"Cryptographic error\0",
-        LNS_ERR_BUFFER_TOO_SMALL => b"Buffer too small\0",
-        _ => b"Unknown error\0",
-    };
-    msg.as_ptr() as *const c_char
+pub extern "C" fn lev_version_string() -> *const c_char {
+    guard(std::ptr::null(), || {
+        concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+    })
 }
 
-// TODO(#29): Add more FFI functions for:
-// - Reticulum instance management
-// - Destination creation and management
-// - Link establishment
-// - Packet sending/receiving
-// - Path requests
-// - Resource transfers
+/// Return the library version as `(major << 16) | (minor << 8) | patch`.
+#[no_mangle]
+pub extern "C" fn lev_version_number() -> u32 {
+    guard(0, || {
+        let (major, minor, patch) = reticulum_std::api::version();
+        ((major as u32) << 16) | ((minor as u32) << 8) | (patch as u32)
+    })
+}

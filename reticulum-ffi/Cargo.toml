@@ -7,20 +7,26 @@ license.workspace = true
 description = "C-API/FFI bindings for reticulum"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# Output libleviculum.so / libleviculum.a so the link flag is -lleviculum.
+# rlib is added so the Rust test suites can link the crate and call the lev_*
+# functions directly; it is an extra artifact and does not affect the shipped
+# cdylib/staticlib.
+name = "leviculum"
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-reticulum-core = { path = "../reticulum-core", default-features = true }
 reticulum-std = { path = "../reticulum-std" }
-libc.workspace = true
-tokio.workspace = true
-rand_core.workspace = true
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc = { workspace = true }
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+hex = "0.4"
+proptest = "1"
 
 [build-dependencies]
 cbindgen = "0.27"
-
-# reticulum-ffi is a stub/orphaned crate (§9.2 of CLEANUP_NOTES) —
-# dependencies sit in Cargo.toml even though the stub does not import
-# them, in anticipation of the planned redesign.
-[package.metadata.cargo-machete]
-ignored = ["libc", "reticulum-std"]

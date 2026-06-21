@@ -51,6 +51,8 @@ pub struct ReticulumNodeBuilder {
     control_channel_capacity_explicit: Option<usize>,
     /// Explicit data-channel capacity override (takes priority over config)
     data_channel_capacity_explicit: Option<usize>,
+    /// Explicit link keepalive override in seconds (takes priority over config)
+    link_keepalive_secs_explicit: Option<u64>,
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
@@ -83,6 +85,7 @@ impl ReticulumNodeBuilder {
             flush_interval_secs_explicit: None,
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
+            link_keepalive_secs_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
         }
@@ -285,6 +288,113 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add an RNode (LoRa) interface programmatically, the equivalent of an
+    /// `[[RNode]]` config block. The six parameters are the required radio
+    /// settings; optional tuning (airtime limits, flow control, buffer size)
+    /// keeps the driver defaults. Use a config file for the optional knobs.
+    pub fn add_rnode_interface(
+        mut self,
+        port: String,
+        frequency: u64,
+        bandwidth: u32,
+        spreading_factor: u8,
+        coding_rate: u8,
+        tx_power: i8,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            enabled: true,
+            outgoing: true,
+            bitrate: DEFAULT_BITRATE_BPS,
+            target_host: None,
+            target_port: None,
+            listen_ip: None,
+            listen_port: None,
+            forward_ip: None,
+            forward_port: None,
+            port: Some(port),
+            speed: None,
+            databits: None,
+            parity: None,
+            stopbits: None,
+            buffer_size: None,
+            reconnect_interval_secs: None,
+            max_reconnect_tries: None,
+            group_id: None,
+            discovery_scope: None,
+            discovery_port: None,
+            data_port: None,
+            devices: None,
+            ignored_devices: None,
+            multicast_loopback: None,
+            networkname: None,
+            passphrase: None,
+            ifac_size: None,
+            frequency: Some(frequency),
+            bandwidth: Some(bandwidth),
+            spreading_factor: Some(spreading_factor),
+            coding_rate: Some(coding_rate),
+            tx_power: Some(tx_power),
+            flow_control: None,
+            airtime_limit_short: None,
+            airtime_limit_long: None,
+            csma_enabled: None,
+        });
+        self
+    }
+
+    /// Add a serial interface programmatically, the equivalent of a
+    /// `[[Serial]]` config block. KISS framing over a raw serial port.
+    pub fn add_serial_interface(
+        mut self,
+        port: String,
+        speed: u32,
+        databits: u8,
+        parity: String,
+        stopbits: u8,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            enabled: true,
+            outgoing: true,
+            bitrate: DEFAULT_BITRATE_BPS,
+            target_host: None,
+            target_port: None,
+            listen_ip: None,
+            listen_port: None,
+            forward_ip: None,
+            forward_port: None,
+            port: Some(port),
+            speed: Some(speed),
+            databits: Some(databits),
+            parity: Some(parity),
+            stopbits: Some(stopbits),
+            buffer_size: None,
+            reconnect_interval_secs: None,
+            max_reconnect_tries: None,
+            group_id: None,
+            discovery_scope: None,
+            discovery_port: None,
+            data_port: None,
+            devices: None,
+            ignored_devices: None,
+            multicast_loopback: None,
+            networkname: None,
+            passphrase: None,
+            ifac_size: None,
+            frequency: None,
+            bandwidth: None,
+            spreading_factor: None,
+            coding_rate: None,
+            tx_power: None,
+            flow_control: None,
+            airtime_limit_short: None,
+            airtime_limit_long: None,
+            csma_enabled: None,
+        });
+        self
+    }
+
     /// Add an AutoInterface with default configuration
     ///
     /// Zero-configuration LAN discovery via IPv6 multicast.
@@ -354,6 +464,16 @@ impl ReticulumNodeBuilder {
     /// If not called, the value from the loaded config is used (default: true).
     pub fn enable_transport(mut self, enabled: bool) -> Self {
         self.enable_transport_explicit = Some(enabled);
+        self
+    }
+
+    /// Override the link keepalive interval (seconds) for every link.
+    ///
+    /// Takes priority over the config `keepalive_interval`. When unset, the
+    /// RTT-derived default is used. Shrinking it also shrinks the stale-link
+    /// timeout, which is what makes stale/recovery testable in seconds.
+    pub fn link_keepalive(mut self, secs: u64) -> Self {
+        self.link_keepalive_secs_explicit = Some(secs);
         self
     }
 
@@ -530,8 +650,15 @@ impl ReticulumNodeBuilder {
             }
             self.core_builder
         };
+        // Apply link keepalive override: explicit > config value.
+        let link_keepalive_secs = self
+            .link_keepalive_secs_explicit
+            .map(Some)
+            .unwrap_or(config.reticulum.keepalive_interval);
+
         let core_builder = core_builder
             .enable_transport(enable_transport)
+            .link_keepalive(link_keepalive_secs)
             .respond_to_probes(config.reticulum.respond_to_probes);
 
         // Build NodeCore (consumes storage, persistent data already loaded)

@@ -2952,6 +2952,45 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
         run_test(&mut runner).expect("test failed");
     }
 
+    // Non-Docker guard: the c-api scenario stays well-formed and keeps
+    // exercising a c-api node through a fault. Runs in the normal test pass, so
+    // a broken scenario is caught without bringing up containers.
+    #[test]
+    fn c_api_restart_recovery_scenario_is_well_formed() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/c_api_restart_recovery.toml"
+        ))
+        .expect("c_api_restart_recovery.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+        assert!(
+            scenario.nodes.values().any(|n| n.node_type == "c-api"),
+            "scenario must exercise a c-api node"
+        );
+        assert!(
+            scenario
+                .steps
+                .iter()
+                .any(|s| matches!(s, Step::Restart { .. })),
+            "scenario must inject a restart fault"
+        );
+    }
+
+    #[test]
+    #[serial(docker)]
+    fn c_api_restart_recovery() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/c_api_restart_recovery.toml"
+        ))
+        .expect("c_api_restart_recovery.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+        let mut runner = require_runner!(scenario);
+
+        run_test(&mut runner).expect("test failed");
+    }
+
     #[test]
     #[serial(docker)]
     fn announce_replacement() {

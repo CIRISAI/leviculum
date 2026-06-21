@@ -24,6 +24,12 @@ case "${NODE_TYPE}" in
     rust)
         exec /usr/local/bin/lnsd -v --config /root/.reticulum
         ;;
+    c-api)
+        # The C daemon built on the Leviculum C API. Reads the same config and
+        # offers the same shared instance plus RPC, so rnprobe/rnstatus/rnpath
+        # and lns/lncp drive it exactly like the Rust lnsd.
+        exec /usr/local/bin/c-lnsd --config /root/.reticulum
+        ;;
     python)
         # RNS_REQUIRE_SHARED is set on the container env so that Python tools
         # (rnprobe, rnpath, rncp, rnstatus, …) launched via `docker exec` fail

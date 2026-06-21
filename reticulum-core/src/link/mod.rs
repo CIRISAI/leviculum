@@ -369,6 +369,11 @@ pub struct Link {
     rtt_us: Option<u64>,
     /// Keepalive interval in seconds (calculated from RTT)
     keepalive_secs: u64,
+    /// Optional keepalive override in seconds. When set, the link uses this
+    /// interval instead of the RTT-derived value and it survives RTT
+    /// recalculation. Threaded from `TransportConfig::link_keepalive_secs`;
+    /// `None` reproduces the default RTT-driven behaviour.
+    keepalive_override: Option<u64>,
     /// Stale time in seconds (keepalive_secs * STALE_FACTOR)
     stale_time_secs: u64,
     /// Time of last inbound packet (timestamp in seconds)
@@ -489,6 +494,7 @@ impl Link {
             hops: 0,
             rtt_us: None,
             keepalive_secs: LINK_KEEPALIVE_SECS,
+            keepalive_override: None,
             stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
             last_inbound: 0,
             had_inbound: false,
@@ -599,6 +605,7 @@ impl Link {
             hops: 0,
             rtt_us: None,
             keepalive_secs: LINK_KEEPALIVE_SECS,
+            keepalive_override: None,
             stale_time_secs: LINK_KEEPALIVE_SECS * LINK_STALE_FACTOR,
             last_inbound: 0,
             had_inbound: false,
@@ -1148,10 +1155,38 @@ impl Link {
         clamped as u64
     }
 
-    /// Update keepalive timing after RTT is known
+    /// Update keepalive timing after RTT is known.
+    ///
+    /// A keepalive override (if set) wins over the RTT-derived value, so a
+    /// configured short keepalive survives link establishment.
     pub fn update_keepalive_from_rtt(&mut self, rtt_secs: f64) {
+        if self.keepalive_override.is_some() {
+            self.apply_keepalive_override();
+            return;
+        }
         self.keepalive_secs = Self::calculate_keepalive_from_rtt(rtt_secs);
         self.stale_time_secs = self.keepalive_secs * LINK_STALE_FACTOR;
+    }
+
+    /// Set or clear the keepalive override (seconds).
+    ///
+    /// When set, the link uses this interval (clamped to
+    /// `LINK_KEEPALIVE_MIN_SECS`) instead of the RTT-derived value, and the
+    /// override survives RTT recalculation. `None` restores RTT-driven timing.
+    pub fn set_keepalive_override(&mut self, secs: Option<u64>) {
+        self.keepalive_override = secs;
+        if secs.is_some() {
+            self.apply_keepalive_override();
+        }
+    }
+
+    /// Apply the current keepalive override to the live timing fields.
+    fn apply_keepalive_override(&mut self) {
+        if let Some(secs) = self.keepalive_override {
+            let clamped = secs.max(LINK_KEEPALIVE_MIN_SECS);
+            self.keepalive_secs = clamped;
+            self.stale_time_secs = clamped * LINK_STALE_FACTOR;
+        }
     }
 
     // RTT retry state (initiator only)
@@ -3029,6 +3064,32 @@ mod tests {
         assert_eq!(link.stale_time_secs(), 20); // 10 * 2
 
         // Update with high RTT
+        link.update_keepalive_from_rtt(2.0);
+        assert_eq!(link.keepalive_secs(), 360);
+        assert_eq!(link.stale_time_secs(), 720);
+    }
+
+    #[test]
+    fn test_keepalive_override_survives_rtt() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+
+        // Override takes effect immediately.
+        link.set_keepalive_override(Some(6));
+        assert_eq!(link.keepalive_secs(), 6);
+        assert_eq!(link.stale_time_secs(), 12); // 6 * 2
+
+        // RTT recalculation must NOT replace the override.
+        link.update_keepalive_from_rtt(2.0);
+        assert_eq!(link.keepalive_secs(), 6);
+        assert_eq!(link.stale_time_secs(), 12);
+
+        // Below-minimum overrides clamp to LINK_KEEPALIVE_MIN_SECS.
+        link.set_keepalive_override(Some(1));
+        assert_eq!(link.keepalive_secs(), LINK_KEEPALIVE_MIN_SECS);
+
+        // Clearing the override restores RTT-driven behaviour.
+        link.set_keepalive_override(None);
         link.update_keepalive_from_rtt(2.0);
         assert_eq!(link.keepalive_secs(), 360);
         assert_eq!(link.stale_time_secs(), 720);

@@ -29,4 +29,11 @@ These keys are ignored by Python Reticulum and optional in Leviculum:
   # normal shutdown always flushes). Default: 3600. Battery-powered or
   # SD-card deployments may want a longer or shorter interval.
   flush_interval = 3600
+
+  # Link keepalive interval in seconds. When set, every link uses this
+  # interval instead of the RTT-derived default, and the stale-link timeout
+  # scales with it (a link goes stale after twice the keepalive). Local
+  # timing only, no wire or semantic change. Useful for slow links. Default:
+  # unset (RTT-derived).
+  keepalive_interval = 360
 ```

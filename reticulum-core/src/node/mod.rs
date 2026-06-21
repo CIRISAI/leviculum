@@ -2789,6 +2789,41 @@ mod tests {
             .collect()
     }
 
+    // Core-level coverage for peer-close notification: a responder-initiated
+    // close emits a close packet, and the initiator that receives it surfaces
+    // LinkClosed (so a peer learns of a graceful close promptly, not only via
+    // the stale timeout). This isolates the close handling from interface
+    // routing: it asserts the packet is built and processed correctly, with
+    // delivery done by hand. Whether that packet actually reaches the peer over
+    // a real interface is a separate routing concern this test does not cover,
+    // and one observed to fail intermittently over TCP (responder->initiator
+    // close packets are usually dropped); that delivery race is tracked
+    // separately, not in the close-handling logic this test exercises.
+    #[test]
+    fn responder_close_packet_notifies_initiator() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+
+        let output = pair.responder.close_link(&pair.responder_link_id);
+        let close_packets = extract_all_action_data(&output);
+        assert!(
+            !close_packets.is_empty(),
+            "a responder-initiated close must emit a close packet to the peer"
+        );
+
+        let output = pair
+            .initiator
+            .handle_packet(InterfaceId(0), &close_packets[0]);
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkClosed { .. })),
+            "initiator must be notified of the peer-initiated close"
+        );
+    }
+
     fn establish_nodecore_link_pair_with_strategy(strategy: ProofStrategy) -> NodeCoreLinkPair {
         use crate::transport::InterfaceId;
 
@@ -3000,6 +3035,66 @@ mod tests {
             .iter()
             .any(|e| matches!(e, NodeEvent::MessageReceived { .. }));
         assert!(has_msg, "responder should get MessageReceived event");
+    }
+
+    // The responder can originate a channel message (the initiator need not
+    // send first); with full packet routing the initiator receives it.
+    #[test]
+    fn channel_responder_can_send_first() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let out = pair
+            .responder
+            .send_on_link(&pair.responder_link_id, b"from-responder")
+            .expect("responder send_on_link");
+
+        let mut got = false;
+        for data in extract_all_action_data(&out) {
+            let io = pair.initiator.handle_packet(InterfaceId(0), &data);
+            got |= io
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::MessageReceived { .. }));
+        }
+        assert!(
+            got,
+            "initiator must receive a responder-first channel message"
+        );
+    }
+
+    // A sustained stream must not stall at one window: with proofs routed back,
+    // the sender's window advances and every message is delivered.
+    #[test]
+    fn channel_stream_does_not_stall_at_window() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let lid = pair.initiator_link_id;
+        let mut delivered = 0usize;
+        for i in 0..40u32 {
+            // Advance the clock so interface pacing is never the blocker; this
+            // isolates the channel window/proof behaviour.
+            let now = pair.initiator.transport().clock().now_ms();
+            pair.initiator.transport().clock().set(now + 1000);
+            let msg = alloc::format!("msg-{i:05}");
+            let out = match pair.initiator.send_on_link(&lid, msg.as_bytes()) {
+                Ok(o) => o,
+                Err(e) => panic!("send {i} failed (window stalled?): {e:?}"),
+            };
+            for data in extract_all_action_data(&out) {
+                let ro = pair.responder.handle_packet(InterfaceId(0), &data);
+                delivered += ro
+                    .events
+                    .iter()
+                    .filter(|e| matches!(e, NodeEvent::MessageReceived { .. }))
+                    .count();
+                for proof in extract_all_action_data(&ro) {
+                    let _ = pair.initiator.handle_packet(InterfaceId(0), &proof);
+                }
+            }
+        }
+        assert_eq!(delivered, 40, "every streamed message must be delivered");
     }
 
     #[test]

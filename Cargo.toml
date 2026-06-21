@@ -81,3 +81,11 @@ opt-level = 3
 # .woodpecker/nightly.yml so cargo-deb's strip is skipped entirely.
 [profile.release]
 strip = "debuginfo"
+# Pin unwinding (already the default). The reticulum-ffi cdylib relies on
+# catch_unwind at every extern "C" boundary so a Rust panic becomes an error
+# code instead of unwinding into C (undefined behaviour). panic = "abort"
+# would make catch_unwind a no-op and turn any internal panic into a process
+# abort of the host application embedding libleviculum, which a library must
+# never do. This forecloses an abort-for-size option on the daemons; that is
+# the intended tradeoff. Behaviour-preserving since unwind is already default.
+panic = "unwind"

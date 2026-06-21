@@ -30,6 +30,9 @@ pub fn generate_compose(
     let lnsd_path = crate::paths::release_bin(target_dir, "lnsd");
     let lns_path = crate::paths::release_bin(target_dir, "lns");
     let lncp_path = crate::paths::release_bin(target_dir, "lncp");
+    // The C daemon (statically linked against libleviculum) is a drop-in
+    // replacement for lnsd, mounted only on c-api nodes.
+    let c_lnsd_path = crate::paths::release_bin(target_dir, "c-lnsd");
 
     // AutoInterface needs IPv6 link-local on the bridge plus a DAD-settle
     // wait in the container entrypoint. Both are gated on this scenario
@@ -87,6 +90,14 @@ pub fn generate_compose(
             lncp_path.display()
         )
         .ok();
+        if node.node_type == "c-api" {
+            writeln!(
+                out,
+                "      - {}:/usr/local/bin/c-lnsd:ro",
+                c_lnsd_path.display()
+            )
+            .ok();
+        }
         writeln!(
             out,
             "      - {}:/root/.reticulum/config:ro",
@@ -276,6 +287,62 @@ mod tests {
                 "{node}: missing storage volume"
             );
         }
+    }
+
+    #[test]
+    fn c_api_node_mounts_c_lnsd_only_for_itself() {
+        let toml_str = r#"
+[test]
+name = "c_api_mount"
+description = "c-api node alongside a rust node"
+timeout_secs = 60
+
+[nodes.cnode]
+type = "c-api"
+respond_to_probes = true
+
+[nodes.rnode]
+type = "rust"
+respond_to_probes = true
+
+[links]
+cnode-rnode = "tcp"
+"#;
+        let scenario = parse_scenario(toml_str).expect("parse failed");
+        let (base_dir, repo_root, target_dir) = sample_paths();
+        let yaml = generate_compose(
+            &scenario,
+            0,
+            &base_dir,
+            &repo_root,
+            &target_dir,
+            &BTreeMap::new(),
+        );
+
+        let cnode_idx = yaml.find("  cnode:").expect("no cnode");
+        let rnode_idx = yaml.find("  rnode:").expect("no rnode");
+        let (cnode_block, rnode_block) = if cnode_idx < rnode_idx {
+            (&yaml[cnode_idx..rnode_idx], &yaml[rnode_idx..])
+        } else {
+            (&yaml[rnode_idx..cnode_idx], &yaml[cnode_idx..])
+        };
+
+        assert!(
+            cnode_block.contains("NODE_TYPE: c-api"),
+            "cnode should be c-api"
+        );
+        let mount = format!(
+            "{}/release/c-lnsd:/usr/local/bin/c-lnsd:ro",
+            target_dir.display()
+        );
+        assert!(
+            cnode_block.contains(&mount),
+            "c-api node missing c-lnsd mount"
+        );
+        assert!(
+            !rnode_block.contains(&mount),
+            "rust node should not mount c-lnsd"
+        );
     }
 
     #[test]

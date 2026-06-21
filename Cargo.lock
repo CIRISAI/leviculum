@@ -1071,11 +1071,16 @@ name = "reticulum-ffi"
 version = "0.6.3"
 dependencies = [
  "cbindgen",
+ "hex",
  "libc",
+ "proptest",
  "rand_core 0.6.4",
- "reticulum-core",
  "reticulum-std",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

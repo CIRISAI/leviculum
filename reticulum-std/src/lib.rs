@@ -12,6 +12,7 @@
 
 #![warn(unreachable_pub)]
 
+pub mod api;
 pub(crate) mod clock;
 pub mod config;
 pub mod driver;
@@ -32,6 +33,7 @@ pub mod test_support;
 
 // Re-export commonly used core types for the high-level API
 pub use reticulum_core::node::{DeliveryError, EventClass, LinkStats, NodeEvent};
+pub use reticulum_core::transport::PathTableExport;
 pub use reticulum_core::{
     AnnounceError, Destination, DestinationHash, DestinationType, Direction, Identity,
     LinkCloseReason, LinkError, LinkId, PeerKeys, ProofStrategy, ReceivedAnnounce, SendError,
@@ -47,7 +49,10 @@ pub fn generate_identity() -> Identity {
 }
 
 pub use config::Config;
-pub use driver::{EventReceiver, LinkHandle, PacketSender, ReticulumNode, ReticulumNodeBuilder};
+pub use driver::{
+    EventReceiver, InterfaceStatusSnapshot, LinkHandle, PacketSender, ReticulumNode,
+    ReticulumNodeBuilder,
+};
 pub use error::{Error, Result};
 pub use reticulum::Reticulum;
 /// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).
