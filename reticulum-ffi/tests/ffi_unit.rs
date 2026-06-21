@@ -92,6 +92,24 @@ fn hex_roundtrip_and_errors() {
     }
 }
 
+// A `len` whose `len * 2` overflows usize must be rejected up front
+// (LEV_ERR_INVALID_ARG), before any allocation or out-of-bounds write. The
+// overflow path is reachable without a real huge buffer: a size query (NULL
+// buf) hits the size computation first. `data` is a valid 1-byte pointer so the
+// only thing that can stop the call is the checked multiply.
+#[test]
+fn hex_encode_length_overflow_is_rejected() {
+    unsafe {
+        let one = [0u8; 1];
+        let mut need = 0usize;
+        let huge = usize::MAX / 2 + 1; // huge * 2 overflows usize
+        assert_eq!(
+            lev_hex_encode(one.as_ptr(), huge, ptr::null_mut(), 0, &mut need),
+            LEV_ERR_INVALID_ARG
+        );
+    }
+}
+
 #[test]
 fn identity_keys_roundtrip() {
     unsafe {
@@ -316,6 +334,62 @@ fn destination_enable_ratchets_validates() {
             lev_destination_enable_ratchets(ptr::null_mut(), 0),
             LEV_ERR_NULL_PTR
         );
+    }
+}
+
+// The accepts-links knob (Codeberg #21): an inbound destination defaults to
+// accepting, can be switched off before registration, and the flag survives the
+// register path (which forwards it to register_destination_with_links). The
+// behavioural proof that accepts_links == false declines an inbound link lives
+// in reticulum-core (inbound_link_rejected_when_destination_does_not_accept);
+// here we cover the FFI plumbing and the consumed-handle contract.
+#[test]
+fn destination_accepts_links_knob() {
+    unsafe {
+        let id = Identity::generate();
+        let app = cstr("app");
+        let asp = cstr("r");
+        let asp_ptrs = [asp.as_ptr()];
+
+        let dest = lev_destination_new(
+            id.0,
+            LEV_DIRECTION_IN,
+            LEV_DEST_SINGLE,
+            app.as_ptr(),
+            asp_ptrs.as_ptr(),
+            1,
+        );
+        assert!(!dest.is_null());
+        // Toggle off, then back on, both before registration.
+        assert_eq!(lev_destination_set_accepts_links(dest, 0), LEV_OK);
+        assert_eq!(lev_destination_set_accepts_links(dest, 1), LEV_OK);
+
+        // NULL guard.
+        assert_eq!(
+            lev_destination_set_accepts_links(ptr::null_mut(), 0),
+            LEV_ERR_NULL_PTR
+        );
+
+        // Build a node and register the destination with accepts-links off.
+        let dir = tempfile::tempdir().unwrap();
+        let b = lev_builder_new();
+        let sp = cstr(dir.path().to_str().unwrap());
+        assert_eq!(lev_builder_storage_path(b, sp.as_ptr()), LEV_OK);
+        let node = lev_builder_build(b);
+        lev_builder_free(b);
+        assert!(!node.is_null(), "build failed: {}", last_error());
+
+        assert_eq!(lev_destination_set_accepts_links(dest, 0), LEV_OK);
+        assert_eq!(lev_register_destination(node, dest), LEV_OK);
+        // After registration the inner destination is consumed: the knob now
+        // reports the already-registered error instead of touching freed state.
+        assert_eq!(
+            lev_destination_set_accepts_links(dest, 1),
+            LEV_ERR_INVALID_ARG
+        );
+
+        lev_destination_free(dest);
+        lev_free(node);
     }
 }
 

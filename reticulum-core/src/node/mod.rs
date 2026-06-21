@@ -2963,6 +2963,74 @@ mod tests {
         }
     }
 
+    // Codeberg #21: a registered destination with accepts_links == false must
+    // keep declining inbound links, the OFF switch the C-API exposes through
+    // lev_destination_set_accepts_links / register_destination_with_links(.., false).
+    // The link request is ignored: no establishment proof is emitted and no
+    // LinkEstablished event fires.
+    #[test]
+    fn inbound_link_rejected_when_destination_does_not_accept() {
+        use crate::transport::InterfaceId;
+
+        // Responder with a destination that does NOT accept links.
+        let resp_identity = Identity::generate(&mut OsRng);
+        let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut responder = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let mut resp_dest = Destination::new(
+            Some(resp_identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["echo"],
+        )
+        .unwrap();
+        resp_dest.set_accepts_links(false);
+        let dest_hash = *resp_dest.hash();
+        responder.register_destination(resp_dest);
+
+        // Initiator connects (broadcasts a link request since no path is known).
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let (_init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let link_req_data = extract_broadcast_data(&output);
+
+        // Responder receives the link request: it is ignored, so there is no
+        // proof to send back and no LinkEstablished event.
+        let output = responder.handle_packet(InterfaceId(0), &link_req_data);
+        assert!(
+            extract_all_action_data(&output).is_empty(),
+            "a non-accepting destination must not emit an establishment proof"
+        );
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })),
+            "a non-accepting destination must not establish an inbound link"
+        );
+    }
+
+    // Pins the addressing contract the std facade `send_proof` relies on: the
+    // engine resolves the signing identity from `destination_hash`, not from
+    // `packet_hash`. A destination hash with no registered local destination has
+    // no identity, so the call fails fast. This is the contract that makes the
+    // facade's parameter mapping (dest_hash, packet_hash) -> engine
+    // (packet_hash, dest_hash) correct; the two arguments also have distinct
+    // types, so a literal swap would not compile.
+    #[test]
+    fn send_proof_resolves_identity_by_destination_hash() {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let packet_hash = [7u8; 32];
+        let unknown_dest = DestinationHash::new([9u8; TRUNCATED_HASHBYTES]);
+        // No destination registered under this hash -> no identity -> error.
+        assert!(
+            node.send_proof(&packet_hash, &unknown_dest).is_err(),
+            "send_proof must look the identity up by destination_hash"
+        );
+    }
+
     #[test]
     fn test_accept_link() {
         let pair = establish_nodecore_link_pair();

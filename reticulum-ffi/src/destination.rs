@@ -49,6 +49,10 @@ fn proof_strategy_from(s: c_int) -> Option<ProofStrategy> {
 /// `lev_register_destination`; the caller still frees the empty shell.
 pub struct lev_destination_t {
     inner: Option<Destination>,
+    /// Whether an inbound destination accepts links on registration. Defaults
+    /// to `true` (auto-accept), overridable via
+    /// `lev_destination_set_accepts_links`.
+    accepts_links: bool,
 }
 
 fn direction_from(d: c_int) -> Option<Direction> {
@@ -126,7 +130,10 @@ pub unsafe extern "C" fn lev_destination_new(
         }
         let id = identity.as_ref().map(|i| i.inner.clone());
         match Destination::new(id, dir, dtype, app_name, &aspect_strs) {
-            Ok(d) => Box::into_raw(Box::new(lev_destination_t { inner: Some(d) })),
+            Ok(d) => Box::into_raw(Box::new(lev_destination_t {
+                inner: Some(d),
+                accepts_links: true,
+            })),
             Err(e) => {
                 set_last_error(format!("{e:?}"));
                 std::ptr::null_mut()
@@ -293,9 +300,36 @@ pub unsafe extern "C" fn lev_destination_ratchet_public(
     })
 }
 
+/// Choose whether an inbound destination accepts links when registered. The
+/// default is `1` (accept), the auto-accept model (Python-RNS parity). Pass `0`
+/// to keep the destination reachable for announces and packets while declining
+/// inbound links (Codeberg #21). No effect on outbound destinations. Call
+/// before `lev_register_destination`. `LEV_ERR_INVALID_ARG` if already
+/// registered.
+#[no_mangle]
+pub unsafe extern "C" fn lev_destination_set_accepts_links(
+    dest: *mut lev_destination_t,
+    accepts: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let d = match dest.as_mut() {
+            Some(d) => d,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if d.inner.is_none() {
+            set_last_error("destination already registered");
+            return LEV_ERR_INVALID_ARG;
+        }
+        d.accepts_links = accepts != 0;
+        LEV_OK
+    })
+}
+
 /// Register a destination on the node so it can be announced and can accept
 /// links or packets. Consumes the destination (the handle is emptied; still
-/// free it). `LEV_ERR_INVALID_ARG` if already registered.
+/// free it). Inbound links are accepted unless
+/// `lev_destination_set_accepts_links(dest, 0)` was called first.
+/// `LEV_ERR_INVALID_ARG` if already registered.
 #[no_mangle]
 pub unsafe extern "C" fn lev_register_destination(
     node: *const leviculum_t,
@@ -310,9 +344,11 @@ pub unsafe extern "C" fn lev_register_destination(
             Some(d) => d,
             None => return LEV_ERR_NULL_PTR,
         };
+        let accepts_links = d.accepts_links;
         match d.inner.take() {
             Some(destination) => {
-                h.node().register_destination(destination);
+                h.node()
+                    .register_destination_with_links(destination, accepts_links);
                 LEV_OK
             }
             None => {

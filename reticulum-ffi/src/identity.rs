@@ -7,6 +7,7 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
 use reticulum_std::api::Identity;
+use zeroize::Zeroizing;
 
 use crate::error::*;
 use crate::{guard, write_out};
@@ -19,7 +20,7 @@ pub const LEV_IDENTITY_KEY_LEN: usize = 64;
 /// Length of the X25519 (encryption) half, bytes 0..32 of a combined key.
 pub const LEV_X25519_KEY_LEN: usize = 32;
 /// Length of the Ed25519 (signing) half, bytes 32..64 of a combined key. This
-/// is the key a link needs; see `lev_connect`.
+/// is the key a link needs; see `lev_connect_with_key`.
 pub const LEV_SIGNING_KEY_LEN: usize = 32;
 
 /// Opaque identity handle.
@@ -144,7 +145,8 @@ pub unsafe extern "C" fn lev_identity_private_key(
             None => return LEV_ERR_NULL_PTR,
         };
         match id.inner.private_key_bytes() {
-            Ok(key) => write_out(&key, buf, cap, out_len),
+            // Zeroize the transient copy of the secret key once written out.
+            Ok(key) => write_out(Zeroizing::new(key).as_slice(), buf, cap, out_len),
             Err(e) => {
                 set_last_error(format!("{e:?}"));
                 LEV_ERR_CRYPTO
@@ -187,15 +189,16 @@ pub unsafe extern "C" fn lev_identity_save_file(
             Some(p) => p,
             None => return LEV_ERR_INVALID_ARG,
         };
+        // Zeroize the transient copy of the secret key on drop.
         let bytes = match id.inner.private_key_bytes() {
-            Ok(b) => b,
+            Ok(b) => Zeroizing::new(b),
             Err(e) => {
                 set_last_error(format!("{e:?}"));
                 return LEV_ERR_CRYPTO;
             }
         };
         let tmp = format!("{path}.tmp");
-        if let Err(e) = std::fs::write(&tmp, bytes) {
+        if let Err(e) = std::fs::write(&tmp, bytes.as_slice()) {
             set_last_error(format!("write {tmp}: {e}"));
             return LEV_ERR_IO;
         }

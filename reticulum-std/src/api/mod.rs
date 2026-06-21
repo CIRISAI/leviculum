@@ -245,9 +245,22 @@ impl Node {
     /// accept decision). Without registration the engine silently drops
     /// incoming link requests.
     pub fn register_destination(&self, destination: Destination) {
+        self.register_destination_with_links(destination, true);
+    }
+
+    /// Register a local destination, choosing whether inbound links are accepted.
+    ///
+    /// Like [`register_destination`](Self::register_destination) but with an
+    /// explicit accept switch for incoming (`Direction::In`) destinations.
+    /// `accepts_links == true` is the auto-accept default (the stack accepts and
+    /// proves inbound links); `false` keeps the destination reachable for
+    /// announces and packets while declining inbound links (Codeberg #21, "keep
+    /// the option to disable accepting"). The flag is ignored for outbound
+    /// destinations, which never accept links.
+    pub fn register_destination_with_links(&self, destination: Destination, accepts_links: bool) {
         let mut destination = destination;
         if destination.direction() == Direction::In {
-            destination.set_accepts_links(true);
+            destination.set_accepts_links(accepts_links);
         }
         self.inner.register_destination(destination);
     }
@@ -362,6 +375,11 @@ impl Node {
         dest_hash: &DestinationHash,
         packet_hash: &[u8; 32],
     ) -> Result<()> {
+        // The engine's send_proof takes (packet_hash, dest_hash); this facade
+        // orders its parameters (dest_hash, packet_hash) to match the C ABI.
+        // The call below maps each named argument to its engine slot, so the
+        // proof is addressed to `dest_hash`. The two have distinct types, so a
+        // genuine swap would not type-check.
         self.inner.send_proof(packet_hash, dest_hash).await
     }
 
@@ -440,11 +458,13 @@ impl Node {
     /// Escape hatch while the facade is incomplete: later phases re-project the
     /// remaining methods (destinations, links, events) so consumers will not
     /// need this. Not part of the stable surface.
+    #[doc(hidden)]
     pub fn engine(&self) -> &ReticulumNode {
         &self.inner
     }
 
     /// Mutable access to the underlying engine node. See [`Node::engine`].
+    #[doc(hidden)]
     pub fn engine_mut(&mut self) -> &mut ReticulumNode {
         &mut self.inner
     }

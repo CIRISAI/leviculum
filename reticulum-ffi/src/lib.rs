@@ -123,7 +123,16 @@ pub unsafe extern "C" fn lev_hex_encode(
         if data.is_null() && len > 0 {
             return LEV_ERR_NULL_PTR;
         }
-        let needed = len * 2;
+        // `len * 2` would wrap in release for a huge `len`, yielding an
+        // undersized `needed` and an out-of-bounds writer loop. Reject it before
+        // any allocation, slice construction, or write.
+        let needed = match len.checked_mul(2) {
+            Some(n) => n,
+            None => {
+                error::set_last_error("hex length overflow");
+                return LEV_ERR_INVALID_ARG;
+            }
+        };
         *out_len = needed;
         if buf.is_null() || cap < needed {
             return LEV_ERR_BUFFER_TOO_SMALL;
@@ -165,6 +174,8 @@ pub unsafe extern "C" fn lev_hex_decode(
             error::set_last_error("hex length must be even");
             return LEV_ERR_INVALID_ARG;
         }
+        // Division cannot overflow; the writer indexes `src[i*2]`/`src[i*2+1]`
+        // for `i < needed`, so the max index is `hex_len - 1`, always in bounds.
         let needed = hex_len / 2;
         *out_len = needed;
         if buf.is_null() || cap < needed {

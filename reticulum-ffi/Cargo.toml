@@ -21,6 +21,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 libc = { workspace = true }
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"

@@ -31,17 +31,23 @@ unsafe fn policy_from(
         LEV_REQUEST_POLICY_ALLOW_NONE => Some(RequestPolicy::AllowNone),
         LEV_REQUEST_POLICY_ALLOW_ALL => Some(RequestPolicy::AllowAll),
         LEV_REQUEST_POLICY_ALLOW_LIST => {
+            if n_ids == 0 {
+                return Some(RequestPolicy::AllowList(Vec::new()));
+            }
+            if allow_identity_hashes.is_null() {
+                return None;
+            }
+            // `n_ids * LEV_ADDR_LEN` would wrap in release for a huge `n_ids`,
+            // feeding a truncated length into from_raw_parts and reading out of
+            // bounds. Reject the overflow before allocating or slicing (also
+            // keeps `Vec::with_capacity(n_ids)` below from a capacity overflow).
+            let total = n_ids.checked_mul(LEV_ADDR_LEN)?;
             let mut ids: Vec<[u8; LEV_ADDR_LEN]> = Vec::with_capacity(n_ids);
-            if n_ids > 0 {
-                if allow_identity_hashes.is_null() {
-                    return None;
-                }
-                let bytes = std::slice::from_raw_parts(allow_identity_hashes, n_ids * LEV_ADDR_LEN);
-                for chunk in bytes.chunks_exact(LEV_ADDR_LEN) {
-                    let mut id = [0u8; LEV_ADDR_LEN];
-                    id.copy_from_slice(chunk);
-                    ids.push(id);
-                }
+            let bytes = std::slice::from_raw_parts(allow_identity_hashes, total);
+            for chunk in bytes.chunks_exact(LEV_ADDR_LEN) {
+                let mut id = [0u8; LEV_ADDR_LEN];
+                id.copy_from_slice(chunk);
+                ids.push(id);
             }
             Some(RequestPolicy::AllowList(ids))
         }
@@ -190,4 +196,35 @@ pub unsafe extern "C" fn lev_send_response(
             Err(()) => LEV_ERR_TIMEOUT,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An allowlist length that overflows `n_ids * LEV_ADDR_LEN` must be rejected
+    // (None -> LEV_ERR_INVALID_ARG at the call site) before any from_raw_parts,
+    // never silently truncated into an out-of-bounds read.
+    #[test]
+    fn allowlist_length_overflow_is_rejected() {
+        let dummy = [0u8; LEV_ADDR_LEN];
+        // n_ids * 16 overflows usize; the pointer is non-null so the only thing
+        // that can stop us reading it is the checked multiply.
+        let n_ids = usize::MAX / 4;
+        let policy = unsafe { policy_from(LEV_REQUEST_POLICY_ALLOW_LIST, dummy.as_ptr(), n_ids) };
+        assert!(policy.is_none(), "overflowing allowlist must be rejected");
+    }
+
+    // A well-formed allowlist still parses into the expected ids.
+    #[test]
+    fn allowlist_parses_small_input() {
+        let ids = [[1u8; LEV_ADDR_LEN], [2u8; LEV_ADDR_LEN]];
+        let flat: Vec<u8> = ids.iter().flatten().copied().collect();
+        let policy =
+            unsafe { policy_from(LEV_REQUEST_POLICY_ALLOW_LIST, flat.as_ptr(), ids.len()) };
+        match policy {
+            Some(RequestPolicy::AllowList(parsed)) => assert_eq!(parsed, ids),
+            other => panic!("expected AllowList, got {other:?}"),
+        }
+    }
 }

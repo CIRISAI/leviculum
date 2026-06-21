@@ -7,7 +7,9 @@
 //! [`LEV_LOG_OFF`], so the library is silent unless asked. See
 //! `docs/leviculum-api-design.md` §12.
 
+use std::cell::Cell;
 use std::os::raw::{c_char, c_int, c_void};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -34,16 +36,22 @@ pub const LEV_LOG_TRACE: c_int = 5;
 /// Log sink callback: `(level, message, user)`. The message is a
 /// NUL-terminated string owned by the library, valid only for the duration of
 /// the call. The callback may run on any internal worker thread and must not
-/// call back into any `lev_*` function (see design §5, §12). NULL restores the
-/// stderr default.
+/// call back into any `lev_*` function (see design §5, §12). It must not unwind
+/// or throw across the boundary; a panic/exception that escapes the callback is
+/// caught and swallowed by the library, but the record is then lost. NULL
+/// restores the stderr default.
 ///
 /// Nullable on purpose: `Option` is inlined into the typedef so cbindgen
 /// renders it as a plain (nullable) C function pointer, not an opaque struct.
+/// The `C-unwind` ABI lets the library contain a callback that unwinds (a C++
+/// exception, or a Rust callback that panics) with `catch_unwind` instead of
+/// the process aborting at a plain `extern "C"` boundary. A normal
+/// non-unwinding C callback remains fully compatible.
 pub type lev_log_callback =
-    Option<extern "C" fn(level: c_int, message: *const c_char, user: *mut c_void)>;
+    Option<extern "C-unwind" fn(level: c_int, message: *const c_char, user: *mut c_void)>;
 
 /// Non-null callback pointer, the inner of [`lev_log_callback`], for storage.
-type LogCb = extern "C" fn(level: c_int, message: *const c_char, user: *mut c_void);
+type LogCb = extern "C-unwind" fn(level: c_int, message: *const c_char, user: *mut c_void);
 
 /// Current verbosity. Events at a level numerically `<=` this are emitted.
 static LEVEL: AtomicU8 = AtomicU8::new(LEV_LOG_OFF as u8);
@@ -72,6 +80,13 @@ fn level_to_lev(level: Level) -> c_int {
     }
 }
 
+thread_local! {
+    /// Set while a callback is running on this thread, so a callback that
+    /// panics (which fires the panic hook, which logs through `dispatch` again)
+    /// or that itself logs cannot recurse back into the user callback.
+    static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Forward one formatted record to the C callback, or to stderr when none is
 /// set. The sink is copied out under the lock and released before the callback
 /// runs, so a callback that is slow or re-enters logging cannot deadlock.
@@ -84,12 +99,30 @@ fn dispatch(level: c_int, target: &str, msg: &str) {
         .copied();
     match sink {
         Some(Sink { cb, user }) => {
+            // Re-entrancy guard. The callback is unguarded C, invoked here on an
+            // internal worker/runtime thread (and from the panic hook), outside
+            // any `extern "C"` firewall. A callback that panics triggers the
+            // installed panic hook, which logs through `dispatch` again; without
+            // this guard that path would call the callback while it is unwinding
+            // and recurse without bound. Route the nested record to stderr.
+            if IN_CALLBACK.with(|f| f.get()) {
+                eprintln!("[leviculum] {line}");
+                return;
+            }
             // Truncate at the first NUL so construction cannot fail.
             let bytes = line.into_bytes();
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             // Safe: no interior NUL up to `end`.
             let c = unsafe { std::ffi::CString::from_vec_unchecked(bytes[..end].to_vec()) };
-            cb(level, c.as_ptr(), user as *mut c_void);
+            let ptr = c.as_ptr();
+            IN_CALLBACK.with(|f| f.set(true));
+            // Unwinding into C is undefined behaviour; contain a panicking
+            // callback and swallow it (the record is lost, the bridge survives).
+            // `catch_unwind` always returns, so the guard flag is cleared.
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                cb(level, ptr, user as *mut c_void);
+            }));
+            IN_CALLBACK.with(|f| f.set(false));
         }
         None => eprintln!("[leviculum] {line}"),
     }
@@ -169,4 +202,74 @@ pub extern "C" fn lev_log_set_callback(cb: lev_log_callback, user: *mut c_void) 
         });
         crate::LEV_OK
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    /// Calls per callback, to prove the bridge stays usable after a panic.
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    /// Serialize the tests: they share the process-global `SINK` slot.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    extern "C-unwind" fn panicking_cb(_level: c_int, _msg: *const c_char, _user: *mut c_void) {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        panic!("callback blew up");
+    }
+
+    extern "C-unwind" fn counting_cb(_level: c_int, _msg: *const c_char, _user: *mut c_void) {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A callback that logs again, exercising the re-entrancy guard.
+    extern "C-unwind" fn reentrant_cb(_level: c_int, _msg: *const c_char, _user: *mut c_void) {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        dispatch(LEV_LOG_ERROR, "reentrant", "from inside the callback");
+    }
+
+    fn set_sink(cb: LogCb) {
+        *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Sink { cb, user: 0 });
+    }
+
+    fn clear_sink() {
+        *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    // A panicking callback must not unwind across the (C) boundary: dispatch
+    // catches it, the process survives, and the sink stays usable afterwards.
+    #[test]
+    fn panicking_callback_is_contained() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        CALLS.store(0, Ordering::SeqCst);
+        set_sink(panicking_cb);
+        // Would abort the test process if the unwind escaped.
+        dispatch(LEV_LOG_ERROR, "test", "first");
+        dispatch(LEV_LOG_ERROR, "test", "second");
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "both records reached the cb"
+        );
+
+        // The bridge is still usable: a fresh, well-behaved callback runs.
+        set_sink(counting_cb);
+        dispatch(LEV_LOG_ERROR, "test", "third");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+        clear_sink();
+    }
+
+    // A callback that logs again is routed to stderr by the guard instead of
+    // recursing into itself.
+    #[test]
+    fn reentrant_callback_does_not_recurse() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        CALLS.store(0, Ordering::SeqCst);
+        set_sink(reentrant_cb);
+        dispatch(LEV_LOG_ERROR, "test", "outer");
+        // Exactly one user-callback invocation; the nested record went to stderr.
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        clear_sink();
+    }
 }

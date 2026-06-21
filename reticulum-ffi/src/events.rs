@@ -393,23 +393,60 @@ unsafe impl Send for EventBridge {}
 unsafe impl Sync for EventBridge {}
 
 /// Increment the eventfd counter by 1. Called under the state lock.
+///
+/// Counter discipline: the eventfd is in semaphore mode and its counter mirrors
+/// the number of queued events, which the per-plane caps bound to at most
+/// `control_cap + data_cap + 1`. That ceiling is far below the eventfd's
+/// `u64::MAX - 1` saturation point, so a write here can never see `EAGAIN`
+/// (which an eventfd returns only when the add would overflow). An eventfd write
+/// is all-or-nothing for the 8-byte value, so there is no short write either.
+/// The one transient failure we can see is `EINTR`, which we retry so the
+/// increment is never lost and `counter == queue length` holds on return.
 fn fd_write(fd: RawFd) {
     let v: u64 = 1;
-    // SAFETY: writing 8 bytes of a u64 to an eventfd is the documented contract.
-    unsafe {
-        libc::write(fd, &v as *const u64 as *const c_void, 8);
+    loop {
+        // SAFETY: writing 8 bytes of a u64 to an eventfd is the documented contract.
+        let n = unsafe { libc::write(fd, &v as *const u64 as *const c_void, 8) };
+        if n == 8 {
+            return;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        // Unreachable under the cap discipline above. Losing the increment would
+        // desync the counter from the queue length and could wedge a poller, so
+        // surface it loudly in debug builds rather than swallowing it silently.
+        debug_assert!(false, "eventfd write failed: {err}");
+        return;
     }
 }
 
 /// Decrement the eventfd counter by 1 (semaphore mode). Called under the state
-/// lock only after a successful pop, so the counter is `>= 1` and `read` does
-/// not block; a spurious `EAGAIN` is tolerated, never treated as an error.
+/// lock only after a successful pop, so the counter is `>= 1` and `read` returns
+/// immediately. See [`fd_write`] for the counter discipline. `EINTR` is retried;
+/// a spurious `EAGAIN` (counter already 0) is unreachable here but tolerated.
 fn fd_read(fd: RawFd) {
     let mut v: u64 = 0;
-    // SAFETY: reading 8 bytes from an eventfd into a u64 is the documented
-    // contract; the fd is non-blocking so this never blocks.
-    unsafe {
-        libc::read(fd, &mut v as *mut u64 as *mut c_void, 8);
+    loop {
+        // SAFETY: reading 8 bytes from an eventfd into a u64 is the documented
+        // contract; the fd is non-blocking so this never blocks.
+        let n = unsafe { libc::read(fd, &mut v as *mut u64 as *mut c_void, 8) };
+        if n == 8 {
+            return;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        // EAGAIN means the counter was already 0; we read exactly once per
+        // successful pop under the lock, so the counter is >= 1 here. Tolerate
+        // it without spinning rather than risk a busy loop.
+        debug_assert!(
+            err.raw_os_error() == Some(libc::EAGAIN),
+            "eventfd read failed: {err}"
+        );
+        return;
     }
 }
 
@@ -484,10 +521,16 @@ impl EventBridge {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let ev = state.queue.pop_front();
         if let Some(ref e) = ev {
+            // The plane class is read from `e.is_control`, the same field
+            // `enqueue` incremented from, so the two counters cannot diverge.
+            // saturating_sub plus a debug_assert guards against an unreachable
+            // underflow wedging the count in release instead of panicking.
             if e.is_control {
-                state.control_len -= 1;
+                debug_assert!(state.control_len > 0, "control_len underflow");
+                state.control_len = state.control_len.saturating_sub(1);
             } else {
-                state.data_len -= 1;
+                debug_assert!(state.data_len > 0, "data_len underflow");
+                state.data_len = state.data_len.saturating_sub(1);
             }
             fd_read(self.fd);
         }
@@ -518,7 +561,11 @@ pub(crate) async fn run_bridge(
 
 // --- C accessors on a drained event handle ---
 
-/// The event's type, one of the `LEV_EVENT_*` constants (0 on NULL).
+/// The event's type, one of the `LEV_EVENT_*` constants. Returns
+/// `LEV_EVENT_OTHER` (0) on a NULL pointer, which is indistinguishable from a
+/// real `LEV_EVENT_OTHER` event; callers that may pass NULL should null-check
+/// the handle first (`lev_next_event`/`lev_wait_event` already yield non-NULL
+/// handles, so this only matters for hand-constructed pointers).
 #[no_mangle]
 pub unsafe extern "C" fn lev_event_type(ev: *const lev_event_t) -> c_int {
     guard(LEV_EVENT_OTHER, || match ev.as_ref() {
