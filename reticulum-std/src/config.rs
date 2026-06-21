@@ -256,6 +256,54 @@ fn default_bitrate() -> u64 {
     DEFAULT_BITRATE_BPS
 }
 
+impl Default for InterfaceConfig {
+    /// An empty interface with the same baseline the serde `default_*` helpers
+    /// give: enabled, outgoing, default bitrate, and every optional field unset.
+    /// Programmatic builders set `interface_type` plus the fields they care
+    /// about and fill the rest with `..Default::default()`.
+    fn default() -> Self {
+        Self {
+            interface_type: String::new(),
+            enabled: true,
+            outgoing: true,
+            bitrate: DEFAULT_BITRATE_BPS,
+            listen_ip: None,
+            listen_port: None,
+            target_host: None,
+            target_port: None,
+            forward_ip: None,
+            forward_port: None,
+            port: None,
+            speed: None,
+            databits: None,
+            parity: None,
+            stopbits: None,
+            buffer_size: None,
+            reconnect_interval_secs: None,
+            max_reconnect_tries: None,
+            group_id: None,
+            discovery_scope: None,
+            discovery_port: None,
+            data_port: None,
+            devices: None,
+            ignored_devices: None,
+            multicast_loopback: None,
+            networkname: None,
+            passphrase: None,
+            ifac_size: None,
+            frequency: None,
+            bandwidth: None,
+            spreading_factor: None,
+            coding_rate: None,
+            tx_power: None,
+            flow_control: None,
+            airtime_limit_short: None,
+            airtime_limit_long: None,
+            csma_enabled: None,
+        }
+    }
+}
+
 impl Config {
     /// Load configuration from a file
     ///

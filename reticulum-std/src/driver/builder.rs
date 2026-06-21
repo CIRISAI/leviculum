@@ -10,7 +10,7 @@ use reticulum_core::node::NodeCoreBuilder;
 use reticulum_core::ProofStrategy;
 
 use crate::clock::SystemClock;
-use crate::config::{Config, InterfaceConfig, DEFAULT_BITRATE_BPS};
+use crate::config::{Config, InterfaceConfig};
 use crate::error::Error;
 use crate::storage::Storage;
 
@@ -155,42 +155,9 @@ impl ReticulumNodeBuilder {
     pub fn add_tcp_client(mut self, addr: SocketAddr) -> Self {
         self.interfaces.push(InterfaceConfig {
             interface_type: "TCPClientInterface".to_string(),
-            enabled: true,
-            outgoing: true,
-            bitrate: DEFAULT_BITRATE_BPS,
             target_host: Some(addr.ip().to_string()),
             target_port: Some(addr.port()),
-            listen_ip: None,
-            listen_port: None,
-            forward_ip: None,
-            forward_port: None,
-            port: None,
-            speed: None,
-            databits: None,
-            parity: None,
-            stopbits: None,
-            buffer_size: None,
-            reconnect_interval_secs: None,
-            max_reconnect_tries: None,
-            group_id: None,
-            discovery_scope: None,
-            discovery_port: None,
-            data_port: None,
-            devices: None,
-            ignored_devices: None,
-            multicast_loopback: None,
-            networkname: None,
-            passphrase: None,
-            ifac_size: None,
-            frequency: None,
-            bandwidth: None,
-            spreading_factor: None,
-            coding_rate: None,
-            tx_power: None,
-            flow_control: None,
-            airtime_limit_short: None,
-            airtime_limit_long: None,
-            csma_enabled: None,
+            ..Default::default()
         });
         self
     }
@@ -201,42 +168,9 @@ impl ReticulumNodeBuilder {
     pub fn add_tcp_server(mut self, addr: SocketAddr) -> Self {
         self.interfaces.push(InterfaceConfig {
             interface_type: "TCPServerInterface".to_string(),
-            enabled: true,
-            outgoing: true,
-            bitrate: DEFAULT_BITRATE_BPS,
             listen_ip: Some(addr.ip().to_string()),
             listen_port: Some(addr.port()),
-            target_host: None,
-            target_port: None,
-            forward_ip: None,
-            forward_port: None,
-            port: None,
-            speed: None,
-            databits: None,
-            parity: None,
-            stopbits: None,
-            buffer_size: None,
-            reconnect_interval_secs: None,
-            max_reconnect_tries: None,
-            group_id: None,
-            discovery_scope: None,
-            discovery_port: None,
-            data_port: None,
-            devices: None,
-            ignored_devices: None,
-            multicast_loopback: None,
-            networkname: None,
-            passphrase: None,
-            ifac_size: None,
-            frequency: None,
-            bandwidth: None,
-            spreading_factor: None,
-            coding_rate: None,
-            tx_power: None,
-            flow_control: None,
-            airtime_limit_short: None,
-            airtime_limit_long: None,
-            csma_enabled: None,
+            ..Default::default()
         });
         self
     }
@@ -248,42 +182,11 @@ impl ReticulumNodeBuilder {
     pub fn add_udp_interface(mut self, listen_addr: SocketAddr, forward_addr: SocketAddr) -> Self {
         self.interfaces.push(InterfaceConfig {
             interface_type: "UDPInterface".to_string(),
-            enabled: true,
-            outgoing: true,
-            bitrate: DEFAULT_BITRATE_BPS,
             listen_ip: Some(listen_addr.ip().to_string()),
             listen_port: Some(listen_addr.port()),
             forward_ip: Some(forward_addr.ip().to_string()),
             forward_port: Some(forward_addr.port()),
-            target_host: None,
-            target_port: None,
-            port: None,
-            speed: None,
-            databits: None,
-            parity: None,
-            stopbits: None,
-            buffer_size: None,
-            reconnect_interval_secs: None,
-            max_reconnect_tries: None,
-            group_id: None,
-            discovery_scope: None,
-            discovery_port: None,
-            data_port: None,
-            devices: None,
-            ignored_devices: None,
-            multicast_loopback: None,
-            networkname: None,
-            passphrase: None,
-            ifac_size: None,
-            frequency: None,
-            bandwidth: None,
-            spreading_factor: None,
-            coding_rate: None,
-            tx_power: None,
-            flow_control: None,
-            airtime_limit_short: None,
-            airtime_limit_long: None,
-            csma_enabled: None,
+            ..Default::default()
         });
         self
     }
@@ -303,42 +206,13 @@ impl ReticulumNodeBuilder {
     ) -> Self {
         self.interfaces.push(InterfaceConfig {
             interface_type: "RNodeInterface".to_string(),
-            enabled: true,
-            outgoing: true,
-            bitrate: DEFAULT_BITRATE_BPS,
-            target_host: None,
-            target_port: None,
-            listen_ip: None,
-            listen_port: None,
-            forward_ip: None,
-            forward_port: None,
             port: Some(port),
-            speed: None,
-            databits: None,
-            parity: None,
-            stopbits: None,
-            buffer_size: None,
-            reconnect_interval_secs: None,
-            max_reconnect_tries: None,
-            group_id: None,
-            discovery_scope: None,
-            discovery_port: None,
-            data_port: None,
-            devices: None,
-            ignored_devices: None,
-            multicast_loopback: None,
-            networkname: None,
-            passphrase: None,
-            ifac_size: None,
             frequency: Some(frequency),
             bandwidth: Some(bandwidth),
             spreading_factor: Some(spreading_factor),
             coding_rate: Some(coding_rate),
             tx_power: Some(tx_power),
-            flow_control: None,
-            airtime_limit_short: None,
-            airtime_limit_long: None,
-            csma_enabled: None,
+            ..Default::default()
         });
         self
     }
@@ -355,42 +229,12 @@ impl ReticulumNodeBuilder {
     ) -> Self {
         self.interfaces.push(InterfaceConfig {
             interface_type: "SerialInterface".to_string(),
-            enabled: true,
-            outgoing: true,
-            bitrate: DEFAULT_BITRATE_BPS,
-            target_host: None,
-            target_port: None,
-            listen_ip: None,
-            listen_port: None,
-            forward_ip: None,
-            forward_port: None,
             port: Some(port),
             speed: Some(speed),
             databits: Some(databits),
             parity: Some(parity),
             stopbits: Some(stopbits),
-            buffer_size: None,
-            reconnect_interval_secs: None,
-            max_reconnect_tries: None,
-            group_id: None,
-            discovery_scope: None,
-            discovery_port: None,
-            data_port: None,
-            devices: None,
-            ignored_devices: None,
-            multicast_loopback: None,
-            networkname: None,
-            passphrase: None,
-            ifac_size: None,
-            frequency: None,
-            bandwidth: None,
-            spreading_factor: None,
-            coding_rate: None,
-            tx_power: None,
-            flow_control: None,
-            airtime_limit_short: None,
-            airtime_limit_long: None,
-            csma_enabled: None,
+            ..Default::default()
         });
         self
     }
@@ -412,23 +256,6 @@ impl ReticulumNodeBuilder {
     ) -> Self {
         self.interfaces.push(InterfaceConfig {
             interface_type: "AutoInterface".to_string(),
-            enabled: true,
-            outgoing: true,
-            bitrate: DEFAULT_BITRATE_BPS,
-            listen_ip: None,
-            listen_port: None,
-            target_host: None,
-            target_port: None,
-            forward_ip: None,
-            forward_port: None,
-            port: None,
-            speed: None,
-            databits: None,
-            parity: None,
-            stopbits: None,
-            buffer_size: None,
-            reconnect_interval_secs: None,
-            max_reconnect_tries: None,
             group_id: Some(String::from_utf8_lossy(&config.group_id).to_string()),
             discovery_scope: Some(config.discovery_scope),
             discovery_port: Some(config.discovery_port),
@@ -436,18 +263,7 @@ impl ReticulumNodeBuilder {
             devices: config.allowed_devices,
             ignored_devices: config.ignored_devices,
             multicast_loopback: Some(config.multicast_loopback),
-            networkname: None,
-            passphrase: None,
-            ifac_size: None,
-            frequency: None,
-            bandwidth: None,
-            spreading_factor: None,
-            coding_rate: None,
-            tx_power: None,
-            flow_control: None,
-            airtime_limit_short: None,
-            airtime_limit_long: None,
-            csma_enabled: None,
+            ..Default::default()
         });
         self
     }
@@ -643,10 +459,15 @@ impl ReticulumNodeBuilder {
             };
             self.core_builder.identity(identity)
         } else {
-            // Explicit identity, write to file so Python tools can read it
+            // Explicit identity, write to file so Python tools can read it.
+            // A save failure is not fatal here (the identity is caller-supplied,
+            // not generated), but warn so it is not lost silently the way the
+            // generate branch would surface it.
             use reticulum_core::identity_store::IdentityStore;
             if let Some(id) = self.core_builder.identity_ref() {
-                let _ = id_store.save(id);
+                if let Err(e) = id_store.save(id) {
+                    tracing::warn!("failed to persist explicit identity: {e}");
+                }
             }
             self.core_builder
         };
