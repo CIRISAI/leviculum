@@ -142,7 +142,26 @@ while (!stop && !link) {
         lev_event_free(ev);
     }
 }
-if (link) pump(node, link);
+```
+
+One subtlety: accepting a link does not make it immediately usable for
+**sending**. The responder's link becomes active only after the initiator's RTT
+exchange, signalled by the responder's own `LEV_EVENT_LINK_ESTABLISHED`. Sending
+before that returns `LEV_ERR_SEND` ("link not active"). So we wait for it before
+pumping, writing through any data that arrives meanwhile so none is lost:
+
+```c
+int active = 0;
+while (link && !stop && !active) {
+    lev_event_t *ev = NULL;
+    if (lev_wait_event(node, &ev, 200) != LEV_OK || !ev) continue;
+    int t = lev_event_type(ev);
+    if (t == LEV_EVENT_LINK_ESTABLISHED) active = 1;
+    else if (t == LEV_EVENT_LINK_MESSAGE) emit_message(ev);   /* don't drop early data */
+    else if (t == LEV_EVENT_LINK_CLOSED)  stop = 1;
+    lev_event_free(ev);
+}
+if (active) pump(node, link);
 ```
 
 `lev_wait_event` is the blocking drain we use during setup; the steady-state
@@ -233,20 +252,24 @@ Two details:
   stdout, using the read(2)-style accessor (size query, then fill):
 
 ```c
+static void emit_message(lev_event_t *ev) {
+    size_t need = 0;
+    lev_event_data(ev, NULL, 0, &need);              /* size query */
+    uint8_t *d = malloc(need ? need : 1);
+    size_t got = need;
+    lev_event_data(ev, d, need, &got);               /* fill */
+    fwrite(d, 1, got, stdout);
+    fflush(stdout);
+    free(d);
+}
+
 static int drain_to_stdout(leviculum_t *node) {
     int closed = 0;
     lev_event_t *ev = NULL;
     while (lev_next_event(node, &ev) == LEV_OK && ev) {
         int t = lev_event_type(ev);
         if (t == LEV_EVENT_LINK_MESSAGE) {
-            size_t need = 0;
-            lev_event_data(ev, NULL, 0, &need);          /* size query */
-            uint8_t *d = malloc(need ? need : 1);
-            size_t got = need;
-            lev_event_data(ev, d, need, &got);           /* fill */
-            fwrite(d, 1, got, stdout);
-            fflush(stdout);
-            free(d);
+            emit_message(ev);
         } else if (t == LEV_EVENT_LINK_CLOSED) {
             closed = 1;
         }

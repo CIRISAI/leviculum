@@ -86,6 +86,18 @@ static void cfg_client(lev_builder_t *b, const char *addr) {
     lev_builder_add_tcp_client(b, addr);
 }
 
+/* Write one received link message's bytes to stdout. */
+static void emit_message(lev_event_t *ev) {
+    size_t need = 0;
+    lev_event_data(ev, NULL, 0, &need);
+    uint8_t *d = malloc(need ? need : 1);
+    size_t got = need;
+    lev_event_data(ev, d, need, &got);
+    fwrite(d, 1, got, stdout);
+    fflush(stdout);
+    free(d);
+}
+
 /* Drain all pending events, writing received link bytes to stdout. Returns 1 if
  * the peer closed the link. */
 static int drain_to_stdout(leviculum_t *node) {
@@ -94,14 +106,7 @@ static int drain_to_stdout(leviculum_t *node) {
     while (lev_next_event(node, &ev) == LEV_OK && ev) {
         int t = lev_event_type(ev);
         if (t == LEV_EVENT_LINK_MESSAGE) {
-            size_t need = 0;
-            lev_event_data(ev, NULL, 0, &need);
-            uint8_t *d = malloc(need ? need : 1);
-            size_t got = need;
-            lev_event_data(ev, d, need, &got);
-            fwrite(d, 1, got, stdout);
-            fflush(stdout);
-            free(d);
+            emit_message(ev);
         } else if (t == LEV_EVENT_LINK_CLOSED) {
             closed = 1;
         }
@@ -205,7 +210,29 @@ static int run_listen(const char *storage, const char *bind_addr) {
     }
 
     if (link) {
-        pump(node, link);
+        /* The responder's link is not active until the initiator's RTT exchange
+         * completes; wait for our own LINK_ESTABLISHED before the pump may send,
+         * or an early send fails with "link not active". Drain any data that
+         * arrives meanwhile so none is lost. */
+        int active = 0;
+        while (!stop && !active) {
+            lev_event_t *ev = NULL;
+            if (lev_wait_event(node, &ev, 200) != LEV_OK || !ev) {
+                continue;
+            }
+            int t = lev_event_type(ev);
+            if (t == LEV_EVENT_LINK_ESTABLISHED) {
+                active = 1;
+            } else if (t == LEV_EVENT_LINK_MESSAGE) {
+                emit_message(ev);
+            } else if (t == LEV_EVENT_LINK_CLOSED) {
+                stop = 1;
+            }
+            lev_event_free(ev);
+        }
+        if (active) {
+            pump(node, link);
+        }
     }
 
     lev_link_free(link);

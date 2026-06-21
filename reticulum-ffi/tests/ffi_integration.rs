@@ -102,6 +102,47 @@ fn establish_link(a: &Node, b: &Node, dest: &[u8; 16]) -> (Link, Link) {
     (Link(lb), Link(la))
 }
 
+// A sustained channel stream must not stall: the flow-control window advances
+// as the receiver proves delivery, so the sender keeps sending past one window.
+#[test]
+fn channel_stream_of_many_messages_does_not_stall() {
+    let p = setup_pair();
+    let (lb, _la) = establish_link(&p.a, &p.b, &p.dest);
+    let msg = [0x7Eu8; 256];
+    for i in 0..500u32 {
+        let rc = unsafe { lev_link_send(lb.0, msg.as_ptr(), msg.len(), 5000) };
+        assert_eq!(
+            rc,
+            LEV_OK,
+            "send {i} failed (window stall): {}",
+            last_error()
+        );
+    }
+}
+
+// The responder can send on its link once that link is active. Its link goes
+// active only after the initiator's RTT exchange, so an app must wait for the
+// responder-side LINK_ESTABLISHED before sending (sending earlier returns
+// LEV_ERR_SEND, "link not active"); levcat does exactly this.
+#[test]
+fn responder_can_send_once_established() {
+    let p = setup_pair();
+    let (_lb, la) = establish_link(&p.a, &p.b, &p.dest);
+    wait_event(p.a.0, LEV_EVENT_LINK_ESTABLISHED, EV).expect("responder link established");
+    let msg = b"from-responder";
+    assert_eq!(
+        unsafe { lev_link_send(la.0, msg.as_ptr(), msg.len(), 5000) },
+        LEV_OK,
+        "responder send: {}",
+        last_error()
+    );
+    let ev = wait_event(p.b.0, LEV_EVENT_LINK_MESSAGE, EV);
+    assert!(
+        ev.is_some(),
+        "initiator must receive the responder's message"
+    );
+}
+
 #[test]
 fn announce_then_link_message_both_directions() {
     let p = setup_pair();
