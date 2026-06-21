@@ -12,19 +12,22 @@ mvr: build-integ-bins
     cargo test -p reticulum-std --test mvr -- --test-threads=1
 
 # Promote the most-recent auto-bug bundle to the coder bridge.
-# Run after a tier RED has emitted to /tmp/leviculum/auto-bug/instructions.md
+# Run after a tier RED has emitted to $BRIDGE/auto-bug/instructions.md
 # and you want the coder to pick it up.  See scripts/_emit-auto-bug-bundle.sh.
+# BRIDGE defaults to ~/.local/state/leviculum (override LEVICULUM_BRIDGE).
 # The source bundle is left in place so a re-promotion (e.g. after a
 # stomped bridge) works without re-triggering the failing tier.
+# One shell block so BRIDGE persists across the recipe lines.
 spawn-coder:
-    @if [ ! -s /tmp/leviculum/auto-bug/instructions.md ]; then \
-        echo "ERROR: no auto-bug bundle at /tmp/leviculum/auto-bug/instructions.md"; \
+    @BRIDGE="${LEVICULUM_BRIDGE:-$HOME/.local/state/leviculum}"; \
+    if [ ! -s "$BRIDGE/auto-bug/instructions.md" ]; then \
+        echo "ERROR: no auto-bug bundle at $BRIDGE/auto-bug/instructions.md"; \
         echo "       Either no recent tier RED, or the file was removed by hand."; \
         exit 1; \
-    fi
-    cp /tmp/leviculum/auto-bug/instructions.md /tmp/leviculum/instructions.md
-    @echo "[spawn-coder] bundle promoted to bridge: /tmp/leviculum/instructions.md"
-    @echo "[spawn-coder] source: /tmp/leviculum/auto-bug/instructions.md (left in place for re-promotion)"
+    fi; \
+    cp "$BRIDGE/auto-bug/instructions.md" "$BRIDGE/instructions.md"; \
+    echo "[spawn-coder] bundle promoted to bridge: $BRIDGE/instructions.md"; \
+    echo "[spawn-coder] source: $BRIDGE/auto-bug/instructions.md (left in place for re-promotion)"
 
 # Lint the embedded firmware workspace. reticulum-nrf is its OWN cargo
 # workspace — `--workspace` invocations in the repo root never reach it,

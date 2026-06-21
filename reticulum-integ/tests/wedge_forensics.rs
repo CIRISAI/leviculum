@@ -28,9 +28,13 @@ fn capture_script_exists_and_is_executable() {
 
 #[test]
 fn capture_script_runs_without_errors() {
+    // Point the bridge at a tempdir so the run does not pollute the
+    // real persistent bridge at ~/.local/state/leviculum.
+    let bridge = tempfile::TempDir::new().expect("tempdir");
     let out = Command::new("bash")
         .arg(script_path())
         .arg("sentinel-test")
+        .env("LEVICULUM_BRIDGE", bridge.path())
         .output()
         .expect("spawn capture script");
     // Best-effort observational — `set +e` inside the script + explicit
@@ -46,13 +50,17 @@ fn capture_script_runs_without_errors() {
 #[test]
 fn capture_script_creates_tagged_directory() {
     let tag = format!("test-tag-{}", std::process::id());
+    // Isolate the bridge to a tempdir: keeps the test deterministic and
+    // stops it polluting the real persistent bridge.
+    let bridge = tempfile::TempDir::new().expect("tempdir");
     Command::new("bash")
         .arg(script_path())
         .arg(&tag)
+        .env("LEVICULUM_BRIDGE", bridge.path())
         .output()
         .expect("spawn");
     // Look up the most recent forensics directory matching our tag.
-    let base = PathBuf::from("/tmp/leviculum/wedge-forensics");
+    let base = bridge.path().join("wedge-forensics");
     let entries = std::fs::read_dir(&base).expect("read forensics dir");
     let found = entries
         .filter_map(Result::ok)

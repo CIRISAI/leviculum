@@ -9,9 +9,11 @@
 #   bash scripts/_emit-auto-bug-bundle.sh tier2     ~/.local/state/leviculum-ci/tier2-20260504-235959-12345.log
 #   bash scripts/_emit-auto-bug-bundle.sh tier3-hw  ~/.local/state/leviculum-ci/nightly-hw-20260504-235959-12345.log
 #
-# Writes /tmp/leviculum/auto-bug/instructions.md (overwriting any
-# prior bundle).  Run `just spawn-coder` to promote the bundle to
-# the coder bridge at /tmp/leviculum/instructions.md.
+# Writes $BRIDGE/auto-bug/instructions.md (overwriting any prior
+# bundle).  Run `just spawn-coder` to promote the bundle to the
+# coder bridge at $BRIDGE/instructions.md.
+# BRIDGE defaults to ~/.local/state/leviculum (override via
+# LEVICULUM_BRIDGE).
 #
 # Defensive degradation: every capture step is best-effort.  If any
 # input (log file, git log, cargo failure pattern) is missing or
@@ -35,7 +37,8 @@ if [[ -z "$TIER" || -z "$LOG_PATH" ]]; then
     exit 2
 fi
 
-BUNDLE_DIR=/tmp/leviculum/auto-bug
+BRIDGE="${LEVICULUM_BRIDGE:-$HOME/.local/state/leviculum}"
+BUNDLE_DIR="$BRIDGE/auto-bug"
 BUNDLE_FILE="$BUNDLE_DIR/instructions.md"
 
 mkdir -p "$BUNDLE_DIR"
@@ -135,7 +138,7 @@ $LOG_TAIL
   context than the excerpts above.
 
 When ready to begin, write your plan / pre-review to
-\`/tmp/leviculum/report.md\` per the standard bridge protocol.
+\`$BRIDGE/report.md\` per the standard bridge protocol.
 EOF
 
 echo "[auto-bug] bundle written: $BUNDLE_FILE"

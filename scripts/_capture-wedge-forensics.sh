@@ -6,7 +6,9 @@
 # Usage:
 #   bash scripts/_capture-wedge-forensics.sh <test-name-tag>
 #
-# Captures into /tmp/leviculum/wedge-forensics/<timestamp>/:
+# Captures into $BRIDGE/wedge-forensics/<timestamp>/
+# (BRIDGE defaults to ~/.local/state/leviculum, override via
+# LEVICULUM_BRIDGE):
 #   - t114-firmware.txt   T114 USB-serial-id + udev attributes
 #   - dmesg-tty-usb.txt   last 200 lines filtered for tty/usb/cdc
 #   - lsusb.txt           lsusb -t and lsusb -v for LoRa devices
@@ -23,7 +25,8 @@ set +e
 
 TAG="${1:-untagged}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-BASEDIR="/tmp/leviculum/wedge-forensics/${STAMP}-${TAG}"
+BRIDGE="${LEVICULUM_BRIDGE:-$HOME/.local/state/leviculum}"
+BASEDIR="$BRIDGE/wedge-forensics/${STAMP}-${TAG}"
 mkdir -p "$BASEDIR"
 
 LOG="${BASEDIR}/capture.log"
