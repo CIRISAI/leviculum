@@ -125,28 +125,76 @@ build-ffi:
 build-ffi-arm64:
     cargo build-ffi-arm64
 
-# Build the leviculum .deb package for amd64. Binaries come from the
-# workspace musl target, so the .deb is fully static and runs on
-# Debian ≥ 9 / Ubuntu ≥ 16.04 regardless of host glibc. Requires
-# `cargo install cargo-deb`. Output: target/debian/leviculum_*.deb.
-build-deb: (_require-cargo-deb)
-    cargo build --release --bin lnsd --bin lns --bin lncp
-    cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build
+# Local .deb production, mirroring .woodpecker/nightly.yml (build-amd64 +
+# build-arm64). Use to build a master .deb by hand for the aarch64 soak
+# node (miauhaus) without waiting for CI. The nightly pipeline is the
+# source of truth; these recipes replicate its exact steps minus the
+# publish/upload (that stays CI-only). Tooling: rustup targets
+# x86_64/aarch64-unknown-linux-musl, cargo-deb, and for arm64
+# cargo-zigbuild + ziglang. Run `just _deb-prereqs` to install them.
 
-# ARM64 .deb via cargo-zigbuild (Zig as cross-linker). Requires:
-#   cargo install cargo-zigbuild
-#   rustup target add aarch64-unknown-linux-musl
-#   Zig installed as a full distribution (binary + lib/ directory),
-#   e.g.  tar xf zig-x86_64-linux-<ver>.tar.xz -C /opt/  and
-#   ln -sf /opt/zig-.../zig /usr/local/bin/zig. A bare zig binary
-#   without its sibling lib/ fails at `zig cc` with "unable to find
-#   zig installation directory".
-build-deb-arm64: (_require-cargo-deb)
-    cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
-    cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build
+# Pin the build ID + DEB version once and persist them, so an amd64 +
+# arm64 pair from a single `just build-deb` run carries identical
+# version strings (no midnight-UTC drift between the two builds), exactly
+# as nightly.yml pins them in its build-amd64 step. Formats match
+# nightly: build-id  nightly.<UTCdate>-<sha7> ; deb-version
+# <cargo version>~nightly.<UTCdate>.<sha7>. The short sha is the first 7
+# chars of git HEAD; a dirty tree still builds, the version just reflects
+# HEAD. No CI env vars are assumed; everything is computed from git+date.
+_deb-stamp:
+    @SHA="$(git rev-parse HEAD | cut -c1-7)"; \
+    DATE="$(date -u +%Y%m%d)"; \
+    VERSION="$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)"; \
+    echo "nightly.${DATE}-${SHA}" >.build-id; \
+    echo "${VERSION}~nightly.${DATE}.${SHA}" >.deb-version; \
+    echo "[deb-stamp] build-id=$(cat .build-id) deb-version=$(cat .deb-version)"
+
+# amd64 musl-static .deb. Binaries come from the workspace musl target,
+# so the .deb is fully static and runs on Debian >= 9 / Ubuntu >= 16.04
+# regardless of host glibc. `cargo clean -p reticulum-cli` is the same
+# incremental-relink insurance nightly uses (a repeated build with an
+# unchanged LEVICULUM_BUILD_ID can skip relinking and ship a stale
+# version string). --no-strip: rust already strips debuginfo at link
+# time; cargo-deb's default strip --strip-all corrupts musl-static
+# binaries (SIGSEGV at startup). Output: target/debian/leviculum_*_amd64.deb
+# (cargo-deb also hardlinks it under target/<triple>/debian/).
+build-deb-amd64: (_require-cargo-deb) _deb-stamp
+    cargo clean -p reticulum-cli
+    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
+    cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+    @echo "[build-deb-amd64] produced: $(ls -1t target/debian/leviculum_*_amd64.deb | head -1)"
+
+# arm64 musl-static .deb via cargo-zigbuild (Zig as the cross
+# compiler/linker — the only way to reach aarch64-musl from an amd64 host
+# without docker-in-docker or an arm64 runner). Requires cargo-zigbuild +
+# ziglang on PATH; `pip install ziglang` provides a self-contained Zig
+# the zigbuild wrapper finds, or install a full Zig distribution (the
+# bare zig binary without its sibling lib/ fails at `zig cc` with "unable
+# to find zig installation directory"). Same clean/--no-strip/version
+# handling as build-deb-amd64. Output: target/debian/leviculum_*_arm64.deb
+# (cargo-deb also hardlinks it under target/<triple>/debian/).
+build-deb-arm64: (_require-cargo-deb) _deb-stamp
+    cargo clean -p reticulum-cli
+    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
+    cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+    @echo "[build-deb-arm64] produced: $(ls -1t target/debian/leviculum_*_arm64.deb | head -1)"
+
+# Build both .debs in one go. _deb-stamp runs first (a dependency of each
+# child), so both packages share one build-id/version pair.
+build-deb: build-deb-amd64 build-deb-arm64
 
 _require-cargo-deb:
-    @cargo deb --version >/dev/null 2>&1 || (echo "cargo-deb not found — run: cargo install cargo-deb" && exit 1)
+    @cargo deb --version >/dev/null 2>&1 || (echo "cargo-deb not found — run: just _deb-prereqs (or cargo install cargo-deb)" && exit 1)
+
+# Best-effort, idempotent install of the cross-build toolchain the
+# build-deb* recipes need: the two musl rustup targets, cargo-deb, and
+# cargo-zigbuild + ziglang for the arm64 cross-link. Safe to re-run.
+_deb-prereqs:
+    rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+    cargo install --locked cargo-deb
+    cargo install --locked cargo-zigbuild
+    @echo "[_deb-prereqs] also ensure ziglang is available for arm64:"
+    @echo "    pip install ziglang   (or install a full Zig distribution on PATH)"
 
 # Status of last runs across all tiers
 status:

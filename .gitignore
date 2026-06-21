@@ -2,6 +2,9 @@
 /target/
 /dist/
 *.deb
+# Version stamp files written by the build-deb* just recipes (and CI nightly).
+/.build-id
+/.deb-version
 reticulum-nrf/target/
 reticulum-nrf/Cargo.lock
 **/*.rs.bk
