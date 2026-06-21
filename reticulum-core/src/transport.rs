@@ -432,15 +432,75 @@ pub struct TransportStats {
     pub(crate) packets_forwarded: u64,
     pub(crate) announces_processed: u64,
     pub(crate) packets_dropped: u64,
-    // Per-reason drop counters (OBS-2). Always on, cheap. The taxonomy
+    // Per-reason drop counters (OBS-2 / OBS-2b). Always on, cheap. The taxonomy
     // separates the correct, high-volume "overheard / not for us" drop
     // (`overheard_transport_id`) from genuine error/anomaly reasons, so a
-    // non-zero error count is the real loss signal, not silence. These are a
-    // subset of `packets_dropped` (the grand total over all drop paths).
+    // non-zero error count is the real loss signal, not silence. Every drop
+    // site routes through `record_drop`, so the reason counters always sum to
+    // `packets_dropped` (the grand total) by construction.
     pub(crate) drops_overheard_transport_id: u64,
     pub(crate) drops_invalid_announce: u64,
     pub(crate) drops_plain_group_multihop: u64,
     pub(crate) drops_no_path: u64,
+    pub(crate) drops_ifac: u64,
+    pub(crate) drops_duplicate: u64,
+    pub(crate) drops_announce_over_max_hops: u64,
+    pub(crate) drops_announce_replay: u64,
+    pub(crate) drops_announce_rate_limited: u64,
+    pub(crate) drops_lrproof_invalid: u64,
+    pub(crate) drops_forward_max_hops: u64,
+}
+
+/// Classified reason for a dropped packet (OBS-2b).
+///
+/// Every `packets_dropped` increment goes through [`TransportStats::record_drop`]
+/// with one of these reasons, so `packets_dropped == sum(per-reason counters)`
+/// holds by construction. Group by CAUSE: sites with the same underlying cause
+/// share a reason (e.g. all three LRPROOF validation failures are
+/// [`DropReason::LrproofInvalid`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropReason {
+    /// HEADER_2 non-announce packet whose transport id is not ours (correct
+    /// overhearing on a shared medium, not loss). High volume.
+    OverheardTransportId,
+    /// Malformed PLAIN/GROUP announce (anomaly; PLAIN/GROUP never announce).
+    InvalidAnnounce,
+    /// PLAIN/GROUP packet received at more than one hop (direct-neighbour only).
+    PlainGroupMultihop,
+    /// Forwardable packet (data or link request) with no known path.
+    NoPath,
+    /// IFAC access-control drop: failed verification on a protected interface,
+    /// or an IFAC-tagged packet on an unprotected interface.
+    Ifac,
+    /// Duplicate packet rejected by the packet-hash dedup cache.
+    Duplicate,
+    /// Incoming announce whose hop count exceeds `max_hops` (receipt gate, BUG-6).
+    AnnounceOverMaxHops,
+    /// Announce whose random blob was already seen (replay protection).
+    AnnounceReplay,
+    /// Announce suppressed by rate limiting with no path improvement.
+    AnnounceRateLimited,
+    /// LRPROOF dropped during validation (bad size, bad signature, or bad key).
+    LrproofInvalid,
+    /// Outbound forward/rebroadcast that would exceed `max_hops`.
+    ForwardMaxHops,
+}
+
+impl DropReason {
+    /// All variants, for taxonomy completeness checks and summary emission.
+    pub const ALL: [DropReason; 11] = [
+        DropReason::OverheardTransportId,
+        DropReason::InvalidAnnounce,
+        DropReason::PlainGroupMultihop,
+        DropReason::NoPath,
+        DropReason::Ifac,
+        DropReason::Duplicate,
+        DropReason::AnnounceOverMaxHops,
+        DropReason::AnnounceReplay,
+        DropReason::AnnounceRateLimited,
+        DropReason::LrproofInvalid,
+        DropReason::ForwardMaxHops,
+    ];
 }
 
 impl TransportStats {
@@ -491,6 +551,85 @@ impl TransportStats {
     /// Drops of forwardable packets with no known path to the destination.
     pub fn drops_no_path(&self) -> u64 {
         self.drops_no_path
+    }
+
+    /// IFAC access-control drops (bad verification or unexpected IFAC tag).
+    pub fn drops_ifac(&self) -> u64 {
+        self.drops_ifac
+    }
+
+    /// Duplicate packets rejected by the packet-hash dedup cache.
+    pub fn drops_duplicate(&self) -> u64 {
+        self.drops_duplicate
+    }
+
+    /// Incoming announces dropped at the receipt hop-limit gate (BUG-6).
+    pub fn drops_announce_over_max_hops(&self) -> u64 {
+        self.drops_announce_over_max_hops
+    }
+
+    /// Announces dropped by random-blob replay protection.
+    pub fn drops_announce_replay(&self) -> u64 {
+        self.drops_announce_replay
+    }
+
+    /// Announces suppressed by rate limiting with no path improvement.
+    pub fn drops_announce_rate_limited(&self) -> u64 {
+        self.drops_announce_rate_limited
+    }
+
+    /// LRPROOFs dropped during validation (bad size, signature, or key).
+    pub fn drops_lrproof_invalid(&self) -> u64 {
+        self.drops_lrproof_invalid
+    }
+
+    /// Outbound forwards/rebroadcasts dropped for exceeding `max_hops`.
+    pub fn drops_forward_max_hops(&self) -> u64 {
+        self.drops_forward_max_hops
+    }
+
+    /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
+    /// by construction (see [`Self::record_drop`]).
+    pub fn drops_reason_sum(&self) -> u64 {
+        self.drops_overheard_transport_id
+            + self.drops_invalid_announce
+            + self.drops_plain_group_multihop
+            + self.drops_no_path
+            + self.drops_ifac
+            + self.drops_duplicate
+            + self.drops_announce_over_max_hops
+            + self.drops_announce_replay
+            + self.drops_announce_rate_limited
+            + self.drops_lrproof_invalid
+            + self.drops_forward_max_hops
+    }
+
+    /// Single choke point for every packet drop (OBS-2b).
+    ///
+    /// Bumps the grand total `packets_dropped` AND the matching per-reason
+    /// counter together, so the invariant `packets_dropped == drops_reason_sum()`
+    /// cannot drift. A direct `packets_dropped += 1` elsewhere would break it;
+    /// the debug assertion below catches that on the next recorded drop.
+    pub(crate) fn record_drop(&mut self, reason: DropReason) {
+        self.packets_dropped += 1;
+        match reason {
+            DropReason::OverheardTransportId => self.drops_overheard_transport_id += 1,
+            DropReason::InvalidAnnounce => self.drops_invalid_announce += 1,
+            DropReason::PlainGroupMultihop => self.drops_plain_group_multihop += 1,
+            DropReason::NoPath => self.drops_no_path += 1,
+            DropReason::Ifac => self.drops_ifac += 1,
+            DropReason::Duplicate => self.drops_duplicate += 1,
+            DropReason::AnnounceOverMaxHops => self.drops_announce_over_max_hops += 1,
+            DropReason::AnnounceReplay => self.drops_announce_replay += 1,
+            DropReason::AnnounceRateLimited => self.drops_announce_rate_limited += 1,
+            DropReason::LrproofInvalid => self.drops_lrproof_invalid += 1,
+            DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
+        }
+        debug_assert_eq!(
+            self.packets_dropped,
+            self.drops_reason_sum(),
+            "drop taxonomy drift: a packets_dropped increment bypassed record_drop"
+        );
     }
 }
 
@@ -1079,7 +1218,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         "Dropping packet: IFAC verification failed on iface {}",
                         self.iface_name(interface_index)
                     );
-                    self.stats.packets_dropped += 1;
+                    self.stats.record_drop(DropReason::Ifac);
                     return Ok(());
                 }
             },
@@ -1089,7 +1228,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         "Dropping IFAC-tagged packet on non-IFAC iface {}",
                         self.iface_name(interface_index)
                     );
-                    self.stats.packets_dropped += 1;
+                    self.stats.record_drop(DropReason::Ifac);
                     return Ok(());
                 }
                 Cow::Borrowed(raw)
@@ -1140,8 +1279,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // neighbours. This is correct overhearing, not loss, so it gets a
             // counter only (surfaced in the periodic PKT_DROP_SUMMARY) and NO
             // per-packet event, to avoid reproducing the 99%-noise problem.
-            self.stats.drops_overheard_transport_id += 1;
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::OverheardTransportId);
             return Ok(());
         }
 
@@ -1167,8 +1305,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     iface_in = %self.iface_name(interface_index),
                     reason = "invalid_announce",
                 );
-                self.stats.drops_invalid_announce += 1;
-                self.stats.packets_dropped += 1;
+                self.stats.record_drop(DropReason::InvalidAnnounce);
                 return Ok(());
             }
             // Non-announce: drop if hops > 1 (PLAIN/GROUP are direct-neighbor only).
@@ -1191,8 +1328,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     iface_in = %self.iface_name(interface_index),
                     reason = "plain_group_multihop",
                 );
-                self.stats.drops_plain_group_multihop += 1;
-                self.stats.packets_dropped += 1;
+                self.stats.record_drop(DropReason::PlainGroupMultihop);
                 return Ok(());
             }
         }
@@ -1280,7 +1416,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 r#type = ?packet.flags.packet_type,
                 context = ?packet.context,
             );
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::Duplicate);
             return Ok(());
         }
 
@@ -1472,6 +1608,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 invalid_announce = self.stats.drops_invalid_announce,
                 plain_group_multihop = self.stats.drops_plain_group_multihop,
                 no_path = self.stats.drops_no_path,
+                ifac = self.stats.drops_ifac,
+                duplicate = self.stats.drops_duplicate,
+                announce_over_max_hops = self.stats.drops_announce_over_max_hops,
+                announce_replay = self.stats.drops_announce_replay,
+                announce_rate_limited = self.stats.drops_announce_rate_limited,
+                lrproof_invalid = self.stats.drops_lrproof_invalid,
+                forward_max_hops = self.stats.drops_forward_max_hops,
                 total = self.stats.packets_dropped,
             );
         }
@@ -1763,7 +1906,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 max_hops = self.config.max_hops,
                 "Dropped announce, hops exceed max_hops"
             );
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::AnnounceOverMaxHops);
             return Ok(());
         }
 
@@ -1783,7 +1926,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     dest = %HexShort(&dest_hash),
                     "Dropped announce, random hash already seen (replay)"
                 );
-                self.stats.packets_dropped += 1;
+                self.stats.record_drop(DropReason::AnnounceReplay);
                 return Ok(());
             }
         }
@@ -1906,7 +2049,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 dest = %HexShort(&dest_hash),
                 "Dropped announce, rate limited (no path improvement)"
             );
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::AnnounceRateLimited);
             return Ok(());
         }
 
@@ -2231,7 +2374,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         HexShort(&dest_hash),
                         self.iface_name(interface_index)
                     );
-                    self.stats.packets_dropped += 1;
+                    self.stats.record_drop(DropReason::NoPath);
                     return Ok(());
                 };
 
@@ -2553,7 +2696,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             len = proof_data.len(),
                             "Dropped LRPROOF, malformed proof size"
                         );
-                        self.stats.packets_dropped += 1;
+                        self.stats.record_drop(DropReason::LrproofInvalid);
                         return Ok(());
                     }
 
@@ -2593,7 +2736,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                             dest = %HexShort(&dest_hash),
                                             "Dropped LRPROOF, signature verification failed"
                                         );
-                                        self.stats.packets_dropped += 1;
+                                        self.stats.record_drop(DropReason::LrproofInvalid);
                                         return Ok(());
                                     }
                                 }
@@ -2604,7 +2747,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                     "Dropped LRPROOF, malformed Ed25519 key"
                                 );
                                 // Malformed key bytes, drop
-                                self.stats.packets_dropped += 1;
+                                self.stats.record_drop(DropReason::LrproofInvalid);
                                 return Ok(());
                             }
                         }
@@ -3000,8 +3143,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     iface_in = %self.iface_name(source_interface_index),
                     reason = "no_path",
                 );
-                self.stats.drops_no_path += 1;
-                self.stats.packets_dropped += 1;
+                self.stats.record_drop(DropReason::NoPath);
                 return Ok(());
             };
 
@@ -3165,7 +3307,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 packet.hops,
                 self.config.max_hops
             );
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::ForwardMaxHops);
             return Ok(());
         }
 
@@ -3195,7 +3337,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 max_hops = self.config.max_hops,
                 "Dropped broadcast packet, max hops exceeded"
             );
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::ForwardMaxHops);
             return;
         }
         let size = packet.packed_size();
@@ -3219,7 +3361,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 max_hops = self.config.max_hops,
                 "Dropped broadcast packet, max hops exceeded"
             );
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::ForwardMaxHops);
             return;
         }
         let size = packet.packed_size();
@@ -4316,7 +4458,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// the driver should deduplicate if this matters for the link type.
     fn broadcast_announce_with_caps(&mut self, packet: &mut Packet) {
         if packet.hops > self.config.max_hops {
-            self.stats.packets_dropped += 1;
+            self.stats.record_drop(DropReason::ForwardMaxHops);
             return;
         }
 
@@ -6068,6 +6210,90 @@ mod tests {
                         && logs.contains("total=3"),
                     "summary must carry per-reason counts; logs:\n{logs}"
                 );
+                // OBS-2b: every taxonomy reason is present in the summary line.
+                assert!(
+                    logs.contains("ifac=")
+                        && logs.contains("duplicate=")
+                        && logs.contains("announce_over_max_hops=")
+                        && logs.contains("announce_replay=")
+                        && logs.contains("announce_rate_limited=")
+                        && logs.contains("lrproof_invalid=")
+                        && logs.contains("forward_max_hops="),
+                    "summary must emit ALL taxonomy reasons; logs:\n{logs}"
+                );
+            }
+
+            // OBS-2b: the choke point makes `total == sum(reasons)` hold by
+            // construction. Drive one of every reason through `record_drop` and
+            // confirm the grand total equals the reason sum, and each reason
+            // lands in its own counter (no aliasing).
+            #[test]
+            fn test_record_drop_total_equals_reason_sum() {
+                let mut s = TransportStats::default();
+                for reason in DropReason::ALL {
+                    s.record_drop(reason);
+                }
+                assert_eq!(
+                    s.packets_dropped,
+                    DropReason::ALL.len() as u64,
+                    "one record_drop per variant must bump the total once each"
+                );
+                assert_eq!(
+                    s.packets_dropped,
+                    s.drops_reason_sum(),
+                    "total must equal the sum of all reason counters"
+                );
+                // Each variant routed to a distinct counter.
+                assert_eq!(s.drops_overheard_transport_id, 1);
+                assert_eq!(s.drops_invalid_announce, 1);
+                assert_eq!(s.drops_plain_group_multihop, 1);
+                assert_eq!(s.drops_no_path, 1);
+                assert_eq!(s.drops_ifac, 1);
+                assert_eq!(s.drops_duplicate, 1);
+                assert_eq!(s.drops_announce_over_max_hops, 1);
+                assert_eq!(s.drops_announce_replay, 1);
+                assert_eq!(s.drops_announce_rate_limited, 1);
+                assert_eq!(s.drops_lrproof_invalid, 1);
+                assert_eq!(s.drops_forward_max_hops, 1);
+            }
+
+            // OBS-2b: the invariant also holds end-to-end across genuinely
+            // different drop sites driven through process_incoming. This is the
+            // regression guard for the soak finding (total climbed while every
+            // named reason stayed 0).
+            #[test]
+            fn test_drop_taxonomy_invariant_end_to_end() {
+                use crate::destination::DestinationType;
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                // Three distinct drop sites, three distinct reasons.
+                transport
+                    .process_incoming(0, &make_overheard_packet([0xAB; TRUNCATED_HASHBYTES]))
+                    .unwrap();
+                transport
+                    .process_incoming(
+                        0,
+                        &make_plain_group_packet(DestinationType::Plain, PacketType::Announce, 0),
+                    )
+                    .unwrap();
+                transport
+                    .process_incoming(
+                        0,
+                        &make_plain_group_packet(DestinationType::Group, PacketType::Data, 1),
+                    )
+                    .unwrap();
+
+                let stats = transport.stats();
+                assert_eq!(stats.packets_dropped, 3, "three drops total");
+                assert_eq!(
+                    stats.packets_dropped,
+                    stats.drops_reason_sum(),
+                    "total must equal the reason sum end-to-end (no unattributed drops)"
+                );
+                assert_eq!(stats.drops_overheard_transport_id, 1);
+                assert_eq!(stats.drops_invalid_announce, 1);
+                assert_eq!(stats.drops_plain_group_multihop, 1);
             }
         } // mod obs_observability
 
