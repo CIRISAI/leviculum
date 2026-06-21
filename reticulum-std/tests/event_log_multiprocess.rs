@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use reticulum_std::test_support::event_log::merge_event_logs;
+use reticulum_std::event_log::merge_event_logs;
 
 /// Locate the compiled `event-log-helper` binary, honouring
 /// `CARGO_TARGET_DIR` and the `--target=x86_64-unknown-linux-musl`

@@ -20,7 +20,7 @@
 use std::thread;
 use std::time::Duration;
 
-use reticulum_std::test_support::event_log::install_global_subscriber;
+use reticulum_std::event_log::install_global_subscriber;
 
 fn main() {
     let mut args = std::env::args().skip(1);

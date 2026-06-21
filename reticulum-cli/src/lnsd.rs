@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         -1 => "warn",
         _ => "error",
     };
-    reticulum_std::test_support::event_log::install_global_subscriber(default_filter);
+    reticulum_std::event_log::install_global_subscriber(default_filter);
 
     info!("Starting lnsd v{}", env!("CARGO_PKG_VERSION"));
 

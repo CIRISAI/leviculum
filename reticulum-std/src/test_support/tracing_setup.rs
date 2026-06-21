@@ -38,8 +38,8 @@ static INIT: Once = Once::new();
 /// - the standard `fmt` layer with `with_test_writer` so libtest
 ///   captures the output, and
 /// - the event-log layer from
-///   [`crate::test_support::event_log::layer`], driven by an
-///   active-handles list shared with [`crate::test_support::event_log::init_event_log`].
+///   [`crate::event_log::layer`], driven by an active-handles list
+///   shared with [`crate::test_support::event_log::init_event_log`].
 ///
 /// Once-guarded — every test file that needs the global subscriber
 /// can call this safely; only the first call wins.
@@ -52,7 +52,7 @@ pub fn init_tracing_with_event_log() {
         // layer see every record.  RUST_LOG=debug still works for
         // anyone who wants verbose fmt output.
         let fmt_layer = fmt::layer().with_test_writer().with_filter(env_filter);
-        let event_layer = crate::test_support::event_log::layer();
+        let event_layer = crate::event_log::layer();
         Registry::default().with(fmt_layer).with(event_layer).init();
     });
 }

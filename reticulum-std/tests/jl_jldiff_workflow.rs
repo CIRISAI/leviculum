@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use reticulum_std::test_support::event_log::{init_event_log, merge_event_logs};
+use reticulum_std::event_log::merge_event_logs;
+use reticulum_std::test_support::event_log::init_event_log;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
