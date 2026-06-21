@@ -1670,6 +1670,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             iface = %self.iface_name(interface_index),
             path_response = is_path_response,
         );
+
+        // Gate on the already-incremented hops (transport.rs:1068 ran in the
+        // inbound path before handle_announce, and local-client/shared-instance
+        // accounting has already been applied there). Announces whose hop count
+        // exceeds max_hops are neither stored in the path table nor scheduled
+        // for rebroadcast: dropping here, before the announce-table insertion,
+        // covers both. Mirrors Python RNS Transport.py:1750
+        // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128):
+        // post-increment hops <= 128 accepted, hops > 128 dropped.
+        if packet.hops > self.config.max_hops {
+            crate::tracing::debug!(
+                dest = %HexShort(&dest_hash),
+                hops = packet.hops,
+                max_hops = self.config.max_hops,
+                "Dropped announce, hops exceed max_hops"
+            );
+            self.stats.packets_dropped += 1;
+            return Ok(());
+        }
+
         let random_hash = *announce.random_hash();
 
         // Random blob replay protection: reject if we've seen this exact random_hash,
@@ -9993,6 +10013,80 @@ mod tests {
             let mut buf = [0u8; MTU];
             let len = packet.pack(&mut buf).unwrap();
             buf[..len].to_vec()
+        }
+
+        // BUG-6 mvr: announces whose post-increment hops exceed max_hops
+        // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
+        // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
+        // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
+        // The inbound path increments hops once (transport.rs:1068) before
+        // handle_announce, so `packet.hops` inside the handler is already the
+        // post-increment value — same accounting as the RNS gate.
+        #[test]
+        fn test_announce_at_max_hops_boundary_stored_and_rebroadcast() {
+            // Wire hops=127 -> post-increment 128 (== max_hops): MUST be stored
+            // at hops=128 and remain rebroadcast-eligible. Boundary, must keep
+            // working after the fix.
+            let mut transport = make_transport_enabled();
+            assert_eq!(transport.config.max_hops, PATHFINDER_MAX_HOPS);
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(127, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_events();
+
+            // Stored at post-increment hops = 128 (proves the accounting).
+            assert_eq!(
+                transport.hops_to(&dest_hash),
+                Some(128),
+                "wire hops=127 -> post-increment 128 (== max_hops) must be stored"
+            );
+            // Rebroadcast-eligible: announce table entry with a scheduled retry.
+            let entry = transport
+                .storage()
+                .get_announce(&dest_hash)
+                .expect("boundary announce must be scheduled for rebroadcast");
+            assert!(
+                entry.retransmit_at_ms.is_some(),
+                "boundary announce (hops=128) must have a retransmit scheduled"
+            );
+        }
+
+        #[test]
+        fn test_announce_over_max_hops_not_stored_or_rebroadcast() {
+            // Wire hops=128 -> post-increment 129 (> max_hops): must be dropped.
+            // Not stored in the path table, and no announce-table entry created
+            // (so it can never be rebroadcast). Mirrors RNS dropping a
+            // post-increment hops=129 announce.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(128, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_events();
+
+            assert_eq!(
+                transport.hops_to(&dest_hash),
+                None,
+                "wire hops=128 -> post-increment 129 (> max_hops) must NOT be stored"
+            );
+            assert!(
+                transport.storage().get_announce(&dest_hash).is_none(),
+                "over-limit announce must NOT be scheduled for rebroadcast"
+            );
+
+            // And nothing is emitted on air after the jitter window.
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            assert_eq!(
+                transport.stats().packets_forwarded,
+                0,
+                "over-limit announce must not be forwarded"
+            );
         }
 
         // Stage 10: Hop count comparison in handle_announce
