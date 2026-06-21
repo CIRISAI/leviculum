@@ -1,6 +1,7 @@
 //! Test-capture helpers for the structured event-log sink.
 //!
-//! The PRODUCTION sink (the [`EventLogLayer`], [`EVENT_CATALOG`], the
+//! The PRODUCTION sink (the [`crate::event_log::EventLogLayer`],
+//! [`crate::event_log::EVENT_CATALOG`], the
 //! visitor, the canonical-line format, the append-only file output,
 //! `install_global_subscriber`) lives in [`crate::event_log`].  This
 //! module adds the per-test buffer-capture layer on top: helpers that

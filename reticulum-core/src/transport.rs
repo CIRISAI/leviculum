@@ -460,7 +460,7 @@ pub struct TransportStats {
 
 /// Classified reason for a dropped packet (OBS-2b).
 ///
-/// Every `packets_dropped` increment goes through [`TransportStats::record_drop`]
+/// Every `packets_dropped` increment goes through `TransportStats::record_drop`
 /// with one of these reasons, so `packets_dropped == sum(per-reason counters)`
 /// holds by construction. Group by CAUSE: sites with the same underlying cause
 /// share a reason (e.g. all three LRPROOF validation failures are
@@ -596,7 +596,7 @@ impl TransportStats {
     }
 
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
-    /// by construction (see [`Self::record_drop`]).
+    /// by construction (see `record_drop`).
     pub fn drops_reason_sum(&self) -> u64 {
         self.drops_overheard_transport_id
             + self.drops_invalid_announce

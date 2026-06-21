@@ -7,7 +7,7 @@
 //! - Complex objects are opaque handles with a `_free` counterpart.
 //! - Functions return `int`: `0` success, negative `LEV_ERR_*` on failure.
 //! - Output buffers are caller-owned, read(2) style (`buf` + `cap` + `out_len`).
-//! - No panic ever crosses the boundary; every function runs under [`guard`].
+//! - No panic ever crosses the boundary; every function runs under `guard`.
 //!
 //! The design of record is `docs/leviculum-api-design.md`.
 
