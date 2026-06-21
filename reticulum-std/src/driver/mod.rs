@@ -59,6 +59,13 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
+
+/// #77 TEMPORARY TRACE (dbg-responder-close-77): process-global count of
+/// TickOutputs carrying a LinkClosed that the event loop's shutdown branch
+/// DROPPED undispatched (graceful close lost to the teardown race). Read by
+/// the responder-close mvr to localize the loss without a tracing subscriber.
+#[doc(hidden)]
+pub static CLOSE77_SHUTDOWN_DROPPED_CLOSES: AtomicUsize = AtomicUsize::new(0);
 use std::task::Poll;
 use std::time::Duration;
 
@@ -1973,6 +1980,41 @@ async fn run_event_loop(
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     tracing::info!("Node shutdown requested");
+                    // #77 TEMPORARY TRACE (dbg-responder-close-77): count any
+                    // TickOutputs still queued in action_dispatch_rx that the
+                    // loop is about to DROP by breaking. A graceful close
+                    // (close_link) enqueues its TickOutput here; if shutdown
+                    // wins the select! race, that output — carrying the
+                    // SendPacket close bytes AND the LinkClosed event — is
+                    // discarded undispatched. We only count + log (NOT
+                    // dispatch) so the bug is preserved, not fixed.
+                    let mut undrained = 0usize;
+                    let mut with_send = 0usize;
+                    let mut with_linkclosed = 0usize;
+                    while let Ok(out) = action_dispatch_rx.try_recv() {
+                        undrained += 1;
+                        if out.actions.iter().any(|a| {
+                            matches!(a, reticulum_core::transport::Action::SendPacket { .. })
+                        }) {
+                            with_send += 1;
+                        }
+                        if out
+                            .events
+                            .iter()
+                            .any(|e| matches!(e, NodeEvent::LinkClosed { .. }))
+                        {
+                            with_linkclosed += 1;
+                        }
+                    }
+                    if undrained > 0 {
+                        CLOSE77_SHUTDOWN_DROPPED_CLOSES
+                            .fetch_add(with_linkclosed, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            target: "reticulum_std::driver",
+                            "CLOSE77_SHUTDOWN_DROP undrained={undrained} \
+                             with_send={with_send} with_linkclosed={with_linkclosed}"
+                        );
+                    }
                     break;
                 }
             }

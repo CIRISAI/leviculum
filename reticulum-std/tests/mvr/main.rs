@@ -20,6 +20,7 @@ pub mod harness;
 
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
+mod responder_close_delivery;
 mod rust_client_path_install_from_python;
 mod rust_client_path_install_loop_race;
 mod rust_client_path_install_via_relay;
