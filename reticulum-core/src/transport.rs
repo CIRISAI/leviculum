@@ -306,6 +306,8 @@ pub(crate) struct InterfaceAnnounceCap {
 pub(crate) struct QueuedAnnounce {
     /// Raw packet bytes ready for sending
     pub raw: Vec<u8>,
+    /// Destination hash (for ANN_TX observability when the queue drains)
+    pub dst: [u8; TRUNCATED_HASHBYTES],
     /// Hop count (lower = higher priority for dequeue)
     pub hops: u8,
     /// When this announce was queued (ms)
@@ -430,6 +432,15 @@ pub struct TransportStats {
     pub(crate) packets_forwarded: u64,
     pub(crate) announces_processed: u64,
     pub(crate) packets_dropped: u64,
+    // Per-reason drop counters (OBS-2). Always on, cheap. The taxonomy
+    // separates the correct, high-volume "overheard / not for us" drop
+    // (`overheard_transport_id`) from genuine error/anomaly reasons, so a
+    // non-zero error count is the real loss signal, not silence. These are a
+    // subset of `packets_dropped` (the grand total over all drop paths).
+    pub(crate) drops_overheard_transport_id: u64,
+    pub(crate) drops_invalid_announce: u64,
+    pub(crate) drops_plain_group_multihop: u64,
+    pub(crate) drops_no_path: u64,
 }
 
 impl TransportStats {
@@ -456,6 +467,30 @@ impl TransportStats {
     /// Packets dropped (duplicate, expired, etc.)
     pub fn packets_dropped(&self) -> u64 {
         self.packets_dropped
+    }
+
+    /// Drops on the high-volume "overheard / not for us" path: HEADER_2
+    /// non-announce packets whose transport id is not ours (correct overhearing
+    /// on a shared medium, not an error).
+    pub fn drops_overheard_transport_id(&self) -> u64 {
+        self.drops_overheard_transport_id
+    }
+
+    /// Drops of malformed PLAIN/GROUP announces (anomaly; PLAIN/GROUP
+    /// destinations never announce).
+    pub fn drops_invalid_announce(&self) -> u64 {
+        self.drops_invalid_announce
+    }
+
+    /// Drops of PLAIN/GROUP packets received at more than one hop (anomaly;
+    /// PLAIN/GROUP are direct-neighbor only).
+    pub fn drops_plain_group_multihop(&self) -> u64 {
+        self.drops_plain_group_multihop
+    }
+
+    /// Drops of forwardable packets with no known path to the destination.
+    pub fn drops_no_path(&self) -> u64 {
+        self.drops_no_path
     }
 }
 
@@ -1100,6 +1135,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 HexShort(&packet.destination_hash),
                 self.iface_name(interface_index)
             );
+            // High-volume "overheard / not for us" path: on a shared medium a
+            // transport node hears every HEADER_2 packet routed via its
+            // neighbours. This is correct overhearing, not loss, so it gets a
+            // counter only (surfaced in the periodic PKT_DROP_SUMMARY) and NO
+            // per-packet event, to avoid reproducing the 99%-noise problem.
+            self.stats.drops_overheard_transport_id += 1;
             self.stats.packets_dropped += 1;
             return Ok(());
         }
@@ -1116,6 +1157,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     HexShort(&packet.destination_hash),
                     self.iface_name(interface_index)
                 );
+                // Rare anomaly (PLAIN/GROUP destinations never announce):
+                // per-packet PKT_DROP for immediate visibility, plus a counter.
+                crate::tracing::debug!(
+                    event = "PKT_DROP",
+                    dst = %HexShort(&packet.destination_hash),
+                    r#type = ?packet.flags.packet_type,
+                    hops = packet.hops,
+                    iface_in = %self.iface_name(interface_index),
+                    reason = "invalid_announce",
+                );
+                self.stats.drops_invalid_announce += 1;
                 self.stats.packets_dropped += 1;
                 return Ok(());
             }
@@ -1129,6 +1181,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     self.iface_name(interface_index),
                     packet.hops
                 );
+                // Rare anomaly (PLAIN/GROUP are direct-neighbour only):
+                // per-packet PKT_DROP for immediate visibility, plus a counter.
+                crate::tracing::debug!(
+                    event = "PKT_DROP",
+                    dst = %HexShort(&packet.destination_hash),
+                    r#type = ?packet.flags.packet_type,
+                    hops = packet.hops,
+                    iface_in = %self.iface_name(interface_index),
+                    reason = "plain_group_multihop",
+                );
+                self.stats.drops_plain_group_multihop += 1;
                 self.stats.packets_dropped += 1;
                 return Ok(());
             }
@@ -1397,6 +1460,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     expires_in_ms = age_ms,
                 );
             }
+
+            // Per-reason drop summary at the same cadence (OBS-2). Surfaces the
+            // always-on drop counters without per-packet flooding: the
+            // high-volume overheard path is visible here as a count, while
+            // genuine error reasons also emit per-packet PKT_DROP. A non-zero
+            // error count (or growing total) is the loss signal.
+            crate::tracing::debug!(
+                event = "PKT_DROP_SUMMARY",
+                overheard_transport_id = self.stats.drops_overheard_transport_id,
+                invalid_announce = self.stats.drops_invalid_announce,
+                plain_group_multihop = self.stats.drops_plain_group_multihop,
+                no_path = self.stats.drops_no_path,
+                total = self.stats.packets_dropped,
+            );
         }
     }
 
@@ -2923,6 +3000,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     iface_in = %self.iface_name(source_interface_index),
                     reason = "no_path",
                 );
+                self.stats.drops_no_path += 1;
                 self.stats.packets_dropped += 1;
                 return Ok(());
             };
@@ -4159,6 +4237,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             iface: InterfaceId(target_iface),
                             data: buf[..len].to_vec(),
                         });
+                        // OBS-1: the node actually (re)transmitted this announce
+                        // on a specific interface (targeted path response).
+                        crate::tracing::debug!(
+                            event = "ANN_TX",
+                            dst = %HexShort(&dest_hash),
+                            hops = parsed.hops,
+                            iface = %self.iface_name(target_iface),
+                        );
                     }
                 } else {
                     // Apply ANNOUNCE_CAP to retries that forward a relayed
@@ -4167,6 +4253,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // without a cap bypass the rate limiter.
                     if parsed.hops == 0 || self.interface_announce_caps.is_empty() {
                         self.forward_on_all(&mut parsed);
+                        // OBS-1: uncapped broadcast goes to every interface via a
+                        // single Broadcast action, so one ANN_TX with iface=all
+                        // covers it. The capped branch emits per-interface inside
+                        // broadcast_announce_with_caps (where send vs queue is
+                        // decided), so it is intentionally not emitted here.
+                        crate::tracing::debug!(
+                            event = "ANN_TX",
+                            dst = %HexShort(&dest_hash),
+                            hops = parsed.hops,
+                            iface = "all",
+                        );
                     } else {
                         self.broadcast_announce_with_caps(&mut parsed);
                     }
@@ -4237,8 +4334,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // on packet_hashlist (Transport.py:1227) to absorb the echo.
         self.storage.add_packet_hash(packet_hash(&raw));
 
-        // Handle capped interfaces individually
+        // Handle capped interfaces individually.
+        //
+        // OBS-1 outcomes are collected here and emitted after the mutable
+        // borrow of `interface_announce_caps` is released (iface_name() needs
+        // a shared borrow of self). `ann_tx_ifaces` = announce actually sent on
+        // that interface this call; `ann_suppressed` = held back by the airtime
+        // cap (queued) or dropped (queue full) so a suppressed rebroadcast is
+        // visible without ever claiming a TX that did not happen.
         let capped_ifaces: Vec<usize> = self.interface_announce_caps.keys().copied().collect();
+        let mut ann_tx_ifaces: Vec<usize> = Vec::new();
+        let mut ann_suppressed: Vec<(usize, &'static str)> = Vec::new();
 
         for iface_idx in &capped_ifaces {
             let cap = self
@@ -4256,14 +4362,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
                 let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
                 cap.allowed_at_ms = now + wait_ms;
+                ann_tx_ifaces.push(*iface_idx);
             } else if cap.queue.len() < self.config.max_queued_announces {
                 cap.queue.push_back(QueuedAnnounce {
                     raw: raw.clone(),
+                    dst: packet.destination_hash,
                     hops: packet.hops,
                     queued_at_ms: now,
                 });
+                ann_suppressed.push((*iface_idx, "airtime_cap"));
+            } else {
+                // Queue full: the announce is dropped on this interface.
+                ann_suppressed.push((*iface_idx, "queue_full"));
             }
-            // else: queue full, drop silently
         }
 
         // Send to uncapped interfaces individually, capped ones were handled
@@ -4277,15 +4388,41 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 iface: InterfaceId(iface_idx),
                 data: raw.clone(),
             });
+            ann_tx_ifaces.push(iface_idx);
         }
         self.stats.packets_forwarded += 1;
+
+        // OBS-1: one ANN_TX per interface the announce actually went out on,
+        // one ANN_TX_SUPPRESSED per interface where the cap held it back.
+        let dst = packet.destination_hash;
+        let hops = packet.hops;
+        for iface_idx in ann_tx_ifaces {
+            crate::tracing::debug!(
+                event = "ANN_TX",
+                dst = %HexShort(&dst),
+                hops = hops,
+                iface = %self.iface_name(iface_idx),
+            );
+        }
+        for (iface_idx, reason) in ann_suppressed {
+            crate::tracing::debug!(
+                event = "ANN_TX_SUPPRESSED",
+                dst = %HexShort(&dst),
+                hops = hops,
+                iface = %self.iface_name(iface_idx),
+                suppressed = true,
+                reason = reason,
+            );
+        }
     }
 
     /// Drain announce queues for interfaces whose holdoff has expired.
     /// Called from `poll()`. Dequeues lowest-hops announce first, then oldest
     /// within same hops (Python Interface.py:263-266).
     fn drain_announce_queues(&mut self, now: u64) {
-        let mut sends: Vec<(usize, Vec<u8>)> = Vec::new();
+        // (iface_idx, raw, dst, hops) for each drained announce. dst/hops carry
+        // the OBS-1 ANN_TX fields for the deferred send.
+        let mut sends: Vec<(usize, Vec<u8>, [u8; TRUNCATED_HASHBYTES], u8)> = Vec::new();
 
         for (iface_idx, cap) in self.interface_announce_caps.iter_mut() {
             if cap.queue.is_empty() || now < cap.allowed_at_ms {
@@ -4308,7 +4445,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let entry = cap.queue.remove(idx).expect("valid index");
                 let raw_len = entry.raw.len();
 
-                sends.push((*iface_idx, entry.raw));
+                sends.push((*iface_idx, entry.raw, entry.dst, entry.hops));
 
                 // Compute holdoff for next announce
                 let tx_bits = raw_len as u64 * 8;
@@ -4318,12 +4455,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
-        for (iface_idx, raw) in sends {
+        for (iface_idx, raw, dst, hops) in sends {
             self.pending_actions.push(Action::SendPacket {
                 iface: InterfaceId(iface_idx),
                 data: raw,
             });
             self.record_outgoing_announce(iface_idx);
+            // OBS-1: a previously cap-suppressed announce is now actually sent.
+            crate::tracing::debug!(
+                event = "ANN_TX",
+                dst = %HexShort(&dst),
+                hops = hops,
+                iface = %self.iface_name(iface_idx),
+            );
         }
     }
 
@@ -5641,6 +5785,291 @@ mod tests {
             transport.poll();
             assert!(transport.stats().packets_forwarded > 0);
         }
+
+        // ---- OBS-1 / OBS-2 observability ----------------------------------
+        //
+        // These tests capture structured tracing output, so they require the
+        // `tracing` feature (the default). Under `--no-default-features` the
+        // level macros are no-ops and there is nothing to capture, so the whole
+        // block is compiled out. The counters themselves are plain fields that
+        // always compile.
+        #[cfg(feature = "tracing")]
+        mod obs_observability {
+            use super::*;
+
+            // Capture all `reticulum_core` tracing into a string for the current
+            // thread, so a test can assert that a structured event fired (or did
+            // NOT fire) without changing any wire/behaviour.
+            fn capture_core_logs<R>(body: impl FnOnce() -> R) -> (R, std::string::String) {
+                use std::sync::{Arc, Mutex};
+                use tracing_subscriber::util::SubscriberInitExt;
+
+                #[derive(Clone)]
+                struct W(Arc<Mutex<std::vec::Vec<u8>>>);
+                impl std::io::Write for W {
+                    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                        self.0.lock().unwrap().extend_from_slice(buf);
+                        std::io::Result::Ok(buf.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        std::io::Result::Ok(())
+                    }
+                }
+                impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for W {
+                    type Writer = W;
+                    fn make_writer(&'a self) -> W {
+                        self.clone()
+                    }
+                }
+
+                let buf = Arc::new(Mutex::new(std::vec::Vec::new()));
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(W(buf.clone()))
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_ansi(false)
+                    .with_target(true)
+                    .finish();
+                let guard = subscriber.set_default();
+                let out = body();
+                drop(guard);
+                let logs = std::string::String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+                (out, logs)
+            }
+
+            // OBS-1: a transport-enabled node that receives a forwardable announce
+            // emits ANN_TX with dst/hops/iface when the retry scheduler actually
+            // rebroadcasts it.
+            #[test]
+            fn test_ann_tx_emitted_on_rebroadcast() {
+                let mut transport = make_transport_enabled();
+                let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                // hops=1 on the wire -> 2 after receipt increment -> ANN_TX hops=2.
+                let (raw, dest_hash) = make_announce_raw(1, PacketContext::None);
+                transport.process_incoming(0, &raw).unwrap();
+                transport.drain_events();
+
+                transport
+                    .clock
+                    .advance(transport.announce_jitter_max_ms() + 100);
+
+                let ((), logs) = capture_core_logs(|| transport.poll());
+
+                assert!(
+                    logs.contains("ANN_TX"),
+                    "rebroadcast must emit ANN_TX; logs:\n{logs}"
+                );
+                assert!(logs.contains("hops=2"), "ANN_TX hops field; logs:\n{logs}");
+                assert!(logs.contains("iface="), "ANN_TX iface field; logs:\n{logs}");
+                let dst_hex = std::format!("{}", HexShort(&dest_hash));
+                assert!(
+                    logs.contains(&dst_hex),
+                    "ANN_TX dst field {dst_hex}; logs:\n{logs}"
+                );
+            }
+
+            // OBS-1: when an airtime cap holds a rebroadcast back, ANN_TX_SUPPRESSED
+            // fires (suppressed=true) and NO ANN_TX is claimed for that interface.
+            #[test]
+            fn test_ann_tx_suppressed_under_airtime_cap() {
+                let mut transport = make_transport_enabled();
+                let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+                // Register a bandwidth cap, then force the interface into holdoff so
+                // the next rebroadcast is queued (suppressed), not sent.
+                transport.register_interface_bitrate(idx0, 1200);
+                if let Some(cap) = transport.interface_announce_caps.get_mut(&idx0) {
+                    cap.allowed_at_ms = TEST_TIME_MS + 10_000_000;
+                }
+
+                let (raw, _dest_hash) = make_announce_raw(1, PacketContext::None);
+                transport.process_incoming(0, &raw).unwrap();
+                transport.drain_events();
+
+                transport
+                    .clock
+                    .advance(transport.announce_jitter_max_ms() + 100);
+
+                let ((), logs) = capture_core_logs(|| transport.poll());
+
+                assert!(
+                    logs.contains("ANN_TX_SUPPRESSED"),
+                    "cap-held rebroadcast must emit ANN_TX_SUPPRESSED; logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains("suppressed=true"),
+                    "suppressed marker field; logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains("airtime_cap"),
+                    "suppression reason; logs:\n{logs}"
+                );
+            }
+
+            // Build a HEADER_2 (transport-routed) non-announce packet addressed to a
+            // transport id that is NOT ours: the high-volume "overheard / not for
+            // us" drop.
+            fn make_overheard_packet(transport_id: [u8; TRUNCATED_HASHBYTES]) -> Vec<u8> {
+                use crate::destination::DestinationType;
+                use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type2,
+                        context_flag: false,
+                        transport_type: TransportType::Transport,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 1,
+                    transport_id: Some(transport_id),
+                    destination_hash: [0x11; TRUNCATED_HASHBYTES],
+                    context: PacketContext::None,
+                    data: PacketData::Owned(b"overheard".to_vec()),
+                };
+                let mut buf = [0u8; crate::constants::MTU];
+                let len = packet.pack(&mut buf).unwrap();
+                buf[..len].to_vec()
+            }
+
+            fn make_plain_group_packet(
+                dest_type: crate::destination::DestinationType,
+                packet_type: PacketType,
+                hops: u8,
+            ) -> Vec<u8> {
+                use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type,
+                        packet_type,
+                    },
+                    hops,
+                    transport_id: None,
+                    destination_hash: [0x22; TRUNCATED_HASHBYTES],
+                    context: PacketContext::None,
+                    data: PacketData::Owned(b"x".to_vec()),
+                };
+                let mut buf = [0u8; crate::constants::MTU];
+                let len = packet.pack(&mut buf).unwrap();
+                buf[..len].to_vec()
+            }
+
+            // OBS-2: the overheard path increments its reason counter but emits NO
+            // per-packet event (no flood).
+            #[test]
+            fn test_overheard_drop_counter_no_per_packet_event() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let raw = make_overheard_packet([0xAB; TRUNCATED_HASHBYTES]);
+                let before = transport.stats().drops_overheard_transport_id;
+                let ((), logs) = capture_core_logs(|| {
+                    transport.process_incoming(0, &raw).unwrap();
+                });
+
+                assert_eq!(
+                    transport.stats().drops_overheard_transport_id,
+                    before + 1,
+                    "overheard drop must increment its counter"
+                );
+                assert_eq!(
+                    transport.stats().packets_dropped,
+                    1,
+                    "counted in grand total"
+                );
+                assert!(
+                    !logs.contains("event=\"PKT_DROP\"") && !logs.contains("PKT_DROP "),
+                    "overheard path must NOT emit a per-packet PKT_DROP event; logs:\n{logs}"
+                );
+            }
+
+            // OBS-2: rare anomaly drops increment their counter AND emit a per-packet
+            // PKT_DROP for immediate visibility.
+            #[test]
+            fn test_invalid_announce_drop_counter_and_event() {
+                use crate::destination::DestinationType;
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let raw = make_plain_group_packet(DestinationType::Plain, PacketType::Announce, 0);
+                let ((), logs) = capture_core_logs(|| {
+                    transport.process_incoming(0, &raw).unwrap();
+                });
+
+                assert_eq!(transport.stats().drops_invalid_announce, 1);
+                assert_eq!(transport.stats().packets_dropped, 1);
+                assert!(
+                    logs.contains("PKT_DROP") && logs.contains("invalid_announce"),
+                    "invalid announce must emit per-packet PKT_DROP; logs:\n{logs}"
+                );
+            }
+
+            #[test]
+            fn test_plain_group_multihop_drop_counter_and_event() {
+                use crate::destination::DestinationType;
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                // hops=1 on the wire -> 2 after receipt increment -> >1 -> drop.
+                let raw = make_plain_group_packet(DestinationType::Group, PacketType::Data, 1);
+                let ((), logs) = capture_core_logs(|| {
+                    transport.process_incoming(0, &raw).unwrap();
+                });
+
+                assert_eq!(transport.stats().drops_plain_group_multihop, 1);
+                assert_eq!(transport.stats().packets_dropped, 1);
+                assert!(
+                    logs.contains("PKT_DROP") && logs.contains("plain_group_multihop"),
+                    "plain/group multihop must emit per-packet PKT_DROP; logs:\n{logs}"
+                );
+            }
+
+            // OBS-2: the periodic summary surfaces the per-reason counts at the
+            // PATH_TABLE cadence.
+            #[test]
+            fn test_pkt_drop_summary_emitted_periodically() {
+                use crate::destination::DestinationType;
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                // One of each error drop + one overheard drop.
+                transport
+                    .process_incoming(0, &make_overheard_packet([0xAB; TRUNCATED_HASHBYTES]))
+                    .unwrap();
+                transport
+                    .process_incoming(
+                        0,
+                        &make_plain_group_packet(DestinationType::Plain, PacketType::Announce, 0),
+                    )
+                    .unwrap();
+                transport
+                    .process_incoming(
+                        0,
+                        &make_plain_group_packet(DestinationType::Group, PacketType::Data, 1),
+                    )
+                    .unwrap();
+                transport.drain_events();
+
+                // Cross the 10s snapshot cadence so the summary fires.
+                transport.clock.advance(10_001);
+                let ((), logs) = capture_core_logs(|| transport.poll());
+
+                assert!(
+                    logs.contains("PKT_DROP_SUMMARY"),
+                    "periodic summary must fire; logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains("overheard_transport_id=1")
+                        && logs.contains("invalid_announce=1")
+                        && logs.contains("plain_group_multihop=1")
+                        && logs.contains("total=3"),
+                    "summary must carry per-reason counts; logs:\n{logs}"
+                );
+            }
+        } // mod obs_observability
 
         #[test]
         fn test_no_rebroadcast_when_transport_disabled() {
@@ -7134,6 +7563,7 @@ mod tests {
             cap.allowed_at_ms = transport.clock.now_ms() + 40_000;
             cap.queue.push_back(QueuedAnnounce {
                 raw: alloc::vec![0xAA; 100],
+                dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 2,
                 queued_at_ms: transport.clock.now_ms(),
             });
@@ -7176,6 +7606,7 @@ mod tests {
             for i in 0..max_queued {
                 cap.queue.push_back(QueuedAnnounce {
                     raw: alloc::vec![i as u8; 50],
+                    dst: [0u8; TRUNCATED_HASHBYTES],
                     hops: 1,
                     queued_at_ms: transport.clock.now_ms() + i as u64,
                 });
@@ -7188,6 +7619,7 @@ mod tests {
             if cap.queue.len() < max_queued {
                 cap.queue.push_back(QueuedAnnounce {
                     raw: alloc::vec![0xFF; 50],
+                    dst: [0u8; TRUNCATED_HASHBYTES],
                     hops: 1,
                     queued_at_ms: transport.clock.now_ms(),
                 });
@@ -7362,11 +7794,13 @@ mod tests {
             // Two queued items: hops=3 (first), hops=1 (second)
             cap.queue.push_back(QueuedAnnounce {
                 raw: alloc::vec![0xAA; 50],
+                dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 3,
                 queued_at_ms: now,
             });
             cap.queue.push_back(QueuedAnnounce {
                 raw: alloc::vec![0xBB; 50],
+                dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 1,
                 queued_at_ms: now + 1,
             });
@@ -7446,6 +7880,7 @@ mod tests {
             cap.allowed_at_ms = drain_at;
             cap.queue.push_back(QueuedAnnounce {
                 raw: alloc::vec![0xAA; 50],
+                dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 1,
                 queued_at_ms: now,
             });

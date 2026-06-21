@@ -233,6 +233,31 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "CONTROL_PLANE_OVERFLOW",
         required_keys: &["dropped_count"],
     },
+    // OBS-1: announce rebroadcast made observable. ANN_TX fires when the node
+    // actually (re)transmits a stored announce on an interface (pairs with
+    // ANN_RX); ANN_TX_SUPPRESSED fires when an airtime cap held the rebroadcast
+    // back, so a suppressed announce is also visible without claiming a TX.
+    EventSchema {
+        name: "ANN_TX",
+        required_keys: &["dst", "hops", "iface"],
+    },
+    EventSchema {
+        name: "ANN_TX_SUPPRESSED",
+        required_keys: &["dst", "hops", "iface", "suppressed", "reason"],
+    },
+    // OBS-2: periodic per-reason drop summary at the PATH_TABLE cadence (~10s).
+    // Surfaces the always-on drop counters (including the high-volume overheard
+    // path) without per-packet flooding.
+    EventSchema {
+        name: "PKT_DROP_SUMMARY",
+        required_keys: &[
+            "overheard_transport_id",
+            "invalid_announce",
+            "plain_group_multihop",
+            "no_path",
+            "total",
+        ],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.
