@@ -160,19 +160,19 @@ impl EventSink {
             Ok(()) => self.flush_overflow(),
             Err(TrySendError::Full(ev)) => {
                 self.control_dropped += 1;
+                // BUG-1 sibling: structured fields only, no trailing prose
+                // (the spaces would corrupt the canonical event-log line).
                 tracing::warn!(
                     event = "EVENT_CHANNEL_FULL",
                     queue_capacity = self.control_capacity,
                     dropped_event_type = ev.variant_name(),
                     pending_dropped = self.control_dropped,
-                    "control event dropped, will surface via ControlPlaneOverflow"
                 );
             }
             Err(TrySendError::Closed(ev)) => {
                 tracing::warn!(
                     event = "EVENT_CHANNEL_CLOSED",
                     dropped_event_type = ev.variant_name(),
-                    "control channel closed (receiver dropped), dropping event"
                 );
             }
         }
@@ -192,11 +192,7 @@ impl EventSink {
             .try_send(NodeEvent::ControlPlaneOverflow { dropped_count })
         {
             Ok(()) => {
-                tracing::warn!(
-                    event = "CONTROL_PLANE_OVERFLOW",
-                    dropped_count,
-                    "surfaced dropped control events via ControlPlaneOverflow"
-                );
+                tracing::warn!(event = "CONTROL_PLANE_OVERFLOW", dropped_count);
                 self.control_dropped = 0;
             }
             // Still full: keep the count and try again on the next emit.
@@ -221,7 +217,6 @@ impl EventSink {
                 tracing::warn!(
                     event = "EVENT_CHANNEL_CLOSED",
                     dropped_event_type = ev.variant_name(),
-                    "data channel closed (receiver dropped), dropping event"
                 );
             }
         }

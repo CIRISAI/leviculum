@@ -276,6 +276,100 @@ fn test_field_value_whitespace_violation() {
     );
 }
 
+/// BUG-3 — well-formed by construction. A field value containing BOTH
+/// whitespace AND an embedded `=` must be sanitized to a single scalar
+/// so the canonical line tokenizes cleanly: every key=val token has
+/// exactly one `=`, the field appears exactly once, and the embedded `=`
+/// does not leak a second (colliding) key. The advisory
+/// EVENT_FIELD_VIOLATION must still fire (it surfaces the source bug).
+#[test]
+fn test_field_value_sanitized_to_scalar() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "EV_SANI",
+        msg = "froze remaining_hops=path_hops for forwarded link request"
+    );
+
+    let lines = lines_for(&handle, "EV_SANI");
+    let canonical = lines
+        .iter()
+        .find(|l| l.starts_with("EV_SANI "))
+        .unwrap_or_else(|| panic!("missing EV_SANI canonical line: {lines:?}"));
+
+    // Every token after the event name is a well-formed key=val.
+    for tok in canonical.split_whitespace().skip(1) {
+        assert_eq!(
+            tok.matches('=').count(),
+            1,
+            "non key=val token {tok:?} in line: {canonical}"
+        );
+    }
+    // The msg field is a single scalar (no stray bare tokens).
+    let msg_tokens: Vec<&str> = canonical
+        .split_whitespace()
+        .filter(|t| t.starts_with("msg="))
+        .collect();
+    assert_eq!(
+        msg_tokens.len(),
+        1,
+        "msg must be a single scalar token: {canonical}"
+    );
+    // The embedded `=` must NOT have leaked a colliding remaining_hops key.
+    assert!(
+        !canonical.contains("remaining_hops="),
+        "embedded `=` leaked a colliding key: {canonical}"
+    );
+
+    // The violation still fires so the source bug is surfaced.
+    assert!(
+        lines.iter().any(|l| l.starts_with("EVENT_FIELD_VIOLATION")
+            && l.contains("event=EV_SANI")
+            && l.contains("field=msg")),
+        "EVENT_FIELD_VIOLATION must still fire for the offending field: {lines:?}"
+    );
+}
+
+/// BUG-2 — `Debug`-recorded values render as bare scalars. An
+/// `Option`-wrapped value must not leak Rust Debug wrapper syntax
+/// (`Some("…")`) or quotes into the line. `None` stays the bare scalar
+/// `None` (legitimate enum variants are also named `None`).
+#[test]
+fn test_record_debug_renders_bare_scalar() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "EV_OPT",
+        next_hop = ?Some("373efabc"),
+        gone = ?Option::<&str>::None,
+    );
+
+    let lines = lines_for(&handle, "EV_OPT");
+    let canonical = lines
+        .iter()
+        .find(|l| l.starts_with("EV_OPT "))
+        .unwrap_or_else(|| panic!("missing EV_OPT canonical line: {lines:?}"));
+
+    assert!(
+        canonical.contains(" next_hop=373efabc "),
+        "expected bare scalar next_hop=373efabc: {canonical}"
+    );
+    assert!(
+        !canonical.contains("Some("),
+        "Debug Some(...) wrapper leaked: {canonical}"
+    );
+    assert!(!canonical.contains('"'), "Debug quote leaked: {canonical}");
+    assert!(
+        canonical.contains(" gone=None "),
+        "None must stay the bare scalar None: {canonical}"
+    );
+    // No field violation: both values are already clean scalars.
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.starts_with("EVENT_FIELD_VIOLATION") && l.contains("event=EV_OPT")),
+        "no EVENT_FIELD_VIOLATION expected for clean scalars: {lines:?}"
+    );
+}
+
 /// Test — `SILENCE_LNODE_ENTER` and `SILENCE_LNODE_EXIT` (Codeberg #50
 /// Bug-A forensic events) emit through the catalogue with their
 /// required keys and trigger an `EVENT_SCHEMA_VIOLATION` when a

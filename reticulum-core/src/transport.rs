@@ -2207,6 +2207,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // "hop count mismatch (remaining_hops)" site below. Logging both
             // values here makes the freeze point observable when bisecting an
             // LRPROOF drop (Bug: LRPROOF hop-mismatch).
+            // BUG-1: no trailing free-text message here. The structured
+            // fields (remaining_hops, packet_hops, recv, next_hop) already
+            // carry the freeze; a prose message renders under the `message`
+            // field whose spaces split the line and whose embedded `=`
+            // collides with the real remaining_hops key.
             crate::tracing::debug!(
                 event = "LINK_ENTRY_SET",
                 dst = %HexShort(&dest_hash),
@@ -2214,7 +2219,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 packet_hops = packet.hops,
                 recv = %self.iface_name(interface_index),
                 next_hop = %self.iface_name(target_iface),
-                "froze remaining_hops=path_hops for forwarded link request"
             );
 
             // Populate reverse table at forwarding time

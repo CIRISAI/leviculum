@@ -341,10 +341,18 @@ fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
     );
 
     // Prove the freeze still happens and the asymmetry is now a warning, not a drop.
+    // BUG-4: the freeze is shown by the structured LINK_ENTRY_SET event fields,
+    // not the old free-text message (dropped in BUG-1 because its spaces and
+    // embedded `=` corrupted the canonical event-log line).
     assert!(
+        o.logs.contains("event=\"LINK_ENTRY_SET\""),
+        "LINK_ENTRY_SET instrumentation must fire.\n--- logs ---\n{}",
         o.logs
-            .contains("froze remaining_hops=path_hops for forwarded link request"),
-        "LINK_ENTRY_SET instrumentation must show the freeze.\n--- logs ---\n{}",
+    );
+    assert!(
+        !o.logs.contains("froze remaining_hops=path_hops"),
+        "the redundant free-text message must be gone (it corrupted the event-log line).\n\
+         --- logs ---\n{}",
         o.logs
     );
     assert!(
@@ -363,6 +371,52 @@ fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
         "proof must still arrive at hops=2 against the frozen remaining_hops=1.\n--- logs ---\n{}",
         o.logs
     );
+}
+
+// ----------------------------------------------------------------------------
+// BUG-1: the LINK_ENTRY_SET emission carries no corrupting free-text message.
+// ----------------------------------------------------------------------------
+
+/// The LINK_ENTRY_SET instrumentation must emit structured fields only. The
+/// old trailing message `"froze remaining_hops=path_hops for forwarded link
+/// request"` rendered under tracing's `message` field; its spaces split the
+/// line and its embedded `=` produced a SECOND `remaining_hops` token that
+/// shadowed the real one. After the fix the freeze is shown by the structured
+/// fields alone, so `remaining_hops` appears exactly once on the line.
+#[test]
+fn link_entry_set_log_line_has_no_corrupting_message() {
+    let o = run_asymmetric_return_path_scenario();
+
+    // Isolate the LINK_ENTRY_SET tracing line(s).
+    let link_lines: Vec<&str> = o
+        .logs
+        .lines()
+        .filter(|l| l.contains("event=\"LINK_ENTRY_SET\""))
+        .collect();
+    assert!(
+        !link_lines.is_empty(),
+        "expected at least one LINK_ENTRY_SET line.\n--- logs ---\n{}",
+        o.logs
+    );
+
+    for line in &link_lines {
+        assert!(
+            !line.contains("froze remaining_hops=path_hops"),
+            "LINK_ENTRY_SET line still carries the free-text message: {line}"
+        );
+        // The embedded `=` in the old message produced a second
+        // `remaining_hops=` token; with the message gone it appears once.
+        let occurrences = line.matches("remaining_hops=").count();
+        assert_eq!(
+            occurrences, 1,
+            "remaining_hops= must appear exactly once (key collision otherwise): {line}"
+        );
+        // The structured freeze fields survive.
+        assert!(
+            line.contains("packet_hops="),
+            "structured packet_hops field missing: {line}"
+        );
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -434,9 +488,15 @@ fn lrproof_symmetric_single_hop_relay_establishes() {
         assert_eq!(initiator.active_link_count(), 1);
     });
 
+    // BUG-4: LINK_ENTRY_SET still fires, shown by the structured event name
+    // rather than the removed free-text message (BUG-1).
     assert!(
-        logs.contains("froze remaining_hops=path_hops for forwarded link request"),
+        logs.contains("event=\"LINK_ENTRY_SET\""),
         "LINK_ENTRY_SET must still fire in the green path.\n--- logs ---\n{logs}"
+    );
+    assert!(
+        !logs.contains("froze remaining_hops=path_hops"),
+        "the redundant free-text message must be gone.\n--- logs ---\n{logs}"
     );
     assert!(
         !logs.contains("Dropped LRPROOF, hop count mismatch"),

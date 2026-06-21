@@ -586,6 +586,49 @@ fn field_value_problem(value: &str) -> Option<&'static str> {
     None
 }
 
+/// Coerce a field value into a whitespace-free scalar so the canonical
+/// line is ALWAYS tokenizable by the documented whitespace `key=val`
+/// parser, no matter what an emission site passed.  Internal whitespace,
+/// embedded `=`, and non-graphic bytes all become `_`.
+///
+/// This is the by-construction safety net behind the advisory
+/// `EVENT_FIELD_VIOLATION`: the violation still fires (so the source bug
+/// gets surfaced and fixed), but the emitted line is parseable regardless
+/// (no stray bare tokens, no key collision from an embedded `=`).
+fn sanitize_scalar(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_whitespace() || c == '=' || !c.is_ascii_graphic() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Reduce a `Debug` rendering to a scalar token: unwrap a single
+/// `Some(...)` wrapper and strip the surrounding string-quote pair that
+/// `Debug` adds to string-like values, so a value like `Some("373e…")`
+/// renders as the bare `373e…` instead of leaking Rust Debug syntax into
+/// the line.  `None` and other enum variants pass through unchanged
+/// (they are already whitespace-free scalars; `None` is NOT collapsed to
+/// empty because legitimate enum variants are also named `None`, e.g.
+/// `PacketContext::None`).  Any residual whitespace/`=` is handled by
+/// [`sanitize_scalar`] at record time.
+fn normalize_debug(raw: &str) -> String {
+    let s = raw.trim();
+    let s = s
+        .strip_prefix("Some(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(s);
+    s.strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(s)
+        .to_string()
+}
+
 #[derive(Default)]
 struct EventVisitor {
     event_name: Option<String>,
@@ -599,10 +642,17 @@ impl EventVisitor {
             self.event_name = Some(value);
             return;
         }
-        if let Some(problem) = field_value_problem(&value) {
-            self.field_violations
-                .push((field.name().to_string(), problem));
-        }
+        // BUG-3: a non-scalar value is reported AND sanitized, so the
+        // canonical line stays well-formed by construction even when an
+        // emission site passes whitespace or an embedded `=`.
+        let value = match field_value_problem(&value) {
+            Some(problem) => {
+                self.field_violations
+                    .push((field.name().to_string(), problem));
+                sanitize_scalar(&value)
+            }
+            None => value,
+        };
         self.fields.insert(field.name().to_string(), value);
     }
 }
@@ -624,9 +674,12 @@ impl Visit for EventVisitor {
         self.record(field, value.to_string());
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let v = format!("{value:?}");
-        let v = v.trim_matches('"').to_string();
-        self.record(field, v);
+        // BUG-2: emit a bare scalar (e.g. `373e…`), not Rust Debug
+        // wrapper syntax (`Some("373e…")`). `trim_matches('"')` used to
+        // strip the quotes that kept a Debug string parseable, leaking
+        // its spaces into the line; `normalize_debug` unwraps the
+        // wrapper instead.
+        self.record(field, normalize_debug(&format!("{value:?}")));
     }
 }
 
