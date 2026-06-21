@@ -108,11 +108,9 @@ async fn run_once_mode(iter: usize, teardown: TeardownMode) -> RunOutcome {
             match ev {
                 NodeEvent::LinkEstablished {
                     link_id,
-                    is_initiator,
+                    is_initiator: false,
                 } => {
-                    if !is_initiator {
-                        let _ = a_link_tx.send(link_id);
-                    }
+                    let _ = a_link_tx.send(link_id);
                 }
                 NodeEvent::LinkClosed { link_id, .. } => {
                     let _ = a_closed_tx.send(link_id);
@@ -132,13 +130,13 @@ async fn run_once_mode(iter: usize, teardown: TeardownMode) -> RunOutcome {
             match ev {
                 NodeEvent::LinkEstablished {
                     link_id,
-                    is_initiator,
+                    is_initiator: true,
                 } => {
-                    if is_initiator {
-                        let _ = b_est_tx.send(link_id);
-                    }
+                    let _ = b_est_tx.send(link_id);
                 }
-                NodeEvent::LinkClosed { link_id, reason, .. } => {
+                NodeEvent::LinkClosed {
+                    link_id, reason, ..
+                } => {
                     let _ = b_closed_tx.send((link_id, reason));
                 }
                 _ => {}
@@ -146,16 +144,17 @@ async fn run_once_mode(iter: usize, teardown: TeardownMode) -> RunOutcome {
         }
     });
 
-    let fail = |note: &str, a_drain: tokio::task::JoinHandle<()>, b_drain: tokio::task::JoinHandle<()>| {
-        a_drain.abort();
-        b_drain.abort();
-        RunOutcome {
-            delivered: false,
-            closer_self_notified: false,
-            delivery_ms: None,
-            note: note.to_string(),
-        }
-    };
+    let fail =
+        |note: &str, a_drain: tokio::task::JoinHandle<()>, b_drain: tokio::task::JoinHandle<()>| {
+            a_drain.abort();
+            b_drain.abort();
+            RunOutcome {
+                delivered: false,
+                closer_self_notified: false,
+                delivery_ms: None,
+                note: note.to_string(),
+            }
+        };
 
     // A registers + announces its destination.
     let a_identity = Identity::generate(&mut rand_core::OsRng);
@@ -195,18 +194,16 @@ async fn run_once_mode(iter: usize, teardown: TeardownMode) -> RunOutcome {
     let _handle = b.connect(&a_hash, &signing_key).await.expect("B connect");
 
     // Wait for B's initiator LinkEstablished.
-    let b_link_id =
-        match tokio::time::timeout(Duration::from_secs(5), b_est_rx.recv()).await {
-            Ok(Some(id)) => id,
-            _ => return fail("B link never established", a_drain, b_drain),
-        };
+    let b_link_id = match tokio::time::timeout(Duration::from_secs(5), b_est_rx.recv()).await {
+        Ok(Some(id)) => id,
+        _ => return fail("B link never established", a_drain, b_drain),
+    };
 
     // Wait for A's responder LinkEstablished (responder link_id).
-    let a_link_id =
-        match tokio::time::timeout(Duration::from_secs(5), a_link_rx.recv()).await {
-            Ok(Some(id)) => id,
-            _ => return fail("A responder link never established", a_drain, b_drain),
-        };
+    let a_link_id = match tokio::time::timeout(Duration::from_secs(5), a_link_rx.recv()).await {
+        Ok(Some(id)) => id,
+        _ => return fail("A responder link never established", a_drain, b_drain),
+    };
 
     // Brief settle so both ends are fully Active and no further handshake
     // traffic is in flight when we close.
@@ -353,77 +350,59 @@ async fn responder_close_delivery_rate() {
     );
 }
 
-/// RED reproduction (Codeberg #77): responder `close_link`s then immediately
-/// tears its node down. The queued close races the event-loop shutdown
-/// branch + runtime abort, so the initiator's LinkClosed is delivered only
-/// intermittently over loopback TCP — a software teardown race, not network
-/// loss. Asserts 100% delivery, so it is RED on master.
-/// `#[ignore]` while the bug is live (keeps the suite green); un-ignore in
-/// the commit that lands the driver-shutdown drain fix.
+/// Codeberg #77 fix verification: responder `close_link`s then immediately
+/// calls `stop()`. The queued close used to race the event-loop shutdown
+/// branch + runtime abort and be dropped undispatched. With the bounded
+/// graceful drain in the driver shutdown path (driver/mod.rs Branch 4 drains
+/// action_dispatch_rx + flushes the interface outgoing queues before break),
+/// every close now reaches the initiator over loopback TCP. Asserts 100%
+/// delivery and that A always self-notifies (the LinkClosed riding in the same
+/// TickOutput survives too).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "Codeberg #77 RED repro — fails on master until the driver shutdown drain fix lands"]
 async fn responder_close_then_teardown_delivery_rate() {
     let n: usize = std::env::var("CLOSE77_N")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(20);
+        .unwrap_or(24);
 
-    use std::sync::atomic::Ordering;
-    let before = reticulum_std::driver::CLOSE77_SHUTDOWN_DROPPED_CLOSES.load(Ordering::Relaxed);
     let t = measure("stop_immediately", TeardownMode::StopImmediately, n).await;
-    let dropped_at_shutdown =
-        reticulum_std::driver::CLOSE77_SHUTDOWN_DROPPED_CLOSES.load(Ordering::Relaxed) - before;
-    let misses = t.effective - t.delivered;
-    println!(
-        "CLOSE77_LOCALIZE[stop_immediately] misses={misses} \
-         shutdown_branch_dropped_closes={dropped_at_shutdown}"
-    );
 
     assert_eq!(
         t.setup_fail, 0,
         "scaffold broke: {}/{n} runs failed setup before the close was tested",
         t.setup_fail
     );
-    // Localization: every miss is a close TickOutput dropped by the shutdown
-    // branch, never dispatched to the interface. self_notified tracks
-    // delivered exactly (the same output carries A's own LinkClosed), and the
-    // shutdown-branch drop counter accounts for every miss.
+    // A's own LinkClosed rides in the same TickOutput as the peer close, so the
+    // graceful drain delivers both: self-notify must hold on every run.
     assert_eq!(
-        t.self_notified, t.delivered,
-        "A's self-LinkClosed should track peer delivery exactly: the whole close \
-         TickOutput is dropped together ({} self vs {} delivered)",
-        t.self_notified, t.delivered
-    );
-    assert_eq!(
-        dropped_at_shutdown, misses,
-        "every miss must be a close output dropped by the event-loop shutdown branch \
-         (driver/mod.rs Branch 4): misses={misses} shutdown_dropped={dropped_at_shutdown}"
+        t.self_notified, t.effective,
+        "A should self-notify on every run (its LinkClosed rides in the drained \
+         close TickOutput): {}/{}",
+        t.self_notified, t.effective
     );
     assert_eq!(
         t.delivered, t.effective,
-        "Codeberg #77 RED: responder-initiated close, followed by an immediate node \
-         teardown, reached the initiator in only {}/{} runs over loopback TCP. \
-         Loopback loses no packets, so this is the H3 flush-vs-teardown race in the \
-         driver shutdown path (reticulum-std/src/driver/mod.rs Branch 4 shutdown \
-         breaks without draining action_dispatch_rx / flushing interface tasks; \
-         stop() then aborts the TCP task via runtime.shutdown_background()).",
+        "Codeberg #77 GREEN: responder-initiated close followed by an immediate \
+         stop() must reach the initiator on every run now that the driver shutdown \
+         path drains action_dispatch_rx and flushes the interface tasks before \
+         abort ({}/{}).",
         t.delivered, t.effective
     );
 }
 
-/// RED reproduction, widest window (Codeberg #77): responder `close_link`s
-/// then `drop`s its node. `Drop` calls `runtime.shutdown_background()`, which
-/// aborts the event loop before it can dispatch the queued close output at
-/// all — so delivery collapses to the ffi-agent's ~1/8 ballpark. Asserts
-/// 100% delivery, so it is RED on master.
-/// `#[ignore]` while the bug is live; un-ignore with the fix.
+/// Codeberg #77 fix verification, widest window: responder `close_link`s then
+/// `drop`s its node. `Drop` used to call `runtime.shutdown_background()`
+/// immediately, aborting the event loop before the queued close was ever
+/// dispatched (~1/8 delivery). The fixed `Drop` first signals shutdown so the
+/// event loop runs the same bounded drain+flush, then waits a bounded window
+/// for the runner to finish before aborting the runtime. Asserts 100% delivery
+/// and self-notify on every run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "Codeberg #77 RED repro (widest window) — fails on master until the fix lands"]
 async fn responder_close_then_drop_delivery_rate() {
     let n: usize = std::env::var("CLOSE77_N")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(20);
+        .unwrap_or(24);
 
     let t = measure("drop_immediately", TeardownMode::DropImmediately, n).await;
 
@@ -433,12 +412,17 @@ async fn responder_close_then_drop_delivery_rate() {
         t.setup_fail
     );
     assert_eq!(
+        t.self_notified, t.effective,
+        "A should self-notify on every run (its LinkClosed rides in the drained \
+         close TickOutput): {}/{}",
+        t.self_notified, t.effective
+    );
+    assert_eq!(
         t.delivered, t.effective,
-        "Codeberg #77 RED: responder-initiated close, followed by dropping the node, \
-         reached the initiator in only {}/{} runs over loopback TCP. Drop's \
-         runtime.shutdown_background() aborts the event loop before the queued close \
-         output (Branch 2, action_dispatch_rx) is ever dispatched to the TCP \
-         interface — the close bytes never reach the socket.",
+        "Codeberg #77 GREEN: responder-initiated close followed by dropping the node \
+         must reach the initiator on every run now that Drop signals shutdown and \
+         lets the event loop drain+flush the queued close before aborting the \
+         runtime ({}/{}).",
         t.delivered, t.effective
     );
 }

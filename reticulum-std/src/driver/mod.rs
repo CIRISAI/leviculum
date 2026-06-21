@@ -59,13 +59,6 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
-
-/// #77 TEMPORARY TRACE (dbg-responder-close-77): process-global count of
-/// TickOutputs carrying a LinkClosed that the event loop's shutdown branch
-/// DROPPED undispatched (graceful close lost to the teardown race). Read by
-/// the responder-close mvr to localize the loss without a tracing subscriber.
-#[doc(hidden)]
-pub static CLOSE77_SHUTDOWN_DROPPED_CLOSES: AtomicUsize = AtomicUsize::new(0);
 use std::task::Poll;
 use std::time::Duration;
 
@@ -118,6 +111,33 @@ const RETRY_QUEUE_CAP: usize = 1024;
 /// to flag that first-order backpressure may be mis-tuned. Held at
 /// 12.5 % of `RETRY_QUEUE_CAP` so the warn fires well before drops do.
 const RETRY_QUEUE_DEPTH_WARN: usize = 128;
+
+/// Total wall-clock budget for the event loop's graceful drain on shutdown
+/// (Codeberg #77). After draining `action_dispatch_rx` and dispatching the
+/// queued outputs (e.g. a responder `close_link`), the loop waits up to this
+/// long for the interface tasks to flush their outgoing queues to the socket
+/// before the runtime aborts them. Caps teardown so a wedged or back-pressured
+/// interface cannot hang shutdown; the common case exits in a couple of polls.
+const SHUTDOWN_FLUSH_BOUND: Duration = Duration::from_millis(250);
+
+/// Poll interval while waiting for the interface outgoing queues to drain
+/// during the shutdown flush. Tight so teardown stays prompt; each poll yields
+/// to the (co-scheduled) interface tasks so they can pop and write.
+const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(1);
+
+/// Write margin applied once the outgoing queues report empty: the interface
+/// task has popped the last packet but may still be inside `write_all`. Yield
+/// this long so the final frame reaches the socket before the task is aborted.
+/// Generous slack over a sub-millisecond loopback write to absorb scheduler
+/// latency on a loaded CI worker.
+const SHUTDOWN_FLUSH_MARGIN: Duration = Duration::from_millis(25);
+
+/// Total wall-clock budget the `Drop` path waits for the event loop to finish
+/// its graceful drain+flush before aborting the runtime. Slightly larger than
+/// the loop's own `SHUTDOWN_FLUSH_BOUND` + `SHUTDOWN_FLUSH_MARGIN` so the
+/// bounded flush can complete; the wait early-exits the instant the runner
+/// finishes, so a clean teardown costs only a few milliseconds.
+const DROP_FLUSH_BOUND: Duration = Duration::from_millis(400);
 
 /// Sender half of the split control/data node-event channels (Codeberg #71).
 ///
@@ -439,6 +459,27 @@ pub struct ReticulumNode {
 
 impl Drop for ReticulumNode {
     fn drop(&mut self) {
+        // Codeberg #77: give work queued right before drop (e.g. a responder
+        // `close_link`) a bounded chance to flush before the runtime is torn
+        // down. Signal the event loop to shut down — it drains
+        // action_dispatch_rx, dispatches the queued outputs to the interfaces,
+        // and waits for the interface tasks to flush them to the socket (see
+        // `run_event_loop` Branch 4) before returning. We then wait a bounded
+        // wall-clock window for the runner to finish on the node's own worker
+        // thread. The wait POLLS the join handle rather than awaiting it: Drop
+        // may run inside another runtime's async context (a PyO3 host dropping
+        // the node from one of its tasks), where a blocking await would panic.
+        // The node owns a separate worker thread, so the polling sleep here does
+        // not stall its event loop / interface tasks.
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(true);
+        }
+        if let Some(handle) = self.runner_handle.take() {
+            let deadline = std::time::Instant::now() + DROP_FLUSH_BOUND;
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(SHUTDOWN_FLUSH_POLL);
+            }
+        }
         // Tear the node's runtime down without blocking. Dropping a tokio
         // `Runtime` directly performs a blocking shutdown, which panics if the
         // drop happens inside another runtime's async context (e.g. the PyO3
@@ -1976,45 +2017,30 @@ async fn run_event_loop(
                 next_poll = tokio::time::Instant::now() + interval;
             }
 
-            // Branch 4: Shutdown
+            // Branch 4: Shutdown — bounded graceful drain (Codeberg #77).
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     tracing::info!("Node shutdown requested");
-                    // #77 TEMPORARY TRACE (dbg-responder-close-77): count any
-                    // TickOutputs still queued in action_dispatch_rx that the
-                    // loop is about to DROP by breaking. A graceful close
-                    // (close_link) enqueues its TickOutput here; if shutdown
-                    // wins the select! race, that output — carrying the
-                    // SendPacket close bytes AND the LinkClosed event — is
-                    // discarded undispatched. We only count + log (NOT
-                    // dispatch) so the bug is preserved, not fixed.
-                    let mut undrained = 0usize;
-                    let mut with_send = 0usize;
-                    let mut with_linkclosed = 0usize;
-                    while let Ok(out) = action_dispatch_rx.try_recv() {
-                        undrained += 1;
-                        if out.actions.iter().any(|a| {
-                            matches!(a, reticulum_core::transport::Action::SendPacket { .. })
-                        }) {
-                            with_send += 1;
-                        }
-                        if out
-                            .events
-                            .iter()
-                            .any(|e| matches!(e, NodeEvent::LinkClosed { .. }))
-                        {
-                            with_linkclosed += 1;
-                        }
-                    }
-                    if undrained > 0 {
-                        CLOSE77_SHUTDOWN_DROPPED_CLOSES
-                            .fetch_add(with_linkclosed, std::sync::atomic::Ordering::Relaxed);
-                        tracing::warn!(
-                            target: "reticulum_std::driver",
-                            "CLOSE77_SHUTDOWN_DROP undrained={undrained} \
-                             with_send={with_send} with_linkclosed={with_linkclosed}"
+                    // Drain any TickOutputs still queued in action_dispatch_rx
+                    // (e.g. a responder close_link enqueued just before stop()/
+                    // drop) and dispatch them to the interfaces. Breaking here
+                    // without draining would discard those outputs undispatched
+                    // — including the SendPacket close bytes AND the LinkClosed
+                    // event riding in the same output — which is the #77 loss.
+                    while let Ok(output) = action_dispatch_rx.try_recv() {
+                        dispatch_output(
+                            output,
+                            &mut registry,
+                            event_sink.as_mut(),
+                            &inner,
+                            &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                         );
                     }
+                    // Bounded graceful flush: dispatch only pushes onto the
+                    // interface outgoing channels; wait for the interface tasks
+                    // to pop and write_all them to the socket before the runtime
+                    // aborts the tasks.
+                    flush_outgoing_on_shutdown(&registry).await;
                     break;
                 }
             }
@@ -2097,6 +2123,49 @@ async fn run_event_loop(
             }
         }
     }
+}
+
+/// Bounded graceful flush of the interface outgoing queues during shutdown
+/// (Codeberg #77). After the shutdown drain has dispatched queued outputs to
+/// the interfaces, their tasks still need to pop each packet and `write_all`
+/// it to the socket. This waits for every interface's outgoing channel to
+/// drain, then a short [`SHUTDOWN_FLUSH_MARGIN`] for the final in-flight write,
+/// before returning and letting the runtime abort the tasks. Bounded by
+/// [`SHUTDOWN_FLUSH_BOUND`] so a wedged or back-pressured interface cannot hang
+/// teardown. Returns immediately when nothing is queued (clean teardown).
+async fn flush_outgoing_on_shutdown(registry: &InterfaceRegistry) {
+    fn pending(registry: &InterfaceRegistry) -> usize {
+        registry
+            .handles()
+            .iter()
+            .map(|h| h.outgoing.max_capacity() - h.outgoing.capacity())
+            .sum()
+    }
+
+    if pending(registry) == 0 {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_FLUSH_BOUND;
+    loop {
+        let remaining = pending(registry);
+        if remaining == 0 {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                "shutdown flush bound ({} ms) reached with {} packet(s) still queued",
+                SHUTDOWN_FLUSH_BOUND.as_millis(),
+                remaining,
+            );
+            return;
+        }
+        // Yields to the co-scheduled interface tasks so they pop and write.
+        tokio::time::sleep(SHUTDOWN_FLUSH_POLL).await;
+    }
+    // The outgoing channels are empty: the interface tasks have popped every
+    // packet, but the last write_all may still be in flight. Yield a short
+    // margin so it completes before the runtime aborts the task.
+    tokio::time::sleep(SHUTDOWN_FLUSH_MARGIN).await;
 }
 
 /// Dispatch a TickOutput: drain retry queues, route Actions to interfaces, forward Events.
