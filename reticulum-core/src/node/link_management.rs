@@ -347,6 +347,47 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// `self.transport.register_destination(link_id)`. This helper
     /// ensures the reverse cleanup always happens together.
     fn remove_link(&mut self, link_id: &LinkId) {
+        // Fail any in-flight resource transfers before dropping the link, so
+        // the app waiting on the transfer is notified instead of hanging
+        // (mirrors RNS Link.link_closed() cancelling both incoming and
+        // outgoing resources). Every genuine teardown removes its link through
+        // here; the establishment re-key/alias path (Codeberg #66) uses
+        // self.links.remove directly and never reaches this helper, so it
+        // emits no spurious ResourceFailed. Pre-activation teardowns (reject,
+        // invalid proof, handshake timeout) hold no resource, so this is a
+        // no-op there.
+        let (outgoing_hash, incoming_hash) = match self.links.get(link_id) {
+            Some(link) => (
+                link.outgoing_resource().map(|r| *r.resource_hash()),
+                link.incoming_resource().map(|r| *r.resource_hash()),
+            ),
+            None => (None, None),
+        };
+        if outgoing_hash.is_some() || incoming_hash.is_some() {
+            // Report the caller-visible id, consistent with emit_link_closed
+            // (which translates re-keyed wire ids back to the original).
+            let event_id = self
+                .link_origin_ids
+                .get(link_id)
+                .copied()
+                .unwrap_or(*link_id);
+            if let Some(resource_hash) = outgoing_hash {
+                self.events.push(NodeEvent::ResourceFailed {
+                    link_id: event_id,
+                    resource_hash,
+                    error: crate::resource::ResourceError::LinkClosed,
+                    is_sender: true,
+                });
+            }
+            if let Some(resource_hash) = incoming_hash {
+                self.events.push(NodeEvent::ResourceFailed {
+                    link_id: event_id,
+                    resource_hash,
+                    error: crate::resource::ResourceError::LinkClosed,
+                    is_sender: false,
+                });
+            }
+        }
         self.links.remove(link_id);
         self.link_retry_state.remove(link_id);
         self.transport.unregister_destination(link_id.as_bytes());

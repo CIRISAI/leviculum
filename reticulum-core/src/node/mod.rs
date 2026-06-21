@@ -53,6 +53,8 @@ mod mvr_establishment_loss;
 mod mvr_link_rekey_alias;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof;
+#[cfg(test)]
+mod mvr_teardown_resource_fail;
 pub mod request;
 mod send;
 

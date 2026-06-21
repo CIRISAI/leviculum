@@ -231,6 +231,8 @@ pub enum ResourceError {
     MaxRetriesExceeded,
     /// Link is not in Active state.
     LinkNotActive,
+    /// Link was torn down while the transfer was in flight.
+    LinkClosed,
     /// Compression feature not available but compressed resource received.
     CompressionUnsupported,
     /// Compression failed.
@@ -261,6 +263,7 @@ impl core::fmt::Display for ResourceError {
             Self::Cancelled => write!(f, "resource transfer cancelled"),
             Self::MaxRetriesExceeded => write!(f, "resource max retries exceeded"),
             Self::LinkNotActive => write!(f, "link not active for resource transfer"),
+            Self::LinkClosed => write!(f, "link closed during resource transfer"),
             Self::CompressionUnsupported => write!(f, "compression not supported"),
             Self::CompressionFailed => write!(f, "compression failed"),
             Self::DecompressionFailed => write!(f, "decompression failed"),
