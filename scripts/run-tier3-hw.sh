@@ -148,6 +148,12 @@ find "$REPO_DIR/reticulum-cli/src" "$REPO_DIR/reticulum-proxy/src" \
 CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
   cargo build --release --bin lnsd --bin lns --bin lncp --bin lora-proxy
 
+# c_api_restart_recovery is non-ignored, so `cargo test --include-ignored`
+# runs it; it resolves c-lnsd via paths::release_bin. Build it here too.
+log "[CI_HW] building c-lnsd"
+CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
+  just build-c-lnsd
+
 # Build the preflight checker itself, then run it. It resolves the same
 # binaries via the same paths:: code TestRunner::new uses, so it cannot
 # drift from the per-test assertion.

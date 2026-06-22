@@ -104,7 +104,7 @@ build-integ-bins:
 # binary on a multi-CPU harness.
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
 # leviculum-ci-tier2.service`): Tier 1 + Docker integ suite.
-extensive: standard build-integ-bins
+extensive: standard build-integ-bins build-c-lnsd
     cargo test -p reticulum-integ -- --test-threads=1
 
 # --include-ignored adds the LoRa hardware tests on top of Tier 2.
@@ -174,12 +174,13 @@ build-ffi-arm64:
 # integ container). Output: target/release/c-lnsd, the binary the
 # reticulum-integ runner mounts for a `c-api` node.
 build-c-lnsd: build-ffi
-    mkdir -p target/release
+    T="${CARGO_TARGET_DIR:-target}"; \
+    mkdir -p "$T/release"; \
     cc reticulum-ffi/examples/c/lnsd.c \
-       target/x86_64-unknown-linux-gnu/release/libleviculum.a \
+       "$T/x86_64-unknown-linux-gnu/release/libleviculum.a" \
        -I reticulum-ffi -O2 -Wall -Wextra -Werror \
        -lpthread -ldl -lm \
-       -o target/release/c-lnsd
+       -o "$T/release/c-lnsd"
 
 # Local .deb production, mirroring .woodpecker/nightly.yml (build-amd64 +
 # build-arm64). Use to build a master .deb by hand for the aarch64 soak
