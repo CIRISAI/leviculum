@@ -50,7 +50,7 @@ sudo usermod -aG leviculum "$USER"
 Verify the installation:
 
 ```sh
-lnsd --version          # e.g. 0.6.3-nightly.20260419-5a5df20
+lnsd --version          # e.g. 0.7.0-nightly.20260419-5a5df20
 lns  --version
 systemctl is-active lnsd
 ```
@@ -154,7 +154,7 @@ and byte counters will differ):
 ===== Leviculum diagnostic bundle =====
 
 ----- Versions / build -----
-lns version: 0.6.3
+lns version: 0.7.0
 build profile: release
 target: x86_64 / linux
 daemon version: not exposed by the shared-instance RPC ...

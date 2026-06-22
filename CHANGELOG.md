@@ -7,17 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.7.0] - 2026-06-22
 
-RNode `flow_control = true` no longer deadlocks the send path. The
-I/O task previously waited for a `CMD_READY` from the firmware that
-only arrives after a TX, producing a chicken-and-egg stall (no TX
-ever fires, the send queue saturates and emits "send queue full,
-dropping oldest" until the upstream traffic source goes away).
-`interface_ready` is now `true` at io-task start, mirroring Python
-`RNodeInterface.py` after `validateRadioState()`.
+### Added
+
+A comprehensive C API (`leviculum.h`) covering node lifecycle and
+config-file / shared-instance daemon setup, destinations, links
+(connect, send, receive, identify), datagrams and request/response,
+resource transfer, identity sign/verify/encrypt/decrypt with
+ratchets, delivery-proof strategies, read-only diagnostics, an event
+stream over an event fd, RNode and serial interfaces, and
+packaging/hex helpers. Ships with C examples and a large test suite
+(Codeberg #29). A new `reticulum-std::api` safe API module and
+driver builder back the binding.
+
+Configurable link keepalive interval on `TransportConfig`.
+
+Structured event-log observability: `ANN_TX` records announce
+rebroadcasts, and `PKT_DROP_SUMMARY` carries a complete drop-reason
+taxonomy (the total equals the sum of the reasons).
+
+Radio-config wire format gained a `radio_silent` flag (byte 15 of
+the payload, backward-compatible parse down to 13 bytes). When set,
+the T114 firmware drops outgoing LoRa packets at the driver
+boundary — the radio keeps listening but never transmits. The
+integration-test runner uses this to neutralize every T114 the
+scenario does not bind, so single-pair LoRa benchmarks stop
+seeing the idle T114's Reticulum announces as CSMA-busy. Bug #2
+CA-ON single-pair PDR distribution collapses from σ≈21 to σ≈4
+(mean 79 → 97 %, min 44 → 88 %).
 
 ### Changed
+
+BREAKING: auto-accept is the only link model. The manual accept path
+(`NodeEvent::LinkRequest`, `accept_link`) was removed and replaced by
+`link_handle`. A destination can decline inbound links via
+`accepts_links = false` (`lev_destination_set_accepts_links`).
 
 The Debian package now installs `/etc/reticulum/` and
 `/etc/reticulum/storage/` with mode 2775 (group-writable + setgid).
@@ -30,17 +55,31 @@ the shared configdir, and Python's `RNS.Reticulum()` auto-detect
 of `/etc/reticulum` then completes without permission errors. No
 per-user configuration step is needed.
 
-### Added
+### Fixed
 
-Radio-config wire format gained a `radio_silent` flag (byte 15 of
-the payload, backward-compatible parse down to 13 bytes). When set,
-the T114 firmware drops outgoing LoRa packets at the driver
-boundary — the radio keeps listening but never transmits. The
-integration-test runner uses this to neutralize every T114 the
-scenario does not bind, so single-pair LoRa benchmarks stop
-seeing the idle T114's Reticulum announces as CSMA-busy. Bug #2
-CA-ON single-pair PDR distribution collapses from σ≈21 to σ≈4
-(mean 79 → 97 %, min 44 → 88 %).
+Announces above `PATHFINDER_MAX_HOPS` (hops > 128) are now gated,
+matching Python-RNS. Responder-initiated graceful close is now
+reliably delivered via the driver shutdown drain (Codeberg #77).
+In-flight resources are failed with `ResourceFailed` on link
+teardown instead of being silently dropped (Codeberg #78). The
+structured event log is now well-formed by construction (no more
+corrupt `LINK_ENTRY_SET` lines or field violations). Stale detection
+now works for links established at uptime second 0.
+
+RNode `flow_control = true` no longer deadlocks the send path. The
+I/O task previously waited for a `CMD_READY` from the firmware that
+only arrives after a TX, producing a chicken-and-egg stall (no TX
+ever fires, the send queue saturates and emits "send queue full,
+dropping oldest" until the upstream traffic source goes away).
+`interface_ready` is now `true` at io-task start, mirroring Python
+`RNodeInterface.py` after `validateRadioState()`.
+
+### Internal
+
+The event-log sink moved out of `test_support` into a production
+module. Added local `.deb` build recipes (`just build-deb*`).
+Integration-test runs are now hermetic across processes
+(process-unique docker names).
 
 ## [0.6.3] - 2026-04-01
 

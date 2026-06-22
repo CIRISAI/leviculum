@@ -625,7 +625,7 @@ number):
 #define LEVICULUM_VERSION_MAJOR <from crate>
 #define LEVICULUM_VERSION_MINOR <from crate>
 #define LEVICULUM_VERSION_PATCH <from crate>
-const char *lev_version_string(void);   /* e.g. "0.6.3" */
+const char *lev_version_string(void);   /* e.g. "0.7.0" */
 uint32_t    lev_version_number(void);    /* (major<<16)|(minor<<8)|patch */
 ```
 

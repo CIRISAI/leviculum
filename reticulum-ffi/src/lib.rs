@@ -204,7 +204,7 @@ pub unsafe extern "C" fn lev_hex_decode(
     })
 }
 
-/// Return the library version string, for example `"0.6.3"`.
+/// Return the library version string, for example `"0.7.0"`.
 ///
 /// Static storage, never freed.
 #[no_mangle]

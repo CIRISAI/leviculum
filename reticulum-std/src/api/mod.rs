@@ -42,7 +42,7 @@ pub fn version() -> (u16, u16, u16) {
     )
 }
 
-/// Version string of the facade, for example `"0.6.3"`.
+/// Version string of the facade, for example `"0.7.0"`.
 pub fn version_string() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
