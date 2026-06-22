@@ -132,7 +132,7 @@ under a second:
 [leviculum]   started=2026-04-14T02:01:33
 [leviculum]   pkg=reticulum-integ
 [leviculum]   binary=reticulum_integ-abc123def
-[leviculum]   cwd=/home/lew/coding/libreticulum
+[leviculum]   cwd=/path/to/leviculum
 [leviculum] Wait for it to finish or stop that process, then retry.
 ```
 

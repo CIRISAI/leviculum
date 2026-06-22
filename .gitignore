@@ -9,6 +9,12 @@ reticulum-nrf/target/
 reticulum-nrf/Cargo.lock
 **/*.rs.bk
 
+# RNode firmware images extracted by `just flash-rnode-extract` (Mark's
+# signed binaries; pulled from a local device, not committed).
+/.rnode-fw/
+# Repo-local venv with a working esptool (just flash-rnode-setup).
+/.rnode-tools/
+
 # Generated headers (cbindgen)
 reticulum-ffi/*.h
 

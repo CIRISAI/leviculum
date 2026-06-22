@@ -44,27 +44,71 @@ The binaries are statically linked against musl, so the package installs on Debi
 
 ### Build from source
 
+Tested on current Debian (trixie). Install the toolchain once. Rust comes
+from rustup because the Debian cargo is usually too old; everything else is
+apt packages. No file outside these packages and the cloned repo is needed.
+
+```sh
+# Rust:
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
+
+# Build, test, and flash tooling:
+sudo apt install just docker.io docker-compose build-essential pkg-config \
+    python3 python3-venv python3-pip python3-serial python-is-python3 esptool
+
+# Let the interop and integration tests run containers without sudo:
+sudo usermod -aG docker "$USER"   # then log out and back in
+```
+
+Then clone and build:
+
 ```sh
 git clone https://codeberg.org/Lew_Palm/leviculum.git
 cd leviculum
+git submodule update --init vendor/Reticulum
 cargo build --release --bin lnsd --bin lncp --bin lns
 ./target/release/lnsd -v
 ```
 
-No system C libraries are required. To run unit tests:
+No system C libraries are linked into the daemon. Run the test tiers:
 
 ```sh
-cargo test-core
-```
-
-To run the interop test suite against Python Reticulum:
-
-```sh
-git submodule update --init vendor/Reticulum
-cargo test-interop
+cargo test-core      # unit tests
+cargo test-interop   # against Python Reticulum (needs Docker and the submodule)
 ```
 
 See the [installation guide](https://codeberg.org/Lew_Palm/leviculum/src/branch/master/docs/src/guide/installation.md) for all cargo aliases and test levels.
+
+#### Flashing LoRa hardware (optional)
+
+For the embedded LNode firmware (Heltec T114, RAK4631), add the embedded
+target once, then flash attached devices over USB:
+
+```sh
+rustup target add thumbv7em-none-eabihf
+just flash            # every attached T114
+just flash-rak4631    # every attached RAK4631
+```
+
+For the RNode radios (LilyGO T-Beam, ESP32), extract Mark Qvist's signed
+firmware off a known-good RNode once, then flash any T-Beam. The ESP32 cannot
+be bricked, a failed flash is always recoverable by re-running flash-rnode:
+
+```sh
+just flash-rnode-extract /dev/ttyACM6   # once, from a trusted RNode
+just flash-rnode /dev/ttyACM6
+```
+
+#### Cross-built .deb packages (optional)
+
+Only for producing the static musl `.deb` artifacts via `just build-deb`:
+
+```sh
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+cargo install cargo-zigbuild cargo-deb
+pip install --user ziglang
+```
 
 ## License
 

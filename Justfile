@@ -308,7 +308,64 @@ flash-rak4631-pocket:
 # externally accessible RESET pin, so the firmware-side admin command is the
 # only software-only DFU entry. After our firmware lands, just-flash-rak4631
 # uses the touch handler from src/usb.rs and this recipe is no longer needed.
-# Requires meshtastic CLI: /home/lew/pythonenvironment/bin/pip install meshtastic
+# Requires the meshtastic CLI on PATH (pip install meshtastic).
 # Usage: just dfu-rak4631 /dev/ttyACM0
 dfu-rak4631 PORT:
-    /home/lew/pythonenvironment/bin/meshtastic --port {{PORT}} --enter-dfu
+    meshtastic --port {{PORT}} --enter-dfu
+
+# RNode (LilyGO T-Beam, ESP32 + SX1276) flashing with Mark's firmware.
+# Run on the host the RNodes are attached to. The ESP32 has a mask-ROM
+# download bootloader and cannot be bricked: a failed flash is always
+# recoverable by re-running flash-rnode. This is unlike the nRF52 LNodes
+# (T114, RAK4631), where a bad external image leaves the device USB-dark.
+#
+# Run flash-rnode-setup once first. It pip-installs esptool into a
+# gitignored repo-local venv (.rnode-tools/): the Debian esptool package is
+# dfsg-stripped of its flasher stubs and fails on large flash reads/writes,
+# so a real esptool is needed. rnodeconf is the repo's vendored copy.
+# Mark's autoinstall is interactive (product menu); instead we read Mark's
+# signed firmware images off a known-good RNode once (flash-rnode-extract,
+# into the gitignored .rnode-fw/), then write them back. The write covers
+# only the firmware regions, not the NVS/EEPROM partition, so the device
+# signature and provisioning are preserved (verified: a T-Beam stayed
+# "Validated, Local signature" across a full reflash).
+
+vendor_reticulum := justfile_directory() / "vendor" / "Reticulum"
+rnodeconf := "PYTHONPATH=" + vendor_reticulum + " python3 " + vendor_reticulum / "RNS" / "Utilities" / "rnodeconf.py"
+esptool := justfile_directory() / ".rnode-tools" / "bin" / "esptool.py"
+rnode_fw := justfile_directory() / ".rnode-fw"
+
+# One-time setup: a repo-local venv with a working esptool (the Debian
+# package cannot read/write large flash regions, its stubs are dfsg-stripped).
+flash-rnode-setup:
+    python3 -m venv {{justfile_directory()}}/.rnode-tools
+    {{justfile_directory()}}/.rnode-tools/bin/pip install --quiet 'esptool<5'
+
+# Read-only device info: connectivity, firmware version, signature.
+#   just flash-rnode-info /dev/ttyACM6
+flash-rnode-info PORT:
+    {{rnodeconf}} --info {{PORT}}
+
+# Back up an RNode EEPROM (board model, signature, provisioning) before any
+# flash. Writes ~/.config/rnodeconf/eeprom<timestamp>.eeprom.
+flash-rnode-backup PORT:
+    {{rnodeconf}} --eeprom-backup {{PORT}}
+
+# Extract Mark's signed firmware images off a known-good, signature-validated
+# RNode into .rnode-fw/ (gitignored). Run ONCE against a trusted device; the
+# images then serve as the flash source for flash-rnode.
+#   just flash-rnode-extract /dev/ttyACM6
+flash-rnode-extract PORT:
+    mkdir -p {{rnode_fw}}
+    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x1000 0x4650 {{rnode_fw}}/bootloader.bin
+    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x8000 0xc00 {{rnode_fw}}/partitions.bin
+    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0xe000 0x2000 {{rnode_fw}}/boot_app0.bin
+    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x10000 0x200000 {{rnode_fw}}/app.bin
+    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x210000 0x1f0000 {{rnode_fw}}/console.bin
+
+# Flash a T-Beam RNode with the extracted Mark firmware. Deterministic and
+# non-interactive. Preserves the EEPROM provisioning. Requires
+# flash-rnode-extract to have populated .rnode-fw/ first.
+#   just flash-rnode /dev/ttyACM6
+flash-rnode PORT:
+    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size detect 0x1000 {{rnode_fw}}/bootloader.bin 0x8000 {{rnode_fw}}/partitions.bin 0xe000 {{rnode_fw}}/boot_app0.bin 0x10000 {{rnode_fw}}/app.bin 0x210000 {{rnode_fw}}/console.bin
