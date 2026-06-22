@@ -5,7 +5,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,24 @@ use crate::topology::{apply_radio_overrides, generate_node_configs, TestScenario
 
 /// Monotonic counter for generating unique run IDs within a process.
 static RUN_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Mint a run ID that is unique across separate test processes.
+///
+/// The in-process counter alone resets to 0 in every `cargo test` invocation,
+/// so two sequential runs of the same scenario would mint identical docker
+/// project, container, and network names (`integ-<test>-0-...`). A run killed
+/// before `down()` (panic, SIGKILL, timeout) then leaves a same-named project
+/// that the next process silently reuses or attaches to, leaking docker state
+/// across runs. Seeding the counter with a per-process base keyed on the PID
+/// makes every run's docker identity unique, so a previous run's leftovers can
+/// never be mistaken for the current run's state. The low 16 bits feed the
+/// per-run IPv6 subnet (see `compose.rs`), so the PID is spread across the
+/// whole word to keep those bits distinct between processes too.
+fn next_run_id() -> u32 {
+    static BASE: OnceLock<u32> = OnceLock::new();
+    let base = *BASE.get_or_init(|| std::process::id().wrapping_mul(0x9E37_79B9));
+    base.wrapping_add(RUN_COUNTER.fetch_add(1, Ordering::Relaxed))
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -296,7 +314,7 @@ impl TestRunner {
 
         let tempdir = TempDir::new()?;
         let base_dir = tempdir.path().join("nodes");
-        let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let run_id = next_run_id();
 
         // Spawn proxy processes before generating configs/compose.
         let (proxy_processes, proxy_sockets, proxy_devices) =
@@ -559,19 +577,32 @@ impl TestRunner {
             Err(e) => eprintln!("Failed to save logs: {e}"),
         }
 
+        // `--volumes --remove-orphans` makes teardown hermetic across runs:
+        // orphan containers (e.g. from a renamed service) and any anonymous
+        // volumes are removed too, so no docker state from this scenario can
+        // leak into a later one. Without `--remove-orphans` compose also
+        // leaves the project network behind in some cases (observed lingering
+        // `integ-..._default` networks).
         let output = self
             .compose_cmd()
-            .args(["down", "--timeout", "10"])
+            .args(["down", "--volumes", "--remove-orphans", "--timeout", "10"])
             .output()?;
 
         self.is_up = false;
         self.kill_proxies();
         self.stop_dmesg_logger();
 
+        // Belt-and-suspenders: if the project network still lingers (compose
+        // occasionally leaves it when a container is slow to stop), drop it so
+        // it cannot accumulate or be reused by a later run.
+        let _ = Command::new("docker")
+            .args(["network", "rm", &format!("{}_default", self.project_name)])
+            .output();
+
         if !output.status.success() {
             check_stale_resources(&self.scenario);
             return Err(RunnerError::Compose {
-                action: "down --timeout 10".into(),
+                action: "down --volumes --remove-orphans --timeout 10".into(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }

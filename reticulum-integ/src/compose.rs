@@ -157,7 +157,10 @@ pub fn generate_compose(
         writeln!(out, "    enable_ipv6: true").ok();
         writeln!(out, "    ipam:").ok();
         writeln!(out, "      config:").ok();
-        writeln!(out, "        - subnet: fd00:dead:beef:{run_id:04x}::/64").ok();
+        // run_id is process-unique (PID-seeded) and can exceed 16 bits; mask
+        // to the low 16 so the subnet stays a valid 4-hex-digit /64 hextet.
+        let subnet_id = run_id & 0xFFFF;
+        writeln!(out, "        - subnet: fd00:dead:beef:{subnet_id:04x}::/64").ok();
     }
 
     out
@@ -563,6 +566,43 @@ alice-bob = "auto"
         assert!(
             yaml.contains("WAIT_FOR_DAD: \"1\""),
             "every service in an auto-link scenario must opt into DAD wait"
+        );
+    }
+
+    #[test]
+    fn large_run_id_masks_to_valid_subnet_hextet() {
+        // run_id is process-unique (PID-seeded) and routinely exceeds 16 bits.
+        // The subnet must stay a valid 4-hex-digit /64 hextet, i.e. masked to
+        // the low 16 bits, never emitting a 5+ digit hextet.
+        let toml_str = r#"
+[test]
+name = "auto_test"
+
+[nodes.alice]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bob]
+type = "rust"
+respond_to_probes = true
+
+[links]
+alice-bob = "auto"
+"#;
+        let scenario = crate::topology::parse_scenario(toml_str).expect("parse");
+        let (base_dir, repo_root, target_dir) = sample_paths();
+        // 0x1_2345 -> low 16 bits 0x2345.
+        let yaml = generate_compose(
+            &scenario,
+            0x1_2345,
+            &base_dir,
+            &repo_root,
+            &target_dir,
+            &BTreeMap::new(),
+        );
+        assert!(
+            yaml.contains("subnet: fd00:dead:beef:2345::/64"),
+            "subnet must mask run_id to low 16 bits, got:\n{yaml}"
         );
     }
 
