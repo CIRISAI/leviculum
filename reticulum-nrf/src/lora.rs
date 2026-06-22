@@ -204,6 +204,31 @@ fn compute_slot_ms(cfg: &RadioConfig) -> u64 {
     core::cmp::max(CSMA_SLOT_MS_MIN, airtime / 10)
 }
 
+/// RX listening window (ms) opened after every transmission, before the next
+/// outgoing item is drained. Half-duplex turn-taking: a busy transmitter must
+/// yield the channel back to RX between sends or it never hears the peer's
+/// acks, retransmits, and the link dies via retry exhaustion (#23). The RNode
+/// firmware achieves the same by returning to continuous RX after each TX and
+/// gating the next TX behind a CSMA wait (DIFS + contention window) during
+/// which the radio listens; it even reserves a fixed post-TX yield
+/// (CSMA_POST_TX_YIELD_SLOTS). We mirror that discipline with an explicit
+/// bounded window.
+///
+/// Sized to one full single-frame reply airtime at the current profile plus a
+/// turnaround margin (peer host processing + its CSMA backoff). `rx_once`
+/// returns the instant a packet arrives, so this is only an upper bound that
+/// costs wall-clock when the channel is genuinely idle, not on every TX.
+fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
+    // One full LoRa frame on the wire (header + max single payload).
+    let reply_bytes = (reticulum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32;
+    let reply_airtime =
+        reticulum_core::rnode::airtime_ms(reply_bytes, cfg.bw_hz, cfg.sf, cfg.cr_denom);
+    // Peer turnaround: host processing jitter + its DIFS-equivalent (2 slots).
+    let turnaround = reticulum_core::rnode::PACING_MARGIN_MS + 2 * compute_slot_ms(cfg);
+    // Clamp to >=1ms (the SX1262 needs a non-zero timeout) and a sane ceiling.
+    (reply_airtime + turnaround).clamp(1, 10_000) as u32
+}
+
 /// Transmit one or two LoRa frames back-to-back. For split packets, both
 /// frames go out without any CSMA/CAD between them, the receiver's
 /// SplitReassembler expects this.
@@ -590,10 +615,27 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     }
                 }
             }
-            // TX just completed, go back to the top of the loop to drain
-            // the next pending packet immediately. This matches the original
-            // tight-drain behavior and avoids an extra 500ms RX gap between
-            // back-to-back outbound packets (e.g. announce rebroadcasts).
+            // TX just completed. Before draining the next outgoing item, give
+            // RX a real, bounded listening window so the peer's ack/reply gets
+            // through. Without this the loop pulled the next queued packet
+            // immediately (only a one-symbol CAD in between) and a sender with
+            // a non-empty queue transmitted back-to-back, never listening for
+            // acks. At slow SF (2.7s/frame at SF10) the busy side went deaf,
+            // retransmitted, and the link died via retry exhaustion (#23). The
+            // window is airtime-aware and self-shortens: rx_once returns as
+            // soon as a packet arrives. Idle continuous RX (queue empty) is
+            // unchanged below.
+            let ack_window_ms = post_tx_rx_window_ms(&config);
+            reassembler.check_timeout(rx_timeout_count, 10);
+            rx_once(
+                &mut radio,
+                &mut rx_buf,
+                ack_window_ms,
+                &mut reassembler,
+                &incoming_tx,
+                &mut rx_timeout_count,
+            )
+            .await;
             continue;
         }
 
