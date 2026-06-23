@@ -35,6 +35,22 @@
 
 # Appendix
 
+- [Reticulum Protocol Specification](appendix/reticulum-specification.md)
+  - [Introduction and scope](appendix/reticulum/00-introduction.md)
+  - [Cryptographic primitives](appendix/reticulum/01-primitives.md)
+  - [Identity](appendix/reticulum/02-identity.md)
+  - [Destination](appendix/reticulum/03-destination.md)
+  - [Packet format](appendix/reticulum/04-packet.md)
+  - [Announce](appendix/reticulum/05-announce.md)
+  - [Link](appendix/reticulum/06-link.md)
+  - [Resource](appendix/reticulum/07-resource.md)
+  - [Channel and Buffer](appendix/reticulum/08-channel-buffer.md)
+  - [Transport](appendix/reticulum/09-transport.md)
+  - [Framing and IFAC](appendix/reticulum/10-framing-ifac.md)
+  - [Constants reference](appendix/reticulum/11-constants.md)
+  - [Coverage ledger](appendix/reticulum/12-coverage-ledger.md)
+  - [Test vectors](appendix/reticulum/13-test-vectors.md)
+  - [Symbol inventory (frozen)](appendix/reticulum/_inventory.md)
 - [LXMF Protocol Specification](appendix/lxmf-specification.md)
   - [Introduction and scope](appendix/lxmf/00-introduction.md)
   - [Cryptographic primitives](appendix/lxmf/01-primitives.md)
