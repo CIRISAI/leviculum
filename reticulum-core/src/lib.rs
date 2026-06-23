@@ -120,7 +120,7 @@ pub mod traits;
 pub mod transport;
 
 // Re-export key types
-pub use announce::{AnnounceError, ReceivedAnnounce};
+pub use announce::{AnnounceControl, AnnounceError, ReceivedAnnounce};
 pub use destination::{
     Destination, DestinationError, DestinationHash, DestinationType, Direction, ProofStrategy,
 };

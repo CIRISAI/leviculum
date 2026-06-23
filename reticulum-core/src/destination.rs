@@ -267,6 +267,11 @@ pub struct Destination {
     ratchets_enabled: bool,
     /// If true, ratchet keys have changed since last persist
     ratchets_dirty: bool,
+    /// If true, `hash` was set to a caller-supplied override rather than
+    /// computed from `truncated_hash(name_hash || identity_hash)`. Such a
+    /// destination is reachable by direct link (the link path carries an
+    /// opaque hash) but MUST NOT be announced — see [`Destination::announce`].
+    explicit_hash: bool,
 }
 
 impl Destination {
@@ -329,12 +334,59 @@ impl Destination {
             enforce_ratchets: false,
             ratchets_enabled: false,
             ratchets_dirty: false,
+            explicit_hash: false,
         })
+    }
+
+    /// Create a destination whose `hash` is a caller-supplied 16-byte override
+    /// rather than the standard `truncated_hash(name_hash || identity_hash)`.
+    ///
+    /// This exists for cross-transport addressing schemes that need a
+    /// destination's routable hash to equal some externally-derived value
+    /// (e.g. `sha256(federation_pubkey)[..16]`) that cannot be obtained as a
+    /// SHA-256 preimage of the structural formula. Identity-based crypto is
+    /// unaffected: link establishment, packet encryption, and the link proof
+    /// all continue to use the destination's real `identity` — the override
+    /// only changes the 16-byte routing index under which the destination is
+    /// stored and matched.
+    ///
+    /// # Compatibility guard
+    /// An explicit-hash destination is reachable **only via direct link**: the
+    /// LINK_REQUEST carries the hash as opaque bytes and the receiver resolves
+    /// it by a bare table lookup, so consenting peers interoperate. It MUST NOT
+    /// be announced — [`Destination::announce`] returns
+    /// [`AnnounceError::ExplicitHashCannotAnnounce`] for it — because an
+    /// announce would advertise a destination_hash that every Python-RNS peer
+    /// recomputes from `name_hash || identity_hash` and rejects on mismatch.
+    /// This confines the wire-break to the opaque link path and keeps the
+    /// announce stream Python-RNS compatible.
+    ///
+    /// Arguments mirror [`Destination::new`], plus `explicit_hash`: the exact
+    /// 16 bytes to index this destination by.
+    pub fn with_explicit_hash(
+        identity: Option<Identity>,
+        direction: Direction,
+        dest_type: DestinationType,
+        app_name: &str,
+        aspects: &[&str],
+        explicit_hash: [u8; TRUNCATED_HASHBYTES],
+    ) -> Result<Self, DestinationError> {
+        let mut dest = Self::new(identity, direction, dest_type, app_name, aspects)?;
+        dest.hash = DestinationHash::new(explicit_hash);
+        dest.explicit_hash = true;
+        Ok(dest)
     }
 
     /// Get the destination hash
     pub fn hash(&self) -> &DestinationHash {
         &self.hash
+    }
+
+    /// Whether this destination's hash is a caller-supplied override
+    /// (constructed via [`Destination::with_explicit_hash`]). Such
+    /// destinations are never announced.
+    pub fn is_explicit_hash(&self) -> bool {
+        self.explicit_hash
     }
 
     /// Get the name hash
@@ -757,6 +809,15 @@ impl Destination {
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
     ) -> Result<Packet, AnnounceError> {
+        // Explicit-hash destinations must never be announced: the announce would
+        // carry a destination_hash that does not match
+        // truncated_hash(name_hash || identity_hash), which every Python-RNS
+        // peer recomputes and rejects. Reachability is preserved via direct
+        // link (opaque hash on the wire); only the announce path is refused.
+        if self.explicit_hash {
+            return Err(AnnounceError::ExplicitHashCannotAnnounce);
+        }
+
         // Only SINGLE destinations can announce (per Python Reticulum spec)
         if self.dest_type != DestinationType::Single {
             return Err(AnnounceError::OnlySingleCanAnnounce);
@@ -1090,6 +1151,38 @@ mod tests {
         assert!(announce.verify_destination_hash());
         assert!(announce.verify_signature().unwrap());
         assert_eq!(announce.app_data(), b"hello");
+    }
+
+    // #16: with_explicit_hash overrides the routing index but the destination
+    // can never be announced (guards Python-RNS announce compatibility).
+    #[test]
+    fn test_with_explicit_hash_sets_hash_and_blocks_announce() {
+        let identity = Identity::generate(&mut OsRng);
+        let explicit = [0x7Au8; 16];
+        let mut dest = Destination::with_explicit_hash(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "ciris.edge",
+            &["fed"],
+            explicit,
+        )
+        .unwrap();
+
+        assert!(dest.is_explicit_hash());
+        assert_eq!(dest.hash().as_bytes(), &explicit);
+        // The override differs from the structural hash this dest would
+        // otherwise carry (name_hash || identity_hash is not a preimage of it).
+        let structural = Destination::compute_destination_hash(
+            dest.name_hash(),
+            dest.identity().unwrap().hash(),
+        );
+        assert_ne!(dest.hash(), &structural);
+
+        assert!(matches!(
+            dest.announce(None, &mut OsRng, TEST_TIME_MS),
+            Err(AnnounceError::ExplicitHashCannotAnnounce)
+        ));
     }
 
     #[test]

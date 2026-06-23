@@ -74,7 +74,7 @@ use reticulum_core::link::LinkId;
 use reticulum_core::node::{EventClass, NodeCore, NodeEvent};
 use reticulum_core::traits::{InterfaceError, Storage as StorageTrait};
 use reticulum_core::transport::{InterfaceId, TickOutput};
-use reticulum_core::{Destination, DestinationHash};
+use reticulum_core::{AnnounceControl, Destination, DestinationHash};
 
 use crate::clock::SystemClock;
 use crate::config::InterfaceConfig;
@@ -1186,6 +1186,26 @@ impl ReticulumNode {
         inner.register_destination(destination);
     }
 
+    /// Register a destination indexed by an explicit (override) hash.
+    ///
+    /// Companion to [`Destination::with_explicit_hash`]. The destination is
+    /// routed under `hash` rather than its structural hash; inbound
+    /// LINK_REQUESTs carrying `hash` resolve to it. Such a destination is
+    /// reachable only by direct link and is never announced.
+    /// `hash` must equal `*destination.hash()`.
+    pub fn register_destination_at(&self, hash: DestinationHash, destination: Destination) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.register_destination_at(hash, destination);
+    }
+
+    /// Install (or clear, with `None`) the per-destination announce-suppression
+    /// policy. Suppressed destinations stay routable but are never gossiped.
+    /// See [`AnnounceControl`].
+    pub fn set_announce_control(&self, policy: Option<Box<dyn AnnounceControl>>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.set_announce_control(policy);
+    }
+
     /// Connect to a remote destination
     ///
     /// Sends a link request to the destination and returns a `LinkHandle`
@@ -1220,6 +1240,21 @@ impl ReticulumNode {
             Arc::clone(&self.inner),
             self.action_dispatch_tx.clone(),
         ))
+    }
+
+    /// Dial a destination by an explicit (override) hash.
+    ///
+    /// Companion to [`register_destination_at`](Self::register_destination_at):
+    /// stamps the LINK_REQUEST with `hash` so it resolves, on the receiver, to
+    /// the destination registered under that explicit hash. Functionally the
+    /// same as [`connect`](Self::connect) (which already accepts any hash),
+    /// named for the explicit-hash flow.
+    pub async fn connect_at(
+        &self,
+        hash: &DestinationHash,
+        dest_signing_key: &[u8; 32],
+    ) -> Result<LinkHandle, Error> {
+        self.connect(hash, dest_signing_key).await
     }
 
     /// Obtain a writable handle for an already-established inbound link.
