@@ -52,11 +52,12 @@ pub use event::{DeliveryError, EventClass, NodeEvent};
 pub use request::{RequestError, RequestPolicy};
 pub use send::SendError;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::announce::AnnounceError;
+use crate::announce::{AnnounceControl, AnnounceError};
 use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
 use crate::destination::{Destination, DestinationHash, Direction, ProofStrategy};
 use crate::identity::Identity;
@@ -187,6 +188,11 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
+    /// Optional policy hook for per-destination announce suppression.
+    /// `None` (default) announces every eligible destination — historical
+    /// behaviour. Consulted on every scheduled announce; see
+    /// [`AnnounceControl`].
+    announce_control: Option<Box<dyn AnnounceControl>>,
 }
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
@@ -234,6 +240,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
             max_incoming_resource_size,
+            announce_control: None,
         }
     }
 
@@ -280,10 +287,50 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
+    /// Register a destination indexed by an explicit hash.
+    ///
+    /// Companion to [`Destination::with_explicit_hash`]: the destination is
+    /// stored and routed under `hash` rather than its structural
+    /// `truncated_hash(name_hash || identity_hash)`. Since
+    /// [`register_destination`](Self::register_destination) already keys off
+    /// `dest.hash()`, this is the same operation with the invariant pinned —
+    /// `hash` MUST equal `*dest.hash()` (which it does when `dest` was built
+    /// via `with_explicit_hash(.., hash)`). Provided as a named entry point so
+    /// the explicit-hash flow reads coherently at call sites.
+    ///
+    /// Inbound LINK_REQUESTs carrying `hash` then resolve to this destination
+    /// by the ordinary table lookup. Such a destination is never announced
+    /// (see [`Destination::announce`]).
+    pub fn register_destination_at(&mut self, hash: DestinationHash, dest: Destination) {
+        debug_assert_eq!(
+            hash,
+            *dest.hash(),
+            "register_destination_at: hash must equal dest.hash() \
+             (build dest via Destination::with_explicit_hash)"
+        );
+        self.register_destination(dest);
+    }
+
     /// Unregister a destination
     pub fn unregister_destination(&mut self, hash: &DestinationHash) {
         self.transport.unregister_destination(hash.as_bytes());
         self.destinations.remove(hash);
+    }
+
+    /// Install (or clear) the per-destination announce-suppression policy.
+    ///
+    /// `None` restores the default of announcing every eligible destination.
+    /// The policy is consulted on every scheduled announce — both the periodic
+    /// management tick and the interface-recovery re-announce — before a
+    /// destination is emitted. Suppressed destinations remain routable; they
+    /// are simply never gossiped. See [`AnnounceControl`].
+    pub fn set_announce_control(&mut self, policy: Option<Box<dyn AnnounceControl>>) {
+        self.announce_control = policy;
+    }
+
+    /// Returns `true` if an announce-suppression policy is installed.
+    pub fn has_announce_control(&self) -> bool {
+        self.announce_control.is_some()
     }
 
     /// Get the probe destination hash (if respond_to_probes is enabled).
@@ -1006,10 +1053,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Clone hashes to avoid borrow conflict with self
         let hashes: Vec<DestinationHash> = self.mgmt_destinations.clone();
         for dest_hash in &hashes {
+            // Installed announce-suppression policy (#17): skip silently.
+            // Borrows announce_control only; released before destinations.get_mut.
+            if let Some(policy) = self.announce_control.as_ref() {
+                if policy.should_suppress_announce(dest_hash) {
+                    continue;
+                }
+            }
             let dest = match self.destinations.get_mut(dest_hash) {
                 Some(d) => d,
                 None => continue,
             };
+            // Explicit-hash destinations are never announced (wire-break guard).
+            // dest.announce() would also reject this; skip first to avoid the
+            // per-tick warning log.
+            if dest.is_explicit_hash() {
+                continue;
+            }
             let packet = match dest.announce(None, &mut self.rng, now_ms) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1264,7 +1324,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .collect();
 
         for dest_hash in &local_hashes {
+            // Installed announce-suppression policy (#17): skip silently.
+            if let Some(policy) = self.announce_control.as_ref() {
+                if policy.should_suppress_announce(dest_hash) {
+                    continue;
+                }
+            }
             if let Some(dest) = self.destinations.get_mut(dest_hash) {
+                // Explicit-hash destinations are never announced (wire-break
+                // guard): they are registered in local_destinations, so they
+                // reach this re-announce loop and must be skipped here.
+                if dest.is_explicit_hash() {
+                    continue;
+                }
                 match dest.announce(None, &mut self.rng, now_ms) {
                     Ok(packet) => {
                         let mut buf = [0u8; crate::constants::MTU];
@@ -1801,6 +1873,218 @@ mod tests {
 
         assert!(node.destination(&hash).is_some());
         assert!(node.transport.has_destination(hash.as_bytes()));
+    }
+
+    // #16: a destination built with an explicit (override) hash is indexed and
+    // routed under THAT hash, not its structural truncated_hash(name||id).
+    #[test]
+    fn test_register_destination_at_indexes_by_explicit_hash() {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+
+        let identity = Identity::generate(&mut OsRng);
+        let explicit = [0xABu8; 16];
+        let dest = Destination::with_explicit_hash(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "ciris.edge",
+            &["fed"],
+            explicit,
+        )
+        .unwrap();
+        // The override is genuinely different from the structural hash.
+        let structural = *Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "ciris.edge",
+            &["fed"],
+        )
+        .unwrap()
+        .hash();
+        let explicit_hash = *dest.hash();
+        assert_eq!(explicit_hash.as_bytes(), &explicit);
+        assert_ne!(explicit_hash, structural);
+        assert!(dest.is_explicit_hash());
+
+        node.register_destination_at(explicit_hash, dest);
+
+        // Reachable under the explicit hash on both the node map and transport.
+        assert!(node.destination(&explicit_hash).is_some());
+        assert!(node.transport.has_destination(&explicit));
+    }
+
+    // #16: explicit-hash destinations must never be announced. Driving the
+    // periodic management-announce tick over one leaves no announce cached.
+    #[test]
+    fn test_explicit_hash_destination_is_not_announced() {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+
+        let identity = Identity::generate(&mut OsRng);
+        let explicit = [0x11u8; 16];
+        let dest = Destination::with_explicit_hash(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "ciris.edge",
+            &["fed"],
+            explicit,
+        )
+        .unwrap();
+        let h = *dest.hash();
+        node.register_destination_at(h, dest);
+
+        // Schedule a management announce for it and fire the tick.
+        node.mgmt_destinations.push(h);
+        node.next_mgmt_announce_ms = Some(TEST_TIME_MS);
+        node.check_mgmt_announces(TEST_TIME_MS);
+
+        // Nothing was cached/emitted: the explicit-hash guard skipped it.
+        assert!(node
+            .transport
+            .storage()
+            .get_announce_cache(&explicit)
+            .is_none());
+        // And the direct guard on Destination::announce agrees.
+        let mut again = Destination::with_explicit_hash(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "ciris.edge",
+            &["fed"],
+            explicit,
+        )
+        .unwrap();
+        assert!(matches!(
+            again.announce(None, &mut OsRng, TEST_TIME_MS),
+            Err(crate::announce::AnnounceError::ExplicitHashCannotAnnounce)
+        ));
+    }
+
+    // #16: a link establishes end-to-end against a destination registered under
+    // an explicit hash — the inbound LINK_REQUEST resolves by bare lookup and
+    // the proof verifies against the real identity key.
+    #[test]
+    fn test_explicit_hash_link_establishes_end_to_end() {
+        use crate::constants::MTU;
+        use crate::transport::InterfaceId;
+        let _ = MTU;
+
+        let resp_identity = Identity::generate(&mut OsRng);
+        let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
+        let explicit = [0xC5u8; 16];
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut responder = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let mut resp_dest = Destination::with_explicit_hash(
+            Some(resp_identity),
+            Direction::In,
+            DestinationType::Single,
+            "ciris.edge",
+            &["fed"],
+            explicit,
+        )
+        .unwrap();
+        resp_dest.set_accepts_links(true);
+        resp_dest.set_proof_strategy(ProofStrategy::All);
+        let dest_hash = *resp_dest.hash();
+        assert_eq!(dest_hash.as_bytes(), &explicit);
+        responder.register_destination_at(dest_hash, resp_dest);
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        // Dial by explicit hash (no announce/path was ever needed).
+        let (_caller_link_id, _routed, output) = initiator.connect_at(dest_hash, &resp_signing_key);
+        let request = extract_broadcast_data(&output);
+
+        let output = responder.handle_packet(InterfaceId(0), &request);
+        let pending = extract_link_request_link_id(&output);
+        let output = responder.accept_link(&pending).unwrap();
+        let proof_data = extract_broadcast_data(&output);
+
+        let output = initiator.handle_packet(InterfaceId(0), &proof_data);
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })),
+            "link must establish against an explicit-hash destination"
+        );
+    }
+
+    // #17: an installed AnnounceControl policy suppresses the scheduled
+    // announce for a matching destination while leaving others alone.
+    #[test]
+    fn test_announce_control_suppresses_scheduled_announce() {
+        struct SuppressOne([u8; 16]);
+        impl crate::announce::AnnounceControl for SuppressOne {
+            fn should_suppress_announce(&self, h: &DestinationHash) -> bool {
+                h.as_bytes() == &self.0
+            }
+        }
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+
+        // Two ordinary announceable destinations.
+        let d_keep = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["keep"],
+        )
+        .unwrap();
+        let d_hide = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["hide"],
+        )
+        .unwrap();
+        let keep = *d_keep.hash();
+        let hide = *d_hide.hash();
+        node.register_destination(d_keep);
+        node.register_destination(d_hide);
+
+        node.set_announce_control(Some(Box::new(SuppressOne(hide.into_bytes()))));
+        assert!(node.has_announce_control());
+
+        node.mgmt_destinations.push(keep);
+        node.mgmt_destinations.push(hide);
+        node.next_mgmt_announce_ms = Some(TEST_TIME_MS);
+        node.check_mgmt_announces(TEST_TIME_MS);
+
+        assert!(
+            node.transport
+                .storage()
+                .get_announce_cache(keep.as_bytes())
+                .is_some(),
+            "unsuppressed destination should announce"
+        );
+        assert!(
+            node.transport
+                .storage()
+                .get_announce_cache(hide.as_bytes())
+                .is_none(),
+            "suppressed destination must not announce"
+        );
+
+        // Clearing the policy restores announcing.
+        node.set_announce_control(None);
+        assert!(!node.has_announce_control());
+        node.next_mgmt_announce_ms = Some(TEST_TIME_MS);
+        node.check_mgmt_announces(TEST_TIME_MS);
+        assert!(
+            node.transport
+                .storage()
+                .get_announce_cache(hide.as_bytes())
+                .is_some(),
+            "after clearing policy the destination announces"
+        );
     }
 
     #[test]

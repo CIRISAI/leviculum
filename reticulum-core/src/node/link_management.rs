@@ -265,6 +265,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         (link_id, was_routed, output)
     }
 
+    /// Dial a destination by an explicit (override) hash.
+    ///
+    /// Companion to [`Destination::with_explicit_hash`](crate::destination::Destination::with_explicit_hash)
+    /// and [`register_destination_at`](Self::register_destination_at): stamps
+    /// the LINK_REQUEST with `hash` so it resolves, on the receiver, to the
+    /// destination registered under that same explicit hash.
+    ///
+    /// Functionally identical to [`connect`](Self::connect) — that method
+    /// already accepts an arbitrary destination hash — but named for the
+    /// explicit-hash flow so dialer call sites read coherently. As with the
+    /// receive side, the LINK_REQUEST carries the hash as opaque bytes, so the
+    /// wire framing is unchanged; only a peer that learned the hash
+    /// out-of-band can dial it.
+    pub fn connect_at(
+        &mut self,
+        hash: DestinationHash,
+        dest_signing_key: &[u8; 32],
+    ) -> (LinkId, bool, crate::transport::TickOutput) {
+        self.connect(hash, dest_signing_key)
+    }
+
     /// Accept an incoming link request
     ///
     /// Looks up the destination's identity from the registered destination
