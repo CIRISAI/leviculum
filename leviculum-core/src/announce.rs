@@ -256,6 +256,30 @@ impl core::fmt::Display for AnnounceError {
     }
 }
 
+/// Policy hook controlling which destinations are emitted on the mesh-wide
+/// announce stream.
+///
+/// Install one with [`crate::node::NodeCore::set_announce_control`]. The node
+/// consults it on every scheduled announce (the periodic management tick and
+/// the interface-recovery re-announce) before emitting; a destination for
+/// which [`should_suppress_announce`](AnnounceControl::should_suppress_announce)
+/// returns `true` stays fully **routable** (it remains registered, links and
+/// data still reach it) but is never gossiped.
+///
+/// This is a pure local policy — it does not change the announce wire format.
+/// With no policy installed the node announces everything, the historical
+/// default. The intended consumer is membership-privacy: group-scoped
+/// destinations whose announce would leak a membership delta to mesh
+/// observers are suppressed, while peers learn them out-of-band.
+///
+/// The hook is consulted synchronously inside the node's single-threaded
+/// event loop, so implementations must not block; `should_suppress_announce`
+/// is expected to be a fast lookup.
+pub trait AnnounceControl: Send + Sync {
+    /// Return `true` to suppress mesh-wide announces for this destination.
+    fn should_suppress_announce(&self, destination_hash: &DestinationHash) -> bool;
+}
+
 /// A received announce message parsed from a packet
 ///
 /// This struct holds the parsed components of an announce and provides

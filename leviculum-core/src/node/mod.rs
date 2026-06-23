@@ -63,11 +63,12 @@ pub use event::{DeliveryError, EventClass, NodeEvent};
 pub use request::{RequestError, RequestPolicy};
 pub use send::SendError;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::announce::AnnounceError;
+use crate::announce::{AnnounceControl, AnnounceError};
 use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
 use crate::destination::{Destination, DestinationHash, Direction, ProofStrategy};
 use crate::identity::Identity;
@@ -198,6 +199,11 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
+    /// Optional policy hook for per-destination announce suppression.
+    /// `None` (default) announces every eligible destination — historical
+    /// behaviour. Consulted on every scheduled announce; see
+    /// [`AnnounceControl`].
+    announce_control: Option<Box<dyn AnnounceControl>>,
 }
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
@@ -245,6 +251,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
             max_incoming_resource_size,
+            announce_control: None,
         }
     }
 
@@ -295,6 +302,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     pub fn unregister_destination(&mut self, hash: &DestinationHash) {
         self.transport.unregister_destination(hash.as_bytes());
         self.destinations.remove(hash);
+    }
+
+    /// Install (or clear) the per-destination announce-suppression policy.
+    ///
+    /// `None` restores the default of announcing every eligible destination.
+    /// The policy is consulted on every scheduled announce — both the periodic
+    /// management tick and the interface-recovery re-announce — before a
+    /// destination is emitted. Suppressed destinations remain routable; they
+    /// are simply never gossiped. See [`AnnounceControl`].
+    pub fn set_announce_control(&mut self, policy: Option<Box<dyn AnnounceControl>>) {
+        self.announce_control = policy;
+    }
+
+    /// Returns `true` if an announce-suppression policy is installed.
+    pub fn has_announce_control(&self) -> bool {
+        self.announce_control.is_some()
     }
 
     /// Get the probe destination hash (if respond_to_probes is enabled).
@@ -1037,6 +1060,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Clone hashes to avoid borrow conflict with self
         let hashes: Vec<DestinationHash> = self.mgmt_destinations.clone();
         for dest_hash in &hashes {
+            // Installed announce-suppression policy: skip silently. Borrows
+            // announce_control only; released before destinations.get_mut.
+            if let Some(policy) = self.announce_control.as_ref() {
+                if policy.should_suppress_announce(dest_hash) {
+                    continue;
+                }
+            }
             let dest = match self.destinations.get_mut(dest_hash) {
                 Some(d) => d,
                 None => continue,
@@ -1314,6 +1344,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .collect();
 
         for dest_hash in &local_hashes {
+            // Installed announce-suppression policy: skip silently.
+            if let Some(policy) = self.announce_control.as_ref() {
+                if policy.should_suppress_announce(dest_hash) {
+                    continue;
+                }
+            }
             if let Some(dest) = self.destinations.get_mut(dest_hash) {
                 match dest.announce(None, &mut self.rng, now_ms) {
                     Ok(packet) => {
@@ -1955,6 +1991,78 @@ mod tests {
 
         assert!(node.destination(&hash).is_some());
         assert!(node.transport.has_destination(hash.as_bytes()));
+    }
+
+    // An installed AnnounceControl policy suppresses the scheduled announce for
+    // a matching destination while leaving others alone.
+    #[test]
+    fn test_announce_control_suppresses_scheduled_announce() {
+        struct SuppressOne([u8; 16]);
+        impl crate::announce::AnnounceControl for SuppressOne {
+            fn should_suppress_announce(&self, h: &DestinationHash) -> bool {
+                h.as_bytes() == &self.0
+            }
+        }
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+
+        let d_keep = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["keep"],
+        )
+        .unwrap();
+        let d_hide = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["hide"],
+        )
+        .unwrap();
+        let keep = *d_keep.hash();
+        let hide = *d_hide.hash();
+        node.register_destination(d_keep);
+        node.register_destination(d_hide);
+
+        node.set_announce_control(Some(Box::new(SuppressOne(hide.into_bytes()))));
+        assert!(node.has_announce_control());
+
+        node.mgmt_destinations.push(keep);
+        node.mgmt_destinations.push(hide);
+        node.next_mgmt_announce_ms = Some(TEST_TIME_MS);
+        node.check_mgmt_announces(TEST_TIME_MS);
+
+        assert!(
+            node.transport
+                .storage()
+                .get_announce_cache(keep.as_bytes())
+                .is_some(),
+            "unsuppressed destination should announce"
+        );
+        assert!(
+            node.transport
+                .storage()
+                .get_announce_cache(hide.as_bytes())
+                .is_none(),
+            "suppressed destination must not announce"
+        );
+
+        // Clearing the policy restores announcing.
+        node.set_announce_control(None);
+        assert!(!node.has_announce_control());
+        node.next_mgmt_announce_ms = Some(TEST_TIME_MS);
+        node.check_mgmt_announces(TEST_TIME_MS);
+        assert!(
+            node.transport
+                .storage()
+                .get_announce_cache(hide.as_bytes())
+                .is_some(),
+            "after clearing policy the destination announces"
+        );
     }
 
     #[test]

@@ -74,7 +74,7 @@ use leviculum_core::link::LinkId;
 use leviculum_core::node::{EventClass, NodeCore, NodeEvent};
 use leviculum_core::traits::{InterfaceError, Storage as StorageTrait};
 use leviculum_core::transport::{InterfaceId, TickOutput};
-use leviculum_core::{Destination, DestinationHash};
+use leviculum_core::{AnnounceControl, Destination, DestinationHash};
 
 use crate::clock::SystemClock;
 use crate::config::InterfaceConfig;
@@ -1231,6 +1231,14 @@ impl ReticulumNode {
     pub fn register_destination(&self, destination: Destination) {
         let mut inner = self.inner.lock().unwrap();
         inner.register_destination(destination);
+    }
+
+    /// Install (or clear, with `None`) the per-destination announce-suppression
+    /// policy. Suppressed destinations stay routable but are never gossiped.
+    /// See [`AnnounceControl`].
+    pub fn set_announce_control(&self, policy: Option<Box<dyn AnnounceControl>>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.set_announce_control(policy);
     }
 
     /// Connect to a remote destination
