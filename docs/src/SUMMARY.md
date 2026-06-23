@@ -2,36 +2,53 @@
 
 [Introduction](introduction.md)
 
+# Concepts
+
+- [Architecture overview](architecture.md)
+- [Interface isolation](concepts/interface-isolation.md)
+- [Python-RNS compatibility](concepts/python-rns-compatibility.md)
+- [Cryptographic identity and forward secrecy](concepts/identity-and-forward-secrecy.md)
+- [Storage and embedding](concepts/storage-and-embedding.md)
+
 # User Guide
 
 - [Installation](guide/installation.md)
-- [Configuration](guide/configuration.md)
-- [lnsd Quickstart](lnsd-quickstart.md)
+- [Configuration reference](guide/configuration.md)
+- [Running lnsd](lnsd-quickstart.md)
+- [lns command-line utility](guide/lns.md)
+- [lncp file transfer](guide/lncp.md)
+- [Manual page: lnsd(1)](man/lnsd.1.md)
+- [Manual page: lns(1)](man/lns.1.md)
+- [Manual page: lncp(1)](man/lncp.1.md)
 
-# C API
+# Firmware (LNode)
 
-- [Overview and Concepts](c-api/overview.md)
-- [Tutorial: A Pipe over Reticulum](c-api/tutorial.md)
-- [How-To: Building Applications](c-api/howto.md)
-- [API Reference](c-api/reference.md)
+- [Supported boards](firmware/boards.md)
+- [Building and flashing](firmware/flashing.md)
+- [Serial ports and udev](firmware/serial-ports.md)
+- [Recovery and troubleshooting](firmware/recovery.md)
 
-# Architecture
+# Developer Guide
 
-- [Overview](architecture.md)
-- [RNode Protocol](rnode-protocol.md)
-- [Storage Trait Analysis](storage-trait-analysis.md)
+- [Choosing a layer](developer/choosing-a-layer.md)
+- [Rust API tutorial](developer/rust-api-tutorial.md)
+- [Rust API specification](developer/rust-api-spec.md)
+- [Embedded integration](developer/embedded.md)
+- [C API: overview and concepts](c-api/overview.md)
+- [C API: tutorial](c-api/tutorial.md)
+- [C API: how-to](c-api/howto.md)
+- [C API: reference](c-api/reference.md)
+
+# Reference and Internals
+
+- [RNode serial protocol](rnode-protocol.md)
+- [SX1262 datasheet reference](sx1262-datasheet-reference.md)
+- [Structured event logs](structured-event-logs.md)
+- [jl / jldiff tools](jl-jldiff.md)
+- [Storage trait analysis](storage-trait-analysis.md)
 - [Broadcast Python-RNS parity](architecture-broadcast-python-parity.md)
-
-# Man Pages
-
-- [lnsd(1)](man/lnsd.1.md)
-- [lns(1)](man/lns.1.md)
-- [lncp(1)](man/lncp.1.md)
-
-# Development
-
-- [Testing Quick Reference](development-testing.md)
-- [CI Pipeline](development-ci.md)
+- [Testing quick reference](development-testing.md)
+- [CI pipeline](development-ci.md)
 
 # Appendix
 

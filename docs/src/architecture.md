@@ -1,6 +1,40 @@
-# Architecture
+# Architecture Overview
 
-Driver internals, packet flow, and platform abstraction details.
+This is the entry point to the **Concepts** part of the manual. It
+covers the sans-IO core, the crate split, the driver event loop, and
+the platform-abstraction traits — the mechanics that the four concept
+pages build on:
+
+- [Interface Isolation](concepts/interface-isolation.md) — why only the
+  interface knows its medium's quirks.
+- [Python-RNS Compatibility](concepts/python-rns-compatibility.md) —
+  wire/semantic compatibility and the drop-in daemon, vs. internal
+  parity (not a goal).
+- [Identity and Forward Secrecy](concepts/identity-and-forward-secrecy.md)
+  — dual keypairs, derived destinations, ratchets.
+- [Storage and Embedding](concepts/storage-and-embedding.md) — the
+  `Clock`/`Storage`/`Interface` traits that let one core run on a host
+  or a microcontroller.
+
+## The crate split
+
+The protocol logic lives in one `no_std` crate; everything platform-
+specific wraps around it:
+
+| Crate | Role |
+|-------|------|
+| `reticulum-core` | All protocol logic, `#![no_std] + alloc`, zero async (`reticulum-core/src/lib.rs:59`). |
+| `reticulum-std` | Host driver: tokio event loop, interfaces, `FileStorage`, RPC, config. |
+| `reticulum-nrf` | Embedded driver: Embassy event loop on nRF52 (cross-compiled, outside the host workspace). |
+| `reticulum-ffi` | C ABI over the core for other-language bindings. |
+| `reticulum-cli` | The `lnsd` / `lns` / `lncp` binaries. |
+
+The application boundary is `NodeCore`: feed it bytes via
+`handle_packet` / `handle_timeout` and drain a
+`TickOutput { actions, events }`. The core decides *what* to send; the
+driver decides *how and when* to put it on the wire. See
+[Storage and Embedding](concepts/storage-and-embedding.md) for the
+injected `Clock`/`Storage`/`Interface` traits that make this portable.
 
 ## Sans-I/O Core
 
@@ -84,7 +118,8 @@ behind the trait. An embedded driver implements it directly on a radio struct.
 
 Core processes packets with zero delay. Collision avoidance (jitter, CSMA)
 is the interface's responsibility — fast interfaces (TCP) transmit immediately,
-slow interfaces (LoRa) apply send-side jitter.
+slow interfaces (LoRa) apply send-side jitter. This is the
+[interface-isolation](concepts/interface-isolation.md) rule in code.
 
 ## Writing a Driver
 
@@ -130,6 +165,10 @@ Python CLI → Unix socket → RPC server (multiprocessing.connection, pickle)
   → pickle response → CLI
 ```
 
+The shared-instance socket and this RPC channel are what make `lnsd` a
+drop-in for `rnsd`; see
+[Python-RNS Compatibility](concepts/python-rns-compatibility.md).
+
 ### IPC platform support
 
 The shared-instance data channel and the RPC control channel use abstract
@@ -139,6 +178,11 @@ and is the one exercised by our CI; macOS/Windows IPC is community-supported
 and not exercised by our CI.
 
 ## Storage Trait
+
+For the conceptual rationale (one core, host or embedded backend) see
+[Storage and Embedding](concepts/storage-and-embedding.md); for the
+per-method deep dive see
+[Storage Trait Split Analysis](storage-trait-analysis.md).
 
 Type-safe methods organized by collection:
 
@@ -157,7 +201,8 @@ Type-safe methods organized by collection:
 Shared types in `storage_types.rs`: `PathEntry`, `ReverseEntry`, `LinkEntry`,
 `AnnounceEntry`, `PacketReceipt`.
 
-Three implementations: `NoStorage` (no-op), `MemoryStorage` (BTreeMap, embedded),
+Implementations: `NoStorage` (no-op), `MemoryStorage` (BTreeMap, host/tests),
+`EmbeddedStorage` (heapless `FnvIndexMap`, fixed capacity, used by `reticulum-nrf`),
 `FileStorage` (wraps MemoryStorage + disk).
 
 ### FileStorage Persistence

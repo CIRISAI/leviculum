@@ -12,6 +12,14 @@ Leviculum provides the same functionality as Python Reticulum but compiled to na
 
 The protocol core (`reticulum-core`) compiles as `no_std` with only `alloc`, so it runs on microcontrollers. The same code powers the Linux daemon, a future Android app, and embedded firmware.
 
+## Who this manual is for
+
+- **Daemon users** running `lnsd` alongside or instead of `rnsd`: start with the [lnsd quickstart](lnsd-quickstart.md) and the [man pages](man/lnsd.1.md).
+- **Developers** embedding or extending the stack: read the [Concepts](architecture.md) part — the [Architecture overview](architecture.md) plus [Interface Isolation](concepts/interface-isolation.md), [Python-RNS Compatibility](concepts/python-rns-compatibility.md), [Identity and Forward Secrecy](concepts/identity-and-forward-secrecy.md), and [Storage and Embedding](concepts/storage-and-embedding.md).
+- **Firmware flashers** putting Leviculum on nRF52 boards: see the firmware section and the [RNode protocol](rnode-protocol.md) reference.
+
+The **Concepts** part explains the non-obvious design ideas; the appendix carries the authoritative [Reticulum](appendix/reticulum-specification.md) and [LXMF](appendix/lxmf-specification.md) specifications.
+
 ## Tools
 
 Leviculum ships three binaries:
