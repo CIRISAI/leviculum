@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -47,6 +47,7 @@ pub enum RunnerError {
     Io(io::Error),
     BinaryNotFound(PathBuf),
     StaleBinary(String),
+    BuildFailed(String),
     ConfigGeneration(String),
     ProxyError(String),
     InsufficientRNodes(String),
@@ -71,6 +72,9 @@ impl fmt::Display for RunnerError {
             }
             RunnerError::StaleBinary(msg) => {
                 write!(f, "stale binary: {msg}")
+            }
+            RunnerError::BuildFailed(msg) => {
+                write!(f, "release binary build failed: {msg}")
             }
             RunnerError::ConfigGeneration(msg) => {
                 write!(f, "config generation failed: {msg}")
@@ -103,6 +107,64 @@ impl From<io::Error> for RunnerError {
 // ---------------------------------------------------------------------------
 // Free helpers (testable without Docker)
 // ---------------------------------------------------------------------------
+
+/// Production binaries the runner mounts and rebuilds. `lora-proxy` lives
+/// in `reticulum-proxy`; the rest in `reticulum-cli`. `c-lnsd` is a C
+/// build (`just build-c-lnsd`), not a cargo bin, so it is not force-rebuilt
+/// here — only the cargo bins, matching `run-tier3-hw.sh`.
+const FORCE_REBUILD_BINS: &[&str] = &["lnsd", "lns", "lncp", "lora-proxy"];
+
+/// Run `cargo build --release` for the mounted production binaries exactly
+/// once per test process, before any binary is resolved. Cargo's
+/// fingerprinting makes this a no-op when the cache already holds binaries
+/// built from the current sources, and a full rebuild when a different
+/// branch was checked out since.
+///
+/// Opt out with `LEVICULUM_SKIP_FORCE_REBUILD=1` when the caller already
+/// guarantees fresh binaries (mirrors `LEVICULUM_SKIP_FRESHNESS_CHECK`).
+///
+/// The result is cached in a `OnceLock` so only the first `TestRunner::new`
+/// in the process pays the cargo invocation; later ones reuse the outcome.
+fn force_rebuild_binaries(repo_root: &Path, target_dir: &Path) -> Result<(), RunnerError> {
+    static BUILD_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+    BUILD_RESULT
+        .get_or_init(|| run_force_rebuild(repo_root, target_dir))
+        .clone()
+        .map_err(RunnerError::BuildFailed)
+}
+
+fn run_force_rebuild(repo_root: &Path, target_dir: &Path) -> Result<(), String> {
+    if std::env::var_os("LEVICULUM_SKIP_FORCE_REBUILD").is_some() {
+        eprintln!("[integ] LEVICULUM_SKIP_FORCE_REBUILD set, skipping force-rebuild");
+        return Ok(());
+    }
+
+    eprintln!(
+        "[integ] force-rebuilding release binaries ({}) into {}",
+        FORCE_REBUILD_BINS.join(", "),
+        target_dir.display()
+    );
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("--release");
+    for bin in FORCE_REBUILD_BINS {
+        cmd.arg("--bin").arg(bin);
+    }
+    // Build the workspace from its root and write artefacts where the
+    // runner resolves them, regardless of the caller's CWD or a preset
+    // CARGO_TARGET_DIR.
+    cmd.current_dir(repo_root);
+    cmd.env("CARGO_TARGET_DIR", target_dir);
+
+    let status = cmd
+        .status()
+        .map_err(|e| format!("spawn cargo build: {e}"))?;
+    if !status.success() {
+        return Err(format!("cargo build exited {status}"));
+    }
+    eprintln!("[integ] force-rebuild complete");
+    Ok(())
+}
 
 /// Format a container name: `integ-{test_name}-{run_id}-{node_name}`.
 ///
@@ -262,6 +324,12 @@ impl TestRunner {
             .to_path_buf();
         let target_dir = crate::paths::target_dir(&repo_root);
 
+        // Force-rebuild the mounted production binaries once per test
+        // process, BEFORE resolving them, so a bare `cargo test` (which
+        // builds only the harness) can never run last-built or wrong-branch
+        // binaries. Cargo is idempotent: fresh bins finish instantly.
+        force_rebuild_binaries(&repo_root, &target_dir)?;
+
         let lnsd_path = crate::paths::release_bin(&target_dir, "lnsd");
         if !lnsd_path.exists() {
             return Err(RunnerError::BinaryNotFound(lnsd_path));
@@ -301,6 +369,14 @@ impl TestRunner {
             freshness_targets.push(&c_lnsd_path);
         }
         crate::paths::check_binary_freshness(&freshness_targets, &repo_root)
+            .map_err(|e| RunnerError::StaleBinary(e.to_string()))?;
+
+        // Commit-hash guard: catches a wrong-branch binary whose mtime is
+        // newer than HEAD (which the mtime check above cannot). lora-proxy
+        // and c-lnsd are excluded: lora-proxy has no clap --version hash
+        // seam, and c-lnsd is a separate C build.
+        let hash_targets: Vec<&std::path::Path> = vec![&lnsd_path, &lns_path, &lncp_path];
+        crate::paths::check_binary_git_hash(&hash_targets, &repo_root)
             .map_err(|e| RunnerError::StaleBinary(e.to_string()))?;
 
         // Apply env-var overrides (LORA_BANDWIDTH, LORA_SF, etc.) before
@@ -1680,6 +1756,27 @@ impl Drop for TestRunner {
 mod tests {
     use super::*;
     use crate::topology::parse_scenario;
+
+    /// Empirical cargo-in-cargo check: invoke `run_force_rebuild` (which
+    /// runs `cargo build --release`) from inside a running `cargo test`.
+    /// The outer cargo has released its build lock during the test phase,
+    /// so the inner build must acquire it and finish, not deadlock.
+    ///
+    /// `#[ignore]` so the normal `--lib` unit run stays fast (it would
+    /// otherwise trigger a full release build); run explicitly with
+    /// `cargo test -p reticulum-integ --lib force_rebuild_cargo_in_cargo
+    /// -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "runs a real cargo build; invoke with --ignored"]
+    fn force_rebuild_cargo_in_cargo_does_not_deadlock() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let target_dir = crate::paths::target_dir(&repo_root);
+        let result = run_force_rebuild(&repo_root, &target_dir);
+        assert!(result.is_ok(), "force-rebuild failed: {result:?}");
+    }
 
     /// Root-2 regression (2026-06-13 nightly): a leaked process holding a
     /// board's serial port blocked every later scenario needing it.

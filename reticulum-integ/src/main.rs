@@ -54,9 +54,37 @@ fn check_freshness(args: &[String]) -> ! {
         .collect();
     let refs: Vec<&Path> = bins.iter().map(PathBuf::as_path).collect();
 
+    // Commit-hash guard. lnsd/lns/lncp embed their build hash via build.rs;
+    // lora-proxy has no such seam, so only the cli bins are hash-checked.
+    let hash_refs: Vec<&Path> = bins
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .is_none_or(|n| n.to_string_lossy() != "lora-proxy")
+        })
+        .map(PathBuf::as_path)
+        .collect();
+    if let Err(e) = paths::check_binary_git_hash(&hash_refs, &repo_root) {
+        match e {
+            paths::FreshnessError::HashMismatch { .. } => {
+                eprintln!("[preflight] WRONG-BRANCH integ binary:");
+                eprintln!("[preflight]   {e}");
+                std::process::exit(2);
+            }
+            other => {
+                eprintln!("[preflight] hash guard error: {other}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     match paths::check_binary_freshness(&refs, &repo_root) {
         Ok(()) => {
-            println!("[preflight] integ binaries fresh ({} checked)", refs.len());
+            println!(
+                "[preflight] integ binaries fresh ({} checked, {} hash-verified)",
+                refs.len(),
+                hash_refs.len()
+            );
             std::process::exit(0);
         }
         Err(paths::FreshnessError::Stale { .. }) => {

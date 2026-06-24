@@ -76,6 +76,11 @@ pub enum FreshnessError {
         bin_mtime: i64,
         head_time: i64,
     },
+    HashMismatch {
+        path: PathBuf,
+        bin_hash: String,
+        head_hash: String,
+    },
     GitFailed(String),
     Io(std::io::Error),
 }
@@ -95,6 +100,20 @@ impl fmt::Display for FreshnessError {
                 path.display(),
                 bin_mtime,
                 head_time
+            ),
+            FreshnessError::HashMismatch {
+                path,
+                bin_hash,
+                head_hash,
+            } => write!(
+                f,
+                "{} was built from git {}, repo HEAD is {} — rebuild release \
+                 binaries before running integ tests (force-rebuild runs \
+                 automatically unless LEVICULUM_SKIP_FORCE_REBUILD=1; freshness \
+                 guard opt-out is LEVICULUM_SKIP_FRESHNESS_CHECK=1)",
+                path.display(),
+                bin_hash,
+                head_hash
             ),
             FreshnessError::GitFailed(msg) => write!(f, "git HEAD lookup failed: {msg}"),
             FreshnessError::Io(e) => write!(f, "I/O error during freshness check: {e}"),
@@ -149,6 +168,95 @@ pub fn check_binary_freshness(binaries: &[&Path], repo_root: &Path) -> Result<()
     }
 
     Ok(())
+}
+
+/// Parse the git hash embedded in a `--version` line by build.rs, which
+/// formats it as `<name> <version> (<hash>)`. Returns the contents of the
+/// last parenthesised group. `None` if there is no such group.
+pub fn parse_embedded_hash(version_output: &str) -> Option<String> {
+    let line = version_output.lines().next()?.trim();
+    let open = line.rfind('(')?;
+    let close = line[open..].find(')')? + open;
+    let hash = line[open + 1..close].trim();
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash.to_string())
+    }
+}
+
+/// Run `<bin> --version` and return the git hash build.rs embedded in it.
+/// Returns "unknown" when the binary predates this mechanism (no
+/// parenthesised hash), so an old binary does not hard-fail the guard.
+pub fn binary_git_hash(bin: &Path) -> Result<String, FreshnessError> {
+    let output = Command::new(bin)
+        .arg("--version")
+        .output()
+        .map_err(|e| FreshnessError::GitFailed(format!("run {} --version: {e}", bin.display())))?;
+    if !output.status.success() {
+        return Err(FreshnessError::GitFailed(format!(
+            "{} --version exited {}",
+            bin.display(),
+            output.status
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_embedded_hash(&stdout).unwrap_or_else(|| "unknown".to_string()))
+}
+
+/// Assert every binary was built from the repo's current HEAD by reading
+/// the git hash embedded at compile time (via `<bin> --version`) and
+/// comparing it to `git rev-parse HEAD`. Unlike the mtime check, this
+/// catches a wrong-branch binary whose mtime is newer than the current
+/// commit.
+///
+/// A binary reporting hash "unknown" (built without git, or before this
+/// mechanism existed) is not failed — the mtime check still guards it.
+/// The repo HEAD likewise resolving to "unknown" skips the comparison.
+///
+/// Skipped entirely when `LEVICULUM_SKIP_FRESHNESS_CHECK` is set, sharing
+/// the opt-out with the mtime check.
+pub fn check_binary_git_hash(binaries: &[&Path], repo_root: &Path) -> Result<(), FreshnessError> {
+    if std::env::var_os("LEVICULUM_SKIP_FRESHNESS_CHECK").is_some() {
+        return Ok(());
+    }
+
+    let head_hash = git_head_hash(repo_root)?;
+    if head_hash == "unknown" {
+        return Ok(());
+    }
+
+    for bin in binaries {
+        let bin_hash = binary_git_hash(bin)?;
+        if bin_hash != "unknown" && bin_hash != head_hash {
+            return Err(FreshnessError::HashMismatch {
+                path: bin.to_path_buf(),
+                bin_hash,
+                head_hash,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// `git rev-parse HEAD` in `repo_root`, or "unknown" if git is absent.
+fn git_head_hash(repo_root: &Path) -> Result<String, FreshnessError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            Ok(if s.is_empty() {
+                "unknown".to_string()
+            } else {
+                s
+            })
+        }
+        _ => Ok("unknown".to_string()),
+    }
 }
 
 /// Paths that contribute to the integ binaries. Listed explicitly so a
@@ -308,6 +416,123 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(&top_bin, b"top newer").expect("write top");
         assert_eq!(release_bin(tmp.path(), "lnsd"), top_bin);
+    }
+
+    #[test]
+    fn parse_embedded_hash_extracts_paren_group() {
+        assert_eq!(
+            parse_embedded_hash("lnsd 0.7.0 (deadbeef)\n"),
+            Some("deadbeef".to_string())
+        );
+        // Nightly version with its own suffix plus the trailing hash:
+        // the LAST parenthesised group wins.
+        assert_eq!(
+            parse_embedded_hash("lns 0.7.0-nightly.20260419-5a5df20 (cafef00d)"),
+            Some("cafef00d".to_string())
+        );
+        assert_eq!(
+            parse_embedded_hash("lncp 0.7.0 (unknown)"),
+            Some("unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_embedded_hash_none_without_group() {
+        assert_eq!(parse_embedded_hash("lnsd 0.7.0"), None);
+        assert_eq!(parse_embedded_hash(""), None);
+        assert_eq!(parse_embedded_hash("lnsd 0.7.0 ()"), None);
+    }
+
+    /// Write an executable shell script that ignores its args and prints
+    /// `line` to stdout, so it stands in for a real binary's `--version`.
+    #[cfg(unix)]
+    fn write_fake_bin(dir: &Path, name: &str, line: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho '{line}'\n")).expect("write fake bin");
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        path
+    }
+
+    /// Initialise a throwaway git repo with one commit and return its HEAD.
+    fn init_repo_with_commit(dir: &Path) -> String {
+        let run = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f"), b"x").expect("write");
+        run(&["add", "f"]);
+        run(&["commit", "-q", "-m", "c"]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .expect("rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_guard_matches_head() {
+        let prior = std::env::var_os("LEVICULUM_SKIP_FRESHNESS_CHECK");
+        // SAFETY: single-threaded suite (--test-threads=1 in all CI tiers).
+        unsafe { std::env::remove_var("LEVICULUM_SKIP_FRESHNESS_CHECK") };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let head = init_repo_with_commit(tmp.path());
+        let bin = write_fake_bin(tmp.path(), "lnsd", &format!("lnsd 0.7.0 ({head})"));
+        let result = check_binary_git_hash(&[bin.as_path()], tmp.path());
+        restore_env("LEVICULUM_SKIP_FRESHNESS_CHECK", prior);
+        assert!(result.is_ok(), "matching hash must pass: {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_guard_rejects_wrong_branch_binary() {
+        let prior = std::env::var_os("LEVICULUM_SKIP_FRESHNESS_CHECK");
+        // SAFETY: single-threaded suite (--test-threads=1 in all CI tiers).
+        unsafe { std::env::remove_var("LEVICULUM_SKIP_FRESHNESS_CHECK") };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _head = init_repo_with_commit(tmp.path());
+        // A binary built from a different commit than the repo HEAD.
+        let bin = write_fake_bin(
+            tmp.path(),
+            "lnsd",
+            "lnsd 0.7.0 (0000000000000000000000000000000000000000)",
+        );
+        let result = check_binary_git_hash(&[bin.as_path()], tmp.path());
+        restore_env("LEVICULUM_SKIP_FRESHNESS_CHECK", prior);
+        match result {
+            Err(FreshnessError::HashMismatch { bin_hash, .. }) => {
+                assert_eq!(bin_hash, "0000000000000000000000000000000000000000");
+            }
+            other => panic!("expected HashMismatch, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_guard_allows_unknown_binary_hash() {
+        let prior = std::env::var_os("LEVICULUM_SKIP_FRESHNESS_CHECK");
+        // SAFETY: single-threaded suite (--test-threads=1 in all CI tiers).
+        unsafe { std::env::remove_var("LEVICULUM_SKIP_FRESHNESS_CHECK") };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _head = init_repo_with_commit(tmp.path());
+        // Binary built without git reports "unknown" and must not hard-fail
+        // (the mtime check still guards it).
+        let bin = write_fake_bin(tmp.path(), "lnsd", "lnsd 0.7.0 (unknown)");
+        let result = check_binary_git_hash(&[bin.as_path()], tmp.path());
+        restore_env("LEVICULUM_SKIP_FRESHNESS_CHECK", prior);
+        assert!(result.is_ok(), "unknown bin hash must pass: {result:?}");
     }
 
     #[test]
