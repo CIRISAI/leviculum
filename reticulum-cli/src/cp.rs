@@ -234,6 +234,72 @@ pub async fn run_send(
     Ok(())
 }
 
+/// The fetch "found" response (0xC3) is fire-and-forget, like Python's, so a
+/// single loss on a lossy link strands the client at `while not
+/// request_resolved`. The serve loop re-sends it on a timer after the resource
+/// proof arrives, until the link tears down or this many re-sends are spent.
+/// At 30% independent loss the first send plus the post-proof re-send plus
+/// `MAX_RESPONSE_RESENDS` periodic re-sends give 0.3^(2+12) ~= 5e-8 residual,
+/// while the cap bounds re-sends to a link whose client left without closing.
+const RESPONSE_RESEND_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_RESPONSE_RESENDS: u32 = 12;
+
+struct FetchEntry {
+    request_id: [u8; 16],
+    proof_received: bool,
+    resends_left: u32,
+}
+
+/// Tracks in-flight fetch responses per link so the serve loop can re-send the
+/// 0xC3 response after the resource proof arrives. Pure bookkeeping, no I/O, so
+/// the re-send policy is unit-testable without a network.
+#[derive(Default)]
+struct FetchResponder {
+    pending: std::collections::HashMap<LinkId, FetchEntry>,
+}
+
+impl FetchResponder {
+    /// Record that a fetch response was sent on `link_id`, so it can be
+    /// re-sent once the resource transfer is proven delivered.
+    fn track(&mut self, link_id: LinkId, request_id: [u8; 16]) {
+        self.pending.insert(
+            link_id,
+            FetchEntry {
+                request_id,
+                proof_received: false,
+                resends_left: MAX_RESPONSE_RESENDS,
+            },
+        );
+    }
+
+    /// Mark the resource proof as received for `link_id`. Returns the
+    /// request_id to re-send the response for immediately (the client now
+    /// provably has the file but may still be missing the response).
+    fn on_proof(&mut self, link_id: &LinkId) -> Option<[u8; 16]> {
+        let entry = self.pending.get_mut(link_id)?;
+        entry.proof_received = true;
+        Some(entry.request_id)
+    }
+
+    /// Targets to re-send on a periodic tick: links whose proof has arrived and
+    /// that still have re-sends left. Decrements the per-link budget.
+    fn resend_targets(&mut self) -> Vec<(LinkId, [u8; 16])> {
+        let mut out = Vec::new();
+        for (link_id, entry) in self.pending.iter_mut() {
+            if entry.proof_received && entry.resends_left > 0 {
+                entry.resends_left -= 1;
+                out.push((*link_id, entry.request_id));
+            }
+        }
+        out
+    }
+
+    /// Stop tracking a link (its client tore down, or the transfer failed).
+    fn forget(&mut self, link_id: &LinkId) {
+        self.pending.remove(link_id);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_listen(
     node: &ReticulumNode,
@@ -300,6 +366,12 @@ pub async fn run_listen(
     let mut segment_buffer: Vec<u8> = Vec::new();
     let mut segment_metadata: Option<Vec<u8>> = None;
     let mut speed_tracker = SpeedTracker::new();
+
+    // Re-send the fetch 0xC3 response after the resource proof arrives so a
+    // loss on a lossy link is recovered (Weg B).
+    let mut fetch_responder = FetchResponder::default();
+    let mut response_resend = tokio::time::interval(RESPONSE_RESEND_INTERVAL);
+    response_resend.tick().await; // consume the immediate first tick
 
     // Event loop
     loop {
@@ -401,22 +473,45 @@ pub async fn run_listen(
                             );
                         }
                     }
+                    // Fetch sender side: the resource proof arrived, so the
+                    // client provably has the file. Re-send the 0xC3 response
+                    // now in case the first one was lost; the periodic timer
+                    // keeps re-sending until the link tears down.
+                    Some(NodeEvent::ResourceCompleted { is_sender: true, link_id, .. }) => {
+                        if let Some(rid) = fetch_responder.on_proof(&link_id) {
+                            let _ = node.send_response(&link_id, &rid, &[0xC3]).await;
+                        }
+                    }
+                    Some(NodeEvent::ResourceFailed { is_sender: true, link_id, error, .. }) => {
+                        fetch_responder.forget(&link_id);
+                        if verbose > 0 {
+                            eprintln!("Transfer failed: {:?}", error);
+                        }
+                    }
                     Some(NodeEvent::ResourceFailed { error, .. })
                         if verbose > 0 => {
                             eprintln!("Transfer failed: {:?}", error);
                         }
-                    Some(NodeEvent::LinkClosed { .. })
-                        if verbose > 0 => {
+                    Some(NodeEvent::LinkClosed { link_id, .. }) => {
+                        // Client tore down (rncp does this on success), so stop
+                        // re-sending its fetch response.
+                        fetch_responder.forget(&link_id);
+                        if verbose > 0 {
                             eprintln!("Link closed");
                         }
+                    }
                     Some(NodeEvent::RequestReceived {
                         link_id, request_id, path, data, ..
                     }) if path == "fetch_file" => {
-                        if let Err(e) = handle_fetch_request(
+                        match handle_fetch_request(
                             node, &link_id, &request_id, &data,
                             fetch_jail.as_deref(), quiet, verbose,
                         ).await {
-                            if !quiet { eprintln!("Fetch error: {e}"); }
+                            Ok(Some(rid)) => fetch_responder.track(link_id, rid),
+                            Ok(None) => {}
+                            Err(e) => {
+                                if !quiet { eprintln!("Fetch error: {e}"); }
+                            }
                         }
                     }
                     None => break,
@@ -426,6 +521,13 @@ pub async fn run_listen(
             _ = async { announce_timer.as_mut().unwrap().tick().await },
                 if announce_timer.is_some() => {
                 let _ = node.announce_destination(&dest_hash, None).await;
+            }
+            _ = response_resend.tick() => {
+                // Re-send the fetch response for every link whose resource is
+                // proven delivered, recovering a response lost more than once.
+                for (link_id, rid) in fetch_responder.resend_targets() {
+                    let _ = node.send_response(&link_id, &rid, &[0xC3]).await;
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("Shutting down");
@@ -443,6 +545,13 @@ pub async fn run_listen(
 /// response. This ordering matches Python rncp exactly, the Resource ADV
 /// is sent before the response so the client (which has AcceptAll set)
 /// receives the data as soon as possible.
+///
+/// On the file-found success path the file is sent as a normal Resource
+/// followed by the 0xC3 response, and the request_id is returned so the serve
+/// loop can re-send the (fire-and-forget) response after the resource proof
+/// arrives, recovering a response lost on a lossy link. Returns `Ok(None)` for
+/// the not-found and not-allowed paths (their own response is sent here and no
+/// resource transfer follows).
 #[allow(clippy::too_many_arguments)]
 async fn handle_fetch_request(
     node: &ReticulumNode,
@@ -452,7 +561,7 @@ async fn handle_fetch_request(
     fetch_jail: Option<&Path>,
     quiet: bool,
     verbose: u8,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<[u8; 16]>, Box<dyn std::error::Error>> {
     // Decode file path from msgpack string
     let requested_path = {
         let mut cursor = Cursor::new(data);
@@ -486,7 +595,7 @@ async fn handle_fetch_request(
                 // Response: 0xF0 = not allowed
                 node.send_response(link_id, request_id, &encode_fetch_response_not_allowed())
                     .await?;
-                return Ok(());
+                return Ok(None);
             }
         };
         if !canonical_file.starts_with(&canonical_jail) {
@@ -495,7 +604,7 @@ async fn handle_fetch_request(
             }
             node.send_response(link_id, request_id, &encode_fetch_response_not_allowed())
                 .await?;
-            return Ok(());
+            return Ok(None);
         }
     }
 
@@ -506,7 +615,7 @@ async fn handle_fetch_request(
         }
         // Response: false = not found
         node.send_response(link_id, request_id, &[0xC2]).await?;
-        return Ok(());
+        return Ok(None);
     }
 
     // Read file
@@ -528,10 +637,12 @@ async fn handle_fetch_request(
     node.send_resource(link_id, &file_data, Some(&metadata_bytes), true)
         .await?;
 
-    // Response: true = found, transfer started
+    // Response: true = found, transfer started. This first response is
+    // fire-and-forget (Python parity); the serve loop re-sends it after the
+    // resource proof arrives so a loss on the way is recovered.
     node.send_response(link_id, request_id, &[0xC3]).await?;
 
-    Ok(())
+    Ok(Some(*request_id))
 }
 
 /// Encode the "not allowed" fetch response (msgpack uint8 0xF0).
@@ -1444,6 +1555,65 @@ mod tests {
         );
 
         listener_handle.abort();
+    }
+
+    /// Weg B regression: the fetch 0xC3 response must be (re-)sent more than
+    /// once across a transfer, so a loss on a lossy link is recovered. The
+    /// re-send policy lives in `FetchResponder`, tested here without a network:
+    /// no re-send before the proof (avoid contending with parts), one re-send
+    /// at the proof, then capped periodic re-sends, stopping on link teardown.
+    #[test]
+    fn fetch_response_resent_more_than_once_across_transfer() {
+        let mut r = FetchResponder::default();
+        let link = LinkId::from([7u8; 16]);
+        let rid = [9u8; 16];
+
+        r.track(link, rid);
+
+        // Before the resource proof: no re-send (parts are still flowing).
+        assert!(
+            r.resend_targets().is_empty(),
+            "must not re-send before the proof arrives"
+        );
+
+        // Proof arrives: one immediate post-proof re-send is scheduled.
+        assert_eq!(r.on_proof(&link), Some(rid), "post-proof re-send expected");
+
+        // Then the periodic timer re-sends, bounded by the cap.
+        let mut periodic = 0usize;
+        loop {
+            let targets = r.resend_targets();
+            if targets.is_empty() {
+                break;
+            }
+            assert_eq!(targets, vec![(link, rid)]);
+            periodic += 1;
+            assert!(
+                periodic <= MAX_RESPONSE_RESENDS as usize,
+                "cap must bound periodic re-sends"
+            );
+        }
+        assert_eq!(
+            periodic, MAX_RESPONSE_RESENDS as usize,
+            "exactly MAX_RESPONSE_RESENDS periodic re-sends"
+        );
+
+        // Total response transmissions across the transfer: original send (in
+        // handle_fetch_request) + post-proof + periodic. More than one.
+        let total_sends = 1 + 1 + periodic;
+        assert!(
+            total_sends > 1,
+            "fetch response must be sent more than once, got {total_sends}"
+        );
+
+        // Client teardown (rncp does this on success) stops re-sending.
+        r.track(link, rid);
+        r.on_proof(&link);
+        r.forget(&link);
+        assert!(
+            r.resend_targets().is_empty(),
+            "no re-send after the link closed"
+        );
     }
 
     #[tokio::test]
