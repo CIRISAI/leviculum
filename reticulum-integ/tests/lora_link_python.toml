@@ -3,6 +3,12 @@
 # Requires two RNode devices at /dev/ttyACM0 and /dev/ttyACM1.
 # Build lnsd with: cargo build --release --bin lnsd --features serial
 # Build lns with: cargo build --release --bin lns
+#
+# Expected-marginal, non-gating: the python relay stack does not recover a lost
+# LinkRequest/LRPROOF in-window over slow LoRa (~60% red, vs the rust and interop
+# relay variants green). On the EXPECTED_MARGINAL allowlist in
+# scripts/run-tier3-hw.sh, the single source of truth: a failure here is reported
+# and counted but does not flip the tier3 verdict RED.
 
 profile = "rnode_pair"
 

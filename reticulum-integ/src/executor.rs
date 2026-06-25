@@ -3258,6 +3258,11 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     // driver is the same `lns selftest` binary as `lora_link_rust` —
     // the only difference between the three LoRa link-test TOMLs is
     // the `[nodes.*].type` field.
+    // Expected-marginal, non-gating: the python relay stack does not recover a
+    // lost LinkRequest/LRPROOF in-window over slow LoRa (~60% red, vs lora_link_rust
+    // and lora_link_interop green). On the EXPECTED_MARGINAL allowlist in
+    // scripts/run-tier3-hw.sh, the single source of truth: a failure is reported
+    // and counted but does not flip the tier3 verdict RED.
     #[serial(lora)]
     fn lora_link_python() {
         crate::timeout::run_with_timeout("lora_link_python", 1800, || {
