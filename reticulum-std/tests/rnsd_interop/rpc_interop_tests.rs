@@ -134,6 +134,52 @@ async fn run_python_tool(script: &str, args: &[&str], config_dir: &Path) -> Outp
     output
 }
 
+/// Poll `rnstatus` against the daemon until it actually answers (RPC server up
+/// and producing output), or panic after `deadline`.
+///
+/// Hardens against the rnstatus-empty-output flake: the daemon's
+/// shared-instance socket starts accepting connections before the RPC handler
+/// is guaranteed to produce a response, and under CI contention a fixed
+/// post-start sleep can elapse while the daemon still answers an empty body
+/// (the client connects, gets EOF, and exits 0 with empty stdout). Waiting on
+/// the real readiness condition — a non-empty `rnstatus` response — makes every
+/// RPC interop test deterministic regardless of load. The first successful
+/// response only gates *readiness*; each test still asserts on its own fresh
+/// query afterwards.
+async fn wait_for_rpc_ready(config_dir: &Path, deadline: Duration) {
+    let start = tokio::time::Instant::now();
+    let mut attempts = 0u32;
+    loop {
+        let output = run_python_tool(RNSTATUS_PY, &[], config_dir).await;
+        attempts += 1;
+        if output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+            return;
+        }
+        if start.elapsed() >= deadline {
+            panic!(
+                "daemon RPC not ready after {:?} ({} rnstatus attempts); \
+                 last status={:?}, stdout_len={}, stderr={}",
+                deadline,
+                attempts,
+                output.status.code(),
+                output.stdout.len(),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Create the Python client config and wait until the daemon's RPC is actually
+/// answering before returning. Use this in place of a bare
+/// `create_python_config_dir` + fixed sleep so the subsequent tool invocation
+/// runs against a provably-ready daemon.
+async fn python_client_ready(instance_name: &str, identity_bytes: &[u8; 64]) -> PathBuf {
+    let config_dir = create_python_config_dir(instance_name, identity_bytes);
+    wait_for_rpc_ready(&config_dir, Duration::from_secs(20)).await;
+    config_dir
+}
+
 use crate::common::cleanup_config_dir;
 
 // rnstatus tests
@@ -147,7 +193,7 @@ async fn test_rnstatus_against_rust_daemon() {
 
     let (_node, instance_name, _tcp_addr, identity_bytes, _storage) =
         start_rust_daemon_with_rpc().await;
-    let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
 
     let output = run_python_tool(RNSTATUS_PY, &[], &config_dir).await;
 
@@ -188,7 +234,7 @@ async fn test_rnstatus_json_against_rust_daemon() {
 
     let (_node, instance_name, _tcp_addr, identity_bytes, _storage) =
         start_rust_daemon_with_rpc().await;
-    let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
 
     let output = run_python_tool(RNSTATUS_PY, &["--json"], &config_dir).await;
 
@@ -239,7 +285,7 @@ async fn test_rnpath_table_against_rust_daemon() {
 
     let (_node, instance_name, _tcp_addr, identity_bytes, _storage) =
         start_rust_daemon_with_rpc().await;
-    let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
 
     let output = run_python_tool(RNPATH_PY, &["-t"], &config_dir).await;
 
@@ -265,7 +311,7 @@ async fn test_rnpath_rate_table_against_rust_daemon() {
 
     let (_node, instance_name, _tcp_addr, identity_bytes, _storage) =
         start_rust_daemon_with_rpc().await;
-    let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
 
     let output = run_python_tool(RNPATH_PY, &["-r"], &config_dir).await;
 
@@ -289,7 +335,7 @@ async fn test_rnstatus_link_stats_against_rust_daemon() {
 
     let (_node, instance_name, _tcp_addr, identity_bytes, _storage) =
         start_rust_daemon_with_rpc().await;
-    let config_dir = create_python_config_dir(&instance_name, &identity_bytes);
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
 
     let output = run_python_tool(RNSTATUS_PY, &["-l"], &config_dir).await;
 
