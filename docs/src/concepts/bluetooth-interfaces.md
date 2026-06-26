@@ -120,6 +120,58 @@ lossy, a fragmented large packet only arrives if both fragments do; reliable
 large transfers use links over a connection oriented path, not broadcast, so
 this is acceptable.
 
+## Combining the protocols
+
+The broadcast and connection oriented protocols are not mutually exclusive. The
+useful combination is broadcast for reach (announces, discovery, small packets
+to everyone, no connection limit) and a connection for reliable directed bulk.
+This maps onto Reticulum's own layering: announces are best effort broadcast,
+links and resources are reliable and directed.
+
+The constraint on how to combine them comes from the interface boundary. An
+Interface is sent only bytes: `try_send(&[u8])` in
+`reticulum-core/src/traits.rs` takes a packet buffer and a priority hint, no
+destination and no next hop. The next hop and the choice of interface live one
+layer up in the transport. So an interface cannot decide "open a connection
+because this packet is for node X" without reading the destination out of the
+packet bytes, which is the link awareness the interface isolation rule forbids.
+The Columba maintainer raised the same objection on the original proposal (see
+the discussion linked below).
+
+The clean way to combine them is therefore to keep the broadcast versus
+connection decision in the transport, which is allowed to be path aware, and to
+run two dumb interfaces rather than one clever one. Two staged options:
+
+- **Stage A, broadcast only.** Run `ble-leviculum` alone. Reliability for large
+  or important traffic comes from Reticulum's existing link and resource layers
+  riding on top of the lossy broadcast, exactly as they already do over LoRa.
+  The interface stays a pure `try_send(bytes)` broadcast pipe, fully isolated,
+  unbounded in scale, with a minimal failure surface. Build this first and
+  measure throughput.
+- **Stage B, broadcast plus per peer connections.** If Stage A throughput is
+  not enough, run `ble-leviculum` and `ble-reticulum` together. Model
+  `ble-reticulum` as one ordinary byte only interface per connected peer (the
+  Columba `BLEPeerInterface` shape): each GATT link is a normal interface that
+  sends the bytes it is given over its one connection, and the transport routes
+  over the set of interfaces normally. Which peers to connect is a neighbour and
+  discovery policy with an idle timeout to free connection slots, not a per
+  packet trigger. The hybrid benefit then emerges from running both planes at
+  once and letting the transport choose, with no clever single interface and no
+  change to the byte only interface boundary.
+
+Power shapes the deployment. Continuous advertising and scanning is costly on
+phones, so powered nodes (`lnsd`, stationary RTNodes) run the broadcast plane,
+while phones connect sparingly over `ble-reticulum` to a nearby powered relay.
+
+True on demand, opening a connection because a packet needs to reach node X,
+belongs in the transport, which knows the next hop, via a control path beyond
+`try_send`. That changes the media agnostic interface boundary and is deferred
+until measurement shows Stage A and Stage B are not enough.
+
+This analysis follows a proposal and debate in the Columba project, discussion
+880, a hybrid broadcast and on demand connection model. The points above record
+why a single hybrid interface is not the chosen path here.
+
 ## Capability matrix
 
 | Protocol | no_std carrier | nRF | lnsd | Phone | Interop with |
@@ -142,8 +194,20 @@ this is acceptable.
   the `*-reticulum` namespace is controlled upstream.
 - **no_std carrier logic.** So the same protocol code runs on embedded nRF and
   on the host. Only the radio and OS binding is platform specific.
+- **Combine by two interfaces plus transport, not one hybrid interface.** The
+  interface boundary is bytes only, so a single interface that opened
+  connections per destination would need link awareness, which the isolation
+  rule forbids. Keep the broadcast versus connection choice in the transport.
+- **Stage broadcast first, then measure.** Build `ble-leviculum` alone, let
+  Reticulum's link and resource layers provide reliability over it, and only add
+  per peer connections if measured throughput requires it.
+- **Idle timeout governs connection management, not packet routing.** Closing
+  idle connections to free slots is fine. Triggering a connection open from a
+  per packet destination is not.
 
 ## See also
 
 - [Interface isolation](interface-isolation.md)
 - `docs/ble5-broadcast-protocol3-spike.md`, the ble-leviculum feasibility spike
+- Columba discussion 880, the hybrid broadcast and connection proposal:
+  https://github.com/torlando-tech/columba/discussions/880
