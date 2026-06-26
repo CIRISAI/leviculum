@@ -39,24 +39,47 @@ pub(crate) const TCP_DEFAULT_BUFFER_SIZE: usize = 256;
 /// its path entries, and the reconnect loop takes over — without these
 /// options the kernel defaults let such a connection linger for many
 /// minutes. No config surface yet, by design (reference parity).
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const TCP_USER_TIMEOUT: Duration = Duration::from_secs(24);
 const TCP_PROBE_AFTER: Duration = Duration::from_secs(5);
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const TCP_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const TCP_PROBES: u32 = 12;
 
 /// Apply the liveness options above to a TCP socket (std or tokio).
 /// Best-effort by contract at the call sites: a socket that cannot take
 /// the options still works, it just falls back to kernel default
 /// dead-peer detection.
+#[cfg(unix)]
 fn apply_liveness_options<S: std::os::fd::AsFd>(stream: &S) -> io::Result<()> {
-    use socket2::{SockRef, TcpKeepalive};
-    let sock = SockRef::from(stream);
-    let keepalive = TcpKeepalive::new()
-        .with_time(TCP_PROBE_AFTER)
-        .with_interval(TCP_PROBE_INTERVAL)
-        .with_retries(TCP_PROBES);
-    sock.set_tcp_keepalive(&keepalive)?;
-    sock.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
+    apply_liveness_sockref(socket2::SockRef::from(stream))
+}
+
+#[cfg(windows)]
+fn apply_liveness_options<S: std::os::windows::io::AsSocket>(stream: &S) -> io::Result<()> {
+    apply_liveness_sockref(socket2::SockRef::from(stream))
+}
+
+/// Shared body. The keepalive interval/retry tuning and `TCP_USER_TIMEOUT` are
+/// Linux/Android-only (socket2 gates the setters; `TCP_USER_TIMEOUT` is a Linux
+/// socket option). Other platforms get the universal idle-keepalive and fall
+/// back to kernel-default dead-peer detection (best-effort by contract).
+fn apply_liveness_sockref(sock: socket2::SockRef<'_>) -> io::Result<()> {
+    use socket2::TcpKeepalive;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let keepalive = TcpKeepalive::new()
+            .with_time(TCP_PROBE_AFTER)
+            .with_interval(TCP_PROBE_INTERVAL)
+            .with_retries(TCP_PROBES);
+        sock.set_tcp_keepalive(&keepalive)?;
+        sock.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        sock.set_tcp_keepalive(&TcpKeepalive::new().with_time(TCP_PROBE_AFTER))?;
+    }
     Ok(())
 }
 
