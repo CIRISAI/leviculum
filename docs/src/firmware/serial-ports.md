@@ -142,10 +142,10 @@ Run the standard health-check and look for the new interface in the
 LoRa traffic flows:
 
 ```sh
-lns diag --config /etc/reticulum
+lnstest diag --config /etc/reticulum
 ```
 
-(`lns diag` usage and the `interface_stats` reading are described in the
+(`lnstest diag` usage and the `interface_stats` reading are described in the
 [lnsd Quickstart](../lnsd-quickstart.md#check-its-working).)
 
 For the full key-by-key reference of the `[[RNode Interface]]` section

@@ -3234,7 +3234,7 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     #[ignore]
     // Requires RNode hardware at /dev/ttyACM0 and /dev/ttyACM1.
     // Build lnsd with: cargo build --release --bin lnsd --features serial
-    // Build lns with: cargo build --release --bin lns
+    // Build lnstest with: cargo build --release --bin lnstest
     #[serial(lora)]
     fn lora_link_rust() {
         crate::timeout::run_with_timeout("lora_link_rust", 1800, || {
@@ -3255,7 +3255,7 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     #[ignore]
     // Python-RNS counterpart to `lora_link_rust`, for Bug #25
     // controlled A/B/A comparison. Both nodes run Python rnsd; the
-    // driver is the same `lns selftest` binary as `lora_link_rust` —
+    // driver is the same `lnstest selftest` binary as `lora_link_rust` —
     // the only difference between the three LoRa link-test TOMLs is
     // the `[nodes.*].type` field.
     // Expected-marginal, non-gating: the python relay stack does not recover a
@@ -3283,7 +3283,7 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     #[ignore]
     // Requires RNode hardware at /dev/ttyACM0 and /dev/ttyACM1.
     // Build lnsd with: cargo build --release --bin lnsd --features serial
-    // Build lns with: cargo build --release --bin lns
+    // Build lnstest with: cargo build --release --bin lnstest
     #[serial(lora)]
     fn lora_link_interop() {
         crate::timeout::run_with_timeout("lora_link_interop", 1800, || {

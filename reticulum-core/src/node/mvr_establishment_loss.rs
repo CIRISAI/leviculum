@@ -478,7 +478,7 @@ fn establishment_persistent_proof_loss_dies_after_bounded_retries() {
 }
 
 // ----------------------------------------------------------------------------
-// (Stage 1 auto-accept) The `lns selftest` Phase-3 acceptor bug — a ONE-SHOT
+// (Stage 1 auto-accept) The `lnstest selftest` Phase-3 acceptor bug — a ONE-SHOT
 // responder that proved only the FIRST LinkRequest and deadlocked under
 // first-proof-loss + re-key (reviewer-confirmed on the LoRa rig:
 // `lr_rx=4 proof_tx=1 retransmits=3`) — is eliminated at the core. With
@@ -658,7 +658,7 @@ fn drive_persistent_proof_loss_to_death() -> bool {
 ///     `info`). The "zero retransmit" observation is therefore a tracing-target
 ///     artifact, present even though the retransmits happened.
 ///
-/// Conclusion locked by this test: the field path (`lns selftest` ->
+/// Conclusion locked by this test: the field path (`lnstest selftest` ->
 /// `Node::connect` -> `NodeCore::connect`) sets the retry budget exactly like
 /// every other caller; the cold-link death is NOT explained by an unpopulated
 /// `link_retry_state`. The retry budget vs. the path's loss rate remains the

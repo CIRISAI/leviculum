@@ -427,7 +427,7 @@ mod tests {
         // Nightly version with its own suffix plus the trailing hash:
         // the LAST parenthesised group wins.
         assert_eq!(
-            parse_embedded_hash("lns 0.7.0-nightly.20260419-5a5df20 (cafef00d)"),
+            parse_embedded_hash("lnstest 0.7.0-nightly.20260419-5a5df20 (cafef00d)"),
             Some("cafef00d".to_string())
         );
         assert_eq!(

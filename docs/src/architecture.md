@@ -27,7 +27,7 @@ specific wraps around it:
 | `reticulum-std` | Host driver: tokio event loop, interfaces, `FileStorage`, RPC, config. |
 | `reticulum-nrf` | Embedded driver: Embassy event loop on nRF52 (cross-compiled, outside the host workspace). |
 | `reticulum-ffi` | C ABI over the core for other-language bindings. |
-| `reticulum-cli` | The `lnsd` / `lns` / `lncp` binaries. |
+| `reticulum-cli` | The `lnsd` / `lnstest` / `lncp` binaries. |
 
 The application boundary is `NodeCore`: feed it bytes via
 `handle_packet` / `handle_timeout` and drain a
@@ -153,7 +153,7 @@ Application → connect/send/announce → TickOutput (via action_dispatch)
 
 ### Local Client (Shared Instance)
 ```
-lns/lncp → Unix socket → LocalInterface (HDLC)
+lnstest/lncp → Unix socket → LocalInterface (HDLC)
   → handle_packet() with is_local_client=true
   → local_client_known_dests updated (6h TTL)
 ```

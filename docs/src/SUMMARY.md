@@ -16,10 +16,10 @@
 - [Installation](guide/installation.md)
 - [Configuration reference](guide/configuration.md)
 - [Running lnsd](lnsd-quickstart.md)
-- [lns command-line utility](guide/lns.md)
+- [lnstest command-line utility](guide/lnstest.md)
 - [lncp file transfer](guide/lncp.md)
 - [Manual page: lnsd(1)](man/lnsd.1.md)
-- [Manual page: lns(1)](man/lns.1.md)
+- [Manual page: lnstest(1)](man/lnstest.1.md)
 - [Manual page: lncp(1)](man/lncp.1.md)
 
 # Firmware (LNode)

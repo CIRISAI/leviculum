@@ -1,22 +1,19 @@
-# lns
+# lnstest
 
-`lns` is the Reticulum command-line utility. It manages identities,
-copies files, runs an interactive session against a daemon, exercises
-the stack with a self-test, and collects diagnostic bundles.
+`lnstest` is the Reticulum test and diagnostics tool. It manages
+identities, runs an interactive session against a daemon, exercises the
+stack with a self-test, and collects diagnostic bundles. It works
+against either `lnsd` or Python `rnsd` through the shared-instance
+interface. For file transfer use the standalone [`lncp`](lncp.md) tool.
 
 ```text
-Reticulum command-line utility
+Reticulum test and diagnostics tool
 
-Usage: lns [OPTIONS] <COMMAND>
+Usage: lnstest [OPTIONS] <COMMAND>
 
 Commands:
-  status      Show status of the Reticulum network
-  path        Show or request paths to destinations
   identity    Identity management
-  probe       Probe a destination
-  interfaces  Show interface information
   selftest    Run integration self-test through relay node(s)
-  cp          Copy files over Reticulum (compatible with rncp)
   connect     Interactive session: connect to rnsd and enter command loop
   diag        Collect a diagnostic bundle from a running lnsd (or rnsd) for bug reports
   help        Print this message or the help of the given subcommand(s)
@@ -40,7 +37,7 @@ key (X25519 + Ed25519); the public half and the 16-byte hash are derived
 from it.
 
 ```text
-Usage: lns identity <COMMAND>
+Usage: lnstest identity <COMMAND>
 
 Commands:
   generate  Generate a new identity
@@ -51,10 +48,10 @@ Commands:
 
 Creates a fresh identity. With `-o/--output FILE` the private key is
 written to the file and the hash is printed; without it, the hash and
-public key are printed and nothing is saved (`lns.rs:1126-1145`).
+public key are printed and nothing is saved (`lnstest.rs:1033-1052`).
 
 ```sh
-lns identity generate -o my-identity.bin
+lnstest identity generate -o my-identity.bin
 ```
 
 ```text
@@ -64,10 +61,10 @@ Saved to: my-identity.bin
 ```
 
 Without `-o`, the public key is printed instead of being saved
-(`lns.rs:1140-1144`):
+(`lnstest.rs:1047-1051`):
 
 ```sh
-lns identity generate
+lnstest identity generate
 ```
 
 ```text
@@ -79,10 +76,10 @@ Public key: <64 hex bytes>
 ### identity show
 
 Loads a saved identity file and prints its path, hash, and public key
-(`lns.rs:1147-1158`):
+(`lnstest.rs:1054-1066`):
 
 ```sh
-lns identity show my-identity.bin
+lnstest identity show my-identity.bin
 ```
 
 ```text
@@ -91,36 +88,21 @@ Hash: 0123456789abcdef0123456789abcdef
 Public key: <64 hex bytes>
 ```
 
-## cp
+## File transfer
 
-Copy files over Reticulum, wire-compatible with Python's `rncp`. This is
-the same engine as the standalone [`lncp`](lncp.md) tool, exposed as an
-`lns` subcommand.
-
-Because `-v/--verbose` and `-c/--config` are global `lns` flags, `cp`
-uses `-V/--cp-verbose` and `--cp-config` for its own verbosity and
-config overrides (`rncp` itself uses `-v` and has no `--config`). Other
-options match `lncp`: `-l/--listen`, `-w TIMEOUT`, `-s/--save`,
-`-O/--overwrite`, `-n/--no-auth`, `-b ANNOUNCE_INTERVAL`. See the
-[`lncp`](lncp.md) page for the full option set and worked examples.
-
-```sh
-# Send a file
-lns cp report.pdf 0123456789abcdef0123456789abcdef
-
-# Listen for incoming transfers
-lns cp -l
-```
+`lnstest` has no file-copy subcommand. Use the standalone
+[`lncp`](lncp.md) tool, the drop-in for Python's `rncp`, which attaches
+to a running `lnsd` (or `rnsd`) through the shared instance.
 
 ## connect
 
 Open an interactive session against a running daemon (`lnsd` or `rnsd`)
 and enter a command loop. The address is the daemon's TCP interface
-(`host:port`); `lns` verifies TCP connectivity before building the node
-(`lns.rs:554-560`).
+(`host:port`); `lnstest` verifies TCP connectivity before building the node
+(`lnstest.rs:486-488`).
 
 ```text
-Usage: lns connect [OPTIONS] <ADDR>
+Usage: lnstest connect [OPTIONS] <ADDR>
 
 Arguments:
   <ADDR>  Address of the rnsd to connect to (host:port)
@@ -131,20 +113,20 @@ Options:
 ```
 
 With no `--identity`, an ephemeral identity is generated for the session
-(`lns.rs:564-573`). On connect, the session announces itself and prints
-its identity and destination hashes (`lns.rs:616-619`):
+(`lnstest.rs:497-501`). On connect, the session announces itself and prints
+its identity and destination hashes (`lnstest.rs:537-547`):
 
 ```text
 Identity: <hash>
 Destination: <hash>
-Announced as lns-cli
+Announced as lnstest-cli
 Type /help for commands.
 >
 ```
 
 ### Interactive commands
 
-The command loop accepts these (`lns.rs:534-546`):
+The command loop accepts these (`lnstest.rs:592-820`):
 
 | Command | Action |
 |---------|--------|
@@ -168,7 +150,7 @@ Run an end-to-end self-test through one or two relay nodes you control.
 The relay addresses are given as `host:port`.
 
 ```text
-Usage: lns selftest [OPTIONS] [TARGETS]...
+Usage: lnstest selftest [OPTIONS] [TARGETS]...
 
 Arguments:
   [TARGETS]...  Address(es) of relay node(s) (host:port). One or two addresses
@@ -194,10 +176,10 @@ direction, and `--discovery-timeout` to 60 seconds.
 
 ```sh
 # Full self-test through one relay
-lns selftest 192.0.2.10:4965
+lnstest selftest 192.0.2.10:4965
 
 # Just the link phase, two relays, shorter run
-lns selftest --mode link --duration 60 192.0.2.10:4965 192.0.2.11:4965
+lnstest selftest --mode link --duration 60 192.0.2.10:4965 192.0.2.11:4965
 ```
 
 ## diag
@@ -209,7 +191,7 @@ secret-redacted config, version and build info, and system info, and
 prints to stdout (or to a file with `--output`).
 
 ```text
-Usage: lns diag [OPTIONS]
+Usage: lnstest diag [OPTIONS]
 
 Options:
   -c, --config <CONFIG>
@@ -224,12 +206,12 @@ Options:
           Skip the daemon RPC queries; emit only config / versions / system
 ```
 
-`--no-rpc` (`lns.rs:491-493`) skips the daemon queries — useful for
+`--no-rpc` (`lnstest.rs:419-421`) skips the daemon queries — useful for
 checking config parse status when the daemon is down.
 
 A bundle is assembled from these sections in order (`diag.rs:63-190`):
 
-- **Versions / build** — `lns` version, build profile, target. (The
+- **Versions / build** — `lnstest` version, build profile, target. (The
   daemon version is not exposed by the RPC; check the daemon's startup
   log if needed.)
 - **Config** — config dir and file, parse status, then the *effective*
@@ -251,7 +233,7 @@ A trimmed bundle (your transport id, paths, and counters will differ):
 ===== Leviculum diagnostic bundle =====
 
 ----- Versions / build -----
-lns version: 0.7.0
+lnstest version: 0.7.0
 build profile: release
 target: x86_64 / linux
 daemon version: not exposed by the shared-instance RPC ...
@@ -313,31 +295,16 @@ hostnames, configured TCP targets, byte counters, and known-paths table,
 so review it once before posting if your topology is sensitive.
 
 ```sh
-lns diag --config /etc/reticulum --output /tmp/lns-diag.txt
+lnstest diag --config /etc/reticulum --output /tmp/lnstest-diag.txt
 ```
 
 See the [lnsd Quickstart](../lnsd-quickstart.md) for how to read the
 bundle as a health check.
 
-## Planned commands
+## Network status, paths, and probing
 
-`status`, `path`, `probe`, and `interfaces` are present as placeholders
-but are **not implemented yet** — they print a "Not implemented yet"
-notice and exit 0 (`lns.rs:1104-1174`). They are tracked as Codeberg
-issue #22. Until they land:
-
-- For status, use `lns diag` or the Python `rnstatus`.
-- For paths and interfaces, use the `interface_stats` and `path_table`
-  sections of `lns diag`, or `rnpath` / `rnstatus`.
-- For probing a destination, use the Python `rnprobe`.
-
-```sh
-lns status
-```
-
-```text
-Reticulum Status
-================
-
-Status: Not implemented yet
-```
+`lnstest` deliberately does not reimplement Python's `rnstatus`,
+`rnpath`, or `rnprobe`. For a running daemon's status, paths, and
+interfaces, read the `interface_stats` and `path_table` sections of
+`lnstest diag`, or point the Python `rnstatus` / `rnpath` / `rnprobe`
+tools at the same shared instance — they attach to `lnsd` transparently.

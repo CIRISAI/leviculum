@@ -56,7 +56,7 @@ steps:
       # string. Fresh containers rarely hit this, but the clean is
       # cheap insurance.
       - cargo clean -p reticulum-cli
-      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
+      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
       # --no-strip: rust strips debuginfo at link time (see workspace
       # Cargo.toml [profile.release] strip = "debuginfo"). cargo-deb's
       # default strip --strip-all corrupted x86_64 musl-static binaries
@@ -76,7 +76,7 @@ steps:
       - rustup target add aarch64-unknown-linux-musl
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - cargo clean -p reticulum-cli
-      - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
+      - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
       - cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
 
   package:

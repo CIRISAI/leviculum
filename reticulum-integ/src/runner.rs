@@ -112,7 +112,7 @@ impl From<io::Error> for RunnerError {
 /// in `reticulum-proxy`; the rest in `reticulum-cli`. `c-lnsd` is a C
 /// build (`just build-c-lnsd`), not a cargo bin, so it is not force-rebuilt
 /// here — only the cargo bins, matching `run-tier3-hw.sh`.
-const FORCE_REBUILD_BINS: &[&str] = &["lnsd", "lns", "lncp", "lora-proxy"];
+const FORCE_REBUILD_BINS: &[&str] = &["lnsd", "lnstest", "lncp", "lora-proxy"];
 
 /// Run `cargo build --release` for the mounted production binaries exactly
 /// once per test process, before any binary is resolved. Cargo's
@@ -335,7 +335,7 @@ impl TestRunner {
             return Err(RunnerError::BinaryNotFound(lnsd_path));
         }
 
-        let lns_path = crate::paths::release_bin(&target_dir, "lns");
+        let lns_path = crate::paths::release_bin(&target_dir, "lnstest");
         if !lns_path.exists() {
             return Err(RunnerError::BinaryNotFound(lns_path));
         }

@@ -36,5 +36,5 @@ duration_secs = 25
 [[steps]]
 action = "exec"
 on = "alpha"
-command = "lns selftest 127.0.0.1:4242 beta:4242 --mode ratchet-basic --discovery-timeout 120"
+command = "lnstest selftest 127.0.0.1:4242 beta:4242 --mode ratchet-basic --discovery-timeout 120"
 expect_exit_code = 0

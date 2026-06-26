@@ -11,7 +11,7 @@
 #
 # Requires two RNode devices at /dev/ttyACM0 and /dev/ttyACM1.
 # Build lnsd with: cargo build --release --bin lnsd --features serial
-# Build lns with: cargo build --release --bin lns
+# Build lnstest with: cargo build --release --bin lnstest
 
 profile = "rnode_pair"
 
@@ -118,6 +118,6 @@ timeout_secs = 120
 [[steps]]
 action = "exec"
 on = "a1"
-command = "lns selftest 127.0.0.1:5555 b1:5555 --mode link --rate 1 --duration 3 --discovery-timeout 360"
+command = "lnstest selftest 127.0.0.1:5555 b1:5555 --mode link --rate 1 --duration 3 --discovery-timeout 360"
 expect_exit_code = 0
 env = { RUST_LOG = "reticulum_core::link::channel=debug,reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info" }

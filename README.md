@@ -38,7 +38,7 @@ sudo usermod -aG leviculum "$USER"
 # log out and back in for the group to apply
 ```
 
-That covers everything: the native Rust clients (`lns`, `lncp`) talk to lnsd via the shared-instance socket, and Python Reticulum tools (`rnstatus`, `rncp`, `rnpath`, `rnprobe`, Sideband, Nomadnet, …) auto-detect `/etc/reticulum` (per `RNS.Reticulum.__init__`'s standard lookup) and connect through the same socket. If you ever swap lnsd out for the Python `rnsd` daemon, the same configdir keeps working — `lnsd` and `rnsd` are wire- and config-compatible.
+That covers everything: the native Rust clients (`lnstest`, `lncp`) talk to lnsd via the shared-instance socket, and Python Reticulum tools (`rnstatus`, `rncp`, `rnpath`, `rnprobe`, Sideband, Nomadnet, …) auto-detect `/etc/reticulum` (per `RNS.Reticulum.__init__`'s standard lookup) and connect through the same socket. If you ever swap lnsd out for the Python `rnsd` daemon, the same configdir keeps working — `lnsd` and `rnsd` are wire- and config-compatible.
 
 The binaries are statically linked against musl, so the package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 (amd64 + arm64) regardless of host glibc. SHA-256 checksums are published alongside every `.deb` with the suffix `.sha256`. The exact build is embedded in the binaries — `lnsd --version` prints e.g. `0.7.0-nightly.20260419-5a5df20`.
 
@@ -67,7 +67,7 @@ Then clone and build:
 git clone https://codeberg.org/Lew_Palm/leviculum.git
 cd leviculum
 git submodule update --init vendor/Reticulum
-cargo build --release --bin lnsd --bin lncp --bin lns
+cargo build --release --bin lnsd --bin lncp --bin lnstest
 ./target/release/lnsd -v
 ```
 

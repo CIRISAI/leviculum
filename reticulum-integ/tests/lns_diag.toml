@@ -1,8 +1,8 @@
-# `lns diag` — collects a self-contained diagnostic bundle from a running
+# `lnstest diag` — collects a self-contained diagnostic bundle from a running
 # daemon over the shared-instance RPC, with the identity private key never
 # leaking into the output. Mirrors `rnstatus_transport_info.toml`: one Rust
 # daemon (alice) and one Python daemon (bob) linked over TCP, so the same
-# `lns diag` is exercised against both — and both must produce a *populated*
+# `lnstest diag` is exercised against both — and both must produce a *populated*
 # daemon-view section (Python-rnsd drop-in compat is Priority 1).
 #
 # Docker-based scenario (the whole reticulum-integ framework is) — runs via
@@ -17,7 +17,7 @@
 
 [test]
 name = "lns_diag"
-description = "lns diag collects a daemon bundle from Rust and Python daemons without leaking the identity key"
+description = "lnstest diag collects a daemon bundle from Rust and Python daemons without leaking the identity key"
 timeout_secs = 90
 
 [nodes.alice]
@@ -42,7 +42,7 @@ duration_secs = 8
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "Leviculum diagnostic bundle"
 
@@ -50,7 +50,7 @@ expect_stdout_contains = "Leviculum diagnostic bundle"
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "daemon uptime:"
 
@@ -59,7 +59,7 @@ expect_stdout_contains = "daemon uptime:"
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "transport id:"
 
@@ -67,7 +67,7 @@ expect_stdout_contains = "transport id:"
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "interfaces ("
 
@@ -75,7 +75,7 @@ expect_stdout_contains = "interfaces ("
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "known paths:"
 
@@ -83,7 +83,7 @@ expect_stdout_contains = "known paths:"
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "end of diagnostic bundle"
 
@@ -91,7 +91,7 @@ expect_stdout_contains = "end of diagnostic bundle"
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "active links:"
 
@@ -105,7 +105,7 @@ expect_exit_code = 0
 expect_stdout_contains = "ok: identity bytes absent"
 
 # --- Python daemon (bob): drop-in compat — same assertions as alice ---
-# `lns diag` against a Python `rnsd` must produce a fully populated daemon-view
+# `lnstest diag` against a Python `rnsd` must produce a fully populated daemon-view
 # section, not just degrade gracefully. (The identity-key-leak property is
 # daemon-agnostic — alice's lns_diag_no_secret.sh step + the
 # `identity_private_key_never_enters_the_bundle` unit test cover it.)
@@ -113,14 +113,14 @@ expect_stdout_contains = "ok: identity bytes absent"
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "Leviculum diagnostic bundle"
 
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "Daemon view"
 
@@ -128,21 +128,21 @@ expect_stdout_contains = "Daemon view"
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "daemon uptime:"
 
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "transport id:"
 
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "interfaces ("
 
@@ -150,20 +150,20 @@ expect_stdout_contains = "interfaces ("
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "known paths:"
 
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "active links:"
 
 [[steps]]
 action = "exec"
 on = "bob"
-command = "lns diag --config /root/.reticulum"
+command = "lnstest diag --config /root/.reticulum"
 expect_exit_code = 0
 expect_stdout_contains = "end of diagnostic bundle"

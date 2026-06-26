@@ -1,16 +1,20 @@
-# lns(1)
+# lnstest(1)
 
 ## NAME
 
-lns -- Reticulum network utility
+lnstest -- Reticulum test and diagnostics tool
 
 ## SYNOPSIS
 
-**lns** [**-c** *dir*] [**-v**] *command* [*args*...]
+**lnstest** [**-c** *dir*] [**-v**] *command* [*args*...]
 
 ## DESCRIPTION
 
-**lns** is a multi-tool for interacting with a running Reticulum network. It combines the functionality of Python's **rnstatus**, **rnpath**, **rnprobe**, and more into a single binary.
+**lnstest** is the test and diagnostics tool for the Leviculum
+Reticulum stack. It drives integration self-tests, collects diagnostic
+bundles from a running daemon, manages identities, and opens interactive
+sessions. It works against either **lnsd** or Python **rnsd** through the
+shared-instance interface. For file transfer use **lncp**(1).
 
 ## GLOBAL OPTIONS
 
@@ -22,39 +26,19 @@ lns -- Reticulum network utility
 
 ## COMMANDS
 
-### lns status
-
-**Not yet implemented** (stub, prints "Not implemented yet" — tracked as Codeberg #22). Will show status of the Reticulum network by connecting to the running daemon via shared instance, equivalent to Python's **rnstatus**.
-
-### lns path [*destination*]
-
-**Not yet implemented** (stub — tracked as Codeberg #22). Will show or request paths to destinations: without an argument, list all known paths; with a destination hash (hex), request a path to that destination. Equivalent to Python's **rnpath**.
-
-### lns probe *destination*
-
-**Not yet implemented** (stub — tracked as Codeberg #22). Will probe a destination by sending a probe packet and measuring round-trip time, equivalent to Python's **rnprobe**.
-
-### lns interfaces
-
-**Not yet implemented** (stub — tracked as Codeberg #22). Will show information about configured network interfaces.
-
-### lns identity generate [**-o** *file*]
+### lnstest identity generate [**-o** *file*]
 
 Generate a new Reticulum identity and write it to *file*.
 
-### lns identity show *file*
+### lnstest identity show *file*
 
 Show the hash and public keys of the identity in *file*.
 
-### lns cp [*options*] [*file*] [*destination*]
-
-Copy files over Reticulum, compatible with Python's **rncp**. See **lncp**(1) for the full option reference.
-
-### lns connect *addr*
+### lnstest connect *addr*
 
 Open an interactive session to a Reticulum daemon at *addr* (host:port). Supports link establishment, message exchange, and announce discovery. Type `/help` in the session for available commands.
 
-### lns selftest *target* [*target*]
+### lnstest selftest *target* [*target*]
 
 Run integration self-tests through one or two relay nodes. Tests link establishment, channel data, ratchet operation, and bulk transfer.
 
@@ -69,7 +53,7 @@ Options:
 **--mode** *mode*
 :   Which phases to run: all, link, packet, ratchet-basic, ratchet-enforced, bulk-transfer, ratchet-rotation (default: all).
 
-### lns diag
+### lnstest diag
 
 Collect a self-contained diagnostic bundle from a running **lnsd** (or **rnsd**) for attaching to bug reports: versions/build, the secret-redacted config and configured interfaces, the daemon's live view via the shared-instance RPC (interface stats, path table, link count), best-effort system info, and an event-log pointer. Printed to stdout by default. Use the global **-c**/**--config** to point at the daemon's config directory.
 
@@ -91,21 +75,17 @@ Options:
 
 ## EXAMPLES
 
-Show network status:
-
-    lns status
-
-Request a path:
-
-    lns path a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
-
-Probe a destination:
-
-    lns probe a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
-
 Generate a new identity:
 
-    lns identity generate -o my_identity
+    lnstest identity generate -o my_identity
+
+Run a self-test through a relay node:
+
+    lnstest selftest 192.0.2.10:4965 --mode link --duration 60
+
+Collect a diagnostic bundle from a running daemon:
+
+    lnstest diag -c /etc/reticulum --output /tmp/lnstest-diag.txt
 
 ## SEE ALSO
 

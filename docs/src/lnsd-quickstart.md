@@ -31,14 +31,14 @@ sudo apt install ./leviculum-nightly-amd64.deb       # or -arm64
 
 The package:
 
-- Installs `lnsd`, `lns`, and `lncp` under `/usr/bin/`.
+- Installs `lnsd`, `lnstest`, and `lncp` under `/usr/bin/`.
 - Creates a system user `leviculum` and a group of the same name.
 - Drops a default config at `/etc/reticulum/config` (mode 2775,
   group-writable + setgid, so everything created inside it inherits
   the group).
 - Enables and starts the `lnsd.service` systemd unit.
 
-For the native tools (`lns`, `lncp`) and Python tools (`rnstatus`,
+For the native tools (`lnstest`, `lncp`) and Python tools (`rnstatus`,
 `rnpath`, `rnprobe`, Sideband, Nomadnet, …) to talk to the running
 daemon, your user has to be in the `leviculum` group:
 
@@ -51,7 +51,7 @@ Verify the installation:
 
 ```sh
 lnsd --version          # e.g. 0.7.0-nightly.20260419-5a5df20
-lns  --version
+lnstest  --version
 systemctl is-active lnsd
 ```
 
@@ -74,7 +74,7 @@ TCP uplink to a public entrypoint. Edit `/etc/reticulum/config` to:
   # machine is mobile or sleeps a lot.
   enable_transport = Yes
 
-  # Required for `lns diag`, `rnstatus`, Sideband etc. to attach to
+  # Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach to
   # this daemon. The default config already sets this.
   share_instance = Yes
 
@@ -107,7 +107,7 @@ Then restart the daemon so it picks up the new config:
 sudo systemctl restart lnsd
 ```
 
-`lns diag` (below) is the easiest way to confirm both interfaces came
+`lnstest diag` (below) is the easiest way to confirm both interfaces came
 up.
 
 ## Start the daemon
@@ -138,13 +138,13 @@ sudo -u leviculum /usr/bin/lnsd -v --config /etc/reticulum
 
 Three commands. Run them as a user that is in the `leviculum` group.
 
-### 1. `lns diag`
+### 1. `lnstest diag`
 
 This is the main health-check. It connects to the running daemon over
 the shared-instance socket and renders a single-file diagnostic bundle:
 
 ```sh
-lns diag --config /etc/reticulum
+lnstest diag --config /etc/reticulum
 ```
 
 A healthy bundle looks roughly like this (your `transport id`, paths,
@@ -154,7 +154,7 @@ and byte counters will differ):
 ===== Leviculum diagnostic bundle =====
 
 ----- Versions / build -----
-lns version: 0.7.0
+lnstest version: 0.7.0
 build profile: release
 target: x86_64 / linux
 daemon version: not exposed by the shared-instance RPC ...
@@ -220,18 +220,18 @@ What to look at first:
 - **`transport id`** is your node's identity (the public half). It is
   safe to share; the private half lives in
   `/etc/reticulum/storage/transport_identity` and is never included
-  in `lns diag` output.
+  in `lnstest diag` output.
 
-### 2. `lns selftest --help`
+### 2. `lnstest selftest --help`
 
-Sanity-checks that `lns` itself is installed and runnable:
+Sanity-checks that `lnstest` itself is installed and runnable:
 
 ```sh
-lns selftest --help
+lnstest selftest --help
 ```
 
-The actual `lns selftest` exercise needs one or two relay nodes you
-control. The full command and options live in `lns(1)`.
+The actual `lnstest selftest` exercise needs one or two relay nodes you
+control. The full command and options live in `lnstest(1)`.
 
 ### 3. `rnstatus` (optional — Python tools)
 
@@ -246,8 +246,8 @@ rnstatus
 
 Python tools auto-detect `/etc/reticulum/config` and connect to the
 running `lnsd` through the same shared-instance socket. No extra flags
-are needed. (`lns status` exists as a placeholder but is not implemented
-yet — use `rnstatus` or `lns diag` until it lands.)
+are needed. (`lnstest` has no network-status command; use `rnstatus` or
+the daemon-view section of `lnstest diag`.)
 
 ## Connect to the wider mesh
 
@@ -260,7 +260,7 @@ With the config above, two things happen as soon as `lnsd` starts:
    the TCP uplink.
 2. **Learning paths.** When other nodes announce, your daemon stores
    a path to each announced destination (hash, next hop, hop count,
-   expiry). `lns diag`'s `known paths: N` is that table's size.
+   expiry). `lnstest diag`'s `known paths: N` is that table's size.
 
 When you want to talk to a specific destination (e.g. send a file with
 `lncp`), the daemon either has a path already (immediate) or requests
@@ -284,7 +284,7 @@ journalctl -u lnsd --since '10 min ago' | tail -50
 Common causes:
 
 - **Config not parsed.** Look for a "Failed to parse config" line in
-  the journal. `lns diag --no-rpc` shows the parse status without
+  the journal. `lnstest diag --no-rpc` shows the parse status without
   needing the daemon up:
   ```
   config file: present but FAILED to parse: <details>
@@ -304,7 +304,7 @@ Common causes:
 
 ### No peers found / `known paths: 0`
 
-Check `lns diag`'s `interface_stats` section:
+Check `lnstest diag`'s `interface_stats` section:
 
 - **`AutoInterface` shows `peers: 0` and `rxb: 0`** — multicast isn't
   reaching the link. Likely causes: corporate Wi-Fi (multicast blocked);
@@ -325,7 +325,7 @@ take a moment.
 
 ### Native and Python tools cannot reach lnsd
 
-Symptom: `lns diag` shows `<unavailable: …>` in the daemon-view
+Symptom: `lnstest diag` shows `<unavailable: …>` in the daemon-view
 section, or `rnstatus` errors with "Reticulum is not running".
 
 - Confirm your user is in the `leviculum` group:
@@ -340,15 +340,15 @@ section, or `rnstatus` errors with "Reticulum is not running".
   ```
 - Confirm both client and daemon are using the same config directory.
   The client defaults to `/etc/reticulum` if it exists, then
-  `~/.config/reticulum`, then `~/.reticulum`. `lns diag --config
+  `~/.config/reticulum`, then `~/.reticulum`. `lnstest diag --config
   /etc/reticulum` is explicit.
 
 ### Submitting a bug report
 
-Run `lns diag` and attach its output to your report:
+Run `lnstest diag` and attach its output to your report:
 
 ```sh
-lns diag --config /etc/reticulum --output /tmp/lns-diag.txt
+lnstest diag --config /etc/reticulum --output /tmp/lnstest-diag.txt
 ```
 
 The bundle is plain UTF-8 text, designed to be safe to attach: IFAC
@@ -364,8 +364,8 @@ If `lnsd` is in a structured event-log run
 `Environment=`), include the tail of that file too:
 
 ```sh
-lns diag --event-log /var/log/lnsd-events.log \
-         --output /tmp/lns-diag.txt
+lnstest diag --event-log /var/log/lnsd-events.log \
+         --output /tmp/lnstest-diag.txt
 ```
 
 Otherwise the bundle already points the reviewer at `journalctl -u
@@ -373,7 +373,7 @@ lnsd`, which is enough.
 
 ## See also
 
-- `lnsd(1)`, `lns(1)`, `lncp(1)` man pages.
+- `lnsd(1)`, `lnstest(1)`, `lncp(1)` man pages.
 - [Configuration](guide/configuration.md) for the format reference.
 - [Installation](guide/installation.md) for the source-build path.
 - The upstream [Reticulum Manual](https://reticulum.network/manual/)

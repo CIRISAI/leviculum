@@ -34,7 +34,7 @@ clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde-pickle.workspace = true
 # The shared-instance RPC client (`rpc::rpc_query`) decodes pickle
-# responses into `serde_json::Value` so callers (e.g. `lns diag`) don't
+# responses into `serde_json::Value` so callers (e.g. `lnstest diag`) don't
 # need a pickle dependency themselves.
 serde_json = "1"
 sha2 = { workspace = true, features = ["std"] }

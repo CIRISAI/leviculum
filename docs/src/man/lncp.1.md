@@ -87,4 +87,4 @@ Listen with verbose logging, accepting from anyone:
 
 ## SEE ALSO
 
-**lnsd**(1), **lns**(1)
+**lnsd**(1), **lnstest**(1)

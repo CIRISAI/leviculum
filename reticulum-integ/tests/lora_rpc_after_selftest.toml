@@ -1,7 +1,7 @@
 # Regression test: rnprobe must work after selftest on same node.
 #
 # Minimal 2-node LoRa topology. Verifies that rnprobe works both
-# before and after running lns selftest on the same node. Previously,
+# before and after running lnstest selftest on the same node. Previously,
 # selftest wrote its ephemeral identity to the daemon's storage dir,
 # causing Python's rnprobe to derive a wrong RPC auth key.
 #
@@ -60,7 +60,7 @@ timeout_secs = 90
 [[steps]]
 action = "exec"
 on = "alpha"
-command = "lns selftest 127.0.0.1:5555 beta:5555 --mode link --rate 1 --duration 3 --discovery-timeout 240"
+command = "lnstest selftest 127.0.0.1:5555 beta:5555 --mode link --rate 1 --duration 3 --discovery-timeout 240"
 env = { RUST_LOG = "reticulum_core::link::channel=debug,reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info" }
 
 # Phase 4: rnprobe AFTER selftest — must still work

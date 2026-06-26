@@ -95,7 +95,7 @@ pub fn enable_fault_injection() {
 
 /// Disable byte-flip fault injection on TCP writes without
 /// changing per-iface `corrupt_every` configuration. Used by
-/// `lns selftest` during Phase-2 mutual discovery so announces
+/// `lnstest selftest` during Phase-2 mutual discovery so announces
 /// cross a clean stream (otherwise a corrupted announce yields
 /// a deterministic 60 s Phase-2 timeout — Bug #31).
 pub fn disable_fault_injection() {

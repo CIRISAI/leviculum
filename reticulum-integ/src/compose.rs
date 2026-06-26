@@ -15,7 +15,7 @@ use crate::topology::TestScenario;
 /// * `base_dir` — absolute path to tempdir containing per-node config/storage
 /// * `repo_root` — absolute path to the leviculum repository root
 /// * `target_dir` — cargo target dir (honours `CARGO_TARGET_DIR`); release
-///   binaries are mounted from `{target_dir}/release/{lnsd,lns,lncp}`
+///   binaries are mounted from `{target_dir}/release/{lnsd,lnstest,lncp}`
 /// * `proxy_devices` — for nodes with `rnode_proxy`, maps node name to the PTY
 ///   slave device path that should be mounted instead of the raw serial device
 pub fn generate_compose(
@@ -28,7 +28,7 @@ pub fn generate_compose(
 ) -> String {
     let test_name = &scenario.test.name;
     let lnsd_path = crate::paths::release_bin(target_dir, "lnsd");
-    let lns_path = crate::paths::release_bin(target_dir, "lns");
+    let lns_path = crate::paths::release_bin(target_dir, "lnstest");
     let lncp_path = crate::paths::release_bin(target_dir, "lncp");
     // The C daemon (statically linked against libleviculum) is a drop-in
     // replacement for lnsd, mounted only on c-api nodes.
@@ -76,7 +76,12 @@ pub fn generate_compose(
             lnsd_path.display()
         )
         .ok();
-        writeln!(out, "      - {}:/usr/local/bin/lns:ro", lns_path.display()).ok();
+        writeln!(
+            out,
+            "      - {}:/usr/local/bin/lnstest:ro",
+            lns_path.display()
+        )
+        .ok();
         let scripts_dir = repo_root.join("reticulum-integ/scripts");
         writeln!(
             out,
@@ -263,10 +268,10 @@ mod tests {
             );
             assert!(
                 yaml.contains(&format!(
-                    "{}/release/lns:/usr/local/bin/lns:ro",
+                    "{}/release/lnstest:/usr/local/bin/lnstest:ro",
                     target_dir.display()
                 )),
-                "{node}: missing lns volume"
+                "{node}: missing lnstest volume"
             );
             assert!(
                 yaml.contains(&format!(

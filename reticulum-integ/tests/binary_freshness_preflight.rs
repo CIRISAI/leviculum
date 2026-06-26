@@ -66,7 +66,7 @@ fn stage(
     let target = tmp.path().join("target");
     let release = target.join("release");
     std::fs::create_dir_all(&release).expect("mkdir release");
-    for name in ["lnsd", "lns", "lncp", "lora-proxy"] {
+    for name in ["lnsd", "lnstest", "lncp", "lora-proxy"] {
         std::fs::write(release.join(name), b"#!/bin/sh\nexit 0\n").expect("write bin");
     }
 
@@ -100,7 +100,7 @@ fn preflight_flags_binary_older_than_production_commit() {
     let release = target.join("release");
     // Every binary predates the production commit by 100 s — the exact
     // shape of the nightly leftover (built before the synced HEAD).
-    for name in ["lnsd", "lns", "lncp", "lora-proxy"] {
+    for name in ["lnsd", "lnstest", "lncp", "lora-proxy"] {
         set_mtime(&release.join(name), head_time - 100);
     }
     assert_eq!(
@@ -115,7 +115,7 @@ fn preflight_passes_when_binaries_postdate_production_commit() {
     let (_tmp, repo, target, head_time) = stage("fresh");
     let release = target.join("release");
     // Simulate a successful relink: binaries stamped after the commit.
-    for name in ["lnsd", "lns", "lncp", "lora-proxy"] {
+    for name in ["lnsd", "lnstest", "lncp", "lora-proxy"] {
         set_mtime(&release.join(name), head_time + 100);
     }
     assert_eq!(

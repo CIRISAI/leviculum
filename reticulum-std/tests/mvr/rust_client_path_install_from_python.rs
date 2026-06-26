@@ -2,7 +2,7 @@
 //! paths from announces forwarded by a Python-RNS rnsd.
 //!
 //! Named mechanism from the n=20 A/B/A report: in the
-//! `lora_link_python` scenario, `lns selftest` constructs two leaf
+//! `lora_link_python` scenario, `lnstest selftest` constructs two leaf
 //! clients with `enable_transport(false)` connected over
 //! `TCPClientInterface` to Python rnsd daemons. The clients receive
 //! Announces for remote destinations (visible as `[PKT_RX]
@@ -17,7 +17,7 @@
 //! the receiving Rust node has `enable_transport = false`.
 //!
 //! This mvr reproduces the failure without LoRa, Docker, or the
-//! `lns selftest` tool — just a Python `rnsd` from
+//! `lnstest selftest` tool — just a Python `rnsd` from
 //! `vendor/Reticulum` (spawned via the existing
 //! `rnsd_interop::TestDaemon`) plus one Rust `ReticulumNode` built
 //! with `enable_transport(false)` mirroring the selftest client's
@@ -60,7 +60,7 @@ async fn rust_client_installs_path_from_python_announce() {
     let dest_hash = parse_dest_hash(&dest_info.hash);
 
     // Build the Rust client with enable_transport(false), exactly as
-    // `lns selftest` does at `reticulum-cli/src/selftest.rs:620`.
+    // `lnstest selftest` does at `reticulum-cli/src/selftest.rs:620`.
     let storage = tempfile::tempdir().expect("tempdir");
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)

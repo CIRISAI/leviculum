@@ -3,7 +3,7 @@
 `lnsd` reads the same INI-style configuration file as Python Reticulum
 (`rnsd`). The format is a drop-in: a config that `rnsd` accepts, `lnsd`
 accepts, and the two share the shared-instance IPC socket so client
-tools (`rnstatus`, `rncp`, `lns diag`, Sideband, Nomadnet) attach to
+tools (`rnstatus`, `rncp`, `lnstest diag`, Sideband, Nomadnet) attach to
 either daemon without changes. Keys `lnsd` does not implement are
 tolerated, not rejected — an unknown key never makes `lnsd` refuse a
 config a current `rnsd` would load (`ini_config.rs:193-198`).
@@ -51,7 +51,7 @@ Core daemon settings. Every key below is parsed in
 |-----|------|---------|---------|
 | `enable_transport` | bool | `true` | Route announces and serve paths for other peers. `lnsd` defaults this to `true` (it is a daemon); the Python *library* default is `false`. (`config.rs:27-28`, `140`) |
 | `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `141`) |
-| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lns diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:32-35`, `142`; key `share_instance` → `shared_instance`, `ini_config.rs:158-159`) |
+| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:32-35`, `142`; key `share_instance` → `shared_instance`, `ini_config.rs:158-159`) |
 | `instance_name` | string | `default` | Names the shared-instance socket: `\0rns/<instance_name>`. Use a unique name to run two daemons side by side. (`config.rs:36-39`, `143`; `ini_config.rs:161-163`) |
 | `shared_instance_type` | `unix`/`tcp` | unset | Parsed for `rnsd` compatibility. Only `tcp`/`unix` are stored; `tcp` clears `shared_instance_socket` (tcp disables AF_UNIX upstream). `lnsd` currently serves only the abstract AF_UNIX socket. (`config.rs:40-47`; `ini_config.rs:164-173`, `126-128`) |
 | `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:48-53`; `ini_config.rs:174-176`) |
@@ -211,8 +211,8 @@ network on the link. They are common to all interface types
 | `passphrase` | string | unset | IFAC passphrase. (`ini_config.rs:244`; `config.rs:226-227`) |
 | `ifac_size` | usize (bits) | unset | IFAC size, specified in bits in the file and stored as bytes (`bits / 8`). (`ini_config.rs:245`; `config.rs:228-229`) |
 
-`networkname` and `passphrase` are secrets: `lns diag` redacts them
-before serialising a bundle (see the [`lns diag`](lns.md#diag) section).
+`networkname` and `passphrase` are secrets: `lnstest diag` redacts them
+before serialising a bundle (see the [`lnstest diag`](lnstest.md#diag) section).
 
 ## Example configurations
 

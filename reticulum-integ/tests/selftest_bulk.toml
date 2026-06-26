@@ -26,6 +26,6 @@ duration_secs = 5
 [[steps]]
 action = "exec"
 on = "daemon_a"
-command = "lns selftest 127.0.0.1:4242 daemon_b:4242 --mode bulk-transfer --duration 30"
+command = "lnstest selftest 127.0.0.1:4242 daemon_b:4242 --mode bulk-transfer --duration 30"
 expect_exit_code = 0
 expect_stdout_contains = "PASS"

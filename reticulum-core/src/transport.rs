@@ -405,7 +405,7 @@ pub struct RateTableExport {
 }
 
 /// Exported link table entry for RPC reporting (the `link_table`
-/// shared-instance RPC, `lns diag` v2). One entry per [`crate::link::Link`]
+/// shared-instance RPC, `lnstest diag` v2). One entry per [`crate::link::Link`]
 /// the local node is participating in (initiator and responder side),
 /// regardless of state — the `state` field disambiguates. Python `rnsd` does
 /// not expose a per-link table at the RPC level (it has `link_count` only);

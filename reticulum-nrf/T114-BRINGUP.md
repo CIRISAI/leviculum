@@ -19,7 +19,7 @@ The T114 runs a Reticulum endpoint node. Confirmed on real hardware:
 
 ## What Doesn't Work Yet
 
-- **`rnprobe` not tested** — `lns probe` command is a stub ("Not implemented yet"), Python Reticulum is not installed on the dev machine. Bidirectional announce exchange is confirmed but end-to-end probe/proof round-trip is unverified.
+- **`rnprobe` not tested** — the Rust CLI has no probe command (probing is left to Python `rnprobe`), and Python Reticulum is not installed on the dev machine. Bidirectional announce exchange is confirmed but end-to-end probe/proof round-trip is unverified.
 
 ## Constraints Discovered
 
@@ -101,9 +101,7 @@ done
 
 ### Priority 1: Test rnprobe Round-Trip
 
-Bidirectional announce exchange works. The next step is proving the full probe/proof round-trip. Either:
-- Implement `lns probe` in the Rust CLI
-- Install Python Reticulum and use `rnprobe`
+Bidirectional announce exchange works. The next step is proving the full probe/proof round-trip: install Python Reticulum and use `rnprobe` against the firmware's probe responder.
 
 ### Priority 2: Investigate Boot Blink Timer Issue
 

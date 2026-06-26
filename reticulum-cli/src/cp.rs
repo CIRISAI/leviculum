@@ -1,7 +1,6 @@
 //! rncp-compatible file transfer over Reticulum
 //!
-//! Shared module used by both `lns cp` (standalone node) and `lncp`
-//! (shared instance client).
+//! Module backing the `lncp` file-transfer tool (shared instance client).
 
 use std::collections::VecDeque;
 use std::io::Cursor;
@@ -654,8 +653,6 @@ fn encode_fetch_response_not_allowed() -> Vec<u8> {
 }
 
 /// Decode the server's fetch response.
-/// Used by lncp binary; dead_code warning is a false positive from lns binary.
-#[allow(dead_code)]
 enum FetchResponse {
     Found,
     NotFound,
@@ -663,7 +660,6 @@ enum FetchResponse {
     RemoteError,
 }
 
-#[allow(dead_code)] // used by lncp, not lns
 fn decode_fetch_response(data: &[u8]) -> FetchResponse {
     let value = rmpv::decode::read_value(&mut Cursor::new(data)).ok();
     match value {
@@ -675,7 +671,6 @@ fn decode_fetch_response(data: &[u8]) -> FetchResponse {
 }
 
 /// Encode a string as msgpack for use as request data.
-#[allow(dead_code)] // used by lncp, not lns
 fn encode_msgpack_string(s: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     rmpv::encode::write_value(&mut buf, &rmpv::Value::String(s.into()))
@@ -684,7 +679,6 @@ fn encode_msgpack_string(s: &str) -> Vec<u8> {
 }
 
 /// Fetch a file from a remote listener.
-#[allow(dead_code)] // used by lncp, not lns
 #[allow(clippy::too_many_arguments)]
 pub async fn run_fetch(
     node: &ReticulumNode,

@@ -220,7 +220,7 @@ async fn handle_rpc_connection(
 /// Wall-clock cap on the shared-instance RPC handshake + request/response.
 ///
 /// The socket is a local abstract Unix socket, so 5 s is generous. Its real
-/// job is to keep a client (`lns diag`, future `lns status`/`interfaces`, …)
+/// job is to keep a client (`lnstest diag`, `rnstatus`, …)
 /// from blocking forever when the daemon is unresponsive or speaks a slightly
 /// different RPC dialect — e.g. a Python `rnsd` that hits an error handling an
 /// unexpected request and sends no response at all.

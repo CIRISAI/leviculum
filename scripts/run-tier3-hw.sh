@@ -69,7 +69,7 @@ mkdir -p "$LOG_DIR"
 #
 # A SECOND, distinct mechanism is also carved out: lora_link_python. This is a
 # python-relay to python-relay LoRa link test (both nodes type = "python"; the
-# only rust part is the `lns selftest` driver, whose Client A/B are the link
+# only rust part is the `lnstest selftest` driver, whose Client A/B are the link
 # endpoints). The python daemon does not recover a single lost LinkRequest /
 # LRPROOF packet in-window over slow LoRa (SF7, 2.73 kbps); our rust transport
 # relays it at 100%. Measured same driver/radio/hardware, only the relaying
@@ -170,12 +170,12 @@ fi
 # simulated-vanish hook and the dry traces in the task).
 CACHE_TARGET=~/.cache/leviculum-ci-target
 if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
-log "[CI_HW] building integ binaries (lnsd / lns / lncp / lora-proxy)"
+log "[CI_HW] building integ binaries (lnsd / lnstest / lncp / lora-proxy)"
 RELEASE_DIR="$CACHE_TARGET/x86_64-unknown-linux-musl/release"
 find "$REPO_DIR/reticulum-cli/src" "$REPO_DIR/reticulum-proxy/src" \
   -name '*.rs' -exec touch {} +
 CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
-  cargo build --release --bin lnsd --bin lns --bin lncp --bin lora-proxy
+  cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
 
 # c_api_restart_recovery is non-ignored, so `cargo test --include-ignored`
 # runs it; it resolves c-lnsd via paths::release_bin. Build it here too.

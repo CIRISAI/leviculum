@@ -1,4 +1,4 @@
-// Compose a full version string for the three CLI binaries (lnsd, lns,
+// Compose a full version string for the three CLI binaries (lnsd, lnstest,
 // lncp). Local builds get the plain crate version ("0.7.0"). CI nightly
 // builds get a suffix via the LEVICULUM_BUILD_ID env var, producing
 // something like "0.7.0-nightly.20260419-5a5df20". The result lands in

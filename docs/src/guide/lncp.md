@@ -3,8 +3,7 @@
 `lncp` is the Reticulum file-transfer tool. It sends a file to a
 destination or listens for incoming transfers, and is wire-compatible
 with Python's `rncp` — an `lncp` listener accepts an `rncp` sender and
-vice versa. The same engine is also reachable as
-[`lns cp`](lns.md#cp).
+vice versa.
 
 ```text
 Reticulum File Transfer Utility

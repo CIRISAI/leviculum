@@ -5,15 +5,15 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-description = "Reticulum network stack daemon (lnsd) and client tools (lns, lncp)"
+description = "Reticulum network stack daemon (lnsd), test tool (lnstest), and file-transfer client (lncp)"
 
 [[bin]]
 name = "lnsd"
 path = "src/lnsd.rs"
 
 [[bin]]
-name = "lns"
-path = "src/lns.rs"
+name = "lnstest"
+path = "src/lnstest.rs"
 
 [[bin]]
 name = "lncp"
@@ -34,7 +34,7 @@ rand_core.workspace = true
 rmpv.workspace = true
 sha2.workspace = true
 serde_json = "1"
-# `lns diag` re-serialises the (secret-redacted) Config to TOML for the bundle.
+# `lnstest diag` re-serialises the (secret-redacted) Config to TOML for the bundle.
 toml.workspace = true
 tempfile = "3"
 
@@ -53,9 +53,9 @@ Leviculum is a Rust implementation of the Reticulum network stack,
 wire-compatible with the Python reference implementation.
 
 This package installs three binaries:
-  lnsd — the Reticulum daemon (drop-in replacement for Python rnsd)
-  lns  — the client CLI (status, path, probe, …)
-  lncp — the file-transfer tool (drop-in for rncp)
+  lnsd    — the Reticulum daemon (drop-in replacement for Python rnsd)
+  lnstest — the test and diagnostics tool (selftest, diag, identity, connect)
+  lncp    — the file-transfer tool (drop-in for rncp)
 
 lnsd is configured as a systemd service running under a dedicated
 'leviculum' user, with its config directory at /etc/reticulum. Python
@@ -78,7 +78,7 @@ assets = [
     # read the literal path, which silently picks up stale non-musl
     # builds. Always use this form.
     ["target/release/lnsd", "usr/bin/", "755"],
-    ["target/release/lns", "usr/bin/", "755"],
+    ["target/release/lnstest", "usr/bin/", "755"],
     ["target/release/lncp", "usr/bin/", "755"],
     ["../packaging/debian/config", "etc/reticulum/config", "644"],
     ["../README.md", "usr/share/doc/leviculum/README.md", "644"],

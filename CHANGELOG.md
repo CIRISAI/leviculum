@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+The client binary `lns` is renamed to `lnstest` to reflect its role as
+the test and diagnostics tool (selftest, diag, identity, interactive
+connect). The unimplemented `status`, `path`, `probe`, and `interfaces`
+placeholder subcommands are removed; use `lnstest diag` or the Python
+`rnstatus` / `rnpath` / `rnprobe` tools against the same shared instance
+instead. The `cp` subcommand is also removed; use the standalone `lncp`
+tool for file transfer.
+
 ## [0.7.0] - 2026-06-22
 
 ### Added

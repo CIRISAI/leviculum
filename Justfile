@@ -94,7 +94,7 @@ standard: fast test-ffi verify-packaging
 # re-hardlinks it from deps/ without relinking, keeping the old mtime.
 build-integ-bins:
     find reticulum-cli/src reticulum-proxy/src -name '*.rs' -exec touch {} +
-    cargo build --release --bin lnsd --bin lns --bin lncp --bin lora-proxy
+    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
 
 # Default cargo test runs non-ignored tests and skips ignored ones.
 # Docker tests (#[serial(docker)]) run; LoRa tests (#[ignore] #[serial(lora)])
@@ -217,7 +217,7 @@ _deb-stamp:
 # (cargo-deb also hardlinks it under target/<triple>/debian/).
 build-deb-amd64: (_require-cargo-deb) _deb-stamp
     cargo clean -p reticulum-cli
-    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
+    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
     cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
     @echo "[build-deb-amd64] produced: $(ls -1t target/debian/leviculum_*_amd64.deb | head -1)"
 
@@ -232,7 +232,7 @@ build-deb-amd64: (_require-cargo-deb) _deb-stamp
 # (cargo-deb also hardlinks it under target/<triple>/debian/).
 build-deb-arm64: (_require-cargo-deb) _deb-stamp
     cargo clean -p reticulum-cli
-    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lns --bin lncp
+    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
     cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
     @echo "[build-deb-arm64] produced: $(ls -1t target/debian/leviculum_*_arm64.deb | head -1)"
 

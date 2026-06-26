@@ -47,14 +47,14 @@ fn check_freshness(args: &[String]) -> ! {
     // mounted for proxy scenarios, but the build always produces all four
     // and the nightly always has proxy scenarios, so checking the full set
     // is the safe superset.
-    let names = ["lnsd", "lns", "lncp", "lora-proxy"];
+    let names = ["lnsd", "lnstest", "lncp", "lora-proxy"];
     let bins: Vec<PathBuf> = names
         .iter()
         .map(|n| paths::release_bin(&target_dir, n))
         .collect();
     let refs: Vec<&Path> = bins.iter().map(PathBuf::as_path).collect();
 
-    // Commit-hash guard. lnsd/lns/lncp embed their build hash via build.rs;
+    // Commit-hash guard. lnsd/lnstest/lncp embed their build hash via build.rs;
     // lora-proxy has no such seam, so only the cli bins are hash-checked.
     let hash_refs: Vec<&Path> = bins
         .iter()

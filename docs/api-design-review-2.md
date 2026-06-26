@@ -96,7 +96,7 @@ before the header.
 ## Note for the merge (not the ffi-Agent)
 The branch pins `panic = "unwind"` in the workspace release profile (root
 Cargo.toml), which is behaviour identical to the default but touches the shared
-file lnsd and lns build on. Rationale is correct (a cdylib with abort would kill
+file lnsd and lnstest build on. Rationale is correct (a cdylib with abort would kill
 the host process on any internal panic). The only cost is losing an
 abort-for-smaller-daemon-binaries option. Decide at merge time whether the
 daemons want abort handled separately.

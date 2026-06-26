@@ -14,7 +14,7 @@ so an lncp/rncp-compatible file tool over TCP is already buildable, but several
 whole capabilities are missing. The Reticulum engine (`reticulum-std`,
 `reticulum-core`) already implements almost all of it; the work is projecting
 it through the additive facade (`reticulum_std::api`) and the thin C FFI
-(`reticulum-ffi`), never refactoring signatures `lnsd`/`lns` depend on.
+(`reticulum-ffi`), never refactoring signatures `lnsd`/`lnstest` depend on.
 
 ## Guiding principles
 
@@ -54,7 +54,7 @@ compatible. Exposing this unlocks two things at once:
 - A minimal C `lnsd`: load a config, offer a shared instance plus RPC, run.
   Because it speaks the same control surface as `lnsd`, it plugs into the
   existing `reticulum-integ` Docker harness as a new `c-api` node type, driven
-  by the existing `rnprobe`/`rnstatus`/`rnpath`/`lns`/`lncp` tools, with no new
+  by the existing `rnprobe`/`rnstatus`/`rnpath`/`lnstest`/`lncp` tools, with no new
   harness steps. This is the on-ramp to the deep in-mesh network tests.
 - Side effect: loading a config file also brings every interface type
   (including RNode and Serial) into a C node, so LoRa is reachable via config

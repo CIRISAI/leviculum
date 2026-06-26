@@ -1,4 +1,4 @@
-//! `lns diag` — collect a self-contained diagnostic bundle from a running
+//! `lnstest diag` — collect a self-contained diagnostic bundle from a running
 //! `lnsd` (or Python `rnsd` — drop-in compatible).
 //!
 //! The bundle is a single annotated UTF-8 text blob: versions/build, the
@@ -22,7 +22,7 @@ use reticulum_std::config::{Config, InterfaceConfig};
 /// Placeholder substituted for redacted secret values.
 const REDACTED: &str = "<redacted>";
 
-/// Options parsed from the `lns diag` subcommand.
+/// Options parsed from the `lnstest diag` subcommand.
 pub struct DiagOptions {
     /// Config directory (the global `-c/--config`); `None` ⇒ default lookup.
     pub config_dir: Option<PathBuf>,
@@ -34,7 +34,7 @@ pub struct DiagOptions {
     pub no_rpc: bool,
 }
 
-/// Run `lns diag`: build the bundle, write it to `output` (or stdout).
+/// Run `lnstest diag`: build the bundle, write it to `output` (or stdout).
 pub async fn run(
     opts: DiagOptions,
     output: Option<PathBuf>,
@@ -65,7 +65,7 @@ pub async fn build_bundle(opts: &DiagOptions) -> String {
 
     // --- Versions / build ---
     section_header(&mut out, "Versions / build");
-    let _ = writeln!(out, "lns version: {}", env!("LEVICULUM_VERSION"));
+    let _ = writeln!(out, "lnstest version: {}", env!("LEVICULUM_VERSION"));
     let _ = writeln!(
         out,
         "build profile: {}",
@@ -604,7 +604,11 @@ mod tests {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         DiagOptions {
             config_dir,
-            instance_name: Some(format!("lns-diag-unittest-{}-{}", std::process::id(), n)),
+            instance_name: Some(format!(
+                "lnstest-diag-unittest-{}-{}",
+                std::process::id(),
+                n
+            )),
             event_log: None,
             no_rpc,
         }

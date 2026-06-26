@@ -24,21 +24,21 @@ duration_secs = 5
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-basic --duration 30"
+command = "lnstest selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-basic --duration 30"
 expect_exit_code = 0
 expect_stdout_contains = "PASS"
 
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-enforced --duration 30"
+command = "lnstest selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-enforced --duration 30"
 expect_exit_code = 0
 expect_stdout_contains = "PASS"
 
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-rotation --duration 30"
+command = "lnstest selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-rotation --duration 30"
 expect_exit_code = 0
 expect_stdout_contains = "PASS"
 
@@ -50,6 +50,6 @@ expect_stdout_contains = "PASS"
 [[steps]]
 action = "exec"
 on = "alice"
-command = "lns selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-enforced --duration 30 --corrupt-every 10000"
+command = "lnstest selftest 127.0.0.1:4242 127.0.0.1:4242 --mode ratchet-enforced --duration 30 --corrupt-every 10000"
 expect_exit_code = 0
 expect_stdout_contains = "PASS"

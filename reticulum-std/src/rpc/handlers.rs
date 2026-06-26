@@ -295,7 +295,7 @@ fn build_path_table(
     pickle_list(list)
 }
 
-// Link Table (Leviculum-only `link_table` RPC — `lns diag` v2)
+// Link Table (Leviculum-only `link_table` RPC — `lnstest diag` v2)
 /// Build the `link_table` response — a list of per-link dicts.
 ///
 /// One entry per local [`crate::link::Link`] regardless of state. Python

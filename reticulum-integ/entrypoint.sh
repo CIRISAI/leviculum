@@ -27,7 +27,7 @@ case "${NODE_TYPE}" in
     c-api)
         # The C daemon built on the Leviculum C API. Reads the same config and
         # offers the same shared instance plus RPC, so rnprobe/rnstatus/rnpath
-        # and lns/lncp drive it exactly like the Rust lnsd.
+        # and lnstest/lncp drive it exactly like the Rust lnsd.
         exec /usr/local/bin/c-lnsd --config /root/.reticulum
         ;;
     python)

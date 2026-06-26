@@ -34,7 +34,7 @@ Rust core can match it.
   control/data channel that client tools connect to. Leviculum speaks
   the same protocol, so Python's `rnstatus`, `rnpath`, `rnprobe`, and
   `rncp` drive a running `lnsd` without modification, and the
-  Leviculum tools `lns` and `lncp` drive a running `rnsd` just the
+  Leviculum tools `lnstest` and `lncp` drive a running `rnsd` just the
   same. The RPC control channel that backs `rnstatus`/`rnpath`/
   `rnprobe` is implemented in `reticulum-std/src/rpc/` (it speaks
   Python's `multiprocessing.connection` framing with pickle payloads,
@@ -49,7 +49,7 @@ Rust core can match it.
 
 This drop-in property is a deliberate design goal, not an accident.
 It is also what makes honest A/B testing possible: the test harness
-points the *same* client binary (e.g. `lns selftest`) at either
+points the *same* client binary (e.g. `lnstest selftest`) at either
 daemon, never a parallel per-stack driver. A parallel driver would
 smuggle configuration differences into what claims to be a stack
 comparison.

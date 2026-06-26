@@ -72,7 +72,7 @@ request/response and resource land last, in phases d and e.
 
 Binding constraints from project policy: additive changes only to
 `reticulum-core` and `reticulum-std` (new module plus re-exports, never a
-refactor of signatures `lnsd`/`lns` depend on); stay out of
+refactor of signatures `lnsd`/`lnstest` depend on); stay out of
 `reticulum-std/src/interfaces/` and `reticulum-nrf`. The facade must not
 break wire or semantic compatibility with Python-RNS peers; it only
 re-projects an already battle-tested engine.
@@ -578,7 +578,7 @@ mutex, `std::sync::Mutex` marks it poisoned. The driver locks with
 node would panic inside the guard and return `LEV_ERR_PANIC` again. The
 review suggested recovering poison with `lock().unwrap_or_else(|e|
 e.into_inner())`, but those lock sites are driver-internal and changing them
-is outside the additive-only boundary for code `lnsd`/`lns` depend on. The
+is outside the additive-only boundary for code `lnsd`/`lnstest` depend on. The
 achievable and stated contract is therefore:
 
 - A caught panic from a node operation may leave that `leviculum_t` in a

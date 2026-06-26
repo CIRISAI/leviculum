@@ -3,7 +3,7 @@
 # This is the single configuration file for Reticulum on this system,
 # shared by:
 #   * lnsd (the leviculum daemon, runs as the `leviculum` user)
-#   * lns / lncp (native Rust clients)
+#   * lnstest / lncp (native Rust clients)
 #   * rnstatus / rncp / rnpath / rnprobe / Sideband / Nomadnet
 #     (Python-Reticulum tools)
 #   * rnsd itself, if you ever swap lnsd out for the Python daemon

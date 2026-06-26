@@ -29,7 +29,7 @@ case "$1" in
 
         # /etc/reticulum is the single config + state directory shared
         # between lnsd and any Reticulum tooling the user runs against
-        # it (lns, rnstatus, rncp, Sideband, Nomadnet, …). Mode 2775
+        # it (lnstest, rnstatus, rncp, Sideband, Nomadnet, …). Mode 2775
         # gives the `leviculum` group write access (so non-root members
         # can persist Python-side state under storage/cache, identities,
         # interfaces, …) and setgid makes new files inherit the group.
@@ -41,7 +41,7 @@ case "$1" in
         # First-install hint only (skip on upgrade, when $2 is set).
         if [ -z "$2" ]; then
             echo ""
-            echo "leviculum: to use lns / lncp / rnstatus / rncp as a non-root user,"
+            echo "leviculum: to use lnstest / lncp / rnstatus / rncp as a non-root user,"
             echo "add the user to the 'leviculum' group, then log out and back in:"
             echo "    sudo usermod -aG leviculum \$USER"
             echo ""

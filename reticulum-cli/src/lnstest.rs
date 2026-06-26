@@ -1,4 +1,4 @@
-//! lns - Reticulum command-line utility
+//! lnstest - Reticulum test and diagnostics tool
 //!
 //! This provides various utility commands for interacting with Reticulum.
 //! Equivalent to rnstatus, rnpath, etc. in the Python implementation.
@@ -14,7 +14,6 @@ use tracing_subscriber::EnvFilter;
 
 use tokio::io::AsyncBufReadExt;
 
-mod cp;
 mod diag;
 mod selftest;
 
@@ -338,8 +337,8 @@ fn skip_msgpack_element(data: &[u8]) -> Option<&[u8]> {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "lns")]
-#[command(author, version = env!("LEVICULUM_VERSION"), about = "Reticulum command-line utility")]
+#[command(name = "lnstest")]
+#[command(author, version = env!("LEVICULUM_VERSION"), about = "Reticulum test and diagnostics tool")]
 struct Args {
     /// Configuration file path
     #[arg(short, long, global = true)]
@@ -361,29 +360,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Show status of the Reticulum network
-    Status,
-
-    /// Show or request paths to destinations
-    Path {
-        /// Destination hash (hex)
-        destination: Option<String>,
-    },
-
     /// Identity management
     Identity {
         #[command(subcommand)]
         action: IdentityAction,
     },
-
-    /// Probe a destination
-    Probe {
-        /// Destination hash (hex)
-        destination: String,
-    },
-
-    /// Show interface information
-    Interfaces,
 
     /// Run integration self-test through relay node(s)
     Selftest {
@@ -402,59 +383,6 @@ enum Commands {
         /// Discovery timeout in seconds (Phase 2: mutual path discovery)
         #[arg(long, default_value = "60")]
         discovery_timeout: u64,
-    },
-
-    /// Copy files over Reticulum (compatible with rncp)
-    ///
-    /// `-v`/`--verbose` and `-c`/`--config` are global Args flags,
-    /// so this subcommand uses `-V`/`--cp-verbose` and `--cp-config` instead.
-    /// rncp uses `-v` and has no `--config` equivalent.
-    Cp {
-        /// File to send (send mode)
-        file: Option<String>,
-
-        /// Destination hash, 32 hex characters (send mode)
-        destination: Option<String>,
-
-        /// Listen for incoming transfers
-        #[arg(short, long)]
-        listen: bool,
-
-        /// Fetch / transfer phase timeout in seconds. Counts after the link
-        /// is established (link establishment has its own internal budget).
-        /// Default: no timeout — the transfer runs to completion or until
-        /// you interrupt it. Slow transports (LoRa) need no artificial cap;
-        /// set this only if you want a hard wall-clock bound on the transfer.
-        #[arg(short = 'w')]
-        timeout: Option<f64>,
-
-        /// Save received files in this directory (listen mode)
-        #[arg(short, long)]
-        save: Option<PathBuf>,
-
-        /// Overwrite existing files instead of adding .1 .2 suffix
-        #[arg(short = 'O', long)]
-        overwrite: bool,
-
-        /// Accept transfers from anyone (default; link.identify() not yet implemented)
-        #[arg(short = 'n', long = "no-auth", default_value = "true")]
-        no_auth: bool,
-
-        /// Announce interval in seconds (-1 = no announce, 0 = once at startup)
-        #[arg(short = 'b', default_value = "0")]
-        announce_interval: i64,
-
-        /// Increase verbosity
-        #[arg(short = 'V', long = "cp-verbose", action = clap::ArgAction::Count)]
-        cp_verbose: u8,
-
-        /// Suppress progress output
-        #[arg(short, long)]
-        quiet: bool,
-
-        /// Path to Reticulum config directory
-        #[arg(long = "cp-config")]
-        cp_config: Option<PathBuf>,
     },
 
     /// Interactive session: connect to rnsd and enter command loop
@@ -596,7 +524,7 @@ async fn run_connect(
         Some(dest_identity),
         Direction::In,
         DestinationType::Single,
-        "lns",
+        "lnstest",
         &["connect"],
     )
     .map_err(|e| format!("destination error: {e}"))?;
@@ -607,7 +535,7 @@ async fn run_connect(
 
     // Announce ourselves
     if let Err(e) = node
-        .announce_destination(&dest_hash, Some(b"lns-cli"))
+        .announce_destination(&dest_hash, Some(b"lnstest-cli"))
         .await
     {
         eprintln!("announce failed: {e}");
@@ -615,7 +543,7 @@ async fn run_connect(
 
     println!("Identity: {identity_hash}");
     println!("Destination: {dest_hash_hex}");
-    println!("Announced as lns-cli");
+    println!("Announced as lnstest-cli");
     println!("Type /help for commands.");
     print_prompt();
 
@@ -844,7 +772,7 @@ async fn run_connect(
                 }
 
                 "/announce" => match node
-                    .announce_destination(&dest_hash, Some(b"lns-cli"))
+                    .announce_destination(&dest_hash, Some(b"lnstest-cli"))
                     .await
                 {
                     Ok(()) => println!("[announced] {dest_hash_hex}"),
@@ -1101,27 +1029,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match args.command {
-        Commands::Status => {
-            println!("Reticulum Status");
-            println!("================");
-            println!();
-            println!("Status: Not implemented yet");
-            // TODO(#22): Connect to running daemon and show status
-        }
-
-        Commands::Path { destination } => {
-            if let Some(dest) = destination {
-                println!("Requesting path to: {dest}");
-                // TODO(#22): Request path via daemon
-            } else {
-                println!("Known paths:");
-                println!("============");
-                println!();
-                println!("No paths (not implemented yet)");
-                // TODO(#22): List known paths from daemon
-            }
-        }
-
         Commands::Identity { action } => match action {
             IdentityAction::Generate { output } => {
                 use rand_core::OsRng;
@@ -1159,20 +1066,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
 
-        Commands::Probe { destination } => {
-            println!("Probing destination: {destination}");
-            println!("Not implemented yet");
-            // TODO(#22): Send probe packet via daemon
-        }
-
-        Commands::Interfaces => {
-            println!("Interfaces");
-            println!("==========");
-            println!();
-            println!("No interfaces (not implemented yet)");
-            // TODO(#22): Show interface information from daemon
-        }
-
         Commands::Selftest {
             targets,
             duration,
@@ -1189,87 +1082,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 discovery_timeout,
             )
             .await?;
-        }
-
-        Commands::Cp {
-            file,
-            destination,
-            listen,
-            timeout,
-            save,
-            overwrite,
-            no_auth,
-            announce_interval,
-            cp_verbose,
-            quiet,
-            cp_config,
-        } => {
-            let config_dir =
-                cp_config.unwrap_or_else(reticulum_std::config::Config::default_config_dir);
-            let config_file = config_dir.join("config");
-            let config = if config_file.exists() {
-                reticulum_std::config::Config::load(&config_file)?
-            } else {
-                reticulum_std::config::Config::default()
-            };
-
-            if listen {
-                let identity_path = config_dir.join("identities").join("lncp");
-                let identity = cp::load_or_generate_identity(&identity_path)?;
-
-                let mut node = ReticulumNodeBuilder::new()
-                    .identity(identity.clone())
-                    .config(config)
-                    .enable_transport(false)
-                    .build_sync()?;
-                node.start().await?;
-                let mut events = node.take_event_receiver().ok_or("no event receiver")?;
-
-                let result = cp::run_listen(
-                    &node,
-                    &mut events,
-                    identity,
-                    save,
-                    overwrite,
-                    no_auth,
-                    &[], // no -a flag for lns cp
-                    announce_interval,
-                    cp_verbose,
-                    quiet,
-                    false, // allow_fetch — lns cp doesn't support fetch
-                    None,  // fetch_jail
-                    false, // phy_rates — lns cp doesn't support -P
-                )
-                .await;
-                node.stop().await?;
-                result?;
-            } else {
-                let file = file.ok_or("file argument required in send mode")?;
-                let dest = destination.ok_or("destination argument required in send mode")?;
-
-                let mut node = ReticulumNodeBuilder::new()
-                    .config(config)
-                    .enable_transport(false)
-                    .build_sync()?;
-                node.start().await?;
-                let mut events = node.take_event_receiver().ok_or("no event receiver")?;
-
-                let result = cp::run_send(
-                    &node,
-                    &mut events,
-                    &file,
-                    &dest,
-                    timeout,
-                    cp_verbose,
-                    quiet,
-                    false,
-                    None,  // lns cp sender does not identify
-                    false, // phy_rates — lns cp doesn't support -P
-                )
-                .await;
-                node.stop().await?;
-                result?;
-            }
         }
 
         Commands::Connect { addr, identity } => {

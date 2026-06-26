@@ -36,7 +36,7 @@ sudo usermod -aG dialout $USER
 ```sh
 git clone https://codeberg.org/Lew_Palm/leviculum.git
 cd leviculum
-cargo build --release --bin lnsd --bin lns --bin lncp
+cargo build --release --bin lnsd --bin lnstest --bin lncp
 ```
 
 The binaries are in `target/release/`.
@@ -85,7 +85,7 @@ cargo test-interop
 **Integration tests** -- require Docker and pre-built release binaries:
 
 ```sh
-cargo build --release --bin lnsd --bin lns --bin lncp
+cargo build --release --bin lnsd --bin lnstest --bin lncp
 cargo test-integ
 ```
 
