@@ -33,9 +33,10 @@ The package:
 
 - Installs `lnsd`, `lnstest`, and `lncp` under `/usr/bin/`.
 - Creates a system user `leviculum` and a group of the same name.
-- Drops a default config at `/etc/reticulum/config` (mode 2775,
-  group-writable + setgid, so everything created inside it inherits
-  the group).
+- Drops a default config file at `/etc/reticulum/config` (mode 644)
+  and creates the config directory `/etc/reticulum` mode 2775
+  (group-writable + setgid, so files created inside it inherit the
+  `leviculum` group).
 - Enables and starts the `lnsd.service` systemd unit.
 
 For the native tools (`lnstest`, `lncp`) and Python tools (`rnstatus`,
@@ -125,7 +126,7 @@ journalctl -u lnsd --since '10 min ago'
 Logs go to the journal. Increase verbosity by editing the unit's
 `ExecStart` to add `-v` (debug) or `-vv` (trace), then
 `sudo systemctl daemon-reload && sudo systemctl restart lnsd`. The
-`RUST_LOG` environment variable also works (see `lnsd(1)`).
+`RUST_LOG` environment variable also works (see `lnsd --help`).
 
 To run `lnsd` by hand without systemd (useful for ad-hoc debugging):
 
@@ -180,17 +181,26 @@ authkey:       derived from /etc/reticulum/storage/transport_identity (not shown
 ## interface_stats
 transport id: 0123456789abcdef0123456789abcdef
 daemon uptime: 12m 34s (754s)
-interfaces (3):
-  - Shared Instance[rns/default]  type=LocalServerInterface status=up rxb=0 txb=0 clients=1
-  - AutoInterface[Default Interface/eth0/aabbccdd]  type=AutoInterface status=up rxb=482 txb=917 peers=2
-  - TCPInterface[RNS TCP Node Germany 002/193.26.158.230:4965]  type=TCPClientInterface status=up rxb=14211 txb=8332
+interfaces (2):
+  - AutoInterface[Default Interface]  type=AutoInterface status=up rxb=482 txb=917 peers=2
+  - tcp_client_0  type=TCPClientInterface status=up rxb=14211 txb=8332
+
+raw:
+{ ... full JSON dump of the same data, one object per interface ... }
 
 ## path_table
 known paths: 7
-[ ... JSON array of {hash, via, hops, expires, ...} ... ]
+[ ... JSON array of {hash, interface, hops, expires, ...} ... ]
 
 ## link_count
 active links: 0
+
+## link_table
+links (0):
+
+raw:
+[ ... JSON array of active links; this section is a Leviculum
+  extension and shows <unavailable> against a Python rnsd ... ]
 
 ----- System -----
 os: linux  kernel: 6.12.73+deb13-amd64
@@ -211,7 +221,7 @@ What to look at first:
   An interface that came up but lost its medium reports `status=down`.
 - **Non-zero `rxb` / `txb`** on the interfaces you expect traffic on
   (`AutoInterface` once any other Reticulum node is on the same LAN,
-  `TCPInterface` as soon as it connects).
+  the TCP uplink `tcp_client_N` as soon as it connects).
 - **`peers=…`** on the `AutoInterface` line: how many other Reticulum
   nodes are visible on the LAN.
 - **`known paths: N`** with N > 0 once announces have crossed the
@@ -231,17 +241,29 @@ lnstest selftest --help
 ```
 
 The actual `lnstest selftest` exercise needs one or two relay nodes you
-control. The full command and options live in `lnstest(1)`.
+control. The full command and options are in `lnstest selftest --help`.
 
 ### 3. `rnstatus` (optional — Python tools)
 
 The `.deb` does **not** install Python Reticulum. If you want `rnstatus`
-/ `rnpath` / `rnprobe` / Sideband:
+/ `rnpath` / `rnprobe` / Sideband, install it in its own environment.
+Debian 12+ and Ubuntu 24.04+ refuse `pip install` into the system
+Python with an `externally-managed-environment` error (PEP 668), so use
+`pipx` (or a venv):
 
 ```sh
-sudo apt install python3 python3-pip
-pip3 install --user rns
+sudo apt install pipx
+pipx install rns
 rnstatus
+```
+
+With a plain virtual environment instead:
+
+```sh
+sudo apt install python3-venv
+python3 -m venv ~/.rns-venv
+~/.rns-venv/bin/pip install rns
+~/.rns-venv/bin/rnstatus
 ```
 
 Python tools auto-detect `/etc/reticulum/config` and connect to the
@@ -259,8 +281,9 @@ With the config above, two things happen as soon as `lnsd` starts:
    on the LAN and within a few minutes to peers reachable through
    the TCP uplink.
 2. **Learning paths.** When other nodes announce, your daemon stores
-   a path to each announced destination (hash, next hop, hop count,
-   expiry). `lnstest diag`'s `known paths: N` is that table's size.
+   a path to each announced destination (destination hash, the
+   interface it was heard on, hop count, expiry). `lnstest diag`'s
+   `known paths: N` is that table's size.
 
 When you want to talk to a specific destination (e.g. send a file with
 `lncp`), the daemon either has a path already (immediate) or requests
@@ -325,8 +348,13 @@ take a moment.
 
 ### Native and Python tools cannot reach lnsd
 
-Symptom: `lnstest diag` shows `<unavailable: …>` in the daemon-view
-section, or `rnstatus` errors with "Reticulum is not running".
+Symptom: in the daemon-view section, `lnstest diag` shows either
+`cannot derive RPC authkey: …/storage/transport_identity: Permission
+denied` followed by `(daemon queries skipped)` (your user cannot read
+the identity file, almost always a missing group membership), or
+`<unavailable: …>` on the individual queries (the daemon is down or
+you targeted the wrong instance). `rnstatus` errors with "Reticulum is
+not running".
 
 - Confirm your user is in the `leviculum` group:
   ```sh
@@ -373,7 +401,8 @@ lnsd`, which is enough.
 
 ## See also
 
-- `lnsd(1)`, `lnstest(1)`, `lncp(1)` man pages.
+- `lnsd --help`, `lnstest --help`, `lncp --help` for the full command
+  and option reference (the `.deb` does not install man pages).
 - [Configuration](guide/configuration.md) for the format reference.
 - [Installation](guide/installation.md) for the source-build path.
 - The upstream [Reticulum Manual](https://reticulum.network/manual/)
