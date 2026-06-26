@@ -13,7 +13,9 @@ use reticulum_core::ProofStrategy;
 use crate::clock::SystemClock;
 use crate::config::{Config, InterfaceConfig};
 use crate::error::Error;
-use crate::interfaces::rnode::{RNodeChannelFactory, RNodeChannelSpec, RNODE_DEFAULT_BUFFER_SIZE};
+use crate::interfaces::rnode::{
+    RNodeChannelConfig, RNodeChannelFactory, RNODE_DEFAULT_BUFFER_SIZE,
+};
 use crate::storage::Storage;
 
 use super::ReticulumNode;
@@ -43,7 +45,7 @@ pub struct ReticulumNodeBuilder {
     /// Channel-backed RNode interfaces (host-supplied byte channels). Kept
     /// separate from `interfaces` because a factory closure is not
     /// representable in the serializable `InterfaceConfig`.
-    rnode_channels: Vec<RNodeChannelSpec>,
+    rnode_channels: Vec<RNodeChannelConfig>,
     corrupt_every: Option<u64>,
     /// Explicit enable_transport override (takes priority over config value)
     enable_transport_explicit: Option<bool>,
@@ -244,7 +246,7 @@ impl ReticulumNodeBuilder {
         coding_rate: u8,
         tx_power: i8,
     ) -> Self {
-        self.rnode_channels.push(RNodeChannelSpec {
+        self.rnode_channels.push(RNodeChannelConfig {
             factory,
             frequency: frequency as u32,
             bandwidth,
