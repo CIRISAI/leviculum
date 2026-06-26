@@ -1701,10 +1701,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 proof_data,
             } => {
                 let dest_hash = DestinationHash::new(destination_hash);
+                // Validate against the local serve destination if present, else
+                // fall back to the recalled remote identity from storage (the
+                // same source the encrypt path uses at the top of send). A remote
+                // outbound dest is never in self.destinations, so without this
+                // fallback a valid proof was misreported as DeliveryFailed (#76).
                 let is_valid = self
                     .destinations
                     .get(&dest_hash)
                     .and_then(|dest| dest.identity())
+                    .or_else(|| self.transport.storage().get_identity(dest_hash.as_bytes()))
                     .map(|identity| identity.verify_proof(&proof_data, &expected_packet_hash))
                     .unwrap_or(false);
 
@@ -4919,6 +4925,120 @@ mod tests {
             crate::storage_types::ReceiptStatus::Delivered,
             "receipt should NOT be marked Delivered with bad proof"
         );
+    }
+
+    #[test]
+    fn test_proof_remote_recalled_identity_delivery_confirmed() {
+        // Codeberg #76: a valid proof from a REMOTE destination must confirm
+        // delivery. The remote dest is NOT in self.destinations; its identity is
+        // only recalled via storage (as an announce would). The proof path must
+        // fall back to the recalled identity, like the encrypt path does.
+        use crate::packet::build_proof_packet;
+        use crate::transport::{InterfaceId, PathEntry};
+
+        // Remote destination identity (held only by the remote peer).
+        let recv_identity = Identity::generate(&mut OsRng);
+        let recv_dest = Destination::new(
+            Some(recv_identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["recallproof"],
+        )
+        .unwrap();
+        let dest_hash = *recv_dest.hash();
+        let recv_pub_bytes = recv_dest.identity().unwrap().public_key_bytes();
+
+        // Sender recalls the remote identity (public key only) via storage, the
+        // way it would after processing the remote's announce. Crucially it does
+        // NOT register a local destination for dest_hash.
+        let send_clock = MockClock::new(TEST_TIME_MS);
+        let mut sender =
+            NodeCoreBuilder::new().build(OsRng, send_clock, MemoryStorage::with_defaults());
+        let sender_iface = sender
+            .transport
+            .register_interface(alloc::boxed::Box::new(MockInterface::new("if0", 1)));
+        sender.transport.insert_path(
+            dest_hash.into_bytes(),
+            PathEntry {
+                hops: 1,
+                expires_ms: u64::MAX,
+                interface_index: sender_iface,
+                random_blobs: Vec::new(),
+                next_hop: None,
+            },
+        );
+        let recalled = Identity::from_public_key_bytes(&recv_pub_bytes).unwrap();
+        sender.remember_identity(dest_hash, recalled);
+        assert!(
+            sender.destination(&dest_hash).is_none(),
+            "remote dest must NOT be a local destination for this test"
+        );
+
+        // VALID proof path -> must confirm delivery.
+        let (receipt_hash, _out) = sender
+            .send_single_packet(&dest_hash, b"hello remote proof")
+            .unwrap();
+        let packet_hash = sender
+            .transport
+            .get_receipt(&receipt_hash)
+            .unwrap()
+            .packet_hash;
+        let good_proof = recv_dest
+            .identity()
+            .unwrap()
+            .create_proof(&packet_hash)
+            .unwrap();
+        let proof_packet = build_proof_packet(&dest_hash.into_bytes(), &good_proof);
+        let mut buf = [0u8; crate::constants::MTU];
+        let len = proof_packet.pack(&mut buf).unwrap();
+        let sender_output = sender.handle_packet(InterfaceId(0), &buf[..len]);
+
+        let has_confirmed = sender_output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::PacketDeliveryConfirmed { .. }));
+        let has_failed = sender_output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::DeliveryFailed { .. }));
+        assert!(
+            has_confirmed,
+            "valid proof from recalled remote identity must confirm delivery, got: {:?}",
+            sender_output.events
+        );
+        assert!(
+            !has_failed,
+            "valid proof from recalled remote identity must NOT fail, got: {:?}",
+            sender_output.events
+        );
+
+        // INVALID proof path -> must still fail (no weakening of rejection).
+        let (receipt_hash2, _out2) = sender
+            .send_single_packet(&dest_hash, b"hello remote proof 2")
+            .unwrap();
+        let packet_hash2 = sender
+            .transport
+            .get_receipt(&receipt_hash2)
+            .unwrap()
+            .packet_hash;
+        let wrong_identity = Identity::generate(&mut OsRng);
+        let bad_proof = wrong_identity.create_proof(&packet_hash2).unwrap();
+        let bad_packet = build_proof_packet(&dest_hash.into_bytes(), &bad_proof);
+        let mut buf2 = [0u8; crate::constants::MTU];
+        let len2 = bad_packet.pack(&mut buf2).unwrap();
+        let bad_output = sender.handle_packet(InterfaceId(0), &buf2[..len2]);
+
+        let bad_confirmed = bad_output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::PacketDeliveryConfirmed { .. }));
+        let bad_failed = bad_output
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::DeliveryFailed { .. }));
+        assert!(bad_failed, "invalid proof must still fail");
+        assert!(!bad_confirmed, "invalid proof must NOT confirm delivery");
     }
 
     #[test]
