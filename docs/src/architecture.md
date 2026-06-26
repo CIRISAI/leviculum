@@ -40,14 +40,14 @@ injected `Clock`/`Storage`/`Interface` traits that make this portable.
 
 ```
                      ┌─────────────────────────────────┐
-                     │         reticulum-core           │
-                     │                                  │
-  handle_packet() ──►│  NodeCore<R, C, S>               │──► TickOutput {
-  (iface_id, data)   │    ├── Transport (routing)       │      actions: Vec<Action>,
-                     │    ├── Links + Channels           │      events: Vec<NodeEvent>,
-  handle_timeout() ─►│    └── Destinations              │    }
-                     │                                  │
-  next_deadline() ──►│  Returns: Option<u64>            │
+                     │         reticulum-core          │
+                     │                                 │
+  handle_packet() ──►│  NodeCore<R, C, S>              │──► TickOutput {
+  (iface_id, data)   │    ├── Transport (routing)      │      actions: Vec<Action>,
+                     │    ├── Links + Channels         │      events: Vec<NodeEvent>,
+  handle_timeout() ─►│    └── Destinations             │    }
+                     │                                 │
+  next_deadline() ──►│  Returns: Option<u64>           │
                      └─────────────────────────────────┘
 
   Action::SendPacket { iface, data }     — send to one interface
