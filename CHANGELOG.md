@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1+ciris.1] - 2026-06-26
+
+### Added
+
+Runtime hot-plug for channel-backed RNode interfaces:
+`ReticulumNode::spawn_rnode_channel_interface(config) -> RNodeChannelHandle`
+attaches a radio over a host-supplied byte channel to an **already-running**
+node, returning a lifecycle handle — **hold it to keep the radio attached,
+drop it (or call `.detach()`) to tear the interface down** cleanly without
+rebuilding the node. This is the counterpart to the construction-time
+`ReticulumNodeBuilder::add_rnode_channel_interface` and is what
+`CIRISEdge` wraps for `PyEdge.add_rnode_channel_interface` (attach/detach a
+radio at any point during the agent's lifetime, including
+detach-and-replace and "not present at startup, plugged in later").
+
+New public types: `RNodeChannelConfig` (radio + transport params; the node
+assigns the id/name) and `RNodeChannelHandle` (the drop-to-detach lifecycle
+handle). The internal `InterfaceHandle` stays internal — its I/O channels
+must live in the event loop for the interface to route, so the lifecycle
+token is a small control handle rather than the raw handle. (Leviculum #19
+follow-up; consumer: CIRISEdge#219 / v7.2.0.)
+
 ## [0.8.0+ciris.1] - 2026-06-25
 
 CIRIS fork cut on top of upstream 0.7.0. Carries the CIRIS-only additions
