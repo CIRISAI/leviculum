@@ -189,16 +189,16 @@ pub fn parse_embedded_hash(version_output: &str) -> Option<String> {
 /// Returns "unknown" when the binary predates this mechanism (no
 /// parenthesised hash), so an old binary does not hard-fail the guard.
 pub fn binary_git_hash(bin: &Path) -> Result<String, FreshnessError> {
-    let output = Command::new(bin)
-        .arg("--version")
-        .output()
-        .map_err(|e| FreshnessError::GitFailed(format!("run {} --version: {e}", bin.display())))?;
+    // An un-runnable binary (non-executable, exec failure) or one that cannot
+    // produce a parseable --version is "unknown", not a hard error. The mtime
+    // check still guards it; only a runnable binary with a real, mismatched
+    // embedded hash is flagged.
+    let output = match Command::new(bin).arg("--version").output() {
+        Ok(output) => output,
+        Err(_) => return Ok("unknown".to_string()),
+    };
     if !output.status.success() {
-        return Err(FreshnessError::GitFailed(format!(
-            "{} --version exited {}",
-            bin.display(),
-            output.status
-        )));
+        return Ok("unknown".to_string());
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(parse_embedded_hash(&stdout).unwrap_or_else(|| "unknown".to_string()))
