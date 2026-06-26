@@ -12,7 +12,7 @@ use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::rnode;
 use leviculum_core::transport::InterfaceId;
 use rand_core::RngCore;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
@@ -157,33 +157,62 @@ const FLOW_CONTROL_QUEUE_LIMIT: usize = 64;
 // Configuration (includes detection)
 // ---------------------------------------------------------------------------
 
-/// Open a serial port, detect the RNode, validate firmware, and configure radio.
-///
-/// Sequence matches Python RNodeInterface.configure_device():
-/// 1. Open serial 115200/8N1
-/// 2. Sleep 2s (device settle)
-/// 3. Detect + validate firmware >= 1.52
-/// 4. Send config commands: frequency, bandwidth, txpower, sf, cr, [st_alock], [lt_alock], radio ON
-/// 5. Sleep 250ms, read confirmation frames 250ms
-/// 6. Validate: frequency within 100 Hz, others exact match
-/// 7. Sleep 300ms
+/// Open + configure a serial RNode in one call. Retained for the hardware
+/// smoke test; the production path uses [`open_serial_port`] +
+/// [`configure_stream`] separately via the reconnect loop.
+#[cfg(test)]
 async fn configure_rnode(
     port_path: &str,
     radio: &RadioParams,
 ) -> Result<(tokio_serial::SerialStream, RNodeDetectResult), RNodeError> {
+    let mut port = open_serial_port(port_path).await?;
+    let detect_result = configure_stream(&mut port, radio, port_path).await?;
+    Ok((port, detect_result))
+}
+
+/// Open the serial port (115200/8N1, no flow control) and wait for the device
+/// to settle. Serial-specific: opening the port toggles DTR, which reboots many
+/// RNode devices, hence the settle delay before any protocol I/O.
+async fn open_serial_port(port_path: &str) -> Result<tokio_serial::SerialStream, RNodeError> {
     let builder = tokio_serial::new(port_path, SERIAL_BAUD_RATE)
         .data_bits(tokio_serial::DataBits::Eight)
         .stop_bits(tokio_serial::StopBits::One)
         .parity(tokio_serial::Parity::None)
         .flow_control(tokio_serial::FlowControl::None);
 
-    let mut port = tokio_serial::SerialStream::open(&builder)?;
+    let port = tokio_serial::SerialStream::open(&builder)?;
 
-    // Wait for device to settle
+    // Wait for device to settle (reboot-on-open)
     tokio::time::sleep(DEVICE_SETTLE).await;
 
+    Ok(port)
+}
+
+/// Detect the RNode, validate firmware, configure the radio, and confirm —
+/// over an already-open, settled byte channel.
+///
+/// Carrier-agnostic: works on any `AsyncRead + AsyncWrite` stream, whether a
+/// `tokio_serial::SerialStream` or a host-supplied channel (USB-CDC, BLE GATT,
+/// mock pipe). The far end speaks RNode KISS regardless of substrate.
+///
+/// Sequence matches Python `RNodeInterface.configure_device()` from the detect
+/// step onward (the port-open + device-settle step is the caller's, since it is
+/// substrate-specific):
+/// 1. Detect + validate firmware >= 1.52
+/// 2. Send config commands: frequency, bandwidth, txpower, sf, cr, [st_alock], [lt_alock], radio ON
+/// 3. Sleep 250ms, read confirmation frames
+/// 4. Validate: frequency within 100 Hz, others exact match
+/// 5. Sleep 300ms
+async fn configure_stream<S>(
+    port: &mut S,
+    radio: &RadioParams,
+    name: &str,
+) -> Result<RNodeDetectResult, RNodeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // --- Detection phase ---
-    let detect_result = detect_on_port(&mut port).await?;
+    let detect_result = detect_on_port(port).await?;
 
     // Validate firmware version
     if let Some((major, minor)) = detect_result.firmware_version {
@@ -208,27 +237,30 @@ async fn configure_rnode(
         radio.cr,
     )
     .map_err(|e| RNodeError::RadioMismatch(e.to_string()))?;
-    send_radio_config(&mut port, radio).await?;
+    send_radio_config(port, radio).await?;
 
     // Wait for device to process configuration
     tokio::time::sleep(CONFIG_PROCESS_WAIT).await;
 
     // Read and validate confirmation frames
-    validate_radio_config(&mut port, radio, port_path).await?;
+    validate_radio_config(port, radio, name).await?;
 
     // Final settle
     tokio::time::sleep(FINAL_SETTLE).await;
 
-    Ok((port, detect_result))
+    Ok(detect_result)
 }
 
 /// Read KISS frames from the serial port until the deadline, calling `handler`
 /// for each successfully deframed frame.
-async fn read_frames_until_deadline(
-    port: &mut tokio_serial::SerialStream,
+async fn read_frames_until_deadline<S>(
+    port: &mut S,
     timeout: Duration,
     mut handler: impl FnMut(u8, &[u8]),
-) -> Result<(), RNodeError> {
+) -> Result<(), RNodeError>
+where
+    S: AsyncRead + Unpin,
+{
     let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
     let mut buf = [0u8; SERIAL_READ_BUF];
     let deadline = tokio::time::Instant::now() + timeout;
@@ -264,9 +296,10 @@ async fn read_frames_until_deadline(
 }
 
 /// Send detect query and parse response frames from an open port.
-async fn detect_on_port(
-    port: &mut tokio_serial::SerialStream,
-) -> Result<RNodeDetectResult, RNodeError> {
+async fn detect_on_port<S>(port: &mut S) -> Result<RNodeDetectResult, RNodeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let query = rnode::build_detect_query();
     port.write_all(&query).await?;
 
@@ -302,10 +335,10 @@ async fn detect_on_port(
 }
 
 /// Send radio configuration commands to the RNode.
-async fn send_radio_config(
-    port: &mut tokio_serial::SerialStream,
-    radio: &RadioParams,
-) -> Result<(), RNodeError> {
+async fn send_radio_config<S>(port: &mut S, radio: &RadioParams) -> Result<(), RNodeError>
+where
+    S: AsyncWrite + Unpin,
+{
     let mut config_bytes = Vec::with_capacity(64);
     config_bytes.extend_from_slice(&rnode::build_set_frequency(radio.frequency));
     config_bytes.extend_from_slice(&rnode::build_set_bandwidth(radio.bandwidth));
@@ -328,11 +361,14 @@ async fn send_radio_config(
 }
 
 /// Read confirmation frames and validate they match the requested config.
-async fn validate_radio_config(
-    port: &mut tokio_serial::SerialStream,
+async fn validate_radio_config<S>(
+    port: &mut S,
     radio: &RadioParams,
     name: &str,
-) -> Result<(), RNodeError> {
+) -> Result<(), RNodeError>
+where
+    S: AsyncRead + Unpin,
+{
     let mut confirmed_freq: Option<u32> = None;
     let mut confirmed_bw: Option<u32> = None;
     let mut confirmed_txp: Option<u8> = None;
@@ -813,27 +849,57 @@ where
 // Reconnect wrapper
 // ---------------------------------------------------------------------------
 
-/// Reconnect loop: configure → I/O → on disconnect → wait → retry.
-async fn rnode_reconnect_task(
-    config: RNodeInterfaceConfig,
+/// Runtime parameters for the reconnect loop, independent of how the byte
+/// channel is obtained (serial path vs. host-supplied channel factory).
+struct RNodeReconnectCtx {
+    id: InterfaceId,
+    name: String,
+    radio: RadioParams,
+    flow_control: bool,
+    reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    jitter_max_ms: u64,
+}
+
+/// Reconnect loop: open channel → configure → I/O → on disconnect → wait → retry.
+///
+/// Carrier-agnostic: `connect` yields a fresh, opened (but unconfigured) byte
+/// channel each attempt — a serial port for the path-based interface, or a
+/// host-supplied duplex channel for [`spawn_rnode_channel_interface`]. The loop
+/// runs detect/configure/validate on it via [`configure_stream`], so the
+/// lifecycle is identical regardless of substrate.
+async fn rnode_reconnect_task<S, C, Fut>(
+    ctx: RNodeReconnectCtx,
+    connect: C,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
-) {
-    let radio = config.radio_params();
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: Fn() -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = Result<S, RNodeError>> + Send,
+{
+    let radio = &ctx.radio;
     let bitrate_bps = rnode::compute_bitrate(radio.sf, radio.cr, radio.bandwidth);
-    let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.bandwidth);
     tracing::debug!(
         "{}: bitrate={} bps, min_spacing={}ms, jitter_max={}ms (airtime-based)",
-        config.name,
+        ctx.name,
         bitrate_bps,
         rnode::MIN_SPACING_MS,
-        jitter_max_ms,
+        ctx.jitter_max_ms,
     );
     let mut has_connected_before = false;
 
     loop {
-        match configure_rnode(&config.port_path, &radio).await {
+        // Open the channel, then configure it. Combined so either step's error
+        // routes through the same reconnect-retry path.
+        let opened = async {
+            let mut port = connect().await?;
+            let detect = configure_stream(&mut port, radio, &ctx.name).await?;
+            Ok::<_, RNodeError>((port, detect))
+        }
+        .await;
+
+        match opened {
             Ok((port, detect)) => {
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
@@ -841,7 +907,7 @@ async fn rnode_reconnect_task(
                 if let Some((major, minor)) = detect.firmware_version {
                     tracing::info!(
                         "{}: configured (FW {}.{}, freq={} Hz, bw={} Hz, sf={}, cr={}, txp={} dBm)",
-                        config.name,
+                        ctx.name,
                         major,
                         minor,
                         radio.frequency,
@@ -854,37 +920,37 @@ async fn rnode_reconnect_task(
 
                 // Notify driver about reconnection so it can re-announce
                 if is_reconnect {
-                    if let Some(ref notify) = config.reconnect_notify {
-                        if let Err(e) = notify.try_send(config.id) {
-                            tracing::warn!("{}: reconnect notify failed: {}", config.name, e);
+                    if let Some(ref notify) = ctx.reconnect_notify {
+                        if let Err(e) = notify.try_send(ctx.id) {
+                            tracing::warn!("{}: reconnect notify failed: {}", ctx.name, e);
                         }
                     }
                 }
 
                 outgoing_rx = rnode_io_task(
-                    config.name.clone(),
+                    ctx.name.clone(),
                     port,
                     incoming_tx.clone(),
                     outgoing_rx,
                     Arc::clone(&counters),
-                    config.flow_control,
-                    jitter_max_ms,
+                    ctx.flow_control,
+                    ctx.jitter_max_ms,
                     radio.bandwidth,
                     radio.sf,
                     radio.cr,
                 )
                 .await;
 
-                tracing::warn!("{}: disconnected", config.name);
+                tracing::warn!("{}: disconnected", ctx.name);
             }
             Err(e) => {
-                tracing::warn!("{}: configuration failed: {}", config.name, e);
+                tracing::warn!("{}: configuration failed: {}", ctx.name, e);
             }
         }
 
         // Check if event loop shut down
         if incoming_tx.is_closed() {
-            tracing::debug!("{}: event loop shut down, stopping reconnect", config.name);
+            tracing::debug!("{}: event loop shut down, stopping reconnect", ctx.name);
             return;
         }
 
@@ -893,25 +959,184 @@ async fn rnode_reconnect_task(
 }
 
 // ---------------------------------------------------------------------------
+// Custom byte-channel factory (phone-attached radios)
+// ---------------------------------------------------------------------------
+
+/// The two boxed halves of a duplex byte channel, as yielded by an
+/// [`RNodeChannelFactory`]. Separate read/write halves rather than a single
+/// `AsyncRead + AsyncWrite` object because a trait object can name only one
+/// non-marker trait; the interface re-joins them with [`tokio::io::join`].
+pub type RNodeChannelHalves = (
+    Box<dyn AsyncRead + Send + Unpin>,
+    Box<dyn AsyncWrite + Send + Unpin>,
+);
+
+/// The future returned by [`RNodeChannelFactory::open`]: resolves to a fresh
+/// pair of channel halves, or a boxed error.
+pub type RNodeChannelOpenFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<RNodeChannelHalves, Box<dyn std::error::Error + Send + Sync>>,
+            > + Send,
+    >,
+>;
+
+/// A factory the reconnect loop calls to obtain a fresh duplex byte channel to
+/// the RNode firmware.
+///
+/// Lets a host application supply the radio I/O over any substrate — USB-CDC,
+/// BLE GATT (notify characteristic for read + write characteristic for write),
+/// BT-Classic SPP, or an in-process mock pipe — on platforms where leviculum
+/// never sees `/dev/ttyACM*` and cannot `open()` a serial path (Android, iOS).
+/// The far end still speaks RNode KISS; leviculum still drives
+/// detection/configuration/lifecycle. `open` is called once per (re)connection
+/// attempt and should return a freshly-established channel each time.
+pub trait RNodeChannelFactory: Send + Sync + 'static {
+    /// Open a fresh duplex byte channel to the radio.
+    fn open(&self) -> RNodeChannelOpenFuture;
+}
+
+/// Configuration for spawning an RNode interface over a host-supplied byte
+/// channel (see [`RNodeChannelFactory`]). Mirrors [`RNodeInterfaceConfig`] but
+/// replaces `port_path` with a `channel_factory`.
+pub(crate) struct RNodeChannelInterfaceConfig {
+    pub id: InterfaceId,
+    pub name: String,
+    pub channel_factory: Arc<dyn RNodeChannelFactory>,
+    pub frequency: u32,
+    pub bandwidth: u32,
+    pub tx_power: u8,
+    pub sf: u8,
+    pub cr: u8,
+    pub st_alock: Option<u16>,
+    pub lt_alock: Option<u16>,
+    pub flow_control: bool,
+    pub buffer_size: usize,
+    pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+}
+
+impl RNodeChannelInterfaceConfig {
+    fn radio_params(&self) -> RadioParams {
+        RadioParams {
+            frequency: self.frequency,
+            bandwidth: self.bandwidth,
+            tx_power: self.tx_power,
+            sf: self.sf,
+            cr: self.cr,
+            st_alock: self.st_alock,
+            lt_alock: self.lt_alock,
+        }
+    }
+}
+
+/// Radio + transport parameters for a channel-backed RNode interface.
+///
+/// Used two ways:
+/// - construction-time, built from
+///   [`ReticulumNodeBuilder::add_rnode_channel_interface`](crate::driver::ReticulumNodeBuilder::add_rnode_channel_interface);
+/// - runtime, passed to
+///   [`ReticulumNode::spawn_rnode_channel_interface`](crate::driver::ReticulumNode::spawn_rnode_channel_interface)
+///   to hot-plug a radio after the node is running.
+///
+/// The node assigns the `InterfaceId` and name; this config carries only the
+/// caller-relevant fields. `frequency`/`bandwidth` are Hz, `tx_power` is dBm.
+pub struct RNodeChannelConfig {
+    pub factory: Arc<dyn RNodeChannelFactory>,
+    pub frequency: u32,
+    pub bandwidth: u32,
+    pub tx_power: u8,
+    pub sf: u8,
+    pub cr: u8,
+    pub st_alock: Option<u16>,
+    pub lt_alock: Option<u16>,
+    pub flow_control: bool,
+    pub buffer_size: usize,
+}
+
+/// Lifecycle handle for a runtime-attached channel-backed RNode interface,
+/// returned by
+/// [`ReticulumNode::spawn_rnode_channel_interface`](crate::driver::ReticulumNode::spawn_rnode_channel_interface).
+///
+/// **Hold it to keep the radio attached; drop it to detach.** Dropping (or
+/// calling [`detach`](Self::detach)) signals the interface task to stop, which
+/// closes its channel and makes the node's event loop tear the interface down
+/// and remove it from routing — cleanly, without rebuilding the node.
+///
+/// (The interface's I/O channels live inside the node's event loop, which is
+/// why this is a small control handle rather than the internal
+/// `InterfaceHandle`: the latter's channels must be owned by the loop for the
+/// interface to route at all.)
+pub struct RNodeChannelHandle {
+    id: InterfaceId,
+    // Dropping this Sender resolves the task's shutdown receiver, which exits
+    // the reconnect loop -> closes the incoming channel -> event loop detaches.
+    _shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+impl RNodeChannelHandle {
+    pub(crate) fn new(id: InterfaceId, shutdown: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            id,
+            _shutdown: shutdown,
+        }
+    }
+
+    /// The id the node assigned to this interface.
+    pub fn id(&self) -> InterfaceId {
+        self.id
+    }
+
+    /// Detach the interface now. Equivalent to dropping the handle; provided as
+    /// an explicit, self-documenting call for host bindings.
+    pub fn detach(self) {}
+}
+
+// ---------------------------------------------------------------------------
 // Spawn
 // ---------------------------------------------------------------------------
 
-/// Spawn a complete RNode interface with reconnection support.
-///
-/// Creates channels + counters, spawns the reconnect task, and returns an
-/// `InterfaceHandle` for the event loop.
-pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHandle {
-    let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
-    let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
+/// Wire up channels + counters, spawn the reconnect task with the given
+/// connector, and return an `InterfaceHandle`. Shared by both the serial
+/// (`spawn_rnode_interface`) and channel (`spawn_rnode_channel_interface`)
+/// entry points.
+fn spawn_rnode_with_connector<S, C, Fut>(
+    ctx: RNodeReconnectCtx,
+    buffer_size: usize,
+    connect: C,
+    shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> InterfaceHandle
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<S, RNodeError>> + Send,
+{
+    let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
+    let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
 
-    let id = config.id;
-    let name = config.name.clone();
+    let id = ctx.id;
+    let name = ctx.name.clone();
     let task_counters = Arc::clone(&counters);
-    let bitrate = rnode::compute_bitrate(config.sf, config.cr, config.bandwidth);
+    let bitrate = rnode::compute_bitrate(ctx.radio.sf, ctx.radio.cr, ctx.radio.bandwidth);
 
     tokio::spawn(async move {
-        rnode_reconnect_task(config, incoming_tx, outgoing_rx, task_counters).await;
+        let run = rnode_reconnect_task(ctx, connect, incoming_tx, outgoing_rx, task_counters);
+        match shutdown {
+            // Runtime-attached interface: stop promptly when the caller drops
+            // its RNodeChannelHandle (the Sender drops, this resolves). The
+            // select drops `run`, cancelling the in-flight configure/IO and the
+            // reconnect sleeps; the task then ends and its incoming channel
+            // closes, which the event loop turns into a detach.
+            Some(sd) => {
+                tokio::select! {
+                    _ = sd => {}
+                    _ = run => {}
+                }
+            }
+            // Construction-time interface: lives until the event loop drops the
+            // handle (closing the incoming channel ends the reconnect loop).
+            None => run.await,
+        }
     });
 
     InterfaceHandle {
@@ -927,14 +1152,95 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
         outgoing: outgoing_tx,
         counters,
         credit: None,
-        // RNode serial-port readiness is async (port open + firmware
-        // probe + radio config) but is currently outside the scope of
+        // RNode readiness is async (channel open + firmware probe + radio
+        // config) but is currently outside the scope of
         // wait_for_interface_ready (TCP-client race is the bug we
         // fixed in this batch).  Pre-signal so the API doesn't block
         // on RNode interfaces; future work can convert this to a
-        // post-port-open signal if needed.
+        // post-open signal if needed.
         ready: super::ReadySignal::ready_immediate(),
     }
+}
+
+fn reconnect_ctx_from_radio(
+    id: InterfaceId,
+    name: String,
+    radio: RadioParams,
+    flow_control: bool,
+    reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+) -> RNodeReconnectCtx {
+    let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.bandwidth);
+    RNodeReconnectCtx {
+        id,
+        name,
+        radio,
+        flow_control,
+        reconnect_notify,
+        jitter_max_ms,
+    }
+}
+
+/// Spawn a complete RNode interface over a serial port, with reconnection.
+///
+/// Creates channels + counters, spawns the reconnect task, and returns an
+/// `InterfaceHandle` for the event loop. Each (re)connection opens the serial
+/// port fresh via [`open_serial_port`].
+pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHandle {
+    let ctx = reconnect_ctx_from_radio(
+        config.id,
+        config.name.clone(),
+        config.radio_params(),
+        config.flow_control,
+        config.reconnect_notify,
+    );
+    let buffer_size = config.buffer_size;
+    let port_path = config.port_path;
+    spawn_rnode_with_connector(
+        ctx,
+        buffer_size,
+        move || {
+            let path = port_path.clone();
+            async move { open_serial_port(&path).await }
+        },
+        None,
+    )
+}
+
+/// Spawn a complete RNode interface over a host-supplied byte channel, with
+/// reconnection. The lifecycle (detect → configure → online → I/O →
+/// reconnect-on-drop) is identical to [`spawn_rnode_interface`]; only the
+/// transport differs. Each (re)connection calls
+/// [`RNodeChannelFactory::open`] for a fresh duplex channel.
+pub(crate) fn spawn_rnode_channel_interface(
+    config: RNodeChannelInterfaceConfig,
+    shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> InterfaceHandle {
+    let ctx = reconnect_ctx_from_radio(
+        config.id,
+        config.name.clone(),
+        config.radio_params(),
+        config.flow_control,
+        config.reconnect_notify,
+    );
+    let buffer_size = config.buffer_size;
+    let factory = config.channel_factory;
+    spawn_rnode_with_connector(
+        ctx,
+        buffer_size,
+        move || {
+            let factory = Arc::clone(&factory);
+            async move {
+                let (read_half, write_half) = factory
+                    .open()
+                    .await
+                    .map_err(|e| RNodeError::SerialPort(e.to_string()))?;
+                // Re-join the two boxed halves into one AsyncRead + AsyncWrite
+                // stream for the carrier-agnostic configure/IO path.
+                Ok(tokio::io::join(read_half, write_half))
+            }
+        },
+        shutdown,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -944,6 +1250,275 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In-process RNode firmware stub over one half of a `tokio::io::duplex`
+    /// pair. Answers the detect probe (so firmware validation passes) and echoes
+    /// each radio-config command back as its confirmation. When it receives the
+    /// first outbound `CMD_DATA` from the interface (proving the I/O phase is
+    /// live) it records the payload and injects one inbound data frame in reply
+    /// — injecting earlier would have it swallowed by the config-validation
+    /// read window, which ignores data frames.
+    async fn rnode_firmware_stub(
+        mut peer: tokio::io::DuplexStream,
+        inbound: Vec<u8>,
+        got_outbound: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) {
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut buf = [0u8; 512];
+        let mut injected = false;
+        // kiss::frame clears its output each call, so accumulate via a scratch.
+        let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
+            let mut one = Vec::new();
+            kiss::frame(cmd, payload, &mut one);
+            reply.extend_from_slice(&one);
+        };
+        loop {
+            let n = match peer.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let mut reply: Vec<u8> = Vec::new();
+            for f in deframer.process(&buf[..n]) {
+                if let KissDeframeResult::Frame { command, payload } = f {
+                    match command {
+                        rnode::CMD_DETECT => {
+                            // Answer the probe: detected + firmware >= required.
+                            push(&mut reply, rnode::CMD_DETECT, &[rnode::DETECT_RESP]);
+                            push(
+                                &mut reply,
+                                rnode::CMD_FW_VERSION,
+                                &[rnode::REQUIRED_FW_MAJ, rnode::REQUIRED_FW_MIN],
+                            );
+                            push(&mut reply, rnode::CMD_PLATFORM, &[rnode::PLATFORM_ESP32]);
+                            push(&mut reply, rnode::CMD_MCU, &[0x00]);
+                        }
+                        rnode::CMD_FREQUENCY
+                        | rnode::CMD_BANDWIDTH
+                        | rnode::CMD_TXPOWER
+                        | rnode::CMD_SF
+                        | rnode::CMD_CR
+                        | rnode::CMD_RADIO_STATE => {
+                            // Echo the requested value back as confirmation.
+                            push(&mut reply, command, &payload);
+                        }
+                        rnode::CMD_DATA => {
+                            let _ = got_outbound.try_send(payload.to_vec());
+                            if !injected {
+                                injected = true;
+                                push(&mut reply, rnode::CMD_DATA, &inbound);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !reply.is_empty() && peer.write_all(&reply).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    // #19: a host-supplied byte channel drives the full RNode lifecycle —
+    // detect → configure → online → outbound frame → inbound frame — with no
+    // serial port, via spawn_rnode_channel_interface + RNodeChannelFactory.
+    #[tokio::test]
+    async fn test_rnode_channel_interface_lifecycle() {
+        // The factory hands leviculum one (split) half of an in-memory duplex;
+        // the firmware stub owns the other half.
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(port);
+        let halves: std::sync::Mutex<Option<RNodeChannelHalves>> = std::sync::Mutex::new(Some((
+            Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
+            Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        )));
+
+        struct MockFactory(std::sync::Mutex<Option<RNodeChannelHalves>>);
+        impl RNodeChannelFactory for MockFactory {
+            fn open(&self) -> RNodeChannelOpenFuture {
+                let taken = self.0.lock().unwrap().take();
+                Box::pin(async move { taken.ok_or_else(|| "channel already opened".into()) })
+            }
+        }
+
+        let (got_tx, mut got_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let stub = tokio::spawn(async move {
+            rnode_firmware_stub(peer, b"inbound-over-channel".to_vec(), got_tx).await;
+        });
+
+        let mut handle = spawn_rnode_channel_interface(
+            RNodeChannelInterfaceConfig {
+                id: InterfaceId(0),
+                name: "rnode_channel_test".to_string(),
+                channel_factory: Arc::new(MockFactory(halves)),
+                frequency: 868_000_000,
+                bandwidth: 125_000,
+                tx_power: 17,
+                sf: 7,
+                cr: 5,
+                st_alock: None,
+                lt_alock: None,
+                flow_control: false,
+                buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
+                reconnect_notify: None,
+            },
+            None,
+        );
+
+        // Bitrate is computed at spawn from the radio params.
+        assert!(handle.info.bitrate.is_some());
+
+        // Queue an outbound packet. Once detect+configure complete and the I/O
+        // phase begins, it must traverse the channel to the firmware stub.
+        handle
+            .outgoing
+            .send(OutgoingPacket {
+                data: b"outbound-over-channel".to_vec(),
+                high_priority: false,
+            })
+            .await
+            .expect("send to interface");
+
+        // The stub records the outbound payload (proves detect → configure →
+        // online completed over the channel) and injects an inbound frame in
+        // reply, which must surface on the interface's incoming channel.
+        let outbound = tokio::time::timeout(Duration::from_secs(8), got_rx.recv())
+            .await
+            .expect("outbound CMD_DATA must reach the stub within 8s (lifecycle reached online)")
+            .expect("got_outbound channel open");
+        assert_eq!(outbound, b"outbound-over-channel");
+
+        let incoming = tokio::time::timeout(Duration::from_secs(8), handle.incoming.recv())
+            .await
+            .expect("inbound packet must arrive within 8s")
+            .expect("incoming channel open");
+        assert_eq!(incoming.data, b"inbound-over-channel");
+
+        stub.abort();
+    }
+
+    /// Minimal firmware stub that answers detect + echoes config confirmations,
+    /// signals once the radio is switched on (`configured`), and signals again
+    /// when the channel closes (`closed`) — i.e. when the interface task is torn
+    /// down. Used by the runtime attach/detach test.
+    async fn rnode_firmware_stub_signals(
+        mut peer: tokio::io::DuplexStream,
+        configured: tokio::sync::mpsc::Sender<()>,
+        closed: tokio::sync::mpsc::Sender<()>,
+    ) {
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut buf = [0u8; 512];
+        let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
+            let mut one = Vec::new();
+            kiss::frame(cmd, payload, &mut one);
+            reply.extend_from_slice(&one);
+        };
+        loop {
+            let n = match peer.read(&mut buf).await {
+                Ok(0) | Err(_) => {
+                    let _ = closed.try_send(());
+                    return;
+                }
+                Ok(n) => n,
+            };
+            let mut reply: Vec<u8> = Vec::new();
+            for f in deframer.process(&buf[..n]) {
+                if let KissDeframeResult::Frame { command, payload } = f {
+                    match command {
+                        rnode::CMD_DETECT => {
+                            push(&mut reply, rnode::CMD_DETECT, &[rnode::DETECT_RESP]);
+                            push(
+                                &mut reply,
+                                rnode::CMD_FW_VERSION,
+                                &[rnode::REQUIRED_FW_MAJ, rnode::REQUIRED_FW_MIN],
+                            );
+                            push(&mut reply, rnode::CMD_PLATFORM, &[rnode::PLATFORM_ESP32]);
+                            push(&mut reply, rnode::CMD_MCU, &[0x00]);
+                        }
+                        rnode::CMD_FREQUENCY
+                        | rnode::CMD_BANDWIDTH
+                        | rnode::CMD_TXPOWER
+                        | rnode::CMD_SF
+                        | rnode::CMD_CR => push(&mut reply, command, &payload),
+                        rnode::CMD_RADIO_STATE => {
+                            push(&mut reply, command, &payload);
+                            let _ = configured.try_send(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !reply.is_empty() && peer.write_all(&reply).await.is_err() {
+                let _ = closed.try_send(());
+                return;
+            }
+        }
+    }
+
+    // #19 follow-up: attach a channel-backed RNode interface to a RUNNING node
+    // at runtime (hot-plug), then detach it by dropping the handle.
+    #[tokio::test]
+    async fn test_runtime_attach_detach_rnode_channel() {
+        use crate::driver::ReticulumNodeBuilder;
+
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(true)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync");
+        node.start().await.expect("start");
+
+        // Wire a mock radio over an in-memory duplex.
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(port);
+        let halves: std::sync::Mutex<Option<RNodeChannelHalves>> = std::sync::Mutex::new(Some((
+            Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
+            Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        )));
+        struct MockFactory(std::sync::Mutex<Option<RNodeChannelHalves>>);
+        impl RNodeChannelFactory for MockFactory {
+            fn open(&self) -> RNodeChannelOpenFuture {
+                let taken = self.0.lock().unwrap().take();
+                Box::pin(async move { taken.ok_or_else(|| "channel already opened".into()) })
+            }
+        }
+
+        let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let stub = tokio::spawn(rnode_firmware_stub_signals(peer, cfg_tx, closed_tx));
+
+        // Hot-plug: attach the radio to the already-running node.
+        let handle = node
+            .spawn_rnode_channel_interface(RNodeChannelConfig {
+                factory: Arc::new(MockFactory(halves)),
+                frequency: 868_000_000,
+                bandwidth: 125_000,
+                tx_power: 17,
+                sf: 7,
+                cr: 5,
+                st_alock: None,
+                lt_alock: None,
+                flow_control: false,
+                buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
+            })
+            .expect("attach must succeed on a running node");
+
+        // The interface ran its detect → configure lifecycle over the channel.
+        tokio::time::timeout(Duration::from_secs(8), cfg_rx.recv())
+            .await
+            .expect("interface must reach configured within 8s (runtime attach worked)")
+            .expect("cfg channel open");
+
+        // Detach by dropping the handle: the task stops and the channel closes.
+        handle.detach();
+        tokio::time::timeout(Duration::from_secs(8), closed_rx.recv())
+            .await
+            .expect("channel must close within 8s of dropping the handle (detach worked)")
+            .expect("closed channel open");
+
+        stub.abort();
+        node.stop().await.expect("stop");
+    }
 
     #[tokio::test]
     #[ignore] // Requires RNode hardware at /dev/ttyACM0

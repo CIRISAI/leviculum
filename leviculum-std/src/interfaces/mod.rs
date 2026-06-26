@@ -14,6 +14,10 @@ pub mod auto_interface;
 pub mod hdlc;
 pub(crate) mod local;
 pub(crate) mod rnode;
+pub use rnode::{
+    RNodeChannelConfig, RNodeChannelFactory, RNodeChannelHalves, RNodeChannelHandle,
+    RNodeChannelOpenFuture,
+};
 pub(crate) mod serial;
 pub(crate) mod tcp;
 pub use tcp::{disable_fault_injection, enable_fault_injection};

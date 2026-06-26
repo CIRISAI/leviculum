@@ -17,6 +17,22 @@ placeholder subcommands are removed; use `lnstest diag` or the Python
 instead. The `cp` subcommand is also removed; use the standalone `lncp`
 tool for file transfer.
 
+### Added
+
+`RNodeInterface` can be driven over a host-supplied duplex byte channel
+instead of a serial-port path, for platforms where the process never sees
+`/dev/ttyACM*` (Android USB host / BLE GATT, iOS BLE). A new
+`RNodeChannelFactory` trait yields boxed `AsyncRead`/`AsyncWrite` halves;
+`ReticulumNodeBuilder::add_rnode_channel_interface` wires one at
+construction, and `ReticulumNode::spawn_rnode_channel_interface` attaches
+one at runtime (hot-plug) returning an `RNodeChannelHandle` — hold it to
+keep the radio attached, drop it (or call `.detach()`) to tear the
+interface down cleanly without rebuilding the node. The detect → configure
+→ online → reconnect lifecycle is identical to the serial path; only the
+transport differs, and `spawn_rnode_interface` (serial) is unchanged.
+Groundwork for the BLE client role (#45) and generic byte-channel TNCs
+(#26).
+
 ## [0.7.0] - 2026-06-22
 
 ### Added

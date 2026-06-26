@@ -456,6 +456,9 @@ pub struct ReticulumNode {
     inner: Arc<Mutex<StdNodeCore>>,
     /// Interface configurations
     interfaces: Vec<InterfaceConfig>,
+    /// Channel-backed RNode interfaces (host-supplied byte channels), spawned
+    /// alongside the file-config interfaces in `initialize_interfaces`.
+    rnode_channels: Vec<crate::interfaces::rnode::RNodeChannelConfig>,
     /// Control-plane event sender, cloned into the runner's `EventSink`.
     /// `None` when built with `without_events()` (daemon-mode); the loop
     /// then never forwards `NodeEvent`s. Kept here so the channel stays open.
@@ -513,6 +516,19 @@ pub struct ReticulumNode {
     /// interface timers. Torn down via `shutdown_background()` in `Drop` so the
     /// runtime is never dropped blocking inside a host async context.
     runtime: Option<tokio::runtime::Runtime>,
+    /// Runtime interface-registration sender, cloned from the channel the event
+    /// loop consumes. `Some` once `start()` has run. Lets the node attach a
+    /// fresh interface (e.g. a hot-plugged RNode radio) while running. See
+    /// [`spawn_rnode_channel_interface`](Self::spawn_rnode_channel_interface).
+    new_iface_tx: Option<mpsc::Sender<InterfaceHandle>>,
+    /// Shared monotonic interface-id allocator (same counter the event loop and
+    /// `initialize_interfaces` use, so runtime ids never collide). `Some` once
+    /// `start()` has run.
+    iface_id_counter: Option<Arc<AtomicUsize>>,
+    /// Reconnect-notify sender handed to runtime-attached interfaces so their
+    /// re-announce-on-recovery works like config interfaces. `Some` after
+    /// `start()`.
+    reconnect_tx: Option<mpsc::Sender<InterfaceId>>,
 }
 
 impl Drop for ReticulumNode {
@@ -590,6 +606,7 @@ impl ReticulumNode {
         Self {
             inner: Arc::new(Mutex::new(core)),
             interfaces,
+            rnode_channels: Vec::new(),
             control_tx,
             data_tx,
             control_channel_capacity,
@@ -607,6 +624,9 @@ impl ReticulumNode {
             iface_online_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             runtime: None,
+            new_iface_tx: None,
+            iface_id_counter: None,
+            reconnect_tx: None,
         }
     }
 
@@ -655,6 +675,12 @@ impl ReticulumNode {
         // its InterfaceId here so the event loop can call handle_interface_up()
         // to re-announce destinations on the recovered link.
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<InterfaceId>(16);
+
+        // Retain clones so the node can attach interfaces at runtime (hot-plug),
+        // not just at construction. Used by `spawn_rnode_channel_interface`.
+        self.new_iface_tx = Some(new_iface_tx.clone());
+        self.iface_id_counter = Some(Arc::clone(&next_id));
+        self.reconnect_tx = Some(reconnect_tx.clone());
 
         // Initialize interfaces, the driver owns them, NOT NodeCore.
         // Interface init is the one fallible step after the runtime exists
@@ -1101,6 +1127,45 @@ impl ReticulumNode {
                     }
                 }
             }
+
+            // Channel-backed RNode interfaces (host-supplied byte channels:
+            // phone USB/BLE). Same lifecycle as the serial RNode path; the
+            // factory replaces the serial-port open. Ids continue past the
+            // file-config interfaces via the shared `next_id` allocator.
+            for spec in std::mem::take(&mut self.rnode_channels) {
+                let id = InterfaceId(next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                let iface_name = format!("rnode_channel_{}", id.0);
+                tracing::info!(
+                    "{}: channel-backed RNode (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm)",
+                    iface_name,
+                    spec.frequency,
+                    spec.sf,
+                    spec.bandwidth,
+                    spec.cr,
+                    spec.tx_power as i8,
+                );
+                let handle = crate::interfaces::rnode::spawn_rnode_channel_interface(
+                    crate::interfaces::rnode::RNodeChannelInterfaceConfig {
+                        id,
+                        name: iface_name,
+                        channel_factory: spec.factory,
+                        frequency: spec.frequency,
+                        bandwidth: spec.bandwidth,
+                        tx_power: spec.tx_power,
+                        sf: spec.sf,
+                        cr: spec.cr,
+                        st_alock: spec.st_alock,
+                        lt_alock: spec.lt_alock,
+                        flow_control: spec.flow_control,
+                        buffer_size: spec.buffer_size,
+                        reconnect_notify: Some(reconnect_tx.clone()),
+                    },
+                    // Construction-time interface: lives for the node's
+                    // lifetime, no caller-driven shutdown handle.
+                    None,
+                );
+                registry.register(handle);
+            }
         } // end if !is_client_mode
 
         // Connect to shared instance daemon as client
@@ -1219,6 +1284,15 @@ impl ReticulumNode {
         self.connect_instance_name = Some(name);
     }
 
+    /// Called by the builder to carry channel-backed RNode interfaces
+    /// (host-supplied byte channels) into `initialize_interfaces`.
+    pub(crate) fn set_rnode_channels(
+        &mut self,
+        specs: Vec<crate::interfaces::rnode::RNodeChannelConfig>,
+    ) {
+        self.rnode_channels = specs;
+    }
+
     /// Check if the node is running
     pub fn is_running(&self) -> bool {
         self.runner_handle
@@ -1239,6 +1313,73 @@ impl ReticulumNode {
     pub fn set_announce_control(&self, policy: Option<Box<dyn AnnounceControl>>) {
         let mut inner = self.inner.lock().unwrap();
         inner.set_announce_control(policy);
+    }
+
+    /// Attach a channel-backed RNode interface to the **running** node at
+    /// runtime, returning a lifecycle handle.
+    ///
+    /// This is the hot-plug counterpart to
+    /// [`ReticulumNodeBuilder::add_rnode_channel_interface`](crate::driver::ReticulumNodeBuilder::add_rnode_channel_interface):
+    /// the builder wires a radio at construction; this plugs one in at any point
+    /// during the node's lifetime — a USB/BLE radio that appears after startup,
+    /// or a detach-and-replace. The radio lifecycle (detect → configure →
+    /// online → reconnect) runs on the node's own runtime.
+    ///
+    /// **Hold the returned [`RNodeChannelHandle`](crate::interfaces::rnode::RNodeChannelHandle) to keep the radio attached;
+    /// drop it (or call [`RNodeChannelHandle::detach`](crate::interfaces::rnode::RNodeChannelHandle::detach)) to detach** — the
+    /// interface task stops, its channel closes, and the event loop removes the
+    /// interface from routing, cleanly, without rebuilding the node.
+    ///
+    /// The node assigns the [`InterfaceId`]. Returns [`Error::NotRunning`] if
+    /// called before [`start`](Self::start).
+    pub fn spawn_rnode_channel_interface(
+        &self,
+        config: crate::interfaces::rnode::RNodeChannelConfig,
+    ) -> Result<crate::interfaces::rnode::RNodeChannelHandle, Error> {
+        use std::sync::atomic::Ordering;
+
+        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+        let reconnect_tx = self.reconnect_tx.clone();
+
+        let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        // Spawn the interface task on the node's own runtime — an external
+        // caller (e.g. a PyO3 host thread) has no tokio context of its own.
+        let handle = {
+            let _enter = runtime.enter();
+            crate::interfaces::rnode::spawn_rnode_channel_interface(
+                crate::interfaces::rnode::RNodeChannelInterfaceConfig {
+                    id,
+                    name: format!("rnode_channel_{}", id.0),
+                    channel_factory: config.factory,
+                    frequency: config.frequency,
+                    bandwidth: config.bandwidth,
+                    tx_power: config.tx_power,
+                    sf: config.sf,
+                    cr: config.cr,
+                    st_alock: config.st_alock,
+                    lt_alock: config.lt_alock,
+                    flow_control: config.flow_control,
+                    buffer_size: config.buffer_size,
+                    reconnect_notify: reconnect_tx,
+                },
+                Some(shutdown_rx),
+            )
+        };
+
+        // Register with the running event loop (non-blocking; the loop drains
+        // this channel every iteration).
+        new_iface_tx
+            .try_send(handle)
+            .map_err(|_| Error::NotRunning)?;
+
+        Ok(crate::interfaces::rnode::RNodeChannelHandle::new(
+            id,
+            shutdown_tx,
+        ))
     }
 
     /// Connect to a remote destination

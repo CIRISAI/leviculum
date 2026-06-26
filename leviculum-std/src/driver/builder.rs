@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeCoreBuilder;
@@ -12,6 +13,9 @@ use leviculum_core::ProofStrategy;
 use crate::clock::SystemClock;
 use crate::config::{Config, InterfaceConfig};
 use crate::error::Error;
+use crate::interfaces::rnode::{
+    RNodeChannelConfig, RNodeChannelFactory, RNODE_DEFAULT_BUFFER_SIZE,
+};
 use crate::storage::Storage;
 
 use super::ReticulumNode;
@@ -38,6 +42,10 @@ pub struct ReticulumNodeBuilder {
     config_path: Option<PathBuf>,
     storage_path: Option<PathBuf>,
     interfaces: Vec<InterfaceConfig>,
+    /// Channel-backed RNode interfaces (host-supplied byte channels). Kept
+    /// separate from `interfaces` because a factory closure is not
+    /// representable in the serializable `InterfaceConfig`.
+    rnode_channels: Vec<RNodeChannelConfig>,
     corrupt_every: Option<u64>,
     /// Explicit enable_transport override (takes priority over config value)
     enable_transport_explicit: Option<bool>,
@@ -78,6 +86,7 @@ impl ReticulumNodeBuilder {
             config_path: None,
             storage_path: None,
             interfaces: Vec::new(),
+            rnode_channels: Vec::new(),
             corrupt_every: None,
             enable_transport_explicit: None,
             share_instance_explicit: None,
@@ -213,6 +222,41 @@ impl ReticulumNodeBuilder {
             coding_rate: Some(coding_rate),
             tx_power: Some(tx_power),
             ..Default::default()
+        });
+        self
+    }
+
+    /// Add an RNode interface over a host-supplied byte channel rather than a
+    /// serial port path.
+    ///
+    /// `factory` is called once per (re)connection to open a fresh duplex
+    /// channel to the RNode firmware (see [`RNodeChannelFactory`]). This is the
+    /// path for phone-attached radios — Android USB host / BLE GATT, iOS BLE —
+    /// where the process never sees `/dev/ttyACM*`. The radio lifecycle
+    /// (detect → configure → online → reconnect-on-drop) is identical to
+    /// [`add_rnode_interface`](Self::add_rnode_interface); only the transport
+    /// differs. Optional tuning (airtime limits, flow control, buffer size)
+    /// uses the driver defaults.
+    pub fn add_rnode_channel_interface(
+        mut self,
+        factory: Arc<dyn RNodeChannelFactory>,
+        frequency: u64,
+        bandwidth: u32,
+        spreading_factor: u8,
+        coding_rate: u8,
+        tx_power: i8,
+    ) -> Self {
+        self.rnode_channels.push(RNodeChannelConfig {
+            factory,
+            frequency: frequency as u32,
+            bandwidth,
+            tx_power: tx_power as u8,
+            sf: spreading_factor,
+            cr: coding_rate,
+            st_alock: None,
+            lt_alock: None,
+            flow_control: false,
+            buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
         });
         self
     }
@@ -436,6 +480,9 @@ impl ReticulumNodeBuilder {
         let mut interfaces = config.interfaces.into_values().collect::<Vec<_>>();
         interfaces.extend(self.interfaces);
 
+        // Channel-backed RNode interfaces (factory closures, not file-config).
+        let rnode_channels = self.rnode_channels;
+
         // Load or generate transport identity via FileIdentityStore
         let mut id_store = crate::file_identity_store::FileIdentityStore::new(&storage_path);
         let core_builder = if self.core_builder.identity_ref().is_none() {
@@ -500,6 +547,7 @@ impl ReticulumNodeBuilder {
         if let Some(ref name) = self.connect_instance_name {
             node.set_connect_instance(name.clone());
         }
+        node.set_rnode_channels(rnode_channels);
 
         Ok(node)
     }
