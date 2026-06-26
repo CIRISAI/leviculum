@@ -6,6 +6,7 @@
 
 - [Architecture overview](architecture.md)
 - [Interface isolation](concepts/interface-isolation.md)
+- [Bluetooth interfaces](concepts/bluetooth-interfaces.md)
 - [Python-RNS compatibility](concepts/python-rns-compatibility.md)
 - [Cryptographic identity and forward secrecy](concepts/identity-and-forward-secrecy.md)
 - [Storage and embedding](concepts/storage-and-embedding.md)
