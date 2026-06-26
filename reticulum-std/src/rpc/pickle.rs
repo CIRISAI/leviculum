@@ -639,6 +639,138 @@ mod tests {
         }
     }
 
+    // destination_data lifecycle codec round-trips (leviculum#12).
+    //
+    // Python-RNS shared-instance clients send
+    // `mp.packb({"destination_data": "used"|"retain"|"unretain",
+    //            "destination_hash": <16 bytes>})` over the RPC socket
+    // (RNS/Reticulum.py:1249-1289). Both codecs must decode it into
+    // the matching typed [`RpcRequest`] variant, and an unknown
+    // operation string must surface as an `InvalidFormat` error
+    // (Python-RNS swallows that gracefully — see issue body).
+
+    fn pickle_destination_data_request(op: &str, hash: &[u8]) -> Vec<u8> {
+        let dict = pickle_dict(vec![
+            (pickle_str_key("destination_data"), pickle_str(op)),
+            (pickle_str_key("destination_hash"), pickle_bytes(hash)),
+        ]);
+        serde_pickle::value_to_vec(&dict, Default::default()).unwrap()
+    }
+
+    fn msgpack_destination_data_request(op: &str, hash: &[u8]) -> Vec<u8> {
+        let v = rmpv::Value::Map(vec![
+            (rmpv::Value::from("destination_data"), rmpv::Value::from(op)),
+            (
+                rmpv::Value::from("destination_hash"),
+                rmpv::Value::Binary(hash.to_vec()),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &v).unwrap();
+        buf
+    }
+
+    #[test]
+    fn test_parse_destination_data_pickle_used() {
+        let hash = vec![0x11; 16];
+        let data = pickle_destination_data_request("used", &hash);
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Pickle);
+        match req {
+            RpcRequest::DestinationDataUsed { destination_hash } => {
+                assert_eq!(destination_hash, hash)
+            }
+            other => panic!("expected DestinationDataUsed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_destination_data_pickle_retain() {
+        let hash = vec![0x22; 16];
+        let data = pickle_destination_data_request("retain", &hash);
+        let (req, _) = parse_request(&data).unwrap();
+        match req {
+            RpcRequest::DestinationDataRetain { destination_hash } => {
+                assert_eq!(destination_hash, hash)
+            }
+            other => panic!("expected DestinationDataRetain, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_destination_data_pickle_unretain() {
+        let hash = vec![0x33; 16];
+        let data = pickle_destination_data_request("unretain", &hash);
+        let (req, _) = parse_request(&data).unwrap();
+        match req {
+            RpcRequest::DestinationDataUnretain { destination_hash } => {
+                assert_eq!(destination_hash, hash)
+            }
+            other => panic!("expected DestinationDataUnretain, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_destination_data_msgpack_used() {
+        // Wire-format reference: this is exactly what
+        // `RNS.Reticulum._used_destination_data` sends over the RPC
+        // socket (`mp.packb({"destination_data": "used",
+        // "destination_hash": <bytes>})`).
+        let hash = vec![0xAA; 16];
+        let data = msgpack_destination_data_request("used", &hash);
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        match req {
+            RpcRequest::DestinationDataUsed { destination_hash } => {
+                assert_eq!(destination_hash, hash)
+            }
+            other => panic!("expected DestinationDataUsed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_destination_data_msgpack_retain() {
+        let hash = vec![0xBB; 16];
+        let data = msgpack_destination_data_request("retain", &hash);
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        assert!(matches!(req, RpcRequest::DestinationDataRetain { .. }));
+    }
+
+    #[test]
+    fn test_parse_destination_data_msgpack_unretain() {
+        let hash = vec![0xCC; 16];
+        let data = msgpack_destination_data_request("unretain", &hash);
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        assert!(matches!(req, RpcRequest::DestinationDataUnretain { .. }));
+    }
+
+    #[test]
+    fn test_parse_destination_data_unknown_operation_is_error() {
+        // Python-RNS swallows an error response gracefully (see issue
+        // body). Returning `InvalidFormat` rather than panicking is
+        // the wire-safe path.
+        let hash = vec![0xDD; 16];
+        let data = pickle_destination_data_request("eject", &hash);
+        let err = parse_request(&data).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("destination_data") && msg.contains("eject"),
+            "error should call out the bad operation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_destination_data_missing_hash_is_error() {
+        let dict = pickle_dict(vec![(
+            pickle_str_key("destination_data"),
+            pickle_str("used"),
+        )]);
+        let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
+        assert!(parse_request(&data).is_err());
+    }
+
     #[test]
     fn test_serialize_response_msgpack_round_trip() {
         // str must encode as msgpack `str` and bytes as msgpack `bin` so that

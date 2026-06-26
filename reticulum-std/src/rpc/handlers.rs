@@ -3,6 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use reticulum_core::constants::TRUNCATED_HASHBYTES;
+use reticulum_core::traits::Storage as _;
 use serde_pickle::value::Value;
 
 use super::error::RpcError;
@@ -55,27 +56,40 @@ pub(super) fn handle_request(
         RpcRequest::BlackholeIdentity { .. } => pickle_bool(true),
         RpcRequest::UnblackholeIdentity { .. } => pickle_bool(true),
 
-        // destination_data lifecycle stubs.
+        // destination_data lifecycle ops (closes leviculum#12).
         //
         // Upstream Reticulum b5658c4 (2026-04-20, "Keep track of which
         // known destinations are actually in use, so irrelevant
         // destination data can be cleaned") added a known_destinations
         // GC scheme exposed via three RPC ops on the destination_data
-        // dict key: "used", "retain", "unretain".  All five upstream
-        // call sites (Identity.recall x3, Transport x2) discard the
-        // return value as of 2026-05-03 — these are pure side-effect
-        // calls.
+        // dict key: "used", "retain", "unretain". Python-RNS shared-
+        // instance clients fire these from `RNS.Reticulum._used_/
+        // _retain_/_unretain_destination_data` whenever
+        // `Identity.recall` / `Transport` touches a destination, and
+        // log `Shared instance RPC failed while setting destination
+        // data use: ...` when the daemon does not recognise the call
+        // (which is what used to happen here before the request
+        // parser landed — see `pickle.rs`'s `destination_data` arm).
         //
-        // Our Rust daemon does not maintain a known_destinations dict
-        // with last-used timestamps; destinations and paths live in
-        // different data structures with different lifetime semantics.
-        // The stubs honor the wire contract (accept the call, return
-        // pickle_bool(true)) without internal bookkeeping.  Safe iff
-        // no upstream caller starts reading the return value; revisit
-        // if that changes.
-        RpcRequest::DestinationDataUsed { .. } => pickle_bool(true),
-        RpcRequest::DestinationDataRetain { .. } => pickle_bool(true),
-        RpcRequest::DestinationDataUnretain { .. } => pickle_bool(true),
+        // Python-RNS semantics (`RNS/Identity.py:268-295`): each op
+        // mutates per-destination retention/LRU state in the daemon's
+        // `known_destinations` dict and returns `True` for a known
+        // destination, `False` otherwise. We do not yet maintain a
+        // last-used timestamp / retain flag on known destinations (our
+        // store keeps the announce-time timestamp, public key and
+        // app_data — see `reticulum_core::known_destinations::
+        // KnownDestEntry`); the minimal-correct path the upstream
+        // issue calls for is to return `True` iff we have an identity
+        // for the destination hash and `False` otherwise, so the
+        // client sees an honest known/unknown answer and the
+        // `Shared instance RPC failed` error noise disappears. The
+        // last-used timestamp + retain-pin bookkeeping is left as a
+        // follow-up; the wire contract is already satisfied.
+        RpcRequest::DestinationDataUsed { destination_hash }
+        | RpcRequest::DestinationDataRetain { destination_hash }
+        | RpcRequest::DestinationDataUnretain { destination_hash } => {
+            pickle_bool(destination_is_known(core, destination_hash))
+        }
     };
 
     serialize_response(&response, codec)
@@ -419,6 +433,21 @@ fn drop_all_via(core: &mut StdNodeCore, via_hash: &[u8]) -> Value {
         None => return pickle_int(0),
     };
     pickle_int(core.drop_all_paths_via(&hash) as i64)
+}
+
+// destination_data lifecycle helpers
+/// Is `destination_hash` a destination we already have an identity for?
+///
+/// Minimal-correct backing for the `used`/`retain`/`unretain` RPC ops
+/// (leviculum#12, see the dispatch arm above). Mirrors the
+/// `destination_hash in Identity.known_destinations` check from
+/// Python-RNS `RNS/Identity.py:268-295`. Returns `false` for short or
+/// otherwise unparseable hashes.
+fn destination_is_known(core: &StdNodeCore, destination_hash: &[u8]) -> bool {
+    match try_into_hash(destination_hash) {
+        Some(h) => core.storage().get_identity(&h).is_some(),
+        None => false,
+    }
 }
 
 // Helpers
