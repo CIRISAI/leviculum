@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0+ciris.1] - 2026-06-25
+
+CIRIS fork cut on top of upstream 0.7.0. Carries the CIRIS-only additions
+below; all are additive and default-off (behaviour is unchanged until a
+consumer opts in).
+
+### Added
+
+`RNodeInterface` can now be driven over a host-supplied duplex byte
+channel instead of a serial-port path. A new `RNodeChannelFactory` trait
+yields boxed `AsyncRead`/`AsyncWrite` halves, and
+`ReticulumNodeBuilder::add_rnode_channel_interface(factory, …)` spawns an
+RNode interface over it. The detect → configure → online → reconnect
+lifecycle is identical to the serial path; only the transport differs.
+This unblocks phone-attached LoRa radios where the process never sees
+`/dev/ttyACM*` — Android USB host / BLE GATT and iOS BLE — by letting the
+host app relay the radio bytes. The serial `spawn_rnode_interface` path is
+byte-for-byte unchanged. (Leviculum #19; consumer: CIRISEdge v7.1.0
+`PyEdge.add_rnode_channel_interface`.)
+
+`Destination::with_explicit_hash` + `Node::register_destination_at` /
+`connect_at`: index a destination by a caller-supplied 16-byte hash (e.g.
+`sha256(fed_pubkey)[..16]`) instead of the structural
+`truncated_hash(name_hash‖identity_hash)`, for byte-equal cross-transport
+addressing. Identity crypto is unaffected; the override is confined to the
+opaque link path and an explicit-hash destination can never be announced
+(`AnnounceError::ExplicitHashCannotAnnounce`), keeping the announce stream
+Python-RNS compatible. (Leviculum #16.)
+
+`AnnounceControl` trait + `Node::set_announce_control`: an optional,
+default-off per-destination announce-suppression policy consulted on every
+scheduled announce. Suppressed destinations stay routable but are never
+gossiped — for membership-privacy on group-scoped destinations. (Leviculum
+#17; offered upstream as Lew_Palm/leviculum#79.)
+
 ## [0.7.0] - 2026-06-22
 
 ### Added

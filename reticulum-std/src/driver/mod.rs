@@ -414,6 +414,9 @@ pub struct ReticulumNode {
     inner: Arc<Mutex<StdNodeCore>>,
     /// Interface configurations
     interfaces: Vec<InterfaceConfig>,
+    /// Channel-backed RNode interfaces (host-supplied byte channels), spawned
+    /// alongside the file-config interfaces in `initialize_interfaces`.
+    rnode_channels: Vec<crate::interfaces::rnode::RNodeChannelSpec>,
     /// Control-plane event sender, cloned into the runner's `EventSink`.
     /// `None` when built with `without_events()` (daemon-mode); the loop
     /// then never forwards `NodeEvent`s. Kept here so the channel stays open.
@@ -548,6 +551,7 @@ impl ReticulumNode {
         Self {
             inner: Arc::new(Mutex::new(core)),
             interfaces,
+            rnode_channels: Vec::new(),
             control_tx,
             data_tx,
             control_channel_capacity,
@@ -1054,6 +1058,42 @@ impl ReticulumNode {
                     }
                 }
             }
+
+            // Channel-backed RNode interfaces (host-supplied byte channels:
+            // phone USB/BLE). Same lifecycle as the serial RNode path; the
+            // factory replaces the serial-port open. Ids continue past the
+            // file-config interfaces via the shared `next_id` allocator.
+            for spec in std::mem::take(&mut self.rnode_channels) {
+                let id = InterfaceId(next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                let iface_name = format!("rnode_channel_{}", id.0);
+                tracing::info!(
+                    "{}: channel-backed RNode (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm)",
+                    iface_name,
+                    spec.frequency,
+                    spec.sf,
+                    spec.bandwidth,
+                    spec.cr,
+                    spec.tx_power as i8,
+                );
+                let handle = crate::interfaces::rnode::spawn_rnode_channel_interface(
+                    crate::interfaces::rnode::RNodeChannelInterfaceConfig {
+                        id,
+                        name: iface_name,
+                        channel_factory: spec.factory,
+                        frequency: spec.frequency,
+                        bandwidth: spec.bandwidth,
+                        tx_power: spec.tx_power,
+                        sf: spec.sf,
+                        cr: spec.cr,
+                        st_alock: spec.st_alock,
+                        lt_alock: spec.lt_alock,
+                        flow_control: spec.flow_control,
+                        buffer_size: spec.buffer_size,
+                        reconnect_notify: Some(reconnect_tx.clone()),
+                    },
+                );
+                registry.register(handle);
+            }
         } // end if !is_client_mode
 
         // Connect to shared instance daemon as client
@@ -1170,6 +1210,15 @@ impl ReticulumNode {
     /// Called by the builder when `connect_to_shared_instance` is set.
     pub(crate) fn set_connect_instance(&mut self, name: String) {
         self.connect_instance_name = Some(name);
+    }
+
+    /// Called by the builder to carry channel-backed RNode interfaces
+    /// (host-supplied byte channels) into `initialize_interfaces`.
+    pub(crate) fn set_rnode_channels(
+        &mut self,
+        specs: Vec<crate::interfaces::rnode::RNodeChannelSpec>,
+    ) {
+        self.rnode_channels = specs;
     }
 
     /// Check if the node is running
