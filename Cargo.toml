@@ -15,7 +15,7 @@ members = [
 exclude = ["reticulum-nrf"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0+ciris.1"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"

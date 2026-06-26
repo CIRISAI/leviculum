@@ -478,7 +478,13 @@ mod tests {
     fn version_matches_crate() {
         let (major, minor, patch) = version();
         let s = format!("{major}.{minor}.{patch}");
-        assert_eq!(s, version_string());
+        // The numeric triple is the release version; strip any semver
+        // pre-release / build-metadata suffix (e.g. a fork tag "+ciris.1").
+        let release = version_string()
+            .split(['+', '-'])
+            .next()
+            .unwrap_or(version_string());
+        assert_eq!(s, release);
     }
 
     #[test]
