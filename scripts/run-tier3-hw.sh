@@ -22,6 +22,17 @@
 # hamster hardware-watchdog freezes (proven 2026-06-15) and is gone for
 # good. The profile `required`/`exclude` lists now only document which
 # boards participate vs. get silenced; they no longer touch power.
+#
+# DEVICE-VANISH HONESTY (Garantie B). The rig boards are passed through to
+# this VM via qemu usb-host. Under sustained load the passthrough hiccups: a
+# board vanishes VM-side (USB disconnect on the VM while the physical host
+# stays stable), with a gap before udev re-attaches. In-flight LoRa tests then
+# fail with EOF / "Path not found". That is an infrastructure glitch, NEVER a
+# code regression, and must never read as RED. So each profile group runs under
+# a device watchdog; if any rig board vanishes during the window the group's
+# results are UNTRUSTED, the group is re-attached and retried ONCE. A clean
+# retry is trusted normally; a retry that vanishes again marks the group's
+# failed tests INFRA_INVALID (terminal): counted, surfaced loudly, but NOT RED.
 
 set -euo pipefail
 
@@ -153,7 +164,12 @@ fi
 # (`reticulum-integ check-freshness`, one source of truth) and abort the
 # whole run on a single clear failure rather than letting N scenarios
 # die one by one.
+# The whole build + freshness preflight is skipped in selftest mode
+# (LEVICULUM_SELFTEST=1), which exercises only the watchdog/retry/verdict
+# logic with a stubbed cargo and needs no binaries or rig (see the
+# simulated-vanish hook and the dry traces in the task).
 CACHE_TARGET=~/.cache/leviculum-ci-target
+if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
 log "[CI_HW] building integ binaries (lnsd / lns / lncp / lora-proxy)"
 RELEASE_DIR="$CACHE_TARGET/x86_64-unknown-linux-musl/release"
 find "$REPO_DIR/reticulum-cli/src" "$REPO_DIR/reticulum-proxy/src" \
@@ -176,6 +192,7 @@ if ! CARGO_TARGET_DIR="$CACHE_TARGET" "$RELEASE_DIR/reticulum-integ" check-fresh
     log "[CI_HW] FATAL: integ binaries still stale after forced rebuild — aborting run"
     echo "$(date -Iseconds) tier3 RED stale-binaries-preflight $LOG" >> "$RESULTS"
     exit 1
+fi
 fi
 
 # --- TOML helpers (python3 + tomllib) ---
@@ -241,6 +258,12 @@ PY
 #   3. <fn-name>.toml does not exist → "default".
 test_profile_for() {
     local fn="$1"
+    # Selftest seam: bucket every supplied fn under one profile so the
+    # dry traces drive a single group deterministically.
+    if [[ -n "${LEVICULUM_SELFTEST:-}" ]]; then
+        echo "${LEVICULUM_SELFTEST_PROFILE:-default}"
+        return
+    fi
     local toml="$TESTS_DIR/$fn.toml"
     if [[ ! -f "$toml" ]]; then
         echo default
@@ -482,6 +505,13 @@ flash_lnodes() {
 # Returns one test fn-name (last `::` segment) per line.  Smoke pattern
 # forwarded as positional cargo filters.
 discover_tests() {
+    # Selftest seam: the dry-trace verification supplies the fn-names
+    # directly so no rig and no `cargo test --list` is needed.
+    if [[ -n "${LEVICULUM_SELFTEST_FNS:-}" ]]; then
+        # shellcheck disable=SC2086
+        printf '%s\n' $LEVICULUM_SELFTEST_FNS | sort -u
+        return
+    fi
     local cargo_args=( -p reticulum-integ -- --include-ignored --list )
     if $SMOKE_MODE; then
         # shellcheck disable=SC2206
@@ -511,6 +541,139 @@ warn_if_fd_held() {
     done
 }
 
+# --- Device-vanish watchdog (Garantie B) ---
+#
+# The four distinct USB IDs of the five rig boards. The two T-Beams share
+# 1a86:55d4, so that ID's baseline count is 2 and a single T-Beam vanish drops
+# it to 1. Every board, including ones the active scenario silenced, counts:
+# a silenced board that vanishes and returns un-silenced can still interfere
+# with the running test, so ANY rig-board disconnect poisons the group.
+RIG_USB_IDS=( "1a86:55d4" "1209:0001" "1209:0002" "303a:1001" )
+
+# Number of currently enumerated USB devices for one vid:pid.
+rig_id_count() { lsusb -d "$1" 2>/dev/null | wc -l | tr -d ' '; }
+
+WATCHDOG_PID=""
+
+# Start a background watchdog for one group's execution window. It snapshots a
+# per-vid:pid baseline count, then polls once a second; the first time any ID's
+# count drops below its baseline it appends one line to $poison (latched per ID
+# so a long outage does not spam). Non-empty $poison after the window == a
+# rig-board vanished during the run. Pure lsusb poll: no root, no dmesg
+# privilege, robust to ttyACM renumbering (keyed by device identity, not node).
+start_device_watchdog() {
+    local poison="$1" stop="$2"
+    rm -f "$stop"
+    : > "$poison"
+    (
+        set +e
+        declare -A base reported
+        local id
+        for id in "${RIG_USB_IDS[@]}"; do
+            base[$id]=$(rig_id_count "$id")
+            reported[$id]=0
+        done
+        while [[ ! -e "$stop" ]]; do
+            for id in "${RIG_USB_IDS[@]}"; do
+                local cur
+                cur=$(rig_id_count "$id")
+                if (( cur < ${base[$id]} )) && (( reported[$id] == 0 )); then
+                    echo "vanish vid_pid=$id baseline=${base[$id]} now=$cur" >> "$poison"
+                    reported[$id]=1
+                fi
+            done
+            sleep 1
+        done
+        exit 0
+    ) &
+    WATCHDOG_PID=$!
+}
+
+# Stop the watchdog (create the stop sentinel, reap the process).
+stop_device_watchdog() {
+    local stop="$1"
+    : > "$stop"
+    if [[ -n "$WATCHDOG_PID" ]]; then
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+    fi
+    WATCHDOG_PID=""
+    rm -f "$stop"
+}
+
+# Per-vid:pid count of a profile's required boards ("vid:pid count" lines).
+profile_required_vidpid_counts() {
+    local profile="$1"
+    python3 - "$DEVICES_TOML" "$profile" <<'PY'
+import sys, tomllib
+from collections import Counter
+path, profile = sys.argv[1], sys.argv[2]
+d = tomllib.load(open(path, 'rb'))
+devices = d.get('devices', {})
+req = d['profiles'].get(profile, {}).get('required', [])
+c = Counter()
+for k in req:
+    vp = devices.get(k, {}).get('vid_pid', '')
+    if vp:
+        c[vp] += 1
+for vp, n in sorted(c.items()):
+    print(f"{vp} {n}")
+PY
+}
+
+# After a vanish, wait for the profile's required boards to re-enumerate
+# (udev lora-vm-attach restores them) before retrying the group. Bounded and
+# best-effort: on timeout we retry anyway and the runner's device-count
+# preflight skips cleanly if a board is still absent. LEVICULUM_SETTLE_TIMEOUT
+# overrides the wait (used short by the dry traces).
+settle_rig() {
+    local profile="$1"
+    local timeout="${LEVICULUM_SETTLE_TIMEOUT:-45}"
+    log "[CI_HW] settling rig for profile=$profile (up to ${timeout}s for required boards to re-attach)"
+    local waited=0 ok vp need have
+    while :; do
+        ok=1
+        while read -r vp need; do
+            [[ -n "$vp" ]] || continue
+            have=$(rig_id_count "$vp")
+            (( have >= need )) || ok=0
+        done < <(profile_required_vidpid_counts "$profile")
+        if (( ok == 1 )); then
+            log "[CI_HW] required boards present after ${waited}s"
+            sleep 2   # let udev settle the fresh nodes/properties
+            return 0
+        fi
+        if (( waited >= timeout )); then
+            log "[CI_HW] WARN: required boards not all back after ${waited}s; retrying anyway (preflight will skip if absent)"
+            return 0
+        fi
+        sleep 3
+        waited=$(( waited + 3 ))
+    done
+}
+
+# Simulated-vanish hook (test-only, no rig). LEVICULUM_SIMULATE_VANISH=<group_
+# or_test> injects ONE synthetic disconnect into the watchdog for the matching
+# group on its FIRST run, so the retry-clean (transient) path is exercised.
+# LEVICULUM_SIMULATE_VANISH_PERSIST=1 also injects on the retry, exercising the
+# terminal INFRA_INVALID path. Matches when the value equals the profile name
+# or any fn-name in the group.
+maybe_simulate_vanish() {
+    local profile="$1" attempt="$2" poison="$3"; shift 3
+    local fns=( "$@" )
+    local want="${LEVICULUM_SIMULATE_VANISH:-}"
+    [[ -n "$want" ]] || return 0
+    local match=0 fn
+    [[ "$want" == "$profile" ]] && match=1
+    for fn in "${fns[@]}"; do
+        [[ "$want" == "$fn" ]] && match=1
+    done
+    (( match == 1 )) || return 0
+    if (( attempt == 1 )) || [[ -n "${LEVICULUM_SIMULATE_VANISH_PERSIST:-}" ]]; then
+        echo "SIMULATED vanish vid_pid=1a86:55d4 attempt=$attempt profile=$profile (LEVICULUM_SIMULATE_VANISH)" >> "$poison"
+        log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (profile=$profile attempt=$attempt)"
+    fi
+}
+
 # --- Per-profile setup ---
 
 setup_profile() {
@@ -535,12 +698,18 @@ setup_profile() {
 
 # --- Per-group cargo invocation ---
 
-run_group() {
-    local profile="$1"
-    shift
+# Run ONE cargo attempt of a profile group under the device watchdog. Parses
+# libtest result lines into the ATTEMPT_* group-scoped arrays and reports
+# whether a rig-board vanish was seen during the window (ATTEMPT_POISONED).
+# Returns cargo's real exit code. The orchestrator (run_group) decides, from
+# ATTEMPT_POISONED, whether to trust this attempt or retry.
+#
+# Sets: ATTEMPT_FAILED_TESTS ATTEMPT_PASSED_TESTS ATTEMPT_FAILED_COUNT
+#       ATTEMPT_POISONED
+run_group_attempt() {
+    local profile="$1" attempt="$2"
+    shift 2
     local fns=( "$@" )
-    setup_profile "$profile"
-    log "[CI_HW] running ${#fns[@]} tests for profile=$profile: ${fns[*]}"
     # Bind LNodes by profile identity, not discovery sort order. The
     # runner reads LEVICULUM_REQUIRED_LNODE_SERIALS and assigns serial
     # nodes to the LNodes whose USB serial is in this set (silencing the
@@ -552,6 +721,15 @@ run_group() {
     if [[ -n "$required_lnode_serials" ]]; then
         log "[CI_HW] required LNode serials for profile=$profile: $required_lnode_serials"
     fi
+
+    # Watchdog covers exactly this cargo window. poison non-empty afterwards
+    # == a rig board vanished while the tests ran (real or simulated).
+    local poison stop
+    poison=$(mktemp)
+    stop=$(mktemp)
+    start_device_watchdog "$poison" "$stop"
+    maybe_simulate_vanish "$profile" "$attempt" "$poison" "${fns[@]}"
+
     # All tests of this profile in one cargo invocation: cheaper than
     # spawning a fresh test binary per test.  --test-threads=1 keeps
     # the integ-lock contract intact.  LEVICULUM_SKIP_LOG collects
@@ -563,44 +741,147 @@ run_group() {
     # but cargo runs a whole profile group in one invocation. The stream is
     # still forwarded to stdout (-> main $LOG) by tee; PIPESTATUS[0] preserves
     # cargo's real exit code through the pipe.
-    local group_log
+    log "[CI_HW] cargo attempt=$attempt for profile=$profile: ${fns[*]}"
+    local group_log cargo_rc
     group_log=$(mktemp)
-    CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
-      LEVICULUM_SKIP_LOG="$SKIP_LOG" \
-      LEVICULUM_REQUIRED_LNODE_SERIALS="$required_lnode_serials" \
-      cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}" \
-      2>&1 | tee "$group_log"
-    local cargo_rc=${PIPESTATUS[0]}
+    if [[ -n "${LEVICULUM_SELFTEST_CARGO:-}" ]]; then
+        # Test seam (dry traces only): stub cargo. The command emits
+        # libtest-style result lines and exits with a chosen code, so the
+        # watchdog/retry/verdict logic is exercised without a rig or a build.
+        bash -c "$LEVICULUM_SELFTEST_CARGO" _ "$profile" "$attempt" "${fns[@]}" \
+          2>&1 | tee "$group_log"
+    else
+        CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 \
+          LEVICULUM_SKIP_LOG="$SKIP_LOG" \
+          LEVICULUM_REQUIRED_LNODE_SERIALS="$required_lnode_serials" \
+          cargo test -p reticulum-integ -- --include-ignored --test-threads=1 "${fns[@]}" \
+          2>&1 | tee "$group_log"
+    fi
+    cargo_rc=${PIPESTATUS[0]}
+
+    stop_device_watchdog "$stop"
 
     # Parse libtest per-test result lines. With --test-threads=1 the result is
     # printed on the running line (`test <path> ... FAILED` / `... ok`). Last
     # `::` segment = fn-name, matching discover_tests and EXPECTED_MARGINAL.
-    # GROUP_FAILED_COUNT lets the caller tell a parseable test failure apart
-    # from a non-zero cargo exit with no test failure (build/harness error),
-    # which must stay a hard RED and cannot be carved out.
-    GROUP_FAILED_COUNT=0
+    # ATTEMPT_FAILED_COUNT lets the caller tell a parseable test failure apart
+    # from a non-zero cargo exit with no test failure (build/harness error).
+    ATTEMPT_FAILED_TESTS=()
+    ATTEMPT_PASSED_TESTS=()
+    ATTEMPT_FAILED_COUNT=0
     local fn
     while IFS= read -r fn; do
         [[ -n "$fn" ]] || continue
-        FAILED_TESTS+=( "$fn" )
-        GROUP_FAILED_COUNT=$(( GROUP_FAILED_COUNT + 1 ))
+        ATTEMPT_FAILED_TESTS+=( "$fn" )
+        ATTEMPT_FAILED_COUNT=$(( ATTEMPT_FAILED_COUNT + 1 ))
     done < <(awk '/^test .* \.\.\. FAILED$/ { print $2 }' "$group_log" \
              | awk -F'::' '{ print $NF }' | sort -u)
     while IFS= read -r fn; do
         [[ -n "$fn" ]] || continue
-        PASSED_TESTS+=( "$fn" )
+        ATTEMPT_PASSED_TESTS+=( "$fn" )
     done < <(awk '/^test .* \.\.\. ok$/ { print $2 }' "$group_log" \
              | awk -F'::' '{ print $NF }' | sort -u)
     rm -f "$group_log"
+
+    if [[ -s "$poison" ]]; then
+        ATTEMPT_POISONED=1
+        log "[CI_HW] WATCHDOG: rig-board vanish during profile=$profile attempt=$attempt:"
+        while IFS= read -r fn; do log "[CI_HW]   $fn"; done < "$poison"
+    else
+        ATTEMPT_POISONED=0
+    fi
+    rm -f "$poison"
     return "$cargo_rc"
+}
+
+# Commit one attempt's parsed results into the run-global verdict arrays.
+#   mode=normal        -> failures gate (FAILED_TESTS), passes recorded
+#   mode=infra_invalid -> failures are untrusted (INFRA_INVALID_TESTS, do NOT
+#                         gate); passes dropped (also untrusted, and would
+#                         mis-fire the EXPECTED_MARGINAL unexpected-pass notice)
+commit_attempt_results() {
+    local mode="$1" fn
+    if [[ "$mode" == "infra_invalid" ]]; then
+        for fn in "${ATTEMPT_FAILED_TESTS[@]:-}"; do
+            [[ -n "$fn" ]] || continue
+            INFRA_INVALID_TESTS+=( "$fn" )
+        done
+        return 0
+    fi
+    for fn in "${ATTEMPT_FAILED_TESTS[@]:-}"; do
+        [[ -n "$fn" ]] || continue
+        FAILED_TESTS+=( "$fn" )
+    done
+    for fn in "${ATTEMPT_PASSED_TESTS[@]:-}"; do
+        [[ -n "$fn" ]] || continue
+        PASSED_TESTS+=( "$fn" )
+    done
+}
+
+# Orchestrate a profile group: run once under the watchdog; if the window saw a
+# vanish, re-attach + retry ONCE. Clean retry -> trust normally; second vanish
+# -> terminal INFRA_INVALID. Sets GROUP_INFRA_INVALID, GROUP_FAILED_COUNT and
+# LAST_GROUP_RC for the main loop; commits results into the verdict arrays.
+run_group() {
+    local profile="$1"
+    shift
+    local fns=( "$@" )
+    setup_profile "$profile"
+    log "[CI_HW] running ${#fns[@]} tests for profile=$profile: ${fns[*]}"
+
+    GROUP_INFRA_INVALID=0
+    GROUP_FAILED_COUNT=0
+    LAST_GROUP_RC=0
+
+    local rc=0
+    run_group_attempt "$profile" 1 "${fns[@]}" && rc=0 || rc=$?
+
+    if (( ATTEMPT_POISONED == 0 )); then
+        commit_attempt_results normal
+        GROUP_FAILED_COUNT=$ATTEMPT_FAILED_COUNT
+        LAST_GROUP_RC=$rc
+        return 0
+    fi
+
+    # Untrusted: a rig board vanished mid-run. Re-attach/settle and retry once.
+    log "[CI_HW] profile=$profile UNTRUSTED — rig-board vanish during run; re-attaching and retrying ONCE"
+    settle_rig "$profile"
+
+    local rc2=0
+    run_group_attempt "$profile" 2 "${fns[@]}" && rc2=0 || rc2=$?
+
+    if (( ATTEMPT_POISONED == 0 )); then
+        log "[CI_HW] profile=$profile retry ran clean — transient glitch absorbed; using retry verdict"
+        commit_attempt_results normal
+        GROUP_FAILED_COUNT=$ATTEMPT_FAILED_COUNT
+        LAST_GROUP_RC=$rc2
+        return 0
+    fi
+
+    # Vanish persisted across the retry: hardware genuinely unstable. The whole
+    # group is untrusted -> INFRA_INVALID (terminal), never RED.
+    log "[CI_HW] profile=$profile INFRA_INVALID — vanish persisted across retry; results untrusted (not RED)"
+    commit_attempt_results infra_invalid
+    GROUP_INFRA_INVALID=1
+    GROUP_FAILED_COUNT=$ATTEMPT_FAILED_COUNT
+    LAST_GROUP_RC=$rc2
+    # Harness abort under device loss (cargo failed with no parseable FAILED
+    # line) still has to be counted/surfaced, not silently zero.
+    if (( ATTEMPT_FAILED_COUNT == 0 )) && (( rc2 != 0 )); then
+        INFRA_INVALID_TESTS+=( "${profile}::harness-abort-under-vanish" )
+    fi
+    return 0
 }
 
 # --- Flash LNodes from HEAD, then discover, group, run ---
 
 # Additive step: bring the attached LNodes to the tested commit before any
 # profile group runs. Smoke runs flash too — a smoke pass against stale
-# firmware is just as misleading as a full one.
-flash_lnodes
+# firmware is just as misleading as a full one. Skipped in selftest mode
+# (no rig, watchdog/verdict-only verification).
+if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
+    flash_lnodes
+fi
 
 mapfile -t ALL_FNS < <(discover_tests)
 if [[ ${#ALL_FNS[@]} -eq 0 ]]; then
@@ -622,17 +903,26 @@ done
 
 # Process buckets in sorted profile order for predictability.
 # Per-test failure accounting for the EXPECTED_MARGINAL carve-out. run_group
-# appends fn-names to these and sets GROUP_FAILED_COUNT for the group it just
-# ran. Initialised here (set -u) before the first call.
+# appends fn-names to these and sets GROUP_FAILED_COUNT / GROUP_INFRA_INVALID /
+# LAST_GROUP_RC for the group it just ran. INFRA_INVALID_TESTS collects the
+# failed tests of any group that ended terminally infra-invalid (device loss
+# persisted across the retry); they are counted, surfaced, but never gate.
+# Initialised here (set -u) before the first call.
 FAILED_TESTS=()
 PASSED_TESTS=()
+INFRA_INVALID_TESTS=()
 GROUP_FAILED_COUNT=0
+GROUP_INFRA_INVALID=0
+LAST_GROUP_RC=0
 
 RC=0
 for profile in $(printf '%s\n' "${!PROFILE_BUCKETS[@]}" | sort); do
     # shellcheck disable=SC2206
     fns=( ${PROFILE_BUCKETS[$profile]} )
-    if ! run_group "$profile" "${fns[@]}"; then
+    # run_group always returns 0 (it absorbs the cargo rc into LAST_GROUP_RC and
+    # the verdict arrays); the non-zero-cargo handling keys off LAST_GROUP_RC.
+    run_group "$profile" "${fns[@]}"
+    if (( LAST_GROUP_RC != 0 )); then
         if [[ -f "$MARKER" ]]; then
             # Lock-contention path mirrors run-tier3.sh: another cargo
             # held the integ lock when this fired.  Treat as SKIPPED,
@@ -643,9 +933,17 @@ for profile in $(printf '%s\n' "${!PROFILE_BUCKETS[@]}" | sort); do
             echo "$(date -Iseconds) tier3 SKIPPED lock-held $LOG" >> "$RESULTS"
             exit 0
         fi
-        if (( GROUP_FAILED_COUNT == 0 )); then
-            # cargo failed but no per-test FAILED line was parsed: build
-            # error, harness abort or crash. Cannot be carved out — hard RED.
+        if (( GROUP_INFRA_INVALID == 1 )); then
+            # Device vanished on both the run and the retry. The group is
+            # untrusted: its failures were routed to INFRA_INVALID_TESTS and
+            # must NOT flip the verdict to RED. This takes precedence over the
+            # build/harness-error branch below — a cargo abort caused by the
+            # board disappearing is the vanish symptom, not a real RED.
+            log "[CI_HW] profile=$profile INFRA_INVALID — device loss persisted across retry; not flipping tier3 RED"
+        elif (( GROUP_FAILED_COUNT == 0 )); then
+            # cargo failed but no per-test FAILED line was parsed (and no
+            # vanish): build error, harness abort or crash. Cannot be carved
+            # out — hard RED.
             RC=1
             log "[CI_HW] profile=$profile RED — cargo failed with no parseable test failure (build/harness error) — see $LOG"
         else
@@ -686,6 +984,30 @@ for m in "${EXPECTED_MARGINAL[@]}"; do
     fi
 done
 
+# INFRA_INVALID carve-out (Garantie B). A test whose group ended terminally
+# infra-invalid (a rig board vanished on BOTH the run and the retry) is
+# untrusted: counted and surfaced loudly, but it does NOT set RC=1. Precedence
+# over EXPECTED_MARGINAL is structural: infra-invalid failures were routed to
+# INFRA_INVALID_TESTS and never entered FAILED_TESTS, so the carve-out loop
+# above could not classify them as "failed as expected" — a board that
+# vanished mid-run gives no trustworthy verdict to assert against.
+INFRA_INVALID_FAILED=0
+for fn in "${INFRA_INVALID_TESTS[@]:-}"; do
+    [[ -n "$fn" ]] || continue
+    INFRA_INVALID_FAILED=$(( INFRA_INVALID_FAILED + 1 ))
+done
+if (( INFRA_INVALID_FAILED > 0 )); then
+    log "[CI_HW] ===================================================================="
+    log "[CI_HW] INFRA_INVALID: $INFRA_INVALID_FAILED test(s) untrusted — rig board"
+    log "[CI_HW] vanished on both the run and the retry (qemu usb-host passthrough"
+    log "[CI_HW] glitch, NOT a code regression). These do NOT flip tier3 RED:"
+    for fn in "${INFRA_INVALID_TESTS[@]:-}"; do
+        [[ -n "$fn" ]] || continue
+        log "[CI_HW]   $fn"
+    done
+    log "[CI_HW] ===================================================================="
+fi
+
 # Device-count skips are neither green nor red — surface them loudly
 # in the summary and the results line. A non-empty skip list with the
 # 4th RNode back in the rig means a profile/registration gap, not noise.
@@ -697,11 +1019,11 @@ if [[ -s "$SKIP_LOG" ]]; then
 fi
 
 if [[ $RC -eq 0 ]]; then
-    log "[CI_HW] tier3 GREEN (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED)"
-    echo "$(date -Iseconds) tier3 GREEN expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 GREEN (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED)"
+    echo "$(date -Iseconds) tier3 GREEN expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED $LOG" >> "$RESULTS"
 else
-    log "[CI_HW] tier3 RED (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED)"
-    echo "$(date -Iseconds) tier3 RED expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 RED (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED)"
+    echo "$(date -Iseconds) tier3 RED expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED $LOG" >> "$RESULTS"
     # One bundle per tier-3 run, not per failing profile group;
     # per-profile RED log lines remain informational only.
     bash "$REPO_DIR/scripts/_emit-auto-bug-bundle.sh" tier3-hw "$LOG" || true
