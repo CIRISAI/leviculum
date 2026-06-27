@@ -38,3 +38,9 @@ hex = "0.4"
 rand_core = { version = "0.6", features = ["getrandom"] }
 # Capture structured tracing output in mvr tests to prove the exact drop reason.
 tracing-subscriber.workspace = true
+# Host-side replay of the firmware's real allocator for the #65 fragmentation
+# harness. Same crate/version the firmware links (reticulum-nrf). `llff` only:
+# the firmware uses LlffHeap. `critical-section/std` supplies the lock impl the
+# heap needs on the host (the firmware supplies its own single-core impl).
+embedded-alloc = { version = "0.7", default-features = false, features = ["llff"] }
+critical-section = { version = "1", features = ["std"] }
