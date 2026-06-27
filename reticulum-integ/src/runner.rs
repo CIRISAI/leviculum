@@ -15,6 +15,18 @@ use crate::compose::generate_compose;
 use crate::lxmf::{helper_log_path, LxmfHelper};
 use crate::topology::{apply_radio_overrides, generate_node_configs, TestScenario};
 
+/// Readiness predicate for the shared-instance RPC answer probe.
+///
+/// A daemon is serving clients only when `rnstatus` both exits success AND
+/// prints a non-empty body. Success with an empty body is the
+/// accept-before-ready signature (commit 06128f3): the client connected to a
+/// socket that accepts but is not yet wired to answer, got EOF, and exited 0
+/// with no output. Treating that as "ready" is exactly the gap that lets a
+/// later tool lose the race and fall back / abort.
+fn rpc_answer_is_ready(success: bool, stdout: &[u8]) -> bool {
+    success && !String::from_utf8_lossy(stdout).trim().is_empty()
+}
+
 /// Monotonic counter for generating unique run IDs within a process.
 static RUN_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -485,17 +497,42 @@ impl TestRunner {
 
     /// Poll a single node until it is ready, or timeout.
     ///
-    /// Probes the abstract Unix socket `\0rns/default` that both lnsd
-    /// (Rust) and rnsd (Python) listen on. Using a raw socket connect
-    /// instead of `rnstatus` avoids a race condition where rnstatus
-    /// accidentally becomes the shared-instance server before rnsd starts.
+    /// Two phases, sharing one deadline:
+    ///
+    /// 1. The abstract Unix socket `\0rns/default` that both lnsd (Rust) and
+    ///    rnsd (Python) listen on accepts a connection. A raw socket connect
+    ///    (not `rnstatus`) is used here so the probe never accidentally
+    ///    becomes the shared-instance server before the daemon binds it.
+    ///
+    /// 2. The daemon's shared-instance RPC actually *answers*. Accepting a
+    ///    connection on `\0rns/default` happens before the daemon is wired up
+    ///    to serve clients (the RPC handler is not guaranteed to answer yet;
+    ///    see commit 06128f3). A tool that connects in that window gets an
+    ///    empty body / EOF and — with `RNS_REQUIRE_SHARED=1` and the
+    ///    fail-loud vendor patch — aborts instead of silently degrading to a
+    ///    standalone transport. `rnstatus` exercises both the shared-instance
+    ///    client path (what rnprobe/lncp use) and the RPC query path (what
+    ///    `lns diag` uses), so a non-empty `rnstatus` success is the union
+    ///    readiness condition for every tool in the suite. Gating startup on
+    ///    it removes the race once for all tests.
     ///
     /// Polls every 500ms. On timeout, collects logs and returns
     /// `ReadinessTimeout`.
     pub fn wait_ready_single(&self, node: &str, timeout_secs: u64) -> Result<(), RunnerError> {
-        let container = self.container_name(node);
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        self.wait_socket_accepting(node, deadline, timeout_secs)?;
+        self.wait_rpc_answering(node, deadline, timeout_secs)?;
+        Ok(())
+    }
 
+    /// Phase 1: poll until the shared-instance socket `\0rns/default` accepts.
+    fn wait_socket_accepting(
+        &self,
+        node: &str,
+        deadline: Instant,
+        timeout_secs: u64,
+    ) -> Result<(), RunnerError> {
+        let container = self.container_name(node);
         loop {
             let output = Command::new("docker")
                 .args([
@@ -508,6 +545,46 @@ impl TestRunner {
                 .output()?;
 
             if output.status.success() {
+                return Ok(());
+            }
+
+            if Instant::now() >= deadline {
+                let _ = self.collect_logs();
+                return Err(RunnerError::ReadinessTimeout {
+                    node: node.to_string(),
+                    timeout_secs,
+                });
+            }
+
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// Phase 2: poll `rnstatus` until the daemon's shared-instance RPC returns
+    /// a non-empty success, proving the handler answers (not merely that the
+    /// socket accepts). Safe to run after phase 1: the daemon already owns
+    /// `\0rns/default`, and `RNS_REQUIRE_SHARED=1` keeps `rnstatus` from
+    /// becoming a server itself, so it fails loudly (retried here) until the
+    /// daemon answers.
+    fn wait_rpc_answering(
+        &self,
+        node: &str,
+        deadline: Instant,
+        timeout_secs: u64,
+    ) -> Result<(), RunnerError> {
+        let container = self.container_name(node);
+        loop {
+            let output = Command::new("docker")
+                .args([
+                    "exec",
+                    &container,
+                    "rnstatus",
+                    "--config",
+                    "/root/.reticulum",
+                ])
+                .output()?;
+
+            if rpc_answer_is_ready(output.status.success(), &output.stdout) {
                 return Ok(());
             }
 
@@ -1756,6 +1833,25 @@ impl Drop for TestRunner {
 mod tests {
     use super::*;
     use crate::topology::parse_scenario;
+
+    /// The shared-instance RPC readiness gate must distinguish a daemon that
+    /// actually answers from one whose socket merely accepts. The
+    /// accept-before-ready window (commit 06128f3) surfaces as `rnstatus`
+    /// exiting 0 with an empty body; the old socket-accept-only gate let that
+    /// through, so a later tool could connect, get EOF, and abort / fall back.
+    /// Only success WITH a non-empty body counts as ready.
+    #[test]
+    fn rpc_answer_is_ready_requires_success_and_nonempty_body() {
+        // Ready: success and a populated response.
+        assert!(rpc_answer_is_ready(true, b"Shared Instance[rns/default]\n"));
+
+        // Not ready: the accept-before-ready signature (success, empty body).
+        assert!(!rpc_answer_is_ready(true, b""));
+        assert!(!rpc_answer_is_ready(true, b"   \n\t "));
+
+        // Not ready: the daemon errored out entirely.
+        assert!(!rpc_answer_is_ready(false, b"some output"));
+    }
 
     /// Empirical cargo-in-cargo check: invoke `run_force_rebuild` (which
     /// runs `cargo build --release`) from inside a running `cargo test`.
