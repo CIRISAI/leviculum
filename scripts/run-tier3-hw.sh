@@ -23,16 +23,23 @@
 # good. The profile `required`/`exclude` lists now only document which
 # boards participate vs. get silenced; they no longer touch power.
 #
-# DEVICE-VANISH HONESTY (Garantie B). The rig boards are passed through to
-# this VM via qemu usb-host. Under sustained load the passthrough hiccups: a
-# board vanishes VM-side (USB disconnect on the VM while the physical host
-# stays stable), with a gap before udev re-attaches. In-flight LoRa tests then
-# fail with EOF / "Path not found". That is an infrastructure glitch, NEVER a
-# code regression, and must never read as RED. So each profile group runs under
-# a device watchdog; if any rig board vanishes during the window the group's
-# results are UNTRUSTED, the group is re-attached and retried ONCE. A clean
-# retry is trusted normally; a retry that vanishes again marks the group's
-# failed tests INFRA_INVALID (terminal): counted, surfaced loudly, but NOT RED.
+# DEVICE-VANISH HONESTY. The rig boards are passed through to this VM via VFIO
+# controller passthrough: the guest owns the xHCI host controller natively, so
+# the host cannot inject a phantom VM-side USB disconnect. The old qemu usb-host
+# passthrough could drop a board VM-side under load as a pure infrastructure
+# artefact; that class is now impossible. A board that vanishes mid-run is
+# therefore ALWAYS a real device/firmware failure (a self-reset under sustained
+# load, suspected heap exhaustion, Codeberg 65), not an infra glitch, and must
+# read as RED.
+#
+# So each profile group runs under a device watchdog. If any rig board vanishes
+# during the window the group's results are UNTRUSTED; the group is re-attached
+# and retried ONCE only to rule out a one-frame sampling blip. A confirmed
+# vanish makes the run RED with the vanished board(s) named in the verdict line,
+# whether it PERSISTS across the retry or RECOVERS on it: post-VFIO a vanish is
+# always a real firmware self-reset, and recovery on the retry does not make it
+# acceptable. The retry result is a diagnostic note only. There is no
+# INFRA_INVALID class any more: a vanish is never absorbed.
 
 set -euo pipefail
 
@@ -653,10 +660,12 @@ settle_rig() {
 
 # Simulated-vanish hook (test-only, no rig). LEVICULUM_SIMULATE_VANISH=<group_
 # or_test> injects ONE synthetic disconnect into the watchdog for the matching
-# group on its FIRST run, so the retry-clean (transient) path is exercised.
-# LEVICULUM_SIMULATE_VANISH_PERSIST=1 also injects on the retry, exercising the
-# terminal INFRA_INVALID path. Matches when the value equals the profile name
-# or any fn-name in the group.
+# group on its FIRST run, so the recovers-on-retry path is exercised (now also
+# RED). LEVICULUM_SIMULATE_VANISH_PERSIST=1 also injects on the retry,
+# exercising the persisted-vanish path. LEVICULUM_SIMULATE_VANISH_VIDPID overrides
+# the injected board id (default 1a86:55d4) so a selftest can assert the
+# attribution names a specific board, e.g. an LNode 1209:0001. Matches when the
+# value equals the profile name or any fn-name in the group.
 maybe_simulate_vanish() {
     local profile="$1" attempt="$2" poison="$3"; shift 3
     local fns=( "$@" )
@@ -668,9 +677,10 @@ maybe_simulate_vanish() {
         [[ "$want" == "$fn" ]] && match=1
     done
     (( match == 1 )) || return 0
+    local vidpid="${LEVICULUM_SIMULATE_VANISH_VIDPID:-1a86:55d4}"
     if (( attempt == 1 )) || [[ -n "${LEVICULUM_SIMULATE_VANISH_PERSIST:-}" ]]; then
-        echo "SIMULATED vanish vid_pid=1a86:55d4 attempt=$attempt profile=$profile (LEVICULUM_SIMULATE_VANISH)" >> "$poison"
-        log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (profile=$profile attempt=$attempt)"
+        echo "SIMULATED vanish vid_pid=$vidpid attempt=$attempt profile=$profile (LEVICULUM_SIMULATE_VANISH)" >> "$poison"
+        log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (profile=$profile attempt=$attempt vid_pid=$vidpid)"
     fi
 }
 
@@ -783,10 +793,20 @@ run_group_attempt() {
              | awk -F'::' '{ print $NF }' | sort -u)
     rm -f "$group_log"
 
+    ATTEMPT_VANISHED_IDS=()
     if [[ -s "$poison" ]]; then
         ATTEMPT_POISONED=1
         log "[CI_HW] WATCHDOG: rig-board vanish during profile=$profile attempt=$attempt:"
         while IFS= read -r fn; do log "[CI_HW]   $fn"; done < "$poison"
+        # Pull the vanished board id(s) out of the poison lines so the verdict
+        # can name the board(s) (both real "vanish vid_pid=.." and SIMULATED
+        # lines carry vid_pid=XXXX:XXXX).
+        local vp
+        while IFS= read -r vp; do
+            [[ -n "$vp" ]] || continue
+            ATTEMPT_VANISHED_IDS+=( "$vp" )
+        done < <(grep -oE 'vid_pid=[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' "$poison" \
+                 | sed 's/^vid_pid=//' | sort -u)
     else
         ATTEMPT_POISONED=0
     fi
@@ -794,20 +814,13 @@ run_group_attempt() {
     return "$cargo_rc"
 }
 
-# Commit one attempt's parsed results into the run-global verdict arrays.
-#   mode=normal        -> failures gate (FAILED_TESTS), passes recorded
-#   mode=infra_invalid -> failures are untrusted (INFRA_INVALID_TESTS, do NOT
-#                         gate); passes dropped (also untrusted, and would
-#                         mis-fire the EXPECTED_MARGINAL unexpected-pass notice)
+# Commit one attempt's parsed results into the run-global verdict arrays:
+# failures gate (FAILED_TESTS), passes are recorded (PASSED_TESTS). Only ever
+# called for a TRUSTED attempt (a first run that saw no vanish). Any confirmed
+# vanish never commits: its results are untrusted and the vanish itself is the
+# RED cause, whether it persisted across the retry or recovered on it.
 commit_attempt_results() {
-    local mode="$1" fn
-    if [[ "$mode" == "infra_invalid" ]]; then
-        for fn in "${ATTEMPT_FAILED_TESTS[@]:-}"; do
-            [[ -n "$fn" ]] || continue
-            INFRA_INVALID_TESTS+=( "$fn" )
-        done
-        return 0
-    fi
+    local fn
     for fn in "${ATTEMPT_FAILED_TESTS[@]:-}"; do
         [[ -n "$fn" ]] || continue
         FAILED_TESTS+=( "$fn" )
@@ -819,9 +832,12 @@ commit_attempt_results() {
 }
 
 # Orchestrate a profile group: run once under the watchdog; if the window saw a
-# vanish, re-attach + retry ONCE. Clean retry -> trust normally; second vanish
-# -> terminal INFRA_INVALID. Sets GROUP_INFRA_INVALID, GROUP_FAILED_COUNT and
-# LAST_GROUP_RC for the main loop; commits results into the verdict arrays.
+# vanish, re-attach + retry ONCE only to rule out a one-frame sampling blip. A
+# confirmed vanish -> the group is RED with the board(s) named
+# (GROUP_BOARD_VANISH / VANISHED_BOARDS_PERSIST), whether it persisted across the
+# retry or recovered on it; the retry result is diagnostic only. Sets
+# GROUP_BOARD_VANISH, GROUP_FAILED_COUNT and LAST_GROUP_RC for the main loop;
+# commits TRUSTED results into the verdict arrays only (never on a vanish).
 run_group() {
     local profile="$1"
     shift
@@ -829,7 +845,7 @@ run_group() {
     setup_profile "$profile"
     log "[CI_HW] running ${#fns[@]} tests for profile=$profile: ${fns[*]}"
 
-    GROUP_INFRA_INVALID=0
+    GROUP_BOARD_VANISH=0
     GROUP_FAILED_COUNT=0
     LAST_GROUP_RC=0
 
@@ -837,38 +853,43 @@ run_group() {
     run_group_attempt "$profile" 1 "${fns[@]}" && rc=0 || rc=$?
 
     if (( ATTEMPT_POISONED == 0 )); then
-        commit_attempt_results normal
+        commit_attempt_results
         GROUP_FAILED_COUNT=$ATTEMPT_FAILED_COUNT
         LAST_GROUP_RC=$rc
         return 0
     fi
 
-    # Untrusted: a rig board vanished mid-run. Re-attach/settle and retry once.
-    log "[CI_HW] profile=$profile UNTRUSTED — rig-board vanish during run; re-attaching and retrying ONCE"
+    # A rig board vanished mid-run. Capture which board(s) before the retry
+    # overwrites ATTEMPT_VANISHED_IDS. Re-attach/settle and retry ONCE only to
+    # rule out a one-frame sampling blip.
+    local first_vanish_ids=( "${ATTEMPT_VANISHED_IDS[@]:-}" )
+    log "[CI_HW] profile=$profile UNTRUSTED — rig-board vanish during run (${first_vanish_ids[*]}); re-attaching and retrying ONCE"
     settle_rig "$profile"
 
     local rc2=0
     run_group_attempt "$profile" 2 "${fns[@]}" && rc2=0 || rc2=$?
 
-    if (( ATTEMPT_POISONED == 0 )); then
-        log "[CI_HW] profile=$profile retry ran clean — transient glitch absorbed; using retry verdict"
-        commit_attempt_results normal
-        GROUP_FAILED_COUNT=$ATTEMPT_FAILED_COUNT
-        LAST_GROUP_RC=$rc2
-        return 0
-    fi
-
-    # Vanish persisted across the retry: hardware genuinely unstable. The whole
-    # group is untrusted -> INFRA_INVALID (terminal), never RED.
-    log "[CI_HW] profile=$profile INFRA_INVALID — vanish persisted across retry; results untrusted (not RED)"
-    commit_attempt_results infra_invalid
-    GROUP_INFRA_INVALID=1
+    # A rig-board vanish was confirmed on the first run; the retry only rules
+    # out a one-frame watchdog sampling blip. Post-VFIO the host cannot drop a
+    # board VM-side, so a confirmed vanish is ALWAYS a real firmware self-reset
+    # (suspected heap exhaustion under load, Codeberg 65) and is RED with the
+    # board(s) named, whether it persisted across the retry or recovered on it:
+    # recovery does not make a self-reset acceptable. The group's own test
+    # results are untrusted and NOT committed; the vanish itself is the RED
+    # cause. The persisted-vs-recovered distinction is a diagnostic log note
+    # only and does not change the verdict.
+    local id
+    for id in "${first_vanish_ids[@]}" "${ATTEMPT_VANISHED_IDS[@]:-}"; do
+        [[ -n "$id" ]] || continue
+        VANISHED_BOARDS_PERSIST+=( "$id" )
+    done
+    GROUP_BOARD_VANISH=1
     GROUP_FAILED_COUNT=$ATTEMPT_FAILED_COUNT
     LAST_GROUP_RC=$rc2
-    # Harness abort under device loss (cargo failed with no parseable FAILED
-    # line) still has to be counted/surfaced, not silently zero.
-    if (( ATTEMPT_FAILED_COUNT == 0 )) && (( rc2 != 0 )); then
-        INFRA_INVALID_TESTS+=( "${profile}::harness-abort-under-vanish" )
+    if (( ATTEMPT_POISONED == 0 )); then
+        log "[CI_HW] profile=$profile RED — board vanish (${first_vanish_ids[*]}) recovered on retry but is a real firmware self-reset (Codeberg 65); RED with board(s) named"
+    else
+        log "[CI_HW] profile=$profile RED — board vanish persisted across retry (${VANISHED_BOARDS_PERSIST[*]}); real device/firmware failure, suspected firmware self-reset (Codeberg 65)"
     fi
     return 0
 }
@@ -903,16 +924,16 @@ done
 
 # Process buckets in sorted profile order for predictability.
 # Per-test failure accounting for the EXPECTED_MARGINAL carve-out. run_group
-# appends fn-names to these and sets GROUP_FAILED_COUNT / GROUP_INFRA_INVALID /
-# LAST_GROUP_RC for the group it just ran. INFRA_INVALID_TESTS collects the
-# failed tests of any group that ended terminally infra-invalid (device loss
-# persisted across the retry); they are counted, surfaced, but never gate.
-# Initialised here (set -u) before the first call.
+# appends fn-names to these and sets GROUP_FAILED_COUNT / GROUP_BOARD_VANISH /
+# LAST_GROUP_RC for the group it just ran. VANISHED_BOARDS_PERSIST collects the
+# vid:pid of every confirmed board vanish (forces RED), whether it persisted
+# across the retry or recovered on it. Initialised here (set -u) before the
+# first call.
 FAILED_TESTS=()
 PASSED_TESTS=()
-INFRA_INVALID_TESTS=()
+VANISHED_BOARDS_PERSIST=()
 GROUP_FAILED_COUNT=0
-GROUP_INFRA_INVALID=0
+GROUP_BOARD_VANISH=0
 LAST_GROUP_RC=0
 
 RC=0
@@ -922,7 +943,16 @@ for profile in $(printf '%s\n' "${!PROFILE_BUCKETS[@]}" | sort); do
     # run_group always returns 0 (it absorbs the cargo rc into LAST_GROUP_RC and
     # the verdict arrays); the non-zero-cargo handling keys off LAST_GROUP_RC.
     run_group "$profile" "${fns[@]}"
-    if (( LAST_GROUP_RC != 0 )); then
+    if (( GROUP_BOARD_VANISH == 1 )); then
+        # A confirmed rig-board vanish (persisted across the retry or recovered
+        # on it). Under VFIO controller passthrough the host cannot drop a board
+        # VM-side, so this is a real device/firmware failure (suspected
+        # self-reset, Codeberg 65), not an infra glitch. It forces RED with the
+        # board(s) named in the verdict block. Handled there; do NOT fall through
+        # to the build/harness-error branch, which would mis-attribute the
+        # vanish-induced cargo abort as a build bug.
+        log "[CI_HW] profile=$profile RED — confirmed rig-board vanish; attributed in verdict"
+    elif (( LAST_GROUP_RC != 0 )); then
         if [[ -f "$MARKER" ]]; then
             # Lock-contention path mirrors run-tier3.sh: another cargo
             # held the integ lock when this fired.  Treat as SKIPPED,
@@ -933,14 +963,7 @@ for profile in $(printf '%s\n' "${!PROFILE_BUCKETS[@]}" | sort); do
             echo "$(date -Iseconds) tier3 SKIPPED lock-held $LOG" >> "$RESULTS"
             exit 0
         fi
-        if (( GROUP_INFRA_INVALID == 1 )); then
-            # Device vanished on both the run and the retry. The group is
-            # untrusted: its failures were routed to INFRA_INVALID_TESTS and
-            # must NOT flip the verdict to RED. This takes precedence over the
-            # build/harness-error branch below — a cargo abort caused by the
-            # board disappearing is the vanish symptom, not a real RED.
-            log "[CI_HW] profile=$profile INFRA_INVALID — device loss persisted across retry; not flipping tier3 RED"
-        elif (( GROUP_FAILED_COUNT == 0 )); then
+        if (( GROUP_FAILED_COUNT == 0 )); then
             # cargo failed but no per-test FAILED line was parsed (and no
             # vanish): build error, harness abort or crash. Cannot be carved
             # out — hard RED.
@@ -984,27 +1007,22 @@ for m in "${EXPECTED_MARGINAL[@]}"; do
     fi
 done
 
-# INFRA_INVALID carve-out (Garantie B). A test whose group ended terminally
-# infra-invalid (a rig board vanished on BOTH the run and the retry) is
-# untrusted: counted and surfaced loudly, but it does NOT set RC=1. Precedence
-# over EXPECTED_MARGINAL is structural: infra-invalid failures were routed to
-# INFRA_INVALID_TESTS and never entered FAILED_TESTS, so the carve-out loop
-# above could not classify them as "failed as expected" — a board that
-# vanished mid-run gives no trustworthy verdict to assert against.
-INFRA_INVALID_FAILED=0
-for fn in "${INFRA_INVALID_TESTS[@]:-}"; do
-    [[ -n "$fn" ]] || continue
-    INFRA_INVALID_FAILED=$(( INFRA_INVALID_FAILED + 1 ))
-done
-if (( INFRA_INVALID_FAILED > 0 )); then
+# Board-vanish attribution (replaces the retired INFRA_INVALID class). Any
+# confirmed rig-board vanish is a real device/firmware failure (suspected
+# firmware self-reset under load, Codeberg 65) and forces RED, whether the board
+# stayed gone across the retry or recovered on it. The VFIO controller
+# passthrough cannot produce a host-side phantom disconnect, so a vanish is
+# never an infrastructure artefact: it is never absorbed.
+dedup_ids() { printf '%s\n' "$@" | awk 'NF' | sort -u | paste -sd, -; }
+BOARD_VANISH_IDS=$(dedup_ids "${VANISHED_BOARDS_PERSIST[@]:-}")
+if [[ -n "$BOARD_VANISH_IDS" ]]; then
+    RC=1
     log "[CI_HW] ===================================================================="
-    log "[CI_HW] INFRA_INVALID: $INFRA_INVALID_FAILED test(s) untrusted — rig board"
-    log "[CI_HW] vanished on both the run and the retry (qemu usb-host passthrough"
-    log "[CI_HW] glitch, NOT a code regression). These do NOT flip tier3 RED:"
-    for fn in "${INFRA_INVALID_TESTS[@]:-}"; do
-        [[ -n "$fn" ]] || continue
-        log "[CI_HW]   $fn"
-    done
+    log "[CI_HW] BOARD VANISH (RED): rig board(s) $BOARD_VANISH_IDS vanished mid-run."
+    log "[CI_HW] Real device/firmware failure, suspected firmware self-reset under"
+    log "[CI_HW] load (Codeberg 65). Forces tier3 RED; the affected group's own"
+    log "[CI_HW] results are untrusted. A vanish that recovered on the retry is RED"
+    log "[CI_HW] too: post-VFIO a vanish is always a real self-reset."
     log "[CI_HW] ===================================================================="
 fi
 
@@ -1018,12 +1036,21 @@ if [[ -s "$SKIP_LOG" ]]; then
     while IFS= read -r line; do log "[CI_HW]   $line"; done < "$SKIP_LOG"
 fi
 
+# Verdict fields. A confirmed board vanish names the board(s) and the suspected
+# cause so the line is unmissable, e.g.
+#   tier3 RED (expected_marginal=0 skipped=0 board_vanish=1209:0001 firmware_self_reset_suspected)
+# This holds whether the board stayed gone across the retry or recovered on it.
+VERDICT_FIELDS="expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED"
+if [[ -n "$BOARD_VANISH_IDS" ]]; then
+    VERDICT_FIELDS="$VERDICT_FIELDS board_vanish=$BOARD_VANISH_IDS firmware_self_reset_suspected"
+fi
+
 if [[ $RC -eq 0 ]]; then
-    log "[CI_HW] tier3 GREEN (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED)"
-    echo "$(date -Iseconds) tier3 GREEN expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 GREEN ($VERDICT_FIELDS)"
+    echo "$(date -Iseconds) tier3 GREEN $VERDICT_FIELDS $LOG" >> "$RESULTS"
 else
-    log "[CI_HW] tier3 RED (expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED)"
-    echo "$(date -Iseconds) tier3 RED expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED infra_invalid=$INFRA_INVALID_FAILED $LOG" >> "$RESULTS"
+    log "[CI_HW] tier3 RED ($VERDICT_FIELDS)"
+    echo "$(date -Iseconds) tier3 RED $VERDICT_FIELDS $LOG" >> "$RESULTS"
     # One bundle per tier-3 run, not per failing profile group;
     # per-profile RED log lines remain informational only.
     bash "$REPO_DIR/scripts/_emit-auto-bug-bundle.sh" tier3-hw "$LOG" || true
