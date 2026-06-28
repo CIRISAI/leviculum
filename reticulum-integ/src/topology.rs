@@ -365,6 +365,20 @@ pub enum Step {
     /// Optional: the runner shuts every helper down at test teardown.
     #[serde(rename = "lxmf_stop")]
     LxmfStop { on: String },
+    /// Launch a Python rnsd inside `on`'s container as a second, persistent
+    /// shared-instance CLIENT of the daemon already running there (a Rust
+    /// lnsd shared-instance server). The step launches rnsd detached, then
+    /// blocks until rnsd logs it attached to the existing instance AND the
+    /// server logged it accepted the client. Fails loudly (with both logs)
+    /// if rnsd starts its own transport, aborts, or never attaches.
+    #[serde(rename = "start_shared_client")]
+    StartSharedClient {
+        on: String,
+        #[serde(default = "default_shared_client_log")]
+        log_path: String,
+        #[serde(default = "default_step_timeout")]
+        timeout_secs: u64,
+    },
 }
 
 /// Benchmark pair: probe from one node to another.
@@ -416,6 +430,10 @@ fn default_transfer_timeout() -> u64 {
 
 fn default_step_timeout() -> u64 {
     30
+}
+
+fn default_shared_client_log() -> String {
+    "/tmp/rnsd_client.log".to_string()
 }
 
 fn default_lxmf_ready_timeout() -> u64 {

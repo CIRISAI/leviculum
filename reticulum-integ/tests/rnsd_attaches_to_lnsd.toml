@@ -1,0 +1,89 @@
+# IPC: a Python rnsd attaches to a running Rust lnsd as a shared-instance
+# client (the user's "rnsd against lnsd" case). alice runs the Rust lnsd as the
+# shared-instance SERVER. A second daemon, Python rnsd, is launched inside
+# alice's container with the same config dir; because lnsd already holds the
+# shared-instance socket, RNS falls back to connecting rnsd as a CLIENT instead
+# of starting its own transport. The shared instance is per network namespace
+# (abstract socket), so both daemons must share one container.
+#
+# Verified:
+#   1. rnsd logs it attached to the existing instance, NOT started its own
+#      transport (start_shared_client checks rnsd's own log).
+#   2. The Rust lnsd SERVER logged it accepted the persistent client
+#      (start_shared_client checks lnsd's log) - this is the path the Stage 2
+#      conformance tools never exercised, since they attach briefly and exit.
+#   3. Functional through the shared instance WHILE rnsd stays attached: probes
+#      leave and replies return via the shared lnsd transport, in both
+#      directions, served to transient rnprobe clients concurrently with the
+#      persistent rnsd client.
+#   4. rnsd survived the real announce/probe traffic without crashing (no
+#      Python traceback in its log), i.e. its persistent read loop stayed
+#      healthy against lnsd's server framing.
+
+[test]
+name = "rnsd_attaches_to_lnsd"
+description = "Python rnsd attaches to a running Rust lnsd shared instance as a persistent client and works"
+timeout_secs = 120
+
+[nodes.alice]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bob]
+type = "rust"
+respond_to_probes = true
+
+[links]
+alice-bob = "tcp"
+
+# Let both daemons boot and the tcp link come up before attaching rnsd.
+[[steps]]
+action = "sleep"
+duration_secs = 6
+
+# Launch Python rnsd inside alice's container. It must detect the running Rust
+# lnsd and attach as a shared-instance client; the step fails loudly if rnsd
+# starts its own transport, aborts, or never attaches.
+[[steps]]
+action = "start_shared_client"
+on = "alice"
+timeout_secs = 40
+
+# Functional check: a probe leaves alice's shared lnsd transport and the reply
+# returns, while rnsd is still attached as a second client.
+[[steps]]
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "rnprobe"
+from = "alice"
+to = "bob.probe"
+expect_hops = 1
+expect_result = "success"
+
+# Reverse direction: alice's announce egresses the shared lnsd and bob's probe
+# round-trips back through it, again concurrent with the attached rnsd.
+[[steps]]
+action = "wait_for_path"
+on = "bob"
+destination = "alice.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "rnprobe"
+from = "bob"
+to = "alice.probe"
+expect_hops = 1
+expect_result = "success"
+
+# rnsd survived the announce/probe traffic without crashing: no Python
+# traceback was appended to its log. grep exits 1 when the pattern is absent,
+# which is the healthy outcome (single-word pattern, no shell needed).
+[[steps]]
+action = "exec"
+on = "alice"
+command = "grep -q -F Traceback /tmp/rnsd_client.log"
+expect_exit_code = 1

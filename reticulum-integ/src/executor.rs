@@ -668,7 +668,145 @@ fn execute_step(
             println!("[{step_num}/{total}] lxmf_stop on {on}...");
             execute_lxmf_stop(runner, index, on)
         }
+        Step::StartSharedClient {
+            on,
+            log_path,
+            timeout_secs,
+        } => {
+            println!("[{step_num}/{total}] start_shared_client (rnsd) on {on}...");
+            execute_start_shared_client(runner, index, on, log_path, scale_timeout(*timeout_secs))
+        }
     }
+}
+
+/// rnsd's warning when it attaches to an existing shared instance instead of
+/// starting its own transport (vendor/Reticulum/RNS/Utilities/rnsd.py). Its
+/// presence proves rnsd is a CLIENT of the running daemon.
+const RNSD_ATTACHED_MARKER: &str = "connected to another shared local instance";
+
+/// Our Rust lnsd shared-instance SERVER log when it accepts a local client
+/// (reticulum-std/src/interfaces/local.rs). Its presence proves the server
+/// accepted rnsd's persistent connection.
+const LNSD_CLIENT_ACCEPTED_MARKER: &str = "Local client connected";
+
+/// Launch a Python rnsd inside `on`'s container as a persistent shared-instance
+/// client of the Rust lnsd already running there, then verify the attach from
+/// both sides: rnsd logs it connected to the existing instance (and did NOT
+/// start its own transport), and lnsd logs it accepted the client.
+fn execute_start_shared_client(
+    runner: &TestRunner,
+    index: usize,
+    on: &str,
+    log_path: &str,
+    timeout_secs: u64,
+) -> Result<(), StepError> {
+    let container = runner.container_name(on);
+
+    // Launch rnsd detached. It uses the same config dir as lnsd, so its
+    // attempt to bind the shared-instance socket fails (lnsd holds it) and RNS
+    // falls back to connecting as a client. RNS_REQUIRE_SHARED=1 (set on every
+    // container) makes rnsd abort loudly rather than silently run standalone if
+    // the attach fails, so a green attach is unambiguous. PYTHONUNBUFFERED=1
+    // keeps the log flushing line by line for the poll below.
+    let launch = format!(
+        "PYTHONUNBUFFERED=1 python3 -m RNS.Utilities.rnsd -v --config /root/.reticulum > {log_path} 2>&1"
+    );
+    let launch_output = std::process::Command::new("docker")
+        .args(["exec", "-d", &container, "sh", "-c", &launch])
+        .output()
+        .map_err(|e| StepError::Runner(RunnerError::Io(e)))?;
+    if !launch_output.status.success() {
+        return Err(StepError::StepFailed {
+            step_index: index,
+            action: format!("start_shared_client on {on}"),
+            detail: format!(
+                "failed to launch rnsd: {}",
+                String::from_utf8_lossy(&launch_output.stderr)
+            ),
+        });
+    }
+    println!("  rnsd launched on {on}, polling for attach (timeout {timeout_secs}s)...");
+
+    // Poll rnsd's log until it reports the attach, or a known failure marker
+    // appears, or we time out.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut rnsd_log = String::new();
+    let mut attached = false;
+    while Instant::now() < deadline {
+        if let Ok(out) = runner.docker_exec(on, &["cat", log_path]) {
+            rnsd_log = String::from_utf8_lossy(&out.stdout).into_owned();
+        }
+        if rnsd_log.contains(RNSD_ATTACHED_MARKER) {
+            attached = true;
+            break;
+        }
+        // Fail fast on the unambiguous "did not attach" outcomes rather than
+        // waiting out the whole timeout.
+        if rnsd_log.contains("Aborting startup")
+            || rnsd_log.contains("could not be connected")
+            || rnsd_log.contains("Traceback")
+            || rnsd_log.contains("refusing to run as standalone")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    let _ = runner.save_exec_output(
+        &format!("rnsd_client_{on}"),
+        rnsd_log.as_bytes(),
+        &[],
+    );
+
+    if !attached {
+        let lnsd_log = runner
+            .docker_logs(on)
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        return Err(StepError::StepFailed {
+            step_index: index,
+            action: format!("start_shared_client on {on}"),
+            detail: format!(
+                "rnsd did not attach to the shared instance within {timeout_secs}s \
+                 (no '{RNSD_ATTACHED_MARKER}' in its log)\n\
+                 --- rnsd log ---\n{rnsd_log}\n\
+                 --- lnsd ({on}) log tail ---\n{}",
+                tail_lines(&lnsd_log, 40)
+            ),
+        });
+    }
+    println!("  rnsd attached as shared-instance client (rnsd log confirms)");
+
+    // Server-side proof: lnsd accepted the persistent client connection.
+    let lnsd_log = runner
+        .docker_logs(on)
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            s
+        })
+        .unwrap_or_default();
+    if !lnsd_log.contains(LNSD_CLIENT_ACCEPTED_MARKER) {
+        return Err(StepError::StepFailed {
+            step_index: index,
+            action: format!("start_shared_client on {on}"),
+            detail: format!(
+                "rnsd logged attach, but lnsd never logged '{LNSD_CLIENT_ACCEPTED_MARKER}' \
+                 (server did not accept the persistent client)\n\
+                 --- lnsd ({on}) log tail ---\n{}",
+                tail_lines(&lnsd_log, 40)
+            ),
+        });
+    }
+    println!("  lnsd accepted the persistent client (server log confirms)");
+    Ok(())
+}
+
+/// Return the last `n` lines of `s`, for compact failure reports.
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
 }
 
 /// Run probe throughput benchmark: spawn parallel probe loops, collect stats.
@@ -3129,6 +3267,21 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
             "/tests/rnid_retain.toml"
         ))
         .expect("rnid_retain.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+        let mut runner = require_runner!(scenario);
+
+        run_test(&mut runner).expect("test failed");
+    }
+
+    #[test]
+    #[serial(docker)]
+    fn rnsd_attaches_to_lnsd() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/rnsd_attaches_to_lnsd.toml"
+        ))
+        .expect("rnsd_attaches_to_lnsd.toml not found");
         let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
         let mut runner = require_runner!(scenario);
