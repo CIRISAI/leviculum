@@ -247,6 +247,26 @@ pub(crate) fn serialize_response(value: &Value, codec: Codec) -> Result<Vec<u8>,
     }
 }
 
+/// Encode a shared-instance RPC request (a `Value` dict) as msgpack, matching
+/// what upstream Python-RNS now sends on the wire (`conn.send_bytes(mp.packb(req))`,
+/// RNS/Reticulum.py). Reuses the response transcode path, so str keys/values
+/// (`"get"`, command names) become msgpack `str` and byte-string values (hashes)
+/// become msgpack `bin` — exactly what `umsgpack` expects to decode back into
+/// Python `str`/`bytes`.
+pub(crate) fn encode_request_msgpack(request: &Value) -> Result<Vec<u8>, RpcError> {
+    let mv = value_to_rmpv(request)?;
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &mv)
+        .map_err(|e| RpcError::InvalidFormat(format!("msgpack encode: {}", e)))?;
+    Ok(buf)
+}
+
+/// Decode a msgpack RPC response (`mp.unpackb(conn.recv_bytes())`) into the
+/// shared `Value` tree the printing/json code already consumes.
+pub(crate) fn decode_response_msgpack(data: &[u8]) -> Result<Value, RpcError> {
+    msgpack_to_value(data)
+}
+
 // Codec transcoding: handlers and the request dispatcher both work in terms of
 // `serde_pickle::Value`; these bridge that model to/from `rmpv::Value` so the
 // msgpack path reuses the exact same request parsing and response builders.

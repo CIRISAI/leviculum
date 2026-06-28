@@ -242,16 +242,19 @@ pub(crate) async fn rpc_client_call(
     std_stream.set_nonblocking(true)?;
     let mut stream = RpcStream::from_std(std_stream)?;
 
-    let request_bytes = serde_pickle::value_to_vec(request, Default::default())
-        .map_err(|e| RpcError::Pickle(format!("serialize request: {}", e)))?;
+    // Upstream Python-RNS migrated the shared-instance RPC payload from pickle to
+    // msgpack (vendor/Reticulum a2ef9782): the client now sends `mp.packb(req)`
+    // and reads `mp.unpackb(resp)`. We match that on the wire. The framing
+    // (4-byte length prefix) and the HMAC handshake are unchanged. Our own server
+    // still auto-detects pickle vs msgpack, so this stays compatible with both
+    // current upstream `rnsd` and our `lnsd`.
+    let request_bytes = pickle::encode_request_msgpack(request)?;
 
     let exchange = async {
         connection::client_handshake(&mut stream, authkey).await?;
         write_message(&mut stream, &request_bytes).await?;
         let response_bytes = read_message(&mut stream).await?;
-        let response: serde_pickle::value::Value =
-            serde_pickle::value_from_slice(&response_bytes, Default::default())
-                .map_err(|e| RpcError::Pickle(format!("deserialize response: {}", e)))?;
+        let response = pickle::decode_response_msgpack(&response_bytes)?;
         Ok::<_, RpcError>(response)
     };
 
@@ -283,9 +286,11 @@ pub(crate) async fn rpc_client_call(
 /// `authkey` is `SHA256(transport_identity)` — the daemon derives the same key
 /// from its `{config_dir}/storage/transport_identity` file (raw 64 bytes).
 ///
-/// Returns the response as JSON: pickle dicts become objects (non-string keys
-/// stringified), `bytes` values become lowercase hex strings, tuples/lists/sets
-/// become arrays, `None` becomes `null`, big ints become decimal strings.
+/// Returns the response as JSON: msgpack maps become objects (non-string keys
+/// stringified), `bin` values become lowercase hex strings, arrays become
+/// arrays, `nil` becomes `null`, big ints become decimal strings. (The wire
+/// codec is msgpack; the decoded value tree is the same `serde_pickle::Value`
+/// model the printing code consumes, so the conversion is unchanged.)
 pub async fn rpc_query(
     instance_name: &str,
     authkey: &[u8; 32],
@@ -428,6 +433,72 @@ mod tests {
 
     fn empty_online_map() -> InterfaceOnlineMap {
         Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    }
+
+    /// The shared-instance RPC client now speaks msgpack on the wire (matching
+    /// upstream Python-RNS `mp.packb`/`mp.unpackb`), not pickle: a request
+    /// encodes as a msgpack map (fixmap header, never the pickle `0x80` PROTO
+    /// opcode), str keys/values stay msgpack `str`, byte-string values stay
+    /// msgpack `bin`, and a msgpack response decodes back into the shared
+    /// `Value` tree the printing/json code consumes.
+    #[test]
+    fn test_client_encodes_request_as_msgpack_and_round_trips() {
+        use pickle::{decode_response_msgpack, encode_request_msgpack, pickle_bytes, pickle_int};
+
+        // {"get": "next_hop", "destination_hash": <16 bytes>}
+        let hash = vec![0xABu8; 16];
+        let request = pickle_dict(vec![
+            (pickle_str_key("get"), pickle_str("next_hop")),
+            (pickle_str_key("destination_hash"), pickle_bytes(&hash)),
+        ]);
+        let bytes = encode_request_msgpack(&request).unwrap();
+
+        // msgpack fixmap-with-2-entries (0x82), never the pickle 0x80 PROTO opcode.
+        assert_eq!(bytes[0], 0x82, "request must be msgpack, not pickle");
+
+        // Decode the request bytes back with a raw msgpack reader and confirm the
+        // str-vs-bin typing Python umsgpack relies on: keys and "next_hop" are
+        // msgpack `str`, the hash is msgpack `bin`.
+        let raw = rmpv::decode::read_value(&mut &bytes[..]).unwrap();
+        let map = match raw {
+            rmpv::Value::Map(m) => m,
+            other => panic!("expected msgpack map, got {other:?}"),
+        };
+        let get = |k: &str| {
+            map.iter()
+                .find(|(key, _)| key.as_str() == Some(k))
+                .map(|(_, v)| v)
+        };
+        assert!(
+            matches!(get("get"), Some(rmpv::Value::String(_))),
+            "str value must encode as msgpack str"
+        );
+        assert!(
+            matches!(get("destination_hash"), Some(rmpv::Value::Binary(b)) if b == &hash),
+            "byte-string value must encode as msgpack bin"
+        );
+
+        // A msgpack response (as Python rnsd sends) decodes into the same Value
+        // tree, preserving bin -> Bytes and int -> I64.
+        let response_value = pickle_dict(vec![
+            (pickle_str_key("transport_id"), pickle_bytes(&[0x42; 16])),
+            (pickle_str_key("link_count"), pickle_int(3)),
+        ]);
+        let response_bytes = encode_request_msgpack(&response_value).unwrap();
+        let decoded = decode_response_msgpack(&response_bytes).unwrap();
+        let Value::Dict(d) = &decoded else {
+            panic!("expected dict response, got {decoded:?}");
+        };
+        assert_eq!(
+            d.get(&HashableValue::String("transport_id".into())),
+            Some(&Value::Bytes(vec![0x42; 16])),
+            "bin must decode back to Bytes"
+        );
+        assert_eq!(
+            d.get(&HashableValue::String("link_count".into())),
+            Some(&Value::I64(3)),
+            "int must decode back to I64"
+        );
     }
 
     /// Spawn a minimal RPC server and test it with a Rust client.
