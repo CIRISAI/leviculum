@@ -1,0 +1,58 @@
+# Conformance: the real Python `rnprobe` tool driven against our Rust lnsd
+# (alice) and a Python rnsd (bob) over the shared instance. A successful probe
+# round-trip walks every rnprobe RPC command:
+#   get_first_hop_timeout  -> called before each probe send/wait window
+#   get_packet_rssi/snr/q  -> called on the DELIVERED reply (shared-instance
+#                             branch). On a non-radio TCP daemon these legitimately
+#                             return None; the tool must omit the stats and still
+#                             print "Valid reply" / exit 0 (graceful None handling).
+#
+# `rnprobe` is driven via the native step (executor resolves the probe
+# destination hash from the daemon startup log, then runs the real
+# `rnprobe rnstransport.probe <hash>` inside the container). A non-zero exit or
+# a missing reply would surface any wrong-shape RPC response as a step failure.
+# get_next_hop / get_next_hop_if_name are covered in rnpath_conformance.toml.
+
+[test]
+name = "rnprobe_conformance"
+description = "real Python rnprobe exercises first_hop_timeout + packet rssi/snr/q RPCs against Rust lnsd and Python rnsd"
+timeout_secs = 120
+
+[nodes.alice]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bob]
+type = "python"
+respond_to_probes = true
+
+[links]
+alice-bob = "tcp"
+
+# rnprobe against the Rust daemon (alice probing bob's responder).
+[[steps]]
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "rnprobe"
+from = "alice"
+to = "bob.probe"
+expect_hops = 1
+expect_result = "success"
+
+# rnprobe against the Python daemon (bob probing alice's responder) - drop-in.
+[[steps]]
+action = "wait_for_path"
+on = "bob"
+destination = "alice.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "rnprobe"
+from = "bob"
+to = "alice.probe"
+expect_hops = 1
+expect_result = "success"

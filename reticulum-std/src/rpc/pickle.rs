@@ -103,6 +103,13 @@ pub(crate) enum RpcRequest {
     DestinationDataUnretain {
         destination_hash: Vec<u8>,
     },
+    // identity_data lifecycle commands (stubs — see handlers.rs)
+    IdentityDataRetain {
+        identity_hash: Vec<u8>,
+    },
+    IdentityDataUnretain {
+        identity_hash: Vec<u8>,
+    },
 }
 
 /// Parse an RPC request, auto-detecting pickle vs msgpack.
@@ -224,6 +231,23 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
             "unretain" => Ok(RpcRequest::DestinationDataUnretain { destination_hash }),
             other => Err(RpcError::InvalidFormat(format!(
                 "unknown destination_data operation: {}",
+                other
+            ))),
+        };
+    }
+
+    // Check for "identity_data" key (retain / unretain operations).
+    // Upstream rnid issues `{"identity_data": "retain", "identity_hash": <bytes>}`
+    // via Reticulum._retain_identity (Reticulum.py:1316). Parsed identically to
+    // destination_data, reading the `identity_hash` bytes field.
+    if let Some(op) = dict_get_str(&dict, "identity_data") {
+        let identity_hash = dict_get_bytes(&dict, "identity_hash")
+            .ok_or_else(|| RpcError::InvalidFormat("missing identity_hash".into()))?;
+        return match op.as_str() {
+            "retain" => Ok(RpcRequest::IdentityDataRetain { identity_hash }),
+            "unretain" => Ok(RpcRequest::IdentityDataUnretain { identity_hash }),
+            other => Err(RpcError::InvalidFormat(format!(
+                "unknown identity_data operation: {}",
                 other
             ))),
         };
@@ -690,5 +714,88 @@ mod tests {
             "str must encode as msgpack str"
         );
         assert!(matches!(get("interfaces"), Some(rmpv::Value::Array(_))));
+    }
+
+    // identity_data lifecycle (rnid retain). Mirrors destination_data parsing,
+    // reading the `identity_hash` bytes field. Before this arm existed the
+    // request fell through to InvalidFormat("unrecognized request"), which
+    // dropped the local client connection.
+
+    #[test]
+    fn test_parse_identity_data_retain_pickle() {
+        let hash = vec![0x5Au8; 16];
+        let dict = pickle_dict(vec![
+            (pickle_str_key("identity_data"), pickle_str("retain")),
+            (pickle_str_key("identity_hash"), pickle_bytes(&hash)),
+        ]);
+        let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Pickle);
+        match req {
+            RpcRequest::IdentityDataRetain { identity_hash } => assert_eq!(identity_hash, hash),
+            other => panic!("expected IdentityDataRetain, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_identity_data_retain_msgpack() {
+        // Exactly what rnid sends: mp.packb({"identity_data": "retain",
+        // "identity_hash": <16 bytes>}) with the hash as a msgpack bin.
+        let hash = vec![0x5Au8; 16];
+        let v = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from("identity_data"),
+                rmpv::Value::from("retain"),
+            ),
+            (
+                rmpv::Value::from("identity_hash"),
+                rmpv::Value::Binary(hash.clone()),
+            ),
+        ]);
+        let mut data = Vec::new();
+        rmpv::encode::write_value(&mut data, &v).unwrap();
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        match req {
+            RpcRequest::IdentityDataRetain { identity_hash } => assert_eq!(identity_hash, hash),
+            other => panic!("expected IdentityDataRetain, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_identity_data_unretain_pickle() {
+        let hash = vec![0x77u8; 16];
+        let dict = pickle_dict(vec![
+            (pickle_str_key("identity_data"), pickle_str("unretain")),
+            (pickle_str_key("identity_hash"), pickle_bytes(&hash)),
+        ]);
+        let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
+        let (req, _) = parse_request(&data).unwrap();
+        match req {
+            RpcRequest::IdentityDataUnretain { identity_hash } => assert_eq!(identity_hash, hash),
+            other => panic!("expected IdentityDataUnretain, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_identity_data_missing_hash_errors() {
+        // identity_data without identity_hash is a clean parse error, never a panic.
+        let dict = pickle_dict(vec![(
+            pickle_str_key("identity_data"),
+            pickle_str("retain"),
+        )]);
+        let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
+        assert!(parse_request(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_identity_data_unknown_op_errors() {
+        let hash = vec![0x01u8; 16];
+        let dict = pickle_dict(vec![
+            (pickle_str_key("identity_data"), pickle_str("frobnicate")),
+            (pickle_str_key("identity_hash"), pickle_bytes(&hash)),
+        ]);
+        let data = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
+        assert!(parse_request(&data).is_err());
     }
 }

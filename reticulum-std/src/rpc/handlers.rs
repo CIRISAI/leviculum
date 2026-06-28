@@ -76,6 +76,22 @@ pub(super) fn handle_request(
         RpcRequest::DestinationDataUsed { .. } => pickle_bool(true),
         RpcRequest::DestinationDataRetain { .. } => pickle_bool(true),
         RpcRequest::DestinationDataUnretain { .. } => pickle_bool(true),
+
+        // identity_data lifecycle stubs.
+        //
+        // rnid retains an identity after a successful recall via
+        // Reticulum._retain_identity, which issues
+        // `{"identity_data": "retain", "identity_hash": <bytes>}` to the
+        // shared instance (Reticulum.py:1316). Upstream rnsd dispatches it
+        // to Identity._retain_identity and discards nothing the client
+        // depends on (the boolean return is best-effort; rnid swallows a
+        // failure and still exits 0). We do not maintain a retained-identity
+        // GC set, so the stub honors the wire contract (accept the call,
+        // return pickle_bool(true)) without internal bookkeeping. The
+        // unretain arm mirrors destination_data for symmetry though current
+        // upstream only emits retain.
+        RpcRequest::IdentityDataRetain { .. } => pickle_bool(true),
+        RpcRequest::IdentityDataUnretain { .. } => pickle_bool(true),
     };
 
     serialize_response(&response, codec)
@@ -542,5 +558,59 @@ mod tests {
         assert!(try_into_hash(&[0xAB; 20]).is_some());
         assert!(try_into_hash(&[0xAB; 15]).is_none());
         assert!(try_into_hash(&[]).is_none());
+    }
+
+    // identity_data lifecycle stubs dispatch end-to-end: handle_request must
+    // produce a bool-true response (never drop the connection) for both the
+    // pickle and msgpack codecs. This is the wire contract rnid relies on when
+    // it issues identity_data:retain after a successful recall.
+    #[test]
+    fn identity_data_handlers_return_bool_true() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
+        use reticulum_core::node::NodeCoreBuilder;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-identity-data-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let start = std::time::Instant::now();
+
+        let decode = |bytes: &[u8], codec: Codec| -> Value {
+            match codec {
+                Codec::Pickle => serde_pickle::value_from_slice(bytes, Default::default()).unwrap(),
+                Codec::Msgpack => decode_response_msgpack(bytes).unwrap(),
+            }
+        };
+
+        for codec in [Codec::Pickle, Codec::Msgpack] {
+            for req in [
+                RpcRequest::IdentityDataRetain {
+                    identity_hash: vec![0x11u8; 16],
+                },
+                RpcRequest::IdentityDataUnretain {
+                    identity_hash: vec![0x22u8; 16],
+                },
+            ] {
+                let bytes =
+                    handle_request(&req, &mut core, start, &stats, &online, 0, codec).unwrap();
+                let value = decode(&bytes, codec);
+                assert!(
+                    matches!(value, Value::Bool(true)),
+                    "{:?} via {:?} must return bool true, got {:?}",
+                    req,
+                    codec,
+                    value
+                );
+            }
+        }
     }
 }

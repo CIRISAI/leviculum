@@ -1,0 +1,75 @@
+# Conformance: the real Python `rnid` retain path against our Rust lnsd (alice)
+# and a Python rnsd (bob) over the shared instance. rnid issues the
+# identity_data:retain RPC (Reticulum.py _retain_identity) only after it
+# successfully recalls an identity for the supplied hash.
+#
+# scripts/rnid_retain.sh discovers a known destination hash from the path table
+# and runs `rnid -i <hash>`, capturing rnid's full stdout+stderr. The script is
+# an HONEST gate: rnid swallows a retain-RPC failure and exits 0, so the script
+# inspects rnid's own output and exits non-zero when the swallowed-failure line
+# "Shared instance RPC failed while retaining identity" is present (the pre-fix
+# Rust gap: the request parser had no identity_data arm, so the daemon dropped
+# the local client connection). The captured output is still saved under logs/
+# for the conformance matrix:
+#   - recall succeeded + retain RPC accepted  -> RETAIN_RPC_CLEAN, script exits 0
+#   - recall succeeded + "RPC failed while retaining identity" present
+#     -> RETAIN_RPC_REJECTED, script exits 4 -> scenario fails (identity_data gap)
+#   - recall failed ("Could not recall Identity") -> no "Identity Hash" printed
+#     -> scenario fails on the stdout assertion (retain path unreachable)
+
+[test]
+name = "rnid_retain"
+description = "real Python rnid retain path exercised against Rust lnsd and Python rnsd"
+timeout_secs = 120
+
+[nodes.alice]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bob]
+type = "python"
+respond_to_probes = true
+
+[links]
+alice-bob = "tcp"
+
+[[steps]]
+action = "sleep"
+duration_secs = 5
+
+[[steps]]
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "wait_for_path"
+on = "bob"
+destination = "alice.probe"
+timeout_secs = 30
+
+# Two assertions, both required to pass:
+#   expect_stdout_contains = "Identity Hash" -> "Identity Hash" is printed only
+#     after a successful recall, immediately after rnid issued the
+#     identity_data:retain RPC, so it proves the retain path was reached.
+#   expect_exit_code = 0 -> the script exits non-zero (4) when rnid's output
+#     carries the swallowed "Shared instance RPC failed while retaining identity"
+#     line, i.e. when the daemon dropped the connection on the identity_data RPC.
+# Against the pre-fix Rust daemon the retain RPC is unrecognized and the
+# connection is dropped, so the script exits 4 and this step FAILS. Against the
+# fixed Rust daemon (and Python rnsd) the RPC returns true, the line is absent,
+# and the script exits 0.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "sh /opt/integ-scripts/rnid_retain.sh"
+expect_exit_code = 0
+expect_stdout_contains = "Identity Hash"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "sh /opt/integ-scripts/rnid_retain.sh"
+expect_exit_code = 0
+expect_stdout_contains = "Identity Hash"

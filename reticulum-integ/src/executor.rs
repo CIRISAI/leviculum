@@ -430,6 +430,7 @@ fn execute_step(
             on,
             command,
             expect_exit_code,
+            expect_exit_code_any,
             expect_stdout_contains,
             env,
         } => {
@@ -464,6 +465,17 @@ fn execute_step(
                         ),
                     });
                 }
+            }
+
+            if !expect_exit_code_any.is_empty() && !expect_exit_code_any.contains(&code) {
+                return Err(StepError::StepFailed {
+                    step_index: index,
+                    action: format!("exec on {on}"),
+                    detail: format!(
+                        "exit code {code}, expected one of {expect_exit_code_any:?}\nstdout: {stdout}\nstderr: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ),
+                });
             }
 
             if let Some(needle) = expect_stdout_contains {
@@ -3072,6 +3084,51 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
         let toml_str =
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/lns_diag.toml"))
                 .expect("lns_diag.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+        let mut runner = require_runner!(scenario);
+
+        run_test(&mut runner).expect("test failed");
+    }
+
+    #[test]
+    #[serial(docker)]
+    fn rnpath_conformance() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/rnpath_conformance.toml"
+        ))
+        .expect("rnpath_conformance.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+        let mut runner = require_runner!(scenario);
+
+        run_test(&mut runner).expect("test failed");
+    }
+
+    #[test]
+    #[serial(docker)]
+    fn rnprobe_conformance() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/rnprobe_conformance.toml"
+        ))
+        .expect("rnprobe_conformance.toml not found");
+        let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+        let mut runner = require_runner!(scenario);
+
+        run_test(&mut runner).expect("test failed");
+    }
+
+    #[test]
+    #[serial(docker)]
+    fn rnid_retain() {
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/rnid_retain.toml"
+        ))
+        .expect("rnid_retain.toml not found");
         let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
         let mut runner = require_runner!(scenario);

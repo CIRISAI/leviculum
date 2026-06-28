@@ -225,6 +225,14 @@ pub enum Step {
         command: String,
         #[serde(default)]
         expect_exit_code: Option<i32>,
+        /// Accept any one of several exit codes. Use this instead of
+        /// `expect_exit_code` for a command whose process exit code is racy
+        /// but whose functional output (asserted via `expect_stdout_contains`)
+        /// is deterministic. It still fails on any code outside the listed
+        /// set, so a genuine error (RPC failure, crash) is not masked. See
+        /// rnpath_conformance.toml for the documented rnpath shutdown race.
+        #[serde(default)]
+        expect_exit_code_any: Vec<i32>,
         #[serde(default)]
         expect_stdout_contains: Option<String>,
         /// Extra environment variables passed to `docker exec -e`.

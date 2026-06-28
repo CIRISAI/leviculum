@@ -1,0 +1,217 @@
+# Conformance: the real Python `rnpath` tool driven against our Rust lnsd
+# (alice) and, drop-in, against a Python rnsd (bob), both over the shared
+# instance. Each step exercises one rnpath RPC command and asserts the tool
+# completes with the documented shape, not an RPC error / early eof / crash.
+#
+# RPC commands covered: get_path_table (-t), get_rate_table (-r),
+# drop_announce_queues (-D), get_blackholed_identities (-b),
+# blackhole_identity (-B), unblackhole_identity (-U), drop_path (-d, both the
+# graceful miss with a synthetic hash and a real hit via the helper script),
+# get_next_hop + get_next_hop_if_name (bare lookup via the helper script).
+#
+# Exec steps are shell-less and whitespace-split (one assertion each); the
+# dynamic-hash cases that need a pipeline live in scripts/rnpath_known_dest.sh.
+# `-j` forces rnpath to walk and hex-encode every field of every table entry,
+# so a wrong-typed field would crash there -> "[" + exit 0 is a real shape proof.
+#
+# RACY EXIT CODE (documented, narrow relaxation). The two commands whose
+# documented exit code is non-zero -- `rnpath -b` (exit 20 on empty set) and
+# `rnpath -d <miss>` (exit 1 on miss) -- race their own process exit code
+# between {20,1} and 0. The stdout is ALWAYS correct (the RPC round-tripped),
+# only the code flakes. Mechanism, independent of the daemon: rnpath runs as a
+# shared-instance client, so RNS spawns a LocalClientInterface read_loop thread
+# on the data socket. On process exit the main thread raises SystemExit(20|1)
+# (rnpath.py exit(20) / exit(1)), but the data socket closes during shutdown
+# and the read_loop thread runs LocalInterface.teardown() ->
+# RNS.exit() (LocalInterface.py:369). RNS.exit() defaults to code 0 and calls
+# os._exit(0) (RNS/__init__.py:350-355), which preempts the main thread's
+# SystemExit -> exit 0. Reproduced against the Python rnsd too (Stage 2c
+# diagnosis: ~2% Python, ~19% our lnsd; our daemon's data-socket traffic widens
+# the race window but the defect is vendor RNS, which we do not patch).
+# So those four steps assert the FUNCTIONAL stdout and accept exit code in the
+# documented racy pair via expect_exit_code_any -- a 255/segfault/RPC error is
+# still caught. Every step that documents exit 0 keeps a hard expect_exit_code:
+# the race can only force 0, so it can never make an exit-0 step flake.
+
+[test]
+name = "rnpath_conformance"
+description = "real Python rnpath exercises every path/blackhole RPC against Rust lnsd and Python rnsd"
+timeout_secs = 120
+
+[nodes.alice]
+type = "rust"
+respond_to_probes = true
+
+[nodes.bob]
+type = "python"
+respond_to_probes = true
+
+[links]
+alice-bob = "tcp"
+
+# Let the link come up, then actively resolve a path each way so both daemon
+# path tables are populated for the get_path_table / drop_path-hit / next_hop
+# cases. wait_for_path drives the real `rnpath <hash>` lookup and only returns
+# once the path is present.
+[[steps]]
+action = "sleep"
+duration_secs = 5
+
+[[steps]]
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 30
+
+[[steps]]
+action = "wait_for_path"
+on = "bob"
+destination = "alice.probe"
+timeout_secs = 30
+
+# ---------------------------------------------------------------------------
+# Rust daemon (alice)
+# ---------------------------------------------------------------------------
+
+# get_path_table: valid JSON list back, no RPC error.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "rnpath -t -j --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "["
+
+# get_rate_table.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "rnpath -r -j --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "["
+
+# drop_announce_queues.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "rnpath -D --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Dropping announce queues"
+
+# get_blackholed_identities: empty set -> tool reports none. Documented exit is
+# 20, but it races to 0 on shutdown (see RACY EXIT CODE header); the stdout is
+# the functional proof the RPC round-tripped.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "rnpath -b --config /root/.reticulum"
+expect_exit_code_any = [20, 0]
+expect_stdout_contains = "No blackholed identity data available"
+
+# blackhole_identity (synthetic hash, stub returns true).
+[[steps]]
+action = "exec"
+on = "alice"
+command = "rnpath -B 00112233445566778899aabbccddeeff --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Blackholed identity"
+
+# unblackhole_identity.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "rnpath -U 00112233445566778899aabbccddeeff --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Lifted blackhole"
+
+# drop_path graceful miss: unknown hash -> "Unable to drop path". Documented
+# exit is 1, but it races to 0 on shutdown (see RACY EXIT CODE header); the
+# stdout is the functional proof the miss was handled gracefully.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "rnpath -d 00112233445566778899aabbccddeeff --config /root/.reticulum"
+expect_exit_code_any = [1, 0]
+expect_stdout_contains = "Unable to drop path"
+
+# drop_path real hit + get_next_hop/get_next_hop_if_name via discovered hash.
+[[steps]]
+action = "exec"
+on = "alice"
+command = "sh /opt/integ-scripts/rnpath_known_dest.sh nexthop"
+expect_exit_code = 0
+expect_stdout_contains = "NEXTHOP_OK"
+
+[[steps]]
+action = "exec"
+on = "alice"
+command = "sh /opt/integ-scripts/rnpath_known_dest.sh drop"
+expect_exit_code = 0
+expect_stdout_contains = "DROP_OK"
+
+# ---------------------------------------------------------------------------
+# Python daemon (bob): same matrix, drop-in compat reference.
+# ---------------------------------------------------------------------------
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "rnpath -t -j --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "["
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "rnpath -r -j --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "["
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "rnpath -D --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Dropping announce queues"
+
+# Same racy exit code as alice (reproduced against the Python rnsd too).
+[[steps]]
+action = "exec"
+on = "bob"
+command = "rnpath -b --config /root/.reticulum"
+expect_exit_code_any = [20, 0]
+expect_stdout_contains = "No blackholed identity data available"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "rnpath -B 00112233445566778899aabbccddeeff --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Blackholed identity"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "rnpath -U 00112233445566778899aabbccddeeff --config /root/.reticulum"
+expect_exit_code = 0
+expect_stdout_contains = "Lifted blackhole"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "rnpath -d 00112233445566778899aabbccddeeff --config /root/.reticulum"
+expect_exit_code_any = [1, 0]
+expect_stdout_contains = "Unable to drop path"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "sh /opt/integ-scripts/rnpath_known_dest.sh nexthop"
+expect_exit_code = 0
+expect_stdout_contains = "NEXTHOP_OK"
+
+[[steps]]
+action = "exec"
+on = "bob"
+command = "sh /opt/integ-scripts/rnpath_known_dest.sh drop"
+expect_exit_code = 0
+expect_stdout_contains = "DROP_OK"
