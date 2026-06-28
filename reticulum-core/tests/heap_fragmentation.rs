@@ -44,13 +44,14 @@ use std::sync::Mutex;
 use embedded_alloc::LlffHeap;
 use rand_core::OsRng;
 
+use reticulum_core::constants::MGMT_ANNOUNCE_INTERVAL_MS;
 use reticulum_core::constants::MTU;
 use reticulum_core::traits::Clock;
 use reticulum_core::transport::{Transport, TransportConfig};
 use reticulum_core::{
-    Action, Destination, DestinationHash, DestinationType, Direction, Identity, InterfaceId,
-    LinkId, MemoryStorage, NoStorage, NodeCore, NodeCoreBuilder, ProofStrategy, SendError,
-    TickOutput,
+    Action, Destination, DestinationHash, DestinationType, Direction, EmbeddedStorage, Identity,
+    InterfaceId, LinkId, MemoryStorage, NoStorage, NodeCore, NodeCoreBuilder, ProofStrategy,
+    SendError, TickOutput,
 };
 
 // ----------------------------------------------------------------------------
@@ -245,6 +246,11 @@ const ANNOUNCE_PEERS: usize = 3;
 const ANNOUNCE_STEP_MS: u64 = 3_000;
 const DATA_PACKETS_PER_ROUND: u64 = 4;
 
+/// Mirror of the firmware `EmbeddedInterface` serial channel: capacity 8,
+/// drop on overflow. Holding the to_vec'd frames briefly before they drain
+/// puts the #65 serial `to_vec` allocations into the recorded trace.
+const SERIAL_CAP: usize = 8;
+
 struct Churn {
     transport: Transport<StepClock, MemoryStorage>,
     peers: Vec<Destination>,
@@ -257,9 +263,15 @@ struct Churn {
     announce: Vec<u8>,
     link_id: LinkId,
     payload: Vec<u8>,
+    // Management-announce node (the #65-pinned path): a probe responder on the
+    // firmware storage, announcing through a bounded serial-style queue.
+    mgmt: NodeCore<OsRng, StepClock, EmbeddedStorage>,
+    mgmt_clock: StepClock,
+    serial: std::collections::VecDeque<Vec<u8>>,
     rounds_run: u64,
     links_established: u64,
     packets_sent: u64,
+    mgmt_announces: u64,
 }
 
 impl Churn {
@@ -296,6 +308,14 @@ impl Churn {
         let link_id = establish(&mut a, &mut b, dest_hash, &key)
             .expect("data link must establish for the fragmentation churn");
 
+        // Management-announce node on the firmware storage with the probe
+        // responder armed (registers rnstransport.probe into mgmt_destinations).
+        let mgmt_clock = StepClock::new(START_MS);
+        let mgmt = NodeCoreBuilder::new()
+            .enable_transport(true)
+            .respond_to_probes(true)
+            .build(OsRng, mgmt_clock.clone(), EmbeddedStorage::new());
+
         Self {
             transport,
             peers,
@@ -308,9 +328,13 @@ impl Churn {
             announce,
             link_id,
             payload: b"heap-fragmentation-probe-payload-0123456789".to_vec(),
+            mgmt,
+            mgmt_clock,
+            serial: std::collections::VecDeque::new(),
             rounds_run: 0,
             links_established: 0,
             packets_sent: 0,
+            mgmt_announces: 0,
         }
     }
 
@@ -357,6 +381,23 @@ impl Churn {
             let out = self.b.handle_timeout();
             settle(&mut self.b, &mut self.a, out);
         }
+
+        // Management announce (#65-pinned path): step past the deadline so one
+        // announce fires, then push every broadcast through the bounded serial
+        // queue (to_vec, cap 8, drop on overflow) and drain it, exactly as the
+        // firmware's EmbeddedInterface + retic_serial_task do.
+        self.mgmt_clock.advance(MGMT_ANNOUNCE_INTERVAL_MS + 1);
+        let out = self.mgmt.handle_timeout();
+        for action in &out.actions {
+            let (Action::Broadcast { data, .. } | Action::SendPacket { data, .. }) = action;
+            if matches!(action, Action::Broadcast { .. }) {
+                self.mgmt_announces += 1;
+            }
+            if self.serial.len() < SERIAL_CAP {
+                self.serial.push_back(data.clone());
+            }
+        }
+        self.serial.clear();
 
         self.rounds_run += 1;
     }
@@ -563,6 +604,13 @@ fn lnode_heap_fragmentation_replay() {
         "churn must send data packets ({} sent over {} rounds), else the trace \
          is not exercising the data path",
         churn.packets_sent,
+        RECORD_ROUNDS,
+    );
+    assert!(
+        churn.mgmt_announces >= RECORD_ROUNDS,
+        "churn must fire a management announce every round ({} over {} rounds), \
+         else the trace is not exercising the #65-pinned mgmt-announce path",
+        churn.mgmt_announces,
         RECORD_ROUNDS,
     );
 
