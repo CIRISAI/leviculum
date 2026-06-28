@@ -79,7 +79,7 @@ pub struct EmbeddedStorage {
     /// reader is every routing decision (very frequent).
     ///
     /// **Capacity:** 32.
-    path_table: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], PathEntry, 32>,
+    path_table: OrderedMap<[u8; TRUNCATED_HASHBYTES], PathEntry, 32>,
 
     /// Per-destination path quality state (`Unknown` / `Unresponsive` /
     /// `Responsive`), used to allow same-emission worse-hop announces
@@ -98,7 +98,7 @@ pub struct EmbeddedStorage {
     /// path-acceptance gate (per-announce).
     ///
     /// **Capacity:** 32.
-    path_states: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], PathState, 32>,
+    path_states: OrderedMap<[u8; TRUNCATED_HASHBYTES], PathState, 32>,
 
     // Announce
     /// Cached announce metadata for rate-limiting and rebroadcast
@@ -118,7 +118,7 @@ pub struct EmbeddedStorage {
     /// `get_announce_mut` for rate checking (frequent).
     ///
     /// **Capacity:** 16.
-    announce_table: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], AnnounceEntry, 16>,
+    announce_table: OrderedMap<[u8; TRUNCATED_HASHBYTES], AnnounceEntry, 16>,
 
     /// Raw cached announce packet bytes, for serving path-request
     /// responses without waiting for the next live announce.
@@ -134,7 +134,7 @@ pub struct EmbeddedStorage {
     /// (frequent); reader is path-request response building.
     ///
     /// **Capacity:** 16.
-    announce_cache: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>, 16>,
+    announce_cache: OrderedMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>, 16>,
 
     /// Per-destination announce rate-tracking: last accepted timestamp,
     /// violation count, blocked-until deadline.
@@ -152,7 +152,7 @@ pub struct EmbeddedStorage {
     /// inbound announce (constant); reader is the rate gate.
     ///
     /// **Capacity:** 32.
-    announce_rate_table: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], AnnounceRateEntry, 32>,
+    announce_rate_table: OrderedMap<[u8; TRUNCATED_HASHBYTES], AnnounceRateEntry, 32>,
 
     // Routing
     /// Active links routed through this transport node: timestamp,
@@ -172,7 +172,7 @@ pub struct EmbeddedStorage {
     /// link-routed data forwarding (frequent).
     ///
     /// **Capacity:** 8.
-    link_table: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], LinkEntry, 8>,
+    link_table: OrderedMap<[u8; TRUNCATED_HASHBYTES], LinkEntry, 8>,
 
     /// Reverse-routing entries for proof responses: which interface a
     /// forwarded packet arrived on and which interface it went out on.
@@ -190,7 +190,7 @@ pub struct EmbeddedStorage {
     /// entry).
     ///
     /// **Capacity:** 16.
-    reverse_table: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], ReverseEntry, 16>,
+    reverse_table: OrderedMap<[u8; TRUNCATED_HASHBYTES], ReverseEntry, 16>,
 
     /// Outstanding discovery requests: "if announces for this
     /// destination arrive, send PATH_RESPONSE to this interface."
@@ -212,7 +212,7 @@ pub struct EmbeddedStorage {
     /// requesting interface).
     ///
     /// **Capacity:** 4.
-    discovery_path_requests: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], (usize, u64), 4>,
+    discovery_path_requests: OrderedMap<[u8; TRUNCATED_HASHBYTES], (usize, u64), 4>,
 
     // Path requests
     /// Last-sent timestamp for outbound path requests, used as the
@@ -233,7 +233,7 @@ pub struct EmbeddedStorage {
     /// emission.
     ///
     /// **Capacity:** 8.
-    path_requests: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], u64, 8>,
+    path_requests: OrderedMap<[u8; TRUNCATED_HASHBYTES], u64, 8>,
 
     /// Inbound path-request dedup tags (hash of dest_hash + source
     /// tag), so a relayed request isn't acted on twice.
@@ -250,7 +250,7 @@ pub struct EmbeddedStorage {
     /// request dedup check (very frequent under flooding).
     ///
     /// **Capacity:** 32.
-    path_request_tag_set: FnvIndexSet<[u8; 32], 32>,
+    path_request_tag_set: OrderedSet<[u8; 32], 32>,
 
     // Identity / security
     /// Cached remote `Identity` (Ed25519 + X25519 public keys), keyed
@@ -269,7 +269,7 @@ pub struct EmbeddedStorage {
     /// for the active set, but goes through other code paths).
     ///
     /// **Capacity:** 16.
-    known_identities: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], Identity, 16>,
+    known_identities: OrderedMap<[u8; TRUNCATED_HASHBYTES], Identity, 16>,
 
     /// Cached remote ratchet public keys, used for batch decryption of
     /// packets sent under the sender's current ratchet.
@@ -287,7 +287,7 @@ pub struct EmbeddedStorage {
     /// destinations).
     ///
     /// **Capacity:** 8.
-    known_ratchets: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], ([u8; RATCHET_SIZE], u64), 8>,
+    known_ratchets: OrderedMap<[u8; TRUNCATED_HASHBYTES], ([u8; RATCHET_SIZE], u64), 8>,
 
     /// Sender-side ratchet private keys (serialized) for our local
     /// destinations, persisted across rotations so old messages remain
@@ -306,7 +306,7 @@ pub struct EmbeddedStorage {
     /// re-key.
     ///
     /// **Capacity:** 4.
-    dest_ratchet_keys: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>, 4>,
+    dest_ratchet_keys: OrderedMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>, 4>,
 
     // Receipts
     /// Pending-delivery `PacketReceipt`s: what we sent, when, and
@@ -336,7 +336,7 @@ pub struct EmbeddedStorage {
     /// and proof handling.
     ///
     /// **Capacity:** 8.
-    receipts: FnvIndexMap<[u8; TRUNCATED_HASHBYTES], PacketReceipt, 8>,
+    receipts: OrderedMap<[u8; TRUNCATED_HASHBYTES], PacketReceipt, 8>,
 }
 
 impl EmbeddedStorage {
@@ -345,20 +345,20 @@ impl EmbeddedStorage {
         Self {
             packet_cache: FnvIndexSet::new(),
             packet_cache_prev: FnvIndexSet::new(),
-            path_table: FnvIndexMap::new(),
-            path_states: FnvIndexMap::new(),
-            announce_table: FnvIndexMap::new(),
-            announce_cache: FnvIndexMap::new(),
-            announce_rate_table: FnvIndexMap::new(),
-            link_table: FnvIndexMap::new(),
-            reverse_table: FnvIndexMap::new(),
-            discovery_path_requests: FnvIndexMap::new(),
-            path_requests: FnvIndexMap::new(),
-            path_request_tag_set: FnvIndexSet::new(),
-            known_identities: FnvIndexMap::new(),
-            known_ratchets: FnvIndexMap::new(),
-            dest_ratchet_keys: FnvIndexMap::new(),
-            receipts: FnvIndexMap::new(),
+            path_table: OrderedMap::new(),
+            path_states: OrderedMap::new(),
+            announce_table: OrderedMap::new(),
+            announce_cache: OrderedMap::new(),
+            announce_rate_table: OrderedMap::new(),
+            link_table: OrderedMap::new(),
+            reverse_table: OrderedMap::new(),
+            discovery_path_requests: OrderedMap::new(),
+            path_requests: OrderedMap::new(),
+            path_request_tag_set: OrderedSet::new(),
+            known_identities: OrderedMap::new(),
+            known_ratchets: OrderedMap::new(),
+            dest_ratchet_keys: OrderedMap::new(),
+            receipts: OrderedMap::new(),
         }
     }
 
@@ -375,101 +375,201 @@ impl Default for EmbeddedStorage {
     }
 }
 
-// Helper: insert-or-evict for FnvIndexMap
-//
-// `heapless::FnvIndexMap::insert()` returns `Err((K,V))` when full and key
-// is new. We evict the truly-oldest entry by insertion order.
-//
-// We can't use `map.remove(&oldest_key)` directly: heapless's `remove` is
-// `swap_remove`, which moves the last entry into the freed slot. After the
-// first overflow, `keys().next()` would no longer be the longest-resident
-// entry, it would be whichever key was last when the previous eviction
-// happened. Strict FIFO requires rebuilding the map: snapshot the keys in
-// insertion order, drop the head, then re-insert the rest plus the new
-// entry. Cost is O(N) per overflow; N ≤ 32 so this is microseconds even
-// on Cortex-M4.
-fn map_set<K: Eq + core::hash::Hash + Copy, V, const N: usize>(
-    map: &mut FnvIndexMap<K, V, N>,
-    key: K,
-    value: V,
-    label: &str,
-) {
-    match map.insert(key, value) {
-        Ok(_) => {}
-        Err((k, v)) => {
-            crate::tracing::debug!(
-                event = "EMB_EVICT",
-                map = label,
-                len_before = map.len(),
-                cap = N,
-            );
-            // Snapshot keys + drain kept (K, V) pairs into heap-backed Vecs.
-            // heapless inline storage would put `N * size_of::<(K, V)>()` on
-            // the stack, which exceeds 2 KB for the larger maps and crashes
-            // the T114 firmware. The two heap allocations live only for the
-            // duration of one overflow and are freed before return.
-            let keys: Vec<K> = map.keys().copied().collect();
-            let mut kept: Vec<(K, V)> = Vec::with_capacity(keys.len());
-            for (idx, kk) in keys.iter().enumerate() {
-                if idx == 0 {
-                    continue;
-                }
-                if let Some(vv) = map.remove(kk) {
-                    kept.push((*kk, vv));
-                }
-            }
-            // The oldest entry is whatever remains in `map`. Drop it.
-            map.clear();
-            // Re-insert the kept entries in original insertion order.
-            for (kk, vv) in kept {
-                let _ = map.insert(kk, vv);
-            }
-            // Insert the new entry at the back.
-            if map.insert(k, v).is_err() {
-                crate::tracing::debug!(
-                    event = "EMB_INSERT_FAIL",
-                    map = label,
-                    len_after_evict = map.len(),
-                    cap = N,
-                );
+/// Capacity-bounded map with FIFO drop-oldest eviction, allocation-free and
+/// stack-safe, with a minimal base-size footprint.
+///
+/// FIFO order is encoded as a monotonic `u32` insertion sequence stamped on
+/// each entry (alongside its value) instead of a companion key-index. heapless
+/// `remove` is `swap_remove` and perturbs the map's own iteration order, so the
+/// order cannot be read back from the map directly; the per-entry sequence
+/// records it without duplicating the (16- or 32-byte) keys. Eviction is an
+/// O(N) scan (N<=32) for the entry with the greatest age. Every mutation
+/// touches only inline storage: no heap `Vec`, no large stack frame.
+///
+/// This is the #65 fix. The original `map_set` rebuilt the entire map through
+/// two transient heap `Vec`s on every overflow insert; under churn the maps sit
+/// at capacity, so that fired per insert and OOMed the near-full 64 KiB heap.
+/// Batch 12 made eviction allocation-free with a companion `heapless::Vec<K,N>`
+/// order index, but full-key duplication grew `size_of::<EmbeddedStorage>()` by
+/// +4.3 KB, eating the idle-heap headroom the win was meant to create. The
+/// per-entry `u32` sequence keeps the allocation-free, stack-safe eviction
+/// while costing only 4 bytes per slot.
+///
+/// **Sequence wraparound:** the `u32` counter wraps after 2^32 inserts. Age is
+/// computed with wrapping subtraction, so FIFO order stays exact as long as no
+/// live entry is older than 2^32 inserts (4 billion). Past that single extreme
+/// the evicted entry is approximately-oldest rather than strictly-oldest, which
+/// the storage contract permits (missing entries recover via timeouts and
+/// retransmits).
+struct OrderedMap<K, V, const N: usize>
+where
+    K: Eq + core::hash::Hash + Copy,
+{
+    /// Each value carries its insertion sequence: `(seq, value)`.
+    map: FnvIndexMap<K, (u32, V), N>,
+    /// Monotonic insertion counter; wraps (see type docs).
+    next_seq: u32,
+}
+
+impl<K, V, const N: usize> OrderedMap<K, V, N>
+where
+    K: Eq + core::hash::Hash + Copy,
+{
+    fn new() -> Self {
+        Self {
+            map: FnvIndexMap::new(),
+            next_seq: 0,
+        }
+    }
+
+    /// Take the current sequence and advance the counter.
+    fn bump_seq(&mut self) -> u32 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        seq
+    }
+
+    /// Key of the oldest entry (greatest age under wrapping arithmetic), or
+    /// `None` if empty. O(N) scan.
+    fn oldest_key(&self) -> Option<K> {
+        let next = self.next_seq;
+        self.map
+            .iter()
+            .max_by_key(|(_, (seq, _))| next.wrapping_sub(*seq))
+            .map(|(k, _)| *k)
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn contains_key(&self, key: &K) -> bool {
+        self.map.contains_key(key)
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        self.map.get(key).map(|(_, v)| v)
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.map.get_mut(key).map(|(_, v)| v)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.map.iter().map(|(k, (_, v))| (k, v))
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.map.keys()
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.map.values().map(|(_, v)| v)
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        self.map.remove(key).map(|(_, v)| v)
+    }
+
+    /// Insert with FIFO eviction and refresh-on-re-insert semantics:
+    /// - existing key: update the value in place and stamp a fresh (newest)
+    ///   sequence, so an actively-refreshed entry is not evicted by unrelated
+    ///   newer inserts;
+    /// - full + new key: drop the oldest entry, then insert as newest;
+    /// - otherwise: insert as newest.
+    fn insert(&mut self, key: K, value: V) {
+        let seq = self.bump_seq();
+        if let Some(slot) = self.map.get_mut(&key) {
+            // In-place value update + refresh to newest.
+            *slot = (seq, value);
+            return;
+        }
+        if self.map.len() >= N {
+            if let Some(oldest) = self.oldest_key() {
+                self.map.remove(&oldest);
             }
         }
+        let _ = self.map.insert(key, (seq, value));
+    }
+
+    /// Retain entries matching `keep`. Allocation-free.
+    fn retain(&mut self, mut keep: impl FnMut(&K, &V) -> bool) {
+        self.map.retain(|k, (_, v)| keep(k, v));
+    }
+
+    /// Like `retain`, but returns the removed `(K, V)` pairs. The heap `Vec`
+    /// here is the caller-visible return value, not eviction scratch; the
+    /// reject-key list lives in inline (stack) storage.
+    fn retain_collect(&mut self, mut keep: impl FnMut(&K, &V) -> bool) -> Vec<(K, V)> {
+        let mut drop_keys: heapless::Vec<K, N> = heapless::Vec::new();
+        for (k, (_, v)) in self.map.iter() {
+            if !keep(k, v) {
+                let _ = drop_keys.push(*k);
+            }
+        }
+        let mut removed = Vec::new();
+        for k in &drop_keys {
+            if let Some((_, v)) = self.map.remove(k) {
+                removed.push((*k, v));
+            }
+        }
+        removed
     }
 }
 
-// Retain helper: heapless FnvIndexMap doesn't have retain().
-// We collect keys to remove, then remove them.
-fn map_retain<K: Eq + core::hash::Hash + Copy, V, const N: usize>(
-    map: &mut FnvIndexMap<K, V, N>,
-    mut pred: impl FnMut(&K, &V) -> bool,
-) {
-    let keys_to_remove: heapless::Vec<K, N> = map
-        .iter()
-        .filter(|(k, v)| !pred(k, v))
-        .map(|(k, _)| *k)
-        .collect();
-    for key in &keys_to_remove {
-        map.remove(key);
-    }
+/// Capacity-bounded set with FIFO drop-oldest eviction, allocation-free.
+/// Same per-entry `u32` sequence scheme as [`OrderedMap`] (the value side of
+/// the backing map *is* the sequence), for the path-request dedup tag set.
+struct OrderedSet<K, const N: usize>
+where
+    K: Eq + core::hash::Hash + Copy,
+{
+    /// Maps each key to its insertion sequence.
+    set: FnvIndexMap<K, u32, N>,
+    next_seq: u32,
 }
 
-// Retain helper that also collects removed entries
-fn map_retain_collect<K: Eq + core::hash::Hash + Copy, V: Clone, const N: usize>(
-    map: &mut FnvIndexMap<K, V, N>,
-    mut pred: impl FnMut(&K, &V) -> bool,
-) -> Vec<(K, V)> {
-    let mut removed = Vec::new();
-    let mut keys_to_remove: heapless::Vec<K, N> = heapless::Vec::new();
-    for (k, v) in map.iter() {
-        if !pred(k, v) {
-            removed.push((*k, v.clone()));
-            let _ = keys_to_remove.push(*k);
+impl<K, const N: usize> OrderedSet<K, N>
+where
+    K: Eq + core::hash::Hash + Copy,
+{
+    fn new() -> Self {
+        Self {
+            set: FnvIndexMap::new(),
+            next_seq: 0,
         }
     }
-    for key in &keys_to_remove {
-        map.remove(key);
+
+    fn contains(&self, key: &K) -> bool {
+        self.set.contains_key(key)
     }
-    removed
+
+    /// Key of the oldest entry (greatest age under wrapping arithmetic).
+    fn oldest_key(&self) -> Option<K> {
+        let next = self.next_seq;
+        self.set
+            .iter()
+            .max_by_key(|(_, seq)| next.wrapping_sub(**seq))
+            .map(|(k, _)| *k)
+    }
+
+    /// Insert a key, evicting the oldest first if full. Returns true if the key
+    /// was newly inserted (was not already present). Tags are never refreshed,
+    /// so a present key leaves the set (and its sequence) untouched.
+    fn insert(&mut self, key: K) -> bool {
+        if self.set.contains_key(&key) {
+            return false;
+        }
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        if self.set.len() >= N {
+            if let Some(oldest) = self.oldest_key() {
+                self.set.remove(&oldest);
+            }
+        }
+        let _ = self.set.insert(key, seq);
+        true
+    }
 }
 
 impl Storage for EmbeddedStorage {
@@ -492,12 +592,10 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_path(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], entry: PathEntry) {
-        // Remove before insert so re-announces refresh the FIFO position.
-        // Without this, a re-announced destination keeps its original
-        // position and can be evicted by unrelated newer entries even while
-        // still actively in use.
-        self.path_table.remove(&dest_hash);
-        map_set(&mut self.path_table, dest_hash, entry, "path_table");
+        // OrderedMap::insert refreshes the FIFO position of a re-announced
+        // destination, so an active path is not evicted by unrelated newer
+        // entries even while still in use.
+        self.path_table.insert(dest_hash, entry);
     }
 
     fn remove_path(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<PathEntry> {
@@ -547,8 +645,7 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_path_state(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], state: PathState) {
-        self.path_states.remove(&dest_hash);
-        map_set(&mut self.path_states, dest_hash, state, "path_states");
+        self.path_states.insert(dest_hash, state);
     }
 
     // Reverse Table
@@ -557,8 +654,7 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_reverse(&mut self, hash: [u8; TRUNCATED_HASHBYTES], entry: ReverseEntry) {
-        self.reverse_table.remove(&hash);
-        map_set(&mut self.reverse_table, hash, entry, "reverse_table");
+        self.reverse_table.insert(hash, entry);
     }
 
     fn remove_reverse(&mut self, hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<ReverseEntry> {
@@ -578,8 +674,7 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_link_entry(&mut self, link_id: [u8; TRUNCATED_HASHBYTES], entry: LinkEntry) {
-        self.link_table.remove(&link_id);
-        map_set(&mut self.link_table, link_id, entry, "link_table");
+        self.link_table.insert(link_id, entry);
     }
 
     // Announce Table
@@ -595,8 +690,7 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_announce(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], entry: AnnounceEntry) {
-        self.announce_table.remove(&dest_hash);
-        map_set(&mut self.announce_table, dest_hash, entry, "announce_table");
+        self.announce_table.insert(dest_hash, entry);
     }
 
     fn remove_announce(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<AnnounceEntry> {
@@ -613,8 +707,7 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_announce_cache(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], raw: Vec<u8>) {
-        self.announce_cache.remove(&dest_hash);
-        map_set(&mut self.announce_cache, dest_hash, raw, "announce_cache");
+        self.announce_cache.insert(dest_hash, raw);
     }
 
     // Announce Rate
@@ -630,13 +723,7 @@ impl Storage for EmbeddedStorage {
         dest_hash: [u8; TRUNCATED_HASHBYTES],
         entry: AnnounceRateEntry,
     ) {
-        self.announce_rate_table.remove(&dest_hash);
-        map_set(
-            &mut self.announce_rate_table,
-            dest_hash,
-            entry,
-            "announce_rate_table",
-        );
+        self.announce_rate_table.insert(dest_hash, entry);
     }
 
     // Receipts
@@ -645,8 +732,7 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_receipt(&mut self, hash: [u8; TRUNCATED_HASHBYTES], receipt: PacketReceipt) {
-        self.receipts.remove(&hash);
-        map_set(&mut self.receipts, hash, receipt, "receipts");
+        self.receipts.insert(hash, receipt);
     }
 
     // Path Requests
@@ -655,26 +741,16 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_path_request_time(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], time_ms: u64) {
-        self.path_requests.remove(&dest_hash);
-        map_set(&mut self.path_requests, dest_hash, time_ms, "path_requests");
+        self.path_requests.insert(dest_hash, time_ms);
     }
 
     fn check_path_request_tag(&mut self, tag: &[u8; 32]) -> bool {
         if self.path_request_tag_set.contains(tag) {
             return true;
         }
-        // If full, evict the truly-oldest tag. heapless's `remove` is
-        // `swap_remove`, so we rebuild to preserve insertion order across
-        // repeated overflows (same reason map_set rebuilds, see comment
-        // there).
-        if self.path_request_tag_set.len() >= self.path_request_tag_set.capacity() {
-            let keys: Vec<[u8; 32]> = self.path_request_tag_set.iter().copied().collect();
-            self.path_request_tag_set.clear();
-            for k in keys.iter().skip(1) {
-                let _ = self.path_request_tag_set.insert(*k);
-            }
-        }
-        let _ = self.path_request_tag_set.insert(*tag);
+        // New tag: OrderedSet::insert evicts the oldest by insertion order if
+        // full, allocation-free (no rebuild, no transient heap Vec).
+        self.path_request_tag_set.insert(*tag);
         false
     }
 
@@ -684,37 +760,31 @@ impl Storage for EmbeddedStorage {
     }
 
     fn set_identity(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], identity: Identity) {
-        self.known_identities.remove(&dest_hash);
-        map_set(
-            &mut self.known_identities,
-            dest_hash,
-            identity,
-            "known_identities",
-        );
+        self.known_identities.insert(dest_hash, identity);
     }
 
     // Cleanup
     fn expire_reverses(&mut self, now_ms: u64, timeout_ms: u64) -> usize {
         let before = self.reverse_table.len();
-        map_retain(&mut self.reverse_table, |_, entry| {
-            now_ms.saturating_sub(entry.timestamp_ms) <= timeout_ms
-        });
+        self.reverse_table
+            .retain(|_, entry| now_ms.saturating_sub(entry.timestamp_ms) <= timeout_ms);
         before - self.reverse_table.len()
     }
 
     fn remove_reverse_entries_for_interface(&mut self, iface_index: usize) {
-        map_retain(&mut self.reverse_table, |_, e| {
+        self.reverse_table.retain(|_, e| {
             e.receiving_interface_index != iface_index && e.outbound_interface_index != iface_index
         });
     }
 
     fn expire_receipts(&mut self, now_ms: u64) -> Vec<PacketReceipt> {
-        map_retain_collect(&mut self.receipts, |_, receipt| {
-            !(receipt.status == ReceiptStatus::Sent && receipt.is_expired(now_ms))
-        })
-        .into_iter()
-        .map(|(_, r)| r)
-        .collect()
+        self.receipts
+            .retain_collect(|_, receipt| {
+                !(receipt.status == ReceiptStatus::Sent && receipt.is_expired(now_ms))
+            })
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect()
     }
 
     fn expire_link_entries(
@@ -722,7 +792,7 @@ impl Storage for EmbeddedStorage {
         now_ms: u64,
         link_timeout_ms: u64,
     ) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)> {
-        map_retain_collect(&mut self.link_table, |_, entry| {
+        self.link_table.retain_collect(|_, entry| {
             let is_expired = if entry.validated {
                 now_ms.saturating_sub(entry.timestamp_ms) > link_timeout_ms
             } else {
@@ -771,7 +841,7 @@ impl Storage for EmbeddedStorage {
         &mut self,
         iface_index: usize,
     ) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)> {
-        map_retain_collect(&mut self.link_table, |_, entry| {
+        self.link_table.retain_collect(|_, entry| {
             entry.received_interface_index != iface_index
                 && entry.next_hop_interface_index != iface_index
         })
@@ -828,20 +898,14 @@ impl Storage for EmbeddedStorage {
         ratchet: [u8; RATCHET_SIZE],
         received_at_ms: u64,
     ) {
-        self.known_ratchets.remove(&dest_hash);
-        map_set(
-            &mut self.known_ratchets,
-            dest_hash,
-            (ratchet, received_at_ms),
-            "known_ratchets",
-        );
+        self.known_ratchets
+            .insert(dest_hash, (ratchet, received_at_ms));
     }
 
     fn expire_known_ratchets(&mut self, now_ms: u64, expiry_ms: u64) -> usize {
         let before = self.known_ratchets.len();
-        map_retain(&mut self.known_ratchets, |_, (_, received_at)| {
-            now_ms.saturating_sub(*received_at) < expiry_ms
-        });
+        self.known_ratchets
+            .retain(|_, (_, received_at)| now_ms.saturating_sub(*received_at) < expiry_ms);
         before - self.known_ratchets.len()
     }
 
@@ -881,12 +945,8 @@ impl Storage for EmbeddedStorage {
     ) {
         // Only store first request (Python behavior)
         if !self.discovery_path_requests.contains_key(&dest_hash) {
-            map_set(
-                &mut self.discovery_path_requests,
-                dest_hash,
-                (requesting_interface, timeout_ms),
-                "discovery_path_requests",
-            );
+            self.discovery_path_requests
+                .insert(dest_hash, (requesting_interface, timeout_ms));
         }
     }
 
@@ -903,9 +963,8 @@ impl Storage for EmbeddedStorage {
 
     fn expire_discovery_path_requests(&mut self, now_ms: u64) -> usize {
         let before = self.discovery_path_requests.len();
-        map_retain(&mut self.discovery_path_requests, |_, (_, timeout)| {
-            *timeout > now_ms
-        });
+        self.discovery_path_requests
+            .retain(|_, (_, timeout)| *timeout > now_ms);
         before - self.discovery_path_requests.len()
     }
 
@@ -919,13 +978,7 @@ impl Storage for EmbeddedStorage {
         dest_hash: [u8; TRUNCATED_HASHBYTES],
         serialized: Vec<u8>,
     ) {
-        self.dest_ratchet_keys.remove(&dest_hash);
-        map_set(
-            &mut self.dest_ratchet_keys,
-            dest_hash,
-            serialized,
-            "dest_ratchet_keys",
-        );
+        self.dest_ratchet_keys.insert(dest_hash, serialized);
     }
 
     fn load_dest_ratchet_keys(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<Vec<u8>> {
@@ -937,6 +990,23 @@ impl Storage for EmbeddedStorage {
 mod tests {
     use super::*;
     use crate::destination::DestinationHash;
+
+    #[test]
+    fn embedded_storage_base_size_guard() {
+        // Base footprint guard (Codeberg #65). Allocation-free eviction must
+        // not reinflate the struct the way Batch 12's full-key order index did
+        // (41280 -> 45616, +4.3 KB, which ate the idle-heap headroom). The
+        // per-entry u32 sequence keeps it near the original 41280 B; the
+        // residual is the irreducible cost of an inline insertion sequence
+        // (per-slot alignment padding, not the 4-byte counter itself). Tighten
+        // or relax this bound deliberately, never by accident.
+        let size = core::mem::size_of::<EmbeddedStorage>();
+        assert!(
+            size <= 43_500,
+            "EmbeddedStorage grew to {size} B; the eviction order tracking must \
+             not duplicate full keys (Batch 12 regression was 45616 B)"
+        );
+    }
 
     #[test]
     fn fnv_remove_insert_moves_to_back() {
