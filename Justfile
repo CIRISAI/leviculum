@@ -277,6 +277,10 @@ install-ci:
 flash:
     cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 
+# SWD firmware debugging via the RPi Debug Probe (see docs/src/firmware/probe-debugging.md)
+probe *args:
+    ./scripts/probe-debug.sh {{args}}
+
 # Useful for A/B testing (one T114 on new firmware, one on old).
 #   just flash-one /dev/ttyACM3
 #   just flash-one /dev/leviculum-transport

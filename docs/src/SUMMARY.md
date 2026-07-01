@@ -28,6 +28,7 @@
 - [Building and flashing](firmware/flashing.md)
 - [Serial ports and udev](firmware/serial-ports.md)
 - [Recovery and troubleshooting](firmware/recovery.md)
+- [Debugging with the Debug Probe (SWD)](firmware/probe-debugging.md)
 
 # Developer Guide
 
