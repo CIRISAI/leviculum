@@ -7,7 +7,7 @@
 //! regardless of when the host opens the port. Old data is overwritten when
 //! the ring buffer is full (like Linux `dmesg` / `printk`).
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
@@ -70,31 +70,45 @@ impl LogRing {
     }
 
     /// Write bytes into the ring buffer. Overwrites oldest data if full.
+    ///
+    /// Sound in both the normal (task) and fault/exception path: never
+    /// forms a `&mut` to the shared buffer, and reserves the byte range
+    /// atomically so a log fired from an interrupt while a task is
+    /// mid-write cannot alias the buffer or race the position update.
+    /// Each producer owns a disjoint reserved range and writes it with
+    /// raw volatile stores. No critical section, so it is safe to call
+    /// from the SoftDevice-masked fault path.
     pub fn write(&self, data: &[u8]) {
-        let buf = unsafe { &mut *self.buf.get() };
-        let mut wp = self.write_pos.load(Ordering::Relaxed);
-        for &byte in data {
-            buf[wp % LOG_RING_SIZE] = byte;
-            wp = wp.wrapping_add(1);
+        let buf = self.buf.get().cast::<u8>();
+        // Reserve `data.len()` bytes atomically. `start` is this
+        // producer's exclusive range; concurrent producers get
+        // non-overlapping ranges.
+        let start = self.write_pos.fetch_add(data.len(), Ordering::AcqRel);
+        for (i, &byte) in data.iter().enumerate() {
+            let idx = start.wrapping_add(i) % LOG_RING_SIZE;
+            unsafe { core::ptr::write_volatile(buf.add(idx), byte) };
         }
-        self.write_pos.store(wp, Ordering::Release);
+        let wp = start.wrapping_add(data.len());
 
         // If writer has lapped reader, advance reader to oldest available data
         let rp = self.read_pos.load(Ordering::Relaxed);
         if wp.wrapping_sub(rp) > LOG_RING_SIZE {
-            self.read_pos.store(wp - LOG_RING_SIZE, Ordering::Release);
+            self.read_pos.store(wp.wrapping_sub(LOG_RING_SIZE), Ordering::Release);
         }
     }
 
     /// Read up to `out.len()` bytes. Returns number of bytes read.
+    ///
+    /// Uses raw volatile reads rather than forming a `&` to the shared
+    /// buffer, so it never aliases a concurrent producer's raw writes.
     pub fn read(&self, out: &mut [u8]) -> usize {
-        let buf = unsafe { &*self.buf.get() };
+        let buf = self.buf.get().cast::<u8>();
         let wp = self.write_pos.load(Ordering::Acquire);
         let mut rp = self.read_pos.load(Ordering::Relaxed);
         let avail = wp.wrapping_sub(rp);
         let to_read = avail.min(out.len());
         for slot in out.iter_mut().take(to_read) {
-            *slot = buf[rp % LOG_RING_SIZE];
+            *slot = unsafe { core::ptr::read_volatile(buf.add(rp % LOG_RING_SIZE)) };
             rp = rp.wrapping_add(1);
         }
         self.read_pos.store(rp, Ordering::Release);
@@ -198,7 +212,11 @@ macro_rules! log_critical {
 #[repr(C)]
 pub struct PersistentTail {
     pub magic: u32,
-    pub write_pos: u32,
+    // Atomic so the byte-range reservation is race-free between a task
+    // and the fault/exception path (same treatment as `LogRing`). Same
+    // size/layout as a plain `u32`, so it survives `sys_reset` in the
+    // `.uninit` region exactly as before.
+    pub write_pos: AtomicU32,
     pub buf: [u8; PERSISTENT_TAIL_SIZE],
 }
 
@@ -215,13 +233,14 @@ impl PersistentTailMirror {
     pub fn write(&self, data: &[u8]) {
         unsafe {
             let p = core::ptr::addr_of_mut!(PERSISTENT_TAIL_RAW).cast::<PersistentTail>();
+            let wp_atomic: &AtomicU32 = &*core::ptr::addr_of!((*p).write_pos);
             // Initialize on first write per boot if magic isn't ours yet.
-            // (After take_persistent_log_lines clears the magic, we
+            // (After take_persistent_log clears the magic, we
             // re-initialize — that's intentional: the tail captures the
             // *current* boot's tail, not the previous boot's.)
             let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
             if magic != PERSISTENT_TAIL_MAGIC {
-                core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).write_pos), 0);
+                wp_atomic.store(0, Ordering::Release);
                 let buf_ptr = core::ptr::addr_of_mut!((*p).buf).cast::<u8>();
                 for i in 0..PERSISTENT_TAIL_SIZE {
                     core::ptr::write_volatile(buf_ptr.add(i), 0);
@@ -231,13 +250,16 @@ impl PersistentTailMirror {
                     PERSISTENT_TAIL_MAGIC,
                 );
             }
-            let mut wp = core::ptr::read_volatile(core::ptr::addr_of!((*p).write_pos)) as usize;
+            // Reserve the byte range atomically (no `&mut`, no non-atomic
+            // RMW), then fill it with raw volatile stores.
+            let start = wp_atomic.fetch_add(data.len() as u32, Ordering::AcqRel) as usize;
             let buf_ptr = core::ptr::addr_of_mut!((*p).buf).cast::<u8>();
-            for &b in data {
-                core::ptr::write_volatile(buf_ptr.add(wp % PERSISTENT_TAIL_SIZE), b);
-                wp = wp.wrapping_add(1);
+            for (i, &b) in data.iter().enumerate() {
+                core::ptr::write_volatile(
+                    buf_ptr.add(start.wrapping_add(i) % PERSISTENT_TAIL_SIZE),
+                    b,
+                );
             }
-            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).write_pos), wp as u32);
         }
     }
 }
@@ -257,7 +279,8 @@ pub fn take_persistent_log() -> Option<PersistentLogSnapshot> {
         if magic != PERSISTENT_TAIL_MAGIC {
             return None;
         }
-        let wp = core::ptr::read_volatile(core::ptr::addr_of!((*p).write_pos)) as usize;
+        let wp_atomic: &AtomicU32 = &*core::ptr::addr_of!((*p).write_pos);
+        let wp = wp_atomic.load(Ordering::Acquire) as usize;
         let mut out = [0u8; PERSISTENT_TAIL_SIZE];
         let buf_ptr = core::ptr::addr_of!((*p).buf).cast::<u8>();
         let (start, len) = if wp >= PERSISTENT_TAIL_SIZE {
