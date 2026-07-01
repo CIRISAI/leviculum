@@ -170,7 +170,7 @@ static HEAP: Heap = Heap::empty();
 /// Stage 1B's commit message) was WRONG — the artifact was real
 /// for the OLD stack_free implementation (commit 42f05e2 fixes that),
 /// but stack overflow at HEAP=96K is also real. Both bugs coexist.
-const HEAP_SIZE: usize = 64 * 1024;
+const HEAP_SIZE: usize = 96 * 1024;
 
 /// Return (used, free) heap bytes at this instant.
 pub fn heap_stats() -> (usize, usize) {
