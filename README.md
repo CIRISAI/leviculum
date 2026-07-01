@@ -1,6 +1,6 @@
 # Leviculum
 
-Leviculum is an independent reimplementation based on the [Reticulum protocol specification](https://reticulum.network).
+Leviculum is an independent reimplementation based on the [Reticulum protocol specification](docs/src/appendix/reticulum-specification.md).
 It is wire-compatible with Reticulum and runs on Linux, macOS, and embedded devices.
 
 ## What is Reticulum?
