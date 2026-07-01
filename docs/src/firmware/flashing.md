@@ -13,16 +13,22 @@ recipe — what each one does and when to reach for it.
 ## Prerequisites
 
 Install the Rust embedded toolchain, the ARM cross-compiler (needed by
-`nrf-sdc` for C-header bindgen), and add your user to the `dialout`
-group for serial-port access. Log out and back in after the `usermod`
-so the new group membership takes effect.
+`nrf-sdc` for C-header bindgen), flip-link, and add your user to the
+`dialout` group for serial-port access. Log out and back in after the
+`usermod` so the new group membership takes effect.
 
 ```sh
 rustup target add thumbv7em-none-eabihf
 rustup component add llvm-tools
+cargo install flip-link
 sudo apt install gcc-arm-none-eabi
 sudo usermod -aG dialout $USER
 ```
+
+flip-link is the firmware linker. It relocates the stack to the bottom
+of RAM so a stack overflow faults cleanly against the RAM floor instead
+of silently corrupting memory. It is link-time only, with zero runtime
+cost.
 
 (`leviculum-nrf/README.md:12-19`)
 

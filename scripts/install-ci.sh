@@ -62,7 +62,16 @@ echo "[install-ci] state dir: ~/.local/state/leviculum-ci"
 mkdir -p ~/.cache/leviculum-ci-target
 echo "[install-ci] cargo target dir: ~/.cache/leviculum-ci-target"
 
-# 6. Install systemd user units, patching the hardcoded
+# 6. Firmware build toolchain.  flip-link is the firmware linker
+#    (stack-overflow protection, Codeberg #50); run-tier3-hw.sh builds
+#    the firmware via `just flash*`.  Both lines are idempotent: the
+#    rustup target is a no-op once added, and `cargo install` skips a
+#    crate that is already present at the requested version.
+rustup target add thumbv7em-none-eabihf
+cargo install --locked flip-link
+echo "[install-ci] firmware toolchain: thumbv7em-none-eabihf + flip-link"
+
+# 7. Install systemd user units, patching the hardcoded
 #    %h/coding/libreticulum literal to point at the worktree this
 #    installer was actually run from.  Lets a `git worktree`-based
 #    second checkout (e.g. ~/coding/libreticulum-ci) install its
@@ -78,10 +87,10 @@ for unit in scripts/systemd/leviculum-ci-tier2.service \
 done
 echo "[install-ci] systemd user units installed in $SYSTEMD_USER_DIR (path: $REPO_DIR)"
 
-# 7. Reload systemd
+# 8. Reload systemd
 systemctl --user daemon-reload
 
-# 8. Enable timers.  Tier 2 is ON-DEMAND (Lew, 2026-06-12): only the
+# 9. Enable timers.  Tier 2 is ON-DEMAND (Lew, 2026-06-12): only the
 #    nightly stays scheduled.  Start tier2 manually when needed:
 #      systemctl --user start leviculum-ci-tier2.service
 #    Upgrade path: drop a previously-installed tier2 timer.
@@ -90,12 +99,12 @@ rm -f "$SYSTEMD_USER_DIR/leviculum-ci-tier2.timer"
 systemctl --user enable --now leviculum-ci-nightly.timer
 echo "[install-ci] nightly timer enabled; tier2 is on-demand"
 
-# 9. LoRa hardware probe (warning only)
+# 10. LoRa hardware probe (warning only)
 if ! ls /dev/ttyACM* >/dev/null 2>&1; then
     echo "[install-ci] WARNING: no /dev/ttyACM* devices found — LoRa tests will skip in nightly."
 fi
 
-# 10. Worktree-scoped vm-mode marker.  Tier-runners check for this
+# 11. Worktree-scoped vm-mode marker.  Tier-runners check for this
 #     file inside their git-dir before running _repo-sync.sh.  Marker
 #     is per-worktree (not per-user) so a manual `bash run-tier2.sh`
 #     from the developer's primary checkout never triggers a
