@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-    "reticulum-core",
-    "reticulum-std",
-    "reticulum-ffi",
-    "reticulum-cli",
+    "leviculum-core",
+    "leviculum-std",
+    "leviculum-ffi",
+    "leviculum-cli",
     "reticulum-integ",
-    "reticulum-proxy",
+    "leviculum-proxy",
 ]
 
-# reticulum-nrf requires cross-compilation (thumbv7em-none-eabihf) and
+# leviculum-nrf requires cross-compilation (thumbv7em-none-eabihf) and
 # cannot build with --workspace on the host.
-# Build with: cargo build -p reticulum-nrf --target thumbv7em-none-eabihf
-exclude = ["reticulum-nrf"]
+# Build with: cargo build -p leviculum-nrf --target thumbv7em-none-eabihf
+exclude = ["leviculum-nrf"]
 
 [workspace.package]
 version = "0.7.0"
@@ -81,7 +81,7 @@ opt-level = 3
 # .woodpecker/nightly.yml so cargo-deb's strip is skipped entirely.
 [profile.release]
 strip = "debuginfo"
-# Pin unwinding (already the default). The reticulum-ffi cdylib relies on
+# Pin unwinding (already the default). The leviculum-ffi cdylib relies on
 # catch_unwind at every extern "C" boundary so a Rust panic becomes an error
 # code instead of unwinding into C (undefined behaviour). panic = "abort"
 # would make catch_unwind a no-op and turn any internal panic into a process

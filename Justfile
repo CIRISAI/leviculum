@@ -9,7 +9,7 @@
 # in the same binary.  Depends on build-integ-bins because the mvr
 # tests spawn the release lnsd/lncp binaries directly.
 mvr: build-integ-bins
-    cargo test -p reticulum-std --test mvr -- --test-threads=1
+    cargo test -p leviculum-std --test mvr -- --test-threads=1
 
 # Promote the most-recent auto-bug bundle to the coder bridge.
 # Run after a tier RED has emitted to $BRIDGE/auto-bug/instructions.md
@@ -29,36 +29,36 @@ spawn-coder:
     echo "[spawn-coder] bundle promoted to bridge: $BRIDGE/instructions.md"; \
     echo "[spawn-coder] source: $BRIDGE/auto-bug/instructions.md (left in place for re-promotion)"
 
-# Lint the embedded firmware workspace. reticulum-nrf is its OWN cargo
+# Lint the embedded firmware workspace. leviculum-nrf is its OWN cargo
 # workspace — `--workspace` invocations in the repo root never reach it,
 # which let 11 clippy findings accumulate unseen (audit 2026-06-11).
 # Both BSP feature sets; clippy subsumes `cargo check` diagnostics.
-# First run compiles the embedded deps into reticulum-nrf/target
+# First run compiles the embedded deps into leviculum-nrf/target
 # (minutes); warm runs are seconds.
 lint-nrf:
-    cd reticulum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
-    cd reticulum-nrf && cargo clippy --features bsp-t114 -- -D warnings
+    cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
+    cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
 
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
-# Tracing-shim gate (PR #57): reticulum-core must pass the SAME suite with
+# Tracing-shim gate (PR #57): leviculum-core must pass the SAME suite with
 # tracing OFF as with it on. The `tracing` feature is default-on; with it
 # off the level macros become no-ops via the `crate::tracing` shim in
 # lib.rs. Running the full suite in that config proves the shim changed no
 # core logic (a bare `tracing::x!` that slipped past the shim would either
 # fail to compile here or, worse, only on M0 — see m0-build-gate).
 core-no-tracing:
-    cargo test -p reticulum-core --no-default-features
+    cargo test -p leviculum-core --no-default-features
 
-# Cortex-M0 gate (PR #57): reticulum-core must cross-compile for thumbv6m
+# Cortex-M0 gate (PR #57): leviculum-core must cross-compile for thumbv6m
 # (atomic-less MCU, e.g. rp2040) with tracing off. tracing-core's CAS-based
 # callsite registry does not compile there, so the default build FAILS on
 # M0; --no-default-features must succeed. Keeps M0 support from rotting.
 m0-build-gate:
     rustup target add thumbv6m-none-eabi
-    cargo build -p reticulum-core --target thumbv6m-none-eabi --no-default-features
+    cargo build -p leviculum-core --target thumbv6m-none-eabi --no-default-features
 
 # Tier 0 (~3 min, runs on every git push): fmt + clippy (host + nrf)
 # + rustdoc gate + tracing-shim + M0 gates + workspace lib tests.
@@ -72,15 +72,15 @@ fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
 # Tier 1 (~15 min): Tier 0 + core/tests + ffi (incl. C-program + Python interop)
 # + proxy + rnsd_interop.
 standard: fast test-ffi verify-packaging
-    cargo test -p reticulum-core --tests
-    cargo test -p reticulum-proxy
-    cargo test -p reticulum-std --test rnsd_interop
-    cargo test -p reticulum-std --test event_log_subscriber -- --test-threads=1
-    cargo test -p reticulum-std --test event_log_multiprocess
+    cargo test -p leviculum-core --tests
+    cargo test -p leviculum-proxy
+    cargo test -p leviculum-std --test rnsd_interop
+    cargo test -p leviculum-std --test event_log_subscriber -- --test-threads=1
+    cargo test -p leviculum-std --test event_log_multiprocess
 
 # Build the production binaries the integ runner mounts into Docker
 # containers. Explicit per-bin list avoids `--workspace --bins` which
-# would also try to build reticulum-nrf firmware on the host. Runs on
+# would also try to build leviculum-nrf firmware on the host. Runs on
 # the same CARGO_TARGET_DIR as the enclosing `cargo test`, so the
 # runner's CARGO_TARGET_DIR-aware path resolver finds them.
 #
@@ -93,7 +93,7 @@ standard: fast test-ffi verify-packaging
 # it for the hardware nightly. Deleting the binary does NOT work: cargo
 # re-hardlinks it from deps/ without relinking, keeping the old mtime.
 build-integ-bins:
-    find reticulum-cli/src reticulum-proxy/src -name '*.rs' -exec touch {} +
+    find leviculum-cli/src leviculum-proxy/src -name '*.rs' -exec touch {} +
     cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
 
 # Default cargo test runs non-ignored tests and skips ignored ones.
@@ -112,7 +112,7 @@ extensive: standard build-integ-bins build-c-lnsd
 nightly: extensive
     cargo test -p reticulum-integ -- --include-ignored --test-threads=1
 
-# Build reticulum-ffi as a real glibc-dynamic cdylib + staticlib for
+# Build leviculum-ffi as a real glibc-dynamic cdylib + staticlib for
 # C-API consumers ("apt install libreticulum-dev" ergonomics). This
 # deliberately overrides the workspace musl default — see the comment
 # in .cargo/config.toml. cbindgen regenerates reticulum.h as a side
@@ -124,7 +124,7 @@ nightly: extensive
 # C-program harness needs libleviculum.so to link and run. The Python interop
 # tests skip cleanly if Python RNS is unavailable.
 test-ffi:
-    cargo build -p reticulum-ffi --target x86_64-unknown-linux-gnu
+    cargo build -p leviculum-ffi --target x86_64-unknown-linux-gnu
     cargo test-ffi
 
 # Memory- and race-check the C API under sanitizers and Miri. On demand, not in
@@ -140,11 +140,11 @@ test-ffi:
 # char** aspects); it cannot run tokio or real I/O, so node/network tests are
 # excluded by filtering to identity/hex/destination.
 sanitize-ffi:
-    RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration --test ffi_property -- --test-threads=1
-    RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0 suppressions={{justfile_directory()}}/reticulum-ffi/tsan-suppressions.txt" cargo +nightly test -p reticulum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit identity
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit hex
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p reticulum-ffi --test ffi_unit destination
+    RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p leviculum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration --test ffi_property -- --test-threads=1
+    RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0 suppressions={{justfile_directory()}}/leviculum-ffi/tsan-suppressions.txt" cargo +nightly test -p leviculum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p leviculum-ffi --test ffi_unit identity
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p leviculum-ffi --test ffi_unit hex
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p leviculum-ffi --test ffi_unit destination
 
 build-ffi:
     cargo build-ffi
@@ -176,9 +176,9 @@ build-ffi-arm64:
 build-c-lnsd: build-ffi
     T="${CARGO_TARGET_DIR:-target}"; \
     mkdir -p "$T/release"; \
-    cc reticulum-ffi/examples/c/lnsd.c \
+    cc leviculum-ffi/examples/c/lnsd.c \
        "$T/x86_64-unknown-linux-gnu/release/libleviculum.a" \
-       -I reticulum-ffi -O2 -Wall -Wextra -Werror \
+       -I leviculum-ffi -O2 -Wall -Wextra -Werror \
        -lpthread -ldl -lm \
        -o "$T/release/c-lnsd"
 
@@ -208,7 +208,7 @@ _deb-stamp:
 
 # amd64 musl-static .deb. Binaries come from the workspace musl target,
 # so the .deb is fully static and runs on Debian >= 9 / Ubuntu >= 16.04
-# regardless of host glibc. `cargo clean -p reticulum-cli` is the same
+# regardless of host glibc. `cargo clean -p leviculum-cli` is the same
 # incremental-relink insurance nightly uses (a repeated build with an
 # unchanged LEVICULUM_BUILD_ID can skip relinking and ship a stale
 # version string). --no-strip: rust already strips debuginfo at link
@@ -216,9 +216,9 @@ _deb-stamp:
 # binaries (SIGSEGV at startup). Output: target/debian/leviculum_*_amd64.deb
 # (cargo-deb also hardlinks it under target/<triple>/debian/).
 build-deb-amd64: (_require-cargo-deb) _deb-stamp
-    cargo clean -p reticulum-cli
+    cargo clean -p leviculum-cli
     LEVICULUM_BUILD_ID="$(cat .build-id)" cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
-    cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+    cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
     @echo "[build-deb-amd64] produced: $(ls -1t target/debian/leviculum_*_amd64.deb | head -1)"
 
 # arm64 musl-static .deb via cargo-zigbuild (Zig as the cross
@@ -231,9 +231,9 @@ build-deb-amd64: (_require-cargo-deb) _deb-stamp
 # handling as build-deb-amd64. Output: target/debian/leviculum_*_arm64.deb
 # (cargo-deb also hardlinks it under target/<triple>/debian/).
 build-deb-arm64: (_require-cargo-deb) _deb-stamp
-    cargo clean -p reticulum-cli
+    cargo clean -p leviculum-cli
     LEVICULUM_BUILD_ID="$(cat .build-id)" cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
-    cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+    cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
     @echo "[build-deb-arm64] produced: $(ls -1t target/debian/leviculum_*_arm64.deb | head -1)"
 
 # Build both .debs in one go. _deb-stamp runs first (a dependency of each
@@ -270,38 +270,38 @@ install-ci:
     bash scripts/install-ci.sh
 
 # Touch-free; double-tap RESET only if the runner prompts for a crashed
-# device. Details: reticulum-nrf/README.md §Build and flash.
+# device. Details: leviculum-nrf/README.md §Build and flash.
 # The firmware crate is outside the workspace (cross-compiled), so we
 # invoke cargo from its own directory.
 # Flash every attached T114 with the current firmware.
 flash:
-    cd reticulum-nrf && cargo run --release --bin t114 --features bsp-t114
+    cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 
 # Useful for A/B testing (one T114 on new firmware, one on old).
 #   just flash-one /dev/ttyACM3
 #   just flash-one /dev/leviculum-transport
 # Flash a single T114 by port path or udev symlink.
 flash-one PORT:
-    cd reticulum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} cargo run --release --bin t114 --features bsp-t114
+    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} cargo run --release --bin t114 --features bsp-t114
 
 # First flash from Meshtastic / blank firmware needs a manual RESET
 # double-tap (the stock app has no 1200-baud-touch handler). Subsequent
 # flashes use the touch path automatically.
 # Flash every attached RAK4631 (WisMesh Pocket V2) with the current firmware.
 flash-rak4631:
-    cd reticulum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631
+    cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631
 
 # Flash a single RAK4631 by port path or udev symlink.
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
 flash-rak4631-one PORT:
-    cd reticulum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631
+    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631
 
 # Flash with all RAK19026 baseboard peripherals enabled — the WisMesh
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
 # baseboard features (display, gnss, battery).
 flash-rak4631-pocket:
-    cd reticulum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+    cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no

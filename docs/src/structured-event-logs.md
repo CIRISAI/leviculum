@@ -60,7 +60,7 @@ cross-test pollution.  Use disjoint event names per test
 Inside any test, before the test body runs:
 
 ```rust
-let _evlog = reticulum_std::test_support::event_log::init_event_log();
+let _evlog = leviculum_std::test_support::event_log::init_event_log();
 ```
 
 The handle is RAII: when the binding goes out of scope it removes
@@ -77,7 +77,7 @@ To make the test fail loud on undocumented schema gaps, end the
 test body with:
 
 ```rust
-reticulum_std::assert_no_schema_violations!(_evlog);
+leviculum_std::assert_no_schema_violations!(_evlog);
 ```
 
 It panics if any `EVENT_SCHEMA_VIOLATION` line appears in the
@@ -106,7 +106,7 @@ Two steps, both in the same commit:
    like `type`, use the raw identifier `r#type`.
 
 2. **Add a catalogue entry** in
-   `reticulum-std/src/test_support/event_log.rs`'s `EVENT_CATALOG`:
+   `leviculum-std/src/test_support/event_log.rs`'s `EVENT_CATALOG`:
 
    ```rust
    EventSchema {
@@ -175,7 +175,7 @@ LEVICULUM_EVENT_NODE=node-a \
 After the children exit, the parent merges all per-process files:
 
 ```rust
-use reticulum_std::test_support::event_log::merge_event_logs;
+use leviculum_std::test_support::event_log::merge_event_logs;
 let merged: Vec<String> = merge_event_logs(&[
     PathBuf::from("/tmp/leviculum-events-12345.log"),
     PathBuf::from("/tmp/leviculum-events-12346.log"),
@@ -197,7 +197,7 @@ catalogue (`ts=<unix-ms>`) and sort on that instead.
 ### Production-daemon integration
 
 `lnsd` honours both env vars at startup via
-`reticulum_std::test_support::event_log::install_global_subscriber()`.
+`leviculum_std::test_support::event_log::install_global_subscriber()`.
 When `LEVICULUM_EVENT_LOG` is unset, the install path is
 functionally equivalent to the previous
 `tracing_subscriber::fmt().init()` call — no event-log layer is
@@ -210,11 +210,11 @@ capture for it is out of scope for the current Rust-side work.
 ## See also
 
 - Codeberg #39 piece 1 (this document's spec).
-- `reticulum-std/src/test_support/event_log.rs` (implementation +
+- `leviculum-std/src/test_support/event_log.rs` (implementation +
   catalogue).
-- `reticulum-std/src/test_support/tracing_setup.rs` (Registry
+- `leviculum-std/src/test_support/tracing_setup.rs` (Registry
   composition + Once-guard).
-- `reticulum-std/tests/event_log_subscriber.rs` (unit tests).
-- `reticulum-std/tests/event_log_multiprocess.rs` (multi-process
+- `leviculum-std/tests/event_log_subscriber.rs` (unit tests).
+- `leviculum-std/tests/event_log_multiprocess.rs` (multi-process
   merge integration test).
 - Stage 7: `jl` / `jldiff` filter tools that consume this format.

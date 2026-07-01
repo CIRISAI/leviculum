@@ -10,7 +10,7 @@ to do when USB stays dark.
 > board. Every step that presses a button, taps a pinhole, or observes a
 > drive appearing is **derived from source — requires the physical
 > device**. The commands and mechanisms are quoted from
-> `reticulum-nrf/README.md` and the `Justfile`; only the hardware
+> `leviculum-nrf/README.md` and the `Justfile`; only the hardware
 > outcome is un-verified here.
 
 ## Entering the UF2 bootloader
@@ -27,7 +27,7 @@ Adafruit UF2 bootloader.
 > firmware intercepts the line-coding change, writes a retained-register
 > magic, and soft-resets into the Adafruit UF2 bootloader. No physical
 > button press required.
-> (`reticulum-nrf/README.md:27`)
+> (`leviculum-nrf/README.md:27`)
 
 All `just flash*` recipes use this path automatically when the device is
 running our firmware. **(derived from source — requires the physical
@@ -47,7 +47,7 @@ rest of the batch keeps flashing touch-free.
 > (panic before the handler is installed, stack overflow, hardware
 > fault). The runner detects this per device via the UF2-drive-polling
 > timeout and prompts for that specific T114 only.
-> (`reticulum-nrf/README.md:38`)
+> (`leviculum-nrf/README.md:38`)
 
 **(derived from source — requires the physical device.)**
 
@@ -101,7 +101,7 @@ firmware updates.
 
 > The device stores its Reticulum identity in internal flash and
 > preserves it across firmware updates.
-> (`reticulum-nrf/README.md:42`)
+> (`leviculum-nrf/README.md:42`)
 
 Mechanically, the firmware loads the identity from a dedicated flash page
 at boot and only generates (and saves) a new one when none is present:
@@ -111,14 +111,14 @@ if id_store.load() => Some(identity)   -> "Identity loaded from flash"
 else                                   -> generate new, then save
 ```
 
-(`reticulum-nrf/src/bin/t114.rs:118-154`,
-`reticulum-nrf/src/bin/rak4631.rs:155-192`. The identity lives on the
+(`leviculum-nrf/src/bin/t114.rs:118-154`,
+`leviculum-nrf/src/bin/rak4631.rs:155-192`. The identity lives on the
 board's `identity_flash_page`, e.g. `0xEC000` on the T114,
-`reticulum-nrf/src/boards/t114.rs:144`.) Flashing new firmware rewrites
+`leviculum-nrf/src/boards/t114.rs:144`.) Flashing new firmware rewrites
 the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
 log prints `Identity loaded from flash` and an `[IDENTITY]` line with the
-full hash (`reticulum-nrf/src/bin/t114.rs:170-174`).
+full hash (`leviculum-nrf/src/bin/t114.rs:170-174`).
 
 ## When USB stays dark
 
@@ -126,7 +126,7 @@ If the board enumerates nothing on USB after a flash or a bad image:
 
 1. **Force the bootloader manually.** On a T114, double-tap RESET to get
    the UF2 drive regardless of the running image
-   (`reticulum-nrf/README.md:38`). On a Pocket V2, use the hidden-pinhole
+   (`leviculum-nrf/README.md:38`). On a Pocket V2, use the hidden-pinhole
    needle double-tap (see above) — the board has no accessible RESET pin
    (`Justfile:307-308`).
 2. **Re-flash the known-good LNode firmware** once the UF2 drive appears:
@@ -141,8 +141,8 @@ If the board enumerates nothing on USB after a flash or a bad image:
    ```
 
    Look for `[HARDFAULT_PMRT]`, `[PANIC_PMRT]`, and `[PERSISTENT_LOG]`
-   lines (`reticulum-nrf/src/bin/t114.rs:77-110`;
-   `reticulum-nrf/README.md:59-60`).
+   lines (`leviculum-nrf/src/bin/t114.rs:77-110`;
+   `leviculum-nrf/README.md:59-60`).
 
 **(All hardware steps: derived from source / project notes — requires the
 physical device.)**

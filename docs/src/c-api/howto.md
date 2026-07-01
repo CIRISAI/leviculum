@@ -4,7 +4,7 @@ This chapter shows how the functions combine into working programs. It assumes
 the model from the [Overview](overview.md): opaque handles, integer error
 codes, read(2) buffers, and the pollable event fd. Each recipe gives the
 functions involved and a focused snippet; the complete, compiling programs are
-the acceptance tests under `reticulum-ffi/examples/c/`, named per recipe. For a
+the acceptance tests under `leviculum-ffi/examples/c/`, named per recipe. For a
 single program built end to end from these pieces, see the
 [Tutorial](tutorial.md).
 
@@ -57,7 +57,7 @@ Interfaces are added on the builder: `lev_builder_add_tcp_client`,
 identity (otherwise one is generated), and `lev_builder_enable_transport(b, 1)`
 to act as a relay.
 
-Full program: `reticulum-ffi/examples/c/phase_a.c`.
+Full program: `leviculum-ffi/examples/c/phase_a.c`.
 
 ## Running the event loop
 
@@ -206,7 +206,7 @@ length); signing and decryption need the private key and return
 `LEV_ERR_CRYPTO` on a public-only identity, while verify needs only the public
 key.
 
-Full programs: `reticulum-ffi/examples/c/phase_a.c` and `crypto.c`.
+Full programs: `leviculum-ffi/examples/c/phase_a.c` and `crypto.c`.
 
 ## Announcing and discovering
 
@@ -235,14 +235,14 @@ For forward secrecy, call `lev_destination_enable_ratchets(dest, now_ms)` on an
 inbound destination before registering it (`now_ms` is the current time in
 milliseconds); peers, including Python ones, then encrypt to a rotating ratchet
 key. `lev_destination_ratchet_public(node, dh, ...)` reads the current key. See
-`reticulum-ffi/examples/c/ratchet.c`.
+`leviculum-ffi/examples/c/ratchet.c`.
 
 For delivery proofs, call `lev_destination_set_proof_strategy(dest, strategy)`
 before registering. `LEV_PROOF_ALL` auto-proves every received packet (Python's
 PROVE_ALL). `LEV_PROOF_APP` raises a `LEV_EVENT_PACKET_PROOF_REQUESTED` event
 whose data is the 32-byte packet hash; the app decides and calls
 `lev_send_proof(node, dest_hash, packet_hash, timeout_ms)`. See
-`reticulum-ffi/examples/c/proof.c`.
+`leviculum-ffi/examples/c/proof.c`.
 
 Receiving side, in the event loop:
 
@@ -260,7 +260,7 @@ After processing the announce, the receiver has a path and the announcer's
 cached identity, so `lev_has_path(node, peer)` returns 1 and `lev_connect` will
 work.
 
-Full program: `reticulum-ffi/examples/c/phase_b.c`.
+Full program: `leviculum-ffi/examples/c/phase_b.c`.
 
 ## Links and exchanging data
 
@@ -321,7 +321,7 @@ Close with `lev_close_link(link, 2000)` and release with `lev_link_free(link)`
 (which also closes an open link). A `LEV_EVENT_LINK_CLOSED` event reports a
 link that drops for any reason.
 
-Full program: `reticulum-ffi/examples/c/phase_c.c`.
+Full program: `leviculum-ffi/examples/c/phase_c.c`.
 
 ## Proving identity on a link
 
@@ -348,7 +348,7 @@ case LEV_EVENT_LINK_IDENTIFIED: {
 The 16-byte identity hash is also the payload of the
 `LEV_EVENT_LINK_IDENTIFIED` event (`lev_event_data`).
 
-Full program: `reticulum-ffi/examples/c/phase_c.c`.
+Full program: `leviculum-ffi/examples/c/phase_c.c`.
 
 ## Request and response
 
@@ -395,7 +395,7 @@ A request that gets no reply within its deadline surfaces as
 `LEV_REQUEST_POLICY_ALLOW_LIST` with an array of `n_ids` 16-byte identity
 hashes.
 
-Full program: `reticulum-ffi/examples/c/phase_d.c`.
+Full program: `leviculum-ffi/examples/c/phase_d.c`.
 
 ## Datagrams
 
@@ -419,7 +419,7 @@ case LEV_EVENT_PACKET_RECEIVED: {
 }
 ```
 
-Full program: `reticulum-ffi/examples/c/phase_d.c`.
+Full program: `leviculum-ffi/examples/c/phase_d.c`.
 
 ## Resource transfer
 
@@ -471,8 +471,8 @@ link it accepted open (freeing a link closes it), and the receiver applies its
 resource strategy on the link before the resource arrives. Exiting the sender
 right after the call returns aborts an in-flight transfer.
 
-Full programs: `reticulum-ffi/examples/c/phase_e.c`, and
-`reticulum-ffi/examples/c/lncp.c`, a complete two-process file-copy tool
+Full programs: `leviculum-ffi/examples/c/phase_e.c`, and
+`leviculum-ffi/examples/c/lncp.c`, a complete two-process file-copy tool
 (`lncp send` / `lncp recv`) that exercises the whole stack end to end.
 
 ## Errors and logging
@@ -536,7 +536,7 @@ The snapshot is a point-in-time copy, so reads never race a changing table.
 Interface stats work the same way (`lev_interface_stats_snapshot` /
 `_count` / `_name` / `_entry` / `_free`), giving each interface's name, online
 status, and byte counters for an `rnstatus`-style interface listing. See
-`reticulum-ffi/examples/c/stats.c`.
+`leviculum-ffi/examples/c/stats.c`.
 
 ## Putting it together
 

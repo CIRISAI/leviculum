@@ -5,8 +5,8 @@
 # Version stamp files written by the build-deb* just recipes (and CI nightly).
 /.build-id
 /.deb-version
-reticulum-nrf/target/
-reticulum-nrf/Cargo.lock
+leviculum-nrf/target/
+leviculum-nrf/Cargo.lock
 **/*.rs.bk
 
 # RNode firmware images extracted by `just flash-rnode-extract` (Mark's
@@ -16,7 +16,7 @@ reticulum-nrf/Cargo.lock
 /.rnode-tools/
 
 # Generated headers (cbindgen)
-reticulum-ffi/*.h
+leviculum-ffi/*.h
 
 # Markdown files
 IMPLEMENTATION_PLAN.md

@@ -46,7 +46,7 @@ error and panic harness, logging and init, the event fd bridge and its
 accessors, destinations and announce, paths, connect and links (including
 identify and remote identity), datagram, request and response, resource
 transfer, and the hex helpers. Packaging (SONAME, pkg-config, install
-layout) is in `reticulum-ffi/Makefile` and `leviculum.pc.in`. Each area has
+layout) is in `leviculum-ffi/Makefile` and `leviculum.pc.in`. Each area has
 a two-node C acceptance test under `examples/c/`. Still later, by design:
 the Android per-ABI build, and any surface beyond v1 (LXMF, LXST). The
 no-panic guard is enforced by `tests/guard_coverage.rs`.
@@ -61,7 +61,7 @@ error strings, and hex/bytes helpers.
 Out of scope for v1: LXMF, LXST, the shared-instance daemon, RPC, fault
 injection, and the diagnostic/stats surface (`transport_stats`,
 `path_table_entries`, `rate_table_entries`, `drop_all_paths_via`, ...).
-These stay internal to `reticulum-std` and never enter the facade.
+These stay internal to `leviculum-std` and never enter the facade.
 
 The review proposed trimming request/response and resource transfer to a
 fast follow. The task brief lists both in v1 (only LXMF and LXST are out),
@@ -71,9 +71,9 @@ destination and announce, link send and receive, datagram, event fd) and
 request/response and resource land last, in phases d and e.
 
 Binding constraints from project policy: additive changes only to
-`reticulum-core` and `reticulum-std` (new module plus re-exports, never a
+`leviculum-core` and `leviculum-std` (new module plus re-exports, never a
 refactor of signatures `lnsd`/`lnstest` depend on); stay out of
-`reticulum-std/src/interfaces/` and `reticulum-nrf`. The facade must not
+`leviculum-std/src/interfaces/` and `leviculum-nrf`. The facade must not
 break wire or semantic compatibility with Python-RNS peers; it only
 re-projects an already battle-tested engine.
 
@@ -82,13 +82,13 @@ re-projects an already battle-tested engine.
 ```
    C application (owns its event loop)
         |  leviculum.h  (extern "C", opaque handles, int codes)
-   reticulum-ffi  (cdylib + staticlib)
+   leviculum-ffi  (cdylib + staticlib)
         |  panic guard, runtime, eventfd bridge, buffer marshalling
-   reticulum_std::api  (curated Rust facade, own stable types)
+   leviculum_std::api  (curated Rust facade, own stable types)
         |  thin re-projection, no new behaviour
-   reticulum_std::driver::ReticulumNode  (existing engine, unchanged)
+   leviculum_std::driver::ReticulumNode  (existing engine, unchanged)
         |
-   reticulum_core  (state machine, wire format, crypto)
+   leviculum_core  (state machine, wire format, crypto)
 ```
 
 The facade adds no behaviour. It selects the app-relevant entry points out
@@ -171,7 +171,7 @@ handle-returning constructors.
 ```
 
 Exact mapping from the facade error to a code. The real
-`reticulum_std::error::Error` has ten variants; the table is the authority,
+`leviculum_std::error::Error` has ten variants; the table is the authority,
 no variant falls through:
 
 | `Error` variant | code |
@@ -683,7 +683,7 @@ output name is set to `leviculum` so the linker flag is `-lleviculum`.
 
 Decision: cbindgen generates `leviculum.h` from the Rust source on every
 build, and the header is a build artifact, not committed (the repo already
-gitignores `reticulum-ffi/*.h`). The Rust source is the single source of
+gitignores `leviculum-ffi/*.h`). The Rust source is the single source of
 truth; packaging installs the freshly generated header.
 
 Rationale. The worst class of C-library bug is a header that disagrees with
@@ -733,7 +733,7 @@ Identity:
 - `lev_identity_load_file`, `lev_identity_save_file` (NEW surface, see note)
 
 The two file functions are not pure re-typing of core `Identity`, which has
-no file IO. They are new facade code over `reticulum-std`'s
+no file IO. They are new facade code over `leviculum-std`'s
 `FileIdentityStore`, and they carry a Python file-format compatibility
 decision (the 64-byte transport identity format, `builder.rs`). Decision:
 reuse `FileIdentityStore` so the on-disk format stays byte-compatible with
@@ -909,7 +909,7 @@ facade tests, and the C example link/run test for that phase
 
 ## The Rust facade
 
-The facade is a new additive module `reticulum_std::api`, re-exported as
+The facade is a new additive module `leviculum_std::api`, re-exported as
 needed. It is the projection target of the C constraints: it exposes only
 the v1 surface and gives it stable types that hide core internals.
 
@@ -922,7 +922,7 @@ Proposed types:
   stable byte-addressed newtype.
 - `api::Event` (projection of `NodeEvent` to the v1 set, internal fields
   dropped).
-- `api::Error` (already close to `reticulum_std::error::Error`; the facade
+- `api::Error` (already close to `leviculum_std::error::Error`; the facade
   re-exports it and the C codes map from it per §2).
 
 Type-ownership decision (review S5). The facade re-exports core `Identity`

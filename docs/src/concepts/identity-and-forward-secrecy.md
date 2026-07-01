@@ -9,7 +9,7 @@ to the [Reticulum specification](../appendix/reticulum-specification.md)
 ## Identities are dual keypairs
 
 A Reticulum identity holds **two** keypairs, used for two different
-jobs (`reticulum-core/src/identity.rs:45`):
+jobs (`leviculum-core/src/identity.rs:45`):
 
 - **X25519** — for key agreement (ECDH). This is how two parties
   derive a shared secret to encrypt traffic to each other.
@@ -21,7 +21,7 @@ and sign) or *public-only* (it holds just the public keys, learned
 from someone else's announce, and can only encrypt and verify). In the
 source this is the difference between the `Option`-wrapped private
 fields and the always-present public fields
-(`reticulum-core/src/identity.rs:48`).
+(`leviculum-core/src/identity.rs:48`).
 
 ## Destinations are derived addresses
 
@@ -29,7 +29,7 @@ You do not pick a Reticulum address; you *derive* one. A
 [Destination](../appendix/reticulum-specification.md) is an addressable
 endpoint whose 16-byte hash is computed from an application name, a
 set of aspects, and (for most types) an identity
-(`reticulum-core/src/destination.rs:1`). Because the address is a hash
+(`leviculum-core/src/destination.rs:1`). Because the address is a hash
 of stable inputs, it is reproducible and self-authenticating: anyone
 who knows the inputs computes the same address, and the identity bound
 into it proves ownership.
@@ -37,7 +37,7 @@ into it proves ownership.
 A destination also carries a *type* (`SINGLE`, `GROUP`, `PLAIN`,
 `LINK`) that selects its encryption behaviour, and a *direction*
 (`IN`, `OUT`) that selects whether it can receive or send
-(`reticulum-core/src/destination.rs:6-7`).
+(`leviculum-core/src/destination.rs:6-7`).
 
 ## Announces carry the public keys
 
@@ -54,7 +54,7 @@ End-to-end encryption protects traffic in flight, but if a long-lived
 identity key is ever compromised, an attacker who recorded past
 ciphertext could decrypt it. **Ratchets** close that window for
 packets sent to `SINGLE` destinations *without* first establishing a
-Link (`reticulum-core/src/ratchet.rs:1`).
+Link (`leviculum-core/src/ratchet.rs:1`).
 
 The mechanism, conceptually:
 

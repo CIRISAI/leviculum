@@ -8,7 +8,7 @@
 # Mirror of lora_lncp_bidir.toml but with serial=true (LNode firmware)
 # instead of rnode=true (ESP32 RNode firmware). Same lncp action.
 # Radio config matches firmware default (RadioConfig::eu_medium in
-# reticulum-nrf::lora).
+# leviculum-nrf::lora).
 
 profile = "lnode_pair"
 
@@ -16,10 +16,10 @@ profile = "lnode_pair"
 name = "lora_lnode_lncp_bidir"
 description = "lncp bidirectional 2KB between two LNodes over direct LoRa"
 timeout_secs = 900
-rust_log = "reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
-# Matches reticulum-nrf::lora::RadioConfig::eu_medium() and the firmware
+# Matches leviculum-nrf::lora::RadioConfig::eu_medium() and the firmware
 # default emitted by both T114 and RAK4631 binaries on bug32-softdevice-spike.
 frequency = 869525000
 bandwidth = 125000

@@ -1,7 +1,7 @@
 # Broadcast behaviour: Python-RNS parity reference
 
 This document is the source-of-truth reference that our Rust
-`reticulum-core` broadcast code must match. It records what
+`leviculum-core` broadcast code must match. It records what
 Python-Reticulum does for every broadcast-related mechanism,
 citing `vendor/Reticulum/RNS/Transport.py` (and neighbouring files)
 by line. The companion mapping table at the end records the
@@ -536,8 +536,8 @@ This document is the audit target for both sides:
   re-verify. A changed line number is a hint the behaviour may
   have shifted; a changed mechanism is a new parity task.
 - When we add a new broadcast code path to
-  `reticulum-core`, we extend the parity matrix (section 12) and
-  add a test under `reticulum-std/tests/rnsd_interop/` that
+  `leviculum-core`, we extend the parity matrix (section 12) and
+  add a test under `leviculum-std/tests/rnsd_interop/` that
   verifies the new path matches what a live Python peer sees.
 
 The parity matrix is the contract. Everything else in this

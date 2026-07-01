@@ -179,7 +179,7 @@ CACHE_TARGET=~/.cache/leviculum-ci-target
 if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
 log "[CI_HW] building integ binaries (lnsd / lnstest / lncp / lora-proxy)"
 RELEASE_DIR="$CACHE_TARGET/x86_64-unknown-linux-musl/release"
-find "$REPO_DIR/reticulum-cli/src" "$REPO_DIR/reticulum-proxy/src" \
+find "$REPO_DIR/leviculum-cli/src" "$REPO_DIR/leviculum-proxy/src" \
   -name '*.rs' -exec touch {} +
 CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
   cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
@@ -292,7 +292,7 @@ PY
 # which makes every LNode result meaningless.
 #
 # The flash mechanic already exists (just flash / just flash-rak4631);
-# both use the 1200-baud touch reset in reticulum-nrf/src/usb.rs, so no
+# both use the 1200-baud touch reset in leviculum-nrf/src/usb.rs, so no
 # manual button press is needed on a board already running our firmware.
 #
 # Non-fatal by contract: a board that is not touch-flashable (stuck in

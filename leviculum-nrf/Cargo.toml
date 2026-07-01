@@ -1,0 +1,142 @@
+[package]
+name = "leviculum-nrf"
+version = "0.4.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T114)"
+
+[dependencies]
+leviculum-core = { path = "../leviculum-core", default-features = false }
+
+# Embassy async runtime
+embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
+embassy-nrf = { version = "0.9", features = ["nrf52840", "time-driver-rtc1", "nfc-pins-as-gpio", "gpiote"] }
+embassy-time = "0.5"
+embassy-sync = "0.7"
+embassy-usb = "0.5"
+embassy-futures = "0.1"
+embassy-embedded-hal = "0.5"
+embedded-hal-async = "1"
+
+# Cortex-M support.
+#
+# `critical-section-single-core` is opt-in via the `bsp-t114` feature
+# (T114 has no BLE; full PRIMASK-based IRQ mask in CS is the standard
+# cortex-m idiom). The Pocket V2 build pulls a SoftDevice-aware impl
+# from `nrf-softdevice` instead via the `bsp-rak4631` feature. Both
+# build paths arrive at exactly one `critical_section::Impl` in the
+# linked binary; mutex enforced by `compile_error!` in `lib.rs`.
+# Bug #32 history: the prior `nrf-mpsl/critical-section-impl` (selective
+# mask, kept BLE-priority IRQs running during app CS) caused
+# Mutex<RefCell<…>> reentrance panics; resolved by SoftDevice migration.
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+
+# Heap allocator for alloc
+embedded-alloc = "0.7"
+
+# Static initialization
+static_cell = "2"
+
+tracing-core = { version = "0.1", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+heapless = { version = "0.9", default-features = false }
+# nrf-softdevice's gatt_service macro generates `FixedGattValue` impls
+# that target heapless 0.8 specifically (the version nrf-softdevice itself
+# uses). Our own code uses 0.9; we keep both in the tree and import the
+# 0.8 one only inside ble.rs for the characteristic value types.
+heapless_v8 = { package = "heapless", version = "0.8", default-features = false }
+embedded-storage = "0.3"
+
+# Optional baseboard peripherals (RAK19026 VC on the WisMesh Pocket V2).
+# All gated behind features so the bare nRF52840 + SX1262 build (T114, or a
+# RAK4631 module without the baseboard) stays unchanged.
+#
+# Note: only SSD1306 is wired up today. The sh1106 crate (v0.5.x) still
+# pins embedded-hal 0.2.3 which would require an embedded-hal-compat shim
+# against our embassy-nrf 0.9 Twim (which speaks embedded-hal 1.0 only).
+# If the WisMesh Pocket V2's OLED probes as SH1106, the display task will
+# log a warning and stay idle — adding SH1106 support is a separate task.
+ssd1306 = { version = "0.10", default-features = false, features = ["graphics"], optional = true }
+embedded-graphics = { version = "0.8", optional = true }
+nmea0183 = { version = "0.6", default-features = false, optional = true }
+
+# BLE stack — Nordic S140 SoftDevice via nrf-softdevice (Embassy-async
+# bindings by Dirbaio). Both boards run BLE through the SoftDevice's
+# closed-source C blob; nrf-softdevice provides the Rust-async wrappers
+# and registers a SoftDevice-aware `critical_section::Impl`. This
+# replaces the Day-1 nrf-mpsl/nrf-sdc/trouble-host stack which exhibited
+# Bug #32 (Mutex<RefCell<…>> reentrance under MPSL-IRQ preemption).
+#
+# Pin: 5949a5b1445cc907745c6449a35577e4544cd255 = HEAD as of 2025-06-26
+# (PR #296 "Support larger discovery characteristics"). The crates.io
+# 0.1.0 publish is stale (nrf-softdevice issue #304); we pin to git HEAD
+# for compatibility with current embassy-nrf.
+nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice", rev = "5949a5b", optional = true }
+nrf-softdevice-s140 = { git = "https://github.com/embassy-rs/nrf-softdevice", rev = "5949a5b", optional = true }
+
+# cortex-m-rt supplies the startup runtime, panic handler, and vector
+# table that the linker needs for a no_std no_main firmware image, even
+# though no Rust module imports it directly. nrf-softdevice is pulled via
+# the `softdevice` aggregator feature (under both bsp-rak4631 and
+# bsp-t114); cargo-machete still flags it as "not directly imported"
+# because its effect is feature-driven.
+[package.metadata.cargo-machete]
+ignored = ["cortex-m-rt", "nrf-softdevice"]
+
+# Optional baseboard peripherals on the RAK19026 VC (WisMesh Pocket V2).
+# Each is independent. `rak-baseboard` is the convenience aggregate built
+# by the `flash-rak4631-pocket` recipe.
+[features]
+default = []
+
+# BSP selection — exactly one must be enabled. Mutex enforced via
+# `compile_error!` in `lib.rs`. Each BSP feature also selects the
+# critical-section impl that's appropriate for that board's runtime
+# (cortex-m's full-mask single-core impl on T114; SoftDevice-aware impl
+# on Pocket V2, added Day 2-3 of bug32-softdevice-spike).
+# Internal aggregator for the SoftDevice + nrf-softdevice feature set.
+# Both BSPs depend on this; expressing it once here keeps the BSP-feature
+# definitions free of SoftDevice-flag drift.
+softdevice = [
+    "dep:nrf-softdevice",
+    "dep:nrf-softdevice-s140",
+    "nrf-softdevice/nrf52840",
+    "nrf-softdevice/s140",
+    "nrf-softdevice/ble-peripheral",
+    "nrf-softdevice/ble-gatt-server",
+    "nrf-softdevice/critical-section-impl",
+    "nrf-softdevice/macros",
+]
+
+# Per-board BSPs: same SoftDevice stack, board-specific peripherals
+# layered on top. Mutex enforced via compile_error! in lib.rs.
+bsp-rak4631 = ["softdevice"]
+bsp-t114 = ["softdevice"]
+
+display = ["dep:ssd1306", "dep:embedded-graphics"]
+gnss = ["dep:nmea0183"]
+battery = []
+rak-baseboard = ["display", "gnss", "battery"]
+
+[profile.release]
+opt-level = "z"      # optimize for size
+lto = true           # link-time optimization across all crates
+codegen-units = 1    # single codegen unit for maximum LTO
+strip = "none"       # was "symbols" — kept off so DWARF survives in
+                     # the .elf for addr2line / objdump on HardFault
+                     # post-mortem PCs. Does NOT bloat the UF2: the
+                     # .bin used to build the UF2 only includes
+                     # loadable sections, debug info stays in the .elf.
+debug = true         # emit DWARF in the first place; required even
+                     # with strip=none, otherwise compiler omits it
+
+# Firmware binaries
+[[bin]]
+name = "t114"
+path = "src/bin/t114.rs"
+
+[[bin]]
+name = "rak4631"
+path = "src/bin/rak4631.rs"

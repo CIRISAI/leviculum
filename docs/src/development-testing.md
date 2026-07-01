@@ -39,9 +39,9 @@ Results go to `~/.local/state/leviculum-ci/last-results.txt`:
 Fast feedback. Run only what you changed:
 
 ```sh
-cargo test -p reticulum-core --lib   # touched core lib code
-cargo test -p reticulum-std          # touched std
-cargo clippy -p reticulum-core       # clippy for one crate
+cargo test -p leviculum-core --lib   # touched core lib code
+cargo test -p leviculum-std          # touched std
+cargo clippy -p leviculum-core       # clippy for one crate
 cargo fmt                             # apply formatter (not --check)
 ```
 
@@ -143,8 +143,8 @@ practice this means: if you're doing late-night hardware work and
 the 02:00 nightly fires, it silently defers. You don't need to
 stop it.
 
-Unit tests in other crates (`reticulum-core`, `reticulum-std`,
-`reticulum-ffi`, `reticulum-proxy`, `reticulum-cli`) run in
+Unit tests in other crates (`leviculum-core`, `leviculum-std`,
+`leviculum-ffi`, `leviculum-proxy`, `leviculum-cli`) run in
 parallel with a held integ lock — they never touch the integ
 infrastructure.
 

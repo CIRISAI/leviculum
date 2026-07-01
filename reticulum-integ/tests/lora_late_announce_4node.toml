@@ -17,7 +17,7 @@ profile = "rnode_pair"
 name = "lora_late_announce_4node"
 description = "Late announce forwarding over LoRa after 5-min idle, 4 nodes"
 timeout_secs = 900
-rust_log = "reticulum_core::link::channel=debug,reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::link::channel=debug,leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 frequency = 869525000
@@ -94,4 +94,4 @@ action = "exec"
 on = "a1"
 command = "lnstest selftest 127.0.0.1:5555 b1:5555 --mode link --rate 1 --duration 3 --discovery-timeout 360"
 expect_exit_code = 0
-env = { RUST_LOG = "reticulum_core::link::channel=debug,reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info" }
+env = { RUST_LOG = "leviculum_core::link::channel=debug,leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info" }

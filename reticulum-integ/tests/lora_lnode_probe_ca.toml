@@ -7,7 +7,7 @@ profile = "rnode_lnode_pair"
 name = "lora_lnode_probe_ca"
 description = "RNode and T114 LNode exchange announces and probes over LoRa with CSMA/CA on"
 timeout_secs = 180
-rust_log = "reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 frequency = 869525000

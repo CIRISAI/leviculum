@@ -17,7 +17,7 @@ structured event-log format established by
 
 ## Test infrastructure
 
-The tools are exercised by six test files in `reticulum-std/tests/`:
+The tools are exercised by six test files in `leviculum-std/tests/`:
 
 - `jl_filter.rs` — Phase A unit/integration tests for `jl` in isolation.
 - `jldiff_compare.rs` — Phase B unit/integration tests for `jldiff` in isolation.

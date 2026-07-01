@@ -42,18 +42,18 @@ Every Bluetooth interface splits into two layers, and the split follows the
 interface isolation rule (see [Interface isolation](interface-isolation.md)).
 
 - **Carrier logic, no_std.** Framing, fragmentation and reassembly, the
-  protocol state machine. This belongs in `reticulum-core`, which is no_std and
+  protocol state machine. This belongs in `leviculum-core`, which is no_std and
   already builds for `thumbv6m`. BLE framing already lives in
-  `reticulum-core/src/framing/ble.rs`. Keeping the carrier logic no_std means
+  `leviculum-core/src/framing/ble.rs`. Keeping the carrier logic no_std means
   the same code runs on the nRF firmware and on the host.
 - **Platform binding.** The radio and OS specific glue. On nRF this is the
-  SoftDevice glue in `reticulum-nrf` (no_std). On `lnsd` this is a Linux BLE
+  SoftDevice glue in `leviculum-nrf` (no_std). On `lnsd` this is a Linux BLE
   stack, candidate `bluer` over BlueZ via DBus (necessarily std). On a phone it
   is the OS BLE API.
 
 The goal is no_std carrier logic wherever possible so it runs on embedded
 devices. One known exception: the RNode over BLE byte channel seam currently
-lives in `reticulum-std` with tokio traits, so it is std only. A no_std variant
+lives in `leviculum-std` with tokio traits, so it is std only. A no_std variant
 over `embedded-io-async` would be needed for on device use, tracked separately.
 
 ## RNode over BLE
@@ -87,8 +87,8 @@ caps at `MAX_CONNECTIONS = 7` and Android allows about 8 BLE connections total
 across all apps; in practice 3 to 4 links are reliable. This protocol therefore
 does not scale to a dense mesh, which is the motivation for `ble-leviculum`.
 
-A partial implementation already exists in tree (`reticulum-core/src/framing/ble.rs`,
-`reticulum-nrf/src/ble.rs`). It is incomplete and needs finishing.
+A partial implementation already exists in tree (`leviculum-core/src/framing/ble.rs`,
+`leviculum-nrf/src/ble.rs`). It is incomplete and needs finishing.
 
 ## ble-leviculum (BLE 5 broadcast mesh)
 
@@ -130,7 +130,7 @@ links and resources are reliable and directed.
 
 The constraint on how to combine them comes from the interface boundary. An
 Interface is sent only bytes: `try_send(&[u8])` in
-`reticulum-core/src/traits.rs` takes a packet buffer and a priority hint, no
+`leviculum-core/src/traits.rs` takes a packet buffer and a priority hint, no
 destination and no next hop. The next hop and the choice of interface live one
 layer up in the transport. So an interface cannot decide "open a connection
 because this packet is for node X" without reading the destination out of the

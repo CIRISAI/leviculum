@@ -800,7 +800,7 @@ if __name__ == '__main__':
     print("Generating test vectors...")
     vectors = generate_vectors()
 
-    output_path = os.path.join(os.path.dirname(__file__), '..', 'reticulum-core', 'tests', 'vectors', 'test_vectors.json')
+    output_path = os.path.join(os.path.dirname(__file__), '..', 'leviculum-core', 'tests', 'vectors', 'test_vectors.json')
     with open(output_path, 'w') as f:
         json.dump(vectors, f, indent=2)
 

@@ -17,7 +17,7 @@ profile = "rnode_quad"
 name = "lora_multihop_link_loss"
 description = "5KB lncp push through 2-hop LoRa relay with 3 dropped frames on Channel A"
 timeout_secs = 900
-rust_log = "reticulum_core::transport=debug,reticulum_core::link=debug,reticulum_core::resource=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::transport=debug,leviculum_core::link=debug,leviculum_core::resource=debug,leviculum_std::interfaces=debug,info"
 
 # Global radio for alpha's single rnode (Channel A).
 [radio]

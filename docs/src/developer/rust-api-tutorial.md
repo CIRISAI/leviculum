@@ -1,14 +1,14 @@
-# Rust API Tutorial: Building on `reticulum-std`
+# Rust API Tutorial: Building on `leviculum-std`
 
-This chapter builds a small application on `reticulum-std`, the std/tokio layer.
+This chapter builds a small application on `leviculum-std`, the std/tokio layer.
 By the end you will have created a node, attached an interface, registered a
 destination, sent both a single packet and link data, and consumed
 [`NodeEvent`](rust-api-spec.md#eventreceiver-and-nodeevent)s. Every snippet is
-adapted from a real example under `reticulum-std/examples/`; each step names the
+adapted from a real example under `leviculum-std/examples/`; each step names the
 file it comes from so you can read the full program. For exact signatures of
 everything used here, see the [Rust API reference](rust-api-spec.md).
 
-If you have not yet decided that `reticulum-std` is the right layer, read
+If you have not yet decided that `leviculum-std` is the right layer, read
 [Choosing a layer](choosing-a-layer.md) first.
 
 ## Setup
@@ -18,7 +18,7 @@ Add the dependency and tokio. The crates are not on crates.io, so use a path
 
 ```toml
 [dependencies]
-reticulum-std = { path = "../libreticulum/reticulum-std" }
+leviculum-std = { path = "../libreticulum/leviculum-std" }
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
 ```
@@ -34,7 +34,7 @@ You add interfaces on the builder, call `build().await`, then `start().await`.
 This is the opening of every example; here it is from `simple_send.rs`:
 
 ```rust
-use reticulum_std::driver::ReticulumNodeBuilder;
+use leviculum_std::driver::ReticulumNodeBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -97,7 +97,7 @@ while let Some(event) = events.recv().await {
 about and ignore the rest.
 
 ```rust
-use reticulum_std::NodeEvent;
+use leviculum_std::NodeEvent;
 
 // Adapted from echo_server.rs
 loop {
@@ -140,7 +140,7 @@ strings. This is from the `api` module's own test, which is the most compact
 worked registration in the tree:
 
 ```rust
-use reticulum_std::{Destination, Direction, DestinationType, generate_identity};
+use leviculum_std::{Destination, Direction, DestinationType, generate_identity};
 
 let id = generate_identity();
 
@@ -216,13 +216,13 @@ send on that.
   `pending_link_count`).
 - `relay_daemon.rs` — a transport node and `transport_stats()`.
 - `link_test.rs` / `link_integration_test.rs` — these drop down to
-  `reticulum-core`'s `Link` directly against a Python `rnsd`, useful if you want
+  `leviculum-core`'s `Link` directly against a Python `rnsd`, useful if you want
   to see the wire-level handshake rather than the high-level handle API.
 
 The full method list of every type is in the generated rustdoc. Build it with:
 
 ```sh
-cargo doc --no-deps --open -p reticulum-std
+cargo doc --no-deps --open -p leviculum-std
 ```
 
 For verified signatures of the types used above, continue to the

@@ -31,7 +31,7 @@ fn stage(
 ) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
-    let prod = repo.join("reticulum-core").join("src");
+    let prod = repo.join("leviculum-core").join("src");
     std::fs::create_dir_all(&prod).expect("mkdir prod");
     std::fs::write(prod.join("lib.rs"), format!("// {test_tag}\n")).expect("write src");
 

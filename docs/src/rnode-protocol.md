@@ -880,9 +880,9 @@ the send queue and KISS-frames them to the serial port.
 - rxb, txb counters
 - first_tx timestamp (for callsign beaconing)
 
-### 7.5 Relationship to Existing KISS Framing in reticulum-core
+### 7.5 Relationship to Existing KISS Framing in leviculum-core
 
-**The existing framing code in `reticulum-core/src/framing/hdlc.rs` is
+**The existing framing code in `leviculum-core/src/framing/hdlc.rs` is
 HDLC framing, NOT KISS framing. They are different protocols.**
 
 Key differences:
@@ -943,28 +943,28 @@ different semantics (frequency vs. txdelay, etc.).
 
 This means our KISS framing module should implement the framing layer
 generically, and the RNode command interpretation should be in a separate
-module (e.g., `interfaces/rnode.rs` in reticulum-std).
+module (e.g., `interfaces/rnode.rs` in leviculum-std).
 
 ### 7.7 Architecture Mapping
 
 ```
-reticulum-core/src/framing/kiss.rs    -- KISS framing (FEND/FESC escaping)
+leviculum-core/src/framing/kiss.rs    -- KISS framing (FEND/FESC escaping)
                                          Layer 0, no_std compatible
                                          Pure data transformation, no I/O
 
-reticulum-std/src/interfaces/rnode.rs  -- RNode interface implementation
+leviculum-std/src/interfaces/rnode.rs  -- RNode interface implementation
                                          Owns serial port (async I/O)
                                          KISS command interpretation
                                          Radio configuration state machine
                                          Flow control queue management
 
-reticulum-std/src/driver/              -- Existing driver integrates RNode
+leviculum-std/src/driver/              -- Existing driver integrates RNode
                                          interface alongside TCP
 ```
 
-The KISS framing module belongs in reticulum-core because it's a pure
+The KISS framing module belongs in leviculum-core because it's a pure
 data transformation (like HDLC). The RNode interface logic belongs in
-reticulum-std because it performs I/O (serial port access).
+leviculum-std because it performs I/O (serial port access).
 
 ### 7.8 Implementation Priority
 

@@ -50,18 +50,18 @@ steps:
       - echo "nightly.$(date -u +%Y%m%d)-${CI_COMMIT_SHA:0:7}" >.build-id
       - echo "$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)~nightly.$(date -u +%Y%m%d).${CI_COMMIT_SHA:0:7}" >.deb-version
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      # `cargo clean -p reticulum-cli` avoids a Cargo incremental quirk
+      # `cargo clean -p leviculum-cli` avoids a Cargo incremental quirk
       # where repeated builds with the same LEVICULUM_BUILD_ID skip
       # relinking some binaries, leaving them with a stale version
       # string. Fresh containers rarely hit this, but the clean is
       # cheap insurance.
-      - cargo clean -p reticulum-cli
+      - cargo clean -p leviculum-cli
       - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
       # --no-strip: rust strips debuginfo at link time (see workspace
       # Cargo.toml [profile.release] strip = "debuginfo"). cargo-deb's
       # default strip --strip-all corrupted x86_64 musl-static binaries
       # (SIGSEGV at startup), so we skip it entirely.
-      - cargo deb -p reticulum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+      - cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
 
   build-arm64:
     image: rust:bookworm
@@ -75,9 +75,9 @@ steps:
       - cargo install --locked cargo-deb
       - rustup target add aarch64-unknown-linux-musl
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      - cargo clean -p reticulum-cli
+      - cargo clean -p leviculum-cli
       - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp
-      - cargo deb -p reticulum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+      - cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
 
   package:
     image: debian:bookworm-slim

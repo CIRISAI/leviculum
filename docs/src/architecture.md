@@ -23,11 +23,11 @@ specific wraps around it:
 
 | Crate | Role |
 |-------|------|
-| `reticulum-core` | All protocol logic, `#![no_std] + alloc`, zero async (`reticulum-core/src/lib.rs:59`). |
-| `reticulum-std` | Host driver: tokio event loop, interfaces, `FileStorage`, RPC, config. |
-| `reticulum-nrf` | Embedded driver: Embassy event loop on nRF52 (cross-compiled, outside the host workspace). |
-| `reticulum-ffi` | C ABI over the core for other-language bindings. |
-| `reticulum-cli` | The `lnsd` / `lnstest` / `lncp` binaries. |
+| `leviculum-core` | All protocol logic, `#![no_std] + alloc`, zero async (`leviculum-core/src/lib.rs:59`). |
+| `leviculum-std` | Host driver: tokio event loop, interfaces, `FileStorage`, RPC, config. |
+| `leviculum-nrf` | Embedded driver: Embassy event loop on nRF52 (cross-compiled, outside the host workspace). |
+| `leviculum-ffi` | C ABI over the core for other-language bindings. |
+| `leviculum-cli` | The `lnsd` / `lnstest` / `lncp` binaries. |
 
 The application boundary is `NodeCore`: feed it bytes via
 `handle_packet` / `handle_timeout` and drain a
@@ -40,7 +40,7 @@ injected `Clock`/`Storage`/`Interface` traits that make this portable.
 
 ```
                      ┌─────────────────────────────────┐
-                     │         reticulum-core          │
+                     │         leviculum-core          │
                      │                                 │
   handle_packet() ──►│  NodeCore<R, C, S>              │──► TickOutput {
   (iface_id, data)   │    ├── Transport (routing)      │      actions: Vec<Action>,
@@ -56,7 +56,7 @@ injected `Clock`/`Storage`/`Interface` traits that make this portable.
 
 ## Driver Event Loop
 
-The `reticulum-std` driver has 6 `select!` branches:
+The `leviculum-std` driver has 6 `select!` branches:
 
 ```rust
 loop {
@@ -113,7 +113,7 @@ Reticulum is best-effort, higher layers retransmit.
 `dispatch_actions()` lives in core (not the driver) because action routing
 (broadcast exclusion, interface selection) is protocol knowledge.
 
-In `reticulum-std`, `InterfaceHandle` wraps `tokio::sync::mpsc::Sender`
+In `leviculum-std`, `InterfaceHandle` wraps `tokio::sync::mpsc::Sender`
 behind the trait. An embedded driver implements it directly on a radio struct.
 
 Core processes packets with zero delay. Collision avoidance (jitter, CSMA)
@@ -202,7 +202,7 @@ Shared types in `storage_types.rs`: `PathEntry`, `ReverseEntry`, `LinkEntry`,
 `AnnounceEntry`, `PacketReceipt`.
 
 Implementations: `NoStorage` (no-op), `MemoryStorage` (BTreeMap, host/tests),
-`EmbeddedStorage` (heapless `FnvIndexMap`, fixed capacity, used by `reticulum-nrf`),
+`EmbeddedStorage` (heapless `FnvIndexMap`, fixed capacity, used by `leviculum-nrf`),
 `FileStorage` (wraps MemoryStorage + disk).
 
 ### FileStorage Persistence

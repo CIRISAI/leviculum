@@ -8,7 +8,7 @@ profile = "rnode_pair"
 name = "lora_direct_rust"
 description = "Two Rust nodes, direct LoRa link via RNode, probe each other"
 timeout_secs = 180
-rust_log = "reticulum_core::link::channel=debug,reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::link::channel=debug,leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 frequency = 869525000

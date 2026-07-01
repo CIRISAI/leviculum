@@ -11,7 +11,7 @@ request, a data packet, or a resource chunk. They are all just bytes.
 
 ## What "media-agnostic core" means
 
-`reticulum-core` decides *what* to send and to *which* interface. It
+`leviculum-core` decides *what* to send and to *which* interface. It
 never decides *when* to put a frame on the wire, never spaces
 transmissions, and never reasons about contention. The core processes
 every packet with zero delay and emits an `Action::SendPacket` or
@@ -35,21 +35,21 @@ budget is exhausted. Concretely:
 
 - **Send-side jitter** — packets are queued, not sent immediately; the
   jitter window is sized from the radio parameters so two nodes do not
-  re-collide (`reticulum-std/src/interfaces/rnode.rs:130`, the
+  re-collide (`leviculum-std/src/interfaces/rnode.rs:130`, the
   `compute_jitter_max_ms` doc comment, and the jitter queue at
   `:448`).
 - **CSMA** — radio-level carrier sensing is handled by the RNode
   firmware; the interface defers collision avoidance to it rather than
-  the core (`reticulum-std/src/interfaces/rnode.rs:451`).
+  the core (`leviculum-std/src/interfaces/rnode.rs:451`).
 - **Airtime backpressure** — a per-interface credit bucket charges
   every send by its airtime cost and signals `BufferFull` rather than
   flooding the serial queue
-  (`reticulum-std/src/interfaces/airtime.rs:1`). This explicitly
-  "never leaks into `reticulum-core`, so the `no_std` core stays free
+  (`leviculum-std/src/interfaces/airtime.rs:1`). This explicitly
+  "never leaks into `leviculum-core`, so the `no_std` core stays free
   of host-side backpressure concerns" (same file).
 
 A TCP interface has none of this. It just writes bytes
-(`reticulum-std/src/interfaces/tcp.rs`).
+(`leviculum-std/src/interfaces/tcp.rs`).
 
 ## Why the rule is hard, not advisory
 

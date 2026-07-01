@@ -13,7 +13,7 @@ profile = "rnode_quad"
 name = "lora_multihop_bidir"
 description = "Bidirectional lncp push through frequency-isolated 2-hop LoRa relay"
 timeout_secs = 900
-rust_log = "reticulum_core::transport=debug,reticulum_core::link=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::transport=debug,leviculum_core::link=debug,leviculum_std::interfaces=debug,info"
 
 [nodes.alpha]
 type = "rust"

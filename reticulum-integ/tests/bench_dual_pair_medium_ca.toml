@@ -4,7 +4,7 @@ profile = "dual_pair_mixed"
 name = "bench_dual_pair_medium_ca"
 description = "Dual-pair probe throughput under contention (SF7/BW125) with CSMA/CA on"
 timeout_secs = 360
-rust_log = "reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 frequency = 869525000

@@ -121,7 +121,7 @@ impl From<io::Error> for RunnerError {
 // ---------------------------------------------------------------------------
 
 /// Production binaries the runner mounts and rebuilds. `lora-proxy` lives
-/// in `reticulum-proxy`; the rest in `reticulum-cli`. `c-lnsd` is a C
+/// in `leviculum-proxy`; the rest in `leviculum-cli`. `c-lnsd` is a C
 /// build (`just build-c-lnsd`), not a cargo bin, so it is not force-rebuilt
 /// here — only the cargo bins, matching `run-tier3-hw.sh`.
 const FORCE_REBUILD_BINS: &[&str] = &["lnsd", "lnstest", "lncp", "lora-proxy"];
@@ -1567,8 +1567,8 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
 /// current scenario does not bind. Best-effort: failures warn and continue./// a silent failure here only reintroduces the CSMA-busy backoff on the
 /// sender.
 fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topology::RadioConfig) {
-    use reticulum_core::framing::hdlc::{frame, DeframeResult, Deframer};
-    use reticulum_core::rnode::{build_radio_config_frame, RadioConfigWire, RADIO_CONFIG_ACK};
+    use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+    use leviculum_core::rnode::{build_radio_config_frame, RadioConfigWire, RADIO_CONFIG_ACK};
     use std::io::{Read, Write};
 
     // Codeberg #50 Bug-A forensic instrumentation.  Structured Stage-6

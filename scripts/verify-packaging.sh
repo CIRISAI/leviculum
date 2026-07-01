@@ -21,7 +21,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ffi_dir="$repo_root/reticulum-ffi"
+ffi_dir="$repo_root/leviculum-ffi"
 target="${1:-x86_64-unknown-linux-gnu}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

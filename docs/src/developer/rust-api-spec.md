@@ -10,16 +10,16 @@ rustdoc for the long tail.
 The hands-on introduction is the [tutorial](rust-api-tutorial.md); the layer
 overview is [Choosing a layer](choosing-a-layer.md).
 
-All `reticulum-std` types are re-exported from the crate root
-(`reticulum-std/src/lib.rs:35-57`), so `use reticulum_std::{NodeEvent, LinkHandle,
+All `leviculum-std` types are re-exported from the crate root
+(`leviculum-std/src/lib.rs:35-57`), so `use leviculum_std::{NodeEvent, LinkHandle,
 …}` works without naming submodules.
 
-## `reticulum-std` (std / tokio)
+## `leviculum-std` (std / tokio)
 
 ### `Reticulum`
 
 The configuration-driven entry point, wrapping a `ReticulumNode`. Defined at
-`reticulum-std/src/reticulum.rs:13`. Use this when your node is described by a
+`leviculum-std/src/reticulum.rs:13`. Use this when your node is described by a
 `Config` (an INI file or a programmatic `Config`); use `ReticulumNodeBuilder`
 when you assemble interfaces in code.
 
@@ -36,8 +36,8 @@ when you assemble interfaces in code.
 
 ### `ReticulumNodeBuilder`
 
-The programmatic builder. Defined at `reticulum-std/src/driver/builder.rs:34`;
-re-exported as `reticulum_std::ReticulumNodeBuilder`. Each setter consumes and
+The programmatic builder. Defined at `leviculum-std/src/driver/builder.rs:34`;
+re-exported as `leviculum_std::ReticulumNodeBuilder`. Each setter consumes and
 returns `self`.
 
 | Signature | Purpose |
@@ -61,8 +61,8 @@ returns `self`.
 
 ### `ReticulumNode`
 
-The running node. Defined at `reticulum-std/src/driver/mod.rs:412`; re-exported
-as `reticulum_std::ReticulumNode`. Selected methods:
+The running node. Defined at `leviculum-std/src/driver/mod.rs:412`; re-exported
+as `leviculum_std::ReticulumNode`. Selected methods:
 
 | Signature | Purpose |
 |-----------|---------|
@@ -84,17 +84,17 @@ as `reticulum_std::ReticulumNode`. Selected methods:
 | `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:1537` | `rnstatus`-style counters |
 | `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:1857` | Relay mode flag |
 
-The stable, curated facade `reticulum_std::api` (`reticulum-std/src/api/mod.rs:55`
+The stable, curated facade `leviculum_std::api` (`leviculum-std/src/api/mod.rs:55`
 `NodeBuilder` / `:206` `Node`) re-projects this surface with core internals
-hidden; it is what `reticulum-ffi` wraps. Notable facade-only helpers:
+hidden; it is what `leviculum-ffi` wraps. Notable facade-only helpers:
 `api::generate_identity()` (`api/mod.rs:30`), `api::version()` (`api/mod.rs:37`),
 `api::version_string()` (`api/mod.rs:46`), and `Node::connect_with_key`
 (`api/mod.rs:329`) / `Node::accept_link` (`api/mod.rs:345`).
 
 ### `LinkHandle`
 
-Send-only async handle for a link. Defined at `reticulum-std/src/driver/stream.rs:45`;
-re-exported as `reticulum_std::LinkHandle`. Incoming data is delivered via
+Send-only async handle for a link. Defined at `leviculum-std/src/driver/stream.rs:45`;
+re-exported as `leviculum_std::LinkHandle`. Incoming data is delivered via
 `NodeEvent`, not on the handle.
 
 | Signature | Purpose |
@@ -108,8 +108,8 @@ re-exported as `reticulum_std::LinkHandle`. Incoming data is delivered via
 ### `PacketSender`
 
 Send-only async handle for single packets, the single-packet analog of
-`LinkHandle`. Defined at `reticulum-std/src/driver/sender.rs:42`; re-exported as
-`reticulum_std::PacketSender`.
+`LinkHandle`. Defined at `leviculum-std/src/driver/sender.rs:42`; re-exported as
+`leviculum_std::PacketSender`.
 
 | Signature | Purpose |
 |-----------|---------|
@@ -119,7 +119,7 @@ Send-only async handle for single packets, the single-packet analog of
 ### `EventReceiver` and `NodeEvent`
 
 `EventReceiver` is the merged event stream, defined at
-`reticulum-std/src/driver/mod.rs:259`. It internally fronts a lossless control
+`leviculum-std/src/driver/mod.rs:259`. It internally fronts a lossless control
 plane and a droppable data plane (Codeberg #71), draining control first.
 
 | Signature | Purpose |
@@ -128,8 +128,8 @@ plane and a droppable data plane (Codeberg #71), draining control first.
 | `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:298` | Non-blocking receive |
 
 `NodeEvent` is the event enum, defined in core at
-`reticulum-core/src/node/event.rs:21` and re-exported as
-`reticulum_std::NodeEvent`. It is `#[non_exhaustive]`, so always include a
+`leviculum-core/src/node/event.rs:21` and re-exported as
+`leviculum_std::NodeEvent`. It is `#[non_exhaustive]`, so always include a
 catch-all arm. The variants most applications match (field names verbatim from
 source):
 
@@ -151,8 +151,8 @@ requests/responses, identify, stale/recovered, control-plane overflow) is in
 
 ### `Config`
 
-Configuration, defined at `reticulum-std/src/config.rs:11`; re-exported as
-`reticulum_std::Config`. `pub reticulum: ReticulumConfig` (`config.rs:14`) and
+Configuration, defined at `leviculum-std/src/config.rs:11`; re-exported as
+`leviculum_std::Config`. `pub reticulum: ReticulumConfig` (`config.rs:14`) and
 `pub interfaces: HashMap<String, InterfaceConfig>` (`config.rs:17`).
 
 | Signature | Purpose |
@@ -161,17 +161,17 @@ Configuration, defined at `reticulum-std/src/config.rs:11`; re-exported as
 | `fn default_config_dir() -> PathBuf` — `config.rs:360` | Default config directory |
 | `fn default_config_path() -> PathBuf` — `config.rs:369` | Default config file path |
 
-## `reticulum-core` (no_std, sans-IO)
+## `leviculum-core` (no_std, sans-IO)
 
 The core is the no_std engine the std layer drives. You use these types directly
-only when building on `reticulum-core` — see [Embedded development](embedded.md).
-All are re-exported from `reticulum-core/src/lib.rs:123-143`.
+only when building on `leviculum-core` — see [Embedded development](embedded.md).
+All are re-exported from `leviculum-core/src/lib.rs:123-143`.
 
 ### `NodeCore<R, C, S>`
 
 The sans-IO protocol engine, generic over an RNG `R: CryptoRngCore`, a clock
 `C: Clock`, and storage `S: Storage`. Defined at
-`reticulum-core/src/node/mod.rs:143`. It never performs I/O; every method that
+`leviculum-core/src/node/mod.rs:143`. It never performs I/O; every method that
 can produce output returns a [`TickOutput`](#core-tickoutput-and-action) the
 caller must dispatch.
 
@@ -196,7 +196,7 @@ A node is more often built with `NodeCoreBuilder` (`node/builder.rs:38`), whose
 ### Core `TickOutput` and `Action`
 
 `TickOutput` is what every core method returns. Defined at
-`reticulum-core/src/transport.rs:138`. It is `#[must_use]` — dropping it silently
+`leviculum-core/src/transport.rs:138`. It is `#[must_use]` — dropping it silently
 loses outbound packets and events.
 
 | Field | Type | Source |
@@ -205,7 +205,7 @@ loses outbound packets and events.
 | `events` | `Vec<NodeEvent>` — application-visible events | `transport.rs:142` |
 | `next_deadline_ms` | `Option<u64>` — when to next call `handle_timeout` | `transport.rs:145` |
 
-`Action` is the I/O the driver performs, defined at `reticulum-core/src/transport.rs:113`:
+`Action` is the I/O the driver performs, defined at `leviculum-core/src/transport.rs:113`:
 
 | Variant | Fields | Source |
 |---------|--------|--------|
@@ -220,7 +220,7 @@ IFAC wrapping handled in core, so every driver gets it for free.
 ### Value types
 
 `Identity` — a key pair or public-only identity. Defined at
-`reticulum-core/src/identity.rs`. Re-exported as `reticulum_std::Identity`.
+`leviculum-core/src/identity.rs`. Re-exported as `leviculum_std::Identity`.
 
 | Signature | Purpose |
 |-----------|---------|
@@ -234,7 +234,7 @@ IFAC wrapping handled in core, so every driver gets it for free.
 | `fn verify(&self, message: &[u8], signature: &[u8]) -> Result<bool, IdentityError>` — `identity.rs:202` | Ed25519 verify |
 
 `Destination` — a local or remote destination. Defined at
-`reticulum-core/src/destination.rs`. Re-exported as `reticulum_std::Destination`.
+`leviculum-core/src/destination.rs`. Re-exported as `leviculum_std::Destination`.
 
 | Signature | Purpose |
 |-----------|---------|
@@ -248,13 +248,13 @@ IFAC wrapping handled in core, so every driver gets it for free.
 `fn into_bytes(self) -> [u8; TRUNCATED_HASHBYTES]` (`destination.rs:172`).
 `Direction` (`destination.rs:130`) and `DestinationType` (`destination.rs:102`)
 are the small enums passed to `Destination::new`. Packets are constructed
-internally (`reticulum_core::packet::Packet`); applications work with
+internally (`leviculum_core::packet::Packet`); applications work with
 destinations and links, not raw packets.
 
 ### Platform traits
 
 The three abstractions you implement to run the core on a platform. Defined in
-`reticulum-core/src/traits.rs` and re-exported from `lib.rs:141`.
+`leviculum-core/src/traits.rs` and re-exported from `lib.rs:141`.
 
 | Trait | Required methods (selected) | Source |
 |-------|------------------------------|--------|
@@ -264,10 +264,10 @@ The three abstractions you implement to run the core on a platform. Defined in
 
 Provided `Storage` implementations: `NoStorage` (`traits.rs:506`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
-(`reticulum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
-`EmbeddedStorage` (`reticulum-core/src/embedded_storage.rs:37`, `heapless`-backed
+(`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
+`EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`, `heapless`-backed
 for flash-constrained targets; `fn new() -> Self` at `embedded_storage.rs:344`).
-`reticulum-std` adds a file-backed `Storage` with Python-compatible on-disk
+`leviculum-std` adds a file-backed `Storage` with Python-compatible on-disk
 formats.
 
 ## Full rustdoc
@@ -276,6 +276,6 @@ This chapter covers the load-bearing surface; the exhaustive method list is the
 generated rustdoc. Build and open it with:
 
 ```sh
-cargo doc --no-deps --open -p reticulum-std    # std/tokio layer
-cargo doc --no-deps --open -p reticulum-core   # no_std core
+cargo doc --no-deps --open -p leviculum-std    # std/tokio layer
+cargo doc --no-deps --open -p leviculum-core   # no_std core
 ```

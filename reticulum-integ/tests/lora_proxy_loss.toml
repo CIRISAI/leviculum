@@ -13,7 +13,7 @@ profile = "rnode_pair"
 name = "lora_proxy_loss"
 description = "Proxy drops 2 data frames, nodes still discover each other"
 timeout_secs = 240
-rust_log = "reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 frequency = 869525000

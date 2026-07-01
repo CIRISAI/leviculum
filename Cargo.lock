@@ -644,6 +644,108 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "leviculum-cli"
+version = "0.7.0"
+dependencies = [
+ "clap",
+ "leviculum-core",
+ "leviculum-std",
+ "rand_core 0.6.4",
+ "rmpv",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "leviculum-core"
+version = "0.7.0"
+dependencies = [
+ "aes",
+ "cbc",
+ "critical-section",
+ "ed25519-dalek",
+ "embedded-alloc",
+ "heapless",
+ "hex",
+ "hkdf",
+ "hmac",
+ "libbz2-rs-sys",
+ "proptest",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "tracing-subscriber",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "leviculum-ffi"
+version = "0.7.0"
+dependencies = [
+ "cbindgen",
+ "hex",
+ "leviculum-std",
+ "libc",
+ "proptest",
+ "rand_core 0.6.4",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
+name = "leviculum-proxy"
+version = "0.7.0"
+dependencies = [
+ "clap",
+ "leviculum-core",
+ "nix 0.29.0",
+ "tokio",
+ "tokio-serial",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "leviculum-std"
+version = "0.7.0"
+dependencies = [
+ "clap",
+ "hex",
+ "hmac",
+ "if-addrs",
+ "leviculum-core",
+ "libc",
+ "md-5",
+ "rand_core 0.6.4",
+ "regex",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "serde-pickle",
+ "serde_json",
+ "sha2",
+ "socket2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-serial",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "libbz2-rs-sys"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1049,73 +1151,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
-name = "reticulum-cli"
-version = "0.7.0"
-dependencies = [
- "clap",
- "rand_core 0.6.4",
- "reticulum-core",
- "reticulum-std",
- "rmpv",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "reticulum-core"
-version = "0.7.0"
-dependencies = [
- "aes",
- "cbc",
- "critical-section",
- "ed25519-dalek",
- "embedded-alloc",
- "heapless",
- "hex",
- "hkdf",
- "hmac",
- "libbz2-rs-sys",
- "proptest",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sha2",
- "tracing",
- "tracing-subscriber",
- "x25519-dalek",
-]
-
-[[package]]
-name = "reticulum-ffi"
-version = "0.7.0"
-dependencies = [
- "cbindgen",
- "hex",
- "libc",
- "proptest",
- "rand_core 0.6.4",
- "reticulum-std",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zeroize",
-]
-
-[[package]]
 name = "reticulum-integ"
 version = "0.7.0"
 dependencies = [
  "base64",
+ "leviculum-core",
  "libc",
  "rand 0.8.5",
- "reticulum-core",
  "serde",
  "serde_json",
  "serial_test",
@@ -1123,48 +1165,6 @@ dependencies = [
  "tempfile",
  "toml",
  "tracing",
-]
-
-[[package]]
-name = "reticulum-proxy"
-version = "0.7.0"
-dependencies = [
- "clap",
- "nix 0.29.0",
- "reticulum-core",
- "tokio",
- "tokio-serial",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "reticulum-std"
-version = "0.7.0"
-dependencies = [
- "clap",
- "hex",
- "hmac",
- "if-addrs",
- "libc",
- "md-5",
- "rand_core 0.6.4",
- "regex",
- "reticulum-core",
- "rmp-serde",
- "rmpv",
- "serde",
- "serde-pickle",
- "serde_json",
- "sha2",
- "socket2",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-serial",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

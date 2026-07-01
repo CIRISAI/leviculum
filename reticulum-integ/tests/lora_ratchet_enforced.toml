@@ -10,7 +10,7 @@ profile = "rnode_pair"
 name = "lora_ratchet_enforced"
 description = "Ratchet enforcement over direct LoRa (issue #19)"
 timeout_secs = 300
-rust_log = "reticulum_core::transport=debug,reticulum_core::link=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::transport=debug,leviculum_core::link=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 frequency = 869525000

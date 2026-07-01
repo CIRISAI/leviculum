@@ -36,16 +36,16 @@ Rust core can match it.
   `rncp` drive a running `lnsd` without modification, and the
   Leviculum tools `lnstest` and `lncp` drive a running `rnsd` just the
   same. The RPC control channel that backs `rnstatus`/`rnpath`/
-  `rnprobe` is implemented in `reticulum-std/src/rpc/` (it speaks
+  `rnprobe` is implemented in `leviculum-std/src/rpc/` (it speaks
   Python's `multiprocessing.connection` framing with pickle payloads,
   see `rpc/connection.rs` and `rpc/pickle.rs`).
 - **The config-file format.** `lnsd` parses the same INI-style config
-  that `rnsd` uses (`reticulum-std/src/config.rs`,
-  `reticulum-std/src/ini_config.rs`). Even keys Leviculum does not act
+  that `rnsd` uses (`leviculum-std/src/config.rs`,
+  `leviculum-std/src/ini_config.rs`). Even keys Leviculum does not act
   on are parsed for compatibility — for example `shared_instance_type`
   and `shared_instance_socket` are read and honoured per RNS 1.3.x
   semantics so an existing `rnsd` config works unchanged
-  (`reticulum-std/src/config.rs:47-53`).
+  (`leviculum-std/src/config.rs:47-53`).
 
 This drop-in property is a deliberate design goal, not an accident.
 It is also what makes honest A/B testing possible: the test harness

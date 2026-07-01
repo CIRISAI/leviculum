@@ -21,7 +21,7 @@ profile = "lnode_pair"
 name = "lora_lnode_lncp_bidir_slow"
 description = "lncp bidirectional 4KB between two LNodes over direct LoRa at SF10"
 timeout_secs = 900
-rust_log = "reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 # Matches bench_single_pair_slow_ca: slow spreading factor, CSMA/CA on.

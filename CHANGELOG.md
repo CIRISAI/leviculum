@@ -28,7 +28,7 @@ resource transfer, identity sign/verify/encrypt/decrypt with
 ratchets, delivery-proof strategies, read-only diagnostics, an event
 stream over an event fd, RNode and serial interfaces, and
 packaging/hex helpers. Ships with C examples and a large test suite
-(Codeberg #29). A new `reticulum-std::api` safe API module and
+(Codeberg #29). A new `leviculum-std::api` safe API module and
 driver builder back the binding.
 
 Configurable link keepalive interval on `TransportConfig`.
@@ -183,7 +183,7 @@ Single-packet delivery through relays was broken. Packets are now converted from
 
 ### Changed
 
-`Identity::encrypt()` returns Result instead of panicking on failure. Selective re-exports from reticulum-std replace the blanket `pub use reticulum_core::*`.
+`Identity::encrypt()` returns Result instead of panicking on failure. Selective re-exports from leviculum-std replace the blanket `pub use leviculum_core::*`.
 
 ## [0.5.10] - 2026-02-12
 

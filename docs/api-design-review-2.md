@@ -3,7 +3,7 @@
 Input to the ffi-Agent, on top of `docs/api-design-review.md` (round 1) and
 your own internal review folded into commit c11a916. Two independent reviewers
 read the post-c11a916 design doc with their own contexts and verified claims
-against the `reticulum-std` / `reticulum-core` source.
+against the `leviculum-std` / `leviculum-core` source.
 
 Both verdicts: ready to keep building. Round 1 plus your internal review are
 confirmed resolved with technically correct citations (panic and poison

@@ -1,0 +1,58 @@
+[package]
+name = "leviculum-std"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Standard library extensions for reticulum - networking, file I/O, async runtime"
+
+[features]
+default = ["compression"]
+# Enable compression support (uses no_std compatible compression from leviculum-core)
+compression = ["leviculum-core/compression"]
+
+[dependencies]
+leviculum-core = { path = "../leviculum-core", default-features = true }
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
+
+tokio.workspace = true
+if-addrs.workspace = true
+socket2.workspace = true
+libc.workspace = true
+tokio-serial.workspace = true
+tracing = { workspace = true, features = ["std"] }
+# Used by `test_support::tracing_setup` (and from commit 2 onward
+# `test_support::event_log`) for the test-harness subscriber.  The
+# crate's runtime presence is a few KB; production builds that don't
+# call into `test_support` see only compile-time pull-in via the
+# Layer trait used by the Registry composition.
+tracing-subscriber.workspace = true
+# Used by the `jl` and `jldiff` binaries (Stage 7 / Codeberg #39 piece 4).
+# Same major version as leviculum-cli's clap; no workspace alias to keep
+# the per-crate Cargo.toml self-contained.
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde-pickle.workspace = true
+# The shared-instance RPC client (`rpc::rpc_query`) decodes pickle
+# responses into `serde_json::Value` so callers (e.g. `lnstest diag`) don't
+# need a pickle dependency themselves.
+serde_json = "1"
+sha2 = { workspace = true, features = ["std"] }
+hmac.workspace = true
+md-5.workspace = true
+rmp-serde.workspace = true
+rmpv.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+# md-5 is imported as `use md5::Md5`; cargo-machete flags the hyphenated
+# package name as unused because grepping the sources finds `md5::` but
+# not `md_5::`.
+[package.metadata.cargo-machete]
+ignored = ["md-5"]
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+hex = "0.4"
+regex = "1"
+tempfile = "3"

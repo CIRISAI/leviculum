@@ -11,10 +11,10 @@ This roadmap is the plan of record for closing the gap between the shipped v1
 surface and that goal. The current gap analysis: v1 covers IP-based
 point-to-point (links, request/response, datagram, resource transfer) well,
 so an lncp/rncp-compatible file tool over TCP is already buildable, but several
-whole capabilities are missing. The Reticulum engine (`reticulum-std`,
-`reticulum-core`) already implements almost all of it; the work is projecting
-it through the additive facade (`reticulum_std::api`) and the thin C FFI
-(`reticulum-ffi`), never refactoring signatures `lnsd`/`lnstest` depend on.
+whole capabilities are missing. The Reticulum engine (`leviculum-std`,
+`leviculum-core`) already implements almost all of it; the work is projecting
+it through the additive facade (`leviculum_std::api`) and the thin C FFI
+(`leviculum-ffi`), never refactoring signatures `lnsd`/`lnstest` depend on.
 
 ## Guiding principles
 
@@ -193,7 +193,7 @@ threading, buffer marshalling, the panic boundary, and wire and semantic
 compatibility with the reference, so the layers are chosen to attack exactly
 those.
 
-1. Function unit tests, Rust-driven (`reticulum-ffi/tests/ffi_unit.rs`). Call
+1. Function unit tests, Rust-driven (`leviculum-ffi/tests/ffi_unit.rs`). Call
    the `lev_*` functions directly, no network. Cover every function's NULL
    guards, the read(2) size-query and buffer-too-small protocol, invalid enums
    and lengths, value round-trips, and error reporting. Add cases for each new
@@ -241,7 +241,7 @@ those.
 
 How the layers run: the fast and cheap layers (1, 2, 3, 4, 5, 7, 11) run in the
 Just `standard` tier on every commit, via the `test-ffi` recipe and
-`cargo test -p reticulum-ffi`. The heavy layers run on demand or nightly:
+`cargo test -p leviculum-ffi`. The heavy layers run on demand or nightly:
 sanitizers and Miri (6) via `just sanitize-ffi`, soak and stress (8) on a timer,
 Docker integration (9) in the extensive tier, and LoRa hardware (10) in the
 nightly tier, matching the existing test tiers.

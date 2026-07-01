@@ -193,8 +193,8 @@ overwritten.
 ### Scope
 
 The lock protects only `reticulum-integ` tests. Unit tests in
-`reticulum-core`, `reticulum-std`, `reticulum-ffi`,
-`reticulum-proxy`, and `reticulum-cli` do not acquire it — they
+`leviculum-core`, `leviculum-std`, `leviculum-ffi`,
+`leviculum-proxy`, and `leviculum-cli` do not acquire it — they
 parallelise freely with an in-progress integ run. Pure-parse unit
 tests inside `reticulum-integ` (e.g. compose YAML validation,
 radio-config wire round-trips) also don't acquire the lock because

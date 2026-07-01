@@ -264,16 +264,16 @@ fn git_head_hash(repo_root: &Path) -> Result<String, FreshnessError> {
 /// artefacts. `Cargo.lock` is included because dependency-version
 /// changes do rebuild.
 const PRODUCTION_SOURCE_PATHS: &[&str] = &[
-    "reticulum-core/src",
-    "reticulum-core/Cargo.toml",
-    "reticulum-std/src",
-    "reticulum-std/Cargo.toml",
-    "reticulum-cli/src",
-    "reticulum-cli/Cargo.toml",
-    "reticulum-proxy/src",
-    "reticulum-proxy/Cargo.toml",
-    "reticulum-nrf/src",
-    "reticulum-nrf/Cargo.toml",
+    "leviculum-core/src",
+    "leviculum-core/Cargo.toml",
+    "leviculum-std/src",
+    "leviculum-std/Cargo.toml",
+    "leviculum-cli/src",
+    "leviculum-cli/Cargo.toml",
+    "leviculum-proxy/src",
+    "leviculum-proxy/Cargo.toml",
+    "leviculum-nrf/src",
+    "leviculum-nrf/Cargo.toml",
     "Cargo.toml",
     "Cargo.lock",
 ];

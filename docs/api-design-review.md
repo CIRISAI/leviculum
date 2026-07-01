@@ -2,7 +2,7 @@
 
 Input to the ffi-Agent. Two independent reviews of `docs/leviculum-api-design.md`
 were run: a primary review and a separate review with its own context that
-verified claims against the actual `reticulum-std` / `reticulum-core` source.
+verified claims against the actual `leviculum-std` / `leviculum-core` source.
 
 Both reached the same verdict: the architecture is sound and the thin layer
 claim mostly holds, but several correctness gaps must be settled before Phase a.
@@ -20,7 +20,7 @@ doc, then implement. Source line numbers are current as of master 50df39a.
   the size, fixed size constants for stack allocation, freeing always through a
   typed `lev_*_free`. Kills the C free vs Rust dealloc class.
 - cbindgen generated header, never committed. Matches the repo (`.gitignore`
-  has `reticulum-ffi/*.h`). No committed copy can go stale.
+  has `leviculum-ffi/*.h`). No committed copy can go stale.
 - Opaque handles plus SONAME 0 plus the 0.x unstable note.
 - `LEV_ERR_AGAIN` mapped to `try_send` Busy and PacingDelay, verified against
   `stream.rs:127-135`.
@@ -88,7 +88,7 @@ can block unboundedly.
 ### S1. Identity file IO has no backing and is net new surface (section 10)
 `lev_identity_load_file` and `lev_identity_save_file` cannot be projected from
 core `Identity`, which has no file IO. File persistence lives in
-`reticulum-std`'s `FileIdentityStore`, not on `Identity`. These two functions
+`leviculum-std`'s `FileIdentityStore`, not on `Identity`. These two functions
 are new facade code, not pure re-typing, and they carry a Python file format
 compatibility decision (the 64 byte transport identity format at
 `builder.rs:924` is load-bearing for Python tool compat). Mark them as new
@@ -107,7 +107,7 @@ enums (`LEV_REQUEST_POLICY_*`, `LEV_RESOURCE_*`). Not mentioned in naming or the
 surface. Enumerate them.
 
 ### S4. Complete the error code mapping (section 2)
-Section 2 calls the codes a flat projection of `reticulum_std::error::Error`,
+Section 2 calls the codes a flat projection of `leviculum_std::error::Error`,
 but the real enum (`error.rs`) has `Io, Config, Storage, Serialization,
 NotRunning, Announce, Send, Link, Resource, Request`. The codes have no
 `STORAGE` or `SERIALIZATION`, so those variants currently fall through to

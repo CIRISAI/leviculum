@@ -14,7 +14,7 @@ file descriptors. After this you can write your own Leviculum program.
 This builds on the [Overview](overview.md) (opaque handles, the read(2) buffer
 convention, the pollable event fd); skim it first. The [How-To](howto.md) is the
 recipe companion, and the [API Reference](reference.md) has every signature. The
-finished program is `reticulum-ffi/examples/c/levcat.c`, compiled and tested in
+finished program is `leviculum-ffi/examples/c/levcat.c`, compiled and tested in
 the repo, so the code here is real, not pseudo-code.
 
 ## What we build
@@ -357,10 +357,10 @@ and the event loop. From here:
 
 - Bulk data with progress, compression, and metadata:
   [How-To: resource transfer](howto.md#resource-transfer) (and the full
-  `reticulum-ffi/examples/c/lncp.c` file-copy tool).
+  `leviculum-ffi/examples/c/lncp.c` file-copy tool).
 - Lightweight RPC: [How-To: request and response](howto.md#request-and-response).
 - Best-effort single packets: [How-To: datagrams](howto.md#datagrams).
 - Inspecting the stack: [How-To: diagnostics](howto.md#diagnostics).
 - Every signature and constant: the [API Reference](reference.md).
 
-Full program: `reticulum-ffi/examples/c/levcat.c`.
+Full program: `leviculum-ffi/examples/c/levcat.c`.

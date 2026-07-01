@@ -1,7 +1,7 @@
 # C API: Reference
 
 Every public function and constant of `leviculum.h`, grouped by area. The
-header `reticulum-ffi/leviculum.h` is generated from the Rust source and is the
+header `leviculum-ffi/leviculum.h` is generated from the Rust source and is the
 canonical statement of the exact prototypes; this reference is kept in sync
 with it and adds semantics. For the model behind these signatures (handles,
 the read(2) buffer convention, out-parameters, the event fd, threading), read

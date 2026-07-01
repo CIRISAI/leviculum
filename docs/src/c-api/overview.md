@@ -28,7 +28,7 @@ paths. To build from source and install the header, the shared object (with its
 SONAME and dev symlinks), the static archive, and the pkg-config file:
 
 ```sh
-make -C reticulum-ffi install PREFIX=/usr/local   # builds, then installs
+make -C leviculum-ffi install PREFIX=/usr/local   # builds, then installs
 ```
 
 To link Leviculum statically while glibc stays dynamic, pass `--static` so

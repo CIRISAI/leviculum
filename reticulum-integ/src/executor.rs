@@ -685,7 +685,7 @@ fn execute_step(
 const RNSD_ATTACHED_MARKER: &str = "connected to another shared local instance";
 
 /// Our Rust lnsd shared-instance SERVER log when it accepts a local client
-/// (reticulum-std/src/interfaces/local.rs). Its presence proves the server
+/// (leviculum-std/src/interfaces/local.rs). Its presence proves the server
 /// accepted rnsd's persistent connection.
 const LNSD_CLIENT_ACCEPTED_MARKER: &str = "Local client connected";
 
@@ -752,11 +752,7 @@ fn execute_start_shared_client(
         thread::sleep(Duration::from_secs(1));
     }
 
-    let _ = runner.save_exec_output(
-        &format!("rnsd_client_{on}"),
-        rnsd_log.as_bytes(),
-        &[],
-    );
+    let _ = runner.save_exec_output(&format!("rnsd_client_{on}"), rnsd_log.as_bytes(), &[]);
 
     if !attached {
         let lnsd_log = runner
@@ -824,7 +820,7 @@ fn execute_benchmark(
     // With persistent RNS connection, each probe is 2 radio TX (no path re-request).
     let min_interval_ms = if let Some(r) = radio {
         let airtime =
-            reticulum_core::rnode::airtime_ms(500, r.bandwidth, r.spreading_factor, r.coding_rate);
+            leviculum_core::rnode::airtime_ms(500, r.bandwidth, r.spreading_factor, r.coding_rate);
         (airtime * 4).max(800)
     } else {
         3000
@@ -834,7 +830,7 @@ fn execute_benchmark(
     // doesn't waste the entire benchmark window.
     let probe_timeout_s = if let Some(r) = radio {
         let airtime =
-            reticulum_core::rnode::airtime_ms(500, r.bandwidth, r.spreading_factor, r.coding_rate);
+            leviculum_core::rnode::airtime_ms(500, r.bandwidth, r.spreading_factor, r.coding_rate);
         ((airtime * 8) / 1000).clamp(10, 30)
     } else {
         15

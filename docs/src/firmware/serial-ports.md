@@ -15,7 +15,7 @@ Reticulum transport interface that carries HDLC frames. The actual
 > port is the debug log output. The higher-numbered port is the
 > Reticulum transport interface that carries HDLC frames. The actual
 > `/dev/ttyACM*` numbers depend on other connected USB devices.
-> (`reticulum-nrf/README.md:44-46`)
+> (`leviculum-nrf/README.md:44-46`)
 
 Each CDC-ACM class occupies two USB interfaces (a Communication
 interface plus a Data interface), so the two ports map onto four USB
@@ -26,7 +26,7 @@ interface numbers:
 | Debug | 00 (comm) + 01 (data) | human-readable log lines |
 | Transport | 02 (comm) + 03 (data) | Reticulum HDLC frames |
 
-(`reticulum-nrf/udev/99-leviculum.rules`, header comment.)
+(`leviculum-nrf/udev/99-leviculum.rules`, header comment.)
 
 ## Stable device paths via udev
 
@@ -38,7 +38,7 @@ sudo cp udev/99-leviculum.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 ```
 
-(`reticulum-nrf/README.md:50-53`)
+(`leviculum-nrf/README.md:50-53`)
 
 After the next plug-in, the symlinks point at the correct ports
 regardless of enumeration order. The names are board-family specific,
@@ -49,17 +49,17 @@ keyed off the per-board USB PID:
 | T114 | `1209:0001` | `/dev/leviculum-debug` | `/dev/leviculum-transport` |
 | RAK4631 / Pocket V2 | `1209:0002` | `/dev/leviculum-rak-debug` | `/dev/leviculum-rak-transport` |
 
-(Symlink names and PIDs: `reticulum-nrf/udev/99-leviculum.rules`. The
+(Symlink names and PIDs: `leviculum-nrf/udev/99-leviculum.rules`. The
 firmware-side USB VID/PID constants:
-`reticulum-nrf/src/boards/t114.rs:139-140` for `1209:0001`,
-`reticulum-nrf/src/boards/rak4631.rs:126-127` for `1209:0002`.)
+`leviculum-nrf/src/boards/t114.rs:139-140` for `1209:0001`,
+`leviculum-nrf/src/boards/rak4631.rs:126-127` for `1209:0002`.)
 
 > **Multiple boards of the same kind.** The short symlinks
 > (`/dev/leviculum-transport`) land on whichever device udev sees first.
 > The rules also emit per-serial-number symlinks
 > (`/dev/leviculum-transport-<SERIAL>`); use those when more than one
 > board of the same family is attached.
-> (`reticulum-nrf/udev/99-leviculum.rules`, header comment and
+> (`leviculum-nrf/udev/99-leviculum.rules`, header comment and
 > `SYMLINK+="leviculum-transport-%s{serial}"` lines.)
 
 ## Reading the debug port
@@ -70,13 +70,13 @@ The debug port is plain text at 115200 baud:
 picocom /dev/leviculum-debug -b 115200
 ```
 
-(`reticulum-nrf/README.md:59-60`)
+(`leviculum-nrf/README.md:59-60`)
 
 On the debug port you will see the boot banner, the firmware git SHA, the
 node identity, and the periodic diagnostics the firmware emits — for
 example the `LNode started -- identity: …` line and the `[FW_BUILD]`
 banner re-emitted every few seconds.
-(`reticulum-nrf/src/bin/t114.rs:164-168`, `:323-333`.) Do **not** point
+(`leviculum-nrf/src/bin/t114.rs:164-168`, `:323-333`.) Do **not** point
 `lnsd` at the debug port; it carries log text, not HDLC frames.
 
 ## Pointing `lnsd` at the transport port
@@ -88,8 +88,8 @@ same wire protocol `lnsd`/`rnsd` use for an RNode. Configure it as an
 
 The radio parameters in the config **must match** the firmware's
 compiled-in defaults (the EU medium profile), otherwise the two sides
-talk past each other on the air. (`reticulum-nrf/README.md:8`;
-`reticulum-nrf/src/lora.rs:124-138`.)
+talk past each other on the air. (`leviculum-nrf/README.md:8`;
+`leviculum-nrf/src/lora.rs:124-138`.)
 
 ```ini
 [interfaces]
@@ -109,7 +109,7 @@ The key names and types come from the `[[RNode Interface]]` config
 schema (`port`, `frequency`, `bandwidth`, `txpower`, `spreadingfactor`,
 `codingrate`; `docs/src/rnode-protocol.md:674-684`). The values above are
 the firmware's compiled defaults: 869.525 MHz, BW 125 kHz, 17 dBm, SF7,
-CR4/5 (`reticulum-nrf/src/lora.rs:124-138`).
+CR4/5 (`leviculum-nrf/src/lora.rs:124-138`).
 
 For a RAK4631 / WisMesh Pocket V2 the only change is the port:
 

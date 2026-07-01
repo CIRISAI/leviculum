@@ -7,7 +7,7 @@ profile = "rnode_pair"
 name = "lora_lncp_bidir"
 description = "lncp bidirectional 2KB over direct LoRa"
 timeout_secs = 480
-rust_log = "reticulum_core::link=debug,reticulum_core::transport=debug,reticulum_std::interfaces=debug,info"
+rust_log = "leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
 
 [radio]
 frequency = 869525000

@@ -57,8 +57,8 @@ Common workflows are available as cargo aliases (defined in `.cargo/config.toml`
 
 | Command | What it does |
 |---------|-------------|
-| `cargo test-core` | Run all reticulum-core unit tests |
-| `cargo test-std` | Run all reticulum-std unit tests |
+| `cargo test-core` | Run all leviculum-core unit tests |
+| `cargo test-std` | Run all leviculum-std unit tests |
 | `cargo test-interop` | Run interop tests against Python Reticulum |
 | `cargo test-integ` | Run Docker-based integration tests |
 | `cargo lint` | Run clippy on all crates |

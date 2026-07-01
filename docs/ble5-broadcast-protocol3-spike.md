@@ -22,7 +22,7 @@ dependency. If the submodule or the SoftDevice is bumped, re-run this spike, the
 2. BLE 4 mesh (Columba). Connection oriented, one link per peer, the peer is
    a full Reticulum node. Hardware allows only 3 or 4 simultaneous links, so
    it does not scale. Partial implementation already in tree
-   (reticulum-core/src/framing/ble.rs, reticulum-nrf/src/ble.rs), buggy and
+   (leviculum-core/src/framing/ble.rs, leviculum-nrf/src/ble.rs), buggy and
    incomplete. Tracked by #45.
 3. BLE 5 broadcast mesh (this spike). Connectionless extended advertising, so
    any number of devices in range form a mesh without per peer links. New
@@ -35,13 +35,13 @@ the per advertisement payload ceiling versus the Reticulum MTU?
 
 ## Environment probed
 
-- nrf-softdevice git rev 5949a5b (reticulum-nrf/Cargo.toml:76).
+- nrf-softdevice git rev 5949a5b (leviculum-nrf/Cargo.toml:76).
 - SoftDevice S140 v7.0.0 (nrf-softdevice-s140/src/bindings.rs:855,
   SD_VERSION = 7000001).
 - Current firmware features: ble-peripheral, ble-gatt-server only. No
-  ble-central, no periodic advertising (reticulum-nrf/Cargo.toml feature
+  ble-central, no periodic advertising (leviculum-nrf/Cargo.toml feature
   aggregator).
-- Reticulum MTU 500 bytes (reticulum-core/src/constants.rs:47).
+- Reticulum MTU 500 bytes (leviculum-core/src/constants.rs:47).
 
 ## Findings
 

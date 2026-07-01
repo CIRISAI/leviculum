@@ -9,7 +9,7 @@ profile = "rnode_lnode_pair"
 name = "lora_lnode_serial_relay"
 description = "Verify lnsd announce is delivered via serial to T114 and relayed to LoRa"
 timeout_secs = 120
-rust_log = "reticulum_std::interfaces::serial=debug,reticulum_core::transport=debug,info"
+rust_log = "leviculum_std::interfaces::serial=debug,leviculum_core::transport=debug,info"
 
 [radio]
 frequency = 869525000

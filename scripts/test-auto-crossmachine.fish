@@ -129,7 +129,7 @@ echo "SSH to $REMOTE_HOST is ready"
 # ── Step 1: Build ────────────────────────────────────────────────────────────
 
 echo "Building $BINARY_NAME..."
-cargo build --package reticulum-cli --bin $BINARY_NAME 2>&1
+cargo build --package leviculum-cli --bin $BINARY_NAME 2>&1
 or fail "cargo build failed"
 
 set -l binary_path "$project_dir/target/debug/$BINARY_NAME"

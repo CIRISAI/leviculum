@@ -2,7 +2,7 @@
 # no libc dependency" for free (binary size delta ~1.5% vs glibc-dynamic).
 # Requires `musl-tools` on Debian/Ubuntu (provides musl-gcc as linker).
 #
-# reticulum-ffi is the exception — see the `build-ffi*` aliases below.
+# leviculum-ffi is the exception — see the `build-ffi*` aliases below.
 # It is the C-API surface (cdylib + staticlib) meant to feel like a
 # native Unix library for glibc-host consumers (Python ctypes, C apps
 # on stock Debian, `apt install libreticulum-dev`). A musl-cdylib
@@ -32,28 +32,28 @@ rustflags = ["-C", "link-self-contained=yes"]
 
 [alias]
 # Development workflow
-test-core = "test -p reticulum-core --lib"
-test-std = "test -p reticulum-std --lib"
-test-interop = "test -p reticulum-std --test rnsd_interop"
+test-core = "test -p leviculum-core --lib"
+test-std = "test -p leviculum-std --lib"
+test-interop = "test -p leviculum-std --test rnsd_interop"
 test-integ = "test -p reticulum-integ -- --nocapture"
 lint = "clippy --all"
 
 # C-API library builds — explicitly glibc, overriding the workspace
 # musl default. Outputs a real .so/.a under target/<arch>-unknown-linux-gnu/.
 # arm64 cross-compile needs `gcc-aarch64-linux-gnu` on Debian/Ubuntu.
-build-ffi = "build -p reticulum-ffi --release --target x86_64-unknown-linux-gnu"
-build-ffi-arm64 = "build -p reticulum-ffi --release --target aarch64-unknown-linux-gnu"
-test-ffi = "test -p reticulum-ffi --target x86_64-unknown-linux-gnu"
+build-ffi = "build -p leviculum-ffi --release --target x86_64-unknown-linux-gnu"
+build-ffi-arm64 = "build -p leviculum-ffi --release --target aarch64-unknown-linux-gnu"
+test-ffi = "test -p leviculum-ffi --target x86_64-unknown-linux-gnu"
 # Just the C-API-to-Python-RNS interop suite (spawns scripts/test_daemon.py;
-# skips if Python RNS is unavailable), called out like reticulum-std's
+# skips if Python RNS is unavailable), called out like leviculum-std's
 # test-interop. The Rust suites also run on the musl default via the rlib.
-test-ffi-interop = "test -p reticulum-ffi --test ffi_interop"
+test-ffi-interop = "test -p leviculum-ffi --test ffi_interop"
 
 # Embedded cross-compilation (requires: rustup target add <target>)
-check-nrf52 = "build -p reticulum-core --target thumbv7em-none-eabihf"
-check-rp2040 = "build -p reticulum-core --target thumbv6m-none-eabi"
-check-esp32s3 = "build -p reticulum-core --target xtensa-esp32s3-none-elf"
-check-embedded = "build -p reticulum-core --target thumbv7em-none-eabihf --target thumbv6m-none-eabi"
+check-nrf52 = "build -p leviculum-core --target thumbv7em-none-eabihf"
+check-rp2040 = "build -p leviculum-core --target thumbv6m-none-eabi"
+check-esp32s3 = "build -p leviculum-core --target xtensa-esp32s3-none-elf"
+check-embedded = "build -p leviculum-core --target thumbv7em-none-eabihf --target thumbv6m-none-eabi"
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
