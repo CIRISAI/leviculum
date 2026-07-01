@@ -30,6 +30,7 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
+use static_cell::StaticCell;
 
 bind_interrupts!(pub struct DisplayIrqs {
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
@@ -126,7 +127,7 @@ pub async fn display_task(
     scl: Peri<'static, peripherals::P0_14>,
     identity_hash: [u8; 16],
 ) {
-    static mut TX_BUF: [u8; 64] = [0u8; 64];
+    static TX_BUF: StaticCell<[u8; 64]> = StaticCell::new();
 
     let mut config = twim::Config::default();
     config.frequency = twim::Frequency::K400;
@@ -135,9 +136,10 @@ pub async fn display_task(
     config.sda_pullup = true;
     config.scl_pullup = true;
 
-    // SAFETY: TX_BUF is owned exclusively by this single, never-respawned
-    // task. We hand it to Twim by `&mut` for the lifetime of the task.
-    let tx_buf: &'static mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(TX_BUF) };
+    // TX_BUF is owned exclusively by this single, never-respawned task.
+    // StaticCell::init hands out a unique `&'static mut` with no aliasing
+    // hazard (it panics if init runs twice, which cannot happen here).
+    let tx_buf: &'static mut [u8] = TX_BUF.init([0u8; 64]);
     let mut twim = Twim::new(twispi0, DisplayIrqs, sda, scl, config, tx_buf);
 
     // OLEDs (and several baseboard sensors) need a few hundred ms after the
