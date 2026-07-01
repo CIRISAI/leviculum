@@ -612,6 +612,100 @@ mod tests {
         assert!(!identity.verify(b"Wrong message", &signature).unwrap());
     }
 
+    /// Known-answer test: Ed25519 signature against RFC 8032 Section 7.1 TEST 1.
+    ///
+    /// This pins our signature OUTPUT to fixed authoritative bytes so a
+    /// wire-incompatible-but-self-consistent crypto swap is caught independent
+    /// of the Python interop harness.
+    ///
+    /// Level pinned: Identity::sign (our public signing API). Identity derives
+    /// the Ed25519 key from the 32-byte seed via ed25519_dalek::SigningKey::from_bytes
+    /// (see from_private_key_bytes) and signs the RAW message with PureEdDSA. This is
+    /// bit-identical to a raw ed25519-dalek keypair built from the same seed, so the
+    /// RFC 8032 seed -> signature vector applies directly at the Identity level. The
+    /// X25519 half of the private key is independent of Ed25519 signing and is set to
+    /// the same seed here purely to satisfy the 64-byte constructor.
+    ///
+    /// Source: RFC 8032 Section 7.1, TEST 1 (empty message). Verified independently
+    /// with the Python `cryptography` library: the seed reproduces the RFC public key
+    /// d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a and the
+    /// deterministic signature below.
+    #[test]
+    fn kat_ed25519_sign_rfc8032() {
+        // RFC 8032 Section 7.1 TEST 1 seed (32 bytes)
+        let seed: [u8; 32] = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4,
+            0x92, 0xec, 0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+            0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
+        ];
+        // RFC 8032 Section 7.1 TEST 1 message is the empty string.
+        let message: &[u8] = b"";
+        // RFC 8032 Section 7.1 TEST 1 signature (64 bytes)
+        let expected_sig: [u8; ED25519_SIGNATURE_SIZE] = [
+            0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72, 0x90, 0x86, 0xe2, 0xcc,
+            0x80, 0x6e, 0x82, 0x8a, 0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74,
+            0xd8, 0x73, 0xe0, 0x65, 0x22, 0x49, 0x01, 0x55, 0x5f, 0xb8, 0x82, 0x15,
+            0x90, 0xa3, 0x3b, 0xac, 0xc6, 0x1e, 0x39, 0x70, 0x1c, 0xf9, 0xb4, 0x6b,
+            0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24, 0x65, 0x51, 0x41, 0x43,
+            0x8e, 0x7a, 0x10, 0x0b,
+        ];
+
+        // Build a private-key identity whose Ed25519 half is the RFC seed. The
+        // X25519 half is irrelevant to signing; reuse the seed to fill 64 bytes.
+        let mut priv_bytes = [0u8; IDENTITY_KEY_SIZE];
+        priv_bytes[..X25519_KEY_SIZE].copy_from_slice(&seed);
+        priv_bytes[X25519_KEY_SIZE..].copy_from_slice(&seed);
+        let identity = Identity::from_private_key_bytes(&priv_bytes).unwrap();
+
+        let sig = identity.sign(message).unwrap();
+        assert_eq!(
+            sig, expected_sig,
+            "Ed25519 signature must match RFC 8032 7.1 TEST 1"
+        );
+        // The signature verifies under the RFC public key as well.
+        assert!(identity.verify(message, &sig).unwrap());
+    }
+
+    /// Known-answer test: X25519 scalar multiplication against RFC 7748 Section 5.2.
+    ///
+    /// Pins the X25519 ECDH primitive (x25519_dalek) that Identity uses for key
+    /// agreement to fixed authoritative output bytes. The RFC input scalar is fed
+    /// raw; X25519 performs the mandated clamping internally, matching the RFC's
+    /// X25519(k, u) definition.
+    ///
+    /// Source: RFC 7748 Section 5.2, first X25519 test vector. Verified independently
+    /// with the Python `cryptography` library (X25519PrivateKey.exchange).
+    #[test]
+    fn kat_x25519_ecdh_rfc7748() {
+        // RFC 7748 Section 5.2 input scalar (32 bytes)
+        let scalar: [u8; 32] = [
+            0xa5, 0x46, 0xe3, 0x6b, 0xf0, 0x52, 0x7c, 0x9d, 0x3b, 0x16, 0x15, 0x4b,
+            0x82, 0x46, 0x5e, 0xdd, 0x62, 0x14, 0x4c, 0x0a, 0xc1, 0xfc, 0x5a, 0x18,
+            0x50, 0x6a, 0x22, 0x44, 0xba, 0x44, 0x9a, 0xc4,
+        ];
+        // RFC 7748 Section 5.2 input u-coordinate (32 bytes)
+        let u: [u8; 32] = [
+            0xe6, 0xdb, 0x68, 0x67, 0x58, 0x30, 0x30, 0xdb, 0x35, 0x94, 0xc1, 0xa4,
+            0x24, 0xb1, 0x5f, 0x7c, 0x72, 0x66, 0x24, 0xec, 0x26, 0xb3, 0x35, 0x3b,
+            0x10, 0xa9, 0x03, 0xa6, 0xd0, 0xab, 0x1c, 0x4c,
+        ];
+        // RFC 7748 Section 5.2 expected output (32 bytes)
+        let expected: [u8; 32] = [
+            0xc3, 0xda, 0x55, 0x37, 0x9d, 0xe9, 0xc6, 0x90, 0x8e, 0x94, 0xea, 0x4d,
+            0xf2, 0x8d, 0x08, 0x4f, 0x32, 0xec, 0xcf, 0x03, 0x49, 0x1c, 0x71, 0xf7,
+            0x54, 0xb4, 0x07, 0x55, 0x77, 0xa2, 0x85, 0x52,
+        ];
+
+        let secret = x25519_dalek::StaticSecret::from(scalar);
+        let point = x25519_dalek::PublicKey::from(u);
+        let shared = secret.diffie_hellman(&point);
+        assert_eq!(
+            shared.to_bytes(),
+            expected,
+            "X25519 output must match RFC 7748 5.2"
+        );
+    }
+
     #[test]
     fn test_key_serialization() {
         let identity = new_identity();
