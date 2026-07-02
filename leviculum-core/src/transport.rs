@@ -80,6 +80,34 @@ const ANNOUNCE_FREQ_SAMPLES: usize = 6;
 /// `ip_freq_deque` / `op_freq_deque` analogues (Python Interface.py:135-136).
 const PR_FREQ_SAMPLES: usize = ANNOUNCE_FREQ_SAMPLES;
 
+/// Ingress-control burst thresholds (Codeberg #87; Python Interface.py:75-84).
+/// Interfaces younger than this window use the stricter "new" frequency
+/// thresholds (Python IC_NEW_TIME = 2 hours).
+const IC_NEW_TIME_MS: u64 = 2 * 60 * 60 * 1000;
+/// Announce ingress burst threshold (Hz) for newly created interfaces
+/// (Python IC_BURST_FREQ_NEW).
+const IC_BURST_FREQ_NEW_HZ: f64 = 3.0;
+/// Announce ingress burst threshold (Hz) for established interfaces
+/// (Python IC_BURST_FREQ).
+const IC_BURST_FREQ_HZ: f64 = 10.0;
+/// Path-request ingress burst threshold (Hz) for newly created interfaces
+/// (Python IC_PR_BURST_FREQ_NEW).
+const IC_PR_BURST_FREQ_NEW_HZ: f64 = 3.0;
+/// Path-request ingress burst threshold (Hz) for established interfaces
+/// (Python IC_PR_BURST_FREQ).
+const IC_PR_BURST_FREQ_HZ: f64 = 8.0;
+/// Grace/hold window (ms) an active announce or path-request burst must persist
+/// before it may clear (Python IC_BURST_HOLD = 15 s).
+const IC_BURST_HOLD_MS: u64 = 15 * 1000;
+/// Minimum announce samples that must be present before an active announce
+/// burst may clear (Python IC_BURST_MIN_SAMPLES). Path-request bursts have no
+/// equivalent minimum-sample gate.
+const IC_BURST_MIN_SAMPLES: usize = 6;
+/// Minimum deque samples before a frequency is considered valid for ingress
+/// decisions (Python IC_DEQUE_MIN_SAMPLE). Under-filled deques read as 0 Hz so
+/// a couple of stray samples never trip a burst.
+const IC_DEQUE_MIN_SAMPLE: usize = 2;
+
 /// Default announce-rate target in seconds when transport is enabled and the
 /// interface leaves the key unset (Python Interface.DEFAULT_AR_TARGET, applied
 /// via Reticulum.py:826-829).
@@ -414,6 +442,40 @@ pub struct AnnounceRateConfig {
     pub grace: Option<u32>,
 }
 
+/// Per-interface ingress-control burst state (Codeberg #87).
+///
+/// Mirrors the Python `Interface` ic_burst_* / ic_pr_burst_* fields
+/// (Interface.py:115-118). `created_ms` records when the interface was
+/// registered so `age()` (Interface.py:225-226) can pick the "new" vs
+/// established burst threshold. The activation timestamps are stored in the
+/// clock's millisecond epoch; the state machine lives in
+/// [`Transport::should_ingress_limit`] / [`Transport::should_ingress_limit_pr`].
+#[derive(Debug, Clone)]
+struct IngressBurstState {
+    /// Interface registration time (clock ms), for the new-interface window.
+    created_ms: u64,
+    /// Announce burst currently active (Python ic_burst_active).
+    ann_active: bool,
+    /// Clock ms the announce burst was last activated (Python ic_burst_activated).
+    ann_activated_ms: u64,
+    /// Path-request burst currently active (Python ic_pr_burst_active).
+    pr_active: bool,
+    /// Clock ms the PR burst was last activated (Python ic_pr_burst_activated).
+    pr_activated_ms: u64,
+}
+
+impl IngressBurstState {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            created_ms: now_ms,
+            ann_active: false,
+            ann_activated_ms: 0,
+            pr_active: false,
+            pr_activated_ms: 0,
+        }
+    }
+}
+
 /// Interface metadata for RPC reporting.
 #[derive(Debug, Clone)]
 pub struct InterfaceStatEntry {
@@ -438,6 +500,18 @@ pub struct InterfaceStatEntry {
     pub announce_rate_penalty: Option<u32>,
     /// Resolved announce-rate grace count.
     pub announce_rate_grace: Option<u32>,
+    /// Announce ingress burst limiter currently active (Codeberg #87; Python
+    /// ic_burst_active).
+    pub burst_active: bool,
+    /// Clock time in seconds the announce burst was last activated (Python
+    /// ic_burst_activated); 0 when it has never activated.
+    pub burst_activated: u64,
+    /// Path-request ingress burst limiter currently active (Python
+    /// ic_pr_burst_active).
+    pub pr_burst_active: bool,
+    /// Clock time in seconds the PR burst was last activated (Python
+    /// ic_pr_burst_activated); 0 when it has never activated.
+    pub pr_burst_activated: u64,
 }
 
 /// Exported path table entry for RPC reporting.
@@ -518,6 +592,7 @@ pub struct TransportStats {
     pub(crate) drops_announce_over_max_hops: u64,
     pub(crate) drops_announce_replay: u64,
     pub(crate) drops_announce_rate_limited: u64,
+    pub(crate) drops_ingress_burst_announce: u64,
     pub(crate) drops_lrproof_invalid: u64,
     pub(crate) drops_forward_max_hops: u64,
 }
@@ -551,6 +626,9 @@ pub enum DropReason {
     AnnounceReplay,
     /// Announce suppressed by rate limiting with no path improvement.
     AnnounceRateLimited,
+    /// Incoming announce for an unknown destination dropped while the receiving
+    /// interface's ingress burst limiter is active (Codeberg #87).
+    IngressBurstAnnounce,
     /// LRPROOF dropped during validation (bad size, bad signature, or bad key).
     LrproofInvalid,
     /// Outbound forward/rebroadcast that would exceed `max_hops`.
@@ -559,7 +637,7 @@ pub enum DropReason {
 
 impl DropReason {
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 11] = [
+    pub const ALL: [DropReason; 12] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -569,6 +647,7 @@ impl DropReason {
         DropReason::AnnounceOverMaxHops,
         DropReason::AnnounceReplay,
         DropReason::AnnounceRateLimited,
+        DropReason::IngressBurstAnnounce,
         DropReason::LrproofInvalid,
         DropReason::ForwardMaxHops,
     ];
@@ -649,6 +728,12 @@ impl TransportStats {
         self.drops_announce_rate_limited
     }
 
+    /// Announces dropped while the receiving interface's ingress burst limiter
+    /// was active (Codeberg #87).
+    pub fn drops_ingress_burst_announce(&self) -> u64 {
+        self.drops_ingress_burst_announce
+    }
+
     /// LRPROOFs dropped during validation (bad size, signature, or key).
     pub fn drops_lrproof_invalid(&self) -> u64 {
         self.drops_lrproof_invalid
@@ -671,6 +756,7 @@ impl TransportStats {
             + self.drops_announce_over_max_hops
             + self.drops_announce_replay
             + self.drops_announce_rate_limited
+            + self.drops_ingress_burst_announce
             + self.drops_lrproof_invalid
             + self.drops_forward_max_hops
     }
@@ -693,6 +779,7 @@ impl TransportStats {
             DropReason::AnnounceOverMaxHops => self.drops_announce_over_max_hops += 1,
             DropReason::AnnounceReplay => self.drops_announce_replay += 1,
             DropReason::AnnounceRateLimited => self.drops_announce_rate_limited += 1,
+            DropReason::IngressBurstAnnounce => self.drops_ingress_burst_announce += 1,
             DropReason::LrproofInvalid => self.drops_lrproof_invalid += 1,
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
         }
@@ -914,6 +1001,13 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
     interface_outgoing_pr_times: BTreeMap<usize, VecDeque<u64>>,
 
+    /// Per-interface ingress-control burst state (Codeberg #87). Entry created
+    /// at interface registration (`set_interface_name`) so the new-interface
+    /// window is measured from registration, and lazily on first ingest for
+    /// interfaces that never registered a name (e.g. in tests).
+    /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
+    interface_ingress_burst: BTreeMap<usize, IngressBurstState>,
+
     /// Per-interface announce-rate configuration (Codeberg #67 Stage 2a).
     /// Present only for interfaces that configured at least one
     /// `announce_rate_*` key; absent entries resolve identically to an
@@ -994,6 +1088,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_outgoing_announce_times: BTreeMap::new(),
             interface_incoming_pr_times: BTreeMap::new(),
             interface_outgoing_pr_times: BTreeMap::new(),
+            interface_ingress_burst: BTreeMap::new(),
             interface_announce_rate_configs: BTreeMap::new(),
             interface_next_slot_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
@@ -1677,6 +1772,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.clean_link_table(now);
         self.clean_path_states();
 
+        // Codeberg #87: drive the ingress-limit burst state machine on the poll
+        // cadence so an active burst clears after its grace window even when no
+        // further traffic arrives (Python runs should_ingress_limit[_pr] in its
+        // periodic jobs loop, Transport.py:941-942). The return value is unused
+        // here; only the state transition matters.
+        let ingress_ifaces: Vec<usize> = self.interface_ingress_burst.keys().copied().collect();
+        for iface in ingress_ifaces {
+            self.should_ingress_limit(iface);
+            self.should_ingress_limit_pr(iface);
+        }
+
         // Periodic path table snapshot for diagnostic tracing (every 10s)
         if now.saturating_sub(self.last_path_snapshot_ms) >= 10_000 {
             self.last_path_snapshot_ms = now;
@@ -1715,6 +1821,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 announce_over_max_hops = self.stats.drops_announce_over_max_hops,
                 announce_replay = self.stats.drops_announce_replay,
                 announce_rate_limited = self.stats.drops_announce_rate_limited,
+                ingress_burst_announce = self.stats.drops_ingress_burst_announce,
                 lrproof_invalid = self.stats.drops_lrproof_invalid,
                 forward_max_hops = self.stats.drops_forward_max_hops,
                 total = self.stats.packets_dropped,
@@ -2027,6 +2134,33 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 dest = %HexShort(&dest_hash),
                 "Dropped announce for own destination (echo)"
             );
+            return Ok(());
+        }
+
+        // Codeberg #87: record the incoming-announce frequency for every
+        // signature-valid announce (Python calls Interface.received_announce
+        // unconditionally at Transport.py:1693, before any ingress decision),
+        // then apply per-interface ingress burst limiting.
+        //
+        // Only announces for UNKNOWN destinations that no local path request is
+        // waiting on are subject to the burst limit (Python Transport.py:1696-1707).
+        // Known destinations are governed by per-destination announce-rate
+        // limiting instead, so their legitimate re-announces are never
+        // burst-dropped; destinations we are actively path-requesting are also
+        // exempt so path recovery is never starved.
+        self.record_incoming_announce(interface_index);
+        let dest_unknown = !self.storage.has_path(&dest_hash);
+        let awaiting_pr = self
+            .storage
+            .get_discovery_path_request(&dest_hash)
+            .is_some();
+        if dest_unknown && !awaiting_pr && self.should_ingress_limit(interface_index) {
+            crate::tracing::debug!(
+                dest = %HexShort(&dest_hash),
+                iface = %self.iface_name(interface_index),
+                "Ingress burst limit active, dropping excess announce for unknown destination"
+            );
+            self.stats.record_drop(DropReason::IngressBurstAnnounce);
             return Ok(());
         }
 
@@ -2403,9 +2537,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         );
                     }
                 }
-
-                // Track incoming announce frequency on receiving interface
-                self.record_incoming_announce(interface_index);
             }
 
             // Cache raw announce for path responses. Always cache regardless of
@@ -3674,6 +3805,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Register a human-readable name for an interface (called by driver at registration).
     pub fn set_interface_name(&mut self, id: usize, name: String) {
         self.interface_names.insert(id, name);
+        // Codeberg #87: stamp the interface creation time so the ingress-limit
+        // new-interface window (Python Interface.age() vs IC_NEW_TIME) is
+        // measured from registration.
+        let now = self.clock.now_ms();
+        self.interface_ingress_burst
+            .entry(id)
+            .or_insert_with(|| IngressBurstState::new(now));
     }
 
     /// Remove interface name (called during handle_interface_down cleanup).
@@ -4064,6 +4202,97 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         1.0 / avg_delta_secs
     }
 
+    /// Frequency (Hz) from a timestamp deque for ingress decisions, applying
+    /// Python's minimum-sample gate (Interface.py:281 `if not n > IC_DEQUE_MIN_SAMPLE`).
+    /// Under-filled deques read as 0 Hz so a handful of stray samples can never
+    /// trip a burst.
+    fn ingress_frequency(deque: Option<&VecDeque<u64>>, now_ms: u64) -> f64 {
+        match deque {
+            Some(d) if d.len() > IC_DEQUE_MIN_SAMPLE => Self::announce_frequency(d, now_ms),
+            _ => 0.0,
+        }
+    }
+
+    /// Announce ingress-limit state machine (Codeberg #87; Python
+    /// `Interface.should_ingress_limit`, Interface.py:145-165).
+    ///
+    /// Advances/clears the receiving interface's announce burst state and
+    /// returns whether an incoming announce should be limited (dropped) right
+    /// now. Ingress control is always enabled for our interfaces (Python
+    /// default `ingress_control = True`). Idempotent state transition: safe to
+    /// call from both the ingest path and the poll cadence.
+    fn should_ingress_limit(&mut self, iface: usize) -> bool {
+        let now = self.clock.now_ms();
+        let ia_freq =
+            Self::ingress_frequency(self.interface_incoming_announce_times.get(&iface), now);
+        let deque_len = self
+            .interface_incoming_announce_times
+            .get(&iface)
+            .map(|d| d.len())
+            .unwrap_or(0);
+        let state = self
+            .interface_ingress_burst
+            .entry(iface)
+            .or_insert_with(|| IngressBurstState::new(now));
+        let threshold = if now.saturating_sub(state.created_ms) < IC_NEW_TIME_MS {
+            IC_BURST_FREQ_NEW_HZ
+        } else {
+            IC_BURST_FREQ_HZ
+        };
+
+        if state.ann_active {
+            // Deactivate only once the frequency has fallen back below the
+            // threshold, the grace/hold window has elapsed, and enough samples
+            // remain to trust the measurement (Python Interface.py:151-152).
+            if ia_freq < threshold
+                && now > state.ann_activated_ms + IC_BURST_HOLD_MS
+                && deque_len >= IC_BURST_MIN_SAMPLES
+            {
+                state.ann_active = false;
+            }
+            true
+        } else if ia_freq > threshold {
+            state.ann_active = true;
+            state.ann_activated_ms = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Path-request ingress-limit state machine (Codeberg #87; Python
+    /// `Interface.should_ingress_limit_pr`, Interface.py:167-186).
+    ///
+    /// Mirrors [`Self::should_ingress_limit`] with the PR thresholds and burst
+    /// state, and without the minimum-sample gate on deactivation (Python has
+    /// no `IC_BURST_MIN_SAMPLES` check for path requests).
+    fn should_ingress_limit_pr(&mut self, iface: usize) -> bool {
+        let now = self.clock.now_ms();
+        let ip_freq = Self::ingress_frequency(self.interface_incoming_pr_times.get(&iface), now);
+        let state = self
+            .interface_ingress_burst
+            .entry(iface)
+            .or_insert_with(|| IngressBurstState::new(now));
+        let threshold = if now.saturating_sub(state.created_ms) < IC_NEW_TIME_MS {
+            IC_PR_BURST_FREQ_NEW_HZ
+        } else {
+            IC_PR_BURST_FREQ_HZ
+        };
+
+        if state.pr_active {
+            if ip_freq < threshold && now > state.pr_activated_ms + IC_BURST_HOLD_MS {
+                state.pr_active = false;
+            }
+            true
+        } else if ip_freq > threshold {
+            state.pr_active = true;
+            state.pr_activated_ms = now;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove announce frequency tracking state for an interface.
     ///
     /// Called from `handle_interface_down()` during cleanup.
@@ -4072,6 +4301,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_outgoing_announce_times.remove(&iface);
         self.interface_incoming_pr_times.remove(&iface);
         self.interface_outgoing_pr_times.remove(&iface);
+        self.interface_ingress_burst.remove(&iface);
     }
 
     // Public: Announce-Rate Config API (Codeberg #67 Stage 2a)
@@ -4142,6 +4372,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     self.interface_announce_rate_configs.get(&id),
                     self.config.enable_transport,
                 );
+                // Codeberg #87: real ingress-limit burst state (Python
+                // ic_burst_* / ic_pr_burst_*). Read-only here; the state machine
+                // is advanced on the ingest path and the poll cadence. Activation
+                // timestamps are reported in seconds to match Python time.time().
+                let burst = self.interface_ingress_burst.get(&id);
+                let burst_active = burst.map(|b| b.ann_active).unwrap_or(false);
+                let burst_activated = burst.map(|b| b.ann_activated_ms / 1000).unwrap_or(0);
+                let pr_burst_active = burst.map(|b| b.pr_active).unwrap_or(false);
+                let pr_burst_activated = burst.map(|b| b.pr_activated_ms / 1000).unwrap_or(0);
                 InterfaceStatEntry {
                     id,
                     name: name.clone(),
@@ -4153,6 +4392,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     announce_rate_target: ar_target,
                     announce_rate_penalty: ar_penalty,
                     announce_rate_grace: ar_grace,
+                    burst_active,
+                    burst_activated,
+                    pr_burst_active,
+                    pr_burst_activated,
                 }
             })
             .collect()
@@ -4241,6 +4484,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             );
             return Ok(());
         }
+
+        // Codeberg #87: advance the path-request ingress burst state for the
+        // receiving interface (Python evaluates should_ingress_limit_pr once per
+        // non-duplicate path request, at the top of Transport.path_request,
+        // Transport.py:2916). The limit only suppresses the *recursive discovery*
+        // of an unknown destination below (Transport.py:3015-3026); answering
+        // local or already-known paths is never limited.
+        let pr_burst_limited = self.should_ingress_limit_pr(interface_index);
 
         // 1. Check if it's a local destination
         if self.local_destinations.contains(&requested_hash) {
@@ -4358,7 +4609,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // 3. Unknown destination from network → re-originate path request
             //    Python Transport.py:2792-2806: create fresh packets with hops=0
             //    on all interfaces except the requester, reusing the same tag.
-            if !from_local {
+            //
+            // Codeberg #87: abort the recursive discovery when the receiving
+            // interface's PR ingress burst limiter is active (Python
+            // Transport.py:3022-3026 `return`s without recording a discovery
+            // request or forwarding). Answering already-known paths above is
+            // never limited, so this drops only the excess recursion.
+            if !from_local && pr_burst_limited {
+                crate::tracing::debug!(
+                    dest = %HexShort(&requested_hash),
+                    iface = %self.iface_name(interface_index),
+                    "Not re-originating recursive path request, PR ingress burst limit active"
+                );
+            } else if !from_local {
                 // Python checks attached_interface.mode in DISCOVER_PATHS_FOR here,
                 // which gates discovery on the interface's operational mode. We skip
                 // this check until per-interface modes are implemented.
@@ -6498,6 +6761,7 @@ mod tests {
                         && logs.contains("announce_over_max_hops=")
                         && logs.contains("announce_replay=")
                         && logs.contains("announce_rate_limited=")
+                        && logs.contains("ingress_burst_announce=")
                         && logs.contains("lrproof_invalid=")
                         && logs.contains("forward_max_hops="),
                     "summary must emit ALL taxonomy reasons; logs:\n{logs}"
@@ -6534,6 +6798,7 @@ mod tests {
                 assert_eq!(s.drops_announce_over_max_hops, 1);
                 assert_eq!(s.drops_announce_replay, 1);
                 assert_eq!(s.drops_announce_rate_limited, 1);
+                assert_eq!(s.drops_ingress_burst_announce, 1);
                 assert_eq!(s.drops_lrproof_invalid, 1);
                 assert_eq!(s.drops_forward_max_hops, 1);
             }
@@ -16280,6 +16545,426 @@ mod tests {
             transport.set_announce_rate_config(0, AnnounceRateConfig::default());
             transport.remove_announce_rate_config(0);
             assert!(!transport.interface_announce_rate_configs.contains_key(&0));
+        }
+    }
+
+    /// Codeberg #87: per-interface ingress rate limiting (burst protection) for
+    /// incoming announces and path requests. Matches Python
+    /// Interface.should_ingress_limit / should_ingress_limit_pr
+    /// (Interface.py:145-186) and the ingest call sites (Transport.py:1693-1707,
+    /// 2895-2926, 3015-3026).
+    mod ingress_burst_tests {
+        use super::*;
+        use crate::destination::{Destination, DestinationType, Direction};
+        use crate::identity::Identity;
+        use crate::memory_storage::MemoryStorage;
+        use crate::packet::{
+            HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
+        };
+        use crate::test_utils::{MockClock, TEST_TIME_MS};
+        use rand_core::OsRng;
+
+        extern crate std;
+
+        const NET_IFACE: usize = 0;
+
+        fn make_transport() -> Transport<MockClock, MemoryStorage> {
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = Identity::generate(&mut OsRng);
+            let config = TransportConfig {
+                enable_transport: true,
+                ..TransportConfig::default()
+            };
+            let mut transport =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            transport.set_interface_name(NET_IFACE, "iface0".into());
+            transport.set_interface_name(1, "iface1".into());
+            transport
+        }
+
+        /// Build a valid announce for a fresh (unknown) Single destination.
+        /// Each call yields a distinct destination hash and random blob, so a
+        /// sequence stays "unknown" (subject to ingress limiting) and never trips
+        /// replay protection. Returns (raw_bytes, dest_hash).
+        fn make_announce_raw() -> (Vec<u8>, [u8; TRUNCATED_HASHBYTES]) {
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["ingress"],
+            )
+            .unwrap();
+            let id = dest.identity().unwrap();
+            // The fresh identity already makes every destination hash unique, so
+            // a fixed random blob still yields distinct (dest, blob) replay keys.
+            let random_hash = [0x42u8; crate::constants::RANDOM_HASHBYTES];
+
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&id.public_key_bytes());
+            payload.extend_from_slice(dest.name_hash());
+            payload.extend_from_slice(&random_hash);
+
+            let app_data = b"test";
+            let mut signed_data = Vec::new();
+            signed_data.extend_from_slice(dest.hash().as_bytes());
+            signed_data.extend_from_slice(&id.public_key_bytes());
+            signed_data.extend_from_slice(dest.name_hash());
+            signed_data.extend_from_slice(&random_hash);
+            signed_data.extend_from_slice(app_data);
+
+            let signature = id.sign(&signed_data).unwrap();
+            payload.extend_from_slice(&signature);
+            payload.extend_from_slice(app_data);
+
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Announce,
+                },
+                hops: 1,
+                transport_id: None,
+                destination_hash: dest.hash().into_bytes(),
+                context: PacketContext::None,
+                data: PacketData::Owned(payload),
+            };
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).unwrap();
+            (buf[..len].to_vec(), dest.hash().into_bytes())
+        }
+
+        /// Build a path-request packet body for a distinct unknown destination
+        /// with a unique dedup tag (so each is processed, not deduped).
+        fn make_path_request(transport: &Transport<MockClock, MemoryStorage>, n: u8) -> Packet {
+            let mut data = Vec::with_capacity(32);
+            data.extend_from_slice(&[n; TRUNCATED_HASHBYTES]); // requested (unknown) hash
+            data.extend_from_slice(&[0xF0 ^ n; TRUNCATED_HASHBYTES]); // unique tag
+            Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 1,
+                transport_id: None,
+                destination_hash: *transport.path_request_hash(),
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            }
+        }
+
+        /// Fill the incoming-announce deque with `count` samples `spacing_ms`
+        /// apart, leaving the clock at the last sample time.
+        fn flood_incoming_announce(
+            transport: &mut Transport<MockClock, MemoryStorage>,
+            iface: usize,
+            count: usize,
+            spacing_ms: u64,
+        ) {
+            for i in 0..count {
+                if i > 0 {
+                    transport.clock.advance(spacing_ms);
+                }
+                transport.record_incoming_announce(iface);
+            }
+        }
+
+        fn flood_incoming_pr(
+            transport: &mut Transport<MockClock, MemoryStorage>,
+            iface: usize,
+            count: usize,
+            spacing_ms: u64,
+        ) {
+            for i in 0..count {
+                if i > 0 {
+                    transport.clock.advance(spacing_ms);
+                }
+                transport.record_incoming_path_request(iface);
+            }
+        }
+
+        fn burst_active(transport: &Transport<MockClock, MemoryStorage>, iface: usize) -> bool {
+            transport
+                .interface_stats()
+                .iter()
+                .find(|s| s.id == iface)
+                .unwrap()
+                .burst_active
+        }
+
+        fn pr_burst_active(transport: &Transport<MockClock, MemoryStorage>, iface: usize) -> bool {
+            transport
+                .interface_stats()
+                .iter()
+                .find(|s| s.id == iface)
+                .unwrap()
+                .pr_burst_active
+        }
+
+        // --- Activation ---
+
+        #[test]
+        fn announce_burst_activates_over_threshold() {
+            let mut transport = make_transport();
+            // New interface threshold is 3 Hz. Eight samples 100 ms apart is far
+            // above it (deque caps at 6 → ~12 Hz).
+            flood_incoming_announce(&mut transport, NET_IFACE, 8, 100);
+            assert!(
+                transport.should_ingress_limit(NET_IFACE),
+                "flood far above threshold must activate the burst"
+            );
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == NET_IFACE).unwrap();
+            assert!(iface0.burst_active, "burst_active must be reported true");
+            assert!(
+                iface0.burst_activated > 0,
+                "burst_activated must record the activation time"
+            );
+            // A quiet interface is untouched.
+            let iface1 = stats.iter().find(|s| s.id == 1).unwrap();
+            assert!(!iface1.burst_active);
+            assert_eq!(iface1.burst_activated, 0);
+        }
+
+        #[test]
+        fn pr_burst_activates_over_threshold() {
+            let mut transport = make_transport();
+            // New interface PR threshold is 3 Hz.
+            flood_incoming_pr(&mut transport, NET_IFACE, 8, 100);
+            assert!(transport.should_ingress_limit_pr(NET_IFACE));
+            assert!(pr_burst_active(&transport, NET_IFACE));
+            // Announce burst is independent and stays clear.
+            assert!(!burst_active(&transport, NET_IFACE));
+        }
+
+        // --- Grace / deactivation ---
+
+        #[test]
+        fn announce_burst_deactivates_after_grace() {
+            let mut transport = make_transport();
+            flood_incoming_announce(&mut transport, NET_IFACE, 8, 100);
+            assert!(transport.should_ingress_limit(NET_IFACE));
+            assert!(burst_active(&transport, NET_IFACE));
+
+            // Within the hold window: still limiting even though the flood stopped.
+            transport.clock.advance(IC_BURST_HOLD_MS - 1000);
+            transport.poll();
+            assert!(
+                burst_active(&transport, NET_IFACE),
+                "burst must persist through the grace/hold window"
+            );
+
+            // Past the hold window with the frequency now decayed below threshold
+            // and >= IC_BURST_MIN_SAMPLES retained: the burst clears.
+            transport.clock.advance(10_000);
+            transport.poll();
+            assert!(
+                !burst_active(&transport, NET_IFACE),
+                "burst must clear after the grace window once traffic subsides"
+            );
+        }
+
+        #[test]
+        fn pr_burst_deactivates_after_grace() {
+            let mut transport = make_transport();
+            flood_incoming_pr(&mut transport, NET_IFACE, 8, 100);
+            assert!(transport.should_ingress_limit_pr(NET_IFACE));
+            assert!(pr_burst_active(&transport, NET_IFACE));
+
+            transport.clock.advance(IC_BURST_HOLD_MS - 1000);
+            transport.poll();
+            assert!(pr_burst_active(&transport, NET_IFACE));
+
+            transport.clock.advance(10_000);
+            transport.poll();
+            assert!(!pr_burst_active(&transport, NET_IFACE));
+        }
+
+        // --- Negative guard: normal-rate traffic never bursts or drops ---
+
+        #[test]
+        fn normal_rate_announce_never_bursts_or_drops() {
+            let mut transport = make_transport();
+            let before = transport.stats().drops_ingress_burst_announce;
+            // One announce every 2 s => 0.5 Hz, well under the 3 Hz new-interface
+            // threshold. Distinct unknown destinations each time.
+            for _ in 0..10 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport.handle_announce(packet, NET_IFACE, &raw).unwrap();
+                transport.clock.advance(2000);
+                transport.poll();
+            }
+            assert!(
+                !burst_active(&transport, NET_IFACE),
+                "normal-rate traffic must never activate the burst"
+            );
+            assert_eq!(
+                transport.stats().drops_ingress_burst_announce,
+                before,
+                "normal-rate announces must never be burst-dropped"
+            );
+        }
+
+        #[test]
+        fn normal_rate_pr_never_bursts() {
+            let mut transport = make_transport();
+            for _ in 0..8 {
+                transport.record_incoming_path_request(NET_IFACE);
+                transport.clock.advance(2000);
+                assert!(!transport.should_ingress_limit_pr(NET_IFACE));
+            }
+            assert!(!pr_burst_active(&transport, NET_IFACE));
+        }
+
+        // --- End-to-end drop through the announce ingest path ---
+
+        #[test]
+        fn handle_announce_drops_excess_during_burst() {
+            let mut transport = make_transport();
+            // Feed 12 distinct unknown-destination announces 100 ms apart.
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport.handle_announce(packet, NET_IFACE, &raw).unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(
+                burst_active(&transport, NET_IFACE),
+                "a sustained flood must activate the burst"
+            );
+            let dropped = transport.stats().drops_ingress_burst_announce;
+            assert!(
+                dropped > 0,
+                "excess announces must be dropped during the burst; dropped={dropped}"
+            );
+            // The very first announces (before the deque fills past the min-sample
+            // gate) are NOT dropped — legitimate early traffic is preserved.
+            assert!(
+                dropped < 12,
+                "the burst must not drop every announce; the first ones pass"
+            );
+        }
+
+        #[test]
+        fn handle_announce_no_drop_at_normal_rate() {
+            let mut transport = make_transport();
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport.handle_announce(packet, NET_IFACE, &raw).unwrap();
+                transport.clock.advance(2000);
+            }
+            assert_eq!(transport.stats().drops_ingress_burst_announce, 0);
+            assert!(!burst_active(&transport, NET_IFACE));
+        }
+
+        // --- End-to-end path-request recursion suppression ---
+
+        #[test]
+        fn handle_path_request_suppresses_recursion_during_burst() {
+            let mut transport = make_transport();
+            // Flood distinct unknown path requests 100 ms apart.
+            for n in 0..12u8 {
+                let packet = make_path_request(&transport, n.wrapping_add(1));
+                transport.handle_path_request(packet, NET_IFACE).unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(
+                pr_burst_active(&transport, NET_IFACE),
+                "a path-request flood must activate the PR burst"
+            );
+
+            // While the PR burst is active, a further unknown path request must
+            // NOT re-originate a recursive discovery broadcast.
+            transport.drain_actions();
+            let packet = make_path_request(&transport, 200);
+            transport.handle_path_request(packet, NET_IFACE).unwrap();
+            let actions = transport.drain_actions();
+            let broadcasts = actions
+                .iter()
+                .filter(|a| matches!(a, Action::Broadcast { .. }))
+                .count();
+            assert_eq!(
+                broadcasts, 0,
+                "no recursive discovery may be re-originated while PR burst is active"
+            );
+        }
+
+        #[test]
+        fn handle_path_request_reoriginates_at_normal_rate() {
+            let mut transport = make_transport();
+            transport.drain_actions();
+            // A single unknown path request at rest re-originates a discovery.
+            let packet = make_path_request(&transport, 1);
+            transport.handle_path_request(packet, NET_IFACE).unwrap();
+            assert!(!pr_burst_active(&transport, NET_IFACE));
+            let actions = transport.drain_actions();
+            let broadcasts = actions
+                .iter()
+                .filter(|a| matches!(a, Action::Broadcast { .. }))
+                .count();
+            assert!(
+                broadcasts >= 1,
+                "an unburst path request must re-originate a discovery broadcast"
+            );
+        }
+
+        // --- Threshold is age-driven, NOT announce_rate-config driven ---
+
+        #[test]
+        fn threshold_is_age_driven_new_vs_established() {
+            // A ~6 Hz flood trips a NEW interface (6 > 3) ...
+            let mut new_iface = make_transport();
+            flood_incoming_announce(&mut new_iface, NET_IFACE, 6, 200);
+            assert!(
+                new_iface.should_ingress_limit(NET_IFACE),
+                "new interface (threshold 3 Hz) must burst at ~6 Hz"
+            );
+
+            // ... but NOT an ESTABLISHED interface (6 < 10). Age the interface past
+            // the 2 h new-interface window before flooding.
+            let mut est_iface = make_transport();
+            est_iface.clock.advance(IC_NEW_TIME_MS + 1000);
+            flood_incoming_announce(&mut est_iface, NET_IFACE, 6, 200);
+            assert!(
+                !est_iface.should_ingress_limit(NET_IFACE),
+                "established interface (threshold 10 Hz) must not burst at ~6 Hz"
+            );
+        }
+
+        #[test]
+        fn announce_rate_config_does_not_change_burst_threshold() {
+            // Reference-first finding: the ingress BURST threshold is the fixed
+            // IC_BURST_FREQ family (Interface.py:76-79), independent of the
+            // per-destination announce_rate_target/penalty/grace config (which
+            // drives check_announce_rate, a separate mechanism). Configuring an
+            // aggressive announce_rate must NOT shift the burst threshold.
+            let mut transport = make_transport();
+            transport.clock.advance(IC_NEW_TIME_MS + 1000); // established → 10 Hz
+            transport.set_announce_rate_config(
+                NET_IFACE,
+                AnnounceRateConfig {
+                    target: Some(1),
+                    penalty: Some(0),
+                    grace: Some(0),
+                },
+            );
+            // ~6 Hz: below the established 10 Hz burst threshold. If the config
+            // (wrongly) fed the threshold, this would trip; it must not.
+            flood_incoming_announce(&mut transport, NET_IFACE, 6, 200);
+            assert!(
+                !transport.should_ingress_limit(NET_IFACE),
+                "announce_rate config must not lower the ingress burst threshold"
+            );
         }
     }
 

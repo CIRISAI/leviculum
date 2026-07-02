@@ -249,6 +249,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "announce_over_max_hops",
             "announce_replay",
             "announce_rate_limited",
+            "ingress_burst_announce",
             "lrproof_invalid",
             "forward_max_hops",
             "total",

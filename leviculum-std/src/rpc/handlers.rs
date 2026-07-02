@@ -269,18 +269,29 @@ fn build_interface_stats(
                 pickle_str_key("announce_rate_grace"),
                 ar_value(entry.announce_rate_grace),
             ),
-            // burst_active/activated + pr_burst_active/activated: ingress-limiter
-            //   burst state. These belong to the announce-rate limiting feature
-            //   (Codeberg #87) and stay at their Stage-1 defaults False / 0,
-            //   matching the Interface initializers ic_burst_active/
-            //   ic_burst_activated and ic_pr_burst_active/ic_pr_burst_activated
-            //   (Interface.py:115-118). rnstatus only reads *_activated when the
-            //   matching *_active is truthy (rnstatus.py:565-573), so False/0
-            //   renders no burst suffix.
-            (pickle_str_key("burst_active"), pickle_bool(false)),
-            (pickle_str_key("burst_activated"), pickle_int(0)),
-            (pickle_str_key("pr_burst_active"), pickle_bool(false)),
-            (pickle_str_key("pr_burst_activated"), pickle_int(0)),
+            // burst_active/activated + pr_burst_active/activated: real ingress
+            //   limiter burst state (Codeberg #87), read from the per-interface
+            //   IngressBurstState (Python ic_burst_active/ic_burst_activated and
+            //   ic_pr_burst_active/ic_pr_burst_activated, Interface.py:115-118).
+            //   Idle interfaces read False / 0. rnstatus only reads *_activated
+            //   when the matching *_active is truthy (rnstatus.py:565-573), so an
+            //   idle interface renders no burst suffix.
+            (
+                pickle_str_key("burst_active"),
+                pickle_bool(entry.burst_active),
+            ),
+            (
+                pickle_str_key("burst_activated"),
+                pickle_int(entry.burst_activated as i64),
+            ),
+            (
+                pickle_str_key("pr_burst_active"),
+                pickle_bool(entry.pr_burst_active),
+            ),
+            (
+                pickle_str_key("pr_burst_activated"),
+                pickle_int(entry.pr_burst_activated as i64),
+            ),
             (pickle_str_key("held_announces"), pickle_int(0)),
             (pickle_str_key("announce_queue"), pickle_none()),
             (pickle_str_key("ifac_signature"), pickle_none()),
