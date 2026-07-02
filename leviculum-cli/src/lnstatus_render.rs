@@ -669,16 +669,21 @@ fn render_traffic_block(
     };
 
     // Burst suffixes (rnstatus.py:565-573). `burst_activated` is an absolute
-    // timestamp; lnsd emits burst_active=false so these stay empty. When a
-    // source does report an active burst we cannot compute `now - activated`
-    // deterministically here, so we mirror the structure with a 0 elapsed.
+    // epoch timestamp (time.time() on rnsd, epoch-converted on lnsd), and the
+    // rendered value is the elapsed burst duration `now - activated`.
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
     let burst_str = if jb(ifstat, "burst_active").unwrap_or(false) {
-        format!(" burst for {}", prettytime(0.0))
+        let activated = jf(ifstat, "burst_activated").unwrap_or(0.0);
+        format!(" burst for {}", prettytime(now_epoch - activated))
     } else {
         String::new()
     };
     let pburst_str = if jb(ifstat, "pr_burst_active").unwrap_or(false) {
-        format!("burst for {}", prettytime(0.0))
+        let activated = jf(ifstat, "pr_burst_activated").unwrap_or(0.0);
+        format!("burst for {}", prettytime(now_epoch - activated))
     } else {
         String::new()
     };

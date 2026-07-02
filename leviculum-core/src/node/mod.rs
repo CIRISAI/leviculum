@@ -1416,8 +1416,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Return metadata for all registered interfaces (for RPC reporting).
-    pub fn interface_stats(&self) -> Vec<crate::transport::InterfaceStatEntry> {
+    /// `&mut` because frequency reads pop decayed samples (Python parity,
+    /// see `Transport::interface_stats`).
+    pub fn interface_stats(&mut self) -> Vec<crate::transport::InterfaceStatEntry> {
         self.transport.interface_stats()
+    }
+
+    /// The registered name for an interface id. Pure lookup without the
+    /// frequency-deque read side effect of [`Self::interface_stats`].
+    pub fn interface_name(&self, id: usize) -> Option<&str> {
+        self.transport.interface_name(id)
     }
 
     /// Get the default proof strategy

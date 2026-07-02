@@ -35,11 +35,13 @@
 //!      incoming_announce_frequency.
 //!   2. PATH REQUESTS: 4 path requests (3 known + 1 unknown destination),
 //!      paced 1.5 s -> real incoming_pr_frequency, outgoing path responses.
-//!   3. BURST: 20 fresh-identity announces at 25 Hz -> ingress burst
-//!      activates on both stacks (Interface.py IC_BURST_FREQ_NEW = 3 Hz,
-//!      IC_BURST_MIN_SAMPLES = 6), excess announces are HELD. Sampled DURING
-//!      the burst (inside the 15 s IC_BURST_PENALTY window, before the first
-//!      release) and again AFTER the drain (held back to 0). Covers #87.
+//!   3. BURST: after a >10 s quiet gap (so earlier samples are past the
+//!      AR_FREQ_DECAY window, see PRE_BURST_DECAY_GAP), 20 fresh-identity
+//!      announces at 25 Hz -> ingress burst activates on both stacks
+//!      (Interface.py IC_BURST_FREQ_NEW = 3 Hz, IC_BURST_MIN_SAMPLES = 6),
+//!      excess announces are HELD. Sampled DURING the burst (inside the 15 s
+//!      IC_BURST_PENALTY window, before the first release) and again AFTER
+//!      the drain (held back to 0). Covers #87.
 //!   4. BLACKHOLE: the victim identity is blackholed via the REAL vendor
 //!      rnpath.py -B against each daemon's own RPC; its re-announce is
 //!      dropped on both stacks while a sentinel announce passes; -U lifts
@@ -229,7 +231,12 @@ struct ParityDaemon {
 impl ParityDaemon {
     async fn start(stack: Stack) -> ParityDaemon {
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let instance_name = format!("parity_{}_{}_{}", stack.label(), std::process::id(), test_id);
+        let instance_name = format!(
+            "parity_{}_{}_{}",
+            stack.label(),
+            std::process::id(),
+            test_id
+        );
         // The harness allocator hands out a minimum of two ports; only the
         // first is used (the daemon's TCP server bind).
         let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate port");
@@ -462,6 +469,16 @@ const BURST_N: usize = 20;
 const SLOW_PACE: Duration = Duration::from_millis(1500);
 /// Burst pacing: ~25 Hz, far above the 3 Hz threshold.
 const BURST_PACE: Duration = Duration::from_millis(40);
+/// Quiet gap before the burst, sized past the 10 s frequency decay window
+/// (Interface.py AR_FREQ_DECAY). Both stacks compute the announce frequency
+/// as n/(now - oldest) over a 48-sample deque and pop only ONE decayed
+/// sample per read once the span exceeds 10 s. Without the gap the
+/// steady-phase samples pin the span at ~9 s (not yet decay-eligible) and
+/// [`BURST_N`] frames only reach ~2.3 Hz - NEITHER stack activates during
+/// the burst. After the gap every pre-burst sample is decay-eligible, the
+/// burst's per-frame frequency reads pop them one per frame, and the
+/// threshold is crossed at (nearly) the same frame on both stacks.
+const PRE_BURST_DECAY_GAP: Duration = Duration::from_secs(12);
 
 /// Build a signed announce frame for a caller-owned identity. Every call
 /// yields a fresh packet hash (random announce blob), so re-announces are
@@ -498,7 +515,9 @@ struct TrafficScript {
 }
 
 fn build_script() -> TrafficScript {
-    let steady_ids: Vec<Identity> = (0..STEADY_N).map(|_| Identity::generate(&mut OsRng)).collect();
+    let steady_ids: Vec<Identity> = (0..STEADY_N)
+        .map(|_| Identity::generate(&mut OsRng))
+        .collect();
     let steady: Vec<_> = steady_ids
         .iter()
         .enumerate()
@@ -603,7 +622,10 @@ fn boolean(v: &Value, key: &str) -> bool {
 }
 
 fn held_total(stats: &Value) -> u64 {
-    ifaces(stats).iter().map(|i| num(i, "held_announces") as u64).sum()
+    ifaces(stats)
+        .iter()
+        .map(|i| num(i, "held_announces") as u64)
+        .sum()
 }
 
 fn any_burst(stats: &Value) -> bool {
@@ -740,7 +762,11 @@ fn canon_diff(a: &Canon, b: &Canon, path: &str, out: &mut Vec<String>) {
         }
         (Canon::Arr(aa), Canon::Arr(ab)) => {
             if aa.len() != ab.len() {
-                out.push(format!("{path}: array lengths {} vs {}", aa.len(), ab.len()));
+                out.push(format!(
+                    "{path}: array lengths {} vs {}",
+                    aa.len(),
+                    ab.len()
+                ));
             } else {
                 for (i, (va, vb)) in aa.iter().zip(ab).enumerate() {
                     canon_diff(va, vb, &format!("{path}[{i}]"), out);
@@ -846,11 +872,32 @@ fn assert_json_identical(left: &Value, right: &Value, what: &str) {
 /// backed by a separate numeric assertion so the normalization never hides a
 /// real divergence. Whitespace is collapsed only on lines that were touched,
 /// because value width changes shift rnstatus's column padding.
+///
+/// Three artifacts of SEQUENTIAL sampling on a live daemon are normalized
+/// structurally (their substance is asserted separately, see the during-burst
+/// section):
+///
+///   * the `<HZ>/c` (or `/p`) per-client rate suffix: rnstatus samples with
+///     itself connected as a shared-instance client (clients=1 on the Shared
+///     Instance entry), lnstatus samples client-free (clients=0), so the
+///     suffix presence differs by observer footprint exactly like the
+///     `clients` field the -j scrub pins;
+///   * the ` burst for <T>` suffix: on rnsd the parent listener's burst flag
+///     is advanced by the 5 s jobs cadence and can flip between the two
+///     samples; presence on the daemon under test is asserted explicitly
+///     before normalization;
+///   * padding between a frequency and its ↑/↓ arrow: rnstatus pads the
+///     shorter of the two frequency strings for column alignment, and the
+///     two clients sample different (decaying) values with different widths.
 fn normalize_status_text(text: &str) -> String {
     let re_time = Regex::new(r"\d+(?:\.\d+)?(?:d|h|m|s)\b").unwrap();
-    let re_hz = Regex::new(r"\d+(?:\.\d+)?\s[KMGTPEZY]?Hz").unwrap();
+    // Frequencies render sub-Hz multipliers (mHz/µHz) once the deque decay
+    // sets in, so the multiplier class covers them as well.
+    let re_hz = Regex::new(r"\d+(?:\.\d+)?\s[munµKMGTPEZY]?Hz").unwrap();
     let re_bps = Regex::new(r"\d+(?:\.\d+)?\s[kKMGTPEZY]?bps").unwrap();
     let re_held = Regex::new(r"\d+ announces?\b").unwrap();
+    let re_per_client = Regex::new(r"\s*<HZ>/[cp]").unwrap();
+    let re_burst_for = Regex::new(r"\s*burst for <T>(?:, <T>)*(?: and <T>)?").unwrap();
 
     text.lines()
         .map(|line| {
@@ -877,7 +924,11 @@ fn normalize_status_text(text: &str) -> String {
                 touched = true;
             }
             if touched {
+                // Structural artifacts of sequential sampling (see above).
+                l = re_per_client.replace_all(&l, "").into_owned();
+                l = re_burst_for.replace_all(&l, "").into_owned();
                 l = l.split_whitespace().collect::<Vec<_>>().join(" ");
+                l = l.replace("<HZ> ↑", "<HZ>↑").replace("<HZ> ↓", "<HZ>↓");
             }
             l
         })
@@ -930,9 +981,12 @@ async fn status_parity_matrix_2x2() {
         .map(|(_, h)| hex::encode(h.as_bytes()))
         .collect();
     for daemon in [&lnsd, &rnsd] {
-        let paths = wait_paths(daemon, "steady paths learned", Duration::from_secs(30), |p| {
-            p == &steady_set
-        })
+        let paths = wait_paths(
+            daemon,
+            "steady paths learned",
+            Duration::from_secs(30),
+            |p| p == &steady_set,
+        )
         .await;
         assert_eq!(paths, steady_set);
     }
@@ -963,6 +1017,11 @@ async fn status_parity_matrix_2x2() {
     }
 
     // ---- Phase 3: BURST (Codeberg #87). ----
+    // Quiet gap first so the steady/PR-phase samples are decay-eligible and
+    // the burst crosses the ingress threshold on both stacks (see
+    // PRE_BURST_DECAY_GAP). This is a traffic-script property (when frames
+    // are sent), not an assertion timing.
+    tokio::time::sleep(PRE_BURST_DECAY_GAP).await;
     let burst_frames: Vec<&[u8]> = script.burst.iter().map(|(f, _)| f.as_slice()).collect();
     injectors.send_paced(&burst_frames, BURST_PACE).await;
     let burst_end = Instant::now();
@@ -1056,8 +1115,18 @@ async fn status_parity_matrix_2x2() {
     // On rnsd the burst lives on the spawned connection entry, which
     // rnstatus HIDES by default (TCPInterface[Client prefix), so the held
     // substance is asserted via RPC above; the -A text parity between the
-    // clients still holds on the visible entries.
+    // clients still holds on the visible entries. The per-client announce
+    // rate (`.../c`) must be rendered by BOTH clients for the TCP listener
+    // (clients=1, the injector connection) - asserted here because the
+    // normalization strips the observer-dependent occurrence on the Shared
+    // Instance entry (rnstatus counts itself, lnstatus is RPC-only).
     let (rn_r, ln_r) = &rnsd_texts;
+    for (who, text) in [("rnstatus", rn_r), ("lnstatus", ln_r)] {
+        assert!(
+            text.contains("/c"),
+            "{who} on rnsd must render the per-client announce rate, got:\n{text}"
+        );
+    }
     assert_eq!(
         normalize_status_text(rn_r),
         normalize_status_text(ln_r),
@@ -1279,12 +1348,16 @@ async fn status_parity_matrix_2x2() {
     // Daemon parity (#67): the reference client reads both daemons; compare
     // via rnstatus -j so the daemon side is the only variable.
     let rn_on_l: Value = serde_json::from_str(
-        run_status(StatusClient::Rnstatus, &lnsd, &["-j"]).await.trim(),
+        run_status(StatusClient::Rnstatus, &lnsd, &["-j"])
+            .await
+            .trim(),
     )
     .expect("rnstatus -j on lnsd JSON");
     wait_observer_gone(&lnsd).await;
     let rn_on_r: Value = serde_json::from_str(
-        run_status(StatusClient::Rnstatus, &rnsd, &["-j"]).await.trim(),
+        run_status(StatusClient::Rnstatus, &rnsd, &["-j"])
+            .await
+            .trim(),
     )
     .expect("rnstatus -j on rnsd JSON");
     wait_observer_gone(&rnsd).await;
@@ -1326,7 +1399,9 @@ async fn status_parity_matrix_2x2() {
 
     // ---- lnstatus on lnsd (full Rust stack): concrete sanity ranges. ----
     let ln_on_l: Value = serde_json::from_str(
-        run_status(StatusClient::Lnstatus, &lnsd, &["-j"]).await.trim(),
+        run_status(StatusClient::Lnstatus, &lnsd, &["-j"])
+            .await
+            .trim(),
     )
     .expect("lnstatus -j on lnsd JSON");
     assert_full_stack_sane(&ln_on_l);
@@ -1365,7 +1440,9 @@ async fn connect_injector(daemon: &ParityDaemon) -> TcpStream {
 fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // Top-level key sets must be identical.
     let keys = |v: &Value| -> BTreeSet<String> {
-        v.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default()
+        v.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
     };
     assert_eq!(
         keys(on_lnsd),
@@ -1402,21 +1479,32 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
 
     let (tl, tr) = (traffic_iface(on_lnsd), traffic_iface(on_rnsd));
 
-    // Pinned per-interface key-set divergence.
+    // Pinned per-interface key-set divergence. `announce_queue` is always
+    // reported by lnsd but only LAZILY by Python: the key appears once the
+    // interface's announce-cap queue has ever held an entry, which depends
+    // on rebroadcast timing under the burst load. Both shapes are pinned.
     let (kl, kr) = (keys(&tl), keys(&tr));
     let ours_only: BTreeSet<String> = kl.difference(&kr).cloned().collect();
     let python_only: BTreeSet<String> = kr.difference(&kl).cloned().collect();
-    assert_eq!(
-        ours_only,
-        ["announce_queue", "peers"].iter().map(|s| s.to_string()).collect(),
-        "unexpected lnsd-only interface_stats keys"
+    let ours_only_full: BTreeSet<String> = ["announce_queue", "peers"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let ours_only_queued: BTreeSet<String> = ["peers"].iter().map(|s| s.to_string()).collect();
+    assert!(
+        ours_only == ours_only_full || ours_only == ours_only_queued,
+        "unexpected lnsd-only interface_stats keys: {ours_only:?}"
     );
     assert_eq!(
         python_only,
-        ["autoconnect_source", "parent_interface_name", "parent_interface_hash"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        [
+            "autoconnect_source",
+            "parent_interface_name",
+            "parent_interface_hash"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
         "unexpected rnsd-only interface_stats keys"
     );
 
@@ -1445,7 +1533,10 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         "txs",
     ] {
         let (a, b) = (canon(&tl[key]), canon(&tr[key]));
-        assert_eq!(a, b, "daemon parity: traffic interface field {key} differs (lnsd vs rnsd)");
+        assert_eq!(
+            a, b,
+            "daemon parity: traffic interface field {key} differs (lnsd vs rnsd)"
+        );
     }
 
     // Both stacks record that an announce burst was activated at some point
@@ -1460,16 +1551,30 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
 
     // Frozen totals: speeds are exactly zero on both.
     for key in ["rxs", "txs"] {
-        assert_eq!(num(on_lnsd, key), 0.0, "lnsd total {key} must be frozen to 0");
-        assert_eq!(num(on_rnsd, key), 0.0, "rnsd total {key} must be frozen to 0");
+        assert_eq!(
+            num(on_lnsd, key),
+            0.0,
+            "lnsd total {key} must be frozen to 0"
+        );
+        assert_eq!(
+            num(on_rnsd, key),
+            0.0,
+            "rnsd total {key} must be frozen to 0"
+        );
     }
 
     // Transport identity fields: per-daemon values, shared shape.
     for (label, v) in [("lnsd", on_lnsd), ("rnsd", on_rnsd)] {
         let tid = v["transport_id"].as_str().unwrap_or_default();
         assert_eq!(tid.len(), 32, "{label}: transport_id must be 16 bytes hex");
-        assert!(v["network_id"].is_null(), "{label}: network_id must be null");
-        assert!(v["probe_responder"].is_null(), "{label}: probe responder is off");
+        assert!(
+            v["network_id"].is_null(),
+            "{label}: network_id must be null"
+        );
+        assert!(
+            v["probe_responder"].is_null(),
+            "{label}: probe responder is off"
+        );
         let up = num(v, "transport_uptime");
         assert!(up > 0.0 && up < 3600.0, "{label}: implausible uptime {up}");
     }
@@ -1513,6 +1618,14 @@ fn assert_full_stack_sane(stats: &Value) {
     );
     let up = num(stats, "transport_uptime");
     assert!(up > 0.0 && up < 3600.0, "implausible uptime {up}");
-    assert_eq!(num(stats, "rxb"), num(t, "rxb"), "totals equal the single interface");
-    assert_eq!(num(stats, "txb"), num(t, "txb"), "totals equal the single interface");
+    assert_eq!(
+        num(stats, "rxb"),
+        num(t, "rxb"),
+        "totals equal the single interface"
+    );
+    assert_eq!(
+        num(stats, "txb"),
+        num(t, "txb"),
+        "totals equal the single interface"
+    );
 }

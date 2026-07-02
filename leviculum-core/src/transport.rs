@@ -71,14 +71,20 @@ use crate::storage_types::{
 use crate::traits::{Clock, Storage};
 
 /// Number of announce timestamp samples per interface for frequency computation
-/// (matches Python Interface.py maxlen=6).
-const ANNOUNCE_FREQ_SAMPLES: usize = 6;
+/// (Python Interface.py IA_FREQ_SAMPLES / OA_FREQ_SAMPLES = 48).
+const ANNOUNCE_FREQ_SAMPLES: usize = 48;
 
 /// Number of path-request timestamp samples per interface for frequency
 /// computation. Path-request frequency mirrors the announce-frequency
 /// mechanics (Codeberg #67 Stage 2a), so the same deque bound applies to the
-/// `ip_freq_deque` / `op_freq_deque` analogues (Python Interface.py:135-136).
+/// `ip_freq_deque` / `op_freq_deque` analogues (Python IP/OP_FREQ_SAMPLES).
 const PR_FREQ_SAMPLES: usize = ANNOUNCE_FREQ_SAMPLES;
+
+/// Span beyond which one decayed sample is popped per frequency read (Python
+/// AR_FREQ_DECAY = PR_FREQ_DECAY = 1 / 0.1 Hz = 10 s). The read-side pop is
+/// what makes an idle interface's frequency drain to an exact 0 instead of
+/// decaying asymptotically; rnstatus-style polling relies on it.
+const FREQ_DECAY_MS: u64 = 10_000;
 
 /// Ingress-control burst thresholds (Codeberg #87; Python Interface.py:75-84).
 /// Interfaces younger than this window use the stricter "new" frequency
@@ -4059,6 +4065,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// The registered name for an interface id, for id -> name lookups that
+    /// must not touch the frequency deques (unlike [`Self::interface_stats`],
+    /// whose reads pop decayed samples).
+    pub fn interface_name(&self, id: usize) -> Option<&str> {
+        self.interface_names.get(&id).map(|s| s.as_str())
+    }
+
     // Public: Interface HW_MTU API
     /// Register the hardware MTU for an interface (called by driver at registration).
     pub fn set_interface_hw_mtu(&mut self, id: usize, hw_mtu: u32) {
@@ -4409,39 +4422,41 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         u64::from_le_bytes(buf) % max_ms
     }
 
-    /// Compute announce frequency from a timestamp deque (matches Python Interface.py).
+    /// Compute a frequency (Hz) from a timestamp deque, mirroring Python's
+    /// Interface.incoming/outgoing_*_frequency() (Interface.py:279-321):
+    /// `hz = n / (now - oldest)`, with ONE decayed sample popped per read once
+    /// the span exceeds [`FREQ_DECAY_MS`]. The pop is a deliberate read side
+    /// effect: repeated reads (rnstatus polling, the ingest path, the periodic
+    /// jobs cadence) drain an idle deque down to `min_samples`, at which point
+    /// the gate returns an exact 0.0. n and span are taken BEFORE the pop, so
+    /// the pop only affects the NEXT read, exactly like Python.
     ///
-    /// Returns frequency in Hz. If fewer than 2 samples, returns 0.0.
-    /// Includes time elapsed since last sample in the average, matching Python's
-    /// `delta_sum += time.time() - deque[-1]`.
-    fn announce_frequency(deque: &VecDeque<u64>, now_ms: u64) -> f64 {
-        if deque.len() <= 1 {
+    /// `min_samples` is the Python gate: IC_DEQUE_MIN_SAMPLE (2) for incoming
+    /// deques, 1 for outgoing deques (`if not n > 1`).
+    fn deque_frequency(deque: &mut VecDeque<u64>, now_ms: u64, min_samples: usize) -> f64 {
+        let n = deque.len();
+        if n <= min_samples {
             return 0.0;
         }
-        let mut delta_sum_ms: u64 = 0;
-        for i in 1..deque.len() {
-            delta_sum_ms += deque[i].saturating_sub(deque[i - 1]);
+        let oldest = deque[0];
+        let span_ms = now_ms.saturating_sub(oldest);
+        if span_ms > FREQ_DECAY_MS {
+            deque.pop_front();
         }
-        // Add time since last sample (matches Python: delta_sum += time.time() - deque[-1])
-        if let Some(&last) = deque.back() {
-            delta_sum_ms += now_ms.saturating_sub(last);
-        }
-
-        if delta_sum_ms == 0 {
+        if span_ms == 0 {
             return 0.0;
         }
-        let avg_delta_secs = (delta_sum_ms as f64 / 1000.0) / (deque.len() as f64);
-        1.0 / avg_delta_secs
+        n as f64 / (span_ms as f64 / 1000.0)
     }
 
-    /// Frequency (Hz) from a timestamp deque for ingress decisions, applying
-    /// Python's minimum-sample gate (Interface.py:281 `if not n > IC_DEQUE_MIN_SAMPLE`).
-    /// Under-filled deques read as 0 Hz so a handful of stray samples can never
-    /// trip a burst.
-    fn ingress_frequency(deque: Option<&VecDeque<u64>>, now_ms: u64) -> f64 {
+    /// Frequency (Hz) from an INCOMING timestamp deque for ingress decisions,
+    /// applying Python's minimum-sample gate (Interface.py:281
+    /// `if not n > IC_DEQUE_MIN_SAMPLE`). Under-filled deques read as 0 Hz so
+    /// a handful of stray samples can never trip a burst.
+    fn ingress_frequency(deque: Option<&mut VecDeque<u64>>, now_ms: u64) -> f64 {
         match deque {
-            Some(d) if d.len() > IC_DEQUE_MIN_SAMPLE => Self::announce_frequency(d, now_ms),
-            _ => 0.0,
+            Some(d) => Self::deque_frequency(d, now_ms, IC_DEQUE_MIN_SAMPLE),
+            None => 0.0,
         }
     }
 
@@ -4456,7 +4471,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     fn should_ingress_limit(&mut self, iface: usize) -> bool {
         let now = self.clock.now_ms();
         let ia_freq =
-            Self::ingress_frequency(self.interface_incoming_announce_times.get(&iface), now);
+            Self::ingress_frequency(self.interface_incoming_announce_times.get_mut(&iface), now);
         let deque_len = self
             .interface_incoming_announce_times
             .get(&iface)
@@ -4504,7 +4519,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// no `IC_BURST_MIN_SAMPLES` check for path requests).
     fn should_ingress_limit_pr(&mut self, iface: usize) -> bool {
         let now = self.clock.now_ms();
-        let ip_freq = Self::ingress_frequency(self.interface_incoming_pr_times.get(&iface), now);
+        let ip_freq =
+            Self::ingress_frequency(self.interface_incoming_pr_times.get_mut(&iface), now);
         let state = self
             .interface_ingress_burst
             .entry(iface)
@@ -4594,7 +4610,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Only release once the burst has calmed (Python Interface.py:237-239).
         let ia_freq =
-            Self::ingress_frequency(self.interface_incoming_announce_times.get(&iface), now);
+            Self::ingress_frequency(self.interface_incoming_announce_times.get_mut(&iface), now);
         let threshold = if now.saturating_sub(created_ms) < IC_NEW_TIME_MS {
             IC_BURST_FREQ_NEW_HZ
         } else {
@@ -4715,32 +4731,42 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Return metadata for all registered interfaces.
     ///
     /// Used by the RPC server to report interface status to CLI tools.
-    pub fn interface_stats(&self) -> Vec<InterfaceStatEntry> {
+    ///
+    /// Takes `&mut self` because reading a frequency pops one decayed sample
+    /// per deque (see [`Self::deque_frequency`]); Python's get_interface_stats
+    /// has the same read side effect via Interface.incoming_*_frequency().
+    /// Incoming frequencies gate at IC_DEQUE_MIN_SAMPLE (2) samples, outgoing
+    /// at 1, matching the per-direction gates in Interface.py:279-321.
+    pub fn interface_stats(&mut self) -> Vec<InterfaceStatEntry> {
         let now = self.clock.now_ms();
-        self.interface_names
+        let ids: Vec<(usize, String)> = self
+            .interface_names
             .iter()
-            .map(|(&id, name)| {
+            .map(|(&id, name)| (id, name.clone()))
+            .collect();
+        ids.into_iter()
+            .map(|(id, name)| {
                 let ia_freq = self
                     .interface_incoming_announce_times
-                    .get(&id)
-                    .map(|d| Self::announce_frequency(d, now))
+                    .get_mut(&id)
+                    .map(|d| Self::deque_frequency(d, now, IC_DEQUE_MIN_SAMPLE))
                     .unwrap_or(0.0);
                 let oa_freq = self
                     .interface_outgoing_announce_times
-                    .get(&id)
-                    .map(|d| Self::announce_frequency(d, now))
+                    .get_mut(&id)
+                    .map(|d| Self::deque_frequency(d, now, 1))
                     .unwrap_or(0.0);
                 // Path-request frequencies reuse the announce-frequency helper
                 // (Codeberg #67 Stage 2a), fed by the ip/op deques.
                 let ip_freq = self
                     .interface_incoming_pr_times
-                    .get(&id)
-                    .map(|d| Self::announce_frequency(d, now))
+                    .get_mut(&id)
+                    .map(|d| Self::deque_frequency(d, now, IC_DEQUE_MIN_SAMPLE))
                     .unwrap_or(0.0);
                 let op_freq = self
                     .interface_outgoing_pr_times
-                    .get(&id)
-                    .map(|d| Self::announce_frequency(d, now))
+                    .get_mut(&id)
+                    .map(|d| Self::deque_frequency(d, now, 1))
                     .unwrap_or(0.0);
                 let (ar_target, ar_penalty, ar_grace) = Self::resolve_announce_rate(
                     self.interface_announce_rate_configs.get(&id),
@@ -4952,6 +4978,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             iface: InterfaceId(interface_index),
                             data: buf[..len].to_vec(),
                         });
+                        // Transmit-time recording, as above (Python routes this
+                        // answer through outbound() -> sent_announce() too).
+                        self.record_outgoing_announce(interface_index);
                     }
                 }
                 return Ok(());
@@ -5302,6 +5331,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             iface: InterfaceId(target_iface),
                             data: buf[..len].to_vec(),
                         });
+                        // Python records sent_announce() at transmit time for
+                        // every announce, including targeted path responses
+                        // (Transport.py:1323), so they count toward
+                        // outgoing_announce_frequency (Codeberg #67 Stage 2a).
+                        self.record_outgoing_announce(target_iface);
                         // OBS-1: the node actually (re)transmitted this announce
                         // on a specific interface (targeted path response).
                         crate::tracing::debug!(
@@ -16466,23 +16500,19 @@ mod tests {
             transport
         }
 
+        type T = Transport<MockClock, MemoryStorage>;
+
         #[test]
         fn frequency_empty_deque_returns_zero() {
-            let deque = VecDeque::new();
-            assert_eq!(
-                Transport::<MockClock, MemoryStorage>::announce_frequency(&deque, 1000),
-                0.0
-            );
+            let mut deque = VecDeque::new();
+            assert_eq!(T::deque_frequency(&mut deque, 1000, 1), 0.0);
         }
 
         #[test]
         fn frequency_single_sample_returns_zero() {
             let mut deque = VecDeque::new();
             deque.push_back(1000);
-            assert_eq!(
-                Transport::<MockClock, MemoryStorage>::announce_frequency(&deque, 2000),
-                0.0
-            );
+            assert_eq!(T::deque_frequency(&mut deque, 2000, 1), 0.0);
         }
 
         #[test]
@@ -16490,11 +16520,13 @@ mod tests {
             let mut deque = VecDeque::new();
             deque.push_back(1000);
             deque.push_back(2000);
-            // Deltas: [1000ms between samples] + [0ms since last sample queried at same time]
-            // avg_delta = 1000ms / 2 samples = 500ms = 0.5s
-            // freq = 1 / 0.5 = 2.0 Hz
-            let freq = Transport::<MockClock, MemoryStorage>::announce_frequency(&deque, 2000);
+            // Python hz = n / (now - oldest): 2 / 1s = 2 Hz (outgoing gate 1).
+            let freq = T::deque_frequency(&mut deque, 2000, 1);
             assert!((freq - 2.0).abs() < 0.001, "expected ~2.0 Hz, got {}", freq);
+            // The incoming gate (IC_DEQUE_MIN_SAMPLE = 2) needs MORE than two
+            // samples (Python `if not n > IC_DEQUE_MIN_SAMPLE: return 0`).
+            let freq = T::deque_frequency(&mut deque, 2000, IC_DEQUE_MIN_SAMPLE);
+            assert_eq!(freq, 0.0);
         }
 
         #[test]
@@ -16502,16 +16534,13 @@ mod tests {
             let mut deque = VecDeque::new();
             deque.push_back(1000);
             deque.push_back(2000);
-            // Deltas: [1000ms between samples] + [3000ms since last sample (now=5000)]
-            // delta_sum = 1000 + 3000 = 4000ms
-            // avg_delta = 4000ms / 2 samples = 2000ms = 2.0s
-            // freq = 1 / 2.0 = 0.5 Hz
-            let freq = Transport::<MockClock, MemoryStorage>::announce_frequency(&deque, 5000);
+            // hz = n / (now - oldest) = 2 / 4s = 0.5 Hz
+            let freq = T::deque_frequency(&mut deque, 5000, 1);
             assert!((freq - 0.5).abs() < 0.001, "expected ~0.5 Hz, got {}", freq);
         }
 
         #[test]
-        fn frequency_six_evenly_spaced_samples() {
+        fn frequency_six_evenly_spaced_samples_pops_one_decayed() {
             let mut deque = VecDeque::new();
             // 6 samples, 10s apart
             for i in 0..6 {
@@ -16519,17 +16548,41 @@ mod tests {
             }
             // now_ms = last sample time (no additional elapsed)
             let now = 10_000 + 5 * 10_000;
-            // 5 inter-sample deltas of 10000ms each + 0ms since last = 50000ms
-            // avg = 50000 / 6 = 8333.33ms = 8.333s
-            // freq = 1 / 8.333 = 0.12 Hz
-            let freq = Transport::<MockClock, MemoryStorage>::announce_frequency(&deque, now);
-            let expected = 1.0 / (50000.0 / 6.0 / 1000.0);
+            // hz = n / (now - oldest) = 6 / 50s = 0.12 Hz, computed BEFORE the
+            // decay pop (span 50s > FREQ_DECAY_MS -> one sample popped per read).
+            let freq = T::deque_frequency(&mut deque, now, IC_DEQUE_MIN_SAMPLE);
+            let expected = 6.0 / 50.0;
             assert!(
                 (freq - expected).abs() < 0.001,
                 "expected ~{}, got {}",
                 expected,
                 freq
             );
+            assert_eq!(deque.len(), 5, "one decayed sample must have been popped");
+        }
+
+        #[test]
+        fn frequency_reads_drain_idle_deque_to_exact_zero() {
+            // The read side effect drains a stale deque down to the gate, at
+            // which point the frequency reads an exact 0.0 (this is what lets
+            // a frozen daemon settle; Python rnstatus polling does the same).
+            let mut deque = VecDeque::new();
+            for i in 0..6 {
+                deque.push_back(1000 + i * 100);
+            }
+            let now = 1_000_000; // long after the last sample
+            let mut last = f64::MAX;
+            for _ in 0..4 {
+                let f = T::deque_frequency(&mut deque, now, IC_DEQUE_MIN_SAMPLE);
+                assert!(f <= last, "frequency must not rise while draining");
+                last = f;
+            }
+            assert_eq!(deque.len(), IC_DEQUE_MIN_SAMPLE);
+            assert_eq!(
+                T::deque_frequency(&mut deque, now, IC_DEQUE_MIN_SAMPLE),
+                0.0
+            );
+            assert_eq!(deque.len(), IC_DEQUE_MIN_SAMPLE, "gated reads must not pop");
         }
 
         #[test]
@@ -16543,20 +16596,27 @@ mod tests {
         }
 
         #[test]
-        fn record_incoming_two_samples_computes_frequency() {
+        fn record_incoming_two_samples_reads_zero_three_compute_frequency() {
             let mut transport = make_transport();
             transport.record_incoming_announce(0);
-            transport.clock.advance(5000);
+            transport.clock.advance(2500);
             transport.record_incoming_announce(0);
 
+            // Incoming gate: MORE than IC_DEQUE_MIN_SAMPLE (2) samples needed
+            // (Python Interface.py:281), so two samples still read 0.
             let stats = transport.interface_stats();
             let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
-            // 2 samples, 5s apart, queried at last sample time
-            // delta_sum = 5000 + 0 = 5000ms, avg = 5000/2 = 2500ms = 2.5s
-            // freq = 1/2.5 = 0.4 Hz
+            assert_eq!(iface0.incoming_announce_frequency, 0.0);
+
+            transport.clock.advance(2500);
+            transport.record_incoming_announce(0);
+            // 3 samples spanning 5s, queried at last sample time:
+            // hz = n / (now - oldest) = 3 / 5s = 0.6 Hz
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
             assert!(
-                (iface0.incoming_announce_frequency - 0.4).abs() < 0.01,
-                "expected ~0.4 Hz, got {}",
+                (iface0.incoming_announce_frequency - 0.6).abs() < 0.01,
+                "expected ~0.6 Hz, got {}",
                 iface0.incoming_announce_frequency
             );
         }
@@ -16582,10 +16642,9 @@ mod tests {
         #[test]
         fn deque_capped_at_max_samples() {
             let mut transport = make_transport();
-            for i in 0..10 {
+            for _ in 0..(ANNOUNCE_FREQ_SAMPLES + 4) {
                 transport.clock.advance(1000);
                 transport.record_incoming_announce(0);
-                let _ = i;
             }
             let deque = transport.interface_incoming_announce_times.get(&0).unwrap();
             assert_eq!(deque.len(), ANNOUNCE_FREQ_SAMPLES);
@@ -16638,12 +16697,14 @@ mod tests {
         #[test]
         fn interface_stats_returns_both_frequencies() {
             let mut transport = make_transport();
-            // Record some incoming on iface 0
+            // Record some incoming on iface 0 (incoming gate needs > 2 samples)
+            transport.record_incoming_announce(0);
+            transport.clock.advance(2000);
             transport.record_incoming_announce(0);
             transport.clock.advance(2000);
             transport.record_incoming_announce(0);
 
-            // Record some outgoing on iface 1
+            // Record some outgoing on iface 1 (outgoing gate needs > 1 sample)
             transport.record_outgoing_announce(1);
             transport.clock.advance(3000);
             transport.record_outgoing_announce(1);
@@ -16656,6 +16717,75 @@ mod tests {
             assert_eq!(iface0.outgoing_announce_frequency, 0.0);
             assert_eq!(iface1.incoming_announce_frequency, 0.0);
             assert!(iface1.outgoing_announce_frequency > 0.0);
+        }
+
+        /// A targeted path response (deferred announce rebroadcast with
+        /// target_interface set) must record an outgoing announce on the
+        /// interface it is sent on. Python records sent_announce() at
+        /// transmit time for every announce (Transport.py:1323); only the
+        /// broadcast branch of check_announce_rebroadcasts did.
+        #[test]
+        fn targeted_path_response_records_outgoing_announce() {
+            use crate::destination::{Destination, DestinationType, Direction};
+            use crate::storage_types::AnnounceEntry;
+            use crate::traits::Storage as _;
+
+            let mut transport = make_transport();
+            let identity = crate::identity::Identity::generate(&mut OsRng);
+            let mut dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "test",
+                &["pathresponse"],
+            )
+            .unwrap();
+            let now = transport.clock.now_ms();
+            let announce = dest.announce(None, &mut OsRng, now).unwrap();
+            let mut buf = [0u8; 500];
+            let len = announce.pack(&mut buf).unwrap();
+
+            // Cached announce scheduled as a path response to interface 1,
+            // exactly as handle_path_request sets it up for a known path.
+            transport.storage.set_announce(
+                dest.hash().into_bytes(),
+                AnnounceEntry {
+                    timestamp_ms: now,
+                    hops: 1,
+                    retries: 0,
+                    retransmit_at_ms: Some(now),
+                    raw_packet: buf[..len].to_vec(),
+                    receiving_interface_index: 0,
+                    target_interface: Some(1),
+                    local_rebroadcasts: 0,
+                    block_rebroadcasts: true,
+                },
+            );
+            transport.check_announce_rebroadcasts(now);
+
+            assert!(
+                transport.pending_actions.iter().any(|a| matches!(
+                    a,
+                    Action::SendPacket {
+                        iface: InterfaceId(1),
+                        ..
+                    }
+                )),
+                "path response must be sent to the requesting interface, got {:?}",
+                transport.pending_actions
+            );
+            assert_eq!(
+                transport
+                    .interface_outgoing_announce_times
+                    .get(&1)
+                    .map(|d| d.len()),
+                Some(1),
+                "targeted path response must count toward outgoing_announce_frequency"
+            );
+            assert!(
+                !transport.interface_outgoing_announce_times.contains_key(&0),
+                "nothing was transmitted on the receiving interface"
+            );
         }
     }
 
@@ -16729,17 +16859,24 @@ mod tests {
         }
 
         #[test]
-        fn incoming_pr_two_samples_computes_frequency() {
+        fn incoming_pr_gated_below_three_samples_then_computes_frequency() {
             let mut transport = make_transport();
             transport.record_incoming_path_request(0);
-            transport.clock.advance(5000);
+            transport.clock.advance(2500);
             transport.record_incoming_path_request(0);
+            // Incoming gate: two samples still read 0 (Python n > 2).
             let stats = transport.interface_stats();
             let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
-            // 2 samples 5s apart, queried at last sample: avg 2.5s → 0.4 Hz.
+            assert_eq!(iface0.incoming_pr_frequency, 0.0);
+
+            transport.clock.advance(2500);
+            transport.record_incoming_path_request(0);
+            // 3 samples spanning 5s: hz = 3 / 5s = 0.6 Hz.
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
             assert!(
-                (iface0.incoming_pr_frequency - 0.4).abs() < 0.01,
-                "expected ~0.4 Hz, got {}",
+                (iface0.incoming_pr_frequency - 0.6).abs() < 0.01,
+                "expected ~0.6 Hz, got {}",
                 iface0.incoming_pr_frequency
             );
             // Outgoing untouched.
@@ -16801,13 +16938,16 @@ mod tests {
         fn handle_path_request_records_incoming_pr() {
             let mut transport = make_transport();
             let requested = [9u8; TRUNCATED_HASHBYTES];
-            // Two distinct requests on iface 0 (distinct tags avoid dedup, but
-            // recording happens before dedup anyway).
-            let p1 = make_path_request_packet(&transport, requested, [1u8; TRUNCATED_HASHBYTES]);
-            transport.handle_path_request(p1, 0).unwrap();
-            transport.clock.advance(4000);
-            let p2 = make_path_request_packet(&transport, requested, [2u8; TRUNCATED_HASHBYTES]);
-            transport.handle_path_request(p2, 0).unwrap();
+            // Three distinct requests on iface 0 (distinct tags avoid dedup,
+            // but recording happens before dedup anyway; three samples pass
+            // the incoming gate n > IC_DEQUE_MIN_SAMPLE).
+            for tag in 1u8..=3 {
+                if tag > 1 {
+                    transport.clock.advance(4000);
+                }
+                let p = make_path_request_packet(&transport, requested, [tag; TRUNCATED_HASHBYTES]);
+                transport.handle_path_request(p, 0).unwrap();
+            }
 
             let stats = transport.interface_stats();
             let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
@@ -17073,32 +17213,32 @@ mod tests {
             }
         }
 
+        // State reads go to the fields directly: interface_stats() pops one
+        // decayed frequency sample per read (Python parity), which would
+        // perturb the scenarios these helpers observe.
         fn burst_active(transport: &Transport<MockClock, MemoryStorage>, iface: usize) -> bool {
             transport
-                .interface_stats()
-                .iter()
-                .find(|s| s.id == iface)
-                .unwrap()
-                .burst_active
+                .interface_ingress_burst
+                .get(&iface)
+                .map(|b| b.ann_active)
+                .unwrap_or(false)
         }
 
         fn pr_burst_active(transport: &Transport<MockClock, MemoryStorage>, iface: usize) -> bool {
             transport
-                .interface_stats()
-                .iter()
-                .find(|s| s.id == iface)
-                .unwrap()
-                .pr_burst_active
+                .interface_ingress_burst
+                .get(&iface)
+                .map(|b| b.pr_active)
+                .unwrap_or(false)
         }
 
-        /// Read the real held-announce count from interface_stats (Codeberg #87).
+        /// Read the real held-announce count (Codeberg #87).
         fn held_count(transport: &Transport<MockClock, MemoryStorage>, iface: usize) -> usize {
             transport
-                .interface_stats()
-                .iter()
-                .find(|s| s.id == iface)
-                .unwrap()
-                .held_announces
+                .interface_held_announces
+                .get(&iface)
+                .map(|q| q.len())
+                .unwrap_or(0)
         }
 
         /// Like `make_announce_raw` but with a caller-chosen hop count baked into

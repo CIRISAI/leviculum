@@ -123,8 +123,10 @@ fn ar_value(v: Option<u32>) -> Value {
 }
 
 /// Build the `interface_stats` response dict matching Python's format.
+/// `core` is mutable because frequency reads pop decayed samples, exactly
+/// like Python's get_interface_stats (Python parity, Codeberg #67/#87).
 fn build_interface_stats(
-    core: &StdNodeCore,
+    core: &mut StdNodeCore,
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
@@ -134,6 +136,7 @@ fn build_interface_stats(
     let identity = core.identity();
     let transport_enabled = core.transport_config().enable_transport;
     let uptime = start_time.elapsed().as_secs_f64();
+    let epoch_base = epoch_base_secs(start_time);
     let counters_map = iface_stats_map.lock().unwrap();
     let online_map = iface_online_map.lock().unwrap();
     let ifac_configs = core.clone_ifac_configs();
@@ -272,13 +275,17 @@ fn build_interface_stats(
             //   Idle interfaces read False / 0. rnstatus only reads *_activated
             //   when the matching *_active is truthy (rnstatus.py:565-573), so an
             //   idle interface renders no burst suffix.
+            //   The core records activation on its monotonic clock; Python
+            //   reports time.time() and rnstatus renders `now - activated` as
+            //   the burst duration (rnstatus.py:566), so convert to epoch
+            //   seconds here. Idle stays the int 0 (Python's initial value).
             (
                 pickle_str_key("burst_active"),
                 pickle_bool(entry.burst_active),
             ),
             (
                 pickle_str_key("burst_activated"),
-                pickle_int(entry.burst_activated as i64),
+                activation_to_epoch(epoch_base, entry.burst_activated),
             ),
             (
                 pickle_str_key("pr_burst_active"),
@@ -286,7 +293,7 @@ fn build_interface_stats(
             ),
             (
                 pickle_str_key("pr_burst_activated"),
-                pickle_int(entry.pr_burst_activated as i64),
+                activation_to_epoch(epoch_base, entry.pr_burst_activated),
             ),
             (
                 pickle_str_key("held_announces"),
@@ -342,7 +349,6 @@ fn build_path_table(
     max_hops: Option<i64>,
 ) -> Value {
     let entries = core.path_table_entries();
-    let iface_stats = core.interface_stats();
     let path_expiry_ms = core.transport_config().path_expiry_secs * 1000;
 
     // Anchor: wall clock at start_time
@@ -359,10 +365,9 @@ fn build_path_table(
             }
         }
 
-        let iface_name = iface_stats
-            .iter()
-            .find(|s| s.id == entry.interface_index)
-            .map(|s| s.name.as_str())
+        // Name lookup only; interface_stats() would pop frequency samples.
+        let iface_name = core
+            .interface_name(entry.interface_index)
             .unwrap_or("unknown");
 
         // Back-compute creation timestamp from expires - path_lifetime
@@ -402,14 +407,13 @@ fn build_path_table(
 /// a list of dicts if they ever consume it.
 fn build_link_table(core: &StdNodeCore) -> Value {
     let entries = core.link_table_entries();
-    let iface_stats = core.interface_stats();
 
     let mut list = Vec::new();
     for entry in &entries {
+        // Name lookup only; interface_stats() would pop frequency samples.
         let iface_name = entry
             .interface_index
-            .and_then(|idx| iface_stats.iter().find(|s| s.id == idx))
-            .map(|s| s.name.as_str())
+            .and_then(|idx| core.interface_name(idx))
             .unwrap_or("");
         let dict = pickle_dict(vec![
             (pickle_str_key("link_id"), pickle_bytes(&entry.link_id)),
@@ -489,13 +493,11 @@ fn get_next_hop_if_name(core: &StdNodeCore, destination_hash: &[u8]) -> Value {
     };
     match core.get_path_clone(&hash) {
         Some(entry) => {
+            // Name lookup only; interface_stats() would pop frequency samples.
             let iface_name = core
-                .interface_stats()
-                .iter()
-                .find(|s| s.id == entry.interface_index)
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| "unknown".into());
-            pickle_str(&iface_name)
+                .interface_name(entry.interface_index)
+                .unwrap_or("unknown");
+            pickle_str(iface_name)
         }
         None => pickle_str("unknown"),
     }
@@ -665,6 +667,19 @@ fn epoch_base_secs(start_time: std::time::Instant) -> f64 {
 /// Convert a core monotonic millisecond timestamp to Unix epoch seconds.
 fn mono_ms_to_epoch(epoch_base: f64, _now_mono_ms: u64, mono_ms: u64) -> f64 {
     epoch_base + (mono_ms as f64 / 1000.0)
+}
+
+/// Burst activation timestamp for interface_stats: 0 (never activated) stays
+/// the int 0 like Python's initial `ic_burst_activated`; a real activation is
+/// converted from the core's monotonic seconds to epoch seconds, because
+/// rnstatus renders `time.time() - burst_activated` as the burst duration
+/// (rnstatus.py:566).
+fn activation_to_epoch(epoch_base: f64, activated_mono_secs: u64) -> Value {
+    if activated_mono_secs == 0 {
+        pickle_int(0)
+    } else {
+        pickle_float(epoch_base + activated_mono_secs as f64)
+    }
 }
 
 #[cfg(test)]
