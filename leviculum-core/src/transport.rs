@@ -74,6 +74,21 @@ use crate::traits::{Clock, Storage};
 /// (matches Python Interface.py maxlen=6).
 const ANNOUNCE_FREQ_SAMPLES: usize = 6;
 
+/// Number of path-request timestamp samples per interface for frequency
+/// computation. Path-request frequency mirrors the announce-frequency
+/// mechanics (Codeberg #67 Stage 2a), so the same deque bound applies to the
+/// `ip_freq_deque` / `op_freq_deque` analogues (Python Interface.py:135-136).
+const PR_FREQ_SAMPLES: usize = ANNOUNCE_FREQ_SAMPLES;
+
+/// Default announce-rate target in seconds when transport is enabled and the
+/// interface leaves the key unset (Python Interface.DEFAULT_AR_TARGET, applied
+/// via Reticulum.py:826-829).
+const DEFAULT_AR_TARGET: u32 = 3600;
+/// Default announce-rate penalty in seconds (Python Interface.DEFAULT_AR_PENALTY).
+const DEFAULT_AR_PENALTY: u32 = 0;
+/// Default announce-rate grace count (Python Interface.DEFAULT_AR_GRACE).
+const DEFAULT_AR_GRACE: u32 = 5;
+
 // Sans-I/O Types
 /// Opaque interface identifier
 ///
@@ -379,6 +394,26 @@ pub struct BlackholeEntry {
     pub reason: Option<String>,
 }
 
+/// Per-interface announce-rate limiting configuration (Codeberg #67 Stage 2a).
+///
+/// Holds the values as read from the interface config after Python's
+/// validation (`announce_rate_target` kept only when > 0, penalty/grace only
+/// when >= 0) and coupling (a configured target defaults an unset penalty/grace
+/// to 0), matching Reticulum.py:798-821. The transport-enabled default fill
+/// (Reticulum.py:826-829) is applied later at emission time in
+/// [`Transport::interface_stats`], because it depends on whether transport is
+/// enabled. Stage 2a only reads + reports these; no on-air rate limiting yet
+/// (that is Codeberg #87).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnnounceRateConfig {
+    /// Configured announce-rate target in seconds, or `None` when unset.
+    pub target: Option<u32>,
+    /// Configured announce-rate penalty in seconds, or `None` when unset.
+    pub penalty: Option<u32>,
+    /// Configured announce-rate grace count, or `None` when unset.
+    pub grace: Option<u32>,
+}
+
 /// Interface metadata for RPC reporting.
 #[derive(Debug, Clone)]
 pub struct InterfaceStatEntry {
@@ -392,6 +427,17 @@ pub struct InterfaceStatEntry {
     pub incoming_announce_frequency: f64,
     /// Outgoing announce frequency in Hz (Python oa_freq_deque)
     pub outgoing_announce_frequency: f64,
+    /// Incoming path-request frequency in Hz (Python ip_freq_deque)
+    pub incoming_pr_frequency: f64,
+    /// Outgoing path-request frequency in Hz (Python op_freq_deque)
+    pub outgoing_pr_frequency: f64,
+    /// Resolved announce-rate target in seconds (`None` when transport is
+    /// disabled and the interface leaves the key unset).
+    pub announce_rate_target: Option<u32>,
+    /// Resolved announce-rate penalty in seconds.
+    pub announce_rate_penalty: Option<u32>,
+    /// Resolved announce-rate grace count.
+    pub announce_rate_grace: Option<u32>,
 }
 
 /// Exported path table entry for RPC reporting.
@@ -856,6 +902,25 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
     interface_outgoing_announce_times: BTreeMap<usize, VecDeque<u64>>,
 
+    /// Per-interface incoming path-request timestamps for frequency computation
+    /// (Python ip_freq_deque, Interface.py:135). Mirrors the incoming-announce
+    /// deque above (Codeberg #67 Stage 2a).
+    /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
+    interface_incoming_pr_times: BTreeMap<usize, VecDeque<u64>>,
+
+    /// Per-interface outgoing path-request timestamps for frequency computation
+    /// (Python op_freq_deque, Interface.py:136). Mirrors the outgoing-announce
+    /// deque above (Codeberg #67 Stage 2a).
+    /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
+    interface_outgoing_pr_times: BTreeMap<usize, VecDeque<u64>>,
+
+    /// Per-interface announce-rate configuration (Codeberg #67 Stage 2a).
+    /// Present only for interfaces that configured at least one
+    /// `announce_rate_*` key; absent entries resolve identically to an
+    /// all-`None` config. Read by `interface_stats` to emit the real values.
+    /// Removal path: removed in handle_interface_down via remove_announce_rate_config().
+    interface_announce_rate_configs: BTreeMap<usize, AnnounceRateConfig>,
+
     /// Per-interface "earliest ready" wall-clock ms pushed by the driver
     /// after each `dispatch_output` tick. Driver computes this via
     /// `Interface::next_slot_ms(MTU, now)` on each handle and mirrors the
@@ -927,6 +992,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             local_client_interfaces: BTreeSet::new(),
             interface_incoming_announce_times: BTreeMap::new(),
             interface_outgoing_announce_times: BTreeMap::new(),
+            interface_incoming_pr_times: BTreeMap::new(),
+            interface_outgoing_pr_times: BTreeMap::new(),
+            interface_announce_rate_configs: BTreeMap::new(),
             interface_next_slot_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
             ifac_configs: BTreeMap::new(),
@@ -3543,9 +3611,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut buf = [0u8; crate::constants::MTU];
         let len = packet.pack(&mut buf)?;
 
+        // Track outgoing path-request frequency (Codeberg #67 Stage 2a).
+        // Mirrors Python Transport.py:1324 `interface.sent_path_request()`,
+        // recorded on each interface the request is actually transmitted on.
         match on_interface {
-            Some(idx) => self.send_on_interface(idx, &buf[..len]),
+            Some(idx) => {
+                self.record_outgoing_path_request(idx);
+                self.send_on_interface(idx, &buf[..len])
+            }
             None => {
+                self.record_outgoing_path_request_broadcast(None);
                 self.send_on_all_interfaces(&buf[..len]);
                 Ok(())
             }
@@ -3899,6 +3974,53 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    // Public: Path-Request Frequency Tracking (Codeberg #67 Stage 2a)
+    // These mirror the announce-frequency recorders above exactly; the only
+    // difference is the deque they push to. Measurement only: no on-air effect.
+    /// Record an incoming path-request timestamp for the given interface
+    /// (Python Interface.received_path_request -> ip_freq_deque.append).
+    fn record_incoming_path_request(&mut self, iface: usize) {
+        let now = self.clock.now_ms();
+        let deque = self.interface_incoming_pr_times.entry(iface).or_default();
+        if deque.len() >= PR_FREQ_SAMPLES {
+            deque.pop_front();
+        }
+        deque.push_back(now);
+    }
+
+    /// Record an outgoing path-request timestamp for a specific interface
+    /// (Python Interface.sent_path_request -> op_freq_deque.append).
+    fn record_outgoing_path_request(&mut self, iface: usize) {
+        let now = self.clock.now_ms();
+        let deque = self.interface_outgoing_pr_times.entry(iface).or_default();
+        if deque.len() >= PR_FREQ_SAMPLES {
+            deque.pop_front();
+        }
+        deque.push_back(now);
+    }
+
+    /// Record an outgoing path request on all registered interfaces, optionally
+    /// excluding one. Used when a path request is broadcast (mirrors
+    /// `record_outgoing_announce_broadcast`). `except` is the interface the
+    /// request arrived on when re-originating, or `None` for a locally
+    /// originated broadcast that goes to every interface.
+    fn record_outgoing_path_request_broadcast(&mut self, except: Option<usize>) {
+        let now = self.clock.now_ms();
+        let ifaces: Vec<usize> = self
+            .interface_names
+            .keys()
+            .copied()
+            .filter(|&i| Some(i) != except)
+            .collect();
+        for iface in ifaces {
+            let deque = self.interface_outgoing_pr_times.entry(iface).or_default();
+            if deque.len() >= PR_FREQ_SAMPLES {
+                deque.pop_front();
+            }
+            deque.push_back(now);
+        }
+    }
+
     /// Compute deterministic jitter in 0..max_ms from this node's identity and a seed hash.
     ///
     /// Different nodes produce different jitter for the same announce because
@@ -3948,6 +4070,41 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     pub fn remove_announce_freq_tracking(&mut self, iface: usize) {
         self.interface_incoming_announce_times.remove(&iface);
         self.interface_outgoing_announce_times.remove(&iface);
+        self.interface_incoming_pr_times.remove(&iface);
+        self.interface_outgoing_pr_times.remove(&iface);
+    }
+
+    // Public: Announce-Rate Config API (Codeberg #67 Stage 2a)
+    /// Register an announce-rate configuration for an interface (called by the
+    /// driver at setup for interfaces that set any `announce_rate_*` key).
+    pub fn set_announce_rate_config(&mut self, id: usize, config: AnnounceRateConfig) {
+        self.interface_announce_rate_configs.insert(id, config);
+    }
+
+    /// Remove announce-rate configuration for an interface (called during
+    /// handle_interface_down cleanup).
+    pub fn remove_announce_rate_config(&mut self, id: usize) {
+        self.interface_announce_rate_configs.remove(&id);
+    }
+
+    /// Resolve the announce-rate values to emit for one interface, applying the
+    /// transport-enabled default fill (Python Reticulum.py:826-829). With
+    /// transport disabled and the key unset the value stays `None`, matching a
+    /// real Python daemon so rnstatus renders no `(t:.../p:.../g:...)` suffix.
+    fn resolve_announce_rate(
+        cfg: Option<&AnnounceRateConfig>,
+        transport_enabled: bool,
+    ) -> (Option<u32>, Option<u32>, Option<u32>) {
+        let (mut target, mut penalty, mut grace) = match cfg {
+            Some(c) => (c.target, c.penalty, c.grace),
+            None => (None, None, None),
+        };
+        if transport_enabled {
+            target.get_or_insert(DEFAULT_AR_TARGET);
+            penalty.get_or_insert(DEFAULT_AR_PENALTY);
+            grace.get_or_insert(DEFAULT_AR_GRACE);
+        }
+        (target, penalty, grace)
     }
 
     // Public: Interface Stats (for RPC)
@@ -3969,12 +4126,33 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .get(&id)
                     .map(|d| Self::announce_frequency(d, now))
                     .unwrap_or(0.0);
+                // Path-request frequencies reuse the announce-frequency helper
+                // (Codeberg #67 Stage 2a), fed by the ip/op deques.
+                let ip_freq = self
+                    .interface_incoming_pr_times
+                    .get(&id)
+                    .map(|d| Self::announce_frequency(d, now))
+                    .unwrap_or(0.0);
+                let op_freq = self
+                    .interface_outgoing_pr_times
+                    .get(&id)
+                    .map(|d| Self::announce_frequency(d, now))
+                    .unwrap_or(0.0);
+                let (ar_target, ar_penalty, ar_grace) = Self::resolve_announce_rate(
+                    self.interface_announce_rate_configs.get(&id),
+                    self.config.enable_transport,
+                );
                 InterfaceStatEntry {
                     id,
                     name: name.clone(),
                     is_local_client: self.local_client_interfaces.contains(&id),
                     incoming_announce_frequency: ia_freq,
                     outgoing_announce_frequency: oa_freq,
+                    incoming_pr_frequency: ip_freq,
+                    outgoing_pr_frequency: op_freq,
+                    announce_rate_target: ar_target,
+                    announce_rate_penalty: ar_penalty,
+                    announce_rate_grace: ar_grace,
                 }
             })
             .collect()
@@ -4044,6 +4222,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let tag_start = data.len() - TRUNCATED_HASHBYTES;
         let mut tag = [0u8; TRUNCATED_HASHBYTES];
         tag.copy_from_slice(&data[tag_start..]);
+
+        // Track incoming path-request frequency on the receiving interface
+        // (Codeberg #67 Stage 2a). Mirrors Python Transport.py:2895
+        // `packet.receiving_interface.received_path_request()`, which records
+        // before the discovery-tag dedup below.
+        self.record_incoming_path_request(interface_index);
 
         // Dedup via tag
         let mut dedup_key = [0u8; 32];
@@ -4237,6 +4421,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let mut buf = [0u8; crate::constants::MTU];
                 let len = fresh_packet.pack(&mut buf)?;
                 self.send_on_all_interfaces_except(interface_index, &buf[..len]);
+                // Outgoing path-request frequency for the re-originated request
+                // (Codeberg #67 Stage 2a). The broadcast plus the local-client
+                // forward below cover every registered interface except the
+                // requester, so a single broadcast record matches.
+                self.record_outgoing_path_request_broadcast(Some(interface_index));
 
                 // Also forward to local clients (Python Transport.py:2808-2813)
                 if self.has_local_clients() {
@@ -4269,6 +4458,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 .filter(|&id| id != interface_index && !self.is_local_client(id))
                 .collect();
             for iface_idx in network_ifaces {
+                // Outgoing path-request frequency for the forwarded request
+                // (Codeberg #67 Stage 2a).
+                self.record_outgoing_path_request(iface_idx);
                 let _ = self.send_on_interface(iface_idx, &buf[..len]);
             }
         }
@@ -4866,6 +5058,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     HexShort(&dest_hash)
                 );
                 self.send_on_all_interfaces_except(requesting_iface, &buf[..len]);
+                // Outgoing path-request frequency for the discovery retry
+                // (Codeberg #67 Stage 2a).
+                self.record_outgoing_path_request_broadcast(Some(requesting_iface));
             }
         }
 
@@ -15814,6 +16009,277 @@ mod tests {
             assert_eq!(iface0.outgoing_announce_frequency, 0.0);
             assert_eq!(iface1.incoming_announce_frequency, 0.0);
             assert!(iface1.outgoing_announce_frequency > 0.0);
+        }
+    }
+
+    /// Codeberg #67 Stage 2a: path-request frequency tracking + announce_rate
+    /// config resolution. PR frequency mirrors the announce-frequency mechanics
+    /// exactly (same `announce_frequency` helper, same deque bound), so these
+    /// tests focus on the PR-specific deques, recording sites, and the config
+    /// resolution logic. Measurement + config read only; no on-air change.
+    mod pr_frequency_tests {
+        use super::*;
+        use crate::memory_storage::MemoryStorage;
+        use crate::packet::{
+            HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
+        };
+        use crate::test_utils::{MockClock, TEST_TIME_MS};
+        use rand_core::OsRng;
+
+        extern crate std;
+
+        fn make_transport() -> Transport<MockClock, MemoryStorage> {
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = crate::identity::Identity::generate(&mut OsRng);
+            let config = TransportConfig {
+                enable_transport: true,
+                ..TransportConfig::default()
+            };
+            let mut transport =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            transport.set_interface_name(0, "iface0".into());
+            transport.set_interface_name(1, "iface1".into());
+            transport
+        }
+
+        /// Build a raw path-request packet body: requested_hash(16) + tag(16).
+        fn make_path_request_packet(
+            transport: &Transport<MockClock, MemoryStorage>,
+            requested: [u8; TRUNCATED_HASHBYTES],
+            tag: [u8; TRUNCATED_HASHBYTES],
+        ) -> Packet {
+            let mut data = alloc::vec::Vec::with_capacity(32);
+            data.extend_from_slice(&requested);
+            data.extend_from_slice(&tag);
+            Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: crate::destination::DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: *transport.path_request_hash(),
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            }
+        }
+
+        // --- PR frequency uses the same helper (under-filled deque => 0) ---
+
+        #[test]
+        fn pr_frequency_under_filled_deque_is_zero() {
+            let mut transport = make_transport();
+            // One incoming PR sample only → frequency 0.0 (needs >= 2).
+            transport.record_incoming_path_request(0);
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
+            assert_eq!(iface0.incoming_pr_frequency, 0.0);
+            assert_eq!(iface0.outgoing_pr_frequency, 0.0);
+        }
+
+        #[test]
+        fn incoming_pr_two_samples_computes_frequency() {
+            let mut transport = make_transport();
+            transport.record_incoming_path_request(0);
+            transport.clock.advance(5000);
+            transport.record_incoming_path_request(0);
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
+            // 2 samples 5s apart, queried at last sample: avg 2.5s → 0.4 Hz.
+            assert!(
+                (iface0.incoming_pr_frequency - 0.4).abs() < 0.01,
+                "expected ~0.4 Hz, got {}",
+                iface0.incoming_pr_frequency
+            );
+            // Outgoing untouched.
+            assert_eq!(iface0.outgoing_pr_frequency, 0.0);
+        }
+
+        #[test]
+        fn outgoing_pr_two_samples_computes_frequency() {
+            let mut transport = make_transport();
+            transport.record_outgoing_path_request(1);
+            transport.clock.advance(2000);
+            transport.record_outgoing_path_request(1);
+            let stats = transport.interface_stats();
+            let iface1 = stats.iter().find(|s| s.id == 1).unwrap();
+            assert!(iface1.outgoing_pr_frequency > 0.0);
+            assert_eq!(iface1.incoming_pr_frequency, 0.0);
+        }
+
+        #[test]
+        fn outgoing_pr_broadcast_except_tracks_all_but_one() {
+            let mut transport = make_transport();
+            transport.record_outgoing_path_request_broadcast(Some(0));
+            assert!(transport.interface_outgoing_pr_times.contains_key(&1));
+            assert!(!transport.interface_outgoing_pr_times.contains_key(&0));
+        }
+
+        #[test]
+        fn outgoing_pr_broadcast_none_tracks_all() {
+            let mut transport = make_transport();
+            transport.record_outgoing_path_request_broadcast(None);
+            assert!(transport.interface_outgoing_pr_times.contains_key(&0));
+            assert!(transport.interface_outgoing_pr_times.contains_key(&1));
+        }
+
+        #[test]
+        fn pr_deque_capped_at_max_samples() {
+            let mut transport = make_transport();
+            for _ in 0..(PR_FREQ_SAMPLES + 4) {
+                transport.clock.advance(1000);
+                transport.record_incoming_path_request(0);
+            }
+            let deque = transport.interface_incoming_pr_times.get(&0).unwrap();
+            assert_eq!(deque.len(), PR_FREQ_SAMPLES);
+        }
+
+        #[test]
+        fn cleanup_removes_pr_tracking() {
+            let mut transport = make_transport();
+            transport.record_incoming_path_request(0);
+            transport.record_outgoing_path_request(0);
+            transport.remove_announce_freq_tracking(0);
+            assert!(!transport.interface_incoming_pr_times.contains_key(&0));
+            assert!(!transport.interface_outgoing_pr_times.contains_key(&0));
+        }
+
+        // --- Recording via the real code paths ---
+
+        #[test]
+        fn handle_path_request_records_incoming_pr() {
+            let mut transport = make_transport();
+            let requested = [9u8; TRUNCATED_HASHBYTES];
+            // Two distinct requests on iface 0 (distinct tags avoid dedup, but
+            // recording happens before dedup anyway).
+            let p1 = make_path_request_packet(&transport, requested, [1u8; TRUNCATED_HASHBYTES]);
+            transport.handle_path_request(p1, 0).unwrap();
+            transport.clock.advance(4000);
+            let p2 = make_path_request_packet(&transport, requested, [2u8; TRUNCATED_HASHBYTES]);
+            transport.handle_path_request(p2, 0).unwrap();
+
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
+            assert!(
+                iface0.incoming_pr_frequency > 0.0,
+                "processing incoming path requests should raise incoming_pr_frequency, got {}",
+                iface0.incoming_pr_frequency
+            );
+            // No outgoing PR was sent on iface 0.
+            assert_eq!(iface0.outgoing_pr_frequency, 0.0);
+        }
+
+        #[test]
+        fn request_path_records_outgoing_pr_on_all_interfaces() {
+            let mut transport = make_transport();
+            // Broadcast path request (on_interface = None) records on every iface.
+            transport
+                .request_path(
+                    &[3u8; TRUNCATED_HASHBYTES],
+                    None,
+                    &[4u8; TRUNCATED_HASHBYTES],
+                )
+                .unwrap();
+            assert!(transport.interface_outgoing_pr_times.contains_key(&0));
+            assert!(transport.interface_outgoing_pr_times.contains_key(&1));
+            // Nothing recorded as incoming.
+            assert!(!transport.interface_incoming_pr_times.contains_key(&0));
+        }
+
+        #[test]
+        fn request_path_targeted_records_single_interface() {
+            let mut transport = make_transport();
+            transport
+                .request_path(
+                    &[5u8; TRUNCATED_HASHBYTES],
+                    Some(1),
+                    &[6u8; TRUNCATED_HASHBYTES],
+                )
+                .unwrap();
+            assert!(transport.interface_outgoing_pr_times.contains_key(&1));
+            assert!(!transport.interface_outgoing_pr_times.contains_key(&0));
+        }
+
+        // --- announce_rate config resolution ---
+
+        #[test]
+        fn resolve_announce_rate_unset_with_transport_uses_python_defaults() {
+            let r = Transport::<MockClock, MemoryStorage>::resolve_announce_rate(None, true);
+            assert_eq!(r, (Some(3600), Some(0), Some(5)));
+        }
+
+        #[test]
+        fn resolve_announce_rate_unset_without_transport_is_none() {
+            let r = Transport::<MockClock, MemoryStorage>::resolve_announce_rate(None, false);
+            assert_eq!(r, (None, None, None));
+        }
+
+        #[test]
+        fn resolve_announce_rate_configured_value_is_read() {
+            let cfg = AnnounceRateConfig {
+                target: Some(7200),
+                penalty: Some(30),
+                grace: Some(2),
+            };
+            // Configured values survive regardless of transport state.
+            assert_eq!(
+                Transport::<MockClock, MemoryStorage>::resolve_announce_rate(Some(&cfg), true),
+                (Some(7200), Some(30), Some(2))
+            );
+            assert_eq!(
+                Transport::<MockClock, MemoryStorage>::resolve_announce_rate(Some(&cfg), false),
+                (Some(7200), Some(30), Some(2))
+            );
+        }
+
+        #[test]
+        fn resolve_announce_rate_partial_config_fills_only_unset() {
+            // target configured (post-coupling penalty/grace = 0), transport on:
+            // configured values kept, no default fill needed.
+            let cfg = AnnounceRateConfig {
+                target: Some(1800),
+                penalty: Some(0),
+                grace: Some(0),
+            };
+            assert_eq!(
+                Transport::<MockClock, MemoryStorage>::resolve_announce_rate(Some(&cfg), true),
+                (Some(1800), Some(0), Some(0))
+            );
+        }
+
+        #[test]
+        fn interface_stats_emits_configured_announce_rate() {
+            let mut transport = make_transport();
+            transport.set_announce_rate_config(
+                0,
+                AnnounceRateConfig {
+                    target: Some(9000),
+                    penalty: Some(15),
+                    grace: Some(3),
+                },
+            );
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
+            assert_eq!(iface0.announce_rate_target, Some(9000));
+            assert_eq!(iface0.announce_rate_penalty, Some(15));
+            assert_eq!(iface0.announce_rate_grace, Some(3));
+            // Unconfigured iface 1 falls back to Python defaults (transport on).
+            let iface1 = stats.iter().find(|s| s.id == 1).unwrap();
+            assert_eq!(iface1.announce_rate_target, Some(3600));
+            assert_eq!(iface1.announce_rate_penalty, Some(0));
+            assert_eq!(iface1.announce_rate_grace, Some(5));
+        }
+
+        #[test]
+        fn cleanup_removes_announce_rate_config() {
+            let mut transport = make_transport();
+            transport.set_announce_rate_config(0, AnnounceRateConfig::default());
+            transport.remove_announce_rate_config(0);
+            assert!(!transport.interface_announce_rate_configs.contains_key(&0));
         }
     }
 

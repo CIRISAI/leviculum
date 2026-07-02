@@ -117,6 +117,15 @@ pub(super) fn handle_request(
 }
 
 // Interface Stats (rnstatus)
+/// Map a resolved announce-rate value to a pickle scalar: `Some(v)` -> int,
+/// `None` -> Python `None` (Codeberg #67 Stage 2a).
+fn ar_value(v: Option<u32>) -> Value {
+    match v {
+        Some(v) => pickle_int(v as i64),
+        None => pickle_none(),
+    }
+}
+
 /// Build the `interface_stats` response dict matching Python's format.
 fn build_interface_stats(
     core: &StdNodeCore,
@@ -140,20 +149,6 @@ fn build_interface_stats(
     let mut total_txb: u64 = 0;
     let mut total_rxs: f64 = 0.0;
     let mut total_txs: f64 = 0.0;
-
-    // Codeberg #67 Stage 1: announce-rate fields mirror Python's transport
-    // branch. With transport enabled and the interface unconfigured, Python
-    // fills the interface defaults (Reticulum.py:831-833 -> Interface.py:89-91):
-    // target=3600 s, penalty=0 s, grace=5. With transport disabled/unconfigured
-    // they stay None (Reticulum.py:798-811). rnstatus renders the `(t:.../p:.../g:...)`
-    // suffix only when target is truthy (rnstatus.py:556-563), so this exactly
-    // reproduces a real Python daemon's output. No tracking yet; Stage 2 wires
-    // per-interface config.
-    let (ar_target, ar_penalty, ar_grace): (Value, Value, Value) = if transport_enabled {
-        (pickle_int(3600), pickle_int(0), pickle_int(5))
-    } else {
-        (pickle_none(), pickle_none(), pickle_none())
-    };
 
     let mut iface_list = Vec::new();
     for entry in &stats {
@@ -243,26 +238,45 @@ fn build_interface_stats(
                 pickle_str_key("outgoing_announce_frequency"),
                 pickle_float(entry.outgoing_announce_frequency),
             ),
-            // Codeberg #67 Stage 1: the 9 rnstatus interface_stats fields, emitted
-            // with Python-matching inactive/unconfigured defaults (no tracking
-            // yet — Stage 2). Types follow the announce_frequency float pair above.
-            //
-            // incoming/outgoing_pr_frequency: path-request frequency in Hz.
-            //   Default 0.0 — Interface.incoming_pr_frequency()/outgoing_pr_frequency()
-            //   return 0 on an under-filled deque (Interface.py:301-321).
-            (pickle_str_key("incoming_pr_frequency"), pickle_float(0.0)),
-            (pickle_str_key("outgoing_pr_frequency"), pickle_float(0.0)),
-            // announce_rate_target/penalty/grace: see the transport-branch note
-            // above (Reticulum.py:831-833, Interface.py:89-91 DEFAULT_AR_*).
-            (pickle_str_key("announce_rate_target"), ar_target.clone()),
-            (pickle_str_key("announce_rate_penalty"), ar_penalty.clone()),
-            (pickle_str_key("announce_rate_grace"), ar_grace.clone()),
+            // Codeberg #67 Stage 2a: incoming/outgoing_pr_frequency are now real,
+            // measured from per-interface path-request deques (Python
+            // ip_freq_deque / op_freq_deque). They read 0.0 on an under-filled
+            // deque, matching Interface.incoming_pr_frequency()/
+            // outgoing_pr_frequency() (Interface.py:301-321).
+            (
+                pickle_str_key("incoming_pr_frequency"),
+                pickle_float(entry.incoming_pr_frequency),
+            ),
+            (
+                pickle_str_key("outgoing_pr_frequency"),
+                pickle_float(entry.outgoing_pr_frequency),
+            ),
+            // Codeberg #67 Stage 2a: announce_rate_target/penalty/grace now carry
+            // the real per-interface config (Reticulum.py:798-833). Unset keys
+            // fall back to the Python interface defaults (target=3600 s,
+            // penalty=0 s, grace=5) when transport is enabled, and stay None when
+            // transport is disabled. rnstatus renders the `(t:.../p:.../g:...)`
+            // suffix only when target is truthy (rnstatus.py:556-563).
+            (
+                pickle_str_key("announce_rate_target"),
+                ar_value(entry.announce_rate_target),
+            ),
+            (
+                pickle_str_key("announce_rate_penalty"),
+                ar_value(entry.announce_rate_penalty),
+            ),
+            (
+                pickle_str_key("announce_rate_grace"),
+                ar_value(entry.announce_rate_grace),
+            ),
             // burst_active/activated + pr_burst_active/activated: ingress-limiter
-            //   burst state. Defaults False / 0, matching the Interface
-            //   initializers ic_burst_active/ic_burst_activated and
-            //   ic_pr_burst_active/ic_pr_burst_activated (Interface.py:115-118).
-            //   rnstatus only reads *_activated when the matching *_active is
-            //   truthy (rnstatus.py:565-573), so False/0 renders no burst suffix.
+            //   burst state. These belong to the announce-rate limiting feature
+            //   (Codeberg #87) and stay at their Stage-1 defaults False / 0,
+            //   matching the Interface initializers ic_burst_active/
+            //   ic_burst_activated and ic_pr_burst_active/ic_pr_burst_activated
+            //   (Interface.py:115-118). rnstatus only reads *_activated when the
+            //   matching *_active is truthy (rnstatus.py:565-573), so False/0
+            //   renders no burst suffix.
             (pickle_str_key("burst_active"), pickle_bool(false)),
             (pickle_str_key("burst_activated"), pickle_int(0)),
             (pickle_str_key("pr_burst_active"), pickle_bool(false)),

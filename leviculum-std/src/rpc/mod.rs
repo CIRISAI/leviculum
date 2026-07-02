@@ -674,6 +674,76 @@ mod tests {
         assert_eq!(get("announce_rate_grace"), Some(&Value::None));
     }
 
+    /// Codeberg #67 Stage 2a: a configured `announce_rate_*` value is read from
+    /// the interface and emitted verbatim, overriding the transport-enabled
+    /// Python defaults. The burst fields still carry their Stage-1 (#87)
+    /// defaults, and the PR frequencies are real (0.0 for an idle interface).
+    #[tokio::test]
+    async fn test_rpc_interface_stats_configured_announce_rate() {
+        use leviculum_core::transport::AnnounceRateConfig;
+
+        let core = make_test_core(true);
+        {
+            let mut c = core.lock().unwrap();
+            c.set_interface_name(0, "tcp_client_0".to_string());
+            c.set_announce_rate_config(
+                0,
+                AnnounceRateConfig {
+                    target: Some(7200),
+                    penalty: Some(30),
+                    grace: Some(2),
+                },
+            );
+        }
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+
+        let instance_name = format!("rpctest_arcfg_{}", std::process::id());
+        let abstract_name = format!("rns/{}/rpc", instance_name);
+
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            empty_online_map(),
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("interface_stats"))]);
+        let response = rpc_client_call(&abstract_name, &authkey, &request)
+            .await
+            .unwrap();
+
+        let Value::Dict(d) = &response else {
+            panic!("expected dict response, got: {response:?}");
+        };
+        let ifaces = match d.get(&HashableValue::String("interfaces".into())) {
+            Some(Value::List(l)) => l,
+            other => panic!("interfaces should be a list, got {other:?}"),
+        };
+        let iface = match &ifaces[0] {
+            Value::Dict(m) => m,
+            other => panic!("interface entry should be a dict, got {other:?}"),
+        };
+        let get = |k: &str| iface.get(&HashableValue::String(k.into()));
+        // Configured announce-rate values are emitted, not the 3600/0/5 defaults.
+        assert_eq!(get("announce_rate_target"), Some(&Value::I64(7200)));
+        assert_eq!(get("announce_rate_penalty"), Some(&Value::I64(30)));
+        assert_eq!(get("announce_rate_grace"), Some(&Value::I64(2)));
+        // PR frequencies are real and read 0.0 for an idle interface.
+        assert_eq!(get("incoming_pr_frequency"), Some(&Value::F64(0.0)));
+        assert_eq!(get("outgoing_pr_frequency"), Some(&Value::F64(0.0)));
+        // Burst fields remain at their #87 defaults.
+        assert_eq!(get("burst_active"), Some(&Value::Bool(false)));
+        assert_eq!(get("burst_activated"), Some(&Value::I64(0)));
+        assert_eq!(get("pr_burst_active"), Some(&Value::Bool(false)));
+        assert_eq!(get("pr_burst_activated"), Some(&Value::I64(0)));
+    }
+
     /// Blackhole handlers end to end over the RPC round trip (Codeberg #67).
     /// One shared `Arc<Mutex<core>>` backs every connection, so the real set
     /// persists across the calls: blackhole -> is_blackholed true + listed ->

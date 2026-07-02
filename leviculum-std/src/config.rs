@@ -220,6 +220,15 @@ pub struct InterfaceConfig {
     /// Enable multicast loopback (for same-machine testing)
     pub multicast_loopback: Option<bool>,
 
+    // Announce-rate limiting (Codeberg #67 Stage 2a). Read + reported only;
+    // on-air enforcement is Codeberg #87. Python: Reticulum.py:798-821.
+    /// Announce-rate target in seconds (Python `announce_rate_target`).
+    pub announce_rate_target: Option<u32>,
+    /// Announce-rate penalty in seconds (Python `announce_rate_penalty`).
+    pub announce_rate_penalty: Option<u32>,
+    /// Announce-rate grace count (Python `announce_rate_grace`).
+    pub announce_rate_grace: Option<u32>,
+
     // IFAC (Interface Access Code)
     /// Network name for IFAC authentication
     pub networkname: Option<String>,
@@ -288,6 +297,9 @@ impl Default for InterfaceConfig {
             devices: None,
             ignored_devices: None,
             multicast_loopback: None,
+            announce_rate_target: None,
+            announce_rate_penalty: None,
+            announce_rate_grace: None,
             networkname: None,
             passphrase: None,
             ifac_size: None,

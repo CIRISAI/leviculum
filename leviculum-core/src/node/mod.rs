@@ -1214,6 +1214,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.clone_ifac_configs()
     }
 
+    /// Register an announce-rate configuration for an interface (Codeberg #67
+    /// Stage 2a). The driver calls this during setup for interfaces that set
+    /// any `announce_rate_*` key.
+    pub fn set_announce_rate_config(
+        &mut self,
+        id: usize,
+        config: crate::transport::AnnounceRateConfig,
+    ) {
+        self.transport.set_announce_rate_config(id, config);
+    }
+
+    /// Remove announce-rate configuration for an interface.
+    pub fn remove_announce_rate_config(&mut self, id: usize) {
+        self.transport.remove_announce_rate_config(id);
+    }
+
     /// Notify core that an interface has gone offline (sans-I/O)
     ///
     /// The driver should call this when it detects that an interface is no
@@ -1257,6 +1273,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Remove IFAC config for this interface
         self.transport.remove_ifac_config(iface_idx);
+
+        // Remove announce-rate config for this interface (Codeberg #67 Stage 2a)
+        self.transport.remove_announce_rate_config(iface_idx);
 
         // Remove local client flag, interface name and HW_MTU
         // (after logging so the name is still available above)

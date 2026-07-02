@@ -328,6 +328,42 @@ fn build_ifac_config(config: &InterfaceConfig) -> Option<leviculum_core::ifac::I
     }
 }
 
+/// Build an [`AnnounceRateConfig`] from interface configuration, applying
+/// Python's validation and coupling (Reticulum.py:798-821). Returns `None`
+/// when no `announce_rate_*` key was set (an absent entry resolves identically
+/// to an all-`None` config). Codeberg #67 Stage 2a: read + report only.
+///
+/// - `announce_rate_target` is kept only when > 0 (Python `> 0`).
+/// - `announce_rate_penalty` / `announce_rate_grace` are kept when >= 0 (always
+///   true for the `u32` parse, which already rejects negatives).
+/// - When a target is set but penalty/grace are unset, they default to 0.
+fn build_announce_rate_config(
+    config: &InterfaceConfig,
+) -> Option<leviculum_core::transport::AnnounceRateConfig> {
+    let target = config.announce_rate_target.filter(|&t| t > 0);
+    let mut penalty = config.announce_rate_penalty;
+    let mut grace = config.announce_rate_grace;
+
+    if config.announce_rate_target.is_none()
+        && config.announce_rate_penalty.is_none()
+        && config.announce_rate_grace.is_none()
+    {
+        return None;
+    }
+
+    // Coupling: a configured target defaults an unset penalty/grace to 0.
+    if target.is_some() {
+        penalty.get_or_insert(0);
+        grace.get_or_insert(0);
+    }
+
+    Some(leviculum_core::transport::AnnounceRateConfig {
+        target,
+        penalty,
+        grace,
+    })
+}
+
 /// Channels consumed by the event loop.
 struct EventLoopChannels {
     /// Split control/data application event sink. `None` when the node was
@@ -671,6 +707,11 @@ impl ReticulumNode {
                             .ifac_size
                             .unwrap_or(leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK)
                     );
+                }
+                // Announce-rate config (Codeberg #67 Stage 2a): read + report
+                // only, no on-air enforcement yet (Codeberg #87).
+                if let Some(ar) = build_announce_rate_config(iface_config) {
+                    core.set_announce_rate_config(idx, ar);
                 }
             }
 
@@ -2499,6 +2540,49 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codeberg #67 Stage 2a: build_announce_rate_config mirrors Python's
+    /// validation (Reticulum.py:798-821): target kept only when > 0, a set
+    /// target defaults an unset penalty/grace to 0, and no keys → None.
+    #[test]
+    fn build_announce_rate_config_semantics() {
+        let mut cfg = InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            ..Default::default()
+        };
+
+        // No keys set → None (resolves like an all-None config).
+        assert!(build_announce_rate_config(&cfg).is_none());
+
+        // Full config passes through verbatim.
+        cfg.announce_rate_target = Some(7200);
+        cfg.announce_rate_penalty = Some(30);
+        cfg.announce_rate_grace = Some(2);
+        let ar = build_announce_rate_config(&cfg).expect("some");
+        assert_eq!(ar.target, Some(7200));
+        assert_eq!(ar.penalty, Some(30));
+        assert_eq!(ar.grace, Some(2));
+
+        // target == 0 is invalid (Python `> 0`) → dropped to None.
+        cfg.announce_rate_target = Some(0);
+        cfg.announce_rate_penalty = None;
+        cfg.announce_rate_grace = None;
+        let ar = build_announce_rate_config(&cfg)
+            .expect("some (penalty/grace absent but present-check)");
+        assert_eq!(ar.target, None);
+        // No target → no coupling, penalty/grace stay None.
+        assert_eq!(ar.penalty, None);
+        assert_eq!(ar.grace, None);
+
+        // Valid target but unset penalty/grace → coupling defaults them to 0.
+        cfg.announce_rate_target = Some(1800);
+        cfg.announce_rate_penalty = None;
+        cfg.announce_rate_grace = None;
+        let ar = build_announce_rate_config(&cfg).expect("some");
+        assert_eq!(ar.target, Some(1800));
+        assert_eq!(ar.penalty, Some(0));
+        assert_eq!(ar.grace, Some(0));
+    }
 
     /// Default builder leaves the event channel enabled. The first
     /// `take_event_receiver()` returns the receiver; second call returns

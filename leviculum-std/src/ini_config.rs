@@ -67,6 +67,9 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                     devices: None,
                     ignored_devices: None,
                     multicast_loopback: None,
+                    announce_rate_target: None,
+                    announce_rate_penalty: None,
+                    announce_rate_grace: None,
                     networkname: None,
                     passphrase: None,
                     ifac_size: None,
@@ -240,6 +243,12 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),
         "csma_enabled" => iface.csma_enabled = Some(parse_bool(value)),
+        // Announce-rate keys (Codeberg #67 Stage 2a). Parsed as unsigned, so a
+        // negative value fails to parse and stays None; Python's >0 (target) /
+        // >=0 (grace, penalty) validation is applied later in the driver.
+        "announce_rate_target" => iface.announce_rate_target = value.parse().ok(),
+        "announce_rate_penalty" => iface.announce_rate_penalty = value.parse().ok(),
+        "announce_rate_grace" => iface.announce_rate_grace = value.parse().ok(),
         "networkname" | "network_name" => iface.networkname = Some(value.to_string()),
         "passphrase" => iface.passphrase = Some(value.to_string()),
         "ifac_size" => iface.ifac_size = value.parse::<usize>().ok().map(|bits| bits / 8),
@@ -317,6 +326,43 @@ mod tests {
         assert!(client.enabled);
         assert_eq!(client.target_host, Some("127.0.0.1".to_string()));
         assert_eq!(client.target_port, Some(4243));
+    }
+
+    #[test]
+    fn test_parse_announce_rate_keys() {
+        // Codeberg #67 Stage 2a: the three announce_rate_* keys parse into the
+        // interface config; an interface that omits them leaves them None.
+        let config = parse_ini(
+            r#"
+[reticulum]
+  enable_transport = True
+
+[interfaces]
+  [[Rated TCP]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4243
+    announce_rate_target = 7200
+    announce_rate_penalty = 30
+    announce_rate_grace = 2
+
+  [[Plain TCP]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4244
+"#,
+        )
+        .unwrap();
+
+        let rated = config.interfaces.get("Rated TCP").expect("rated");
+        assert_eq!(rated.announce_rate_target, Some(7200));
+        assert_eq!(rated.announce_rate_penalty, Some(30));
+        assert_eq!(rated.announce_rate_grace, Some(2));
+
+        let plain = config.interfaces.get("Plain TCP").expect("plain");
+        assert_eq!(plain.announce_rate_target, None);
+        assert_eq!(plain.announce_rate_penalty, None);
+        assert_eq!(plain.announce_rate_grace, None);
     }
 
     #[test]
