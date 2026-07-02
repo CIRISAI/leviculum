@@ -129,7 +129,9 @@ async fn wait_for_all_paths(
 async fn hold_not_drop_and_visibility_rust_lnsd_dut() {
     init_tracing();
 
-    let (ports, _port_alloc) = find_available_ports::<1>()
+    // The harness allocator hands out a minimum of two ports; only the first
+    // is needed here (the DUT's TCP server bind).
+    let (ports, _port_alloc) = find_available_ports::<2>()
         .await
         .expect("allocate DUT tcp port");
     let dut_tcp_addr: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();
@@ -283,7 +285,8 @@ async fn hold_not_drop_and_visibility_python_rnsd_dut() {
 async fn held_queue_caps_at_max_rust_lnsd_dut() {
     init_tracing();
 
-    let (ports, _port_alloc) = find_available_ports::<1>()
+    // Minimum allocation is two ports; only the first is used (DUT TCP server).
+    let (ports, _port_alloc) = find_available_ports::<2>()
         .await
         .expect("allocate DUT tcp port");
     let dut_tcp_addr: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();

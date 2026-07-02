@@ -285,6 +285,15 @@ async fn test_transport_path_from_daemon_announce() {
 ///
 /// Uses the high-level ReticulumNode API which handles HDLC deframing
 /// correctly via the spawned TCP interface task's HDLC deframing.
+///
+/// The announces are spaced 1 s apart to stay below the ingress burst
+/// threshold (Codeberg #87): on a new interface the limit is
+/// IC_BURST_FREQ_NEW = 3 Hz, and the frequency at the third announce is
+/// n / span = 3 / 2s = 1.5 Hz, a 2x margin. Python RNS 1.3.5 applies the
+/// same limit (measured: at the previous 100 ms spacing a Python receiver
+/// holds the third announce too), so rapid spacing would make this test
+/// exercise burst limiting instead of discovery. Burst hold-and-release
+/// has its own coverage in held_announce_interop_tests.
 #[tokio::test]
 async fn test_multiple_daemon_announces() {
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
@@ -330,18 +339,19 @@ async fn test_multiple_daemon_announces() {
     println!("  B: {}", dest_b.hash);
     println!("  C: {}", dest_c.hash);
 
-    // Announce all three destinations with small delays
+    // Announce all three destinations, spaced below the 3 Hz ingress burst
+    // threshold (see doc comment).
     daemon
         .announce_destination(&dest_a.hash, b"data-a")
         .await
         .expect("Failed to announce A");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     daemon
         .announce_destination(&dest_b.hash, b"data-b")
         .await
         .expect("Failed to announce B");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     daemon
         .announce_destination(&dest_c.hash, b"data-c")
