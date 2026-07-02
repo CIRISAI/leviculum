@@ -361,6 +361,24 @@ impl Default for TransportConfig {
     }
 }
 
+/// A blackholed-identity entry, mirroring the value stored in Python
+/// `RNS.Transport.blackholed_identities[identity_hash]`
+/// (Transport.py:3420 `{"source": ..., "until": ..., "reason": ...}`).
+///
+/// Codeberg #67 Stage 1: kept in memory only (no on-disk persistence, no
+/// expiry sweeper, no packet-drop wiring yet — those are Stage 2).
+#[derive(Debug, Clone)]
+pub struct BlackholeEntry {
+    /// Identity hash of the node that added this blackhole (our own transport
+    /// identity hash for locally-added entries, matching Python's
+    /// `{"source": Transport.identity.hash}`).
+    pub source: [u8; TRUNCATED_HASHBYTES],
+    /// Optional unix timestamp (seconds) at which the blackhole expires.
+    pub until: Option<f64>,
+    /// Optional human-readable reason for the blackhole.
+    pub reason: Option<String>,
+}
+
 /// Interface metadata for RPC reporting.
 #[derive(Debug, Clone)]
 pub struct InterfaceStatEntry {
@@ -858,6 +876,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Removal path: removed in handle_interface_down via remove_ifac_config().
     ifac_configs: BTreeMap<usize, IfacConfig>,
 
+    /// Blackholed identities, keyed by identity hash. Mirrors Python
+    /// `RNS.Transport.blackholed_identities` (Transport.py:123), which is a
+    /// dict of identity_hash -> entry. Mutated via the shared-instance RPC
+    /// (blackhole_identity / unblackhole_identity) and read by is_blackholed /
+    /// get_blackholed_identities. Codeberg #67 Stage 1: in-memory only; no
+    /// persistence, no expiry sweep, and no inbound packet-drop yet (Stage 2).
+    blackholed_identities: BTreeMap<[u8; TRUNCATED_HASHBYTES], BlackholeEntry>,
+
     /// Pending I/O actions for the driver (sans-I/O buffer)
     pending_actions: Vec<Action>,
 
@@ -904,6 +930,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_next_slot_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
             ifac_configs: BTreeMap::new(),
+            blackholed_identities: BTreeMap::new(),
             pending_actions: Vec::new(),
             last_discovery_retry_ms: 0,
             #[cfg(test)]
@@ -1825,6 +1852,58 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.storage.remove_path(&h);
         }
         count
+    }
+
+    // Blackholed identities (Codeberg #67)
+    //
+    // Mirrors the Python `RNS.Transport` blackhole API. The set is authoritative
+    // state mutated only through the shared-instance RPC. Stage 1 is the set
+    // plus RPC wiring; the inbound-packet drop is a Stage 2 follow-up (see the
+    // handlers.rs dispatch comment for the exact Python drop-site citation).
+
+    /// Add an identity to the blackhole set.
+    ///
+    /// Returns `true` if the identity was newly blackholed, `false` if it was
+    /// already present. Mirrors `Transport.blackhole_identity`
+    /// (Transport.py:3409-3427): a fresh insert returns `True`, a duplicate
+    /// returns `None`; the caller maps `false` here to that `None`.
+    pub fn blackhole_identity(
+        &mut self,
+        identity_hash: [u8; TRUNCATED_HASHBYTES],
+        until: Option<f64>,
+        reason: Option<String>,
+    ) -> bool {
+        if self.blackholed_identities.contains_key(&identity_hash) {
+            return false;
+        }
+        let entry = BlackholeEntry {
+            source: *self.identity.hash(),
+            until,
+            reason,
+        };
+        self.blackholed_identities.insert(identity_hash, entry);
+        true
+    }
+
+    /// Remove an identity from the blackhole set.
+    ///
+    /// Returns `true` if it was present and removed, `false` if it was not
+    /// blackholed. Mirrors `Transport.unblackhole_identity`
+    /// (Transport.py:3434-3448): removal returns `True`, absence returns `None`.
+    pub fn unblackhole_identity(&mut self, identity_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.blackholed_identities.remove(identity_hash).is_some()
+    }
+
+    /// Return whether an identity hash is currently blackholed.
+    /// Mirrors `identity_hash in RNS.Transport.blackholed_identities`
+    /// (Reticulum.py:1720).
+    pub fn is_blackholed(&self, identity_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.blackholed_identities.contains_key(identity_hash)
+    }
+
+    /// Borrow the full blackhole map for RPC export (get_blackholed_identities).
+    pub fn blackholed_identities(&self) -> &BTreeMap<[u8; TRUNCATED_HASHBYTES], BlackholeEntry> {
+        &self.blackholed_identities
     }
 
     /// Insert a path entry (thin wrapper around storage, test helper)
@@ -17089,5 +17168,73 @@ mod tests {
             ja, jb,
             "two random identities produced identical jitter for the same dest"
         );
+    }
+}
+
+// Blackhole set (Codeberg #67 Stage 1)
+#[cfg(test)]
+mod blackhole_tests {
+    use super::*;
+    use crate::test_utils::test_transport;
+
+    const H1: [u8; TRUNCATED_HASHBYTES] = [0x11; TRUNCATED_HASHBYTES];
+    const H2: [u8; TRUNCATED_HASHBYTES] = [0x22; TRUNCATED_HASHBYTES];
+
+    #[test]
+    fn blackhole_lifecycle_insert_query_remove() {
+        let mut t = test_transport();
+        // Empty to start.
+        assert!(!t.is_blackholed(&H1));
+        assert!(t.blackholed_identities().is_empty());
+
+        // Fresh insert returns true and is then a member.
+        assert!(t.blackhole_identity(H1, None, None));
+        assert!(t.is_blackholed(&H1));
+        assert_eq!(t.blackholed_identities().len(), 1);
+
+        // Removing a present entry returns true; then it is gone.
+        assert!(t.unblackhole_identity(&H1));
+        assert!(!t.is_blackholed(&H1));
+        assert!(t.blackholed_identities().is_empty());
+    }
+
+    #[test]
+    fn blackhole_duplicate_insert_returns_false() {
+        let mut t = test_transport();
+        assert!(t.blackhole_identity(H1, None, None));
+        // Second insert of the same hash is a no-op -> false (Python returns None).
+        assert!(!t.blackhole_identity(H1, Some(999.0), Some("dup".into())));
+        // Still exactly one entry, and the original metadata is preserved.
+        assert_eq!(t.blackholed_identities().len(), 1);
+        let entry = &t.blackholed_identities()[&H1];
+        assert_eq!(entry.until, None);
+        assert_eq!(entry.reason, None);
+    }
+
+    #[test]
+    fn unblackhole_unknown_returns_false() {
+        let mut t = test_transport();
+        // Never blackholed -> removal reports false (Python returns None).
+        assert!(!t.unblackhole_identity(&H1));
+    }
+
+    #[test]
+    fn blackhole_stores_source_until_reason() {
+        let mut t = test_transport();
+        let expected_source = *t.identity().hash();
+        assert!(t.blackhole_identity(H2, Some(1234.5), Some("spam".into())));
+        let entry = &t.blackholed_identities()[&H2];
+        assert_eq!(entry.source, expected_source);
+        assert_eq!(entry.until, Some(1234.5));
+        assert_eq!(entry.reason.as_deref(), Some("spam"));
+    }
+
+    #[test]
+    fn blackhole_membership_is_per_hash() {
+        let mut t = test_transport();
+        assert!(t.blackhole_identity(H1, None, None));
+        // H2 was never added.
+        assert!(t.is_blackholed(&H1));
+        assert!(!t.is_blackholed(&H2));
     }
 }

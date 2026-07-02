@@ -42,9 +42,10 @@ fn detect_codec(data: &[u8]) -> Codec {
 /// Parsed RPC request.
 ///
 /// Fields are parsed from pickle dicts and logged via `Debug`.
-/// Some stub fields (blackhole params) are not yet read by handlers.
+/// The `until`/`reason` blackhole params are parsed and logged but not yet
+/// acted on (Stage 2 will honor expiry — see handlers.rs).
 #[derive(Debug)]
-#[allow(dead_code)] // blackhole fields not yet used — see Codeberg issues
+#[allow(dead_code)] // until/reason parsed for the wire contract, not yet acted on
 pub(crate) enum RpcRequest {
     // GET commands
     GetInterfaceStats,
@@ -76,6 +77,12 @@ pub(crate) enum RpcRequest {
         packet_hash: Vec<u8>,
     },
     GetBlackholedIdentities,
+    /// Membership check against the blackhole set. Python sends
+    /// `{"get": "is_blackholed", "identity_hash": <16 bytes>}` and expects a
+    /// bool back (Reticulum.py:1708-1720).
+    IsBlackholed {
+        identity_hash: Vec<u8>,
+    },
     // DROP commands
     DropPath {
         destination_hash: Vec<u8>,
@@ -175,6 +182,11 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 Ok(RpcRequest::GetPacketQ { packet_hash })
             }
             "blackholed_identities" => Ok(RpcRequest::GetBlackholedIdentities),
+            "is_blackholed" => {
+                let identity_hash = dict_get_bytes(&dict, "identity_hash")
+                    .ok_or_else(|| RpcError::InvalidFormat("missing identity_hash".into()))?;
+                Ok(RpcRequest::IsBlackholed { identity_hash })
+            }
             other => Err(RpcError::InvalidFormat(format!(
                 "unknown get command: {}",
                 other
@@ -588,6 +600,47 @@ mod tests {
             }
             other => panic!("expected BlackholeIdentity, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_is_blackholed_pickle() {
+        // Python sends {"get": "is_blackholed", "identity_hash": <16 bytes>}.
+        let hash = vec![0x3Cu8; 16];
+        let data = build_get_request_with_bytes("is_blackholed", "identity_hash", &hash);
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Pickle);
+        match req {
+            RpcRequest::IsBlackholed { identity_hash } => assert_eq!(identity_hash, hash),
+            other => panic!("expected IsBlackholed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_is_blackholed_msgpack() {
+        // Exactly what a 1.3.5 client sends: the hash as a msgpack bin.
+        let hash = vec![0x3Cu8; 16];
+        let v = rmpv::Value::Map(vec![
+            (rmpv::Value::from("get"), rmpv::Value::from("is_blackholed")),
+            (
+                rmpv::Value::from("identity_hash"),
+                rmpv::Value::Binary(hash.clone()),
+            ),
+        ]);
+        let mut data = Vec::new();
+        rmpv::encode::write_value(&mut data, &v).unwrap();
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        match req {
+            RpcRequest::IsBlackholed { identity_hash } => assert_eq!(identity_hash, hash),
+            other => panic!("expected IsBlackholed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_is_blackholed_missing_hash_errors() {
+        // is_blackholed without identity_hash is a clean parse error, never a panic.
+        let data = build_get_request("is_blackholed");
+        assert!(parse_request(&data).is_err());
     }
 
     #[test]

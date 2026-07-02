@@ -1513,6 +1513,41 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.drop_all_paths_via(via_hash)
     }
 
+    /// Blackhole an identity (Codeberg #67). Returns true if newly added.
+    pub fn blackhole_identity(
+        &mut self,
+        identity_hash: [u8; crate::constants::TRUNCATED_HASHBYTES],
+        until: Option<f64>,
+        reason: Option<String>,
+    ) -> bool {
+        self.transport
+            .blackhole_identity(identity_hash, until, reason)
+    }
+
+    /// Lift a blackhole (Codeberg #67). Returns true if it was present.
+    pub fn unblackhole_identity(
+        &mut self,
+        identity_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> bool {
+        self.transport.unblackhole_identity(identity_hash)
+    }
+
+    /// Return whether an identity hash is currently blackholed (Codeberg #67).
+    pub fn is_blackholed(
+        &self,
+        identity_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> bool {
+        self.transport.is_blackholed(identity_hash)
+    }
+
+    /// Borrow the blackhole map for RPC export (Codeberg #67).
+    pub fn blackholed_identities(
+        &self,
+    ) -> &BTreeMap<[u8; crate::constants::TRUNCATED_HASHBYTES], crate::transport::BlackholeEntry>
+    {
+        self.transport.blackholed_identities()
+    }
+
     /// Access the underlying transport (test-only, for clock manipulation)
     #[cfg(test)]
     pub(crate) fn transport(&self) -> &Transport<C, S> {

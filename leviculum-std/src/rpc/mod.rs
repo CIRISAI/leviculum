@@ -502,9 +502,20 @@ mod tests {
     }
 
     /// Spawn a minimal RPC server and test it with a Rust client.
+    ///
+    /// Registers a non-local-client interface so the `interfaces` list is
+    /// non-empty, then asserts (Codeberg #67 Stage 1) that every one of the 9
+    /// new interface_stats keys is present with the correct type and the
+    /// documented Python-matching default (transport enabled: announce_rate
+    /// target=3600/penalty=0/grace=5).
     #[tokio::test]
     async fn test_rpc_interface_stats_round_trip() {
         let core = make_test_core(true);
+        // Register an interface so it appears in the stats list (not a local
+        // client -> not skipped by build_interface_stats).
+        core.lock()
+            .unwrap()
+            .set_interface_name(0, "tcp_client_0".to_string());
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -548,9 +559,229 @@ mod tests {
                 {
                     assert!(*uptime >= 0.0, "uptime should be non-negative");
                 }
+
+                // Codeberg #67 Stage 1: the 9 new keys on the interface dict.
+                let ifaces = match d.get(&HashableValue::String("interfaces".into())) {
+                    Some(Value::List(l)) => l,
+                    other => panic!("interfaces should be a list, got {other:?}"),
+                };
+                assert_eq!(ifaces.len(), 1, "exactly the one registered interface");
+                let iface = match &ifaces[0] {
+                    Value::Dict(m) => m,
+                    other => panic!("interface entry should be a dict, got {other:?}"),
+                };
+                let get = |k: &str| iface.get(&HashableValue::String(k.into()));
+
+                // Path-request frequencies: float 0.0 default.
+                assert_eq!(
+                    get("incoming_pr_frequency"),
+                    Some(&Value::F64(0.0)),
+                    "incoming_pr_frequency default 0.0"
+                );
+                assert_eq!(
+                    get("outgoing_pr_frequency"),
+                    Some(&Value::F64(0.0)),
+                    "outgoing_pr_frequency default 0.0"
+                );
+                // Announce-rate defaults for a transport-enabled node.
+                assert_eq!(
+                    get("announce_rate_target"),
+                    Some(&Value::I64(3600)),
+                    "announce_rate_target default 3600"
+                );
+                assert_eq!(
+                    get("announce_rate_penalty"),
+                    Some(&Value::I64(0)),
+                    "announce_rate_penalty default 0"
+                );
+                assert_eq!(
+                    get("announce_rate_grace"),
+                    Some(&Value::I64(5)),
+                    "announce_rate_grace default 5"
+                );
+                // Burst flags: False/0.
+                assert_eq!(
+                    get("burst_active"),
+                    Some(&Value::Bool(false)),
+                    "burst_active default false"
+                );
+                assert_eq!(
+                    get("burst_activated"),
+                    Some(&Value::I64(0)),
+                    "burst_activated default 0"
+                );
+                assert_eq!(
+                    get("pr_burst_active"),
+                    Some(&Value::Bool(false)),
+                    "pr_burst_active default false"
+                );
+                assert_eq!(
+                    get("pr_burst_activated"),
+                    Some(&Value::I64(0)),
+                    "pr_burst_activated default 0"
+                );
             }
             other => panic!("expected dict response, got: {:?}", other),
         }
+    }
+
+    /// The announce-rate defaults track Python's transport branch: with
+    /// transport DISABLED and unconfigured they are None (Reticulum.py:798-811),
+    /// so rnstatus renders no `(t:.../p:.../g:...)` suffix.
+    #[tokio::test]
+    async fn test_rpc_interface_stats_announce_rate_none_without_transport() {
+        let core = make_test_core(false);
+        core.lock()
+            .unwrap()
+            .set_interface_name(0, "tcp_client_0".to_string());
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+
+        let instance_name = format!("rpctest_arnone_{}", std::process::id());
+        let abstract_name = format!("rns/{}/rpc", instance_name);
+
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            empty_online_map(),
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("interface_stats"))]);
+        let response = rpc_client_call(&abstract_name, &authkey, &request)
+            .await
+            .unwrap();
+
+        let Value::Dict(d) = &response else {
+            panic!("expected dict response, got: {response:?}");
+        };
+        let ifaces = match d.get(&HashableValue::String("interfaces".into())) {
+            Some(Value::List(l)) => l,
+            other => panic!("interfaces should be a list, got {other:?}"),
+        };
+        let iface = match &ifaces[0] {
+            Value::Dict(m) => m,
+            other => panic!("interface entry should be a dict, got {other:?}"),
+        };
+        let get = |k: &str| iface.get(&HashableValue::String(k.into()));
+        assert_eq!(get("announce_rate_target"), Some(&Value::None));
+        assert_eq!(get("announce_rate_penalty"), Some(&Value::None));
+        assert_eq!(get("announce_rate_grace"), Some(&Value::None));
+    }
+
+    /// Blackhole handlers end to end over the RPC round trip (Codeberg #67).
+    /// One shared `Arc<Mutex<core>>` backs every connection, so the real set
+    /// persists across the calls: blackhole -> is_blackholed true + listed ->
+    /// unblackhole -> is_blackholed false + empty.
+    #[tokio::test]
+    async fn test_rpc_blackhole_round_trip() {
+        use pickle::pickle_bytes;
+
+        let core = make_test_core(true);
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+
+        let instance_name = format!("rpctest_bh_{}", std::process::id());
+        let abstract_name = format!("rns/{}/rpc", instance_name);
+
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            empty_online_map(),
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let hash = vec![0x9Au8; 16];
+        let is_blackholed = |h: &[u8]| {
+            pickle_dict(vec![
+                (pickle_str_key("get"), pickle_str("is_blackholed")),
+                (pickle_str_key("identity_hash"), pickle_bytes(h)),
+            ])
+        };
+
+        // Initially not blackholed.
+        let r = rpc_client_call(&abstract_name, &authkey, &is_blackholed(&hash))
+            .await
+            .unwrap();
+        assert_eq!(r, Value::Bool(false), "not blackholed before insert");
+
+        // Blackhole it: fresh insert returns bool true.
+        let req = pickle_dict(vec![
+            (pickle_str_key("blackhole_identity"), pickle_bytes(&hash)),
+            (pickle_str_key("until"), Value::None),
+            (pickle_str_key("reason"), Value::None),
+        ]);
+        let r = rpc_client_call(&abstract_name, &authkey, &req)
+            .await
+            .unwrap();
+        assert_eq!(r, Value::Bool(true), "fresh blackhole returns true");
+
+        // Now reported as blackholed.
+        let r = rpc_client_call(&abstract_name, &authkey, &is_blackholed(&hash))
+            .await
+            .unwrap();
+        assert_eq!(r, Value::Bool(true), "blackholed after insert");
+
+        // Duplicate insert returns None (Python semantics).
+        let r = rpc_client_call(&abstract_name, &authkey, &req)
+            .await
+            .unwrap();
+        assert_eq!(r, Value::None, "duplicate blackhole returns None");
+
+        // Listed in blackholed_identities as a dict keyed by the hash.
+        let list_req = pickle_dict(vec![(
+            pickle_str_key("get"),
+            pickle_str("blackholed_identities"),
+        )]);
+        let r = rpc_client_call(&abstract_name, &authkey, &list_req)
+            .await
+            .unwrap();
+        match &r {
+            Value::Dict(m) => {
+                assert_eq!(m.len(), 1, "one blackholed identity");
+                assert!(
+                    m.contains_key(&HashableValue::Bytes(hash.clone())),
+                    "listed under its identity hash"
+                );
+            }
+            other => panic!("expected dict, got {other:?}"),
+        }
+
+        // Unblackhole: was present -> bool true.
+        let unreq = pickle_dict(vec![(
+            pickle_str_key("unblackhole_identity"),
+            pickle_bytes(&hash),
+        )]);
+        let r = rpc_client_call(&abstract_name, &authkey, &unreq)
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            Value::Bool(true),
+            "lifting a present blackhole returns true"
+        );
+
+        // Gone now.
+        let r = rpc_client_call(&abstract_name, &authkey, &is_blackholed(&hash))
+            .await
+            .unwrap();
+        assert_eq!(r, Value::Bool(false), "not blackholed after removal");
+
+        // Unblackhole again: not present -> None.
+        let r = rpc_client_call(&abstract_name, &authkey, &unreq)
+            .await
+            .unwrap();
+        assert_eq!(r, Value::None, "lifting an absent blackhole returns None");
     }
 
     /// Test that wrong authkey is rejected.

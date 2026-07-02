@@ -50,10 +50,29 @@ pub(super) fn handle_request(
         RpcRequest::GetPacketSnr { .. } => pickle_none(),
         RpcRequest::GetPacketQ { .. } => pickle_none(),
 
-        // Blackhole stubs
-        RpcRequest::GetBlackholedIdentities => pickle_dict(vec![]),
-        RpcRequest::BlackholeIdentity { .. } => pickle_bool(true),
-        RpcRequest::UnblackholeIdentity { .. } => pickle_bool(true),
+        // Blackhole set (Codeberg #67 Stage 1). Real membership-backed set on
+        // Transport; matches the Python wire contract (Reticulum.py:1699-1742,
+        // Transport.py:3409-3448).
+        //
+        // DROP NOT IMPLEMENTED (Stage 2 follow-up): Python does not filter
+        // inbound packets per-hash in the live ingest path. Its blackhole
+        // "drop" is path-table management — excluding blackholed destinations
+        // when reloading the path table from storage (Transport.py:315-317) and
+        // remove_blackholed_paths() dropping matching path-table rows on
+        // blackhole (Transport.py:3423, 3494-3513). Both require mapping a
+        // destination hash back to its identity via Identity.recall, which our
+        // daemon does not yet expose in this path. Implementing the set + RPC
+        // only here is the faithful Stage 1 scope.
+        RpcRequest::GetBlackholedIdentities => build_blackholed_identities(core),
+        RpcRequest::BlackholeIdentity {
+            identity_hash,
+            until,
+            reason,
+        } => blackhole_identity(core, identity_hash, *until, reason.clone()),
+        RpcRequest::UnblackholeIdentity { identity_hash } => {
+            unblackhole_identity(core, identity_hash)
+        }
+        RpcRequest::IsBlackholed { identity_hash } => is_blackholed(core, identity_hash),
 
         // destination_data lifecycle stubs.
         //
@@ -121,6 +140,20 @@ fn build_interface_stats(
     let mut total_txb: u64 = 0;
     let mut total_rxs: f64 = 0.0;
     let mut total_txs: f64 = 0.0;
+
+    // Codeberg #67 Stage 1: announce-rate fields mirror Python's transport
+    // branch. With transport enabled and the interface unconfigured, Python
+    // fills the interface defaults (Reticulum.py:831-833 -> Interface.py:89-91):
+    // target=3600 s, penalty=0 s, grace=5. With transport disabled/unconfigured
+    // they stay None (Reticulum.py:798-811). rnstatus renders the `(t:.../p:.../g:...)`
+    // suffix only when target is truthy (rnstatus.py:556-563), so this exactly
+    // reproduces a real Python daemon's output. No tracking yet; Stage 2 wires
+    // per-interface config.
+    let (ar_target, ar_penalty, ar_grace): (Value, Value, Value) = if transport_enabled {
+        (pickle_int(3600), pickle_int(0), pickle_int(5))
+    } else {
+        (pickle_none(), pickle_none(), pickle_none())
+    };
 
     let mut iface_list = Vec::new();
     for entry in &stats {
@@ -210,6 +243,30 @@ fn build_interface_stats(
                 pickle_str_key("outgoing_announce_frequency"),
                 pickle_float(entry.outgoing_announce_frequency),
             ),
+            // Codeberg #67 Stage 1: the 9 rnstatus interface_stats fields, emitted
+            // with Python-matching inactive/unconfigured defaults (no tracking
+            // yet — Stage 2). Types follow the announce_frequency float pair above.
+            //
+            // incoming/outgoing_pr_frequency: path-request frequency in Hz.
+            //   Default 0.0 — Interface.incoming_pr_frequency()/outgoing_pr_frequency()
+            //   return 0 on an under-filled deque (Interface.py:301-321).
+            (pickle_str_key("incoming_pr_frequency"), pickle_float(0.0)),
+            (pickle_str_key("outgoing_pr_frequency"), pickle_float(0.0)),
+            // announce_rate_target/penalty/grace: see the transport-branch note
+            // above (Reticulum.py:831-833, Interface.py:89-91 DEFAULT_AR_*).
+            (pickle_str_key("announce_rate_target"), ar_target.clone()),
+            (pickle_str_key("announce_rate_penalty"), ar_penalty.clone()),
+            (pickle_str_key("announce_rate_grace"), ar_grace.clone()),
+            // burst_active/activated + pr_burst_active/activated: ingress-limiter
+            //   burst state. Defaults False / 0, matching the Interface
+            //   initializers ic_burst_active/ic_burst_activated and
+            //   ic_pr_burst_active/ic_pr_burst_activated (Interface.py:115-118).
+            //   rnstatus only reads *_activated when the matching *_active is
+            //   truthy (rnstatus.py:565-573), so False/0 renders no burst suffix.
+            (pickle_str_key("burst_active"), pickle_bool(false)),
+            (pickle_str_key("burst_activated"), pickle_int(0)),
+            (pickle_str_key("pr_burst_active"), pickle_bool(false)),
+            (pickle_str_key("pr_burst_activated"), pickle_int(0)),
             (pickle_str_key("held_announces"), pickle_int(0)),
             (pickle_str_key("announce_queue"), pickle_none()),
             (pickle_str_key("ifac_signature"), pickle_none()),
@@ -435,6 +492,85 @@ fn drop_all_via(core: &mut StdNodeCore, via_hash: &[u8]) -> Value {
         None => return pickle_int(0),
     };
     pickle_int(core.drop_all_paths_via(&hash) as i64)
+}
+
+// Blackhole set (Codeberg #67)
+/// Build the `blackholed_identities` response: a dict keyed by identity hash
+/// (bytes) mapping to an entry dict `{"source", "until", "reason"}`, matching
+/// Python's `RNS.Transport.blackholed_identities` (Transport.py:3420). The empty
+/// case is an empty dict, exactly as the prior stub returned.
+fn build_blackholed_identities(core: &StdNodeCore) -> Value {
+    use serde_pickle::value::HashableValue;
+    let entries = core
+        .blackholed_identities()
+        .iter()
+        .map(|(hash, entry)| {
+            let value = pickle_dict(vec![
+                (pickle_str_key("source"), pickle_bytes(&entry.source)),
+                (
+                    pickle_str_key("until"),
+                    entry.until.map(pickle_float).unwrap_or_else(pickle_none),
+                ),
+                (
+                    pickle_str_key("reason"),
+                    entry
+                        .reason
+                        .as_deref()
+                        .map(pickle_str)
+                        .unwrap_or_else(pickle_none),
+                ),
+            ]);
+            (HashableValue::Bytes(hash.to_vec()), value)
+        })
+        .collect();
+    Value::Dict(entries)
+}
+
+/// Insert into the blackhole set. Returns bool `true` on a fresh blackhole and
+/// `None` when the identity was already present, mirroring Python's
+/// `Transport.blackhole_identity` (Transport.py:3425/3427). An invalid hash
+/// length yields `false`, matching the client-side length guard
+/// (Reticulum.py:1723).
+fn blackhole_identity(
+    core: &mut StdNodeCore,
+    identity_hash: &[u8],
+    until: Option<f64>,
+    reason: Option<String>,
+) -> Value {
+    let hash = match try_into_hash(identity_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    if core.blackhole_identity(hash, until, reason) {
+        pickle_bool(true)
+    } else {
+        pickle_none()
+    }
+}
+
+/// Remove from the blackhole set. Returns bool `true` when an entry was lifted
+/// and `None` when the identity was not blackholed, mirroring Python's
+/// `Transport.unblackhole_identity` (Transport.py:3446/3448).
+fn unblackhole_identity(core: &mut StdNodeCore, identity_hash: &[u8]) -> Value {
+    let hash = match try_into_hash(identity_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    if core.unblackhole_identity(&hash) {
+        pickle_bool(true)
+    } else {
+        pickle_none()
+    }
+}
+
+/// Membership check. Returns a bool, matching `identity_hash in
+/// RNS.Transport.blackholed_identities` (Reticulum.py:1720).
+fn is_blackholed(core: &StdNodeCore, identity_hash: &[u8]) -> Value {
+    let hash = match try_into_hash(identity_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    pickle_bool(core.is_blackholed(&hash))
 }
 
 // Helpers
