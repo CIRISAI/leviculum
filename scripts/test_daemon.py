@@ -321,6 +321,11 @@ class TestDaemon:
         elif method == "get_interfaces":
             interfaces = []
             for iface in Transport.interfaces:
+                # Codeberg #87: expose the ingress-control held-announce queue
+                # length and burst flag so interop tests can A/B the hold-and-
+                # release behavior against the Rust stack. held_announces is a
+                # dict keyed by destination hash (Interface.py:131).
+                held = getattr(iface, 'held_announces', None)
                 interfaces.append({
                     "name": str(iface),
                     "online": getattr(iface, 'online', None),
@@ -330,6 +335,8 @@ class TestDaemon:
                     "rxb": getattr(iface, 'rxb', None),
                     "mode": getattr(iface, 'mode', None),
                     "ifac_identity": hasattr(iface, 'ifac_identity') and iface.ifac_identity is not None,
+                    "held_announces": len(held) if held is not None else 0,
+                    "burst_active": bool(getattr(iface, 'ic_burst_active', False)),
                 })
             return {"result": interfaces}
 

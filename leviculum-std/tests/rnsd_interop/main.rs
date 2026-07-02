@@ -42,6 +42,7 @@ mod encryption_tests;
 mod flood_tests;
 mod flow_tests;
 mod harness;
+mod held_announce_interop_tests;
 mod lifecycle_tests;
 mod link_keepalive_close_tests;
 mod link_manager_tests;

@@ -107,6 +107,19 @@ const IC_BURST_MIN_SAMPLES: usize = 6;
 /// decisions (Python IC_DEQUE_MIN_SAMPLE). Under-filled deques read as 0 Hz so
 /// a couple of stray samples never trip a burst.
 const IC_DEQUE_MIN_SAMPLE: usize = 2;
+/// Maximum ingress-limited announces held per interface at any time. Once the
+/// queue is full, announces for new destinations are rejected while updates for
+/// already-held destinations still overwrite (Python MAX_HELD_ANNOUNCES /
+/// ic_max_held_announces = 256, Interface.py:70, hold_announce Interface.py:228-232).
+const MAX_HELD_ANNOUNCES: usize = 256;
+/// Penalty window (ms) after an announce burst activates before the first held
+/// announce may be released. Python sets `ic_held_release = now + IC_BURST_PENALTY`
+/// on burst activation (IC_BURST_PENALTY = 15 s, Interface.py:81/160).
+const IC_BURST_PENALTY_MS: u64 = 15 * 1000;
+/// Minimum interval (ms) between successive held-announce releases (Python
+/// IC_HELD_RELEASE_INTERVAL = 5 s, Interface.py:82; applied in
+/// process_held_announces at Interface.py:250).
+const IC_HELD_RELEASE_INTERVAL_MS: u64 = 5 * 1000;
 
 /// Default announce-rate target in seconds when transport is enabled and the
 /// interface leaves the key unset (Python Interface.DEFAULT_AR_TARGET, applied
@@ -462,6 +475,11 @@ struct IngressBurstState {
     pr_active: bool,
     /// Clock ms the PR burst was last activated (Python ic_pr_burst_activated).
     pr_activated_ms: u64,
+    /// Earliest clock ms at which the next held announce may be released (Python
+    /// ic_held_release, Interface.py:119). Set to `now + IC_BURST_PENALTY` when
+    /// the announce burst activates and advanced by `IC_HELD_RELEASE_INTERVAL`
+    /// after each release.
+    held_release_ms: u64,
 }
 
 impl IngressBurstState {
@@ -472,8 +490,25 @@ impl IngressBurstState {
             ann_activated_ms: 0,
             pr_active: false,
             pr_activated_ms: 0,
+            held_release_ms: 0,
         }
     }
+}
+
+/// A single ingress-limited announce held for later release (Codeberg #87;
+/// Python stores the whole `announce_packet` in `Interface.held_announces`,
+/// Interface.py:228-232). We keep the original wire bytes plus the
+/// receipt-adjusted hop count so the announce can be re-injected into the normal
+/// inbound path exactly as it would have been processed on first receipt.
+#[derive(Debug, Clone)]
+struct HeldAnnounce {
+    /// Original wire bytes as received (unmodified; used for rebroadcast and
+    /// re-parsing on release).
+    raw: Vec<u8>,
+    /// Receipt-adjusted hop count captured at hold time (Python
+    /// announce_packet.hops), restored on release since `Packet::unpack` reads
+    /// the pre-increment wire value.
+    hops: u8,
 }
 
 /// Interface metadata for RPC reporting.
@@ -512,6 +547,9 @@ pub struct InterfaceStatEntry {
     /// Clock time in seconds the PR burst was last activated (Python
     /// ic_pr_burst_activated); 0 when it has never activated.
     pub pr_burst_activated: u64,
+    /// Number of ingress-limited announces currently held for later release on
+    /// this interface (Codeberg #87; Python len(Interface.held_announces)).
+    pub held_announces: usize,
 }
 
 /// Exported path table entry for RPC reporting.
@@ -1008,6 +1046,15 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
     interface_ingress_burst: BTreeMap<usize, IngressBurstState>,
 
+    /// Per-interface held-announce queue (Codeberg #87; Python
+    /// `Interface.held_announces`, Interface.py:131). Keyed by destination hash
+    /// so a repeat announce for a held destination overwrites rather than
+    /// accumulates (matching Python's dict semantics). Bounded at
+    /// [`MAX_HELD_ANNOUNCES`] per interface. Drained by `process_held_announces`
+    /// on the poll cadence; entries fed back into the normal inbound path.
+    /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
+    interface_held_announces: BTreeMap<usize, BTreeMap<[u8; TRUNCATED_HASHBYTES], HeldAnnounce>>,
+
     /// Per-interface announce-rate configuration (Codeberg #67 Stage 2a).
     /// Present only for interfaces that configured at least one
     /// `announce_rate_*` key; absent entries resolve identically to an
@@ -1089,6 +1136,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_incoming_pr_times: BTreeMap::new(),
             interface_outgoing_pr_times: BTreeMap::new(),
             interface_ingress_burst: BTreeMap::new(),
+            interface_held_announces: BTreeMap::new(),
             interface_announce_rate_configs: BTreeMap::new(),
             interface_next_slot_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
@@ -1636,7 +1684,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // handle_data link-table routing, handle_link_request) so they include the
         // outbound interface index needed for proof routing.
         match packet.flags.packet_type {
-            PacketType::Announce => self.handle_announce(packet, interface_index, &raw),
+            PacketType::Announce => self.handle_announce(packet, interface_index, &raw, false),
             PacketType::LinkRequest => {
                 self.handle_link_request(packet, interface_index, &raw, truncated_hash)
             }
@@ -1781,6 +1829,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         for iface in ingress_ifaces {
             self.should_ingress_limit(iface);
             self.should_ingress_limit_pr(iface);
+        }
+
+        // Codeberg #87: release held announces on the poll cadence (Python runs
+        // process_held_announces in its periodic interface jobs loop,
+        // Transport.py:943). The per-interface ic_held_release timer
+        // self-throttles releases to one per IC_HELD_RELEASE_INTERVAL, so calling
+        // this every poll cannot release faster than Python's 5 s job cadence.
+        let held_ifaces: Vec<usize> = self.interface_held_announces.keys().copied().collect();
+        for iface in held_ifaces {
+            self.process_held_announces(iface);
         }
 
         // Periodic path table snapshot for diagnostic tracing (every 10s)
@@ -2114,6 +2172,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         packet: Packet,
         interface_index: usize,
         raw: &[u8],
+        from_held: bool,
     ) -> Result<(), TransportError> {
         let now = self.clock.now_ms();
         let is_path_response = packet.context == PacketContext::PathResponse;
@@ -2154,13 +2213,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .storage
             .get_discovery_path_request(&dest_hash)
             .is_some();
-        if dest_unknown && !awaiting_pr && self.should_ingress_limit(interface_index) {
+        //
+        // A released announce (from_held) bypasses this check: it was already
+        // burst-limited once and process_held_announces only releases when the
+        // burst has calmed (ia_freq < threshold), so re-limiting it would loop it
+        // back into the queue. Python avoids the loop differently (its
+        // should_ingress_limit returns True but simultaneously clears the burst
+        // flag on the release pass, Interface.py:150-154); skipping the check here
+        // reaches the same end state without the extra bounce.
+        if !from_held && dest_unknown && !awaiting_pr && self.should_ingress_limit(interface_index)
+        {
+            // HOLD, do not drop (Codeberg #87; Python Transport.py:1705-1707 calls
+            // interface.hold_announce(packet) instead of dropping). The announce
+            // is queued per-interface and released slowly by process_held_announces,
+            // so a burst DELAYS propagation instead of losing it.
+            let held = self.hold_announce(interface_index, dest_hash, raw, packet.hops);
             crate::tracing::debug!(
                 dest = %HexShort(&dest_hash),
                 iface = %self.iface_name(interface_index),
-                "Ingress burst limit active, dropping excess announce for unknown destination"
+                held = held,
+                "Ingress burst limit active, holding excess announce for unknown destination"
             );
-            self.stats.record_drop(DropReason::IngressBurstAnnounce);
+            if !held {
+                // Queue was at MAX_HELD_ANNOUNCES for a new destination: Python
+                // silently drops the announce (Interface.py:231 falls through).
+                self.stats.record_drop(DropReason::IngressBurstAnnounce);
+            }
             return Ok(());
         }
 
@@ -4254,6 +4332,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         } else if ia_freq > threshold {
             state.ann_active = true;
             state.ann_activated_ms = now;
+            // Python sets ic_held_release = now + IC_BURST_PENALTY on activation
+            // (Interface.py:160): the first held announce cannot be released until
+            // the penalty window has elapsed.
+            state.held_release_ms = now + IC_BURST_PENALTY_MS;
             true
         } else {
             false
@@ -4293,6 +4375,143 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// Enqueue an ingress-limited announce for later release (Codeberg #87;
+    /// Python `Interface.hold_announce`, Interface.py:228-232).
+    ///
+    /// Returns `true` if the announce was stored, whether as a new entry or by
+    /// overwriting an already-held destination, and `false` if the queue was
+    /// already at [`MAX_HELD_ANNOUNCES`] for a destination not yet held (Python
+    /// falls through and silently drops it). Keying by destination hash means a
+    /// repeat announce for a held destination refreshes to the newest packet
+    /// rather than accumulating, matching Python's dict semantics.
+    fn hold_announce(
+        &mut self,
+        iface: usize,
+        dest_hash: [u8; TRUNCATED_HASHBYTES],
+        raw: &[u8],
+        hops: u8,
+    ) -> bool {
+        let queue = self.interface_held_announces.entry(iface).or_default();
+        if queue.contains_key(&dest_hash) || queue.len() < MAX_HELD_ANNOUNCES {
+            queue.insert(
+                dest_hash,
+                HeldAnnounce {
+                    raw: raw.to_vec(),
+                    hops,
+                },
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Release at most one held announce for `iface` back into the normal inbound
+    /// path (Codeberg #87; Python `Interface.process_held_announces`,
+    /// Interface.py:234-253).
+    ///
+    /// Gating, all of which must hold: the queue is non-empty, the release timer
+    /// has elapsed (`now > ic_held_release`), and the incoming-announce frequency
+    /// has fallen back below the burst threshold. The lowest-hop held announce is
+    /// selected (Python picks min hops, Interface.py:241-246), popped, and
+    /// re-injected. Each release advances `ic_held_release` by
+    /// [`IC_HELD_RELEASE_INTERVAL_MS`], so releases are paced at most one per
+    /// interval no matter how often this runs.
+    fn process_held_announces(&mut self, iface: usize) {
+        let now = self.clock.now_ms();
+
+        let queue_empty = self
+            .interface_held_announces
+            .get(&iface)
+            .map(|q| q.is_empty())
+            .unwrap_or(true);
+        if queue_empty {
+            return;
+        }
+
+        // Release timer elapsed? (Python `time.time() > self.ic_held_release`.)
+        let (held_release_ms, created_ms) = match self.interface_ingress_burst.get(&iface) {
+            Some(s) => (s.held_release_ms, s.created_ms),
+            None => (0, now),
+        };
+        if now <= held_release_ms {
+            return;
+        }
+
+        // Only release once the burst has calmed (Python Interface.py:237-239).
+        let ia_freq =
+            Self::ingress_frequency(self.interface_incoming_announce_times.get(&iface), now);
+        let threshold = if now.saturating_sub(created_ms) < IC_NEW_TIME_MS {
+            IC_BURST_FREQ_NEW_HZ
+        } else {
+            IC_BURST_FREQ_HZ
+        };
+        if ia_freq >= threshold {
+            return;
+        }
+
+        // Select the lowest-hop held announce (Python Interface.py:241-246,
+        // min_hops initialised to PATHFINDER_M so an announce at max hops is
+        // never selected). Ties resolve to the first in destination-hash order.
+        let selected = self.interface_held_announces.get(&iface).and_then(|q| {
+            let mut best: Option<([u8; TRUNCATED_HASHBYTES], HeldAnnounce)> = None;
+            let mut min_hops = PATHFINDER_MAX_HOPS;
+            for (dest, held) in q {
+                if held.hops < min_hops {
+                    min_hops = held.hops;
+                    best = Some((*dest, held.clone()));
+                }
+            }
+            best
+        });
+        let (dest_hash, held) = match selected {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Advance the release timer and pop the selected announce before
+        // re-injecting (Python Interface.py:250-251).
+        if let Some(state) = self.interface_ingress_burst.get_mut(&iface) {
+            state.held_release_ms = now + IC_HELD_RELEASE_INTERVAL_MS;
+        }
+        if let Some(q) = self.interface_held_announces.get_mut(&iface) {
+            q.remove(&dest_hash);
+        }
+
+        // Re-inject on the normal inbound path (Python spawns a thread running
+        // RNS.Transport.inbound(raw, receiving_interface), Interface.py:252). We
+        // call handle_announce directly with from_held=true so the burst check is
+        // skipped and the announce is processed / rebroadcast as usual. Restore
+        // the receipt-adjusted hop count that Packet::unpack does not carry.
+        match Packet::unpack(&held.raw) {
+            Ok(mut packet) => {
+                packet.hops = held.hops;
+                if let Err(e) = self.handle_announce(packet, iface, &held.raw, true) {
+                    crate::tracing::debug!(
+                        dest = %HexShort(&dest_hash),
+                        iface = %self.iface_name(iface),
+                        "Error releasing held announce: {:?}",
+                        e
+                    );
+                } else {
+                    crate::tracing::debug!(
+                        dest = %HexShort(&dest_hash),
+                        iface = %self.iface_name(iface),
+                        hops = held.hops,
+                        "Released held announce"
+                    );
+                }
+            }
+            Err(e) => {
+                crate::tracing::debug!(
+                    dest = %HexShort(&dest_hash),
+                    "Dropped unparseable held announce: {:?}",
+                    e
+                );
+            }
+        }
+    }
+
     /// Remove announce frequency tracking state for an interface.
     ///
     /// Called from `handle_interface_down()` during cleanup.
@@ -4302,6 +4521,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_incoming_pr_times.remove(&iface);
         self.interface_outgoing_pr_times.remove(&iface);
         self.interface_ingress_burst.remove(&iface);
+        self.interface_held_announces.remove(&iface);
     }
 
     // Public: Announce-Rate Config API (Codeberg #67 Stage 2a)
@@ -4381,6 +4601,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let burst_activated = burst.map(|b| b.ann_activated_ms / 1000).unwrap_or(0);
                 let pr_burst_active = burst.map(|b| b.pr_active).unwrap_or(false);
                 let pr_burst_activated = burst.map(|b| b.pr_activated_ms / 1000).unwrap_or(0);
+                // Codeberg #87: real held-announce count (Python
+                // len(Interface.held_announces)), replacing the Stage-1 hardcoded 0.
+                let held_announces = self
+                    .interface_held_announces
+                    .get(&id)
+                    .map(|q| q.len())
+                    .unwrap_or(0);
                 InterfaceStatEntry {
                     id,
                     name: name.clone(),
@@ -4396,6 +4623,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     burst_activated,
                     pr_burst_active,
                     pr_burst_activated,
+                    held_announces,
                 }
             })
             .collect()
@@ -14488,7 +14716,7 @@ mod tests {
 
             // Process announce arriving from the network interface
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw);
+            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
             assert!(result.is_ok());
 
             // Check that a SendPacket action was emitted for the local client
@@ -14512,7 +14740,7 @@ mod tests {
             // Simulate process_incoming's receipt hop increment
             let mut packet = Packet::unpack(&raw).unwrap();
             packet.hops = packet.hops.saturating_add(1);
-            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw);
+            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
             assert!(result.is_ok());
 
             // Extract the forwarded announce bytes
@@ -14554,7 +14782,7 @@ mod tests {
 
             // Process announce arriving FROM the local client itself
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, LOCAL_CLIENT_IFACE, &raw);
+            let result = transport.handle_announce(packet, LOCAL_CLIENT_IFACE, &raw, false);
             assert!(result.is_ok());
 
             // Should NOT forward back to the same local client
@@ -14583,7 +14811,7 @@ mod tests {
 
             let (raw, _dest_hash) = make_announce_raw(0, crate::packet::PacketContext::None);
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw);
+            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
             assert!(result.is_ok());
 
             // Without local clients, no SendPacket to local client should exist
@@ -14613,7 +14841,7 @@ mod tests {
 
             let (raw, dest_hash) = make_announce_raw(0, crate::packet::PacketContext::None);
             let packet = Packet::unpack(&raw).unwrap();
-            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw);
+            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
 
             assert!(
                 transport.storage.get_announce_cache(&dest_hash).is_some(),
@@ -14995,7 +15223,7 @@ mod tests {
             // Process an announce on the network interface to populate the cache
             let (raw, dest_hash) = make_announce_raw(0, crate::packet::PacketContext::None);
             let packet = Packet::unpack(&raw).unwrap();
-            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw);
+            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
             transport.drain_actions();
             transport.drain_events();
 
@@ -16709,6 +16937,71 @@ mod tests {
                 .pr_burst_active
         }
 
+        /// Read the real held-announce count from interface_stats (Codeberg #87).
+        fn held_count(transport: &Transport<MockClock, MemoryStorage>, iface: usize) -> usize {
+            transport
+                .interface_stats()
+                .iter()
+                .find(|s| s.id == iface)
+                .unwrap()
+                .held_announces
+        }
+
+        /// Like `make_announce_raw` but with a caller-chosen hop count baked into
+        /// the packet, so the min-hops release ordering can be exercised. Returns
+        /// (raw_bytes, dest_hash). The `hops` value is what `handle_announce`
+        /// receives directly (the receipt increment happens in `inbound`, which
+        /// these tests bypass).
+        fn make_announce_raw_hops(hops: u8) -> (Vec<u8>, [u8; TRUNCATED_HASHBYTES]) {
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["ingress"],
+            )
+            .unwrap();
+            let id = dest.identity().unwrap();
+            let random_hash = [0x42u8; crate::constants::RANDOM_HASHBYTES];
+
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&id.public_key_bytes());
+            payload.extend_from_slice(dest.name_hash());
+            payload.extend_from_slice(&random_hash);
+
+            let app_data = b"test";
+            let mut signed_data = Vec::new();
+            signed_data.extend_from_slice(dest.hash().as_bytes());
+            signed_data.extend_from_slice(&id.public_key_bytes());
+            signed_data.extend_from_slice(dest.name_hash());
+            signed_data.extend_from_slice(&random_hash);
+            signed_data.extend_from_slice(app_data);
+
+            let signature = id.sign(&signed_data).unwrap();
+            payload.extend_from_slice(&signature);
+            payload.extend_from_slice(app_data);
+
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Announce,
+                },
+                hops,
+                transport_id: None,
+                destination_hash: dest.hash().into_bytes(),
+                context: PacketContext::None,
+                data: PacketData::Owned(payload),
+            };
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).unwrap();
+            (buf[..len].to_vec(), dest.hash().into_bytes())
+        }
+
         // --- Activation ---
 
         #[test]
@@ -16799,7 +17092,9 @@ mod tests {
             for _ in 0..10 {
                 let (raw, _dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
-                transport.handle_announce(packet, NET_IFACE, &raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, &raw, false)
+                    .unwrap();
                 transport.clock.advance(2000);
                 transport.poll();
             }
@@ -16828,29 +17123,40 @@ mod tests {
         // --- End-to-end drop through the announce ingest path ---
 
         #[test]
-        fn handle_announce_drops_excess_during_burst() {
+        fn handle_announce_holds_excess_during_burst() {
+            // Codeberg #87 hold-and-release: excess announces during a burst are
+            // HELD (queued for later release), NOT dropped (Python
+            // Transport.py:1705-1707 calls interface.hold_announce, not a drop).
             let mut transport = make_transport();
             // Feed 12 distinct unknown-destination announces 100 ms apart.
             for _ in 0..12 {
                 let (raw, _dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
-                transport.handle_announce(packet, NET_IFACE, &raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, &raw, false)
+                    .unwrap();
                 transport.clock.advance(100);
             }
             assert!(
                 burst_active(&transport, NET_IFACE),
                 "a sustained flood must activate the burst"
             );
-            let dropped = transport.stats().drops_ingress_burst_announce;
+            // Nothing is burst-DROPPED below the cap: the excess is held instead.
+            assert_eq!(
+                transport.stats().drops_ingress_burst_announce,
+                0,
+                "excess announces must be HELD, not dropped, below MAX_HELD_ANNOUNCES"
+            );
+            let held = held_count(&transport, NET_IFACE);
             assert!(
-                dropped > 0,
-                "excess announces must be dropped during the burst; dropped={dropped}"
+                held > 0,
+                "excess announces during the burst must be queued; held={held}"
             );
             // The very first announces (before the deque fills past the min-sample
-            // gate) are NOT dropped — legitimate early traffic is preserved.
+            // gate) pass through and are learned, so not everything is held.
             assert!(
-                dropped < 12,
-                "the burst must not drop every announce; the first ones pass"
+                held < 12,
+                "the burst must not hold every announce; the first ones pass"
             );
         }
 
@@ -16860,7 +17166,9 @@ mod tests {
             for _ in 0..12 {
                 let (raw, _dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
-                transport.handle_announce(packet, NET_IFACE, &raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, &raw, false)
+                    .unwrap();
                 transport.clock.advance(2000);
             }
             assert_eq!(transport.stats().drops_ingress_burst_announce, 0);
@@ -16964,6 +17272,239 @@ mod tests {
             assert!(
                 !transport.should_ingress_limit(NET_IFACE),
                 "announce_rate config must not lower the ingress burst threshold"
+            );
+        }
+
+        // --- Codeberg #87 hold-and-release ---
+
+        /// Pre-activate the announce burst, then feed `n` distinct unknown-
+        /// destination announces through the ingest path. With the burst active
+        /// every one is held, so the returned dest hashes are exactly the held
+        /// set. Leaves the clock a few ms past the last feed.
+        fn hold_n_announces(
+            transport: &mut Transport<MockClock, MemoryStorage>,
+            iface: usize,
+            n: usize,
+        ) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+            // Fill the frequency deque above the 3 Hz new-interface threshold so
+            // the first fed announce activates the burst.
+            flood_incoming_announce(transport, iface, ANNOUNCE_FREQ_SAMPLES, 100);
+            let mut dests = Vec::with_capacity(n);
+            for _ in 0..n {
+                let (raw, dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, iface, &raw, false)
+                    .unwrap();
+                dests.push(dest);
+                transport.clock.advance(50);
+            }
+            dests
+        }
+
+        #[test]
+        fn held_announce_stat_tracks_the_queue() {
+            // interface_stats held_announces reflects the real queue length, not
+            // the Stage-1 hardcoded 0.
+            let mut transport = make_transport();
+            assert_eq!(held_count(&transport, NET_IFACE), 0);
+            let dests = hold_n_announces(&mut transport, NET_IFACE, 4);
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                dests.len(),
+                "held_announces must equal the number of queued announces"
+            );
+            assert!(
+                burst_active(&transport, NET_IFACE),
+                "the burst must be active while announces are held"
+            );
+            // None of the held destinations is learned yet (held, not processed).
+            for dest in &dests {
+                assert!(
+                    !transport.has_path(dest),
+                    "a held announce must not be learned until released"
+                );
+            }
+            assert_eq!(
+                transport.stats().drops_ingress_burst_announce,
+                0,
+                "holding is not dropping"
+            );
+        }
+
+        #[test]
+        fn held_announces_drain_and_paths_are_learned() {
+            // The distinguishing property of hold vs drop: every held announce
+            // eventually propagates. Drive a burst of N (over threshold, under the
+            // cap), then let the queue drain and assert all N paths are learned and
+            // none were lost.
+            let mut transport = make_transport();
+            let dests = hold_n_announces(&mut transport, NET_IFACE, 4);
+            assert_eq!(held_count(&transport, NET_IFACE), 4);
+
+            // Stop feeding and let the frequency decay below threshold, then step
+            // past the release penalty and drain. Eventual-consistency loop (no
+            // brittle wall-clock coupling): poll in release-interval steps until
+            // the queue empties or a generous cap is hit.
+            transport.clock.advance(IC_BURST_PENALTY_MS + 1000);
+            let mut burst_cleared_during_drain = false;
+            for _ in 0..40 {
+                transport.poll();
+                if !burst_active(&transport, NET_IFACE) {
+                    burst_cleared_during_drain = true;
+                }
+                if held_count(&transport, NET_IFACE) == 0 {
+                    break;
+                }
+                transport.clock.advance(IC_HELD_RELEASE_INTERVAL_MS + 100);
+            }
+
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                0,
+                "the held queue must drain completely"
+            );
+            // Interaction with burst deactivation: the queue keeps draining after
+            // the burst itself has cleared (release is gated on the timer + calm
+            // frequency, not on ic_burst_active).
+            assert!(
+                burst_cleared_during_drain,
+                "the burst must clear while the queue is still draining"
+            );
+            for dest in &dests {
+                assert!(
+                    transport.has_path(dest),
+                    "every released announce must be learned (re-entered the path/rebroadcast machinery)"
+                );
+            }
+            assert_eq!(
+                transport.stats().drops_ingress_burst_announce,
+                0,
+                "nothing was dropped below the cap"
+            );
+        }
+
+        #[test]
+        fn held_release_is_paced_one_per_interval() {
+            // Releases match Python's schedule: none before the burst-penalty
+            // window, then at most one per IC_HELD_RELEASE_INTERVAL.
+            let mut transport = make_transport();
+            hold_n_announces(&mut transport, NET_IFACE, 4);
+            let start = held_count(&transport, NET_IFACE);
+            assert_eq!(start, 4);
+
+            // Within the penalty window: polling releases nothing (Python sets
+            // ic_held_release = activation + IC_BURST_PENALTY).
+            transport.clock.advance(IC_BURST_PENALTY_MS / 2);
+            transport.poll();
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                start,
+                "no release may happen inside the burst-penalty window"
+            );
+
+            // Past the penalty window: one poll releases exactly one.
+            transport.clock.advance(IC_BURST_PENALTY_MS);
+            transport.poll();
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                start - 1,
+                "the first release fires once the penalty window elapses"
+            );
+
+            // A second poll at the same instant releases nothing more: the
+            // per-release interval throttles it.
+            transport.poll();
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                start - 1,
+                "no second release within the same IC_HELD_RELEASE_INTERVAL"
+            );
+
+            // After the interval elapses, exactly one more is released.
+            transport.clock.advance(IC_HELD_RELEASE_INTERVAL_MS + 100);
+            transport.poll();
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                start - 2,
+                "one further release after the interval elapses"
+            );
+        }
+
+        #[test]
+        fn held_release_order_is_lowest_hops_first() {
+            // Python selects the minimum-hop held announce to release first
+            // (Interface.py:241-246). Hold three announces with distinct hop
+            // counts and assert the lowest-hop one is released first.
+            let mut transport = make_transport();
+            flood_incoming_announce(&mut transport, NET_IFACE, ANNOUNCE_FREQ_SAMPLES, 100);
+            let (raw_hi, dest_hi) = make_announce_raw_hops(8);
+            let (raw_lo, dest_lo) = make_announce_raw_hops(2);
+            let (raw_mid, dest_mid) = make_announce_raw_hops(5);
+            for (raw, _) in [(&raw_hi, dest_hi), (&raw_lo, dest_lo), (&raw_mid, dest_mid)] {
+                let packet = Packet::unpack(raw).unwrap();
+                transport
+                    .handle_announce(packet, NET_IFACE, raw, false)
+                    .unwrap();
+                transport.clock.advance(50);
+            }
+            assert_eq!(held_count(&transport, NET_IFACE), 3, "all three held");
+
+            // Release exactly one.
+            transport.clock.advance(IC_BURST_PENALTY_MS + 1000);
+            transport.poll();
+            assert_eq!(held_count(&transport, NET_IFACE), 2, "one released");
+
+            // The lowest-hop destination (hops=2) must be the one learned first.
+            assert!(
+                transport.has_path(&dest_lo),
+                "the lowest-hop held announce must be released first"
+            );
+            assert!(
+                !transport.has_path(&dest_mid) && !transport.has_path(&dest_hi),
+                "higher-hop held announces must still be waiting"
+            );
+        }
+
+        #[test]
+        fn hold_announce_caps_at_max_held_announces() {
+            // At MAX_HELD_ANNOUNCES the queue rejects a NEW destination (Python
+            // Interface.py:231 falls through and drops it) but still overwrites an
+            // already-held destination with the newest packet (Interface.py:230).
+            let mut transport = make_transport();
+            let mut dests = Vec::with_capacity(MAX_HELD_ANNOUNCES);
+            for _ in 0..MAX_HELD_ANNOUNCES {
+                let (raw, dest) = make_announce_raw();
+                assert!(
+                    transport.hold_announce(NET_IFACE, dest, &raw, 2),
+                    "holding below the cap must succeed"
+                );
+                dests.push((raw, dest));
+            }
+            assert_eq!(held_count(&transport, NET_IFACE), MAX_HELD_ANNOUNCES);
+
+            // A new destination beyond the cap is rejected without growing.
+            let (raw_new, dest_new) = make_announce_raw();
+            assert!(
+                !transport.hold_announce(NET_IFACE, dest_new, &raw_new, 2),
+                "a new destination at the cap must be rejected"
+            );
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                MAX_HELD_ANNOUNCES,
+                "the queue must not grow past the cap"
+            );
+
+            // An already-held destination still overwrites (no growth).
+            let (raw0, dest0) = &dests[0];
+            assert!(
+                transport.hold_announce(NET_IFACE, *dest0, raw0, 3),
+                "an already-held destination must still be updatable at the cap"
+            );
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                MAX_HELD_ANNOUNCES,
+                "overwriting a held destination must not grow the queue"
             );
         }
     }
@@ -17307,7 +17848,7 @@ mod tests {
 
             // Process an announce matching the destination from iface_b
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, IFACE_B, &raw);
+            let result = transport.handle_announce(packet, IFACE_B, &raw, false);
             assert!(result.is_ok());
 
             // The discovery response should have been sent as a SendPacket
@@ -17408,7 +17949,7 @@ mod tests {
 
             // Process a matching announce, should NOT trigger a discovery response
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, IFACE_B, &raw);
+            let result = transport.handle_announce(packet, IFACE_B, &raw, false);
             assert!(result.is_ok());
 
             // No targeted SendPacket to iface_a

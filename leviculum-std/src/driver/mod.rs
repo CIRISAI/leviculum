@@ -438,6 +438,12 @@ pub struct InterfaceStatusSnapshot {
     pub rx_bytes: u64,
     /// Bytes transmitted on this interface.
     pub tx_bytes: u64,
+    /// Ingress-limited announces currently held for later release on this
+    /// interface (Codeberg #87; Python len(Interface.held_announces)).
+    pub held_announces: usize,
+    /// Whether the announce ingress burst limiter is currently active (Codeberg
+    /// #87; Python ic_burst_active).
+    pub burst_active: bool,
 }
 
 /// High-level async Reticulum node
@@ -1607,6 +1613,8 @@ impl ReticulumNode {
                     online: online.get(&e.id).copied().unwrap_or(true),
                     rx_bytes,
                     tx_bytes,
+                    held_announces: e.held_announces,
+                    burst_active: e.burst_active,
                 }
             })
             .collect()

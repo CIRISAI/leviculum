@@ -292,7 +292,10 @@ fn build_interface_stats(
                 pickle_str_key("pr_burst_activated"),
                 pickle_int(entry.pr_burst_activated as i64),
             ),
-            (pickle_str_key("held_announces"), pickle_int(0)),
+            (
+                pickle_str_key("held_announces"),
+                pickle_int(entry.held_announces as i64),
+            ),
             (pickle_str_key("announce_queue"), pickle_none()),
             (pickle_str_key("ifac_signature"), pickle_none()),
             (

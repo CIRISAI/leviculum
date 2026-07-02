@@ -897,12 +897,22 @@ impl TestDaemon {
                 let online = entry.get("online").and_then(|v| v.as_bool());
                 let in_enabled = entry.get("IN").and_then(|v| v.as_bool());
                 let out_enabled = entry.get("OUT").and_then(|v| v.as_bool());
+                let held_announces = entry
+                    .get("held_announces")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let burst_active = entry
+                    .get("burst_active")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 interfaces.push(InterfaceInfo {
                     name,
                     online,
                     in_enabled,
                     out_enabled,
+                    held_announces,
+                    burst_active,
                 });
             }
         }
@@ -1766,6 +1776,13 @@ pub struct InterfaceInfo {
     pub online: Option<bool>,
     pub in_enabled: Option<bool>,
     pub out_enabled: Option<bool>,
+    /// Codeberg #87: ingress-limited announces currently held on this interface
+    /// (Python len(Interface.held_announces)); 0 when the daemon predates the
+    /// field or the interface has none held.
+    pub held_announces: usize,
+    /// Codeberg #87: whether the announce ingress burst limiter is active
+    /// (Python ic_burst_active).
+    pub burst_active: bool,
 }
 
 /// Information about a registered destination.
