@@ -20,6 +20,10 @@ name = "lncp"
 path = "src/lncp.rs"
 
 [[bin]]
+name = "lnstatus"
+path = "src/lnstatus.rs"
+
+[[bin]]
 name = "auto-crossmachine-test"
 path = "src/bin/auto_crossmachine_test.rs"
 
