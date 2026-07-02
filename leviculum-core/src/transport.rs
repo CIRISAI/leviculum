@@ -4733,7 +4733,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Used by the RPC server to report interface status to CLI tools.
     ///
     /// Takes `&mut self` because reading a frequency pops one decayed sample
-    /// per deque (see [`Self::deque_frequency`]); Python's get_interface_stats
+    /// per deque (see `Self::deque_frequency`); Python's get_interface_stats
     /// has the same read side effect via Interface.incoming_*_frequency().
     /// Incoming frequencies gate at IC_DEQUE_MIN_SAMPLE (2) samples, outgoing
     /// at 1, matching the per-direction gates in Interface.py:279-321.
