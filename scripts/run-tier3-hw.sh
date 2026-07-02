@@ -397,9 +397,19 @@ PY
 }
 
 # Read the firmware [FW_BUILD] banner back over the debug serial and check
-# its git_sha against the expected HEAD sha. Defense-in-depth: a silent
-# touch-flash that did not actually take (board re-enumerated but old
-# firmware still resident) is caught here. Non-fatal — WARN only.
+# its git_sha against the expected HEAD sha. A silent touch-flash that did not
+# actually take (board re-enumerated but old firmware still resident) is caught
+# here. This is a hardware-honesty check (same class as a board vanish): return
+# 0 ONLY on a CONFIRMED git_sha match, NON-ZERO whenever the firmware cannot be
+# confirmed == HEAD (definitive mismatch, no banner, or no debug serial). The
+# caller turns non-zero into a firmware-unverified RED.
+#
+# Zero tolerance for false positives: the read is ROBUST FIRST. The debug serial
+# can lag udev after a fresh re-enumeration, so resolving it is retried; a board
+# running current firmware re-emits [FW_BUILD] every ~5 s, so the banner read is
+# retried across ~3 windows (~24 s total) before concluding "no banner". A
+# genuinely-current board catches its banner on the first window and returns 0
+# immediately, so the happy path pays no extra latency.
 verify_lnode_banner() {
     local board="$1" expect_sha="$2"
     local pid
@@ -408,26 +418,41 @@ verify_lnode_banner() {
         rak4631) pid=0002 ;;
         *)       return 0 ;;
     esac
-    local port
-    if ! port=$(resolve_lnode_debug_port "$pid"); then
-        log "[CI_HW] WARN: $board debug serial (VID 1209 PID $pid intf 00) not found; cannot verify firmware sha"
-        return 0
+    # Robust debug-serial resolve: retry a few times before concluding absent.
+    local port="" tries=0
+    while (( tries < 3 )); do
+        if port=$(resolve_lnode_debug_port "$pid"); then
+            break
+        fi
+        port=""
+        tries=$(( tries + 1 ))
+        (( tries < 3 )) && sleep 2
+    done
+    if [[ -z "$port" ]]; then
+        log "[CI_HW] WARN: $board debug serial (VID 1209 PID $pid intf 00) not found after retries; firmware sha UNVERIFIED"
+        return 1
     fi
     log "[CI_HW] $board debug serial resolved to $port"
-    # The firmware re-emits the banner every ~5 s, so an 8 s window always
-    # catches at least one even though the boot-time banner is long gone.
-    local banner
-    banner=$(read_fw_build_banner "$port" 8)
+    # The firmware re-emits the banner every ~5 s. Read robustly over up to 3
+    # windows (~24 s total) so a current board reliably yields at least one
+    # banner before we ever conclude "none".
+    local banner="" attempt=0
+    while (( attempt < 3 )); do
+        banner=$(read_fw_build_banner "$port" 8)
+        [[ -n "$banner" ]] && break
+        attempt=$(( attempt + 1 ))
+    done
     if [[ -z "$banner" ]]; then
-        log "[CI_HW] WARN: $board no [FW_BUILD] banner seen on $port within window"
-        return 0
+        log "[CI_HW] WARN: $board no [FW_BUILD] banner seen on $port after robust retries; firmware sha UNVERIFIED"
+        return 1
     fi
     log "[CI_HW] $board banner: $banner"
     if [[ "$banner" == *"git_sha=$expect_sha"* ]]; then
         log "[CI_HW] $board firmware sha matches HEAD ($expect_sha)"
-    else
-        log "[CI_HW] WARN: LNode firmware sha mismatch ($board): expected $expect_sha, banner='$banner'"
+        return 0
     fi
+    log "[CI_HW] WARN: LNode firmware sha mismatch ($board): expected $expect_sha, banner='$banner'; firmware UNVERIFIED"
+    return 1
 }
 
 flash_lnodes() {
@@ -446,8 +471,11 @@ flash_lnodes() {
     #
     # T114 fleet, then Pocket-V2 fleet. Each just-target builds the embedded
     # firmware (cargo run) and touch-flashes every attached board of that
-    # kind. A failing fleet warns + notifies but does not abort.
+    # kind. A failing fleet warns + notifies but does not abort; a hard flash
+    # failure marks the board UNVERIFIED (collected in flash_failed_ids) so the
+    # verdict goes RED rather than silently testing whatever firmware remains.
     local flashed_ids=()
+    local flash_failed_ids=()
 
     if lnode_present 1209:0001; then
         if ( cd "$REPO_DIR" && UF2_TIMEOUT=120 just flash ); then
@@ -455,6 +483,7 @@ flash_lnodes() {
         else
             log "[CI_HW] WARN: LNode flash failed (t114)"
             notify_flash_failed t114
+            flash_failed_ids+=( "1209:0001" )
         fi
         flashed_ids+=( "1209:0001" )
     else
@@ -467,6 +496,7 @@ flash_lnodes() {
         else
             log "[CI_HW] WARN: LNode flash failed (rak4631)"
             notify_flash_failed rak4631
+            flash_failed_ids+=( "1209:0002" )
         fi
         flashed_ids+=( "1209:0002" )
     else
@@ -485,7 +515,7 @@ flash_lnodes() {
     local waited=0
     while ! ids_enumerated "${flashed_ids[@]}"; do
         if (( waited >= 30 )); then
-            log "[CI_HW] WARN: LNodes not fully re-enumerated after ${waited}s; proceeding (profiles gate on device-count)"
+            log "[CI_HW] WARN: LNodes not fully re-enumerated after ${waited}s; proceeding (verify marks any unconfirmed board UNVERIFIED)"
             break
         fi
         sleep 2
@@ -493,17 +523,37 @@ flash_lnodes() {
     done
     if ids_enumerated "${flashed_ids[@]}"; then
         log "[CI_HW] LNodes re-enumerated after ${waited}s"
-        # Give udev a beat to settle the fresh ttyACM nodes + properties
-        # before resolve_lnode_debug_port iterates them.
-        sleep 2
-        local id
-        for id in "${flashed_ids[@]}"; do
-            case "$id" in
-                1209:0001) verify_lnode_banner t114    "$head_sha" ;;
-                1209:0002) verify_lnode_banner rak4631 "$head_sha" ;;
-            esac
-        done
     fi
+    # Give udev a beat to settle the fresh ttyACM nodes + properties before
+    # resolve_lnode_debug_port iterates them.
+    sleep 2
+
+    # Verify every flashed (enumerated-at-flash-time) board runs HEAD. A board
+    # is UNVERIFIED if EITHER its `just flash` invocation returned non-zero
+    # (hard flash failure) OR verify_lnode_banner could not confirm its git_sha
+    # == HEAD (mismatch / no banner / debug serial gone). An UNVERIFIED board's
+    # USB id is collected into the run-global LNODE_FW_UNVERIFIED_IDS so the
+    # verdict goes RED and names it. An ABSENT board was never in flashed_ids
+    # and is correctly untouched — absence is a clean device-count skip, not a
+    # stale-firmware failure.
+    local id
+    for id in "${flashed_ids[@]}"; do
+        local board
+        case "$id" in
+            1209:0001) board=t114 ;;
+            1209:0002) board=rak4631 ;;
+            *)         continue ;;
+        esac
+        if printf '%s\n' "${flash_failed_ids[@]:-}" | grep -qxF "$id"; then
+            log "[CI_HW] WARN: $board ($id) hard flash failure — firmware UNVERIFIED; run will be RED"
+            LNODE_FW_UNVERIFIED_IDS+=( "$id" )
+            continue
+        fi
+        if ! verify_lnode_banner "$board" "$head_sha"; then
+            log "[CI_HW] WARN: $board ($id) firmware UNVERIFIED — cannot confirm HEAD $head_sha; run will be RED"
+            LNODE_FW_UNVERIFIED_IDS+=( "$id" )
+        fi
+    done
     return 0
 }
 
@@ -682,6 +732,19 @@ maybe_simulate_vanish() {
         echo "SIMULATED vanish vid_pid=$vidpid attempt=$attempt profile=$profile (LEVICULUM_SIMULATE_VANISH)" >> "$poison"
         log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (profile=$profile attempt=$attempt vid_pid=$vidpid)"
     fi
+}
+
+# Simulated firmware-stale hook (test-only, no rig / no flash). Mirrors
+# LEVICULUM_SIMULATE_VANISH: LEVICULUM_SIMULATE_FW_STALE=<usb_id> forces the
+# firmware-unverified path for a given board id by appending it to the
+# run-global LNODE_FW_UNVERIFIED_IDS, so the RED + firmware_unverified verdict
+# path is exercised deterministically. Selftest mode skips the real
+# flash_lnodes, so this is the only way that path runs under the selftest.
+maybe_simulate_fw_stale() {
+    local want="${LEVICULUM_SIMULATE_FW_STALE:-}"
+    [[ -n "$want" ]] || return 0
+    LNODE_FW_UNVERIFIED_IDS+=( "$want" )
+    log "[CI_HW] FW_VERIFY: simulated firmware-unverified injected (board=$want, LEVICULUM_SIMULATE_FW_STALE)"
 }
 
 # --- Per-profile setup ---
@@ -900,9 +963,19 @@ run_group() {
 # profile group runs. Smoke runs flash too — a smoke pass against stale
 # firmware is just as misleading as a full one. Skipped in selftest mode
 # (no rig, watchdog/verdict-only verification).
+# Firmware-unverified run-global array. Collects the USB id of every enumerated
+# LNode we could not confirm runs HEAD (hard flash failure or unconfirmed
+# [FW_BUILD] banner). Non-empty -> the run is RED and the verdict line names the
+# board(s) via firmware_unverified=<ids>, mirroring board_vanish. Initialised
+# BEFORE flash_lnodes so its verify loop can append to it, and BEFORE the
+# simulate hook.
+LNODE_FW_UNVERIFIED_IDS=()
 if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
     flash_lnodes
 fi
+# Test-only: force the firmware-unverified path for a given board id without a
+# rig/flash (selftest skips the real flash above).
+maybe_simulate_fw_stale
 
 mapfile -t ALL_FNS < <(discover_tests)
 if [[ ${#ALL_FNS[@]} -eq 0 ]]; then
@@ -1026,6 +1099,25 @@ if [[ -n "$BOARD_VANISH_IDS" ]]; then
     log "[CI_HW] ===================================================================="
 fi
 
+# Firmware-unverified attribution. Same hardware-honesty class as a board
+# vanish: an enumerated LNode whose firmware we could NOT confirm == HEAD (hard
+# flash failure or no matching [FW_BUILD] banner) means the run tested UNKNOWN
+# firmware, so its results cannot be trusted. Forces RED with the board(s) named
+# in the verdict line, exactly as board_vanish does. It does NOT abort the run
+# (non-fatal-flash contract): the RAK + RNodes may still yield valid results, so
+# only the verdict flips. An absent board never reaches here (it was never
+# flashed) and stays a clean device-count skip.
+FW_UNVERIFIED_IDS=$(dedup_ids "${LNODE_FW_UNVERIFIED_IDS[@]:-}")
+if [[ -n "$FW_UNVERIFIED_IDS" ]]; then
+    RC=1
+    log "[CI_HW] ===================================================================="
+    log "[CI_HW] FIRMWARE UNVERIFIED (RED): LNode(s) $FW_UNVERIFIED_IDS could not be"
+    log "[CI_HW] confirmed to run HEAD (hard flash failure or no matching [FW_BUILD]"
+    log "[CI_HW] banner). The run tested UNKNOWN firmware; forces tier3 RED so a"
+    log "[CI_HW] stale/failed flash is never silently trusted."
+    log "[CI_HW] ===================================================================="
+fi
+
 # Device-count skips are neither green nor red — surface them loudly
 # in the summary and the results line. A non-empty skip list with the
 # 4th RNode back in the rig means a profile/registration gap, not noise.
@@ -1040,9 +1132,15 @@ fi
 # cause so the line is unmissable, e.g.
 #   tier3 RED (expected_marginal=0 skipped=0 board_vanish=1209:0001 firmware_self_reset_suspected)
 # This holds whether the board stayed gone across the retry or recovered on it.
+# A firmware-unverified LNode (stale/failed flash) is the same honesty class and
+# names its board too, e.g.
+#   tier3 RED (expected_marginal=0 skipped=0 firmware_unverified=1209:0001)
 VERDICT_FIELDS="expected_marginal=$EXPECTED_MARGINAL_FAILED skipped=$SKIPPED"
 if [[ -n "$BOARD_VANISH_IDS" ]]; then
     VERDICT_FIELDS="$VERDICT_FIELDS board_vanish=$BOARD_VANISH_IDS firmware_self_reset_suspected"
+fi
+if [[ -n "$FW_UNVERIFIED_IDS" ]]; then
+    VERDICT_FIELDS="$VERDICT_FIELDS firmware_unverified=$FW_UNVERIFIED_IDS"
 fi
 
 if [[ $RC -eq 0 ]]; then

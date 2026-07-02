@@ -115,6 +115,20 @@ assert_rc "$RC" 1 "real test failure exits non-zero (RED)"
 assert_contains "$OUT" "tier3 RED (expected_marginal=0 skipped=0)" "plain RED verdict, no vanish fields"
 assert_absent  "$OUT" "board_vanish=" "no board_vanish token for a plain test failure"
 
+echo "== Case 5: stale/unverified LNode firmware -> RED with firmware_unverified attribution =="
+run_case \
+    LEVICULUM_SELFTEST_CARGO="$STUB_OK" \
+    LEVICULUM_SIMULATE_FW_STALE=1209:0001
+assert_rc "$RC" 1 "unverified firmware exits non-zero (RED)"
+assert_contains "$OUT" "tier3 RED (expected_marginal=0 skipped=0 firmware_unverified=1209:0001)" "verdict line names the unverified board"
+assert_contains "$OUT" "FIRMWARE UNVERIFIED (RED)" "loud firmware-unverified banner emitted"
+assert_absent  "$OUT" "tier3 GREEN" "unverified firmware is not GREEN"
+
+echo "== Case 6: clean run has no firmware_unverified token (regression) =="
+run_case LEVICULUM_SELFTEST_CARGO="$STUB_OK"
+assert_rc "$RC" 0 "clean run still GREEN"
+assert_absent  "$OUT" "firmware_unverified=" "no firmware_unverified token on a clean run"
+
 echo
 if (( FAILED == 0 )); then
     echo "tier3-hw-selftest: ALL PASS"
