@@ -25,7 +25,7 @@ const RNSTATUS_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../vendor/Reticulum/RNS/Utilities/rnstatus.py"
 );
-const RNPATH_PY: &str = concat!(
+pub(crate) const RNPATH_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../vendor/Reticulum/RNS/Utilities/rnpath.py"
 );
@@ -36,7 +36,7 @@ const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/Re
 /// Start a Rust daemon with shared instance + RPC and return the node,
 /// instance name, TCP address, and the identity's private key bytes
 /// (needed to write the transport_identity file for Python tools).
-async fn start_rust_daemon_with_rpc() -> (
+pub(crate) async fn start_rust_daemon_with_rpc() -> (
     leviculum_std::ReticulumNode,
     String,
     SocketAddr,
@@ -118,7 +118,7 @@ fn create_python_config_dir(instance_name: &str, identity_bytes: &[u8; 64]) -> P
 }
 
 /// Run a Python utility and return its output.
-async fn run_python_tool(script: &str, args: &[&str], config_dir: &Path) -> Output {
+pub(crate) async fn run_python_tool(script: &str, args: &[&str], config_dir: &Path) -> Output {
     let config_str = config_dir.to_str().expect("config dir must be valid UTF-8");
 
     let output = tokio::process::Command::new("python3")
@@ -174,7 +174,7 @@ async fn wait_for_rpc_ready(config_dir: &Path, deadline: Duration) {
 /// answering before returning. Use this in place of a bare
 /// `create_python_config_dir` + fixed sleep so the subsequent tool invocation
 /// runs against a provably-ready daemon.
-async fn python_client_ready(instance_name: &str, identity_bytes: &[u8; 64]) -> PathBuf {
+pub(crate) async fn python_client_ready(instance_name: &str, identity_bytes: &[u8; 64]) -> PathBuf {
     let config_dir = create_python_config_dir(instance_name, identity_bytes);
     wait_for_rpc_ready(&config_dir, Duration::from_secs(20)).await;
     config_dir

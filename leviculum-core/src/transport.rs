@@ -633,6 +633,7 @@ pub struct TransportStats {
     pub(crate) drops_ingress_burst_announce: u64,
     pub(crate) drops_lrproof_invalid: u64,
     pub(crate) drops_forward_max_hops: u64,
+    pub(crate) drops_blackholed_announce: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -671,11 +672,16 @@ pub enum DropReason {
     LrproofInvalid,
     /// Outbound forward/rebroadcast that would exceed `max_hops`.
     ForwardMaxHops,
+    /// Incoming announce from a blackholed identity (Codeberg #67). The announce
+    /// carries the identity's public key, so `identity_hash =
+    /// truncated_hash(public_key)` is matched directly against the blackhole set;
+    /// mirrors Python's drop in `Identity.validate_announce` (Identity.py:574-577).
+    BlackholedAnnounce,
 }
 
 impl DropReason {
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 12] = [
+    pub const ALL: [DropReason; 13] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -688,6 +694,7 @@ impl DropReason {
         DropReason::IngressBurstAnnounce,
         DropReason::LrproofInvalid,
         DropReason::ForwardMaxHops,
+        DropReason::BlackholedAnnounce,
     ];
 }
 
@@ -782,6 +789,12 @@ impl TransportStats {
         self.drops_forward_max_hops
     }
 
+    /// Incoming announces dropped because the announcing identity is blackholed
+    /// (Codeberg #67).
+    pub fn drops_blackholed_announce(&self) -> u64 {
+        self.drops_blackholed_announce
+    }
+
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
     /// by construction (see `record_drop`).
     pub fn drops_reason_sum(&self) -> u64 {
@@ -797,6 +810,7 @@ impl TransportStats {
             + self.drops_ingress_burst_announce
             + self.drops_lrproof_invalid
             + self.drops_forward_max_hops
+            + self.drops_blackholed_announce
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -820,6 +834,7 @@ impl TransportStats {
             DropReason::IngressBurstAnnounce => self.drops_ingress_burst_announce += 1,
             DropReason::LrproofInvalid => self.drops_lrproof_invalid += 1,
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
+            DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -1086,9 +1101,15 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `RNS.Transport.blackholed_identities` (Transport.py:123), which is a
     /// dict of identity_hash -> entry. Mutated via the shared-instance RPC
     /// (blackhole_identity / unblackhole_identity) and read by is_blackholed /
-    /// get_blackholed_identities. Codeberg #67 Stage 1: in-memory only; no
-    /// persistence, no expiry sweep, and no inbound packet-drop yet (Stage 2).
+    /// get_blackholed_identities. Enforced on the inbound announce path and in
+    /// remove_blackholed_paths (Codeberg #88); in-memory only, no persistence.
     blackholed_identities: BTreeMap<[u8; TRUNCATED_HASHBYTES], BlackholeEntry>,
+
+    /// Monotonic timestamp of the last blackhole expiry sweep. Mirrors Python
+    /// `Transport.blackhole_last_checked` (Transport.py:195), which throttles
+    /// the expiry check in the jobs loop to one sweep per
+    /// `blackhole_check_interval` (60 s, Transport.py:196).
+    blackhole_last_checked_ms: u64,
 
     /// Pending I/O actions for the driver (sans-I/O buffer)
     pending_actions: Vec<Action>,
@@ -1142,6 +1163,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_max_airtime_ms: BTreeMap::new(),
             ifac_configs: BTreeMap::new(),
             blackholed_identities: BTreeMap::new(),
+            blackhole_last_checked_ms: 0,
             pending_actions: Vec::new(),
             last_discovery_retry_ms: 0,
             #[cfg(test)]
@@ -2115,7 +2137,71 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             reason,
         };
         self.blackholed_identities.insert(identity_hash, entry);
+        // Python calls remove_blackholed_paths() right after the insert
+        // (Transport.py:3423): drop any existing path-table rows whose associated
+        // identity is now blackholed, so a route learned before the blackhole is
+        // torn down immediately rather than lingering until it expires.
+        self.remove_blackholed_paths();
         true
+    }
+
+    /// Remove every path-table row whose associated identity is blackholed.
+    ///
+    /// Mirrors `Transport.remove_blackholed_paths` (Transport.py:3494-3513).
+    /// Python recalls the identity for each destination via
+    /// `Identity.recall(destination_hash)` (its `known_destinations` cache) and
+    /// drops the path if that identity is in the blackhole set. Our equivalent
+    /// recall source is the cached announce for the destination
+    /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
+    /// whose payload starts with the 64-byte public key), the same source the
+    /// link-request path uses at transport.rs:2749. A destination with no cached
+    /// announce cannot be associated with an identity, so it is left untouched,
+    /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
+    ///
+    /// Returns the number of destinations removed.
+    fn remove_blackholed_paths(&mut self) -> usize {
+        if self.blackholed_identities.is_empty() {
+            return 0;
+        }
+        let mut drop_destinations: Vec<[u8; TRUNCATED_HASHBYTES]> = Vec::new();
+        for (dest_hash, _entry) in self.storage.path_entries() {
+            if let Some(identity_hash) = self.recall_identity_hash(&dest_hash) {
+                if self.blackholed_identities.contains_key(&identity_hash) {
+                    drop_destinations.push(dest_hash);
+                }
+            }
+        }
+        for dest_hash in &drop_destinations {
+            self.storage.remove_path(dest_hash);
+            crate::tracing::debug!(
+                dest = %HexShort(dest_hash),
+                "Removed path table entry associated with blackholed identity"
+            );
+        }
+        if !drop_destinations.is_empty() {
+            crate::tracing::info!(
+                count = drop_destinations.len(),
+                "Removed destinations associated with blackholed identities from path table"
+            );
+        }
+        drop_destinations.len()
+    }
+
+    /// Recall the identity hash for a destination from its cached announce.
+    ///
+    /// The cached announce raw packet's payload begins with the 64-byte combined
+    /// public key; the identity hash is `truncated_hash(public_key)`. Returns
+    /// `None` when no announce is cached for the destination or the cached bytes
+    /// cannot be parsed as an announce (the association is then unknown, matching
+    /// a `None` from Python's `Identity.recall`).
+    fn recall_identity_hash(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Option<[u8; TRUNCATED_HASHBYTES]> {
+        let cached_raw = self.storage.get_announce_cache(dest_hash)?;
+        let packet = Packet::unpack(cached_raw).ok()?;
+        let announce = ReceivedAnnounce::from_packet(&packet).ok()?;
+        Some(announce.computed_identity_hash())
     }
 
     /// Remove an identity from the blackhole set.
@@ -2137,6 +2223,48 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Borrow the full blackhole map for RPC export (get_blackholed_identities).
     pub fn blackholed_identities(&self) -> &BTreeMap<[u8; TRUNCATED_HASHBYTES], BlackholeEntry> {
         &self.blackholed_identities
+    }
+
+    /// Remove blackhole entries whose `until` timestamp has passed.
+    ///
+    /// Mirrors the expiry sweep in Python's jobs loop (Transport.py:973-994):
+    /// every `blackhole_check_interval` (60 s), entries with
+    /// `until and time.time() > until` are popped from the set; entries with
+    /// `until == None` are permanent. Membership checks (`is_blackholed`, the
+    /// announce drop) deliberately do NOT consult `until` — exactly like
+    /// Python, an expired entry keeps blocking until the next sweep runs.
+    ///
+    /// The core clock is monotonic, but `until` is a unix timestamp handed in
+    /// over the RPC (rnpath.py:214 `time.time()+duration`), so the caller (the
+    /// std driver's timer branch) supplies wall-clock `now_unix_secs`. The 60 s
+    /// throttle itself runs on the monotonic clock.
+    ///
+    /// Returns the number of entries removed.
+    pub fn expire_blackholed_identities(&mut self, now_unix_secs: f64) -> usize {
+        const BLACKHOLE_CHECK_INTERVAL_MS: u64 = 60_000;
+        let now_ms = self.clock.now_ms();
+        if now_ms < self.blackhole_last_checked_ms + BLACKHOLE_CHECK_INTERVAL_MS {
+            return 0;
+        }
+        self.blackhole_last_checked_ms = now_ms;
+
+        let stale: Vec<[u8; TRUNCATED_HASHBYTES]> = self
+            .blackholed_identities
+            .iter()
+            .filter(|(_, entry)| matches!(entry.until, Some(until) if now_unix_secs > until))
+            .map(|(hash, _)| *hash)
+            .collect();
+        for identity_hash in &stale {
+            self.blackholed_identities.remove(identity_hash);
+            crate::tracing::debug!(
+                identity = %HexShort(identity_hash),
+                "Removed expired blackhole entry"
+            );
+        }
+        if !stale.is_empty() {
+            crate::tracing::info!(count = stale.len(), "Removed expired blackholed identities");
+        }
+        stale.len()
     }
 
     /// Insert a path entry (thin wrapper around storage, test helper)
@@ -2180,6 +2308,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Parse announce
         let announce =
             ReceivedAnnounce::from_packet(&packet).map_err(TransportError::AnnounceError)?;
+
+        // Codeberg #67: drop announces from blackholed identities. The announce
+        // carries the identity's public key, so the identity hash
+        // (truncated_hash(public_key)) can be matched directly against the
+        // blackhole set. Python enforces this inside Identity.validate_announce
+        // (Identity.py:574-577, returning False), which Transport.inbound calls
+        // first at Transport.py:1691 (only_validate_signature=True) BEFORE
+        // interface.received_announce() and the ingress-burst limiter. We mirror
+        // that ordering exactly: the check runs before signature validation
+        // (Python's is at Identity.py:579) and before record_incoming_announce
+        // below, so a blackholed identity never costs an Ed25519 verify and
+        // never touches ingress accounting or the path, announce, and
+        // rebroadcast tables. This is the only packet type whose originating
+        // identity can be matched on the inbound path (a plain data packet
+        // carries only a destination hash, not the identity), so blackhole
+        // enforcement for those destinations is via path-table removal only.
+        let announce_identity_hash = announce.computed_identity_hash();
+        if self.is_blackholed(&announce_identity_hash) {
+            crate::tracing::debug!(
+                dest = %HexShort(&announce.destination_hash().into_bytes()),
+                identity = %HexShort(&announce_identity_hash),
+                "Dropped announce from blackholed identity"
+            );
+            self.stats.record_drop(DropReason::BlackholedAnnounce);
+            return Ok(());
+        }
 
         // Validate signature and destination hash
         announce.validate().map_err(TransportError::AnnounceError)?;
@@ -18928,5 +19082,374 @@ mod blackhole_tests {
         // H2 was never added.
         assert!(t.is_blackholed(&H1));
         assert!(!t.is_blackholed(&H2));
+    }
+}
+
+// Blackhole enforcement (Codeberg #67): actually drop announces from
+// blackholed identities on the inbound path, and remove their existing
+// path-table rows. Mirrors Python's Identity.validate_announce drop
+// (Identity.py:574-577) and Transport.remove_blackholed_paths
+// (Transport.py:3494-3513).
+#[cfg(test)]
+mod blackhole_enforcement_tests {
+    use super::*;
+    use crate::destination::{Destination, DestinationType, Direction};
+    use crate::identity::Identity;
+    use crate::memory_storage::MemoryStorage;
+    use crate::packet::{
+        HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
+    };
+    use crate::test_utils::{MockClock, TEST_TIME_MS};
+    use rand_core::OsRng;
+
+    const NET_IFACE: usize = 0;
+
+    fn make_transport() -> Transport<MockClock, MemoryStorage> {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let identity = Identity::generate(&mut OsRng);
+        let config = TransportConfig {
+            enable_transport: true,
+            ..TransportConfig::default()
+        };
+        let mut transport = Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+        transport.set_interface_name(NET_IFACE, "iface0".into());
+        transport
+    }
+
+    /// Build a valid Single-destination announce for a caller-supplied identity,
+    /// so a test can blackhole that identity and then feed one of its announces.
+    /// The `aspect`/`random_byte` pair keeps distinct announces from the same
+    /// identity from tripping replay protection. Returns (raw, dest_hash).
+    fn make_announce_for(
+        identity: &Identity,
+        aspect: &str,
+        random_byte: u8,
+    ) -> (Vec<u8>, [u8; TRUNCATED_HASHBYTES]) {
+        let dest = Destination::new(
+            Some(identity.clone()),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &[aspect],
+        )
+        .unwrap();
+        let id = dest.identity().unwrap();
+        let random_hash = [random_byte; crate::constants::RANDOM_HASHBYTES];
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&id.public_key_bytes());
+        payload.extend_from_slice(dest.name_hash());
+        payload.extend_from_slice(&random_hash);
+
+        let app_data = b"test";
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(dest.hash().as_bytes());
+        signed_data.extend_from_slice(&id.public_key_bytes());
+        signed_data.extend_from_slice(dest.name_hash());
+        signed_data.extend_from_slice(&random_hash);
+        signed_data.extend_from_slice(app_data);
+
+        let signature = id.sign(&signed_data).unwrap();
+        payload.extend_from_slice(&signature);
+        payload.extend_from_slice(app_data);
+
+        let packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: DestinationType::Single,
+                packet_type: PacketType::Announce,
+            },
+            hops: 1,
+            transport_id: None,
+            destination_hash: dest.hash().into_bytes(),
+            context: PacketContext::None,
+            data: PacketData::Owned(payload),
+        };
+        let mut buf = [0u8; 500];
+        let len = packet.pack(&mut buf).unwrap();
+        (buf[..len].to_vec(), dest.hash().into_bytes())
+    }
+
+    fn feed_announce(transport: &mut Transport<MockClock, MemoryStorage>, raw: &[u8]) {
+        let packet = Packet::unpack(raw).unwrap();
+        transport
+            .handle_announce(packet, NET_IFACE, raw, false)
+            .unwrap();
+    }
+
+    /// A blackholed identity's announce is dropped: no path is learned, the
+    /// blackhole drop counter ticks, and it is never counted as processed.
+    #[test]
+    fn blackholed_announce_is_dropped() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+        let (raw, dest_hash) = make_announce_for(&identity, "victim", 0x01);
+
+        assert!(t.blackhole_identity(*identity.hash(), None, None));
+
+        let before_drop = t.stats().drops_blackholed_announce;
+        let before_proc = t.stats().announces_processed;
+        feed_announce(&mut t, &raw);
+
+        assert!(
+            !t.storage.has_path(&dest_hash),
+            "blackholed identity's announce must not create a path"
+        );
+        assert_eq!(
+            t.stats().drops_blackholed_announce,
+            before_drop + 1,
+            "the blackhole drop counter must tick exactly once"
+        );
+        assert_eq!(
+            t.stats().announces_processed,
+            before_proc,
+            "a dropped announce is never counted as processed"
+        );
+    }
+
+    /// Blackholing an identity removes the path-table row it had already learned
+    /// (Python remove_blackholed_paths, called from blackhole_identity).
+    #[test]
+    fn blackhole_removes_existing_path() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+        let (raw, dest_hash) = make_announce_for(&identity, "victim", 0x01);
+
+        // Learn the path first, while the identity is NOT blackholed.
+        feed_announce(&mut t, &raw);
+        assert!(
+            t.storage.has_path(&dest_hash),
+            "announce from a normal identity should learn a path"
+        );
+
+        // Blackholing must tear that path down immediately.
+        assert!(t.blackhole_identity(*identity.hash(), None, None));
+        assert!(
+            !t.storage.has_path(&dest_hash),
+            "blackholing must remove the identity's existing path-table row"
+        );
+    }
+
+    /// After unblackhole, the same identity's announce is processed normally
+    /// again (Python unblackhole just stops future drops; paths re-form from
+    /// subsequent announces).
+    #[test]
+    fn unblackhole_reprocesses_announce() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+
+        assert!(t.blackhole_identity(*identity.hash(), None, None));
+        let (raw1, dest_hash) = make_announce_for(&identity, "victim", 0x01);
+        feed_announce(&mut t, &raw1);
+        assert!(
+            !t.storage.has_path(&dest_hash),
+            "while blackholed, the announce is dropped and no path is learned"
+        );
+
+        assert!(t.unblackhole_identity(identity.hash()));
+
+        // A fresh announce (distinct random blob) from the same identity is now
+        // handled normally and a path is learned.
+        let (raw2, dest_hash2) = make_announce_for(&identity, "victim", 0x02);
+        assert_eq!(
+            dest_hash, dest_hash2,
+            "same identity+aspect -> same dest hash"
+        );
+        feed_announce(&mut t, &raw2);
+        assert!(
+            t.storage.has_path(&dest_hash),
+            "after unblackhole the identity's announce must be processed again"
+        );
+    }
+
+    /// NEGATIVE guard: a non-blackholed identity is never affected. Its path is
+    /// not removed when a different identity is blackholed, its announces are not
+    /// dropped, and its drop counter never moves.
+    #[test]
+    fn non_blackholed_identity_never_affected() {
+        let mut t = make_transport();
+        let id_a = Identity::generate(&mut OsRng);
+        let id_b = Identity::generate(&mut OsRng);
+
+        let (raw_a, dest_a) = make_announce_for(&id_a, "aspect_a", 0x0A);
+        let (raw_b, dest_b) = make_announce_for(&id_b, "aspect_b", 0x0B);
+
+        // Both identities learn paths while neither is blackholed.
+        feed_announce(&mut t, &raw_a);
+        feed_announce(&mut t, &raw_b);
+        assert!(t.storage.has_path(&dest_a));
+        assert!(t.storage.has_path(&dest_b));
+
+        let b_drops_before = t.stats().drops_blackholed_announce;
+
+        // Blackhole only A. B's path must survive untouched.
+        assert!(t.blackhole_identity(*id_a.hash(), None, None));
+        assert!(
+            !t.storage.has_path(&dest_a),
+            "A's path is removed on blackhole"
+        );
+        assert!(
+            t.storage.has_path(&dest_b),
+            "B's path must NOT be touched when A is blackholed"
+        );
+
+        // A fresh announce from B (while A stays blackholed) is processed
+        // normally and never counted as a blackhole drop.
+        let (raw_b2, _) = make_announce_for(&id_b, "aspect_b", 0x0C);
+        feed_announce(&mut t, &raw_b2);
+        assert!(t.storage.has_path(&dest_b), "B's path persists");
+        assert_eq!(
+            t.stats().drops_blackholed_announce,
+            b_drops_before,
+            "processing B's announce must never tick the blackhole drop counter"
+        );
+
+        // Meanwhile A's announce IS still dropped.
+        let (raw_a2, _) = make_announce_for(&id_a, "aspect_a", 0x0D);
+        feed_announce(&mut t, &raw_a2);
+        assert!(!t.storage.has_path(&dest_a));
+        assert_eq!(t.stats().drops_blackholed_announce, b_drops_before + 1);
+    }
+
+    /// Documentation + guard for the type we CANNOT match: a plain data packet
+    /// carries only a destination hash, not the announcing identity's public
+    /// key, so blackhole enforcement can never associate it with an identity.
+    /// Python matches blackhole exclusively inside Identity.validate_announce,
+    /// which only runs for announces; the data-packet inbound path has no
+    /// blackhole check. Enforcement for such a destination is indirect, via the
+    /// path-table removal above (no path -> not routable). This test confirms a
+    /// data packet to a blackholed identity's destination is NOT dropped as a
+    /// blackholed announce.
+    #[test]
+    fn data_packet_to_blackholed_dest_is_not_a_blackhole_drop() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+        // Learn the dest hash the data packet will target.
+        let (_raw, dest_hash) = make_announce_for(&identity, "victim", 0x01);
+
+        assert!(t.blackhole_identity(*identity.hash(), None, None));
+
+        let before = t.stats().drops_blackholed_announce;
+        let data_packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: DestinationType::Single,
+                packet_type: PacketType::Data,
+            },
+            hops: 1,
+            transport_id: None,
+            destination_hash: dest_hash,
+            context: PacketContext::None,
+            data: PacketData::Owned(alloc::vec![0xAA; 16]),
+        };
+        let mut buf = [0u8; 200];
+        let len = data_packet.pack(&mut buf).unwrap();
+        // Feed via the full inbound path so the type-dispatch is exercised.
+        let _ = t.process_incoming(NET_IFACE, &buf[..len]);
+
+        assert_eq!(
+            t.stats().drops_blackholed_announce,
+            before,
+            "a data packet can never be dropped as a blackholed announce"
+        );
+    }
+
+    /// The blackhole check runs BEFORE signature validation, exactly like
+    /// Python (Identity.py:574 precedes the validate at :579): an announce
+    /// from a blackholed identity is dropped as BlackholedAnnounce even when
+    /// its signature is invalid, and never costs an Ed25519 verify.
+    #[test]
+    fn blackhole_check_precedes_signature_validation() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+        let (mut raw, dest_hash) = make_announce_for(&identity, "victim", 0x01);
+
+        // Corrupt the trailing app_data byte: the signature covers app_data,
+        // so validation now fails, while the leading public key (and thus the
+        // computed identity hash) is untouched.
+        let last = raw.len() - 1;
+        raw[last] ^= 0xFF;
+
+        // Control: without a blackhole, the corrupted announce is a signature
+        // error, not a silent drop.
+        let packet = Packet::unpack(&raw).unwrap();
+        assert!(
+            t.handle_announce(packet, NET_IFACE, &raw, false).is_err(),
+            "corrupted announce must fail signature validation"
+        );
+
+        assert!(t.blackhole_identity(*identity.hash(), None, None));
+        let before = t.stats().drops_blackholed_announce;
+        let packet = Packet::unpack(&raw).unwrap();
+        assert!(
+            t.handle_announce(packet, NET_IFACE, &raw, false).is_ok(),
+            "blackholed announce is dropped before signature validation"
+        );
+        assert_eq!(t.stats().drops_blackholed_announce, before + 1);
+        assert!(!t.storage.has_path(&dest_hash));
+    }
+
+    /// The expiry sweep removes only entries whose `until` has passed
+    /// (Python jobs loop, Transport.py:973-994): permanent entries
+    /// (until=None) and not-yet-expired entries survive, and the previously
+    /// expired identity's announces are processed normally again.
+    #[test]
+    fn expired_blackhole_is_swept() {
+        let mut t = make_transport();
+        let id_expired = Identity::generate(&mut OsRng);
+        let id_permanent = Identity::generate(&mut OsRng);
+        let id_future = Identity::generate(&mut OsRng);
+
+        assert!(t.blackhole_identity(*id_expired.hash(), Some(1_000.0), None));
+        assert!(t.blackhole_identity(*id_permanent.hash(), None, None));
+        assert!(t.blackhole_identity(*id_future.hash(), Some(9_000.0), None));
+
+        // Wall clock 2000 s: only id_expired's until (1000 s) has passed.
+        assert_eq!(t.expire_blackholed_identities(2_000.0), 1);
+        assert!(!t.is_blackholed(id_expired.hash()));
+        assert!(t.is_blackholed(id_permanent.hash()));
+        assert!(t.is_blackholed(id_future.hash()));
+
+        // The formerly blackholed identity announces normally again.
+        let (raw, dest_hash) = make_announce_for(&id_expired, "victim", 0x01);
+        feed_announce(&mut t, &raw);
+        assert!(
+            t.storage.has_path(&dest_hash),
+            "after expiry the identity's announce must be processed again"
+        );
+    }
+
+    /// The sweep self-throttles to one pass per 60 s on the monotonic clock
+    /// (Python blackhole_check_interval, Transport.py:196): a second call
+    /// inside the window is a no-op and the entry keeps blocking until the
+    /// next eligible sweep.
+    #[test]
+    fn expiry_sweep_throttled_to_60s() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+
+        // First sweep (empty set) consumes the interval.
+        assert_eq!(t.expire_blackholed_identities(2_000.0), 0);
+
+        assert!(t.blackhole_identity(*identity.hash(), Some(1_000.0), None));
+        assert_eq!(
+            t.expire_blackholed_identities(2_000.0),
+            0,
+            "second sweep inside the 60 s window must be a no-op"
+        );
+        assert!(
+            t.is_blackholed(identity.hash()),
+            "an expired entry keeps blocking until the next sweep"
+        );
+
+        t.clock.advance(60_000);
+        assert_eq!(t.expire_blackholed_identities(2_000.0), 1);
+        assert!(!t.is_blackholed(identity.hash()));
     }
 }

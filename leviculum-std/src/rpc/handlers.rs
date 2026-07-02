@@ -50,19 +50,15 @@ pub(super) fn handle_request(
         RpcRequest::GetPacketSnr { .. } => pickle_none(),
         RpcRequest::GetPacketQ { .. } => pickle_none(),
 
-        // Blackhole set (Codeberg #67 Stage 1). Real membership-backed set on
+        // Blackhole set (Codeberg #67 + #88). Real membership-backed set on
         // Transport; matches the Python wire contract (Reticulum.py:1699-1742,
-        // Transport.py:3409-3448).
-        //
-        // DROP NOT IMPLEMENTED (Stage 2 follow-up): Python does not filter
-        // inbound packets per-hash in the live ingest path. Its blackhole
-        // "drop" is path-table management — excluding blackholed destinations
-        // when reloading the path table from storage (Transport.py:315-317) and
-        // remove_blackholed_paths() dropping matching path-table rows on
-        // blackhole (Transport.py:3423, 3494-3513). Both require mapping a
-        // destination hash back to its identity via Identity.recall, which our
-        // daemon does not yet expose in this path. Implementing the set + RPC
-        // only here is the faithful Stage 1 scope.
+        // Transport.py:3409-3448). Enforcement mirrors Python's three read
+        // sites: inbound announces from blackholed identities are dropped
+        // (Identity.py:574-577), matching path-table rows are removed on
+        // blackhole (Transport.py:3423, 3494-3513), and incoming links that
+        // identify as a blackholed identity are torn down (Link.py:1021-1023).
+        // Expired `until` entries are swept from the driver's timer branch
+        // (Transport.py:973-994).
         RpcRequest::GetBlackholedIdentities => build_blackholed_identities(core),
         RpcRequest::BlackholeIdentity {
             identity_hash,

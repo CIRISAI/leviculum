@@ -238,6 +238,9 @@ pub enum LinkCloseReason {
     /// The link was established and operational, but a message could not
     /// be delivered despite repeated retransmission attempts.
     ChannelExhausted,
+    /// The peer identified (LINKIDENTIFY) as a blackholed identity and the
+    /// link was torn down (Codeberg #88; Python Link.py:1021-1023).
+    Blackholed,
 }
 
 /// Peer's public keys from a link request

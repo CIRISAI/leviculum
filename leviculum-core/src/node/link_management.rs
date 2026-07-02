@@ -1484,8 +1484,40 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         }
 
-        // Store identity on link and emit event
         let identity_hash = *identity.hash();
+
+        // Codeberg #88: terminate incoming links from blackholed identities.
+        // Python runs this check right after the identify signature validates
+        // (Link.py:1021-1023) and calls teardown(), which sends a LINKCLOSE
+        // to the peer (Link.py:704). The identity is NOT stored and no
+        // identified event is emitted.
+        if self.transport.is_blackholed(&identity_hash) {
+            crate::tracing::debug!(
+                link = %HexShort(link_id.as_bytes()),
+                identity = %HexShort(&identity_hash),
+                "Terminating incoming link from blackholed identity"
+            );
+            if let Some(link) = self.links.get_mut(&link_id) {
+                let is_initiator = link.is_initiator();
+                let destination_hash = *link.destination_hash();
+                if let Ok(close_packet) = link.build_close_packet(&mut self.rng) {
+                    link.close();
+                    self.route_link_packet(&link_id, &close_packet);
+                } else {
+                    link.close();
+                }
+                self.remove_link(&link_id);
+                self.emit_link_closed(
+                    link_id,
+                    LinkCloseReason::Blackholed,
+                    is_initiator,
+                    destination_hash,
+                );
+            }
+            return;
+        }
+
+        // Store identity on link and emit event
         crate::tracing::debug!(
             link = %HexShort(link_id.as_bytes()),
             identity = %HexShort(&identity_hash),

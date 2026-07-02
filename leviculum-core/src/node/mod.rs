@@ -1567,6 +1567,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.blackholed_identities()
     }
 
+    /// Remove expired blackhole entries (Codeberg #88). `now_unix_secs` is
+    /// wall-clock unix time supplied by the driver; the sweep self-throttles
+    /// to one pass per 60 s like Python's jobs loop (Transport.py:973-994).
+    pub fn expire_blackholed_identities(&mut self, now_unix_secs: f64) -> usize {
+        self.transport.expire_blackholed_identities(now_unix_secs)
+    }
+
     /// Access the underlying transport (test-only, for clock manipulation)
     #[cfg(test)]
     pub(crate) fn transport(&self) -> &Transport<C, S> {
@@ -6889,6 +6896,91 @@ mod tests {
             .get_remote_identity(&pair.responder_link_id)
             .expect("responder should have remote identity");
         assert_eq!(remote.hash(), &expected_hash);
+    }
+
+    /// A peer that identifies (LINKIDENTIFY) as a blackholed identity gets its
+    /// link torn down: no LinkIdentified event, no stored remote identity, the
+    /// link is removed, and LinkClosed carries reason Blackholed (Codeberg #88;
+    /// Python Link.py:1021-1023).
+    #[test]
+    fn test_identify_link_blackholed_identity_tears_down() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let identity = Identity::generate(&mut OsRng);
+
+        assert!(pair
+            .responder
+            .blackhole_identity(*identity.hash(), None, None));
+
+        let output = pair
+            .initiator
+            .identify_link(&pair.initiator_link_id, &identity)
+            .expect("identify_link should succeed");
+        let identify_data = extract_broadcast_data(&output);
+
+        let output = pair.responder.handle_packet(InterfaceId(0), &identify_data);
+
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkIdentified { .. })),
+            "blackholed identity must not produce LinkIdentified"
+        );
+        let closed_reason = output
+            .events
+            .iter()
+            .find_map(|e| match e {
+                NodeEvent::LinkClosed { reason, .. } => Some(*reason),
+                _ => None,
+            })
+            .expect("responder should emit LinkClosed for blackholed identify");
+        assert_eq!(closed_reason, crate::link::LinkCloseReason::Blackholed);
+        assert!(
+            pair.responder.link(&pair.responder_link_id).is_none(),
+            "the link must be removed on the responder"
+        );
+    }
+
+    /// NEGATIVE guard: while some OTHER identity is blackholed, a
+    /// non-blackholed peer identifies normally and its link stays up.
+    #[test]
+    fn test_identify_link_unrelated_blackhole_does_not_tear_down() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let identity = Identity::generate(&mut OsRng);
+        let other = Identity::generate(&mut OsRng);
+
+        assert!(pair.responder.blackhole_identity(*other.hash(), None, None));
+
+        let output = pair
+            .initiator
+            .identify_link(&pair.initiator_link_id, &identity)
+            .expect("identify_link should succeed");
+        let identify_data = extract_broadcast_data(&output);
+
+        let output = pair.responder.handle_packet(InterfaceId(0), &identify_data);
+
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkIdentified { .. })),
+            "non-blackholed identity must identify normally"
+        );
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::LinkClosed { .. })),
+            "an unrelated blackhole must not close the link"
+        );
+        assert!(
+            pair.responder.link(&pair.responder_link_id).is_some(),
+            "the link must stay up"
+        );
     }
 
     #[test]

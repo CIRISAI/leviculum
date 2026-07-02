@@ -2118,6 +2118,15 @@ async fn run_event_loop(
                 let (output, now_ms) = {
                     let mut core = inner.lock().unwrap();
                     let output = core.handle_timeout();
+                    // Blackhole `until` timestamps are unix wall-clock values
+                    // from the Python RPC, so the expiry sweep needs wall time
+                    // injected here; the sweep self-throttles to one pass per
+                    // 60 s (Python Transport.py:973-994).
+                    let unix_now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    core.expire_blackholed_identities(unix_now);
                     let now_ms = core.now_ms();
                     (output, now_ms)
                 };
