@@ -388,6 +388,36 @@ class TestDaemon:
             valid = bool(identity.validate(signature, message))
             return {"result": {"valid": valid}}
 
+        elif method == "group_encrypt":
+            # Encrypt plaintext with a GROUP destination holding a shared key.
+            # Exercises the real Python GROUP branch: Destination.encrypt ->
+            # self.prv.encrypt (RNS Token, AES-256-CBC). key/plaintext are hex.
+            key = bytes.fromhex(params.get("key", ""))
+            plaintext = bytes.fromhex(params.get("plaintext", ""))
+            dest = RNS.Destination(
+                None, RNS.Destination.IN, RNS.Destination.GROUP, "levgroup", "interop"
+            )
+            dest.load_private_key(key)
+            ciphertext = dest.encrypt(plaintext)
+            return {"result": {"ciphertext": ciphertext.hex()}}
+
+        elif method == "group_decrypt":
+            # Decrypt a GROUP token with a shared key via a Python GROUP
+            # destination. key/ciphertext are hex. Returns plaintext hex, or
+            # null if decryption failed (bad HMAC / wrong key).
+            key = bytes.fromhex(params.get("key", ""))
+            ciphertext = bytes.fromhex(params.get("ciphertext", ""))
+            dest = RNS.Destination(
+                None, RNS.Destination.IN, RNS.Destination.GROUP, "levgroup", "interop"
+            )
+            dest.load_private_key(key)
+            plaintext = dest.decrypt(ciphertext)
+            return {
+                "result": {
+                    "plaintext": plaintext.hex() if plaintext is not None else None
+                }
+            }
+
         elif method == "register_echo_request_handler":
             # Register an echo request handler on a destination
             dest_hash = params.get("dest_hash")

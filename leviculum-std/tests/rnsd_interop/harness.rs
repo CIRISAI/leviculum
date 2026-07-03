@@ -1537,6 +1537,67 @@ impl TestDaemon {
         Ok(strategy)
     }
 
+    /// Encrypt plaintext through a Python GROUP destination with a shared key.
+    ///
+    /// Drives the real Python GROUP branch (`Destination.encrypt` over an
+    /// `RNS.Cryptography.Token`). `key` is the 64-byte shared symmetric key.
+    /// Returns the RNS Token wire bytes.
+    pub async fn group_encrypt(
+        &self,
+        key: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, HarnessError> {
+        let result = self
+            .query(
+                "group_encrypt",
+                serde_json::json!({
+                    "key": hex::encode(key),
+                    "plaintext": hex::encode(plaintext),
+                }),
+            )
+            .await?;
+
+        let ct_hex = result
+            .get("ciphertext")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HarnessError::ParseError("missing ciphertext".into()))?;
+        hex::decode(ct_hex).map_err(|e| HarnessError::ParseError(e.to_string()))
+    }
+
+    /// Decrypt an RNS Token through a Python GROUP destination with a shared key.
+    ///
+    /// Drives the real Python GROUP branch (`Destination.decrypt`). `key` is the
+    /// 64-byte shared symmetric key. Returns the recovered plaintext, or a
+    /// `CommandFailed` error if Python could not decrypt (bad HMAC / wrong key).
+    pub async fn group_decrypt(
+        &self,
+        key: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HarnessError> {
+        let result = self
+            .query(
+                "group_decrypt",
+                serde_json::json!({
+                    "key": hex::encode(key),
+                    "ciphertext": hex::encode(ciphertext),
+                }),
+            )
+            .await?;
+
+        let pt = result
+            .get("plaintext")
+            .ok_or_else(|| HarnessError::ParseError("missing plaintext".into()))?;
+        if pt.is_null() {
+            return Err(HarnessError::CommandFailed(
+                "Python GROUP destination could not decrypt".into(),
+            ));
+        }
+        let pt_hex = pt
+            .as_str()
+            .ok_or_else(|| HarnessError::ParseError("plaintext not a string".into()))?;
+        hex::decode(pt_hex).map_err(|e| HarnessError::ParseError(e.to_string()))
+    }
+
     /// Get detailed announce table entries from the daemon.
     ///
     /// Returns the full announce_table with rebroadcast info (timestamp,

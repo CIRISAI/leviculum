@@ -16,8 +16,10 @@
 //! See [`Destination::enable_ratchets`] for more details.
 
 use crate::announce::{build_announce_payload, AnnounceError};
-use crate::constants::{IDENTITY_HASHBYTES, NAME_HASHBYTES, RATCHET_SIZE, TRUNCATED_HASHBYTES};
-use crate::crypto::{sha256, truncated_hash};
+use crate::constants::{
+    IDENTITY_HASHBYTES, NAME_HASHBYTES, RATCHET_SIZE, TOKEN_KEY_SIZE, TRUNCATED_HASHBYTES,
+};
+use crate::crypto::{decrypt_token, encrypt_token, sha256, truncated_hash};
 use crate::identity::{Identity, IdentityError};
 use crate::packet::{
     HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
@@ -25,6 +27,7 @@ use crate::packet::{
 use crate::ratchet::{Ratchet, DEFAULT_INTERVAL_MS, DEFAULT_RETAINED_RATCHETS};
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use rand_core::CryptoRngCore;
 
@@ -49,6 +52,12 @@ pub enum DestinationError {
     InvalidRatchetData,
     /// Ed25519 signature verification failed
     InvalidSignature,
+    /// Operation is only valid on a GROUP destination
+    NotGroupType,
+    /// GROUP destination holds no symmetric key (call create/load first)
+    NoGroupKey,
+    /// Supplied GROUP key has an unsupported length (must be 64 bytes)
+    InvalidGroupKeyLength,
 }
 
 impl core::fmt::Display for DestinationError {
@@ -80,6 +89,15 @@ impl core::fmt::Display for DestinationError {
             }
             DestinationError::InvalidSignature => {
                 write!(f, "Ed25519 signature verification failed")
+            }
+            DestinationError::NotGroupType => {
+                write!(f, "Operation is only valid on a GROUP destination")
+            }
+            DestinationError::NoGroupKey => {
+                write!(f, "GROUP destination holds no symmetric key")
+            }
+            DestinationError::InvalidGroupKeyLength => {
+                write!(f, "GROUP key must be 64 bytes")
             }
         }
     }
@@ -267,6 +285,13 @@ pub struct Destination {
     ratchets_enabled: bool,
     /// If true, ratchet keys have changed since last persist
     ratchets_dirty: bool,
+
+    /// Symmetric key for GROUP destinations (64 bytes: 32 signing + 32 AES).
+    ///
+    /// Mirrors Python `Destination.prv_bytes` for GROUP type. `None` until
+    /// `create_group_key` or `load_group_key` is called. Only meaningful for
+    /// [`DestinationType::Group`].
+    group_key: Option<[u8; TOKEN_KEY_SIZE]>,
 }
 
 impl Destination {
@@ -329,6 +354,7 @@ impl Destination {
             enforce_ratchets: false,
             ratchets_enabled: false,
             ratchets_dirty: false,
+            group_key: None,
         })
     }
 
@@ -381,6 +407,61 @@ impl Destination {
     ///   - `ProofStrategy::All` - Automatically prove every packet
     pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
         self.proof_strategy = strategy;
+    }
+
+    // GROUP symmetric key management
+    /// Generate a new symmetric key for this GROUP destination.
+    ///
+    /// Mirrors Python `Destination.create_keys()` for the GROUP branch, which
+    /// calls `Token.generate_key()` with its default mode (`AES_256_CBC`),
+    /// producing 64 random bytes: 32-byte HMAC-SHA256 signing key followed by a
+    /// 32-byte AES-256 key. A GROUP destination must hold a key before it can
+    /// [`encrypt`](Self::encrypt)/[`decrypt`](Self::decrypt).
+    ///
+    /// # Errors
+    /// * `NotGroupType` - the destination is not a GROUP destination.
+    pub fn create_group_key(
+        &mut self,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), DestinationError> {
+        if self.dest_type != DestinationType::Group {
+            return Err(DestinationError::NotGroupType);
+        }
+        let mut key = [0u8; TOKEN_KEY_SIZE];
+        rng.fill_bytes(&mut key);
+        self.group_key = Some(key);
+        Ok(())
+    }
+
+    /// Load a shared symmetric key into this GROUP destination.
+    ///
+    /// Mirrors Python `Destination.load_private_key(key)` for the GROUP branch.
+    /// The key must be exactly 64 bytes (the `AES_256_CBC` token key size that
+    /// `create_keys` generates): the first 32 bytes are the HMAC signing key and
+    /// the last 32 bytes are the AES-256 key.
+    ///
+    /// # Errors
+    /// * `NotGroupType` - the destination is not a GROUP destination.
+    /// * `InvalidGroupKeyLength` - the key is not 64 bytes.
+    pub fn load_group_key(&mut self, key: &[u8]) -> Result<(), DestinationError> {
+        if self.dest_type != DestinationType::Group {
+            return Err(DestinationError::NotGroupType);
+        }
+        if key.len() != TOKEN_KEY_SIZE {
+            return Err(DestinationError::InvalidGroupKeyLength);
+        }
+        let mut stored = [0u8; TOKEN_KEY_SIZE];
+        stored.copy_from_slice(key);
+        self.group_key = Some(stored);
+        Ok(())
+    }
+
+    /// Return the symmetric key held by this GROUP destination.
+    ///
+    /// Mirrors Python `Destination.get_private_key()` for the GROUP branch.
+    /// Returns `None` if no key has been created or loaded.
+    pub fn group_key(&self) -> Option<&[u8; TOKEN_KEY_SIZE]> {
+        self.group_key.as_ref()
     }
 
     // Ratchet Management
@@ -640,6 +721,11 @@ impl Destination {
     /// * `DecryptionFailed` - No ratchet or identity key could decrypt
     /// * `RatchetRequired` - Ratchets enforced but decrypted with identity key
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, DestinationError> {
+        // GROUP destinations decrypt with the shared symmetric RNS Token.
+        if self.dest_type == DestinationType::Group {
+            return self.group_decrypt(ciphertext);
+        }
+
         let identity = self.identity.as_ref().ok_or(DestinationError::NoIdentity)?;
 
         // Always try with identity fallback to know if ratchet was used
@@ -679,9 +765,57 @@ impl Destination {
         ratchet_public: Option<&[u8; RATCHET_SIZE]>,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<u8>, DestinationError> {
+        // GROUP destinations encrypt with the shared symmetric RNS Token. The
+        // ratchet key is not used for GROUP; the random IV comes from `rng`.
+        if self.dest_type == DestinationType::Group {
+            return self.group_encrypt(plaintext, rng);
+        }
+
         let identity = self.identity.as_ref().ok_or(DestinationError::NoIdentity)?;
 
         Ok(identity.encrypt_for_destination(plaintext, ratchet_public, rng)?)
+    }
+
+    /// Encrypt with the GROUP shared key, producing RNS Token wire bytes.
+    ///
+    /// Layout (Python `RNS.Cryptography.Token`): `IV(16) || AES-256-CBC(PKCS7)
+    /// || HMAC-SHA256(32)`, HMAC computed over `IV || ciphertext`.
+    fn group_encrypt(
+        &self,
+        plaintext: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, DestinationError> {
+        let key = self
+            .group_key
+            .as_ref()
+            .ok_or(DestinationError::NoGroupKey)?;
+
+        let mut iv = [0u8; 16];
+        rng.fill_bytes(&mut iv);
+
+        // token length = IV(16) + padded ciphertext + HMAC(32)
+        let padded_len = ((plaintext.len() / 16) + 1) * 16;
+        let mut out = vec![0u8; 16 + padded_len + 32];
+
+        let n = encrypt_token(key, &iv, plaintext, &mut out)
+            .map_err(|_| DestinationError::EncryptionFailed)?;
+        out.truncate(n);
+        Ok(out)
+    }
+
+    /// Decrypt RNS Token wire bytes with the GROUP shared key.
+    fn group_decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, DestinationError> {
+        let key = self
+            .group_key
+            .as_ref()
+            .ok_or(DestinationError::NoGroupKey)?;
+
+        // Plaintext is never longer than the ciphertext body.
+        let mut out = vec![0u8; ciphertext.len()];
+        let n = decrypt_token(key, ciphertext, &mut out)
+            .map_err(|_| DestinationError::DecryptionFailed)?;
+        out.truncate(n);
+        Ok(out)
     }
 
     /// Compute the name hash from app_name and aspects.
@@ -1998,5 +2132,184 @@ mod tests {
             Destination::new(None, Direction::In, DestinationType::Plain, "plain", &[]).unwrap();
 
         assert!(dest.serialize_ratchets_signed().is_none());
+    }
+
+    // GROUP shared-key crypto tests
+    fn group_dest() -> Destination {
+        // GROUP IN destinations auto-scope like Python, but for crypto the
+        // identity is irrelevant. We attach one so the address is well-formed.
+        let identity = Identity::generate(&mut OsRng);
+        Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Group,
+            "levgroup",
+            &["interop"],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_group_create_key_size() {
+        let mut dest = group_dest();
+        assert!(dest.group_key().is_none());
+        dest.create_group_key(&mut OsRng).unwrap();
+        // Matches Python create_keys -> Token.generate_key() default (AES-256): 64 bytes.
+        assert_eq!(dest.group_key().unwrap().len(), TOKEN_KEY_SIZE);
+        assert_eq!(TOKEN_KEY_SIZE, 64);
+    }
+
+    #[test]
+    fn test_group_get_and_load_key() {
+        let mut src = group_dest();
+        src.create_group_key(&mut OsRng).unwrap();
+        let key = *src.group_key().unwrap();
+
+        let mut dst = group_dest();
+        dst.load_group_key(&key).unwrap();
+        assert_eq!(dst.group_key().unwrap(), &key);
+    }
+
+    #[test]
+    fn test_group_roundtrip() {
+        let mut sender = group_dest();
+        sender.create_group_key(&mut OsRng).unwrap();
+        let key = *sender.group_key().unwrap();
+
+        let mut receiver = group_dest();
+        receiver.load_group_key(&key).unwrap();
+
+        let plaintext = b"group broadcast message";
+        let ciphertext = sender.encrypt(plaintext, None, &mut OsRng).unwrap();
+        // Ciphertext must not contain the plaintext.
+        assert!(!ciphertext.windows(plaintext.len()).any(|w| w == plaintext));
+
+        let decrypted = receiver.decrypt(&ciphertext).unwrap();
+        assert_eq!(&decrypted[..], plaintext);
+    }
+
+    #[test]
+    fn test_group_empty_plaintext_roundtrip() {
+        let mut dest = group_dest();
+        dest.create_group_key(&mut OsRng).unwrap();
+        let ct = dest.encrypt(b"", None, &mut OsRng).unwrap();
+        let pt = dest.decrypt(&ct).unwrap();
+        assert!(pt.is_empty());
+    }
+
+    #[test]
+    fn test_group_wrong_key_fails() {
+        let mut sender = group_dest();
+        sender.create_group_key(&mut OsRng).unwrap();
+        let ciphertext = sender.encrypt(b"secret", None, &mut OsRng).unwrap();
+
+        let mut wrong = group_dest();
+        wrong.create_group_key(&mut OsRng).unwrap();
+        let result = wrong.decrypt(&ciphertext);
+        assert_eq!(result, Err(DestinationError::DecryptionFailed));
+    }
+
+    #[test]
+    fn test_group_encrypt_without_key_fails() {
+        let dest = group_dest();
+        let result = dest.encrypt(b"x", None, &mut OsRng);
+        assert_eq!(result, Err(DestinationError::NoGroupKey));
+    }
+
+    #[test]
+    fn test_group_key_ops_reject_non_group() {
+        let identity = Identity::generate(&mut OsRng);
+        let mut single = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["s"],
+        )
+        .unwrap();
+        assert_eq!(
+            single.create_group_key(&mut OsRng),
+            Err(DestinationError::NotGroupType)
+        );
+        assert_eq!(
+            single.load_group_key(&[0u8; TOKEN_KEY_SIZE]),
+            Err(DestinationError::NotGroupType)
+        );
+    }
+
+    #[test]
+    fn test_group_load_key_wrong_length() {
+        let mut dest = group_dest();
+        assert_eq!(
+            dest.load_group_key(&[0u8; 32]),
+            Err(DestinationError::InvalidGroupKeyLength)
+        );
+    }
+
+    /// Known-answer test pinning the GROUP wire format to Python-RNS.
+    ///
+    /// Source: vendored Python-RNS `RNS.Destination` GROUP branch
+    /// (`dest.load_private_key(key)`, `dest.encrypt`/`dest.decrypt`), which
+    /// routes through `RNS.Cryptography.Token` in `AES_256_CBC` mode. Captured
+    /// with `os.urandom` patched to emit the fixed IV below so the encrypt is
+    /// deterministic.
+    ///
+    /// Fixed 64-byte key (0x00..0x3f), fixed 16-byte IV (0x00..0x0f),
+    /// plaintext b"Reticulum GROUP KAT" (19 bytes). Reference token is 80 bytes:
+    /// IV(16) || AES-256-CBC ciphertext(32) || HMAC-SHA256(32).
+    ///
+    /// Asserts both directions:
+    ///   - our decrypt(reference token) == plaintext, and
+    ///   - our encrypt(key, iv, plaintext) == reference token, byte-for-byte.
+    #[test]
+    fn kat_group_python_rns_vector() {
+        let key: [u8; 64] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+            0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+        ];
+        let iv: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        // b"Reticulum GROUP KAT"
+        let plaintext: [u8; 19] = [
+            0x52, 0x65, 0x74, 0x69, 0x63, 0x75, 0x6c, 0x75, 0x6d, 0x20, 0x47, 0x52, 0x4f, 0x55,
+            0x50, 0x20, 0x4b, 0x41, 0x54,
+        ];
+        // Reference token captured from Python-RNS GROUP Destination.encrypt.
+        let reference_token: [u8; 80] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x02, 0xd6, 0x54, 0x59, 0x85, 0x2c, 0xf1, 0xef, 0xe0, 0xed, 0xcf, 0xd8,
+            0x31, 0xf6, 0x85, 0xa6, 0x10, 0x0d, 0x7a, 0x4c, 0x4c, 0x5c, 0x8c, 0x87, 0x77, 0x6a,
+            0xee, 0xd6, 0x7c, 0x3b, 0x2e, 0x9a, 0x7d, 0xbe, 0xa6, 0x7c, 0x10, 0x09, 0xb9, 0xb6,
+            0xbf, 0x76, 0x36, 0x1d, 0x9b, 0x4f, 0x6f, 0x3e, 0xc6, 0xf2, 0xcf, 0x21, 0x41, 0xa9,
+            0xe9, 0x68, 0xa6, 0x21, 0xaa, 0x8f, 0xa1, 0xdc, 0xe6, 0xfa,
+        ];
+
+        // Our decrypt of the fixed Python-RNS GROUP token recovers the plaintext.
+        let mut dest = group_dest();
+        dest.load_group_key(&key).unwrap();
+        let decrypted = dest.decrypt(&reference_token).unwrap();
+        assert_eq!(
+            &decrypted[..],
+            &plaintext,
+            "our GROUP decrypt of the Python-RNS token must recover the plaintext"
+        );
+
+        // Our encrypt with the same key + IV reproduces the exact token bytes.
+        // (group_encrypt draws the IV from rng, so exercise the token layer with
+        // the pinned IV directly, matching the same code path.)
+        let padded_len = ((plaintext.len() / 16) + 1) * 16;
+        let mut tok = vec![0u8; 16 + padded_len + 32];
+        let n = crate::crypto::encrypt_token(&key, &iv, &plaintext, &mut tok).unwrap();
+        tok.truncate(n);
+        assert_eq!(
+            &tok[..],
+            &reference_token,
+            "our GROUP token bytes must match the Python-RNS reference token"
+        );
     }
 }
