@@ -843,6 +843,26 @@ fn scrub_client_sample(stats: &mut Value, client: StatusClient, stack: Stack) {
                 );
                 iface["clients"] = Value::from(0);
             }
+            // burst_activated / pr_burst_activated are absolute wall-clock
+            // epoch timestamps (Interface.py ic_burst_activated /
+            // ic_pr_burst_activated; rnstatus renders `now - activated` as the
+            // burst duration, rnstatus.py:566). The daemon derives them from a
+            // fresh SystemTime::now() epoch base on every query, so two
+            // sequential samples of the same live daemon differ in the low
+            // digits (e.g. 1783071384.7079797 vs 1783071384.70798) and the
+            // exact-float structural compare flakes. Assert the KEY is emitted
+            // by both stacks (the parity guarantee), then normalise the
+            // volatile VALUE to a fixed sentinel. Mirrors `clients` above; an
+            // idle interface already reads the int 0, which this leaves intact.
+            for key in ["burst_activated", "pr_burst_activated"] {
+                assert!(
+                    iface.get(key).is_some(),
+                    "{} on {}: interface -j must emit `{key}`",
+                    client.label(),
+                    stack.label()
+                );
+                iface[key] = Value::from(0);
+            }
         }
     }
 }
