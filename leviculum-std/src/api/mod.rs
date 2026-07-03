@@ -292,6 +292,14 @@ impl Node {
         self.inner.destination_ratchet_public(dest_hash)
     }
 
+    /// The KNOWN REMOTE ratchet public key for a destination, learned from a
+    /// ratcheted announce. This is what the send path uses to encrypt to a
+    /// remote peer; unlike `destination_ratchet_public` it is not restricted to
+    /// local destinations.
+    pub fn known_remote_ratchet(&self, dest_hash: &DestinationHash) -> Option<[u8; 32]> {
+        self.inner.known_remote_ratchet(dest_hash)
+    }
+
     /// A read-only snapshot of the transport counters (packets sent, received,
     /// forwarded, announces processed, packets dropped).
     pub fn transport_stats(&self) -> leviculum_core::transport::TransportStats {

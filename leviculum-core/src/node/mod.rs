@@ -1510,6 +1510,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .and_then(|d| d.current_ratchet_public())
     }
 
+    /// Returns the KNOWN REMOTE ratchet public key for a destination, learned
+    /// from a ratcheted announce. Read-only view over the transport's known-ratchet
+    /// store; unlike `destination_ratchet_public` (OWN destinations only), this is
+    /// what the send path uses to encrypt to a remote peer.
+    pub fn known_remote_ratchet(&self, dest_hash: &DestinationHash) -> Option<[u8; RATCHET_SIZE]> {
+        self.transport.get_ratchet(dest_hash)
+    }
+
     /// Get the number of known paths
     pub fn path_count(&self) -> usize {
         self.transport.path_count()

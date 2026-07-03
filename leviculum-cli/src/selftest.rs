@@ -1164,9 +1164,52 @@ pub async fn run_selftest(
     if run_ratchet_any {
         let ratchet_start = Instant::now();
 
-        // Wait for ratchet key propagation via announce
-        println!("[selftest] Ratchet: waiting 2s for ratchet key propagation...");
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Precondition: a ratchet-enforced receiver REJECTS non-ratchet packets, so a
+        // sender that never learned the peer's KNOWN REMOTE ratchet (from a ratcheted
+        // announce) drops to 0%. The old blind 2s wait raced this. Poll the actual
+        // send-path lookup until BOTH directions have the peer's ratchet, re-announcing
+        // the owning peer whenever a side lags.
+        let ratchet_ready_timeout = std::time::Duration::from_secs(30);
+        let poll_start = Instant::now();
+        let mut poll_iter = 0u32;
+        loop {
+            let a_has_b = node_a.known_remote_ratchet(&dest_hash_b).is_some();
+            let b_has_a = node_b.known_remote_ratchet(&dest_hash_a).is_some();
+            if a_has_b && b_has_a {
+                break;
+            }
+            if poll_start.elapsed() >= ratchet_ready_timeout {
+                return Err(format!(
+                    "Ratchet precondition timeout: known-remote-ratchet not learned after {}s \
+                     (A_has_B={a_has_b} B_has_A={b_has_a})",
+                    ratchet_ready_timeout.as_secs()
+                )
+                .into());
+            }
+            // Every ~4s (8 × 500ms), re-announce the peer whose ratchet is still missing.
+            // A missing B's ratchet -> B re-announces its own destination, and vice versa.
+            if poll_iter > 0 && poll_iter.is_multiple_of(8) {
+                if !a_has_b {
+                    node_b
+                        .announce_destination(&dest_hash_b, Some(b"selftest-b"))
+                        .await
+                        .map_err(|e| format!("ratchet re-announce B: {e}"))?;
+                }
+                if !b_has_a {
+                    node_a
+                        .announce_destination(&dest_hash_a, Some(b"selftest-a"))
+                        .await
+                        .map_err(|e| format!("ratchet re-announce A: {e}"))?;
+                }
+            }
+            poll_iter += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        println!(
+            "[selftest] RATCHET-READY: A_has_B={} B_has_A={}",
+            node_a.known_remote_ratchet(&dest_hash_b).is_some(),
+            node_b.known_remote_ratchet(&dest_hash_a).is_some(),
+        );
 
         let ep_a = node_a.packet_sender(&dest_hash_b);
         let ep_b = node_b.packet_sender(&dest_hash_a);

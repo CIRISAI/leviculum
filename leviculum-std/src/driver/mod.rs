@@ -1651,6 +1651,15 @@ impl ReticulumNode {
             .destination_ratchet_public(dest_hash)
     }
 
+    /// Returns the KNOWN REMOTE ratchet public key for a destination, learned
+    /// from a ratcheted announce (read-only view over the transport store).
+    pub fn known_remote_ratchet(
+        &self,
+        dest_hash: &leviculum_core::DestinationHash,
+    ) -> Option<[u8; 32]> {
+        self.inner.lock().unwrap().known_remote_ratchet(dest_hash)
+    }
+
     /// Get the number of known paths
     pub fn path_count(&self) -> usize {
         self.inner.lock().unwrap().path_count()
