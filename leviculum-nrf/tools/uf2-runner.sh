@@ -36,6 +36,23 @@ BIN_FILE="$ELF.bin"
 UF2_FILE="$ELF.uf2"
 UF2_TIMEOUT="${UF2_TIMEOUT:-30}"
 
+# Reliability knobs (see flash_one_device). A UF2 copy returning 0 does NOT
+# prove the flash took — the bootloader flashes + reboots asynchronously — so we
+# verify the application re-enumerated and retry a bounded number of times.
+#   FLASH_ATTEMPTS      number of automatic detect→copy→verify cycles per board
+#   UF2_VERIFY_TIMEOUT  seconds to wait for the app PID to reappear after a copy
+FLASH_ATTEMPTS="${LEVICULUM_FLASH_ATTEMPTS:-3}"
+UF2_VERIFY_TIMEOUT="${LEVICULUM_UF2_VERIFY_TIMEOUT:-20}"
+
+# Non-interactive mode: no human is present to satisfy a manual double-tap
+# prompt (the automated VFIO tier3 run). Detected via an explicit flag the
+# harness can set, or the absence of a controlling TTY on stdin. In this mode
+# flash_one_device retries then FAILS instead of blocking on a prompt.
+noninteractive() {
+    [ -n "${LEVICULUM_NONINTERACTIVE:-}" ] && return 0
+    [ ! -t 0 ]
+}
+
 FLASH_BASE=0x27000
 FAMILY_ID=0xADA52840
 
@@ -211,29 +228,17 @@ find_all_t114_transport_ports() {
     echo -n "$out" | sort | awk '{print $2}'
 }
 
-# --- Helper: flash one UF2 to whichever bootloader drive appears ------------
-# Args: $1 = hint string (port path or "(unknown device)") for log/prompt
-# Returns:
-#   0 = UF2 successfully copied to the drive
-#   1 = UF2 drive never appeared within UF2_TIMEOUT (manual prompt was
-#       displayed but ignored, or no T114 in bootloader mode)
-#   2 = drive appeared but cp failed (write-protect, FS error, mid-flight unplug)
-# The helper prints a precise per-failure diagnostic line BEFORE returning
-# non-zero, so the caller's summary need only list the port without
-# re-explaining the cause.
-
-flash_one_uf2() {
-    local hint="${1:-(unknown device)}"
-    local drive
-    # Track which mismatched drives we have already warned about so the log
-    # does not flood while we keep polling for the right one.
-    local warned_about=""
-
-    # Inline helper: poll once, returning a drive only if it matches the
-    # configured Board-ID. Mismatched drives (e.g. a T114 bootloader while we
-    # are flashing a RAK4631) are skipped with a one-shot warning.
-    poll_one() {
-        local d
+# --- Helper: poll for OUR board's UF2 bootloader drive ----------------------
+# Polls up to $2 ticks (0.5 s each; 0 = check once) for a UF2 drive whose
+# INFO_UF2.TXT Board-ID matches $BOOTLOADER_BOARD_ID. Mismatched drives (a
+# sibling board of a different kind sitting in DFU) are skipped with a one-shot
+# warning so the log does not flood. Prints the matching drive path on stdout
+# (empty + non-zero if none appeared within the budget).
+# Args: $1 = hint (for log lines), $2 = max ticks
+poll_matching_drive() {
+    local hint="$1" max_ticks="$2"
+    local warned_about="" tick=0 d
+    while : ; do
         d="$(find_uf2_drive)"
         if [ -n "$d" ] && ! uf2_drive_matches_board "$d"; then
             case "$warned_about" in
@@ -250,88 +255,182 @@ flash_one_uf2() {
             esac
             d=""
         fi
-        echo "$d"
-    }
-
-    # Quick silent grace period: if 1200-baud-touch worked the firmware will
-    # have rebooted into the UF2 bootloader within ~1-2 s. Polling silently
-    # for QUIET_GRACE seconds before showing the manual-tap prompt avoids
-    # misleading the user into thinking they need to tap when touch already
-    # succeeded.
-    local QUIET_GRACE=4
-    local quiet_ticks=$((QUIET_GRACE * 2))   # 0.5s per tick
-    drive="$(poll_one)"
-    local tick=0
-    while [ -z "$drive" ] && [ "$tick" -lt "$quiet_ticks" ]; do
+        if [ -n "$d" ]; then
+            echo "$d"
+            return 0
+        fi
+        [ "$tick" -ge "$max_ticks" ] && break
         sleep 0.5
         tick=$((tick + 1))
-        drive="$(poll_one)"
     done
+    echo ""
+    return 1
+}
 
-    if [ -z "$drive" ]; then
-        # Touch didn't bring up a drive in the grace window — show the prompt
-        # and continue polling for the remaining UF2_TIMEOUT.
-        echo "==> $hint: looking for UF2 drive..."
-        echo "    ┌──────────────────────────────────────────────────┐"
-        printf  "    │  Double-tap RESET on %-6s to enter bootloader. │\n" "$BOARD_NAME"
-        echo "    └──────────────────────────────────────────────────┘"
-        echo "==> Waiting for UF2 drive (${UF2_TIMEOUT}s)..."
-
-        local remaining_ticks=$(( (UF2_TIMEOUT - QUIET_GRACE) * 2 ))
-        [ "$remaining_ticks" -lt 0 ] && remaining_ticks=0
-        tick=0
-        while [ "$tick" -lt "$remaining_ticks" ]; do
-            sleep 0.5
-            tick=$((tick + 1))
-            drive="$(poll_one)"
-            if [ -n "$drive" ]; then
-                break
-            fi
-        done
-
-        if [ -z "$drive" ]; then
-            echo "[uf2-runner] $hint: UF2 drive never appeared (timeout after ${UF2_TIMEOUT}s manual prompt)" >&2
-            return 1
-        fi
-    fi
-
-    local drive_name
-    drive_name="$(basename "$drive")"
-    echo "==> $hint: found UF2 drive at $drive ($drive_name)"
-
-    # UF2 bootloaders intercept FAT filesystem writes and check each 512-byte
-    # sector for UF2 magic. Write the file via cp (same approach as uf2conv.py
-    # and the Heltec Arduino toolchain). sync may return I/O errors because the
-    # bootloader resets after processing the last UF2 block — this is normal
-    # and expected.
+# --- Helper: copy the UF2 image onto a (validated) bootloader drive ---------
+# UF2 bootloaders intercept FAT writes and scan each 512-byte sector for UF2
+# magic. Write via cp (same approach as uf2conv.py / the Heltec toolchain).
+# sync may return I/O errors because the bootloader resets after the final UF2
+# block — normal and tolerated. Returns 0 on a successful copy, 2 on a write
+# failure (write-protect, FS error, mid-flight unplug).
+# Args: $1 = drive path, $2 = hint
+copy_uf2_to_drive() {
+    local drive="$1" hint="$2"
     local uf2_size uf2_blocks
     uf2_size="$(stat -c%s "$UF2_FILE")"
     uf2_blocks=$((uf2_size / 512))
-    echo "==> $hint: deploying firmware.uf2 (${uf2_size} bytes, ${uf2_blocks} blocks)"
+    echo "==> $hint: deploying firmware.uf2 (${uf2_size} bytes, ${uf2_blocks} blocks) to $drive"
 
     if [ -w "$drive" ]; then
         if ! cp "$UF2_FILE" "$drive/NEW.UF2" 2>/dev/null; then
             echo "[uf2-runner] $hint: UF2 drive mounted at $drive but cp failed" >&2
-            # Best-effort cleanup if we mounted to /mnt
-            [ "$drive" = "/mnt" ] && sudo -n umount /mnt 2>/dev/null || true
+            if [ "$drive" = "/mnt" ]; then sudo -n umount /mnt 2>/dev/null || true; fi
             return 2
         fi
         sync 2>/dev/null || true
     else
         if ! sudo cp "$UF2_FILE" "$drive/NEW.UF2" 2>/dev/null; then
             echo "[uf2-runner] $hint: UF2 drive mounted at $drive but sudo cp failed" >&2
-            [ "$drive" = "/mnt" ] && sudo -n umount /mnt 2>/dev/null || true
+            if [ "$drive" = "/mnt" ]; then sudo -n umount /mnt 2>/dev/null || true; fi
             return 2
         fi
         sudo sync 2>/dev/null || true
     fi
 
     # Best-effort cleanup if we mounted to /mnt
-    if [ "$drive" = "/mnt" ]; then
-        sudo -n umount /mnt 2>/dev/null || true
+    if [ "$drive" = "/mnt" ]; then sudo -n umount /mnt 2>/dev/null || true; fi
+    return 0
+}
+
+# --- Helper: is this board's APPLICATION firmware back on the bus? ----------
+# The Adafruit/Nordic UF2 bootloader enumerates a DIFFERENT VID/PID than the
+# application, so an app-PID match ($BOARD_VID:$BOARD_PID) is only ever true
+# once the freshly-flashed firmware has booted and re-enumerated — never while
+# the board sits in the bootloader. When the pre-flash USB serial is known we
+# match it precisely via the transport CDC port (interface 02), so a sibling
+# board of the same PID already in app mode is never mistaken for this one;
+# otherwise we fall back to a plain lsusb VID:PID presence match.
+# Args: $1 = pre-flash serial ("" if unknown)
+board_app_returned() {
+    local serial="${1:-}"
+    if [ -n "$serial" ]; then
+        local p s
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            s="$(udevadm info -q property "$p" 2>/dev/null | grep '^ID_SERIAL_SHORT=' | cut -d= -f2 || true)"
+            [ "$s" = "$serial" ] && return 0
+        done <<< "$(find_all_t114_transport_ports)"
+        return 1
+    fi
+    lsusb 2>/dev/null | grep -qiE "[[:space:]]${BOARD_VID}:${BOARD_PID}[[:space:]]"
+}
+
+# --- Helper: verify the board rebooted into the APP after a UF2 copy --------
+# A copy returning 0 does NOT mean the flash took: the bootloader flashes and
+# reboots asynchronously. Poll (bounded, UF2_VERIFY_TIMEOUT s) for BOTH the app
+# to re-enumerate (board_app_returned) AND our board's UF2 drive to be gone (a
+# drive that lingers/reappears == the app crashed straight back to DFU). Return
+# 0 the moment both hold; non-zero on timeout (== the flash did not take).
+# Args: $1 = hint, $2 = pre-flash serial ("" if unknown)
+verify_app_return() {
+    local hint="$1" serial="${2:-}"
+    local ticks=$((UF2_VERIFY_TIMEOUT * 2))
+    local tick=0 d
+    while [ "$tick" -lt "$ticks" ]; do
+        sleep 0.5
+        tick=$((tick + 1))
+        if board_app_returned "$serial"; then
+            d="$(find_uf2_drive)"
+            if [ -z "$d" ] || ! uf2_drive_matches_board "$d"; then
+                echo "[uf2-runner] $hint: app-returned (${BOARD_VID}:${BOARD_PID} present, bootloader drive gone) after $((tick / 2))s"
+                return 0
+            fi
+        fi
+    done
+    echo "[uf2-runner] $hint: app-NOT-returned (no ${BOARD_VID}:${BOARD_PID} within ${UF2_VERIFY_TIMEOUT}s of copy)" >&2
+    return 1
+}
+
+# --- Flash one device: touch → copy → verify-app-return, with retries -------
+# Wraps a full detect→copy→verify cycle in a bounded retry loop
+# ($FLASH_ATTEMPTS). Only returns 0 once the application firmware is CONFIRMED
+# back on the bus; a copy that never boots the app is a FAILED flash (non-zero),
+# NOT a false success. Self-heals a board stuck in the bootloader from a prior
+# attempt by re-copying directly (no touch needed). After the retries are
+# exhausted the manual double-tap prompt is shown ONLY in interactive mode; a
+# non-interactive run (VFIO tier3, no human) skips the prompt and fails.
+# Args: $1 = port path ("" if none, e.g. a crashed board already in DFU)
+#       $2 = pre-flash USB serial ("" if unknown)
+# Returns 0 = app confirmed booted; non-zero = flash failed after all attempts.
+flash_one_device() {
+    local port="$1" serial="${2:-}"
+    local hint="${port:-(unknown device)}"
+    [ -n "$serial" ] && hint="$hint (serial=$serial)"
+
+    local grace_ticks=$((UF2_TIMEOUT * 2))
+    local attempt
+    for (( attempt = 1; attempt <= FLASH_ATTEMPTS; attempt++ )); do
+        echo ""
+        echo "==> $hint: flash attempt $attempt/$FLASH_ATTEMPTS"
+
+        # Is the board already sitting in ITS bootloader? (stuck from a prior
+        # attempt, or crashed-and-double-tapped) → re-copy directly, no touch.
+        local drive
+        drive="$(poll_matching_drive "$hint" 0 || true)"
+        if [ -n "$drive" ]; then
+            echo "[uf2-runner] $hint: bootloader-persisted (UF2 drive at $drive already present) — copying without touch"
+        else
+            # Not in bootloader: issue the 1200-baud touch to trigger it, then
+            # wait (up to UF2_TIMEOUT) for the UF2 drive. Touch is best-effort —
+            # the port may have renumbered/vanished across a prior attempt, and
+            # old firmware ignores it entirely.
+            if [ -n "$port" ]; then
+                echo "[uf2-runner] $hint: issuing 1200-baud touch"
+                stty -F "$port" 1200 2>/dev/null || true
+            fi
+            drive="$(poll_matching_drive "$hint" "$grace_ticks" || true)"
+        fi
+
+        if [ -z "$drive" ]; then
+            echo "[uf2-runner] $hint: attempt $attempt — no UF2 drive appeared within ${UF2_TIMEOUT}s" >&2
+            continue
+        fi
+
+        echo "==> $hint: found UF2 drive at $drive ($(basename "$drive"))"
+        if ! copy_uf2_to_drive "$drive" "$hint"; then
+            echo "[uf2-runner] $hint: attempt $attempt — copy failed" >&2
+            continue
+        fi
+
+        if verify_app_return "$hint" "$serial"; then
+            echo "[uf2-runner] $hint: flash CONFIRMED on attempt $attempt"
+            return 0
+        fi
+        echo "[uf2-runner] $hint: attempt $attempt — app did not return; retrying" >&2
+    done
+
+    # Retries exhausted. Interactive: one last human-driven double-tap round.
+    # Non-interactive: no human to answer the prompt, so fail straight through.
+    if noninteractive; then
+        echo "[uf2-runner] $hint: non-interactive — skipping manual double-tap prompt" >&2
+    else
+        echo "==> $hint: automatic flash failed after $FLASH_ATTEMPTS attempts."
+        echo "    ┌──────────────────────────────────────────────────┐"
+        printf  "    │  Double-tap RESET on %-6s to enter bootloader. │\n" "$BOARD_NAME"
+        echo "    └──────────────────────────────────────────────────┘"
+        echo "==> Waiting for UF2 drive (${UF2_TIMEOUT}s)..."
+        local drive
+        drive="$(poll_matching_drive "$hint" "$grace_ticks" || true)"
+        if [ -n "$drive" ] && copy_uf2_to_drive "$drive" "$hint"; then
+            if verify_app_return "$hint" "$serial"; then
+                echo "[uf2-runner] $hint: flash CONFIRMED after manual double-tap"
+                return 0
+            fi
+        fi
     fi
 
-    return 0
+    echo "[uf2-runner] $hint: FLASH FAILED after $FLASH_ATTEMPTS attempts (app never re-enumerated)" >&2
+    return 1
 }
 
 # --- Step 5: Determine target list ------------------------------------------
@@ -358,7 +457,7 @@ if [ -z "$PORTS" ]; then
     # bootloader mode (UF2 drive only), or all crashed. Run one round of the
     # legacy fallback (manual prompt + UF2-drive polling).
     echo "[uf2-runner] no $BOARD_NAME transport port detected; awaiting manual double-tap"
-    if flash_one_uf2 "(unknown device)"; then
+    if flash_one_device "" ""; then
         FLASHED_PORTS="(unknown)"
     else
         FAILED_PORTS="(unknown)"
@@ -379,11 +478,11 @@ else
         else
             echo "==> ($INDEX/$NUM) trying $BOARD_NAME at $PORT"
         fi
-        # 1200-baud-touch. Old firmware ignores; new firmware writes the
-        # GPREGRET magic and resets into the UF2 bootloader. stty errors are
-        # tolerated (port may have already disappeared mid-loop).
-        stty -F "$PORT" 1200 2>/dev/null || true
-        if flash_one_uf2 "$PORT"; then
+        # flash_one_device owns the 1200-baud touch, the copy, the app-return
+        # verification and the bounded retry loop. Old firmware ignores the
+        # touch; new firmware writes the GPREGRET magic and resets into the UF2
+        # bootloader. It only returns 0 once the app is CONFIRMED back on USB.
+        if flash_one_device "$PORT" "$PORT_SERIAL"; then
             FLASHED_PORTS="$FLASHED_PORTS"$'\n'"$PORT"
             [ -n "$PORT_SERIAL" ] && FLASHED_SERIALS="$FLASHED_SERIALS"$'\n'"$PORT_SERIAL"
         else
