@@ -270,25 +270,6 @@ fn parse_delivery_measurement(line: &str) -> Option<(u64, u64, String)> {
     Some((sent, recv, pct_str.to_string()))
 }
 
-/// Parse a percentage threshold token like `threshold: 99%` into `"99"`.
-///
-/// Only matches percentage thresholds (a digit run immediately followed by
-/// `%`), so unrelated `threshold_ms=1234` style log lines are not mistaken
-/// for a delivery threshold.
-fn parse_threshold_pct(line: &str) -> Option<String> {
-    let pos = line.find("threshold")?;
-    let after = &line[pos + "threshold".len()..];
-    let start = after.find(|c: char| c.is_ascii_digit())?;
-    let digits = &after[start..];
-    let end = digits
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(digits.len());
-    if end == 0 || !digits[end..].starts_with('%') {
-        return None;
-    }
-    Some(digits[..end].to_string())
-}
-
 // ---------------------------------------------------------------------------
 // Step execution
 // ---------------------------------------------------------------------------
@@ -511,33 +492,45 @@ fn execute_step(
             let stdout = String::from_utf8_lossy(&output.stdout);
             let code = output.status.code().unwrap_or(-1);
 
+            // === LoRa delivery-rate diagnostics: LEVICULUM_DELIVERY_LOG ===
+            //
             // Durable per-run delivery-% record for LoRa delivery/ratchet
             // tests. libtest swallows a green test's stdout, so the recv%
             // summary line (`sent=N recv=M (P%)`) emitted by `lnstest
             // selftest` is otherwise only visible when the test FAILS. When
-            // LEVICULUM_DELIVERY_LOG is set, mirror each such summary line
-            // into an append-only file so a recv% distribution can be
-            // collected across runs (the rust-vs-python reference-first A/B).
-            // Unset = zero behaviour change. Mirrors the LEVICULUM_SKIP_LOG
-            // append pattern used by require_runner!.
+            // the env var `LEVICULUM_DELIVERY_LOG=<file>` is set, mirror each
+            // such summary line into an append-only file, one line per
+            // measurement:
+            //
+            //     DELIVERY test=<name> sent=<N> recv=<M> pct=<P>
+            //
+            // Both green and red runs are logged. Unset = zero behaviour
+            // change. Mirrors the LEVICULUM_SKIP_LOG append pattern used by
+            // require_runner!.
+            //
+            // WHEN TO USE: for LoRa delivery-rate investigations, set this
+            // env var and run the delivery test N times to collect a recv%
+            // distribution across green and red runs (e.g. the recv% is
+            // bimodal 0%/100% rather than a stable rate). This is how the
+            // lora_ratchet_enforced bimodal-delivery bug was root-caused.
+            //
+            // NOTE: no `threshold`/`verdict` field is logged. The per-
+            // measurement pass threshold (90% link, 50% relaxed single-
+            // packet, per-ratchet-phase for ratchet tests) is a constant
+            // inside `lnstest selftest`, not reliably recoverable from the
+            // free-form stdout the executor sees here: only two ratchet
+            // phases print a `threshold: N%` token, and the general Link /
+            // Single-Packet summaries print none, so any scanned threshold
+            // would be stale or mismatched for most measurements. A wrong
+            // verdict is worse than none; sent/recv/pct are the useful,
+            // unambiguous data. Read the recv% distribution directly.
             if let Ok(path) = std::env::var("LEVICULUM_DELIVERY_LOG") {
-                // Derive the verdict from the same exit-code expectations the
-                // assertions below enforce; this only reads them, it does not
-                // alter the pass/fail logic.
-                let passed = expect_exit_code.is_none_or(|e| code == e)
-                    && (expect_exit_code_any.is_empty() || expect_exit_code_any.contains(&code));
-                let verdict = if passed { "pass" } else { "fail" };
                 let test_name = &runner.scenario().test.name;
-                let mut current_threshold: Option<String> = None;
                 let mut lines_out: Vec<String> = Vec::new();
                 for line in stdout.lines() {
-                    if let Some(t) = parse_threshold_pct(line) {
-                        current_threshold = Some(t);
-                    }
                     if let Some((sent, recv, pct)) = parse_delivery_measurement(line) {
-                        let threshold = current_threshold.as_deref().unwrap_or("na");
                         lines_out.push(format!(
-                            "DELIVERY test={test_name} sent={sent} recv={recv} pct={pct} threshold={threshold} verdict={verdict}"
+                            "DELIVERY test={test_name} sent={sent} recv={recv} pct={pct}"
                         ));
                     }
                 }
@@ -2858,21 +2851,6 @@ mod tests {
         // Periodic progress lines carry no parenthesised recv percentage.
         let line = "[selftest]   +5s:  sent=7  recv=4  ack=4  fails=0  retx=0  win=2 — ok";
         assert_eq!(parse_delivery_measurement(line), None);
-    }
-
-    #[test]
-    fn threshold_parse_percentage_only() {
-        assert_eq!(
-            parse_threshold_pct(
-                "[selftest] Ratchet: sending 40 messages each direction (threshold: 99%)"
-            ),
-            Some("99".to_string())
-        );
-        // A `_ms` threshold in a log line is not a percentage threshold.
-        assert_eq!(
-            parse_threshold_pct("LINK_DIED ... threshold_ms=15000 rtt_ms=42"),
-            None
-        );
     }
 
     /// Create a TestRunner, skipping (return) if devices are missing.
