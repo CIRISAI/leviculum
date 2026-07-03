@@ -6,8 +6,8 @@
 # runs.
 #
 # Expects:
-#   target/x86_64-unknown-linux-musl/release/{lnsd,lnstest,lncp}
-#   target/aarch64-unknown-linux-musl/release/{lnsd,lnstest,lncp}
+#   target/x86_64-unknown-linux-musl/release/{lnsd,lnstest,lncp,lnstatus}
+#   target/aarch64-unknown-linux-musl/release/{lnsd,lnstest,lncp,lnstatus}
 #   target/debian/leviculum_*_amd64.deb
 #   target/debian/leviculum_*_arm64.deb
 #   git available on PATH
@@ -55,9 +55,9 @@ collect_deb() {
 collect_deb amd64
 collect_deb arm64
 
-# Per-arch userspace binary tarball: just the three binaries plus
+# Per-arch userspace binary tarball: just the four binaries plus
 # README/LICENSE/CHANGELOG and a VERSION pointer. Drop-in for users
-# who want lnstest/lncp/lnsd without root, system service, or .deb tooling.
+# who want lnstest/lncp/lnstatus/lnsd without root, system service, or .deb tooling.
 pack_bin_tarball() {
     local arch_dash="$1"    # amd64 | arm64
     local rust_triple="$2"  # x86_64-unknown-linux-musl | aarch64-unknown-linux-musl
@@ -67,7 +67,7 @@ pack_bin_tarball() {
     local src="target/${rust_triple}/release"
 
     mkdir -p "$stage/bin" "$stage/doc"
-    for bin in lnsd lnstest lncp; do
+    for bin in lnsd lnstest lncp lnstatus; do
         cp "$src/$bin" "$stage/bin/$bin"
     done
     cp README.md LICENSE CHANGELOG.md "$stage/doc/"

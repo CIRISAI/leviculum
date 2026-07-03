@@ -63,4 +63,4 @@ Start with a custom config directory:
 
 ## SEE ALSO
 
-**lnstest**(1), **lncp**(1)
+**lnstest**(1), **lncp**(1), **lnstatus**(1)

@@ -22,8 +22,9 @@ The **Concepts** part explains the non-obvious design ideas; the appendix carrie
 
 ## Tools
 
-Leviculum ships three binaries:
+Leviculum ships four binaries:
 
 - **[lnsd](man/lnsd.1.md)** -- the Reticulum network daemon
 - **[lnstest](man/lnstest.1.md)** -- test and diagnostics tool: integration self-test, diagnostic bundles, identity management, and interactive sessions
 - **[lncp](man/lncp.1.md)** -- standalone file transfer utility (compatible with Python `rncp`)
+- **[lnstatus](man/lnstatus.1.md)** -- network status tool (compatible with Python `rnstatus`)

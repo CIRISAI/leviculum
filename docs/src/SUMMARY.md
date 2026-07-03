@@ -18,9 +18,11 @@
 - [Running lnsd](lnsd-quickstart.md)
 - [lnstest command-line utility](guide/lnstest.md)
 - [lncp file transfer](guide/lncp.md)
+- [lnstatus network status](guide/lnstatus.md)
 - [Manual page: lnsd(1)](man/lnsd.1.md)
 - [Manual page: lnstest(1)](man/lnstest.1.md)
 - [Manual page: lncp(1)](man/lncp.1.md)
+- [Manual page: lnstatus(1)](man/lnstatus.1.md)
 
 # Firmware (LNode)
 

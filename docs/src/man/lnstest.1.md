@@ -89,4 +89,4 @@ Collect a diagnostic bundle from a running daemon:
 
 ## SEE ALSO
 
-**lnsd**(1), **lncp**(1)
+**lnsd**(1), **lncp**(1), **lnstatus**(1)

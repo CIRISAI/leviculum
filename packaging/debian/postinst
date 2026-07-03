@@ -41,7 +41,7 @@ case "$1" in
         # First-install hint only (skip on upgrade, when $2 is set).
         if [ -z "$2" ]; then
             echo ""
-            echo "leviculum: to use lnstest / lncp / rnstatus / rncp as a non-root user,"
+            echo "leviculum: to use lnstest / lncp / lnstatus / rnstatus / rncp as a non-root user,"
             echo "add the user to the 'leviculum' group, then log out and back in:"
             echo "    sudo usermod -aG leviculum \$USER"
             echo ""
