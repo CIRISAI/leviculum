@@ -232,6 +232,63 @@ fn scale_command_timeouts(command: &str) -> String {
     result
 }
 
+/// Parse a `lnstest selftest` summary line of the form
+/// `... sent=<N> recv=<M> (<P>%) ...` into `(sent, recv, pct_str)`.
+///
+/// Returns `None` for lines without the parenthesised recv percentage
+/// (e.g. the periodic progress lines `sent=.. recv=.. ack=.. fails=..`,
+/// which carry no `(P%)`), so only the per-phase delivery summaries are
+/// captured. `pct_str` is the verbatim percentage text (e.g. `65.0`).
+fn parse_delivery_measurement(line: &str) -> Option<(u64, u64, String)> {
+    let sent_pos = line.find("sent=")?;
+    let after_sent = &line[sent_pos + 5..];
+    let sent_end = after_sent
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_sent.len());
+    if sent_end == 0 {
+        return None;
+    }
+    let sent: u64 = after_sent[..sent_end].parse().ok()?;
+
+    let recv_pos = line.find("recv=")?;
+    let after_recv = &line[recv_pos + 5..];
+    let recv_end = after_recv
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_recv.len());
+    if recv_end == 0 {
+        return None;
+    }
+    let recv: u64 = after_recv[..recv_end].parse().ok()?;
+
+    // The recv percentage is the first parenthesised value after `recv=`,
+    // e.g. `(65.0%)`. The `ack=.. (P%)` group that may follow is ignored.
+    let rest = &after_recv[recv_end..];
+    let open = rest.find('(')?;
+    let close_rel = rest[open + 1..].find("%)")?;
+    let pct_str = rest[open + 1..open + 1 + close_rel].trim();
+    pct_str.parse::<f64>().ok()?;
+    Some((sent, recv, pct_str.to_string()))
+}
+
+/// Parse a percentage threshold token like `threshold: 99%` into `"99"`.
+///
+/// Only matches percentage thresholds (a digit run immediately followed by
+/// `%`), so unrelated `threshold_ms=1234` style log lines are not mistaken
+/// for a delivery threshold.
+fn parse_threshold_pct(line: &str) -> Option<String> {
+    let pos = line.find("threshold")?;
+    let after = &line[pos + "threshold".len()..];
+    let start = after.find(|c: char| c.is_ascii_digit())?;
+    let digits = &after[start..];
+    let end = digits
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(digits.len());
+    if end == 0 || !digits[end..].starts_with('%') {
+        return None;
+    }
+    Some(digits[..end].to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Step execution
 // ---------------------------------------------------------------------------
@@ -453,6 +510,50 @@ fn execute_step(
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             let code = output.status.code().unwrap_or(-1);
+
+            // Durable per-run delivery-% record for LoRa delivery/ratchet
+            // tests. libtest swallows a green test's stdout, so the recv%
+            // summary line (`sent=N recv=M (P%)`) emitted by `lnstest
+            // selftest` is otherwise only visible when the test FAILS. When
+            // LEVICULUM_DELIVERY_LOG is set, mirror each such summary line
+            // into an append-only file so a recv% distribution can be
+            // collected across runs (the rust-vs-python reference-first A/B).
+            // Unset = zero behaviour change. Mirrors the LEVICULUM_SKIP_LOG
+            // append pattern used by require_runner!.
+            if let Ok(path) = std::env::var("LEVICULUM_DELIVERY_LOG") {
+                // Derive the verdict from the same exit-code expectations the
+                // assertions below enforce; this only reads them, it does not
+                // alter the pass/fail logic.
+                let passed = expect_exit_code.is_none_or(|e| code == e)
+                    && (expect_exit_code_any.is_empty() || expect_exit_code_any.contains(&code));
+                let verdict = if passed { "pass" } else { "fail" };
+                let test_name = &runner.scenario().test.name;
+                let mut current_threshold: Option<String> = None;
+                let mut lines_out: Vec<String> = Vec::new();
+                for line in stdout.lines() {
+                    if let Some(t) = parse_threshold_pct(line) {
+                        current_threshold = Some(t);
+                    }
+                    if let Some((sent, recv, pct)) = parse_delivery_measurement(line) {
+                        let threshold = current_threshold.as_deref().unwrap_or("na");
+                        lines_out.push(format!(
+                            "DELIVERY test={test_name} sent={sent} recv={recv} pct={pct} threshold={threshold} verdict={verdict}"
+                        ));
+                    }
+                }
+                if !lines_out.is_empty() {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        for l in &lines_out {
+                            let _ = writeln!(f, "{l}");
+                        }
+                    }
+                }
+            }
 
             if let Some(expected) = expect_exit_code {
                 if code != *expected {
@@ -2732,6 +2833,47 @@ fn parse_hops_from_output(output: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn delivery_parse_link_summary_line() {
+        // The real `lnstest selftest` link-phase summary line.
+        let line = "[selftest]  Messages:      sent=20 recv=13 (65.0%) ack=13 (65.0%)";
+        assert_eq!(
+            parse_delivery_measurement(line),
+            Some((20, 13, "65.0".to_string()))
+        );
+    }
+
+    #[test]
+    fn delivery_parse_ratchet_summary_line() {
+        let line = "[selftest] Ratchet direct: sent=40 recv=40 (100.0%) corrupt=0 — PASS";
+        assert_eq!(
+            parse_delivery_measurement(line),
+            Some((40, 40, "100.0".to_string()))
+        );
+    }
+
+    #[test]
+    fn delivery_parse_ignores_progress_lines() {
+        // Periodic progress lines carry no parenthesised recv percentage.
+        let line = "[selftest]   +5s:  sent=7  recv=4  ack=4  fails=0  retx=0  win=2 — ok";
+        assert_eq!(parse_delivery_measurement(line), None);
+    }
+
+    #[test]
+    fn threshold_parse_percentage_only() {
+        assert_eq!(
+            parse_threshold_pct(
+                "[selftest] Ratchet: sending 40 messages each direction (threshold: 99%)"
+            ),
+            Some("99".to_string())
+        );
+        // A `_ms` threshold in a log line is not a percentage threshold.
+        assert_eq!(
+            parse_threshold_pct("LINK_DIED ... threshold_ms=15000 rtt_ms=42"),
+            None
+        );
+    }
 
     /// Create a TestRunner, skipping (return) if devices are missing.
     /// Panics on any other error from TestRunner::new().
