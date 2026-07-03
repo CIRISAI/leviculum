@@ -90,6 +90,24 @@ pub struct MemoryStorage {
 
     // Sender-side ratchet keys (destination private keys)
     dest_ratchet_keys: BTreeMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>>,
+
+    // Known-destination cache lifecycle (Codeberg #84).
+    // Mirrors Python's known_destinations[dest][4] use-state field: an entry is
+    // either recency-touched (`Used`, Python >0) or pinned (`Retained`, Python
+    // -1). Absence means "never used" (Python 0). Keyed by destination hash; the
+    // authoritative "known" set is announce_cache. Retained entries survive
+    // clean_announce_cache even without a path.
+    known_dest_use: BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestUse>,
+}
+
+/// Cache-lifecycle state for a known destination, mirroring the fifth field of
+/// Python's `Identity.known_destinations` entry (Codeberg #84).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KnownDestUse {
+    /// Recency touch: last-used monotonic timestamp in ms (Python `time.time()`, >0).
+    Used(u64),
+    /// Pinned against eviction (Python sentinel -1).
+    Retained,
 }
 
 impl MemoryStorage {
@@ -117,6 +135,7 @@ impl MemoryStorage {
             local_client_known_dests: BTreeMap::new(),
             discovery_path_requests: BTreeMap::new(),
             dest_ratchet_keys: BTreeMap::new(),
+            known_dest_use: BTreeMap::new(),
         }
     }
 
@@ -177,6 +196,7 @@ impl MemoryStorage {
         self.local_client_known_dests.clear();
         self.discovery_path_requests.clear();
         self.dest_ratchet_keys.clear();
+        self.known_dest_use.clear();
     }
 
     /// Number of entries in the announce rate table (test/stats convenience)
@@ -742,9 +762,71 @@ impl Storage for MemoryStorage {
     }
 
     fn clean_announce_cache(&mut self, local_destinations: &BTreeSet<[u8; TRUNCATED_HASHBYTES]>) {
+        let known_dest_use = &self.known_dest_use;
         self.announce_cache.retain(|hash, _| {
-            self.path_table.contains_key(hash) || local_destinations.contains(hash)
+            self.path_table.contains_key(hash)
+                || local_destinations.contains(hash)
+                || matches!(known_dest_use.get(hash), Some(KnownDestUse::Retained))
         });
+        // Drop lifecycle state for destinations whose cached announce was
+        // evicted (retained ones survive above, so this only reaps stale
+        // Used timestamps), mirroring Python popping the whole entry.
+        let announce_cache = &self.announce_cache;
+        self.known_dest_use
+            .retain(|hash, _| announce_cache.contains_key(hash));
+    }
+
+    fn announce_cache_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+        self.announce_cache.keys().copied().collect()
+    }
+
+    fn retain_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        // Python Identity._retain_destination_data: pin iff the destination is
+        // known (has a cached announce), setting use-state to the -1 sentinel.
+        if self.announce_cache.contains_key(dest) {
+            self.known_dest_use.insert(*dest, KnownDestUse::Retained);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unretain_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES], now_ms: u64) -> bool {
+        // Python Identity._unretain_destination_data: reset use-state to a
+        // recency timestamp (lifting the pin) iff the destination is known.
+        if self.announce_cache.contains_key(dest) {
+            self.known_dest_use
+                .insert(*dest, KnownDestUse::Used(now_ms));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn used_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES], now_ms: u64) -> bool {
+        // Python Identity._used_destination_data: touch recency only when the
+        // destination is known AND not retained (use-state not < 0); a retained
+        // entry is left pinned and the call reports False.
+        if !self.announce_cache.contains_key(dest) {
+            return false;
+        }
+        if matches!(self.known_dest_use.get(dest), Some(KnownDestUse::Retained)) {
+            return false;
+        }
+        self.known_dest_use
+            .insert(*dest, KnownDestUse::Used(now_ms));
+        true
+    }
+
+    fn is_known_dest_retained(&self, dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        matches!(self.known_dest_use.get(dest), Some(KnownDestUse::Retained))
+    }
+
+    fn known_dest_last_used(&self, dest: &[u8; TRUNCATED_HASHBYTES]) -> Option<u64> {
+        match self.known_dest_use.get(dest) {
+            Some(KnownDestUse::Used(ts)) => Some(*ts),
+            _ => None,
+        }
     }
 
     fn remove_link_entries_for_interface(
@@ -1267,6 +1349,99 @@ mod tests {
     #[test]
     fn test_default_identity_cap() {
         assert_eq!(DEFAULT_IDENTITY_CAP, 50_000);
+    }
+
+    // Known-destination cache lifecycle (Codeberg #84).
+    #[test]
+    fn test_retain_survives_clean_announce_cache() {
+        let mut s = MemoryStorage::with_defaults();
+        let pinned = [0x01u8; TRUNCATED_HASHBYTES];
+        let plain = [0x02u8; TRUNCATED_HASHBYTES];
+        s.set_announce_cache(pinned, vec![0xAA; 20]);
+        s.set_announce_cache(plain, vec![0xBB; 20]);
+
+        // Retain only takes effect for a known destination.
+        assert!(s.retain_known_dest(&pinned), "known dest → retained");
+        assert!(
+            !s.retain_known_dest(&[0x09u8; TRUNCATED_HASHBYTES]),
+            "unknown dest → not retained"
+        );
+        assert!(s.is_known_dest_retained(&pinned));
+
+        // Neither has a path nor is local: only the pinned one survives.
+        let empty = BTreeSet::new();
+        s.clean_announce_cache(&empty);
+        assert!(
+            s.get_announce_cache(&pinned).is_some(),
+            "retained → survives cache pressure"
+        );
+        assert!(
+            s.get_announce_cache(&plain).is_none(),
+            "non-retained, no path, not local → evicted (negative guard)"
+        );
+        // Use-state for the evicted entry is reaped; the pin persists.
+        assert!(s.is_known_dest_retained(&pinned));
+
+        // Unretain lifts the pin; the entry can then be evicted.
+        assert!(s.unretain_known_dest(&pinned, 5_000));
+        assert!(!s.is_known_dest_retained(&pinned));
+        assert_eq!(s.known_dest_last_used(&pinned), Some(5_000));
+        s.clean_announce_cache(&empty);
+        assert!(
+            s.get_announce_cache(&pinned).is_none(),
+            "after unretain → evicted normally"
+        );
+    }
+
+    #[test]
+    fn test_used_touches_recency_and_skips_retained() {
+        let mut s = MemoryStorage::with_defaults();
+        let dest = [0x03u8; TRUNCATED_HASHBYTES];
+
+        // Unknown destination: used reports false, no recency recorded.
+        assert!(!s.used_known_dest(&dest, 1_000));
+        assert_eq!(s.known_dest_last_used(&dest), None);
+
+        // Known destination: used is a recency touch (Python >0).
+        s.set_announce_cache(dest, vec![0xCC; 20]);
+        assert!(s.used_known_dest(&dest, 1_000));
+        assert_eq!(s.known_dest_last_used(&dest), Some(1_000));
+        assert!(s.used_known_dest(&dest, 2_000));
+        assert_eq!(s.known_dest_last_used(&dest), Some(2_000));
+
+        // Once retained, used leaves the pin intact and reports false
+        // (Python skips use-state < 0).
+        assert!(s.retain_known_dest(&dest));
+        assert!(!s.used_known_dest(&dest, 3_000));
+        assert!(s.is_known_dest_retained(&dest));
+        assert_eq!(
+            s.known_dest_last_used(&dest),
+            None,
+            "retained entry exposes no recency timestamp"
+        );
+    }
+
+    #[test]
+    fn test_retained_survives_even_without_path_or_local() {
+        // Explicit negative-vs-positive contrast in a single clean pass.
+        let mut s = MemoryStorage::with_defaults();
+        let a = [0x0Au8; TRUNCATED_HASHBYTES];
+        let b = [0x0Bu8; TRUNCATED_HASHBYTES];
+        let c = [0x0Cu8; TRUNCATED_HASHBYTES];
+        s.set_announce_cache(a, vec![1; 8]);
+        s.set_announce_cache(b, vec![2; 8]);
+        s.set_announce_cache(c, vec![3; 8]);
+
+        s.retain_known_dest(&b);
+        s.used_known_dest(&c, 100); // touched but not pinned
+
+        s.clean_announce_cache(&BTreeSet::new());
+        assert!(s.get_announce_cache(&a).is_none(), "never used → evicted");
+        assert!(s.get_announce_cache(&b).is_some(), "retained → kept");
+        assert!(
+            s.get_announce_cache(&c).is_none(),
+            "recency-touched but not pinned → still evicted"
+        );
     }
 
     // Announce table operations

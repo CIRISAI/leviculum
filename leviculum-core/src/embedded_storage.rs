@@ -710,6 +710,29 @@ impl Storage for EmbeddedStorage {
         self.announce_cache.insert(dest_hash, raw);
     }
 
+    fn announce_cache_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+        self.announce_cache.keys().copied().collect()
+    }
+
+    // Known-destination cache lifecycle (Codeberg #84). The shared-instance
+    // retain RPC is a std-daemon feature; embedded nodes keep the wire-contract
+    // no-ops (no retained-pin bookkeeping in the flash-backed cache).
+    fn retain_known_dest(&mut self, _dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        false
+    }
+    fn unretain_known_dest(&mut self, _dest: &[u8; TRUNCATED_HASHBYTES], _now_ms: u64) -> bool {
+        false
+    }
+    fn used_known_dest(&mut self, _dest: &[u8; TRUNCATED_HASHBYTES], _now_ms: u64) -> bool {
+        false
+    }
+    fn is_known_dest_retained(&self, _dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        false
+    }
+    fn known_dest_last_used(&self, _dest: &[u8; TRUNCATED_HASHBYTES]) -> Option<u64> {
+        None
+    }
+
     // Announce Rate
     fn get_announce_rate(
         &self,

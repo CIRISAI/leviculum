@@ -1582,6 +1582,50 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.expire_blackholed_identities(now_unix_secs)
     }
 
+    /// Pin a known destination against cache eviction (Codeberg #84).
+    /// Returns true iff the destination is known (has a cached announce).
+    pub fn retain_destination_data(
+        &mut self,
+        dest_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> bool {
+        self.transport.retain_destination_data(dest_hash)
+    }
+
+    /// Lift a destination's retain pin (Codeberg #84). Returns true iff known.
+    pub fn unretain_destination_data(
+        &mut self,
+        dest_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> bool {
+        self.transport.unretain_destination_data(dest_hash)
+    }
+
+    /// Touch a known, non-retained destination's recency (Codeberg #84).
+    /// Returns true iff the touch applied (known and not retained).
+    pub fn used_destination_data(
+        &mut self,
+        dest_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> bool {
+        self.transport.used_destination_data(dest_hash)
+    }
+
+    /// Retain every known destination for an identity (Codeberg #84).
+    /// Returns true iff at least one destination was retained.
+    pub fn retain_identity_data(
+        &mut self,
+        identity_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> bool {
+        self.transport.retain_identity_data(identity_hash)
+    }
+
+    /// Lift the retain pin on every known destination for an identity
+    /// (Codeberg #84). Returns true iff at least one was affected.
+    pub fn unretain_identity_data(
+        &mut self,
+        identity_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> bool {
+        self.transport.unretain_identity_data(identity_hash)
+    }
+
     /// Access the underlying transport (test-only, for clock manipulation)
     #[cfg(test)]
     pub(crate) fn transport(&self) -> &Transport<C, S> {

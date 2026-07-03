@@ -452,6 +452,26 @@ impl leviculum_core::traits::Storage for Storage {
     fn set_announce_cache(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], raw: Vec<u8>) {
         self.inner.set_announce_cache(dest_hash, raw)
     }
+    fn announce_cache_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+        self.inner.announce_cache_keys()
+    }
+
+    // Known-destination cache lifecycle (Codeberg #84)
+    fn retain_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.inner.retain_known_dest(dest)
+    }
+    fn unretain_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES], now_ms: u64) -> bool {
+        self.inner.unretain_known_dest(dest, now_ms)
+    }
+    fn used_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES], now_ms: u64) -> bool {
+        self.inner.used_known_dest(dest, now_ms)
+    }
+    fn is_known_dest_retained(&self, dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.inner.is_known_dest_retained(dest)
+    }
+    fn known_dest_last_used(&self, dest: &[u8; TRUNCATED_HASHBYTES]) -> Option<u64> {
+        self.inner.known_dest_last_used(dest)
+    }
 
     // Announce Rate
     fn get_announce_rate(

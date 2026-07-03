@@ -70,43 +70,46 @@ pub(super) fn handle_request(
         }
         RpcRequest::IsBlackholed { identity_hash } => is_blackholed(core, identity_hash),
 
-        // destination_data lifecycle stubs.
+        // destination_data cache lifecycle (Codeberg #84).
         //
         // Upstream Reticulum b5658c4 (2026-04-20, "Keep track of which
         // known destinations are actually in use, so irrelevant
         // destination data can be cleaned") added a known_destinations
         // GC scheme exposed via three RPC ops on the destination_data
-        // dict key: "used", "retain", "unretain".  All five upstream
-        // call sites (Identity.recall x3, Transport x2) discard the
-        // return value as of 2026-05-03 — these are pure side-effect
-        // calls.
-        //
-        // Our Rust daemon does not maintain a known_destinations dict
-        // with last-used timestamps; destinations and paths live in
-        // different data structures with different lifetime semantics.
-        // The stubs honor the wire contract (accept the call, return
-        // pickle_bool(true)) without internal bookkeeping.  Safe iff
-        // no upstream caller starts reading the return value; revisit
-        // if that changes.
-        RpcRequest::DestinationDataUsed { .. } => pickle_bool(true),
-        RpcRequest::DestinationDataRetain { .. } => pickle_bool(true),
-        RpcRequest::DestinationDataUnretain { .. } => pickle_bool(true),
+        // dict key: "used", "retain", "unretain".  These map onto our
+        // announce_cache: "retain" pins an entry so clean_announce_cache
+        // never evicts it, "unretain" lifts the pin, "used" is a recency
+        // touch that skips pinned entries — the same use-state semantics
+        // as Python's known_destinations[dest][4].  A Python tool driving
+        // lnsd sees the same booleans and the same survival-under-pressure
+        // behaviour as against a Python rnsd.
+        RpcRequest::DestinationDataUsed { destination_hash } => {
+            destination_data_used(core, destination_hash)
+        }
+        RpcRequest::DestinationDataRetain { destination_hash } => {
+            destination_data_retain(core, destination_hash)
+        }
+        RpcRequest::DestinationDataUnretain { destination_hash } => {
+            destination_data_unretain(core, destination_hash)
+        }
 
-        // identity_data lifecycle stubs.
+        // identity_data cache lifecycle (Codeberg #84).
         //
         // rnid retains an identity after a successful recall via
         // Reticulum._retain_identity, which issues
         // `{"identity_data": "retain", "identity_hash": <bytes>}` to the
         // shared instance (Reticulum.py:1316). Upstream rnsd dispatches it
-        // to Identity._retain_identity and discards nothing the client
-        // depends on (the boolean return is best-effort; rnid swallows a
-        // failure and still exits 0). We do not maintain a retained-identity
-        // GC set, so the stub honors the wire contract (accept the call,
-        // return pickle_bool(true)) without internal bookkeeping. The
-        // unretain arm mirrors destination_data for symmetry though current
-        // upstream only emits retain.
-        RpcRequest::IdentityDataRetain { .. } => pickle_bool(true),
-        RpcRequest::IdentityDataUnretain { .. } => pickle_bool(true),
+        // to Identity._retain_identity, which retains every known
+        // destination whose public key hashes to that identity. We mirror
+        // that: retain/unretain pin/unpin all announce_cache destinations
+        // matching the identity. The unretain arm is symmetric though
+        // current upstream only emits retain.
+        RpcRequest::IdentityDataRetain { identity_hash } => {
+            identity_data_retain(core, identity_hash)
+        }
+        RpcRequest::IdentityDataUnretain { identity_hash } => {
+            identity_data_unretain(core, identity_hash)
+        }
     };
 
     serialize_response(&response, codec)
@@ -599,6 +602,58 @@ fn is_blackholed(core: &StdNodeCore, identity_hash: &[u8]) -> Value {
     pickle_bool(core.is_blackholed(&hash))
 }
 
+// Known-destination cache lifecycle (Codeberg #84)
+/// Recency touch. Returns bool, mirroring Python
+/// `Identity._used_destination_data`: true only when the destination is known
+/// and not retained, false otherwise (including an invalid-length hash).
+fn destination_data_used(core: &mut StdNodeCore, destination_hash: &[u8]) -> Value {
+    let hash = match try_into_hash(destination_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    pickle_bool(core.used_destination_data(&hash))
+}
+
+/// Pin a known destination against cache eviction. Returns bool, mirroring
+/// Python `Identity._retain_destination_data`.
+fn destination_data_retain(core: &mut StdNodeCore, destination_hash: &[u8]) -> Value {
+    let hash = match try_into_hash(destination_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    pickle_bool(core.retain_destination_data(&hash))
+}
+
+/// Lift a destination's retain pin. Returns bool, mirroring Python
+/// `Identity._unretain_destination_data`.
+fn destination_data_unretain(core: &mut StdNodeCore, destination_hash: &[u8]) -> Value {
+    let hash = match try_into_hash(destination_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    pickle_bool(core.unretain_destination_data(&hash))
+}
+
+/// Retain every known destination for an identity. Returns bool, mirroring
+/// Python `Identity._retain_identity` (true iff at least one was retained).
+fn identity_data_retain(core: &mut StdNodeCore, identity_hash: &[u8]) -> Value {
+    let hash = match try_into_hash(identity_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    pickle_bool(core.retain_identity_data(&hash))
+}
+
+/// Lift the retain pin on every known destination for an identity. Returns
+/// bool (symmetric counterpart to [`identity_data_retain`]).
+fn identity_data_unretain(core: &mut StdNodeCore, identity_hash: &[u8]) -> Value {
+    let hash = match try_into_hash(identity_hash) {
+        Some(h) => h,
+        None => return pickle_bool(false),
+    };
+    pickle_bool(core.unretain_identity_data(&hash))
+}
+
 // Helpers
 /// Compute a 16-byte interface hash from its name (matches Python Identity.full_hash).
 fn compute_interface_hash(name: &str) -> [u8; 16] {
@@ -735,12 +790,14 @@ mod tests {
         assert!(try_into_hash(&[]).is_none());
     }
 
-    // identity_data lifecycle stubs dispatch end-to-end: handle_request must
-    // produce a bool-true response (never drop the connection) for both the
-    // pickle and msgpack codecs. This is the wire contract rnid relies on when
-    // it issues identity_data:retain after a successful recall.
+    // identity_data lifecycle dispatch end-to-end: handle_request must produce a
+    // bool response (never drop the connection) for both the pickle and msgpack
+    // codecs. For an identity with no known destinations (nothing cached), the
+    // real handler reports Bool(false), mirroring Python `_retain_identity`
+    // returning retained=False. This is the wire contract rnid relies on when it
+    // issues identity_data:retain after a recall (it swallows the boolean).
     #[test]
-    fn identity_data_handlers_return_bool_true() {
+    fn identity_data_handlers_return_bool_false_when_unknown() {
         use crate::clock::SystemClock;
         use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
         use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
@@ -779,13 +836,137 @@ mod tests {
                     handle_request(&req, &mut core, start, &stats, &online, 0, codec).unwrap();
                 let value = decode(&bytes, codec);
                 assert!(
-                    matches!(value, Value::Bool(true)),
-                    "{:?} via {:?} must return bool true, got {:?}",
+                    matches!(value, Value::Bool(false)),
+                    "{:?} via {:?} must return bool false for an unknown identity, got {:?}",
                     req,
                     codec,
                     value
                 );
             }
+        }
+    }
+
+    // destination_data cache-lifecycle RPC round-trip (Codeberg #84): each op
+    // dispatches end-to-end and returns the real bool reflecting the known
+    // destination's use-state, over both codecs.
+    #[test]
+    fn destination_data_rpc_round_trip() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::traits::Storage;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-dest-data-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let start = std::time::Instant::now();
+
+        let decode = |bytes: &[u8], codec: Codec| -> Value {
+            match codec {
+                Codec::Pickle => serde_pickle::value_from_slice(bytes, Default::default()).unwrap(),
+                Codec::Msgpack => decode_response_msgpack(bytes).unwrap(),
+            }
+        };
+        let dispatch = |core: &mut StdNodeCore, req: &RpcRequest, codec: Codec| -> Value {
+            let bytes = handle_request(req, core, start, &stats, &online, 0, codec).unwrap();
+            decode(&bytes, codec)
+        };
+
+        let dest = vec![0x42u8; 16];
+        let dest_arr: [u8; 16] = dest.clone().try_into().unwrap();
+
+        for codec in [Codec::Pickle, Codec::Msgpack] {
+            let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+                rand_core::OsRng,
+                SystemClock::new(),
+                crate::storage::Storage::new(&tmp).unwrap(),
+            );
+
+            // Unknown destination: every op reports false.
+            for op in [
+                RpcRequest::DestinationDataUsed {
+                    destination_hash: dest.clone(),
+                },
+                RpcRequest::DestinationDataRetain {
+                    destination_hash: dest.clone(),
+                },
+                RpcRequest::DestinationDataUnretain {
+                    destination_hash: dest.clone(),
+                },
+            ] {
+                assert!(
+                    matches!(dispatch(&mut core, &op, codec), Value::Bool(false)),
+                    "{:?} on an unknown destination must be false ({:?})",
+                    op,
+                    codec
+                );
+            }
+
+            // Make it known (cache a placeholder announce blob).
+            core.storage_mut()
+                .set_announce_cache(dest_arr, vec![0xAB; 32]);
+
+            // used → true (recency touch), retain → true (pin), then used → false
+            // because a retained entry is skipped, unretain → true (lifts pin),
+            // used → true again.
+            assert!(matches!(
+                dispatch(
+                    &mut core,
+                    &RpcRequest::DestinationDataUsed {
+                        destination_hash: dest.clone()
+                    },
+                    codec
+                ),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                dispatch(
+                    &mut core,
+                    &RpcRequest::DestinationDataRetain {
+                        destination_hash: dest.clone()
+                    },
+                    codec
+                ),
+                Value::Bool(true)
+            ));
+            assert!(
+                matches!(
+                    dispatch(
+                        &mut core,
+                        &RpcRequest::DestinationDataUsed {
+                            destination_hash: dest.clone()
+                        },
+                        codec
+                    ),
+                    Value::Bool(false)
+                ),
+                "used on a retained destination is false ({:?})",
+                codec
+            );
+            assert!(matches!(
+                dispatch(
+                    &mut core,
+                    &RpcRequest::DestinationDataUnretain {
+                        destination_hash: dest.clone()
+                    },
+                    codec
+                ),
+                Value::Bool(true)
+            ));
+            assert!(matches!(
+                dispatch(
+                    &mut core,
+                    &RpcRequest::DestinationDataUsed {
+                        destination_hash: dest.clone()
+                    },
+                    codec
+                ),
+                Value::Bool(true)
+            ));
         }
     }
 }

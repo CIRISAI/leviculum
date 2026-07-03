@@ -290,6 +290,35 @@ pub trait Storage {
     /// Cache raw announce bytes for a destination
     fn set_announce_cache(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], raw: Vec<u8>);
 
+    /// Return every destination hash that has a cached announce (Codeberg #84).
+    fn announce_cache_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]>;
+
+    // Known-destination cache lifecycle (Codeberg #84).
+    // These mirror Python's Identity retain/used/unretain over the fifth
+    // known_destinations field, driven over the shared-instance RPC.
+
+    /// Pin a known destination against announce-cache cleaning. Returns true iff
+    /// the destination is known (has a cached announce). Mirrors Python
+    /// `Identity._retain_destination_data` (use-state -> -1).
+    fn retain_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES]) -> bool;
+
+    /// Lift a destination's retain pin, resetting recency to `now_ms`. Returns
+    /// true iff known. Mirrors Python `Identity._unretain_destination_data`
+    /// (use-state -> time.time()).
+    fn unretain_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES], now_ms: u64) -> bool;
+
+    /// Touch recency for a known, non-retained destination. Returns true iff the
+    /// touch applied (known and not retained). Mirrors Python
+    /// `Identity._used_destination_data` (skips use-state < 0).
+    fn used_known_dest(&mut self, dest: &[u8; TRUNCATED_HASHBYTES], now_ms: u64) -> bool;
+
+    /// Whether a destination is currently retained (pinned).
+    fn is_known_dest_retained(&self, dest: &[u8; TRUNCATED_HASHBYTES]) -> bool;
+
+    /// Last-used recency timestamp (ms) for a destination, or `None` when it was
+    /// never touched or is retained. Diagnostic/test accessor.
+    fn known_dest_last_used(&self, dest: &[u8; TRUNCATED_HASHBYTES]) -> Option<u64>;
+
     // Announce Rate
     /// Get announce rate tracking for a destination
     fn get_announce_rate(
@@ -581,6 +610,24 @@ impl Storage for NoStorage {
         None
     }
     fn set_announce_cache(&mut self, _dest_hash: [u8; TRUNCATED_HASHBYTES], _raw: Vec<u8>) {}
+    fn announce_cache_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+        Vec::new()
+    }
+    fn retain_known_dest(&mut self, _dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        false
+    }
+    fn unretain_known_dest(&mut self, _dest: &[u8; TRUNCATED_HASHBYTES], _now_ms: u64) -> bool {
+        false
+    }
+    fn used_known_dest(&mut self, _dest: &[u8; TRUNCATED_HASHBYTES], _now_ms: u64) -> bool {
+        false
+    }
+    fn is_known_dest_retained(&self, _dest: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        false
+    }
+    fn known_dest_last_used(&self, _dest: &[u8; TRUNCATED_HASHBYTES]) -> Option<u64> {
+        None
+    }
 
     fn get_announce_rate(
         &self,

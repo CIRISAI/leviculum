@@ -2210,6 +2210,71 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         Some(announce.computed_identity_hash())
     }
 
+    // Known-destination cache lifecycle (Codeberg #84).
+    //
+    // The shared instance exposes three destination_data ops and two
+    // identity_data ops over the RPC. They map onto Python's
+    // Identity.known_destinations use-state field (index 4): `retain` pins an
+    // entry so clean_announce_cache never evicts it, `unretain` lifts the pin,
+    // `used` is a recency touch that skips pinned entries. Our "known" set is
+    // the announce_cache (the same recall source recall_identity_hash reads),
+    // so an op only takes effect for a destination we have a cached announce
+    // for -- exactly as Python only acts on `destination_hash in
+    // known_destinations`.
+
+    /// Pin a known destination against announce-cache cleaning. Returns true
+    /// iff the destination is known. Mirrors Python
+    /// `Reticulum._retain_destination_data` -> `Identity._retain_destination_data`.
+    pub fn retain_destination_data(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.storage.retain_known_dest(dest_hash)
+    }
+
+    /// Lift a destination's retain pin (recency reset to now). Returns true iff
+    /// known. Mirrors Python `Identity._unretain_destination_data`.
+    pub fn unretain_destination_data(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        let now = self.clock.now_ms();
+        self.storage.unretain_known_dest(dest_hash, now)
+    }
+
+    /// Touch a known, non-retained destination's recency. Returns true iff the
+    /// touch applied. Mirrors Python `Identity._used_destination_data`.
+    pub fn used_destination_data(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        let now = self.clock.now_ms();
+        self.storage.used_known_dest(dest_hash, now)
+    }
+
+    /// Retain every known destination whose cached-announce identity matches
+    /// `identity_hash`. Returns true iff at least one was retained. Mirrors
+    /// Python `Identity._retain_identity`, which retains each known destination
+    /// with `truncated_hash(public_key) == identity_hash`.
+    pub fn retain_identity_data(&mut self, identity_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        let mut retained = false;
+        for dest_hash in self.storage.announce_cache_keys() {
+            if self.recall_identity_hash(&dest_hash).as_ref() == Some(identity_hash)
+                && self.storage.retain_known_dest(&dest_hash)
+            {
+                retained = true;
+            }
+        }
+        retained
+    }
+
+    /// Lift the retain pin on every known destination matching `identity_hash`.
+    /// Returns true iff at least one was affected. Symmetric counterpart to
+    /// [`Self::retain_identity_data`] (upstream currently emits only retain).
+    pub fn unretain_identity_data(&mut self, identity_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        let now = self.clock.now_ms();
+        let mut changed = false;
+        for dest_hash in self.storage.announce_cache_keys() {
+            if self.recall_identity_hash(&dest_hash).as_ref() == Some(identity_hash)
+                && self.storage.unretain_known_dest(&dest_hash, now)
+            {
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Remove an identity from the blackhole set.
     ///
     /// Returns `true` if it was present and removed, `false` if it was not
@@ -19591,5 +19656,124 @@ mod blackhole_enforcement_tests {
         t.clock.advance(60_000);
         assert_eq!(t.expire_blackholed_identities(2_000.0), 1);
         assert!(!t.is_blackholed(identity.hash()));
+    }
+
+    // Known-destination cache lifecycle (Codeberg #84).
+
+    /// destination_data retain pins a known destination so clean_announce_cache
+    /// keeps it even with no path and not local; unretain lifts the pin so it is
+    /// evicted normally.
+    #[test]
+    fn retain_destination_survives_cache_cleaning() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+        let (raw, dest_hash) = make_announce_for(&identity, "retain_target", 0x01);
+        feed_announce(&mut t, &raw);
+        assert!(t.storage.get_announce_cache(&dest_hash).is_some());
+
+        // Retain the destination directly.
+        assert!(
+            t.retain_destination_data(&dest_hash),
+            "retain of a known destination returns true"
+        );
+        assert!(t.storage.is_known_dest_retained(&dest_hash));
+
+        // Drop the path so only the pin can protect the cached announce, then
+        // apply cache pressure (nothing local).
+        t.storage.remove_path(&dest_hash);
+        t.storage.clean_announce_cache(&BTreeSet::new());
+        assert!(
+            t.storage.get_announce_cache(&dest_hash).is_some(),
+            "retained destination survives cache pressure"
+        );
+
+        // Unretain, then the same pressure evicts it.
+        assert!(t.unretain_destination_data(&dest_hash));
+        assert!(!t.storage.is_known_dest_retained(&dest_hash));
+        t.storage.clean_announce_cache(&BTreeSet::new());
+        assert!(
+            t.storage.get_announce_cache(&dest_hash).is_none(),
+            "after unretain the destination is evicted normally"
+        );
+    }
+
+    /// identity_data retain pins every known destination for that identity;
+    /// unretain lifts them. A non-matching identity is never affected.
+    #[test]
+    fn retain_identity_pins_matching_destinations() {
+        let mut t = make_transport();
+        let target = Identity::generate(&mut OsRng);
+        let bystander = Identity::generate(&mut OsRng);
+        let (raw_t, dest_t) = make_announce_for(&target, "target", 0x01);
+        let (raw_b, dest_b) = make_announce_for(&bystander, "bystander", 0x02);
+        feed_announce(&mut t, &raw_t);
+        feed_announce(&mut t, &raw_b);
+
+        // Retaining an unrelated identity affects nothing (negative guard).
+        let stranger = Identity::generate(&mut OsRng);
+        assert!(
+            !t.retain_identity_data(stranger.hash()),
+            "no known destination matches the stranger identity"
+        );
+        assert!(!t.storage.is_known_dest_retained(&dest_t));
+        assert!(!t.storage.is_known_dest_retained(&dest_b));
+
+        // Retaining the target identity pins only its destination.
+        assert!(t.retain_identity_data(target.hash()));
+        assert!(t.storage.is_known_dest_retained(&dest_t));
+        assert!(
+            !t.storage.is_known_dest_retained(&dest_b),
+            "bystander destination is not pinned by the target's identity retain"
+        );
+
+        // Under pressure with no paths, only the pinned destination survives.
+        t.storage.remove_path(&dest_t);
+        t.storage.remove_path(&dest_b);
+        t.storage.clean_announce_cache(&BTreeSet::new());
+        assert!(
+            t.storage.get_announce_cache(&dest_t).is_some(),
+            "target's retained destination survives"
+        );
+        assert!(
+            t.storage.get_announce_cache(&dest_b).is_none(),
+            "bystander destination is evicted (negative guard)"
+        );
+
+        // unretain_identity_data lifts the pin; the destination is evictable.
+        assert!(t.unretain_identity_data(target.hash()));
+        assert!(!t.storage.is_known_dest_retained(&dest_t));
+        t.storage.clean_announce_cache(&BTreeSet::new());
+        assert!(
+            t.storage.get_announce_cache(&dest_t).is_none(),
+            "after identity unretain the destination is evicted"
+        );
+    }
+
+    /// used_destination_data is a recency touch for a known, non-retained
+    /// destination and reports false once the destination is pinned.
+    #[test]
+    fn used_destination_touches_recency() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+        let (raw, dest_hash) = make_announce_for(&identity, "used_target", 0x01);
+        feed_announce(&mut t, &raw);
+
+        assert!(
+            t.used_destination_data(&dest_hash),
+            "used on a known, non-retained destination returns true"
+        );
+        assert_eq!(
+            t.storage.known_dest_last_used(&dest_hash),
+            Some(t.clock.now_ms()),
+            "used records the current monotonic time as recency"
+        );
+
+        // Pin it: used now leaves the pin and returns false.
+        assert!(t.retain_destination_data(&dest_hash));
+        assert!(
+            !t.used_destination_data(&dest_hash),
+            "used on a retained destination returns false"
+        );
+        assert!(t.storage.is_known_dest_retained(&dest_hash));
     }
 }
