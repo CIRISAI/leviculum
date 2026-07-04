@@ -225,6 +225,12 @@ pub struct InterfaceConfig {
     /// Beacon identification callsign/data (Python `id_callsign`).
     pub id_callsign: Option<String>,
 
+    // AX25KISSInterface specific (AX.25 UI-frame addressing).
+    /// Source callsign for the AX.25 address (Python `callsign`, 3-6 chars).
+    pub callsign: Option<String>,
+    /// Source SSID for the AX.25 address (Python `ssid`, 0-15).
+    pub ssid: Option<u8>,
+
     // Reconnection / buffer tuning
     /// Channel buffer size for this interface (default: per interface type)
     pub buffer_size: Option<usize>,
@@ -324,6 +330,8 @@ impl Default for InterfaceConfig {
             slottime: None,
             id_interval: None,
             id_callsign: None,
+            callsign: None,
+            ssid: None,
             buffer_size: None,
             reconnect_interval_secs: None,
             max_reconnect_tries: None,

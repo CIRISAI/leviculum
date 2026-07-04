@@ -316,7 +316,7 @@ fn build_ifac_config(config: &InterfaceConfig) -> Option<leviculum_core::ifac::I
     let default_size = match config.interface_type.as_str() {
         // Serial-family interfaces (incl. Pipe) default to the 8-byte IFAC
         // size upstream (PipeInterface.DEFAULT_IFAC_SIZE = 8).
-        "RNodeInterface" | "PipeInterface" | "KISSInterface" => {
+        "RNodeInterface" | "PipeInterface" | "KISSInterface" | "AX25KISSInterface" => {
             leviculum_core::constants::IFAC_DEFAULT_SIZE_SERIAL
         }
         _ => leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
@@ -1184,14 +1184,46 @@ impl ReticulumNode {
                         tracing::info!("Pipe interface (command: {})", command);
                         registry.register(handle);
                     }
-                    "KISSInterface" => {
+                    "KISSInterface" | "AX25KISSInterface" => {
+                        let is_ax25 = config.interface_type == "AX25KISSInterface";
                         let port_path = config
                             .port
                             .as_ref()
                             .ok_or_else(|| {
-                                Error::Config("KISSInterface requires port".to_string())
+                                Error::Config(format!("{} requires port", config.interface_type))
                             })?
                             .clone();
+
+                        // AX25KISSInterface adds an AX.25 UI-frame header keyed
+                        // on a source callsign/SSID (Python __init__ validates
+                        // callsign length 3-6 and ssid 0-15). Build + validate it
+                        // here; a plain KISSInterface has none.
+                        let ax25 = if is_ax25 {
+                            let callsign = config
+                                .callsign
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    Error::Config("AX25KISSInterface requires callsign".to_string())
+                                })?
+                                .to_uppercase();
+                            let ssid = config.ssid.ok_or_else(|| {
+                                Error::Config("AX25KISSInterface requires ssid".to_string())
+                            })?;
+                            let addressing = leviculum_core::framing::ax25::Ax25Addressing::new(
+                                callsign.as_bytes(),
+                                ssid,
+                            )
+                            .map_err(|e| {
+                                Error::Config(format!(
+                                    "AX25KISSInterface invalid AX.25 addressing \
+                                         (callsign '{}', ssid {}): {:?}",
+                                    callsign, ssid, e
+                                ))
+                            })?;
+                            Some(addressing)
+                        } else {
+                            None
+                        };
                         // Python KISSInterface defaults: speed 9600, 8-N-1.
                         let speed = config.speed.unwrap_or(9600);
                         let data_bits = crate::interfaces::serial::parse_data_bits(
@@ -1207,7 +1239,11 @@ impl ReticulumNode {
                             .buffer_size
                             .unwrap_or(crate::interfaces::kiss::KISS_DEFAULT_BUFFER_SIZE);
 
-                        let iface_name = format!("kiss_{}", idx);
+                        let iface_name = if is_ax25 {
+                            format!("ax25kiss_{}", idx)
+                        } else {
+                            format!("kiss_{}", idx)
+                        };
                         let id = InterfaceId(idx);
 
                         let mut handle = crate::interfaces::kiss::spawn_kiss_interface(
@@ -1232,13 +1268,19 @@ impl ReticulumNode {
                                     .slottime
                                     .unwrap_or(crate::interfaces::kiss::DEFAULT_SLOTTIME_MS),
                                 flow_control: config.flow_control.unwrap_or(false),
+                                ax25,
                                 buffer_size,
                                 reconnect_notify: Some(reconnect_tx.clone()),
                             },
                         );
                         handle.info.bitrate = Some(speed);
 
-                        tracing::info!("KISS interface on {} (speed={} baud)", port_path, speed);
+                        tracing::info!(
+                            "{} interface on {} (speed={} baud)",
+                            config.interface_type,
+                            port_path,
+                            speed
+                        );
                         if config.id_interval.is_some() || config.id_callsign.is_some() {
                             tracing::warn!(
                                 "KISS interface {}: beacon identification \

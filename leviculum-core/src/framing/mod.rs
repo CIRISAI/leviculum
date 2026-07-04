@@ -25,6 +25,13 @@
 //! [FEND 0xC0] [command] [escaped payload] [FEND 0xC0]
 //! ```
 //!
+//! # AX.25 Framing
+//!
+//! The [`ax25`] sub-module adds an AX.25 UI-frame header (source/destination
+//! callsign+SSID, control, PID) on top of KISS, as Python Reticulum's
+//! `AX25KISSInterface` does. The header wraps the payload; the whole AX.25 frame
+//! is then KISS-framed with [`kiss`].
+//!
 //! # Usage
 //!
 //! ```text
@@ -45,6 +52,7 @@
 //! [`frame_to_slice`] and [`crc16`] work without `alloc`.
 //! [`Deframer`] and [`frame`] require `alloc`.
 
+pub mod ax25;
 pub mod ble;
 pub mod hdlc;
 pub mod kiss;

@@ -111,7 +111,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             let size = iface
                 .ifac_size
                 .unwrap_or(match iface.interface_type.as_str() {
-                    "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface" => 8,
+                    "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface"
+                    | "AX25KISSInterface" => 8,
                     _ => 16,
                 });
             if leviculum_core::ifac::IfacConfig::new(
@@ -150,7 +151,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         .into_iter()
         .filter(|(name, iface)| match iface.interface_type.as_str() {
             "TCPServerInterface" | "TCPClientInterface" | "UDPInterface" | "AutoInterface"
-            | "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface" => true,
+            | "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface"
+            | "AX25KISSInterface" => true,
             other => {
                 tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
@@ -267,6 +269,9 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "slottime" => iface.slottime = value.parse().ok(),
         "id_interval" => iface.id_interval = value.parse().ok(),
         "id_callsign" => iface.id_callsign = Some(value.to_string()),
+        // AX25KISSInterface AX.25 addressing (AX25KISSInterface.py:104-105).
+        "callsign" => iface.callsign = Some(value.to_string()),
+        "ssid" => iface.ssid = value.parse().ok(),
         "bitrate" => {
             if let Ok(v) = value.parse() {
                 iface.bitrate = v;
@@ -525,6 +530,40 @@ mod tests {
         assert_eq!(iface.flow_control, Some(true));
         assert_eq!(iface.id_interval, Some(600));
         assert_eq!(iface.id_callsign.as_deref(), Some("MYCALL-1"));
+    }
+
+    #[test]
+    fn test_parse_ax25_kiss_interface() {
+        // An AX25KISSInterface config maps the AX.25 addressing (callsign/ssid)
+        // on top of the same KISS/serial params, is a supported type, and
+        // survives the filter (Codeberg #97).
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[My AX25 TNC]]
+    type = AX25KISSInterface
+    port = /dev/ttyUSB0
+    speed = 115200
+    databits = 8
+    parity = none
+    stopbits = 1
+    callsign = N0CALL
+    ssid = 3
+    preamble = 150
+"#,
+        )
+        .unwrap();
+
+        let iface = config
+            .interfaces
+            .get("My AX25 TNC")
+            .expect("ax25 kiss iface");
+        assert_eq!(iface.interface_type, "AX25KISSInterface");
+        assert_eq!(iface.port.as_deref(), Some("/dev/ttyUSB0"));
+        assert_eq!(iface.speed, Some(115200));
+        assert_eq!(iface.callsign.as_deref(), Some("N0CALL"));
+        assert_eq!(iface.ssid, Some(3));
+        assert_eq!(iface.preamble, Some(150));
     }
 
     #[test]
@@ -1295,6 +1334,7 @@ loglevel = 4
             "TCP Client Interface",
             "RNode LoRa Interface",
             "Packet Radio KISS Interface",
+            "Packet Radio AX.25 KISS Interface",
         ] {
             assert!(
                 config.interfaces.contains_key(accepted),
@@ -1302,12 +1342,10 @@ loglevel = 4
             );
         }
         // Not-yet-implemented interface types are skipped, not rejected outright.
-        for skipped in ["I2P", "Packet Radio AX.25 KISS Interface"] {
-            assert!(
-                !config.interfaces.contains_key(skipped),
-                "{skipped} is unimplemented and must be skipped"
-            );
-        }
+        assert!(
+            !config.interfaces.contains_key("I2P"),
+            "I2P is unimplemented and must be skipped"
+        );
     }
 
     #[test]

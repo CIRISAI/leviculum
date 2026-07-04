@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leviculum_core::constants::MTU;
+use leviculum_core::framing::ax25::Ax25Addressing;
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::transport::InterfaceId;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -95,6 +96,10 @@ pub(crate) struct KissInterfaceConfig {
     pub slottime_ms: u32,
     /// Gate TX on the TNC's CMD_READY signal (Python `flow_control`).
     pub flow_control: bool,
+    /// AX.25 UI-frame addressing (`AX25KISSInterface`). When `Some`, outgoing
+    /// packets are wrapped in an AX.25 header before KISS framing and the header
+    /// is stripped off incoming frames; when `None` this is a plain KISS link.
+    pub ax25: Option<Ax25Addressing>,
     pub buffer_size: usize,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
 }
@@ -147,18 +152,32 @@ where
 }
 
 /// Frame a payload as a KISS data frame and write it to the port.
+///
+/// With `ax25` set, the payload is first wrapped in an AX.25 UI-frame header
+/// (`AX25KISSInterface`), then the whole AX.25 frame is KISS-framed — matching
+/// Python's `process_outgoing`, which prepends the address/control/PID header
+/// and KISS-frames the result. Without it this is a plain KISS data frame.
 async fn write_data_frame<S>(
     port: &mut S,
     payload: &[u8],
+    ax25: Option<&Ax25Addressing>,
     frame_buf: &mut Vec<u8>,
     counters: &InterfaceCounters,
 ) -> std::io::Result<()>
 where
     S: AsyncWrite + Unpin,
 {
-    kiss::frame(kiss::CMD_DATA, payload, frame_buf);
+    match ax25 {
+        Some(addr) => {
+            let ax25_frame = addr.wrap(payload);
+            kiss::frame(kiss::CMD_DATA, &ax25_frame, frame_buf);
+        }
+        None => kiss::frame(kiss::CMD_DATA, payload, frame_buf),
+    }
     port.write_all(frame_buf).await?;
     port.flush().await?;
+    // Count the packet bytes, not the AX.25/KISS overhead, matching Python's
+    // `self.txb += datalen`.
     counters
         .tx_bytes
         .fetch_add(payload.len() as u64, Ordering::Relaxed);
@@ -197,6 +216,7 @@ where
         outgoing_rx,
         counters,
         cfg.flow_control,
+        cfg.ax25.as_ref(),
     )
     .await
 }
@@ -210,6 +230,7 @@ where
 /// lock until the TNC returns CMD_READY (or `FLOW_CONTROL_TIMEOUT` elapses),
 /// mirroring Python's `interface_ready` gating. With it clear (the default) the
 /// queue drains immediately.
+#[allow(clippy::too_many_arguments)]
 async fn kiss_io_task<S>(
     name: &str,
     mut port: S,
@@ -217,11 +238,19 @@ async fn kiss_io_task<S>(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
     flow_control: bool,
+    ax25: Option<&Ax25Addressing>,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut deframer = KissDeframer::with_max_payload(KISS_HW_MTU as usize);
+    // An AX.25 frame carries the 16-byte UI header on top of the packet, so the
+    // KISS payload budget grows by the header size (Python bounds its RX buffer
+    // at `HW_MTU + AX25.HEADER_SIZE`).
+    let max_frame = KISS_HW_MTU as usize
+        + ax25
+            .map(|_| leviculum_core::framing::ax25::HEADER_SIZE)
+            .unwrap_or(0);
+    let mut deframer = KissDeframer::with_max_payload(max_frame);
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut last_read_at = Instant::now();
@@ -235,7 +264,9 @@ where
         // Flush as much of the queue as the flow-control gate allows.
         while !send_queue.is_empty() && (!flow_control || interface_ready) {
             let payload = send_queue.pop_front().expect("queue non-empty");
-            if let Err(e) = write_data_frame(&mut port, &payload, &mut frame_buf, &counters).await {
+            if let Err(e) =
+                write_data_frame(&mut port, &payload, ax25, &mut frame_buf, &counters).await
+            {
                 tracing::debug!("KISS interface {}: write error: {}", name, e);
                 return outgoing_rx;
             }
@@ -285,10 +316,25 @@ where
                             if let KissDeframeResult::Frame { command, payload } = r {
                                 match command {
                                     kiss::CMD_DATA => {
+                                        // With AX.25 addressing, strip the 16-byte
+                                        // UI-frame header before delivering (Python
+                                        // `process_incoming`); a frame no longer than
+                                        // the header carries no packet and is dropped.
+                                        let data = match ax25 {
+                                            Some(_) => {
+                                                match leviculum_core::framing::ax25::strip_header(
+                                                    &payload,
+                                                ) {
+                                                    Some(inner) => inner.to_vec(),
+                                                    None => continue,
+                                                }
+                                            }
+                                            None => payload,
+                                        };
                                         counters.rx_bytes.fetch_add(
-                                            payload.len() as u64, Ordering::Relaxed);
+                                            data.len() as u64, Ordering::Relaxed);
                                         if incoming_tx
-                                            .send(IncomingPacket { data: payload })
+                                            .send(IncomingPacket { data })
                                             .await
                                             .is_err()
                                         {
@@ -311,7 +357,7 @@ where
                             }
                         }
                         // HW_MTU enforcement: reset a runaway partial frame.
-                        if deframer.buffer_len() > KISS_HW_MTU as usize {
+                        if deframer.buffer_len() > max_frame {
                             tracing::trace!(
                                 "KISS interface {}: frame exceeds HW_MTU, discarding", name);
                             deframer.reset();
@@ -478,6 +524,7 @@ mod tests {
             persistence: DEFAULT_PERSISTENCE,
             slottime_ms: DEFAULT_SLOTTIME_MS,
             flow_control: false,
+            ax25: None,
             buffer_size: KISS_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
         }
@@ -558,14 +605,14 @@ mod tests {
         let (a_out_tx, a_out_rx) = mpsc::channel(8);
         let a_counters = Arc::new(InterfaceCounters::new());
         tokio::spawn(async move {
-            kiss_io_task("A", a, a_in_tx, a_out_rx, a_counters, false).await;
+            kiss_io_task("A", a, a_in_tx, a_out_rx, a_counters, false, None).await;
         });
 
         let (b_in_tx, mut b_in_rx) = mpsc::channel(8);
         let (_b_out_tx, b_out_rx) = mpsc::channel(8);
         let b_counters = Arc::new(InterfaceCounters::new());
         tokio::spawn(async move {
-            kiss_io_task("B", b, b_in_tx, b_out_rx, b_counters, false).await;
+            kiss_io_task("B", b, b_in_tx, b_out_rx, b_counters, false, None).await;
         });
 
         let payload = vec![FEND, 0x11, FESC, TFEND, TFESC, 0x00, FEND, 0xDB, 0x42];
@@ -679,6 +726,178 @@ mod tests {
             &packet.destination_hash,
             dest_hash.as_bytes(),
             "crossed announce must carry the original destination hash"
+        );
+    }
+
+    // --- AX.25 (AX25KISSInterface) tests ---
+
+    fn ax25_config(name: &str, callsign: &[u8], ssid: u8) -> KissInterfaceConfig {
+        KissInterfaceConfig {
+            ax25: Some(Ax25Addressing::new(callsign, ssid).expect("valid AX.25 addressing")),
+            ..base_config(name)
+        }
+    }
+
+    /// Byte-for-byte parity: the AX.25 TX path must emit exactly the KISS frame
+    /// Python's `process_outgoing` writes — `FEND CMD_DATA <escaped(header +
+    /// payload)> FEND` — for a fixed callsign/SSID and a payload with no special
+    /// bytes.
+    #[tokio::test]
+    async fn ax25_write_frame_matches_python() {
+        let cfg = ax25_config("ax25-kat", b"N0CALL", 0);
+        let counters = InterfaceCounters::new();
+        let mut frame_buf = Vec::new();
+        let mut sink: Vec<u8> = Vec::new();
+        let payload = [0x11u8, 0x22, 0x33];
+        write_data_frame(
+            &mut sink,
+            &payload,
+            cfg.ax25.as_ref(),
+            &mut frame_buf,
+            &counters,
+        )
+        .await
+        .expect("write ax25 frame");
+
+        // Expected: FEND, CMD_DATA, then the 16-byte AX.25 header (dst APZRNS-0,
+        // src N0CALL-0, ctrl 0x03, PID 0xF0) followed by the payload, then FEND.
+        // No byte in header/payload is FEND/FESC so nothing is escaped.
+        let expected = vec![
+            FEND,
+            kiss::CMD_DATA,
+            0x82,
+            0xA0,
+            0xB4,
+            0xA4,
+            0x9C,
+            0xA6,
+            0x60, // dst APZRNS-0
+            0x9C,
+            0x60,
+            0x86,
+            0x82,
+            0x98,
+            0x98,
+            0x61, // src N0CALL-0
+            0x03,
+            0xF0, // ctrl UI, PID no-layer-3
+            0x11,
+            0x22,
+            0x33, // payload
+            FEND,
+        ];
+        assert_eq!(
+            sink, expected,
+            "AX.25 KISS frame must match Python byte-for-byte"
+        );
+    }
+
+    /// End-to-end: a genuine Reticulum announce crosses an AX.25-over-KISS link
+    /// between two nodes. Both endpoints wrap TX in an AX.25 UI header and strip
+    /// it on RX; the delivered bytes must be the original packet (header gone)
+    /// and unpack as a verified announce.
+    #[tokio::test]
+    async fn announce_crosses_ax25_kiss_link_between_two_nodes() {
+        use leviculum_core::packet::{Packet, PacketType};
+        use leviculum_core::{Destination, DestinationType, Direction, Identity};
+        use rand_core::OsRng;
+
+        let (a_stream, b_stream) = tokio::io::duplex(64 * 1024);
+
+        let (a_in_tx, _a_in_rx) = mpsc::channel(8);
+        let (a_out_tx, a_out_rx) = mpsc::channel(8);
+        let a_cfg = ax25_config("ax25-A", b"N0CALL", 1);
+        let a_counters = Arc::new(InterfaceCounters::new());
+        tokio::spawn(async move {
+            run_kiss_over_stream(&a_cfg, a_stream, a_in_tx, a_out_rx, a_counters).await;
+        });
+
+        let (b_in_tx, mut b_in_rx) = mpsc::channel(8);
+        let (_b_out_tx, b_out_rx) = mpsc::channel(8);
+        let b_cfg = ax25_config("ax25-B", b"N0CALL", 2);
+        let b_counters = Arc::new(InterfaceCounters::new());
+        tokio::spawn(async move {
+            run_kiss_over_stream(&b_cfg, b_stream, b_in_tx, b_out_rx, b_counters).await;
+        });
+
+        let identity = Identity::generate(&mut OsRng);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "ax25app",
+            &["announce", "test"],
+        )
+        .expect("destination");
+        let dest_hash = *dest.hash();
+        let announce_packet = dest
+            .announce(Some(b"ax25-e2e"), &mut OsRng, 1_000)
+            .expect("announce packet");
+        let mut buf = [0u8; leviculum_core::constants::MTU];
+        let len = announce_packet.pack(&mut buf).expect("pack announce");
+        let announce_bytes = buf[..len].to_vec();
+
+        a_out_tx
+            .send(OutgoingPacket {
+                data: announce_bytes.clone(),
+                high_priority: false,
+            })
+            .await
+            .expect("send announce into A");
+
+        let got = tokio::time::timeout(Duration::from_secs(5), b_in_rx.recv())
+            .await
+            .expect("B receives the announce within timeout")
+            .expect("channel open");
+        assert_eq!(
+            got.data, announce_bytes,
+            "announce bytes must cross the AX.25/KISS link with the AX.25 header stripped"
+        );
+
+        let packet = Packet::unpack(&got.data).expect("unpack crossed packet");
+        assert_eq!(packet.flags.packet_type, PacketType::Announce);
+        assert_eq!(&packet.destination_hash, dest_hash.as_bytes());
+    }
+
+    /// The AX.25/KISS escape round-trip: a payload whose bytes (and whose
+    /// resulting AX.25 frame) contain FEND/FESC must survive KISS escaping and
+    /// AX.25 header strip intact.
+    #[tokio::test]
+    async fn ax25_round_trips_escaped_payload() {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+
+        let (a_in_tx, _a_in_rx) = mpsc::channel(8);
+        let (a_out_tx, a_out_rx) = mpsc::channel(8);
+        let a_cfg = ax25_config("ax25-esc-A", b"AB1CD", 3);
+        let a_counters = Arc::new(InterfaceCounters::new());
+        tokio::spawn(async move {
+            run_kiss_over_stream(&a_cfg, a, a_in_tx, a_out_rx, a_counters).await;
+        });
+
+        let (b_in_tx, mut b_in_rx) = mpsc::channel(8);
+        let (_b_out_tx, b_out_rx) = mpsc::channel(8);
+        let b_cfg = ax25_config("ax25-esc-B", b"AB1CD", 4);
+        let b_counters = Arc::new(InterfaceCounters::new());
+        tokio::spawn(async move {
+            run_kiss_over_stream(&b_cfg, b, b_in_tx, b_out_rx, b_counters).await;
+        });
+
+        let payload = vec![FEND, 0x11, FESC, TFEND, TFESC, 0x00, FEND, 0xDB, 0x42];
+        a_out_tx
+            .send(OutgoingPacket {
+                data: payload.clone(),
+                high_priority: false,
+            })
+            .await
+            .expect("send into A");
+
+        let got = tokio::time::timeout(Duration::from_secs(5), b_in_rx.recv())
+            .await
+            .expect("B receives within timeout")
+            .expect("channel open");
+        assert_eq!(
+            got.data, payload,
+            "escaped payload must survive the AX.25/KISS round-trip"
         );
     }
 }
