@@ -350,6 +350,39 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add an AX.25 KISS interface programmatically, the equivalent of a
+    /// `[[...]] type = AX25KISSInterface` config block. A plain KISS interface
+    /// wrapped in an AX.25 UI-frame header keyed on `callsign`/`ssid` (Python
+    /// validates callsign length 3-6 and ssid 0-15). The tocall is the fixed
+    /// `APZRNS-0` Python uses, so frames interoperate byte-for-byte with a
+    /// Python `AX25KISSInterface`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_ax25_kiss_interface(
+        mut self,
+        port: String,
+        callsign: String,
+        ssid: u8,
+        speed: u32,
+        databits: u8,
+        parity: String,
+        stopbits: u8,
+        flow_control: bool,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "AX25KISSInterface".to_string(),
+            port: Some(port),
+            callsign: Some(callsign),
+            ssid: Some(ssid),
+            speed: Some(speed),
+            databits: Some(databits),
+            parity: Some(parity),
+            stopbits: Some(stopbits),
+            flow_control: Some(flow_control),
+            ..Default::default()
+        });
+        self
+    }
+
     /// Add a PipeInterface that bridges packets through an external program.
     ///
     /// `command` is a shell-style command line spawned as a subprocess;

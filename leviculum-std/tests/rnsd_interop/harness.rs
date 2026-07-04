@@ -378,6 +378,77 @@ impl TestDaemon {
         }
     }
 
+    /// Retry wrapper shared by the #102 serial-family starters. Allocates a
+    /// fresh `(rns_port, cmd_port)` pair per attempt (the daemon keeps its TCP
+    /// server + JSON-RPC port alongside the serial interface) and forwards the
+    /// serial `extra_args` to the Python daemon.
+    async fn start_serial_family(extra_args: Vec<String>) -> Result<Self, HarnessError> {
+        ensure_reticulum_submodule()?;
+
+        let mut last_error = None;
+        for _ in 0..Self::MAX_STARTUP_RETRIES {
+            let (rns_port, cmd_port) = find_two_available_ports()?;
+            match Self::start_with_ports_and_options(rns_port, cmd_port, extra_args.clone()).await {
+                Ok(daemon) => return Ok(daemon),
+                Err(e) => last_error = Some(e),
+            }
+        }
+        Err(last_error.unwrap_or(HarnessError::StartupTimeout))
+    }
+
+    /// Start a Python daemon whose only over-the-air interface is a
+    /// `KISSInterface` bound to `pty` (Codeberg #102). The Rust lnsd holds the
+    /// other pty end of the socat pair.
+    pub async fn start_with_kiss_serial(pty: &str, speed: u32) -> Result<Self, HarnessError> {
+        Self::start_serial_family(vec![
+            "--serial-kind".to_string(),
+            "kiss".to_string(),
+            "--serial-port".to_string(),
+            pty.to_string(),
+            "--serial-speed".to_string(),
+            speed.to_string(),
+        ])
+        .await
+    }
+
+    /// Start a Python daemon with an `AX25KISSInterface` bound to `pty`
+    /// (Codeberg #102). `callsign`/`ssid` set the AX.25 source address; the
+    /// tocall is Python's fixed `APZRNS-0`.
+    pub async fn start_with_ax25_serial(
+        pty: &str,
+        speed: u32,
+        callsign: &str,
+        ssid: u8,
+    ) -> Result<Self, HarnessError> {
+        Self::start_serial_family(vec![
+            "--serial-kind".to_string(),
+            "ax25kiss".to_string(),
+            "--serial-port".to_string(),
+            pty.to_string(),
+            "--serial-speed".to_string(),
+            speed.to_string(),
+            "--ax25-callsign".to_string(),
+            callsign.to_string(),
+            "--ax25-ssid".to_string(),
+            ssid.to_string(),
+        ])
+        .await
+    }
+
+    /// Start a Python daemon with a `PipeInterface` running `command`
+    /// (Codeberg #102). Pipe is a subprocess bridge, not a serial port, so this
+    /// does not use a pty: `command` should be a stdio<->TCP bridge that meets
+    /// the Rust lnsd's mirror bridge over loopback.
+    pub async fn start_with_pipe(command: &str) -> Result<Self, HarnessError> {
+        Self::start_serial_family(vec![
+            "--serial-kind".to_string(),
+            "pipe".to_string(),
+            "--pipe-command".to_string(),
+            command.to_string(),
+        ])
+        .await
+    }
+
     /// Start a daemon with a UDP interface in addition to TCP.
     ///
     /// The daemon binds its UDP interface on `udp_listen_port` and forwards
@@ -2088,6 +2159,80 @@ impl Drop for TestDaemon {
         std::thread::sleep(Duration::from_millis(100));
 
         // Force kill if still running
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+/// A linked pseudo-terminal pair created by `socat` (Codeberg #102).
+///
+/// Running `socat -d -d pty,raw,echo=0 pty,raw,echo=0` opens two `/dev/pts/N`
+/// devices and bridges them: bytes written to one appear on the other. This is
+/// the serial-cable stand-in for the KISS / AX.25 interop tests: the Python
+/// daemon opens one end, our lnsd opens the other. Dropping the pair kills the
+/// `socat` process, tearing both ends down.
+pub struct SocatPtyPair {
+    process: Child,
+    /// First pty device path (e.g. `/dev/pts/3`).
+    pub end_a: String,
+    /// Second pty device path (e.g. `/dev/pts/4`).
+    pub end_b: String,
+}
+
+impl SocatPtyPair {
+    /// Spawn `socat` and return the two linked pty paths once both are open.
+    ///
+    /// `socat -d -d` logs each `N PTY is /dev/pts/M` line to stderr; we parse
+    /// the two device paths from there. Returns an error if `socat` is missing
+    /// or does not report two ptys within the timeout.
+    pub async fn spawn() -> Result<Self, HarnessError> {
+        let mut process = Command::new("socat")
+            .args(["-d", "-d", "pty,raw,echo=0", "pty,raw,echo=0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(HarnessError::SpawnFailed)?;
+
+        let stderr = process.stderr.take().expect("stderr should be captured");
+
+        let parse = tokio::task::spawn_blocking(move || {
+            let reader = BufReader::new(stderr);
+            let mut ends: Vec<String> = Vec::with_capacity(2);
+            for line in reader.lines() {
+                let line = line.map_err(|e| HarnessError::ParseError(e.to_string()))?;
+                if let Some(idx) = line.find("/dev/pts/") {
+                    let path: String = line[idx..]
+                        .chars()
+                        .take_while(|c| !c.is_whitespace())
+                        .collect();
+                    ends.push(path);
+                    if ends.len() == 2 {
+                        return Ok((ends[0].clone(), ends[1].clone()));
+                    }
+                }
+            }
+            Err(HarnessError::StartupTimeout)
+        });
+
+        let (end_a, end_b) = timeout(Duration::from_secs(10), parse)
+            .await
+            .map_err(|_| HarnessError::StartupTimeout)?
+            .map_err(|_| HarnessError::StartupTimeout)??;
+
+        // socat needs a beat after logging the paths before the ptys are fully
+        // wired; a short settle avoids an open() racing the link setup.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        Ok(Self {
+            process,
+            end_a,
+            end_b,
+        })
+    }
+}
+
+impl Drop for SocatPtyPair {
+    fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
     }

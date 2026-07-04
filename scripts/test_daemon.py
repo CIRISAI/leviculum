@@ -108,7 +108,21 @@ class TestDaemon:
                  enable_remote_management: bool = False,
                  remote_management_allowed: list = None,
                  ifac_netname: str = None, ifac_passphrase: str = None,
-                 ifac_size: int = None):
+                 ifac_size: int = None,
+                 serial_kind: str = None, serial_port: str = None,
+                 serial_speed: int = 9600, ax25_callsign: str = None,
+                 ax25_ssid: int = None, pipe_command: str = None):
+        # Serial-family interface (Codeberg #102): a KISSInterface,
+        # AX25KISSInterface or PipeInterface driven over a socat pty pair (or,
+        # for Pipe, a subprocess bridge command). Off by default; when set, the
+        # matching block is appended to the generated config so a Rust lnsd on
+        # the other pty end can exchange announces with this live Python peer.
+        self.serial_kind = serial_kind
+        self.serial_port = serial_port
+        self.serial_speed = serial_speed
+        self.ax25_callsign = ax25_callsign
+        self.ax25_ssid = ax25_ssid
+        self.pipe_command = pipe_command
         self.rns_port = rns_port
         self.ifac_netname = ifac_netname
         self.ifac_passphrase = ifac_passphrase
@@ -238,6 +252,38 @@ class TestDaemon:
     type = AutoInterface
     enabled = yes
     group_id = {self.group_id}
+"""
+
+        # Serial-family interface for the #102 socat interop tests. KISS and
+        # AX25KISS point `port` at one pty end (the Rust lnsd holds the other);
+        # Pipe spawns a bridge subprocess instead of touching a serial port.
+        if self.serial_kind in ("kiss", "ax25kiss"):
+            itype = "KISSInterface" if self.serial_kind == "kiss" else "AX25KISSInterface"
+            config += f"""
+  [[Test Serial]]
+    type = {itype}
+    enabled = yes
+    port = {self.serial_port}
+    speed = {self.serial_speed}
+    databits = 8
+    parity = none
+    stopbits = 1
+    flow_control = off
+    preamble = 150
+    txtail = 10
+    persistence = 200
+    slottime = 20
+"""
+            if self.serial_kind == "ax25kiss":
+                config += f"    callsign = {self.ax25_callsign}\n"
+                config += f"    ssid = {self.ax25_ssid}\n"
+        elif self.serial_kind == "pipe":
+            config += f"""
+  [[Test Pipe]]
+    type = PipeInterface
+    enabled = yes
+    command = {self.pipe_command}
+    respawn_delay = 0.2
 """
 
         config_path = os.path.join(self.config_dir, "config")
@@ -1638,6 +1684,19 @@ def main():
                         help="IFAC passphrase for the TCP server interface")
     parser.add_argument("--ifac-size", type=int, default=None,
                         help="IFAC size in bits for the TCP server interface")
+    parser.add_argument("--serial-kind", type=str, default=None,
+                        choices=["kiss", "ax25kiss", "pipe"],
+                        help="Serial-family interface for #102 socat interop")
+    parser.add_argument("--serial-port", type=str, default=None,
+                        help="pty path for the kiss/ax25kiss serial interface")
+    parser.add_argument("--serial-speed", type=int, default=9600,
+                        help="Baud rate for the kiss/ax25kiss serial interface")
+    parser.add_argument("--ax25-callsign", type=str, default=None,
+                        help="Source callsign for the ax25kiss interface")
+    parser.add_argument("--ax25-ssid", type=int, default=None,
+                        help="Source SSID for the ax25kiss interface")
+    parser.add_argument("--pipe-command", type=str, default=None,
+                        help="Bridge command for the pipe interface")
 
     args = parser.parse_args()
 
@@ -1664,6 +1723,12 @@ def main():
         ifac_netname=args.ifac_netname,
         ifac_passphrase=args.ifac_passphrase,
         ifac_size=args.ifac_size,
+        serial_kind=args.serial_kind,
+        serial_port=args.serial_port,
+        serial_speed=args.serial_speed,
+        ax25_callsign=args.ax25_callsign,
+        ax25_ssid=args.ax25_ssid,
+        pipe_command=args.pipe_command,
     )
     daemon.run()
 
