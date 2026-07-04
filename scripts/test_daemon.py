@@ -754,9 +754,20 @@ class TestDaemon:
                 # Set announce rate attributes required by Transport.inbound's
                 # announce processing (Transport.py:1692). Without these,
                 # incoming announces on this interface cause an AttributeError.
-                client_iface.announce_rate_target = None
-                client_iface.announce_rate_grace = None
-                client_iface.announce_rate_penalty = None
+                # When announce_rate_target is supplied (Codeberg #92 interop),
+                # apply Python's config coupling: a configured target defaults an
+                # unset penalty/grace to 0 (Reticulum.py:813-817).
+                ar_target = params.get("announce_rate_target")
+                if ar_target is not None:
+                    client_iface.announce_rate_target = ar_target
+                    client_iface.announce_rate_grace = params.get(
+                        "announce_rate_grace", 0)
+                    client_iface.announce_rate_penalty = params.get(
+                        "announce_rate_penalty", 0)
+                else:
+                    client_iface.announce_rate_target = None
+                    client_iface.announce_rate_grace = None
+                    client_iface.announce_rate_penalty = None
 
                 # Register with Transport
                 RNS.Transport.interfaces.append(client_iface)

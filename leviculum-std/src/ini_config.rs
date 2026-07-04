@@ -347,12 +347,18 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),
         "csma_enabled" => iface.csma_enabled = Some(parse_bool(value)),
-        // Announce-rate keys (Codeberg #67 Stage 2a). Parsed as unsigned, so a
+        // Announce-rate keys (Codeberg #92). Parsed as unsigned, so a
         // negative value fails to parse and stays None; Python's >0 (target) /
         // >=0 (grace, penalty) validation is applied later in the driver.
         "announce_rate_target" => iface.announce_rate_target = value.parse().ok(),
         "announce_rate_penalty" => iface.announce_rate_penalty = value.parse().ok(),
         "announce_rate_grace" => iface.announce_rate_grace = value.parse().ok(),
+        // Announce bandwidth cap (Codeberg #92, Reticulum.py:819-822). Python
+        // keeps the value only when `0 < v <= 100`; an out-of-range or
+        // unparseable value leaves the default (None) in place.
+        "announce_cap" => {
+            iface.announce_cap = value.parse::<f32>().ok().filter(|&v| v > 0.0 && v <= 100.0);
+        }
         // Interface propagation mode (Codeberg #91). Both `mode` and
         // `interface_mode` spellings map here; the value string is resolved to
         // an `InterfaceMode` at registration via `InterfaceMode::from_config_str`
@@ -939,6 +945,63 @@ mod tests {
         assert_eq!(plain.announce_rate_target, None);
         assert_eq!(plain.announce_rate_penalty, None);
         assert_eq!(plain.announce_rate_grace, None);
+    }
+
+    #[test]
+    fn test_parse_announce_cap_key() {
+        // Codeberg #92: announce_cap parses a percentage, kept only when
+        // 0 < v <= 100 (Reticulum.py:819-822). Out-of-range / unparseable
+        // values leave the default (None) in place.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Capped]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4243
+    announce_cap = 5
+
+  [[Fractional]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4244
+    announce_cap = 2.5
+
+  [[Zero]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4245
+    announce_cap = 0
+
+  [[TooLarge]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4246
+    announce_cap = 150
+
+  [[Plain]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4247
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.interfaces.get("Capped").unwrap().announce_cap,
+            Some(5.0)
+        );
+        assert_eq!(
+            config.interfaces.get("Fractional").unwrap().announce_cap,
+            Some(2.5)
+        );
+        // 0 and >100 are rejected by Python's validation, so they stay None.
+        assert_eq!(config.interfaces.get("Zero").unwrap().announce_cap, None);
+        assert_eq!(
+            config.interfaces.get("TooLarge").unwrap().announce_cap,
+            None
+        );
+        assert_eq!(config.interfaces.get("Plain").unwrap().announce_cap, None);
     }
 
     #[test]

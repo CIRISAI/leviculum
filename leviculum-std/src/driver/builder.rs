@@ -171,6 +171,30 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add a TCP client interface with per-interface announce-rate limiting
+    /// configured (Codeberg #92). Equivalent to a `[[TCPClientInterface]]`
+    /// block that also sets `announce_rate_target/grace/penalty` (seconds /
+    /// count / seconds). Used to drive config-driven rebroadcast rate limiting
+    /// against a real Python peer in interop tests.
+    pub fn add_tcp_client_with_announce_rate(
+        mut self,
+        addr: SocketAddr,
+        announce_rate_target: u32,
+        announce_rate_grace: u32,
+        announce_rate_penalty: u32,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            target_host: Some(addr.ip().to_string()),
+            target_port: Some(addr.port()),
+            announce_rate_target: Some(announce_rate_target),
+            announce_rate_grace: Some(announce_rate_grace),
+            announce_rate_penalty: Some(announce_rate_penalty),
+            ..Default::default()
+        });
+        self
+    }
+
     /// Add a TCP server interface
     ///
     /// This listens for incoming connections from other Reticulum nodes.

@@ -1540,6 +1540,36 @@ impl TestDaemon {
         Ok(ClientInterfaceInfo)
     }
 
+    /// Add a Python `TCPClientInterface` with per-interface announce-rate
+    /// limiting configured (Codeberg #92). Makes this daemon a Python reference
+    /// relay whose rebroadcast rate limiting can be compared against our own.
+    /// `target`/`grace`/`penalty` are seconds / count / seconds.
+    pub async fn add_client_interface_rate_limited(
+        &self,
+        target_ip: &str,
+        target_port: u16,
+        name: Option<&str>,
+        announce_rate_target: u32,
+        announce_rate_grace: u32,
+        announce_rate_penalty: u32,
+    ) -> Result<ClientInterfaceInfo, HarnessError> {
+        let mut params = serde_json::json!({
+            "target_ip": target_ip,
+            "target_port": target_port,
+            "announce_rate_target": announce_rate_target,
+            "announce_rate_grace": announce_rate_grace,
+            "announce_rate_penalty": announce_rate_penalty,
+        });
+
+        if let Some(n) = name {
+            params["name"] = serde_json::json!(n);
+        }
+
+        let _result = self.query("add_client_interface", params).await?;
+
+        Ok(ClientInterfaceInfo)
+    }
+
     /// Add a real Python `BackboneClientInterface` connecting to another daemon's
     /// TCP listener (Codeberg #89). Backbone is wire-identical to TCP, so this
     /// drives the reference Backbone interface against our lnsd TCP server built

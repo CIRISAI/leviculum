@@ -764,8 +764,9 @@ impl ReticulumNode {
                             .unwrap_or(leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK)
                     );
                 }
-                // Announce-rate config (Codeberg #67 Stage 2a): read + report
-                // only, no on-air enforcement yet (Codeberg #87).
+                // Announce-rate config (Codeberg #92): drives both status
+                // reporting and per-destination rebroadcast rate limiting
+                // (enforced per receiving interface in transport).
                 if let Some(ar) = build_announce_rate_config(iface_config) {
                     core.set_announce_rate_config(idx, ar);
                 }

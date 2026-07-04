@@ -42,9 +42,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::constants::{
-    ANNOUNCE_RATE_GRACE, ANNOUNCE_RATE_LIMIT_MS, ANNOUNCE_RATE_PENALTY_MS,
-    DEFAULT_ANNOUNCE_CAP_PERCENT, DISCOVERY_RETRY_INTERVAL_MS, DISCOVERY_TIMEOUT_MS,
-    ESTABLISHMENT_TIMEOUT_PER_HOP_MS, JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS,
+    ANNOUNCE_RATE_LIMIT_MS, DEFAULT_ANNOUNCE_CAP_PERCENT, DISCOVERY_RETRY_INTERVAL_MS,
+    DISCOVERY_TIMEOUT_MS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS, JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS,
     LOCAL_CLIENT_ANNOUNCE_DELAY_MS, LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX,
     MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU,
     PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
@@ -394,15 +393,12 @@ pub struct TransportConfig {
     pub max_hops: u8,
     /// Path expiry time in seconds
     pub path_expiry_secs: u64,
-    /// Announce rate limit minimum interval (ms)
+    /// Announce rate limit minimum interval (ms). This is the short
+    /// local-rebroadcast dedup window (Transport.py:1584-1590), distinct from
+    /// the per-destination `announce_rate_target` anti-flood limit, which is
+    /// configured per interface (see [`AnnounceRateConfig`]) and enforced in
+    /// `Transport::check_announce_rate`.
     pub announce_rate_limit_ms: u64,
-    /// Per-destination announce rate target (ms). None = disabled (default).
-    /// When set, announces arriving faster than this interval accumulate violations.
-    pub announce_rate_target_ms: Option<u64>,
-    /// Number of rate violations allowed before blocking rebroadcast. Default 0.
-    pub announce_rate_grace: u8,
-    /// Additional blocking penalty (ms) added to the blocking window. Default 0.
-    pub announce_rate_penalty_ms: u64,
     /// Maximum queued announces per capped interface. Default: 16384.
     pub max_queued_announces: usize,
     /// Maximum random blobs retained per path entry for replay detection. Default: 64.
@@ -422,9 +418,6 @@ impl Default for TransportConfig {
             max_hops: PATHFINDER_MAX_HOPS,
             path_expiry_secs: PATHFINDER_EXPIRY_SECS,
             announce_rate_limit_ms: ANNOUNCE_RATE_LIMIT_MS,
-            announce_rate_target_ms: None,
-            announce_rate_grace: ANNOUNCE_RATE_GRACE,
-            announce_rate_penalty_ms: ANNOUNCE_RATE_PENALTY_MS,
             max_queued_announces: MAX_QUEUED_ANNOUNCES_PER_INTERFACE,
             max_random_blobs: MAX_RANDOM_BLOBS,
             link_keepalive_secs: None,
@@ -450,16 +443,16 @@ pub struct BlackholeEntry {
     pub reason: Option<String>,
 }
 
-/// Per-interface announce-rate limiting configuration (Codeberg #67 Stage 2a).
+/// Per-interface announce-rate limiting configuration (Codeberg #92).
 ///
 /// Holds the values as read from the interface config after Python's
 /// validation (`announce_rate_target` kept only when > 0, penalty/grace only
 /// when >= 0) and coupling (a configured target defaults an unset penalty/grace
 /// to 0), matching Reticulum.py:798-821. The transport-enabled default fill
-/// (Reticulum.py:826-829) is applied later at emission time in
-/// [`Transport::interface_stats`], because it depends on whether transport is
-/// enabled. Stage 2a only reads + reports these; no on-air rate limiting yet
-/// (that is Codeberg #87).
+/// (Reticulum.py:826-829) is applied via `Transport::resolve_announce_rate`,
+/// which is shared by reporting ([`Transport::interface_stats`]) and
+/// enforcement (`Transport::check_announce_rate`, via
+/// `Transport::effective_announce_rate`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnnounceRateConfig {
     /// Configured announce-rate target in seconds, or `None` when unset.
@@ -2756,7 +2749,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Only blocks rebroadcast (announce_table insertion), path_table is already updated.
             // Skipped for PATH_RESPONSE context packets.
             let rate_blocked = if !is_path_response {
-                self.check_announce_rate(&dest_hash, now)
+                self.check_announce_rate(interface_index, &dest_hash, now)
             } else {
                 false
             };
@@ -2766,6 +2759,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     dest = %HexShort(&dest_hash),
                     "Announce rebroadcast blocked by per-destination rate limit"
                 );
+                // Observability: a rebroadcast suppressed by the per-destination
+                // announce-rate limit is an announce-rate drop (the path table
+                // was still updated above, only the rebroadcast is dropped).
+                self.stats.record_drop(DropReason::AnnounceRateLimited);
             }
 
             // Track local client destinations (Block B). When an announce arrives
@@ -6052,14 +6049,50 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // We remove immediately to avoid wasting airtime on constrained LoRa links.
     }
 
+    /// Resolve the effective per-destination announce-rate limit (in
+    /// milliseconds) for the interface an announce was received on.
+    ///
+    /// Mirrors Python's per-interface model: enforcement keys on
+    /// `packet.receiving_interface.announce_rate_target` (Transport.py:1838),
+    /// whose value was resolved at config time from the interface's
+    /// `announce_rate_*` keys plus the transport-enabled default fill
+    /// (Reticulum.py:826-829, Interface DEFAULT_AR_TARGET/PENALTY/GRACE).
+    /// Reuses [`Self::resolve_announce_rate`] so reporting (`interface_stats`)
+    /// and enforcement share one source of truth. Returns `None` when rate
+    /// limiting is inactive for the interface (no target configured and
+    /// transport disabled), matching `announce_rate_target == None`.
+    ///
+    /// The config values are in seconds (Python units); this converts the
+    /// target and penalty to the millisecond epoch the rate table stores.
+    fn effective_announce_rate(&self, iface_index: usize) -> Option<(u64, u8, u64)> {
+        let (target_s, penalty_s, grace) = Self::resolve_announce_rate(
+            self.interface_announce_rate_configs.get(&iface_index),
+            self.config.enable_transport,
+        );
+        let target_ms = target_s? as u64 * 1000;
+        // When a target resolves, grace/penalty are always populated too (the
+        // config coupling at Reticulum.py:813-817 defaults them to 0 for a
+        // configured target, and the transport fill sets both). The unwrap_or
+        // keeps the DEFAULT_* fallbacks as belt-and-suspenders.
+        let grace = grace.unwrap_or(DEFAULT_AR_GRACE).min(u8::MAX as u32) as u8;
+        let penalty_ms = penalty_s.unwrap_or(DEFAULT_AR_PENALTY) as u64 * 1000;
+        Some((target_ms, grace, penalty_ms))
+    }
+
     /// Check announce rate for a destination, returning true if rebroadcast should be blocked.
     ///
-    /// Matches Python Transport.py:1692-1719. Only blocks rebroadcast (announce_table insertion),
-    /// NOT path_table updates. Skipped for PATH_RESPONSE context and when rate target is None.
-    fn check_announce_rate(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES], now: u64) -> bool {
-        let rate_target = match self.config.announce_rate_target_ms {
-            Some(t) => t,
-            None => return false, // Disabled
+    /// Matches Python Transport.py:1838-1864. Only blocks rebroadcast (announce_table insertion),
+    /// NOT path_table updates. Skipped for PATH_RESPONSE context and when the receiving
+    /// interface has no announce-rate target (see [`Self::effective_announce_rate`]).
+    fn check_announce_rate(
+        &mut self,
+        iface_index: usize,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        now: u64,
+    ) -> bool {
+        let (rate_target, grace, penalty_ms) = match self.effective_announce_rate(iface_index) {
+            Some(v) => v,
+            None => return false, // Disabled for this interface
         };
 
         if let Some(entry) = self.storage.get_announce_rate(dest_hash) {
@@ -6077,9 +6110,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 entry.rate_violations = entry.rate_violations.saturating_sub(1);
             }
 
-            if entry.rate_violations > self.config.announce_rate_grace {
-                entry.blocked_until_ms =
-                    entry.last_ms + rate_target + self.config.announce_rate_penalty_ms;
+            if entry.rate_violations > grace {
+                entry.blocked_until_ms = entry.last_ms + rate_target + penalty_ms;
                 self.storage.set_announce_rate(*dest_hash, entry);
                 return true;
             }
@@ -14370,12 +14402,24 @@ mod tests {
             let identity = Identity::generate(&mut OsRng);
             let config = TransportConfig {
                 enable_transport: true,
-                announce_rate_target_ms: Some(target_ms),
-                announce_rate_grace: grace,
-                announce_rate_penalty_ms: penalty_ms,
                 ..TransportConfig::default()
             };
-            Transport::new(config, clock, MemoryStorage::with_defaults(), identity)
+            let mut transport =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            // Enforcement is per receiving interface (Python keys on
+            // packet.receiving_interface.announce_rate_target). Install the
+            // config on interface 0, which every rate-limit test registers and
+            // receives on. Config units are whole seconds; all test targets and
+            // penalties are whole-second multiples.
+            transport.set_announce_rate_config(
+                0,
+                AnnounceRateConfig {
+                    target: Some((target_ms / 1000) as u32),
+                    penalty: Some((penalty_ms / 1000) as u32),
+                    grace: Some(grace as u32),
+                },
+            );
+            transport
         }
 
         #[test]
@@ -14722,11 +14766,16 @@ mod tests {
         }
 
         #[test]
-        fn test_announce_rate_disabled_by_default() {
-            // Default config has announce_rate_target_ms: None
-            let mut transport = make_transport_enabled();
-            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
-
+        fn test_announce_rate_disabled_when_transport_off() {
+            // Python parity (Reticulum.py:826-829): the transport-enabled default
+            // fill only applies when transport is enabled. On a leaf node
+            // (transport off) with no explicit announce_rate_* config, the
+            // receiving interface's announce_rate_target stays None, so rate
+            // limiting is inactive and no rate table entry is created.
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = Identity::generate(&mut OsRng);
+            // Local destination so a leaf node still tracks the announce even
+            // though it does not rebroadcast (from_local path).
             let dest = crate::destination::Destination::new(
                 Some(Identity::generate(&mut OsRng)),
                 crate::destination::Direction::In,
@@ -14736,20 +14785,28 @@ mod tests {
             )
             .unwrap();
             let dest_hash = dest.hash().into_bytes();
+            let config = TransportConfig {
+                enable_transport: false,
+                ..TransportConfig::default()
+            };
+            let mut transport =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            transport.set_local_client(idx0, true);
 
             // Rapid announces (only bypass simple rate limit and packet cache)
             let now1 = transport.clock.now_ms();
             let raw1 = make_announce_raw_for_dest(&dest, 1, now1);
-            transport.process_incoming(0, &raw1).unwrap();
+            transport.process_incoming(idx0, &raw1).unwrap();
             assert!(transport.storage().get_announce(&dest_hash).is_some());
 
             transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
             transport.storage_mut().clear_packet_hashes();
             let now2 = transport.clock.now_ms();
             let raw2 = make_announce_raw_for_dest(&dest, 1, now2);
-            transport.process_incoming(0, &raw2).unwrap();
+            transport.process_incoming(idx0, &raw2).unwrap();
 
-            // Should be accepted (rate limiting is disabled)
+            // Should be accepted (rate limiting is disabled for this interface)
             let entry = transport.storage().get_announce(&dest_hash).unwrap();
             assert_eq!(
                 entry.timestamp_ms, now2,
@@ -14761,6 +14818,105 @@ mod tests {
                 transport.storage().announce_rate_count(),
                 0,
                 "Rate table should be empty when rate limiting is disabled"
+            );
+        }
+
+        #[test]
+        fn test_announce_rate_default_fill_active_on_transport_node() {
+            // Python parity (Reticulum.py:826-829, Interface DEFAULT_AR_*): a
+            // transport-enabled node with NO explicit announce_rate_* config
+            // still rate-limits, because the default fill sets target=3600s,
+            // grace=5, penalty=0 on every interface. The first few rapid
+            // announces are accepted (under grace), but the rate table IS
+            // populated, and after grace is exceeded the rebroadcast blocks.
+            let mut transport = make_transport_enabled();
+            let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            // No set_announce_rate_config: rely purely on the transport default.
+
+            let dest = crate::destination::Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                crate::destination::Direction::In,
+                crate::destination::DestinationType::Single,
+                "testapp",
+                &["defaultfill"],
+            )
+            .unwrap();
+
+            // Emit DEFAULT_AR_GRACE + 2 rapid fresh announces. Each is well under
+            // the 3600s target, so violations accrue and the last one blocks.
+            let mut last_blocked = false;
+            for i in 0..(DEFAULT_AR_GRACE + 2) {
+                if i > 0 {
+                    transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+                    transport.storage_mut().clear_packet_hashes();
+                }
+                let now = transport.clock.now_ms();
+                let raw = make_announce_raw_for_dest(&dest, 1, now);
+                let before = transport.stats().drops_announce_rate_limited();
+                transport.process_incoming(idx0, &raw).unwrap();
+                last_blocked = transport.stats().drops_announce_rate_limited() > before;
+            }
+
+            // A rate entry exists (default fill is active), and the final
+            // announce was rebroadcast-blocked once grace was exceeded.
+            assert_eq!(
+                transport.storage().announce_rate_count(),
+                1,
+                "transport node populates the rate table by default"
+            );
+            assert!(
+                last_blocked,
+                "rebroadcast should be blocked after DEFAULT_AR_GRACE violations"
+            );
+        }
+
+        #[test]
+        fn test_effective_announce_rate_keys_on_receiving_interface() {
+            // Enforcement resolves the limit from the RECEIVING interface's
+            // config (Python keys on packet.receiving_interface.announce_rate_*).
+            let mut transport = make_transport_enabled();
+            let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 1)));
+
+            // Interface 0: explicit config (target 120s, grace 3, penalty 10s).
+            transport.set_announce_rate_config(
+                idx0,
+                AnnounceRateConfig {
+                    target: Some(120),
+                    penalty: Some(10),
+                    grace: Some(3),
+                },
+            );
+            // Interface 1: no explicit config -> transport-enabled default fill.
+
+            assert_eq!(
+                transport.effective_announce_rate(idx0),
+                Some((120_000, 3, 10_000)),
+                "iface 0 uses its explicit per-interface config (seconds -> ms)"
+            );
+            assert_eq!(
+                transport.effective_announce_rate(idx1),
+                Some((
+                    DEFAULT_AR_TARGET as u64 * 1000,
+                    DEFAULT_AR_GRACE as u8,
+                    DEFAULT_AR_PENALTY as u64 * 1000,
+                )),
+                "iface 1 falls back to the transport-enabled default fill"
+            );
+
+            // With transport disabled and no config, the interface has no limit.
+            transport.config.enable_transport = false;
+            assert_eq!(
+                transport.effective_announce_rate(idx1),
+                None,
+                "leaf interface with no config has no announce-rate limit"
+            );
+            // ...but an explicitly configured interface still enforces even on a
+            // leaf node (config coupling filled grace/penalty at parse time).
+            assert_eq!(
+                transport.effective_announce_rate(idx0),
+                Some((120_000, 3, 10_000)),
+                "explicit config enforces regardless of transport mode"
             );
         }
 

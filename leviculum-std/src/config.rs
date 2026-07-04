@@ -270,14 +270,20 @@ pub struct InterfaceConfig {
     /// Enable multicast loopback (for same-machine testing)
     pub multicast_loopback: Option<bool>,
 
-    // Announce-rate limiting (Codeberg #67 Stage 2a). Read + reported only;
-    // on-air enforcement is Codeberg #87. Python: Reticulum.py:798-821.
+    // Announce-rate limiting (Codeberg #92). Python: Reticulum.py:798-821.
+    // The target/grace/penalty keys drive per-destination rebroadcast rate
+    // limiting (Transport.py:1838-1864); enforcement lives in transport.
     /// Announce-rate target in seconds (Python `announce_rate_target`).
     pub announce_rate_target: Option<u32>,
     /// Announce-rate penalty in seconds (Python `announce_rate_penalty`).
     pub announce_rate_penalty: Option<u32>,
     /// Announce-rate grace count (Python `announce_rate_grace`).
     pub announce_rate_grace: Option<u32>,
+    /// Announce bandwidth cap as a percentage of link capacity (Python
+    /// `announce_cap`, Reticulum.py:819-822). Kept only when `0 < v <= 100`.
+    /// `None` uses the default cap (2%). Python stores this as a fraction; we
+    /// keep the raw percentage.
+    pub announce_cap: Option<f32>,
 
     // IFAC (Interface Access Code)
     /// Network name for IFAC authentication
@@ -422,6 +428,7 @@ impl Default for InterfaceConfig {
             announce_rate_target: None,
             announce_rate_penalty: None,
             announce_rate_grace: None,
+            announce_cap: None,
             networkname: None,
             passphrase: None,
             ifac_size: None,

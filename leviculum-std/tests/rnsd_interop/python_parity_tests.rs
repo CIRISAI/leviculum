@@ -503,3 +503,127 @@ async fn test_local_rebroadcasts_max_enforced() {
 
     relay.stop().await.expect("stop");
 }
+
+/// Codeberg #92: per-interface announce-rate limiting (target/grace/penalty).
+///
+/// Topology: Python source (SRC) -> relay -> Python sink (SNK). The relay is a
+/// client to both, so announces from SRC are received on the SRC-facing
+/// interface and rebroadcast toward SNK. That interface carries an
+/// `announce_rate_target`, so a source re-announcing faster than the target
+/// has its rebroadcasts rate-limited once grace is exceeded
+/// (Transport.py:1838-1864).
+///
+/// The SAME source/sink daemons drive two identically-configured relays:
+///   1. our Rust relay -> assert it rate-limits (drops_announce_rate_limited
+///      grows) while the sink still learns the path (rate limiting blocks
+///      rebroadcast, not path-table propagation), and
+///   2. a Python reference relay -> assert the sink likewise learns the path
+///      on the identical scenario.
+///
+/// The exact per-decision algorithm parity (which announce is blocked vs
+/// accepted, step for step) is pinned by the algorithm-identical unit tests in
+/// `leviculum-core` (`test_announce_rate_*`). This interop test validates the
+/// config -> enforcement -> semantic path against a live Python peer.
+#[tokio::test]
+async fn test_announce_rate_target_matches_python() {
+    // Spacing above the 2 s local-rebroadcast dedup window so only the
+    // per-destination announce_rate_target logic is exercised.
+    const ANNOUNCE_SPACING: Duration = Duration::from_millis(2500);
+    const ANNOUNCE_COUNT: usize = 6;
+    const AR_TARGET: u32 = 60; // seconds; the source re-announces far faster
+    const AR_GRACE: u32 = 0;
+    const AR_PENALTY: u32 = 0;
+
+    // ---- Run 1: our Rust relay ----
+    let source = TestDaemon::start().await.expect("source daemon");
+    let sink = TestDaemon::start().await.expect("sink daemon");
+
+    let _storage = crate::common::temp_storage("announce_rate_target", "relay");
+    let mut relay = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_client_with_announce_rate(source.rns_addr(), AR_TARGET, AR_GRACE, AR_PENALTY)
+        .add_tcp_client(sink.rns_addr())
+        .storage_path(_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build relay");
+    relay.start().await.expect("start relay");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let dest_info = source
+        .register_destination("parity_test", &["ar_target"])
+        .await
+        .expect("register");
+    let dest_hash = leviculum_core::DestinationHash::new(parse_hash(&dest_info.hash));
+
+    for _ in 0..ANNOUNCE_COUNT {
+        source
+            .announce_destination(&dest_info.hash, b"ar")
+            .await
+            .expect("announce");
+        tokio::time::sleep(ANNOUNCE_SPACING).await;
+    }
+    // Let forwarding and retries settle.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // The sink learned the destination from the first (accepted) announce:
+    // rate limiting blocks rebroadcast, not path-table propagation.
+    assert!(
+        crate::common::wait_for_path_on_daemon(&sink, &dest_hash, Duration::from_secs(10)).await,
+        "sink should learn the destination through the rate-limited Rust relay"
+    );
+
+    // Rebroadcasts after grace were blocked. With grace=0, announces #2..N are
+    // all blocked, so at least ANNOUNCE_COUNT-2 drops are recorded.
+    let drops = relay.transport_stats().drops_announce_rate_limited();
+    assert!(
+        drops >= (ANNOUNCE_COUNT as u64 - 2),
+        "Rust relay should rate-limit rebroadcasts (drops={drops}, want >= {})",
+        ANNOUNCE_COUNT - 2
+    );
+
+    relay.stop().await.expect("stop relay");
+    drop(source);
+    drop(sink);
+
+    // ---- Run 2: Python reference relay, same config, same scenario ----
+    let src = TestDaemon::start().await.expect("ref source daemon");
+    let snk = TestDaemon::start().await.expect("ref sink daemon");
+    let relay_py = TestDaemon::start().await.expect("ref relay daemon");
+
+    relay_py
+        .add_client_interface_rate_limited(
+            "127.0.0.1",
+            src.rns_port(),
+            Some("to_source"),
+            AR_TARGET,
+            AR_GRACE,
+            AR_PENALTY,
+        )
+        .await
+        .expect("relay->source iface");
+    relay_py
+        .add_client_interface("127.0.0.1", snk.rns_port(), Some("to_sink"))
+        .await
+        .expect("relay->sink iface");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let ref_info = src
+        .register_destination("parity_test", &["ar_target"])
+        .await
+        .expect("register");
+    let ref_hash = leviculum_core::DestinationHash::new(parse_hash(&ref_info.hash));
+
+    for _ in 0..ANNOUNCE_COUNT {
+        src.announce_destination(&ref_info.hash, b"ar")
+            .await
+            .expect("announce");
+        tokio::time::sleep(ANNOUNCE_SPACING).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    assert!(
+        crate::common::wait_for_path_on_daemon(&snk, &ref_hash, Duration::from_secs(10)).await,
+        "sink should learn the destination through the identically-configured Python relay"
+    );
+}
