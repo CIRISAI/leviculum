@@ -96,6 +96,7 @@ pub mod compression;
 pub mod constants;
 pub mod crypto;
 pub(crate) mod destination;
+pub mod discovery;
 pub mod embedded_storage;
 pub mod framing;
 mod hex_fmt;

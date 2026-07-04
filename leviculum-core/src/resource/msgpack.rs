@@ -23,6 +23,31 @@ pub(crate) fn write_fixstr(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(s.as_bytes());
 }
 
+/// Write a UTF-8 string in compact msgpack format (Python `umsgpack`-compatible).
+///
+/// Encoding rules mirror `umsgpack._pack_string`:
+/// - `< 32` bytes: fixstr (`0xa0 | len`)
+/// - `< 256` bytes: str8 (`0xd9` + 1 len byte)
+/// - `< 65536` bytes: str16 (`0xda` + 2 len bytes BE)
+/// - larger: str32 (`0xdb` + 4 len bytes BE)
+pub(crate) fn write_str(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    if len < 32 {
+        buf.push(0xa0 | (len as u8));
+    } else if len < 256 {
+        buf.push(0xd9);
+        buf.push(len as u8);
+    } else if len < 65536 {
+        buf.push(0xda);
+        buf.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        buf.push(0xdb);
+        buf.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+    buf.extend_from_slice(bytes);
+}
+
 /// Write binary data as bin8 or bin16.
 pub(crate) fn write_bin(buf: &mut Vec<u8>, data: &[u8]) {
     let len = data.len();
@@ -83,7 +108,6 @@ pub(crate) fn write_float64(buf: &mut Vec<u8>, val: f64) {
 }
 
 /// Write a boolean value.
-#[cfg(test)]
 pub(crate) fn write_bool(buf: &mut Vec<u8>, val: bool) {
     buf.push(if val { 0xc3 } else { 0xc2 });
 }
@@ -172,7 +196,6 @@ pub(crate) fn read_float64(data: &[u8], pos: &mut usize) -> Option<f64> {
 }
 
 /// Read a msgpack boolean.
-#[cfg(test)]
 pub(crate) fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
     let tag = read_byte(data, pos)?;
     match tag {
