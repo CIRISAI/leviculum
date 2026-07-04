@@ -322,9 +322,15 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
             );
         }
         "connectable" => iface.connectable = Some(parse_bool(value)),
+        // Honour a configured bitrate only when it clears MINIMUM_BITRATE, else
+        // leave it unset so the interface keeps its default (Python
+        // Reticulum.py:793-796). The stored value overrides the medium default
+        // and feeds announce bandwidth capping / timing.
         "bitrate" => {
-            if let Ok(v) = value.parse() {
-                iface.bitrate = v;
+            if let Ok(v) = value.parse::<u64>() {
+                if v >= leviculum_core::constants::MINIMUM_BITRATE as u64 {
+                    iface.bitrate = Some(v);
+                }
             }
         }
         "buffer_size" => iface.buffer_size = value.parse().ok(),
@@ -1002,6 +1008,62 @@ mod tests {
             None
         );
         assert_eq!(config.interfaces.get("Plain").unwrap().announce_cap, None);
+    }
+
+    #[test]
+    fn test_parse_bitrate_key() {
+        // Codeberg #93: a configured bitrate is honoured only when it clears
+        // MINIMUM_BITRATE (5 bps); below that it is ignored and stays unset,
+        // matching Python (Reticulum.py:793-796). An unset key also stays None.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Fast]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4243
+    bitrate = 1200
+
+  [[AtMinimum]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4244
+    bitrate = 5
+
+  [[BelowMinimum]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4245
+    bitrate = 4
+
+  [[Plain]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4246
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.interfaces.get("Fast").unwrap().bitrate,
+            Some(1200),
+            "bitrate >= MINIMUM_BITRATE is honoured"
+        );
+        assert_eq!(
+            config.interfaces.get("AtMinimum").unwrap().bitrate,
+            Some(5),
+            "bitrate exactly at MINIMUM_BITRATE is honoured"
+        );
+        assert_eq!(
+            config.interfaces.get("BelowMinimum").unwrap().bitrate,
+            None,
+            "bitrate below MINIMUM_BITRATE is ignored (stays unset)"
+        );
+        assert_eq!(
+            config.interfaces.get("Plain").unwrap().bitrate,
+            None,
+            "an unset bitrate key stays None"
+        );
     }
 
     #[test]

@@ -531,6 +531,12 @@ pub struct InterfaceStatEntry {
     /// Reticulum propagation mode (Python `Interface.mode`, Codeberg #91).
     /// Reported over the shared-instance IPC so `rnstatus`/`lnstatus` show it.
     pub mode: InterfaceMode,
+    /// Effective configured bitrate in bits per second (Codeberg #93), or `None`
+    /// when the interface has no configured bitrate. When set, this is the value
+    /// that drives the announce bandwidth cap / timing and is reported by
+    /// `rnstatus`/`lnstatus` instead of the medium default guess (Python
+    /// `interface.bitrate`, Reticulum.py:1421-1423).
+    pub configured_bitrate: Option<u32>,
     /// Incoming announce frequency in Hz (Python ia_freq_deque)
     pub incoming_announce_frequency: f64,
     /// Outgoing announce frequency in Hz (Python oa_freq_deque)
@@ -5022,11 +5028,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .get(&id)
                     .map(|q| q.len())
                     .unwrap_or(0);
+                // Codeberg #93: the effective bitrate is whatever was registered
+                // for the announce cap (from a configured `bitrate`); `None`
+                // leaves reporting to the medium default guess.
+                let configured_bitrate = self
+                    .interface_announce_caps
+                    .get(&id)
+                    .map(|cap| cap.bitrate_bps);
                 InterfaceStatEntry {
                     id,
                     name: name.clone(),
                     is_local_client: self.local_client_interfaces.contains(&id),
                     mode: self.interface_mode(id),
+                    configured_bitrate,
                     incoming_announce_frequency: ia_freq,
                     outgoing_announce_frequency: oa_freq,
                     incoming_pr_frequency: ip_freq,
@@ -9307,6 +9321,50 @@ mod tests {
                 .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
                 .count();
             assert_eq!(sent_after, 1, "should drain queued announce after holdoff");
+        }
+
+        /// Codeberg #93: the announce holdoff registered from a configured
+        /// bitrate must equal Python's spacing exactly. Python computes
+        /// `tx_time = len*8/bitrate` then `wait = tx_time/announce_cap` (a
+        /// fraction, e.g. 0.02); ours is `wait_ms = len*8*1000/(bitrate*cap%/100)`,
+        /// the same value. Asserted against the real sent-announce length.
+        #[test]
+        fn announce_cap_holdoff_matches_python_formula() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let bitrate: u64 = 1000;
+            transport.register_interface_bitrate(1, bitrate as u32);
+
+            let (raw1, _dh1) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &raw1).unwrap();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            let send_time = transport.clock.now_ms();
+            transport.poll();
+            let actions = transport.drain_actions();
+            let _ = transport.drain_events();
+
+            let sent_len = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.len()),
+                    _ => None,
+                })
+                .expect("announce should be sent on the capped interface");
+
+            // Python-derived spacing for this bitrate + default 2% cap.
+            let cap_bps = bitrate * DEFAULT_ANNOUNCE_CAP_PERCENT as u64 / 100;
+            let expected_wait = (sent_len as u64 * 8 * 1000) / cap_bps;
+
+            let cap = transport.interface_announce_caps.get(&1).unwrap();
+            assert_eq!(
+                cap.allowed_at_ms,
+                send_time + expected_wait,
+                "holdoff must equal Python tx_time/announce_cap for bitrate={bitrate}"
+            );
         }
 
         #[test]
@@ -17379,6 +17437,34 @@ mod tests {
             assert_eq!(iface0.outgoing_announce_frequency, 0.0);
             assert_eq!(iface1.incoming_announce_frequency, 0.0);
             assert!(iface1.outgoing_announce_frequency > 0.0);
+        }
+
+        /// Codeberg #93: a configured bitrate registered for the announce cap
+        /// is reported as the effective bitrate via `interface_stats`, while an
+        /// interface without one leaves the field unset (the RPC layer then
+        /// falls back to the medium default guess).
+        #[test]
+        fn interface_stats_emits_configured_bitrate() {
+            let mut transport = make_transport();
+            transport.register_interface_bitrate(0, 1200);
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
+            let iface1 = stats.iter().find(|s| s.id == 1).unwrap();
+            assert_eq!(iface0.configured_bitrate, Some(1200));
+            assert_eq!(iface1.configured_bitrate, None);
+        }
+
+        /// Codeberg #93: registering a bitrate of 0 (unlimited) removes any cap
+        /// and leaves the reported bitrate unset, matching
+        /// `register_interface_bitrate`'s no-cap contract.
+        #[test]
+        fn interface_stats_zero_bitrate_is_unset() {
+            let mut transport = make_transport();
+            transport.register_interface_bitrate(0, 1200);
+            transport.register_interface_bitrate(0, 0);
+            let stats = transport.interface_stats();
+            let iface0 = stats.iter().find(|s| s.id == 0).unwrap();
+            assert_eq!(iface0.configured_bitrate, None);
         }
 
         /// A targeted path response (deferred announce rebroadcast with

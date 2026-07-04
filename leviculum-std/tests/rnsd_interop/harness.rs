@@ -1069,6 +1069,7 @@ impl TestDaemon {
                     .get("burst_active")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let bitrate = entry.get("bitrate").and_then(|v| v.as_u64());
 
                 interfaces.push(InterfaceInfo {
                     name,
@@ -1077,6 +1078,7 @@ impl TestDaemon {
                     out_enabled,
                     held_announces,
                     burst_active,
+                    bitrate,
                 });
             }
         }
@@ -1559,6 +1561,33 @@ impl TestDaemon {
             "announce_rate_target": announce_rate_target,
             "announce_rate_grace": announce_rate_grace,
             "announce_rate_penalty": announce_rate_penalty,
+        });
+
+        if let Some(n) = name {
+            params["name"] = serde_json::json!(n);
+        }
+
+        let _result = self.query("add_client_interface", params).await?;
+
+        Ok(ClientInterfaceInfo)
+    }
+
+    /// Add a Python `TCPClientInterface` with a configured `bitrate` (Codeberg
+    /// #93). Mirrors Python's `configured_bitrate` override
+    /// (Reticulum.py:887): the value replaces the interface's medium default and
+    /// is reported back via `get_interfaces`, giving a reference to compare our
+    /// effective-bitrate handling against.
+    pub async fn add_client_interface_with_bitrate(
+        &self,
+        target_ip: &str,
+        target_port: u16,
+        name: Option<&str>,
+        bitrate: u64,
+    ) -> Result<ClientInterfaceInfo, HarnessError> {
+        let mut params = serde_json::json!({
+            "target_ip": target_ip,
+            "target_port": target_port,
+            "bitrate": bitrate,
         });
 
         if let Some(n) = name {
@@ -2093,6 +2122,10 @@ pub struct InterfaceInfo {
     /// Codeberg #87: whether the announce ingress burst limiter is active
     /// (Python ic_burst_active).
     pub burst_active: bool,
+    /// Codeberg #93: the interface's effective bitrate in bits per second
+    /// (Python `interface.bitrate`), or `None` when the daemon predates the
+    /// field. A configured `bitrate` overrides the medium default here.
+    pub bitrate: Option<u64>,
 }
 
 /// Information about a registered destination.

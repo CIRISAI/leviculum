@@ -369,6 +369,10 @@ class TestDaemon:
                     "ifac_identity": hasattr(iface, 'ifac_identity') and iface.ifac_identity is not None,
                     "held_announces": len(held) if held is not None else 0,
                     "burst_active": bool(getattr(iface, 'ic_burst_active', False)),
+                    # Codeberg #93: the interface's effective bitrate. A
+                    # configured bitrate overrides the medium default here
+                    # (Reticulum.py:887).
+                    "bitrate": getattr(iface, 'bitrate', None),
                 })
             return {"result": interfaces}
 
@@ -768,6 +772,15 @@ class TestDaemon:
                     client_iface.announce_rate_target = None
                     client_iface.announce_rate_grace = None
                     client_iface.announce_rate_penalty = None
+
+                # Codeberg #93: honour a configured bitrate exactly as Reticulum
+                # applies configured_bitrate (Reticulum.py:794-796,887): the value
+                # overrides the interface's medium default only when it clears
+                # MINIMUM_BITRATE.
+                cfg_bitrate = params.get("bitrate")
+                if cfg_bitrate is not None and \
+                        int(cfg_bitrate) >= RNS.Reticulum.MINIMUM_BITRATE:
+                    client_iface.bitrate = int(cfg_bitrate)
 
                 # Register with Transport
                 RNS.Transport.interfaces.append(client_iface)

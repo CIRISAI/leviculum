@@ -254,6 +254,11 @@ pub const MAX_QUEUED_ANNOUNCES_PER_INTERFACE: usize = 16384;
 /// Default announce bandwidth cap as percentage of link capacity (Python Interface.py:25)
 pub const DEFAULT_ANNOUNCE_CAP_PERCENT: u32 = 2;
 
+/// Minimum bitrate (bps) a medium must sustain for a configured `bitrate` to be
+/// honoured. A configured value below this is ignored and the interface keeps
+/// its default (Python `Reticulum.MINIMUM_BITRATE`, Reticulum.py:134/794-796).
+pub const MINIMUM_BITRATE: u32 = 5;
+
 /// Maximum packet hashlist size (matches Python Transport.hashlist_maxsize)
 ///
 /// When the current dedup set exceeds half this size, it rotates into the

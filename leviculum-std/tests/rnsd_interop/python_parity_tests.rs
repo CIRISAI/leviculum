@@ -627,3 +627,68 @@ async fn test_announce_rate_target_matches_python() {
         "sink should learn the destination through the identically-configured Python relay"
     );
 }
+
+/// Codeberg #93: a configured `bitrate` is honoured identically by both
+/// stacks. A real Python `TCPClientInterface` and our TCP client, each given
+/// the same `bitrate`, report that exact effective bitrate. This is the clean
+/// external observable of the configured value (the announce tx-spacing effect
+/// is internal weighting, covered by a focused unit test against Python's
+/// `tx_time/announce_cap` formula). Proves our `configured_bitrate` handling
+/// matches the reference (Reticulum.py:794-796,887).
+#[tokio::test]
+async fn test_configured_bitrate_matches_python() {
+    const BITRATE: u64 = 9600;
+
+    let inspect = TestDaemon::start().await.expect("inspect daemon");
+    let target = TestDaemon::start().await.expect("target daemon");
+
+    // Reference: a real Python TCPClientInterface with the configured bitrate.
+    inspect
+        .add_client_interface_with_bitrate(
+            &target.rns_addr().ip().to_string(),
+            target.rns_addr().port(),
+            Some("BitrateProbe"),
+            BITRATE,
+        )
+        .await
+        .expect("add python client interface");
+
+    // Our stack: a TCP client configured with the same bitrate.
+    let storage = crate::common::temp_storage("configured_bitrate_matches_python", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_client_with_bitrate(target.rns_addr(), BITRATE)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build rust node");
+    node.start().await.expect("start rust node");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Python reports the configured bitrate on the probe interface (uniquely
+    // identified: the daemon's default interfaces carry the 10 Mbps guess).
+    let py_ifaces = inspect.get_interfaces().await.expect("python interfaces");
+    let py_probe = py_ifaces
+        .iter()
+        .find(|i| i.bitrate == Some(BITRATE))
+        .expect("python probe interface reports the configured bitrate");
+
+    // Our stack reports the same effective bitrate on its TCP client interface.
+    let our_ifaces = node.interface_stats();
+    let our_tcp = our_ifaces
+        .iter()
+        .find(|i| !i.is_local_client)
+        .expect("our tcp interface present");
+    assert_eq!(
+        our_tcp.configured_bitrate,
+        Some(BITRATE as u32),
+        "our stack must report the configured bitrate"
+    );
+
+    // Same-value agreement across stacks (drop-in parity on the configured value).
+    assert_eq!(
+        our_tcp.configured_bitrate.map(u64::from),
+        py_probe.bitrate,
+        "both stacks agree on the effective configured bitrate"
+    );
+}

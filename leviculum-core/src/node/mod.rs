@@ -1444,6 +1444,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.remove_announce_rate_config(id);
     }
 
+    /// Register an interface's configured bitrate (Codeberg #93). The driver
+    /// calls this during setup for interfaces whose `bitrate` config key cleared
+    /// [`crate::constants::MINIMUM_BITRATE`]. The bitrate feeds announce
+    /// bandwidth capping / timing and is reported via `interface_stats`.
+    pub fn register_interface_bitrate(&mut self, id: usize, bitrate_bps: u32) {
+        self.transport.register_interface_bitrate(id, bitrate_bps);
+    }
+
     /// Notify core that an interface has gone offline (sans-I/O)
     ///
     /// The driver should call this when it detects that an interface is no

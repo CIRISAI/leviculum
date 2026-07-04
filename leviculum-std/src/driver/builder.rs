@@ -171,6 +171,22 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add a TCP client interface with a configured `bitrate` (Codeberg #93).
+    /// Equivalent to a `[[TCPClientInterface]]` block that also sets `bitrate`
+    /// (bits per second). The value feeds the announce bandwidth cap / timing
+    /// and the effective bitrate reported via `interface_stats`, matching
+    /// Python's `configured_bitrate` override.
+    pub fn add_tcp_client_with_bitrate(mut self, addr: SocketAddr, bitrate: u64) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            target_host: Some(addr.ip().to_string()),
+            target_port: Some(addr.port()),
+            bitrate: Some(bitrate),
+            ..Default::default()
+        });
+        self
+    }
+
     /// Add a TCP client interface with per-interface announce-rate limiting
     /// configured (Codeberg #92). Equivalent to a `[[TCPClientInterface]]`
     /// block that also sets `announce_rate_target/grace/penalty` (seconds /

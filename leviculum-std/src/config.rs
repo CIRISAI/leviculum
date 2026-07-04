@@ -182,9 +182,12 @@ pub struct InterfaceConfig {
     /// Can send outgoing packets
     #[serde(default = "default_true")]
     pub outgoing: bool,
-    /// Bitrate in bits per second
-    #[serde(default = "default_bitrate")]
-    pub bitrate: u64,
+    /// Configured medium bitrate in bits per second (Python `bitrate`,
+    /// Reticulum.py:793-796). `None` when unset or below
+    /// [`leviculum_core::constants::MINIMUM_BITRATE`]; a set value overrides the
+    /// interface's default and feeds announce bandwidth capping / timing.
+    #[serde(default)]
+    pub bitrate: Option<u64>,
 
     // TCP/UDP specific
     /// Listen IP address
@@ -373,25 +376,18 @@ impl Default for SubinterfaceConfig {
     }
 }
 
-/// Default interface bitrate in bits/second (matches Python Reticulum default)
-pub(crate) const DEFAULT_BITRATE_BPS: u64 = 62_500;
-
-fn default_bitrate() -> u64 {
-    DEFAULT_BITRATE_BPS
-}
-
 impl Default for InterfaceConfig {
     /// An empty interface with the same baseline the serde `default_*` helpers
-    /// give: enabled, outgoing, default bitrate, and every optional field unset.
-    /// Programmatic builders set `interface_type` plus the fields they care
-    /// about and fill the rest with `..Default::default()`.
+    /// give: enabled, outgoing, no configured bitrate, and every optional field
+    /// unset. Programmatic builders set `interface_type` plus the fields they
+    /// care about and fill the rest with `..Default::default()`.
     fn default() -> Self {
         Self {
             interface_type: String::new(),
             enabled: true,
             mode: None,
             outgoing: true,
-            bitrate: DEFAULT_BITRATE_BPS,
+            bitrate: None,
             listen_ip: None,
             listen_port: None,
             target_host: None,

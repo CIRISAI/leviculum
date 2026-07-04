@@ -181,10 +181,16 @@ pub(crate) fn build_interface_stats(
         total_rxs += rxs;
         total_txs += txs;
 
-        // Bitrate per interface type (matching Python's BITRATE_GUESS)
-        let bitrate = match itype.as_str() {
-            "LocalInterface" => pickle_int(1_000_000_000),
-            _ => pickle_int(10_000_000),
+        // Bitrate reporting (Codeberg #93). A configured `bitrate` (fed into the
+        // announce cap) overrides the per-type BITRATE_GUESS, matching Python's
+        // `configured_bitrate` override (Reticulum.py:887/1421-1423). Unset falls
+        // back to the medium default guess.
+        let bitrate = match entry.configured_bitrate {
+            Some(bps) => pickle_int(bps as i64),
+            None => match itype.as_str() {
+                "LocalInterface" => pickle_int(1_000_000_000),
+                _ => pickle_int(10_000_000),
+            },
         };
 
         // Clients field: only meaningful for LocalInterface server

@@ -456,6 +456,10 @@ pub struct InterfaceStatusSnapshot {
     /// Whether the announce ingress burst limiter is currently active (Codeberg
     /// #87; Python ic_burst_active).
     pub burst_active: bool,
+    /// Effective configured bitrate in bits per second (Codeberg #93), or `None`
+    /// when the interface has no configured bitrate and reporting falls back to
+    /// the medium default guess.
+    pub configured_bitrate: Option<u32>,
 }
 
 /// High-level async Reticulum node
@@ -769,6 +773,17 @@ impl ReticulumNode {
                 // (enforced per receiving interface in transport).
                 if let Some(ar) = build_announce_rate_config(iface_config) {
                     core.set_announce_rate_config(idx, ar);
+                }
+                // Configured interface bitrate (Codeberg #93). A `bitrate` key
+                // that cleared MINIMUM_BITRATE overrides the medium default and
+                // is fed to the announce bandwidth cap / timing, exactly where
+                // Python applies `configured_bitrate` (Reticulum.py:887,
+                // Transport.py:1257). Media-agnostic: transport only sees a
+                // number of bits per second.
+                if let Some(bitrate) = iface_config.bitrate {
+                    let bps = bitrate.min(u32::MAX as u64) as u32;
+                    core.register_interface_bitrate(idx, bps);
+                    tracing::info!("Interface {} configured bitrate: {} bps", idx, bps);
                 }
                 // Interface propagation mode (Codeberg #91). Resolve the config
                 // string to an InterfaceMode and hand it to transport, which
@@ -2190,6 +2205,7 @@ impl ReticulumNode {
                     tx_bytes,
                     held_announces: e.held_announces,
                     burst_active: e.burst_active,
+                    configured_bitrate: e.configured_bitrate,
                 }
             })
             .collect()
