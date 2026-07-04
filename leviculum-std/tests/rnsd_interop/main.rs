@@ -59,6 +59,7 @@ mod probe_tests;
 mod proof_tests;
 mod protocol_tests;
 mod python_parity_tests;
+mod python_rnstatus_server_tests;
 mod ratchet_rotation_tests;
 mod ratchet_tests;
 mod relay_integration_tests;

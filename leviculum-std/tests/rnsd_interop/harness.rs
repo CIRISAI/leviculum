@@ -2149,6 +2149,146 @@ impl DaemonTopology {
     }
 }
 
+/// Captured outcome of a vendored `rnstatus` subprocess run.
+pub struct RnstatusRemoteResult {
+    /// Process exit status (`None` exit code means killed by the wall-clock
+    /// `timeout` guard or a signal).
+    pub status: std::process::ExitStatus,
+    /// Everything the tool printed on stdout (JSON status bundle on success
+    /// with `-j`).
+    pub stdout: String,
+    /// Everything the tool printed on stderr (RNS log lines, tracebacks).
+    pub stderr: String,
+}
+
+impl RnstatusRemoteResult {
+    /// Convenience: the exit code, or `None` if the process was signalled /
+    /// killed by the wall-clock guard.
+    pub fn code(&self) -> Option<i32> {
+        self.status.code()
+    }
+}
+
+/// Drive the vendored Python `rnstatus -R <hash> -i <identity> [-l] -w <t>`
+/// against a Rust server (our `lnsd`) reachable at `server_addr`.
+///
+/// This is the Python-client mirror of [`fetch_remote_status`]: instead of our
+/// own Rust client, the real Python status CLI queries our daemon's
+/// `rnstransport.remote.management` destination. It proves wire + semantic
+/// compatibility of our `/status` responder against the reference tool.
+///
+/// Wiring:
+/// * A temporary RNS config dir is written whose ONLY interface is a
+///   `TCPClientInterface` targeting `server_addr` — the same shared TCP
+///   segment our lnsd listens on. rnstatus builds a standalone Reticulum from
+///   that dir (`require_shared_instance=False` under `-R`), forms a link to our
+///   server, and requests `/status`.
+/// * The management identity (`management_identity_prv`, the 64 raw private-key
+///   bytes from [`Identity::private_key_bytes`]) is written to a file rnstatus
+///   loads with `-i`. Its hash must be on the server's
+///   `remote_management_allowed` list for the request to be authorised. The
+///   Python and Rust identity file formats are identical (X25519 priv ‖ Ed25519
+///   priv, 64 bytes), so the same bytes yield the same identity hash on both
+///   sides.
+///
+/// `-j` is always passed so a successful run prints the status bundle as JSON
+/// on stdout, which the caller parses to assert a populated status came back.
+///
+/// The whole invocation is wrapped in the `timeout(1)` coreutil (`-w` plus a
+/// guard) so a dropped/unanswered request (e.g. a non-allowed identity) can
+/// never hang the test binary; it terminates with a non-zero status instead.
+///
+/// This is a blocking call (spawns a subprocess and waits); run it from a
+/// `spawn_blocking` context inside async tests.
+pub fn run_python_rnstatus_remote(
+    server_addr: SocketAddr,
+    server_transport_hash: &[u8],
+    management_identity_prv: &[u8],
+    include_lstats: bool,
+    timeout_secs: u64,
+) -> Result<RnstatusRemoteResult, HarnessError> {
+    ensure_reticulum_submodule()?;
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let vendor_dir = manifest_dir.join("../vendor/Reticulum");
+    let rnstatus_script = vendor_dir.join("RNS/Utilities/rnstatus.py");
+
+    // Isolated config + identity dir for this run; kept alive until the
+    // subprocess returns (it runs synchronously below), then dropped.
+    let workdir = tempfile::Builder::new()
+        .prefix("rnstatus_remote_")
+        .tempdir()
+        .map_err(HarnessError::SpawnFailed)?;
+
+    // Config: a single TCPClientInterface onto our lnsd's shared TCP segment.
+    // enable_transport = no — rnstatus is a leaf client, not a router.
+    let config = format!(
+        "[reticulum]\n  \
+           enable_transport = no\n  \
+           share_instance = no\n  \
+           panic_on_interface_error = no\n\n\
+         [interfaces]\n  \
+           [[Rust Server Link]]\n    \
+             type = TCPClientInterface\n    \
+             enabled = yes\n    \
+             target_host = {ip}\n    \
+             target_port = {port}\n",
+        ip = server_addr.ip(),
+        port = server_addr.port(),
+    );
+    let config_path = workdir.path().join("config");
+    std::fs::write(&config_path, config).map_err(HarnessError::SpawnFailed)?;
+
+    // Management identity file: the raw 64-byte private key, byte-identical to
+    // what Python's `Identity.to_file` writes and `Identity.from_file` reads.
+    let identity_path = workdir.path().join("management_identity");
+    std::fs::write(&identity_path, management_identity_prv).map_err(HarnessError::SpawnFailed)?;
+
+    let hash_hex = hex_lower_bytes(server_transport_hash);
+
+    // Wall-clock guard above the query timeout so a hung request can't wedge
+    // the test. RNS's own request timeout fires the failure callback well
+    // inside this window on the reject path.
+    let guard_secs = timeout_secs + 15;
+
+    let mut cmd = Command::new("timeout");
+    cmd.arg(guard_secs.to_string())
+        .arg("python3")
+        .arg(&rnstatus_script)
+        .arg("--config")
+        .arg(workdir.path())
+        .arg("-j")
+        .arg("-w")
+        .arg(timeout_secs.to_string())
+        .arg("-i")
+        .arg(&identity_path)
+        .arg("-R")
+        .arg(&hash_hex);
+    if include_lstats {
+        cmd.arg("-l");
+    }
+    // rnstatus does a bare `import RNS`; point Python at the vendored tree.
+    cmd.env("PYTHONPATH", &vendor_dir);
+
+    let output = cmd.output().map_err(HarnessError::SpawnFailed)?;
+
+    Ok(RnstatusRemoteResult {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+/// Lowercase hex of a byte slice (no external deps).
+fn hex_lower_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
