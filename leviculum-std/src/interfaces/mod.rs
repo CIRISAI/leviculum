@@ -15,6 +15,7 @@ pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod kiss;
 pub(crate) mod local;
+pub(crate) mod netdevice;
 pub(crate) mod pipe;
 pub(crate) mod rnode;
 pub use rnode::{

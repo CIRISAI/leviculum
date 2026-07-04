@@ -276,6 +276,12 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // disables an interface with the old key is not silently enabled.
         "enabled" | "interface_enabled" => iface.enabled = parse_bool(value),
         "outgoing" => iface.outgoing = parse_bool(value),
+        // Kernel NIC to bind to, plus IPv6 preference when resolving it
+        // (Codeberg #94/#3; TCPInterface.py:504/509, UDPInterface.py:61,
+        // BackboneInterface.py:114/118). The name is resolved to a concrete
+        // bind address at interface start.
+        "device" => iface.device = Some(value.to_string()),
+        "prefer_ipv6" => iface.prefer_ipv6 = Some(parse_bool(value)),
         "listen_ip" => iface.listen_ip = Some(value.to_string()),
         "listen_port" => iface.listen_port = value.parse().ok(),
         "target_host" => iface.target_host = Some(value.to_string()),
@@ -544,6 +550,45 @@ mod tests {
         assert!(client.enabled);
         assert_eq!(client.target_host, Some("127.0.0.1".to_string()));
         assert_eq!(client.target_port, Some(4243));
+    }
+
+    #[test]
+    fn test_parse_device_and_prefer_ipv6() {
+        // Codeberg #94/#3: `device` (kernel NIC to bind to) and `prefer_ipv6`
+        // parse into the interface config across TCP/Backbone and UDP.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Bound TCP]]
+    type = TCPServerInterface
+    listen_port = 4242
+    device = eth0
+    prefer_ipv6 = yes
+
+  [[Bound Backbone]]
+    type = BackboneInterface
+    port = 4243
+    device = eth1
+
+  [[Bound UDP]]
+    type = UDPInterface
+    listen_port = 4244
+    device = eth2
+"#,
+        )
+        .unwrap();
+
+        let tcp = config.interfaces.get("Bound TCP").expect("tcp");
+        assert_eq!(tcp.device.as_deref(), Some("eth0"));
+        assert_eq!(tcp.prefer_ipv6, Some(true));
+
+        // Backbone normalizes to TCPServerInterface but keeps `device`.
+        let backbone = config.interfaces.get("Bound Backbone").expect("backbone");
+        assert_eq!(backbone.device.as_deref(), Some("eth1"));
+        assert_eq!(backbone.prefer_ipv6, None);
+
+        let udp = config.interfaces.get("Bound UDP").expect("udp");
+        assert_eq!(udp.device.as_deref(), Some("eth2"));
     }
 
     #[test]

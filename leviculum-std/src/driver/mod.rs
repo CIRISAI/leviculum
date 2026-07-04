@@ -981,14 +981,33 @@ impl ReticulumNode {
                         registry.register(handle);
                     }
                     "TCPServerInterface" => {
-                        let listen_ip = config.listen_ip.as_deref().unwrap_or("0.0.0.0");
                         let listen_port = config.listen_port.ok_or_else(|| {
                             Error::Config("TCPServerInterface requires listen_port".to_string())
                         })?;
 
-                        let addr: SocketAddr = format!("{}:{}", listen_ip, listen_port)
-                            .parse()
-                            .map_err(|e| Error::Config(format!("invalid listen address: {}", e)))?;
+                        // A configured `device` binds to that kernel NIC's own
+                        // address (Codeberg #94, BackboneInterface.py:138-139);
+                        // otherwise fall back to the wildcard/`listen_ip` bind.
+                        let addr: SocketAddr = if let Some(device) = config.device.as_deref() {
+                            crate::interfaces::netdevice::resolve_if_bind_address(
+                                device,
+                                listen_port,
+                                config.prefer_ipv6.unwrap_or(false),
+                            )
+                            .map_err(|e| {
+                                Error::Config(format!(
+                                    "TCPServerInterface device \"{}\": {}",
+                                    device, e
+                                ))
+                            })?
+                        } else {
+                            let listen_ip = config.listen_ip.as_deref().unwrap_or("0.0.0.0");
+                            format!("{}:{}", listen_ip, listen_port)
+                                .parse()
+                                .map_err(|e| {
+                                    Error::Config(format!("invalid listen address: {}", e))
+                                })?
+                        };
 
                         let buffer_size = config.buffer_size.unwrap_or(TCP_DEFAULT_BUFFER_SIZE);
                         let ifac = build_ifac_config(config);
@@ -1002,13 +1021,39 @@ impl ReticulumNode {
                         )?;
                     }
                     "UDPInterface" => {
-                        let listen_ip = config.listen_ip.as_deref().unwrap_or("0.0.0.0");
+                        // A configured `device` supplies the NIC's IPv4
+                        // broadcast address for whichever of listen_ip /
+                        // forward_ip is left unset (Codeberg #3,
+                        // UDPInterface.py:82-86). Explicit keys win over it.
+                        let device_broadcast = match config.device.as_deref() {
+                            Some(device) => Some(
+                                crate::interfaces::netdevice::resolve_if_broadcast(device)
+                                    .map_err(|e| {
+                                        Error::Config(format!(
+                                            "UDPInterface device \"{}\": {}",
+                                            device, e
+                                        ))
+                                    })?
+                                    .to_string(),
+                            ),
+                            None => None,
+                        };
+
+                        let listen_ip = config
+                            .listen_ip
+                            .as_deref()
+                            .or(device_broadcast.as_deref())
+                            .unwrap_or("0.0.0.0");
                         let listen_port = config.listen_port.ok_or_else(|| {
                             Error::Config("UDPInterface requires listen_port".to_string())
                         })?;
-                        let forward_ip = config.forward_ip.as_ref().ok_or_else(|| {
-                            Error::Config("UDPInterface requires forward_ip".to_string())
-                        })?;
+                        let forward_ip = config
+                            .forward_ip
+                            .as_deref()
+                            .or(device_broadcast.as_deref())
+                            .ok_or_else(|| {
+                                Error::Config("UDPInterface requires forward_ip".to_string())
+                            })?;
                         let forward_port = config.forward_port.ok_or_else(|| {
                             Error::Config("UDPInterface requires forward_port".to_string())
                         })?;

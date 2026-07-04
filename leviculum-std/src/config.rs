@@ -190,6 +190,18 @@ pub struct InterfaceConfig {
     pub bitrate: Option<u64>,
 
     // TCP/UDP specific
+    /// Kernel network interface name to bind to (Python `device`,
+    /// TCPInterface.py:504 / UDPInterface.py:61 / BackboneInterface.py:114).
+    /// When set, the bind address is resolved from this NIC's addresses
+    /// instead of the wildcard/`listen_ip` default: for TCP/Backbone the
+    /// interface's own IPv4 (or IPv6 when `prefer_ipv6`) address, for UDP its
+    /// IPv4 broadcast address. Lets an interface bind one physical NIC on a
+    /// multi-homed host (Codeberg #94, #3).
+    pub device: Option<String>,
+    /// Prefer an IPv6 bind address when resolving `device` (Python
+    /// `prefer_ipv6`, TCPInterface.py:509 / BackboneInterface.py:118). No
+    /// effect without `device`, or for UDP (broadcast is IPv4-only).
+    pub prefer_ipv6: Option<bool>,
     /// Listen IP address
     pub listen_ip: Option<String>,
     /// Listen port
@@ -388,6 +400,8 @@ impl Default for InterfaceConfig {
             mode: None,
             outgoing: true,
             bitrate: None,
+            device: None,
+            prefer_ipv6: None,
             listen_ip: None,
             listen_port: None,
             target_host: None,
