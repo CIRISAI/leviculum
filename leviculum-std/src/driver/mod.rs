@@ -316,7 +316,9 @@ fn build_ifac_config(config: &InterfaceConfig) -> Option<leviculum_core::ifac::I
     let default_size = match config.interface_type.as_str() {
         // Serial-family interfaces (incl. Pipe) default to the 8-byte IFAC
         // size upstream (PipeInterface.DEFAULT_IFAC_SIZE = 8).
-        "RNodeInterface" | "PipeInterface" => leviculum_core::constants::IFAC_DEFAULT_SIZE_SERIAL,
+        "RNodeInterface" | "PipeInterface" | "KISSInterface" => {
+            leviculum_core::constants::IFAC_DEFAULT_SIZE_SERIAL
+        }
         _ => leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
     };
     let size = config.ifac_size.unwrap_or(default_size);
@@ -1180,6 +1182,71 @@ impl ReticulumNode {
                         );
 
                         tracing::info!("Pipe interface (command: {})", command);
+                        registry.register(handle);
+                    }
+                    "KISSInterface" => {
+                        let port_path = config
+                            .port
+                            .as_ref()
+                            .ok_or_else(|| {
+                                Error::Config("KISSInterface requires port".to_string())
+                            })?
+                            .clone();
+                        // Python KISSInterface defaults: speed 9600, 8-N-1.
+                        let speed = config.speed.unwrap_or(9600);
+                        let data_bits = crate::interfaces::serial::parse_data_bits(
+                            config.databits.unwrap_or(8),
+                        );
+                        let parity = crate::interfaces::serial::parse_parity(
+                            config.parity.as_deref().unwrap_or("N"),
+                        );
+                        let stop_bits = crate::interfaces::serial::parse_stop_bits(
+                            config.stopbits.unwrap_or(1),
+                        );
+                        let buffer_size = config
+                            .buffer_size
+                            .unwrap_or(crate::interfaces::kiss::KISS_DEFAULT_BUFFER_SIZE);
+
+                        let iface_name = format!("kiss_{}", idx);
+                        let id = InterfaceId(idx);
+
+                        let mut handle = crate::interfaces::kiss::spawn_kiss_interface(
+                            crate::interfaces::kiss::KissInterfaceConfig {
+                                id,
+                                name: iface_name.clone(),
+                                port: port_path.clone(),
+                                speed,
+                                data_bits,
+                                parity,
+                                stop_bits,
+                                preamble_ms: config
+                                    .preamble
+                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_PREAMBLE_MS),
+                                txtail_ms: config
+                                    .txtail
+                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_TXTAIL_MS),
+                                persistence: config
+                                    .persistence
+                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_PERSISTENCE),
+                                slottime_ms: config
+                                    .slottime
+                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_SLOTTIME_MS),
+                                flow_control: config.flow_control.unwrap_or(false),
+                                buffer_size,
+                                reconnect_notify: Some(reconnect_tx.clone()),
+                            },
+                        );
+                        handle.info.bitrate = Some(speed);
+
+                        tracing::info!("KISS interface on {} (speed={} baud)", port_path, speed);
+                        if config.id_interval.is_some() || config.id_callsign.is_some() {
+                            tracing::warn!(
+                                "KISS interface {}: beacon identification \
+                                 (id_interval/id_callsign) is configured but not yet transmitted \
+                                 (Codeberg #96 gap)",
+                                iface_name
+                            );
+                        }
                         registry.register(handle);
                     }
                     other => {

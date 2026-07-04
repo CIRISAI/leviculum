@@ -12,6 +12,7 @@
 pub(crate) mod airtime;
 pub mod auto_interface;
 pub mod hdlc;
+pub(crate) mod kiss;
 pub(crate) mod local;
 pub(crate) mod pipe;
 pub(crate) mod rnode;

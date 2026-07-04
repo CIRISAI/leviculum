@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::config::{Config, InterfaceConfig, ReticulumConfig, DEFAULT_BITRATE_BPS};
+use crate::config::{Config, InterfaceConfig, ReticulumConfig};
 
 /// Parse a Python Reticulum INI config string into our `Config` struct.
 pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
@@ -43,47 +43,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                 name,
                 InterfaceConfig {
                     interface_type: String::new(),
-                    enabled: true,
-                    outgoing: true,
-                    bitrate: DEFAULT_BITRATE_BPS,
-                    listen_ip: None,
-                    listen_port: None,
-                    target_host: None,
-                    target_port: None,
-                    forward_ip: None,
-                    forward_port: None,
-                    port: None,
-                    speed: None,
-                    databits: None,
-                    parity: None,
-                    stopbits: None,
-                    command: None,
-                    respawn_delay: None,
-                    buffer_size: None,
-                    reconnect_interval_secs: None,
-                    max_reconnect_tries: None,
-                    group_id: None,
-                    discovery_scope: None,
-                    discovery_port: None,
-                    data_port: None,
-                    devices: None,
-                    ignored_devices: None,
-                    multicast_loopback: None,
-                    announce_rate_target: None,
-                    announce_rate_penalty: None,
-                    announce_rate_grace: None,
-                    networkname: None,
-                    passphrase: None,
-                    ifac_size: None,
-                    frequency: None,
-                    bandwidth: None,
-                    spreading_factor: None,
-                    coding_rate: None,
-                    tx_power: None,
-                    flow_control: None,
-                    airtime_limit_short: None,
-                    airtime_limit_long: None,
-                    csma_enabled: None,
+                    ..Default::default()
                 },
             ));
             continue;
@@ -151,7 +111,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             let size = iface
                 .ifac_size
                 .unwrap_or(match iface.interface_type.as_str() {
-                    "RNodeInterface" | "SerialInterface" | "PipeInterface" => 8,
+                    "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface" => 8,
                     _ => 16,
                 });
             if leviculum_core::ifac::IfacConfig::new(
@@ -190,7 +150,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         .into_iter()
         .filter(|(name, iface)| match iface.interface_type.as_str() {
             "TCPServerInterface" | "TCPClientInterface" | "UDPInterface" | "AutoInterface"
-            | "RNodeInterface" | "SerialInterface" | "PipeInterface" => true,
+            | "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface" => true,
             other => {
                 tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
@@ -299,6 +259,14 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // (PipeInterface.py:67-68). `command` is a plain shell-style string.
         "command" => iface.command = Some(value.to_string()),
         "respawn_delay" => iface.respawn_delay = value.parse().ok(),
+        // KISSInterface TNC parameters (KISSInterface.py:86-89) and beacon
+        // identification (id_interval/id_callsign, KISSInterface.py:96-97).
+        "preamble" => iface.preamble = value.parse().ok(),
+        "txtail" => iface.txtail = value.parse().ok(),
+        "persistence" => iface.persistence = value.parse().ok(),
+        "slottime" => iface.slottime = value.parse().ok(),
+        "id_interval" => iface.id_interval = value.parse().ok(),
+        "id_callsign" => iface.id_callsign = Some(value.to_string()),
         "bitrate" => {
             if let Ok(v) = value.parse() {
                 iface.bitrate = v;
@@ -517,6 +485,49 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_kiss_interface() {
+        // A KISSInterface config maps the serial line settings, the TNC
+        // parameters (preamble/txtail/persistence/slottime), flow_control, and
+        // the beacon keys (id_interval/id_callsign) onto the interface, is a
+        // supported type, and survives the filter (Codeberg #96).
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[My KISS TNC]]
+    type = KISSInterface
+    port = /dev/ttyUSB0
+    speed = 115200
+    databits = 8
+    parity = none
+    stopbits = 1
+    preamble = 150
+    txtail = 10
+    persistence = 200
+    slottime = 30
+    flow_control = true
+    id_interval = 600
+    id_callsign = MYCALL-1
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("My KISS TNC").expect("kiss iface");
+        assert_eq!(iface.interface_type, "KISSInterface");
+        assert_eq!(iface.port.as_deref(), Some("/dev/ttyUSB0"));
+        assert_eq!(iface.speed, Some(115200));
+        assert_eq!(iface.databits, Some(8));
+        assert_eq!(iface.parity.as_deref(), Some("none"));
+        assert_eq!(iface.stopbits, Some(1));
+        assert_eq!(iface.preamble, Some(150));
+        assert_eq!(iface.txtail, Some(10));
+        assert_eq!(iface.persistence, Some(200));
+        assert_eq!(iface.slottime, Some(30));
+        assert_eq!(iface.flow_control, Some(true));
+        assert_eq!(iface.id_interval, Some(600));
+        assert_eq!(iface.id_callsign.as_deref(), Some("MYCALL-1"));
+    }
+
+    #[test]
     fn test_parse_ifac_alt_spellings() {
         // The Python config accepts both `networkname`/`network_name` and
         // `passphrase`/`pass_phrase`. Both spellings must populate the same
@@ -660,19 +671,20 @@ mod tests {
     enabled = yes
     listen_port = 4242
 
-  [[Serial KISS]]
-    type = KISSInterface
-    port = /dev/ttyUSB0
+  [[I2P Link]]
+    type = I2PInterface
+    peers = somebase64.b32.i2p
 "#,
         )
         .unwrap();
 
-        // KISSInterface should be skipped; Auto, RNode, TCP are supported
+        // I2PInterface is unimplemented and should be skipped; Auto, RNode, TCP
+        // are supported.
         assert_eq!(config.interfaces.len(), 3);
         assert!(config.interfaces.contains_key("TCP Server"));
         assert!(config.interfaces.contains_key("Auto"));
         assert!(config.interfaces.contains_key("RNode"));
-        assert!(!config.interfaces.contains_key("Serial KISS"));
+        assert!(!config.interfaces.contains_key("I2P Link"));
     }
 
     #[test]
@@ -1282,6 +1294,7 @@ loglevel = 4
             "TCP Server Interface",
             "TCP Client Interface",
             "RNode LoRa Interface",
+            "Packet Radio KISS Interface",
         ] {
             assert!(
                 config.interfaces.contains_key(accepted),
@@ -1289,11 +1302,7 @@ loglevel = 4
             );
         }
         // Not-yet-implemented interface types are skipped, not rejected outright.
-        for skipped in [
-            "I2P",
-            "Packet Radio KISS Interface",
-            "Packet Radio AX.25 KISS Interface",
-        ] {
+        for skipped in ["I2P", "Packet Radio AX.25 KISS Interface"] {
             assert!(
                 !config.interfaces.contains_key(skipped),
                 "{skipped} is unimplemented and must be skipped"

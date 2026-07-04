@@ -30,6 +30,26 @@ pub const TFEND: u8 = 0xDC;
 /// Transposed FESC (after FESC)
 pub const TFESC: u8 = 0xDD;
 
+// --- KISS TNC command bytes (the low nibble after the opening FEND) ---
+//
+// These are the standard KISS protocol commands a host sends to a TNC. They
+// are shared by the `KISSInterface` and are reusable by AX.25 framing (#97),
+// which layers on the same command set. Values match Python Reticulum's
+// `KISS` class in `KISSInterface.py`.
+
+/// Data frame: the payload is a packet to transmit / that was received.
+pub const CMD_DATA: u8 = 0x00;
+/// TX delay / preamble length (value in units of 10 ms).
+pub const CMD_TXDELAY: u8 = 0x01;
+/// Persistence parameter `p` for the CSMA/p-persistent algorithm.
+pub const CMD_P: u8 = 0x02;
+/// Slot time (value in units of 10 ms).
+pub const CMD_SLOTTIME: u8 = 0x03;
+/// TX tail (value in units of 10 ms).
+pub const CMD_TXTAIL: u8 = 0x04;
+/// Software flow-control "ready for next frame" signal.
+pub const CMD_READY: u8 = 0x0F;
+
 /// Check if a byte needs KISS escaping
 #[inline]
 pub fn needs_escape(byte: u8) -> bool {
@@ -173,6 +193,19 @@ impl KissDeframer {
             command: None,
             max_payload,
         }
+    }
+
+    /// Whether the deframer is currently mid-frame (an opening FEND was seen
+    /// but the closing FEND has not arrived yet). Used by stream interfaces to
+    /// arm an incomplete-frame timeout.
+    pub fn is_in_frame(&self) -> bool {
+        self.in_frame
+    }
+
+    /// Number of payload bytes buffered for the in-progress frame. Used by
+    /// stream interfaces to bound memory by discarding a runaway partial frame.
+    pub fn buffer_len(&self) -> usize {
+        self.buffer.len()
     }
 
     /// Reset the deframer state, discarding any partial frame

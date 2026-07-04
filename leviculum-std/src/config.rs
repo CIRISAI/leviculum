@@ -211,6 +211,20 @@ pub struct InterfaceConfig {
     /// Delay in seconds before respawning the child after it exits (default: 5).
     pub respawn_delay: Option<f64>,
 
+    // KISSInterface specific (TNC parameters + beacon).
+    /// Preamble / TX delay in ms sent to the TNC (CMD_TXDELAY, default 350).
+    pub preamble: Option<u32>,
+    /// TX tail in ms sent to the TNC (CMD_TXTAIL, default 20).
+    pub txtail: Option<u32>,
+    /// Persistence parameter sent to the TNC (CMD_P, default 64).
+    pub persistence: Option<u32>,
+    /// Slot time in ms sent to the TNC (CMD_SLOTTIME, default 20).
+    pub slottime: Option<u32>,
+    /// Beacon identification interval in seconds (Python `id_interval`).
+    pub id_interval: Option<u32>,
+    /// Beacon identification callsign/data (Python `id_callsign`).
+    pub id_callsign: Option<String>,
+
     // Reconnection / buffer tuning
     /// Channel buffer size for this interface (default: per interface type)
     pub buffer_size: Option<usize>,
@@ -304,6 +318,12 @@ impl Default for InterfaceConfig {
             stopbits: None,
             command: None,
             respawn_delay: None,
+            preamble: None,
+            txtail: None,
+            persistence: None,
+            slottime: None,
+            id_interval: None,
+            id_callsign: None,
             buffer_size: None,
             reconnect_interval_secs: None,
             max_reconnect_tries: None,

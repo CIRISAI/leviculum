@@ -283,6 +283,33 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add a KISS interface programmatically, the equivalent of a
+    /// `[[...]] type = KISSInterface` config block. KISS TNC framing over a
+    /// serial port. TNC parameters (preamble/txtail/persistence/slottime) and
+    /// beacon keys default to the Python `KISSInterface` values when unset here;
+    /// tune them via the config file if needed.
+    pub fn add_kiss_interface(
+        mut self,
+        port: String,
+        speed: u32,
+        databits: u8,
+        parity: String,
+        stopbits: u8,
+        flow_control: bool,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "KISSInterface".to_string(),
+            port: Some(port),
+            speed: Some(speed),
+            databits: Some(databits),
+            parity: Some(parity),
+            stopbits: Some(stopbits),
+            flow_control: Some(flow_control),
+            ..Default::default()
+        });
+        self
+    }
+
     /// Add a PipeInterface that bridges packets through an external program.
     ///
     /// `command` is a shell-style command line spawned as a subprocess;
