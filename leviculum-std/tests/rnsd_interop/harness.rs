@@ -1375,6 +1375,30 @@ impl TestDaemon {
         Ok(ClientInterfaceInfo)
     }
 
+    /// Add a real Python `BackboneClientInterface` connecting to another daemon's
+    /// TCP listener (Codeberg #89). Backbone is wire-identical to TCP, so this
+    /// drives the reference Backbone interface against our lnsd TCP server built
+    /// from a `type = BackboneInterface` config.
+    pub async fn add_backbone_client_interface(
+        &self,
+        target_ip: &str,
+        target_port: u16,
+        name: Option<&str>,
+    ) -> Result<ClientInterfaceInfo, HarnessError> {
+        let mut params = serde_json::json!({
+            "target_ip": target_ip,
+            "target_port": target_port,
+        });
+
+        if let Some(n) = name {
+            params["name"] = serde_json::json!(n);
+        }
+
+        let _result = self.query("add_backbone_client_interface", params).await?;
+
+        Ok(ClientInterfaceInfo)
+    }
+
     /// Get transport/routing status.
     pub async fn get_transport_status(&self) -> Result<TransportStatus, HarnessError> {
         let result = self

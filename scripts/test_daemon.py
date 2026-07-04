@@ -75,6 +75,7 @@ try:
     import RNS.Channel
     from RNS import Transport
     from RNS.Interfaces.TCPInterface import TCPClientInterface
+    from RNS.Interfaces.BackboneInterface import BackboneClientInterface
 except ImportError:
     print("ERROR: Reticulum (RNS) not found.")
     print("Options:")
@@ -756,6 +757,61 @@ class TestDaemon:
 
             except Exception as e:
                 return {"error": f"Failed to create client interface: {str(e)}"}
+
+        elif method == "add_backbone_client_interface":
+            # Connect this daemon to another daemon's TCP listener using the REAL
+            # Python BackboneClientInterface (Codeberg #89 drop-in proof). Backbone
+            # is wire-identical to TCP, so a BackboneClientInterface connects to
+            # our lnsd's TCP server built from a `type = BackboneInterface` config.
+            target_ip = params.get("target_ip", "127.0.0.1")
+            target_port = params.get("target_port")
+            name = params.get("name")
+
+            if not target_port:
+                return {"error": "target_port is required"}
+
+            if not name:
+                name = f"BackboneClient_{target_ip}_{target_port}"
+
+            try:
+                config = {
+                    "name": name,
+                    "target_host": target_ip,
+                    "target_port": target_port,
+                }
+
+                client_iface = BackboneClientInterface(
+                    RNS.Transport,
+                    config,
+                )
+
+                # BackboneClientInterface defaults OUT=False; Transport.outbound()
+                # gates on interface.OUT, so enable it (mirrors add_client_interface).
+                client_iface.OUT = True
+                client_iface.IN = True
+                client_iface.mode = RNS.Interfaces.Interface.Interface.MODE_GATEWAY
+
+                client_iface.announce_rate_target = None
+                client_iface.announce_rate_grace = None
+                client_iface.announce_rate_penalty = None
+
+                RNS.Transport.interfaces.append(client_iface)
+                self.client_interfaces[name] = client_iface
+
+                # Wait briefly for the connection to establish.
+                time.sleep(0.5)
+
+                return {
+                    "result": {
+                        "name": name,
+                        "online": getattr(client_iface, 'online', False),
+                        "target_ip": target_ip,
+                        "target_port": target_port,
+                    }
+                }
+
+            except Exception as e:
+                return {"error": f"Failed to create backbone client interface: {str(e)}"}
 
         elif method == "get_transport_status":
             # Get transport/routing status

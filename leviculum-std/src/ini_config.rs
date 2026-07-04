@@ -122,6 +122,33 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         interfaces.insert(name, iface);
     }
 
+    // Normalize Backbone interfaces onto our TCP interface. BackboneInterface is
+    // wire-identical to TCPInterface (HDLC-over-TCP), so we map the config the
+    // same way Python does (Reticulum.py:960-972) and let the rest of the stack
+    // treat it as a TCPServer/TCPClient. Done post-parse so key order in the file
+    // does not matter -- mirrors ConfigObj handing Python the whole section dict.
+    for iface in interfaces.values_mut() {
+        normalize_backbone_interface(iface);
+    }
+
+    // IFAC keys (network_name/networkname/passphrase/pass_phrase/ifac_size) are
+    // parsed and retained but NOT yet enforced by lnsd (Codeberg #90). An
+    // interface that configures them will run UNAUTHENTICATED, so a config that
+    // relies on IFAC to gate the network would silently admit us in the clear.
+    // Warn loudly, once per affected interface, rather than dropping the keys
+    // silently. The interface is still accepted (parsed) so drop-in loading of a
+    // stock rnsd config keeps working.
+    for (name, iface) in interfaces.iter() {
+        if iface.networkname.is_some() || iface.passphrase.is_some() || iface.ifac_size.is_some() {
+            tracing::warn!(
+                "interface '{}': IFAC (network_name/passphrase) is configured but NOT yet \
+                 enforced by lnsd (see Codeberg #90) -- this interface will run UNAUTHENTICATED \
+                 and cannot join the IFAC-protected network.",
+                name
+            );
+        }
+    }
+
     // RNS 1.3.x semantic: shared_instance_type = tcp disables AF_UNIX and
     // therefore overrides any configured shared_instance_socket path (tcp
     // wins on conflict). Applied here, post-parse, so it holds for any key
@@ -137,7 +164,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             "TCPServerInterface" | "TCPClientInterface" | "UDPInterface" | "AutoInterface"
             | "RNodeInterface" | "SerialInterface" => true,
             other => {
-                tracing::info!(
+                tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
                     other,
                     name
@@ -217,12 +244,22 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
 fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
     match key {
         "type" => iface.interface_type = value.to_string(),
-        "enabled" => iface.enabled = parse_bool(value),
+        // `enabled` is the modern key; `interface_enabled` is the legacy spelling
+        // upstream still honours (Reticulum.py:950). Accept both so a config that
+        // disables an interface with the old key is not silently enabled.
+        "enabled" | "interface_enabled" => iface.enabled = parse_bool(value),
         "outgoing" => iface.outgoing = parse_bool(value),
         "listen_ip" => iface.listen_ip = Some(value.to_string()),
         "listen_port" => iface.listen_port = value.parse().ok(),
         "target_host" => iface.target_host = Some(value.to_string()),
         "target_port" => iface.target_port = value.parse().ok(),
+        // Backbone key aliases (Reticulum.py:963-964): `remote` is the peer to
+        // connect to (-> target_host), `listen_on` is the local bind address
+        // (-> listen_ip). No other interface type uses these spellings, so the
+        // mapping is a safe superset; the `port` alias needs the type context and
+        // is handled in `normalize_backbone_interface` after the full parse.
+        "remote" => iface.target_host = Some(value.to_string()),
+        "listen_on" => iface.listen_ip = Some(value.to_string()),
         "forward_ip" => iface.forward_ip = Some(value.to_string()),
         "forward_port" => iface.forward_port = value.parse().ok(),
         "port" => iface.port = Some(value.to_string()),
@@ -262,10 +299,55 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "announce_rate_penalty" => iface.announce_rate_penalty = value.parse().ok(),
         "announce_rate_grace" => iface.announce_rate_grace = value.parse().ok(),
         "networkname" | "network_name" => iface.networkname = Some(value.to_string()),
-        "passphrase" => iface.passphrase = Some(value.to_string()),
+        "passphrase" | "pass_phrase" => iface.passphrase = Some(value.to_string()),
         "ifac_size" => iface.ifac_size = value.parse::<usize>().ok().map(|bits| bits / 8),
-        _ => {} // Ignore unknown keys (id_callsign, id_interval, modulation, etc.)
+        // Unknown per-interface key: log and ignore. An unrecognised key (a
+        // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
+        // bind, id_callsign, modulation, ...) must never make lnsd reject an
+        // interface a current rnsd would accept.
+        _ => {
+            tracing::debug!("Ignoring unknown interface key '{}' = '{}'", key, value);
+        }
     }
+}
+
+/// Map a `BackboneInterface` / `BackboneClientInterface` config onto our TCP
+/// interface, mirroring Python's normalization + mode dispatch
+/// (`Reticulum.py:960-972`). BackboneInterface is wire-identical to TCPInterface
+/// (HDLC-over-TCP, same FLAG/ESC framing, no handshake), so the resulting
+/// `InterfaceConfig` is indistinguishable from the equivalent
+/// `TCPServerInterface` / `TCPClientInterface` and the rest of the stack is
+/// untouched. A non-Backbone interface passes through unchanged.
+fn normalize_backbone_interface(iface: &mut InterfaceConfig) {
+    match iface.interface_type.as_str() {
+        "BackboneInterface" | "BackboneClientInterface" => {}
+        _ => return,
+    }
+
+    // `port` -> both listen_port and target_port (Reticulum.py:961-962). On a
+    // Backbone entry `port` is a TCP port number, not a serial device path, so
+    // consume `iface.port` here. `remote` (-> target_host) and `listen_on`
+    // (-> listen_ip) were already applied during the key scan.
+    if let Some(p) = iface
+        .port
+        .as_deref()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+    {
+        iface.listen_port = Some(p);
+        iface.target_port = Some(p);
+        iface.port = None;
+    }
+
+    // Mode dispatch (Reticulum.py:966-972): a BackboneClientInterface is always a
+    // client; a plain BackboneInterface with a target host is a client, otherwise
+    // it listens as a server.
+    let is_client =
+        iface.interface_type == "BackboneClientInterface" || iface.target_host.is_some();
+    iface.interface_type = if is_client {
+        "TCPClientInterface".to_string()
+    } else {
+        "TCPServerInterface".to_string()
+    };
 }
 
 /// Parse a ConfigObj boolean value.
@@ -804,5 +886,281 @@ mod tests {
         assert_eq!(rnode.flow_control, Some(true));
         assert_eq!(rnode.airtime_limit_short, Some(15.0));
         assert_eq!(rnode.airtime_limit_long, Some(5.0));
+    }
+
+    // --- Backbone drop-in (Codeberg #89) -----------------------------------
+    // BackboneInterface is wire-identical to TCPInterface; a stock rnsd config
+    // that uses `type = BackboneInterface` must load unchanged and normalize
+    // onto our TCP interface exactly as Python does (Reticulum.py:960-972).
+
+    #[test]
+    fn test_backbone_interface_server_listen() {
+        // `type = BackboneInterface` WITHOUT a target host -> TCP server.
+        // `port` -> listen_port, `listen_on` -> listen_ip.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Backbone Listen]]
+    type = BackboneInterface
+    listen_on = 0.0.0.0
+    port = 4242
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Backbone Listen").expect("iface");
+        assert_eq!(
+            iface.interface_type, "TCPServerInterface",
+            "a Backbone entry with no target host must become a TCP server"
+        );
+        assert_eq!(iface.listen_ip, Some("0.0.0.0".to_string()));
+        assert_eq!(iface.listen_port, Some(4242));
+        // `port` is a TCP port here, not a serial device path -> consumed.
+        assert_eq!(iface.port, None);
+        assert_eq!(iface.target_host, None);
+    }
+
+    #[test]
+    fn test_backbone_interface_client_via_remote() {
+        // `type = BackboneInterface` WITH `remote` -> TCP client.
+        // `port` -> target_port, `remote` -> target_host.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Backbone Uplink]]
+    type = BackboneInterface
+    remote = backbone.example.com
+    port = 4965
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Backbone Uplink").expect("iface");
+        assert_eq!(
+            iface.interface_type, "TCPClientInterface",
+            "a Backbone entry with a remote host must become a TCP client"
+        );
+        assert_eq!(iface.target_host, Some("backbone.example.com".to_string()));
+        assert_eq!(iface.target_port, Some(4965));
+        assert_eq!(iface.port, None);
+    }
+
+    #[test]
+    fn test_backbone_client_interface_always_client() {
+        // `type = BackboneClientInterface` is always a client, even though the
+        // reference config below only carries `remote`/`port`.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Backbone Client]]
+    type = BackboneClientInterface
+    remote = 127.0.0.1
+    port = 7822
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Backbone Client").expect("iface");
+        assert_eq!(iface.interface_type, "TCPClientInterface");
+        assert_eq!(iface.target_host, Some("127.0.0.1".to_string()));
+        assert_eq!(iface.target_port, Some(7822));
+    }
+
+    #[test]
+    fn test_backbone_uses_explicit_tcp_keys() {
+        // A Backbone entry may also carry the literal TCP keys instead of the
+        // `port`/`remote`/`listen_on` aliases; presence of target_host still
+        // dispatches to client (Reticulum.py:967).
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Backbone Explicit]]
+    type = BackboneInterface
+    target_host = 10.0.0.1
+    target_port = 4242
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Backbone Explicit").expect("iface");
+        assert_eq!(iface.interface_type, "TCPClientInterface");
+        assert_eq!(iface.target_host, Some("10.0.0.1".to_string()));
+        assert_eq!(iface.target_port, Some(4242));
+    }
+
+    #[test]
+    fn test_stock_rnsd_default_config_loads() {
+        // Config drop-in audit (Codeberg #89): the verbatim stock rnsd default
+        // config (Reticulum.py __default_rns_config__) must load unchanged --
+        // known [reticulum] keys take effect, [logging] is ignored, the default
+        // AutoInterface is accepted.
+        let config = parse_ini(
+            r#"[reticulum]
+enable_transport = False
+share_instance = Yes
+instance_name = default
+
+[logging]
+loglevel = 4
+
+[interfaces]
+  [[Default Interface]]
+    type = AutoInterface
+    enabled = Yes
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.reticulum.enable_transport);
+        assert!(config.reticulum.shared_instance);
+        assert_eq!(config.reticulum.instance_name, "default");
+        let auto = config.interfaces.get("Default Interface").expect("auto");
+        assert_eq!(auto.interface_type, "AutoInterface");
+        assert!(auto.enabled);
+    }
+
+    #[test]
+    fn test_example_config_interface_type_coverage() {
+        // Config drop-in audit (Codeberg #89): `rnsd --exampleconfig` documents
+        // eight interface types. We ACCEPT Auto/UDP/TCP*/RNode; I2P/KISS/AX25
+        // are not implemented yet and are SKIPPED (logged, not rejected). No key
+        // on any block causes the config to fail to load.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Default Interface]]
+    type = AutoInterface
+    enabled = Yes
+  [[UDP Interface]]
+    type = UDPInterface
+    enabled = no
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    forward_ip = 255.255.255.255
+    forward_port = 4242
+  [[TCP Server Interface]]
+    type = TCPServerInterface
+    enabled = no
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    device = eth0
+    connectable = yes
+  [[TCP Client Interface]]
+    type = TCPClientInterface
+    enabled = no
+    target_host = 127.0.0.1
+    target_port = 4242
+  [[I2P]]
+    type = I2PInterface
+    enabled = no
+    connectable = yes
+    peers = ykzlw5ujbaqc2xkec4cpvgyxj257wcrmmgkuxqmqcur7cq3w3lha.b32.i2p
+  [[RNode LoRa Interface]]
+    type = RNodeInterface
+    enabled = no
+    port = /dev/ttyUSB0
+    frequency = 867200000
+    bandwidth = 125000
+    txpower = 7
+    spreadingfactor = 8
+    codingrate = 5
+    id_callsign = MYCALL-0
+    id_interval = 600
+  [[Packet Radio KISS Interface]]
+    type = KISSInterface
+    enabled = no
+    port = /dev/ttyUSB1
+    speed = 115200
+    databits = 8
+    parity = none
+    stopbits = 1
+    preamble = 150
+    txtail = 10
+    persistence = 200
+    slottime = 20
+  [[Packet Radio AX.25 KISS Interface]]
+    type = AX25KISSInterface
+    enabled = no
+    callsign = MYCALL
+    ssid = 0
+    port = /dev/ttyUSB2
+    speed = 115200
+    databits = 8
+    parity = none
+    stopbits = 1
+"#,
+        )
+        .unwrap();
+
+        // Accepted interface types survive the load.
+        for accepted in [
+            "Default Interface",
+            "UDP Interface",
+            "TCP Server Interface",
+            "TCP Client Interface",
+            "RNode LoRa Interface",
+        ] {
+            assert!(
+                config.interfaces.contains_key(accepted),
+                "{accepted} must be accepted"
+            );
+        }
+        // Not-yet-implemented interface types are skipped, not rejected outright.
+        for skipped in [
+            "I2P",
+            "Packet Radio KISS Interface",
+            "Packet Radio AX.25 KISS Interface",
+        ] {
+            assert!(
+                !config.interfaces.contains_key(skipped),
+                "{skipped} is unimplemented and must be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn test_interface_enabled_legacy_alias() {
+        // Config drop-in audit fix: the legacy `interface_enabled` key must
+        // disable an interface just like `enabled` (Reticulum.py:950).
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Legacy Off]]
+    type = TCPServerInterface
+    interface_enabled = No
+    listen_port = 4242
+"#,
+        )
+        .unwrap();
+        let iface = config.interfaces.get("Legacy Off").expect("iface");
+        assert!(
+            !iface.enabled,
+            "interface_enabled = No must disable the interface"
+        );
+    }
+
+    #[test]
+    fn test_backbone_with_unknown_extra_keys_accepted() {
+        // Backbone-only knobs (prioritise, network_name, ifac_*, device binds)
+        // must not reject the interface -- they are logged and ignored.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Backbone Rich]]
+    type = BackboneInterface
+    listen_on = 0.0.0.0
+    port = 4242
+    prioritise = eth0
+    ifac_netname = mynet
+    ifac_netkey = supersecret
+    some_future_backbone_knob = 1234
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Backbone Rich").expect("iface");
+        assert_eq!(iface.interface_type, "TCPServerInterface");
+        assert_eq!(iface.listen_port, Some(4242));
+        assert_eq!(iface.listen_ip, Some("0.0.0.0".to_string()));
     }
 }
