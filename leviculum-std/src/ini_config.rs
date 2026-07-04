@@ -188,7 +188,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             | "SerialInterface"
             | "PipeInterface"
             | "KISSInterface"
-            | "AX25KISSInterface" => true,
+            | "AX25KISSInterface"
+            | "I2PInterface" => true,
             other => {
                 tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
@@ -308,6 +309,19 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // AX25KISSInterface AX.25 addressing (AX25KISSInterface.py:104-105).
         "callsign" => iface.callsign = Some(value.to_string()),
         "ssid" => iface.ssid = value.parse().ok(),
+        // I2PInterface: comma-separated list of remote `.b32.i2p` peers
+        // (ConfigObj `as_list`, I2PInterface.py:851) and the `connectable`
+        // flag that opens a local inbound endpoint (I2PInterface.py:852).
+        "peers" => {
+            iface.peers = Some(
+                value
+                    .split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect(),
+            );
+        }
+        "connectable" => iface.connectable = Some(parse_bool(value)),
         "bitrate" => {
             if let Ok(v) = value.parse() {
                 iface.bitrate = v;
@@ -885,20 +899,20 @@ mod tests {
     enabled = yes
     listen_port = 4242
 
-  [[I2P Link]]
-    type = I2PInterface
+  [[Unknown]]
+    type = SomeFutureInterface
     peers = somebase64.b32.i2p
 "#,
         )
         .unwrap();
 
-        // I2PInterface is unimplemented and should be skipped; Auto, RNode, TCP
-        // are supported.
+        // A genuinely-unknown interface type is skipped; Auto, RNode, TCP are
+        // supported. (I2PInterface is now supported and covered separately.)
         assert_eq!(config.interfaces.len(), 3);
         assert!(config.interfaces.contains_key("TCP Server"));
         assert!(config.interfaces.contains_key("Auto"));
         assert!(config.interfaces.contains_key("RNode"));
-        assert!(!config.interfaces.contains_key("I2P Link"));
+        assert!(!config.interfaces.contains_key("Unknown"));
     }
 
     #[test]
@@ -1431,9 +1445,8 @@ loglevel = 4
     #[test]
     fn test_example_config_interface_type_coverage() {
         // Config drop-in audit (Codeberg #89): `rnsd --exampleconfig` documents
-        // eight interface types. We ACCEPT Auto/UDP/TCP*/RNode; I2P/KISS/AX25
-        // are not implemented yet and are SKIPPED (logged, not rejected). No key
-        // on any block causes the config to fail to load.
+        // eight interface types, all of which we now accept. No key on any block
+        // causes the config to fail to load.
         let config = parse_ini(
             r#"
 [interfaces]
@@ -1507,6 +1520,7 @@ loglevel = 4
             "UDP Interface",
             "TCP Server Interface",
             "TCP Client Interface",
+            "I2P",
             "RNode LoRa Interface",
             "Packet Radio KISS Interface",
             "Packet Radio AX.25 KISS Interface",
@@ -1516,10 +1530,13 @@ loglevel = 4
                 "{accepted} must be accepted"
             );
         }
-        // Not-yet-implemented interface types are skipped, not rejected outright.
-        assert!(
-            !config.interfaces.contains_key("I2P"),
-            "I2P is unimplemented and must be skipped"
+
+        // The I2P block's `peers`/`connectable` keys parse into typed fields.
+        let i2p = config.interfaces.get("I2P").expect("I2P");
+        assert_eq!(i2p.connectable, Some(true));
+        assert_eq!(
+            i2p.peers.as_deref(),
+            Some(&["ykzlw5ujbaqc2xkec4cpvgyxj257wcrmmgkuxqmqcur7cq3w3lha.b32.i2p".to_string()][..])
         );
     }
 

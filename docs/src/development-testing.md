@@ -21,6 +21,12 @@ system packages must be installed (all apt-installable on Debian):
   Python `rnsd`/`rnstatus` as the compatibility reference.
 - **socat** — bridges a virtual serial pty pair so the serial-family interfaces
   (KISS, AX.25, Pipe) can be interop-tested against a real Python peer.
+- **i2pd** (optional) — provides the SAM bridge on 127.0.0.1:7656 that the
+  `I2PInterface` live tests use. The default suite covers `I2PInterface` with an
+  in-process mock SAM bridge, so i2pd is not needed to go green; it only gates
+  the `#[ignore]`d live tests (`cargo test -p leviculum-std i2pd_live --
+  --ignored`). Enable the bridge with `sam.enabled = true` in
+  `/etc/i2pd/i2pd.conf` and start the `i2pd` service.
 - **just**, **cargo**, **flock**, **notify-send** — build/CI plumbing.
 
 `scripts/install-ci.sh` checks for these at setup and prints the `sudo apt

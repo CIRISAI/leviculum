@@ -60,6 +60,7 @@ pub use stream::LinkHandle;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -84,6 +85,10 @@ use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::auto_interface::orchestrator::spawn_auto_interface;
 use crate::interfaces::auto_interface::AutoInterfaceConfig;
+use crate::interfaces::i2p::{
+    spawn_i2p_client, spawn_i2p_server, I2pClientConfig, I2pServerConfig, I2P_DEFAULT_BUFFER_SIZE,
+    I2P_DEFAULT_RECONNECT_WAIT,
+};
 use crate::interfaces::tcp::{
     spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig,
     DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
@@ -536,6 +541,11 @@ pub struct ReticulumNode {
     /// re-announce-on-recovery works like config interfaces. `Some` after
     /// `start()`.
     reconnect_tx: Option<mpsc::Sender<InterfaceId>>,
+    /// Storage directory, needed by interface types that persist per-interface
+    /// state (currently only `I2PInterface`, which stores its SAM destination
+    /// private key so its `.b32.i2p` address survives restarts). Set by the
+    /// builder; `None` falls back to the default config dir.
+    storage_path: Option<PathBuf>,
 }
 
 impl Drop for ReticulumNode {
@@ -634,7 +644,14 @@ impl ReticulumNode {
             new_iface_tx: None,
             iface_id_counter: None,
             reconnect_tx: None,
+            storage_path: None,
         }
+    }
+
+    /// Set the storage directory (called by the builder). Used by interface
+    /// types that persist per-interface state under `<storage>/i2p/`.
+    pub(crate) fn set_storage_path(&mut self, path: PathBuf) {
+        self.storage_path = Some(path);
     }
 
     /// Start the node
@@ -1421,6 +1438,82 @@ impl ReticulumNode {
                             );
                         }
                         registry.register(handle);
+                    }
+                    "I2PInterface" => {
+                        // SAM bridge address: honour the I2P_SAM_ADDRESS env var
+                        // (i2plib `get_sam_address`), else the default 7656.
+                        let sam_address = std::env::var("I2P_SAM_ADDRESS").unwrap_or_else(|_| {
+                            crate::interfaces::i2p::sam::DEFAULT_SAM_ADDRESS.to_string()
+                        });
+                        let buffer_size = config.buffer_size.unwrap_or(I2P_DEFAULT_BUFFER_SIZE);
+                        let reconnect_wait = config
+                            .reconnect_interval_secs
+                            .map(Duration::from_secs)
+                            .unwrap_or(I2P_DEFAULT_RECONNECT_WAIT);
+                        let ifac = build_ifac_config(config);
+                        let storage_root = self.storage_path.clone().unwrap_or_else(|| {
+                            crate::config::Config::default_config_dir().join("storage")
+                        });
+
+                        // Server endpoint (accepts inbound I2P connections),
+                        // spawning one sub-interface per peer via new_iface_tx.
+                        if config.connectable.unwrap_or(false) {
+                            let keyfile = storage_root
+                                .join("i2p")
+                                .join(format!("i2p_iface_{}.i2p", idx));
+                            spawn_i2p_server(I2pServerConfig {
+                                sam_address: sam_address.clone(),
+                                keyfile,
+                                buffer_size,
+                                name_prefix: format!("i2p_{}", idx),
+                                reconnect_wait,
+                                next_id: next_id.clone(),
+                                new_interface_tx: new_iface_tx.clone(),
+                                ifac: ifac.clone(),
+                            });
+                            tracing::info!("I2P connectable endpoint (interface {})", idx);
+                        }
+
+                        // Outbound client sub-interface per configured peer.
+                        // Routed through new_iface_tx (like server-accepted
+                        // connections) so each gets a unique id with IFAC and
+                        // hw_mtu applied uniformly by the registration branch.
+                        // The event loop is not consuming yet, so handles buffer
+                        // in the channel until it starts.
+                        if let Some(peers) = &config.peers {
+                            for peer in peers {
+                                let id = InterfaceId(
+                                    next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                );
+                                let name = format!("i2p_{}_to_{}", idx, peer);
+                                let handle = spawn_i2p_client(I2pClientConfig {
+                                    id,
+                                    name: name.clone(),
+                                    sam_address: sam_address.clone(),
+                                    peer: peer.clone(),
+                                    buffer_size,
+                                    reconnect_wait,
+                                    ifac: ifac.clone(),
+                                    reconnect_notify: Some(reconnect_tx.clone()),
+                                });
+                                if new_iface_tx.try_send(handle).is_err() {
+                                    tracing::error!(
+                                        "could not register I2P peer interface {}: \
+                                         new-interface channel full",
+                                        name
+                                    );
+                                }
+                                tracing::info!("I2P client peer {} -> {}", idx, peer);
+                            }
+                        }
+
+                        if !config.connectable.unwrap_or(false) && config.peers.is_none() {
+                            tracing::warn!(
+                                "I2PInterface {} has neither `connectable = yes` nor `peers`; \
+                                 nothing to do",
+                                idx
+                            );
+                        }
                     }
                     other => {
                         tracing::warn!("Unknown interface type: {}", other);

@@ -231,6 +231,14 @@ pub struct InterfaceConfig {
     /// Source SSID for the AX.25 address (Python `ssid`, 0-15).
     pub ssid: Option<u8>,
 
+    // I2PInterface specific (Reticulum over I2P via SAM v3).
+    /// Remote `.b32.i2p` (or base64) destinations to connect to as a client
+    /// (Python `peers`, ConfigObj `as_list`). One outbound sub-interface each.
+    pub peers: Option<Vec<String>>,
+    /// Whether this interface opens a local I2P endpoint accepting inbound
+    /// connections (Python `connectable`).
+    pub connectable: Option<bool>,
+
     // Reconnection / buffer tuning
     /// Channel buffer size for this interface (default: per interface type)
     pub buffer_size: Option<usize>,
@@ -391,6 +399,8 @@ impl Default for InterfaceConfig {
             id_callsign: None,
             callsign: None,
             ssid: None,
+            peers: None,
+            connectable: None,
             buffer_size: None,
             reconnect_interval_secs: None,
             max_reconnect_tries: None,
