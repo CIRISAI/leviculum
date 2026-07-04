@@ -47,8 +47,11 @@
 //! ```
 
 mod builder;
+mod remote_mgmt;
 mod sender;
 mod stream;
+
+use remote_mgmt::RemoteMgmtResponder;
 
 pub use builder::ReticulumNodeBuilder;
 pub use sender::PacketSender;
@@ -791,6 +794,26 @@ impl ReticulumNode {
         let iface_online_map = Arc::clone(&self.iface_online_map);
         let flush_interval_secs = self.flush_interval_secs;
 
+        // Remote-management `/status` responder (Codeberg #86). Enabled when the
+        // core created the `rnstransport.remote.management` destination at build
+        // time. The event loop drives it even in daemon mode (no app event
+        // sink), because it consumes `RequestReceived` from the raw
+        // `TickOutput`, not the forwarded event stream.
+        let remote_mgmt = self
+            .inner
+            .lock()
+            .unwrap()
+            .remote_mgmt_dest_hash()
+            .is_some()
+            .then(|| {
+                RemoteMgmtResponder::new(
+                    Arc::clone(&self.iface_stats_map),
+                    Arc::clone(&self.iface_online_map),
+                    self.start_time,
+                    self.auto_peer_count_rx.as_ref().cloned(),
+                )
+            });
+
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
             run_event_loop(
@@ -806,6 +829,7 @@ impl ReticulumNode {
                 iface_stats_map,
                 iface_online_map,
                 flush_interval_secs,
+                remote_mgmt,
             )
             .await;
         });
@@ -2130,6 +2154,7 @@ async fn run_event_loop(
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
     flush_interval_secs: u64,
+    remote_mgmt: Option<RemoteMgmtResponder>,
 ) {
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
@@ -2225,6 +2250,7 @@ async fn run_event_loop(
                             event_sink.as_mut(),
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                            remote_mgmt.as_ref(),
                         );
                     }
                     RecvEvent::Disconnected(iface_id) => {
@@ -2239,6 +2265,7 @@ async fn run_event_loop(
                             event_sink.as_mut(),
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                            remote_mgmt.as_ref(),
                         );
                         // Clear retry queue for disconnected interface. The legacy
                         // is_interface_congested flag was removed in Phase F;
@@ -2268,6 +2295,7 @@ async fn run_event_loop(
                     event_sink.as_mut(),
                     &inner,
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                    remote_mgmt.as_ref(),
                 );
             }
 
@@ -2295,6 +2323,7 @@ async fn run_event_loop(
                     event_sink.as_mut(),
                     &inner,
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                    remote_mgmt.as_ref(),
                 );
 
                 // Advance next_poll based on next_deadline_ms
@@ -2325,6 +2354,7 @@ async fn run_event_loop(
                             event_sink.as_mut(),
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                            remote_mgmt.as_ref(),
                         );
                     }
                     // Bounded graceful flush: dispatch only pushes onto the
@@ -2379,7 +2409,7 @@ async fn run_event_loop(
                         let mut core = inner.lock().unwrap();
                         core.handle_interface_up(iface_idx)
                     };
-                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs);
+                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref());
                 }
             }
 
@@ -2400,7 +2430,7 @@ async fn run_event_loop(
                     let mut core = inner.lock().unwrap();
                     core.handle_interface_up(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs);
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref());
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
@@ -2475,6 +2505,7 @@ fn dispatch_output(
     retry_queue_warned: &mut std::collections::BTreeSet<usize>,
     retry_queue_max_depth: &mut BTreeMap<usize, usize>,
     ifac_configs: &BTreeMap<usize, leviculum_core::ifac::IfacConfig>,
+    remote_mgmt: Option<&RemoteMgmtResponder>,
 ) {
     // Drain retry queues before dispatching new actions
     let drain_now_ms = inner.lock().unwrap().now_ms();
@@ -2545,6 +2576,32 @@ fn dispatch_output(
     // airtime.
     push_interface_state(registry, inner);
 
+    // Remote-management `/status` responder (Codeberg #86). Runs even in
+    // daemon mode: it consumes `RequestReceived` straight from the raw
+    // `TickOutput` rather than the forwarded event stream, so it works with
+    // `without_events()`. The core has already applied the destination and
+    // allow-list checks before emitting the event, so any request that
+    // reaches here is authorised. The response `TickOutput` is dispatched
+    // after event forwarding to keep the borrow of `output.events` short.
+    let mut mgmt_responses: Vec<TickOutput> = Vec::new();
+    if let Some(responder) = remote_mgmt {
+        for event in &output.events {
+            if let NodeEvent::RequestReceived {
+                link_id,
+                request_id,
+                path,
+                data,
+                ..
+            } = event
+            {
+                if let Some(resp) = responder.handle_request(inner, link_id, request_id, path, data)
+                {
+                    mgmt_responses.push(resp);
+                }
+            }
+        }
+    }
+
     // Forward events to the application via the split-plane EventSink:
     // control events lossless-by-default (overflow surfaced via
     // ControlPlaneOverflow), data events droppable under load (Codeberg #71).
@@ -2558,6 +2615,23 @@ fn dispatch_output(
             }
             event_sink.emit(event);
         }
+    }
+
+    // Dispatch the `/status` responses produced above. `remote_mgmt` is None
+    // on the recursive call: a response carries no `RequestReceived`, so this
+    // never recurses further.
+    for resp in mgmt_responses {
+        dispatch_output(
+            resp,
+            registry,
+            None,
+            inner,
+            retry_queues,
+            retry_queue_warned,
+            retry_queue_max_depth,
+            ifac_configs,
+            None,
+        );
     }
 }
 
@@ -2852,6 +2926,7 @@ mod tests {
             &mut retry_queue_warned,
             &mut retry_queue_max_depth,
             &ifac_configs,
+            None,
         );
     }
 

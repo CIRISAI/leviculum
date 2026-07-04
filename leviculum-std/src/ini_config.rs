@@ -180,8 +180,20 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         "respond_to_probes" => {
             config.respond_to_probes = parse_bool(value);
         }
-        "remote_management_enabled" => {
+        // `enable_remote_management` is the upstream rnsd key
+        // (Reticulum.py:548); `remote_management_enabled` is accepted as a
+        // Leviculum-side alias so either spelling works.
+        "enable_remote_management" | "remote_management_enabled" => {
             config.remote_management_enabled = parse_bool(value);
+        }
+        // Comma-separated identity hashes (ConfigObj `as_list`,
+        // Reticulum.py:553). Hex is validated when the destination is built.
+        "remote_management_allowed" => {
+            config.remote_management_allowed = value
+                .split(',')
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .collect();
         }
         "flush_interval" => {
             if let Ok(v) = value.trim().parse() {
@@ -592,6 +604,42 @@ mod tests {
         )
         .unwrap();
         assert!(config.reticulum.respond_to_probes);
+    }
+
+    #[test]
+    fn test_remote_management_default_off() {
+        let config = parse_ini("[reticulum]\n").unwrap();
+        assert!(!config.reticulum.remote_management_enabled);
+        assert!(config.reticulum.remote_management_allowed.is_empty());
+    }
+
+    #[test]
+    fn test_remote_management_python_keys() {
+        // The upstream rnsd spelling `enable_remote_management` plus the
+        // comma-separated `remote_management_allowed` list (ConfigObj as_list).
+        let config = parse_ini(
+            r#"
+[reticulum]
+  enable_remote_management = Yes
+  remote_management_allowed = aabbccddeeff00112233445566778899, 00112233445566778899aabbccddeeff
+"#,
+        )
+        .unwrap();
+        assert!(config.reticulum.remote_management_enabled);
+        assert_eq!(
+            config.reticulum.remote_management_allowed,
+            vec![
+                "aabbccddeeff00112233445566778899".to_string(),
+                "00112233445566778899aabbccddeeff".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_remote_management_enabled_alias() {
+        // `remote_management_enabled` is accepted as a Leviculum-side alias.
+        let config = parse_ini("[reticulum]\n  remote_management_enabled = True\n").unwrap();
+        assert!(config.reticulum.remote_management_enabled);
     }
 
     #[test]

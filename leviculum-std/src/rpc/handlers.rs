@@ -128,7 +128,7 @@ fn ar_value(v: Option<u32>) -> Value {
 /// Build the `interface_stats` response dict matching Python's format.
 /// `core` is mutable because frequency reads pop decayed samples, exactly
 /// like Python's get_interface_stats (Python parity, Codeberg #67/#87).
-fn build_interface_stats(
+pub(crate) fn build_interface_stats(
     core: &mut StdNodeCore,
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,

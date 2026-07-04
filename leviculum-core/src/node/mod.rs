@@ -163,6 +163,12 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// Probe destination hash (if respond_to_probes is enabled).
     /// Used for periodic management announces and status reporting.
     probe_dest_hash: Option<DestinationHash>,
+    /// Remote-management destination hash (if remote management is enabled).
+    /// The `rnstransport.remote.management` destination on the transport
+    /// identity that serves the `/status` request handler (Codeberg #86).
+    /// The driver reads this to route `/status` requests to its stats
+    /// responder.
+    remote_mgmt_dest_hash: Option<DestinationHash>,
     /// Management destinations to announce periodically (probe, etc.).
     /// Announced 15s after startup, then every 2 hours (matching Python).
     mgmt_destinations: Vec<DestinationHash>,
@@ -243,6 +249,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             default_proof_strategy: proof_strategy,
             events: Vec::new(),
             probe_dest_hash: None,
+            remote_mgmt_dest_hash: None,
             mgmt_destinations: Vec::new(),
             next_mgmt_announce_ms: None,
             request_handlers: BTreeMap::new(),
@@ -378,6 +385,87 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             "[IDENTITY] probe_destination={} aspect=rnstransport.probe",
             hash
         );
+    }
+
+    /// Get the remote-management destination hash (if remote management is
+    /// enabled). The driver reads this to route incoming `/status` requests to
+    /// its stats responder.
+    pub fn remote_mgmt_dest_hash(&self) -> Option<&DestinationHash> {
+        self.remote_mgmt_dest_hash.as_ref()
+    }
+
+    /// Create and register the remote-management destination
+    /// (`rnstransport.remote.management`) and its `/status` request handler.
+    ///
+    /// Called by `NodeCoreBuilder::build()` when remote management is enabled.
+    /// Mirrors Python `Transport.py:253-259`: a `Destination(identity, IN,
+    /// SINGLE, "rnstransport", "remote", "management")` on the transport
+    /// identity with a `/status` handler gated by an ALLOW_LIST of identity
+    /// hashes. The destination is announced on the management schedule so
+    /// `rnstatus -R` clients can request a path and recall its identity.
+    ///
+    /// `allowed` is the set of identity hashes permitted to query; an empty
+    /// list registers the handler but rejects every requester (Python parity:
+    /// the ACL is consulted even when empty).
+    fn enable_remote_management(&mut self, allowed: Vec<[u8; TRUNCATED_HASHBYTES]>) {
+        let identity_bytes = match self.transport.identity().private_key_bytes() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                crate::tracing::warn!("Cannot create remote management destination: {e}");
+                return;
+            }
+        };
+        let mgmt_identity = match Identity::from_private_key_bytes(&identity_bytes) {
+            Ok(id) => id,
+            Err(e) => {
+                crate::tracing::warn!("Cannot create remote management destination: {e}");
+                return;
+            }
+        };
+        let mgmt_dest = match Destination::new(
+            Some(mgmt_identity),
+            crate::destination::Direction::In,
+            crate::destination::DestinationType::Single,
+            "rnstransport",
+            &["remote", "management"],
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::tracing::warn!("Cannot create remote management destination: {e}");
+                return;
+            }
+        };
+        let hash = *mgmt_dest.hash();
+        // IN/SINGLE destinations accept links by default; the client
+        // establishes a link, identifies, then issues the `/status` request.
+        self.register_destination(mgmt_dest);
+        self.register_request_handler(hash, "/status", request::RequestPolicy::AllowList(allowed));
+        self.remote_mgmt_dest_hash = Some(hash);
+        self.mgmt_destinations.push(hash);
+
+        // Schedule first announce 15s after startup (shared mgmt schedule).
+        let now_ms = self.transport.clock().now_ms();
+        if self.next_mgmt_announce_ms.is_none() {
+            self.next_mgmt_announce_ms = Some(now_ms + MGMT_ANNOUNCE_INITIAL_DELAY_MS);
+        }
+
+        // Seed the announce cache now so the FIRST path request for this local
+        // destination can be answered immediately, rather than waiting for the
+        // 15s periodic announce or a discovery retry. No interfaces exist at
+        // build time, so this only populates the cache; the actual path
+        // response is regenerated fresh by the PathRequestReceived handler.
+        if let Some(dest) = self.destinations.get_mut(&hash) {
+            if let Ok(packet) = dest.announce(None, &mut self.rng, now_ms) {
+                let mut buf = [0u8; crate::constants::MTU];
+                if let Ok(len) = packet.pack(&mut buf) {
+                    self.transport
+                        .storage_mut()
+                        .set_announce_cache(hash.into_bytes(), buf[..len].to_vec());
+                }
+            }
+        }
+
+        crate::tracing::info!("Remote management responder at <{}> active", hash);
     }
 
     /// Get a registered destination
@@ -910,6 +998,90 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     link.clear_outgoing_resource();
                 }
                 crate::tracing::debug!("Failed to build resource ADV packet: {e}");
+                return Err(ResourceError::InvalidRequest);
+            }
+        }
+
+        Ok((resource_hash, self.process_events_and_actions()))
+    }
+
+    /// Send a request response that exceeds the link MDU as a response Resource.
+    ///
+    /// The single-packet counterpart is [`send_response`](Self::send_response);
+    /// call this when it returns [`RequestError::PayloadTooLarge`]. The resource
+    /// carries `msgpack [request_id, response_data]` (the same framing
+    /// [`send_response`](Self::send_response) packs into one RESPONSE packet)
+    /// and its advertisement
+    /// sets the `is_response` flag with the `request_id`, so a receiver
+    /// correlates it to its pending request. Mirrors Python's
+    /// `RNS.Resource(umsgpack.packb([request_id, response]), is_response=True,
+    /// request_id=request_id)` (`Link.py` response path).
+    ///
+    /// `response_data` must be exactly one valid msgpack-encoded value.
+    pub fn send_response_resource(
+        &mut self,
+        link_id: &LinkId,
+        request_id: &[u8; TRUNCATED_HASHBYTES],
+        response_data: &[u8],
+    ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::msgpack::{write_bin, write_fixarray_header};
+        use crate::resource::outgoing::OutgoingResource;
+        use crate::resource::ResourceError;
+
+        let now_ms = self.transport.clock().now_ms();
+
+        // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
+        // link) so every links.get/get_mut and the route use the wire id.
+        let link_id = &self.resolve_link_id(link_id);
+
+        // Frame the payload identically to send_response: fixarray(2) +
+        // bin(request_id) + response_data (raw single msgpack value).
+        let mut wrapped = Vec::new();
+        write_fixarray_header(&mut wrapped, 2);
+        write_bin(&mut wrapped, request_id);
+        wrapped.extend_from_slice(response_data);
+
+        let link = self
+            .links
+            .get(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+
+        if link.has_outgoing_resource() {
+            return Err(ResourceError::TransferInProgress);
+        }
+
+        let outgoing = OutgoingResource::new_response(
+            &wrapped,
+            None,
+            Some(request_id),
+            link,
+            true,
+            &mut self.rng,
+            now_ms,
+        )?;
+        let resource_hash = *outgoing.resource_hash();
+        let adv_bytes = outgoing.adv_packet().to_vec();
+
+        let link = self
+            .links
+            .get_mut(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.set_outgoing_resource(outgoing);
+
+        match link.build_data_packet_with_context(
+            &adv_bytes,
+            PacketContext::ResourceAdv,
+            &mut self.rng,
+        ) {
+            Ok(pkt) => {
+                self.route_link_packet(link_id, &pkt);
+            }
+            Err(e) => {
+                if let Some(link) = self.links.get_mut(link_id) {
+                    link.clear_outgoing_resource();
+                }
+                crate::tracing::debug!("Failed to build response resource ADV packet: {e}");
                 return Err(ResourceError::InvalidRequest);
             }
         }

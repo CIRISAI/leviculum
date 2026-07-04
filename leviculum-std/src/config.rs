@@ -61,6 +61,14 @@ pub struct ReticulumConfig {
     /// Enable remote management
     #[serde(default)]
     pub remote_management_enabled: bool,
+    /// Identity hashes permitted to query remote management (`/status`).
+    ///
+    /// Each entry is a 32-hex-character (16-byte) identity hash, matching
+    /// Python's `remote_management_allowed` list (`Reticulum.py:552-561`). An
+    /// empty list with `remote_management_enabled = true` registers the
+    /// handler but rejects every requester.
+    #[serde(default)]
+    pub remote_management_allowed: Vec<String>,
     /// Storage path (relative to config dir or absolute)
     #[serde(default)]
     pub storage_path: Option<PathBuf>,
@@ -145,6 +153,7 @@ impl Default for ReticulumConfig {
             shared_instance_socket: None,
             respond_to_probes: false,
             remote_management_enabled: false,
+            remote_management_allowed: Vec::new(),
             storage_path: None,
             flush_interval_secs: DEFAULT_FLUSH_INTERVAL_SECS,
             control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,

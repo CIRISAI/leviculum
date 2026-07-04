@@ -3,6 +3,8 @@
 //! The [`NodeCoreBuilder`] provides a fluent API for configuring and creating
 //! a [`NodeCore`] instance.
 
+use alloc::vec::Vec;
+
 use crate::destination::ProofStrategy;
 use crate::identity::Identity;
 use crate::resource::RESOURCE_MAX_INCOMING_SIZE;
@@ -40,6 +42,8 @@ pub struct NodeCoreBuilder {
     proof_strategy: ProofStrategy,
     transport_config: TransportConfig,
     respond_to_probes: bool,
+    remote_management: bool,
+    remote_management_allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
     max_incoming_resource_size: usize,
 }
 
@@ -57,6 +61,8 @@ impl NodeCoreBuilder {
             proof_strategy: ProofStrategy::None,
             transport_config: TransportConfig::default(),
             respond_to_probes: false,
+            remote_management: false,
+            remote_management_allowed: Vec::new(),
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
         }
     }
@@ -131,6 +137,23 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Enable remote management (rnstransport.remote.management `/status`).
+    ///
+    /// When enabled, the node creates a `rnstransport.remote.management`
+    /// destination from its transport identity at build time, registers a
+    /// `/status` request handler gated by `allowed` (identity hashes), and
+    /// announces the destination periodically so `rnstatus -R` clients can
+    /// resolve it. Mirrors Python `Transport.py:253-259`.
+    pub fn remote_management(
+        mut self,
+        enable: bool,
+        allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
+    ) -> Self {
+        self.remote_management = enable;
+        self.remote_management_allowed = allowed;
+        self
+    }
+
     /// Set the maximum incoming resource size in bytes.
     ///
     /// Resources advertised with `transfer_size` above this limit are
@@ -189,6 +212,10 @@ impl NodeCoreBuilder {
 
         if self.respond_to_probes {
             node.enable_probe_responder();
+        }
+
+        if self.remote_management {
+            node.enable_remote_management(self.remote_management_allowed);
         }
 
         node

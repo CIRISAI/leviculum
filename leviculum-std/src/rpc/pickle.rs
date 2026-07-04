@@ -382,7 +382,7 @@ fn rmpv_to_hashable(v: &rmpv::Value) -> Result<HashableValue, RpcError> {
 /// Preserves the str-vs-bytes distinction RNS relies on: pickle strings become
 /// msgpack `str` and pickle bytes become msgpack `bin`, so umsgpack decodes
 /// them back to `str`/`bytes` respectively.
-fn value_to_rmpv(v: &Value) -> Result<rmpv::Value, RpcError> {
+pub(crate) fn value_to_rmpv(v: &Value) -> Result<rmpv::Value, RpcError> {
     use rmpv::Value as M;
     Ok(match v {
         Value::None => M::Nil,

@@ -91,6 +91,58 @@ impl OutgoingResource {
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
     ) -> Result<Self, ResourceError> {
+        Self::new_with_flags(
+            data,
+            metadata,
+            request_id,
+            link,
+            auto_compress,
+            rng,
+            now_ms,
+            false,
+        )
+    }
+
+    /// Like [`new`](Self::new) but marks the advertisement as a response
+    /// resource (`is_response` flag set, `request_id` carried in the ADV).
+    ///
+    /// Mirrors Python `RNS.Resource(..., is_response=True, request_id=...)`
+    /// (`Link.py` response path): a request whose packed response exceeds the
+    /// link MDU is delivered as a Resource the receiver correlates to its
+    /// pending request. Used by the request/response responder for large
+    /// `/status`-style bundles.
+    pub(crate) fn new_response(
+        data: &[u8],
+        metadata: Option<&[u8]>,
+        request_id: Option<&[u8]>,
+        link: &Link,
+        auto_compress: bool,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+    ) -> Result<Self, ResourceError> {
+        Self::new_with_flags(
+            data,
+            metadata,
+            request_id,
+            link,
+            auto_compress,
+            rng,
+            now_ms,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_flags(
+        data: &[u8],
+        metadata: Option<&[u8]>,
+        request_id: Option<&[u8]>,
+        link: &Link,
+        auto_compress: bool,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+        is_response: bool,
+    ) -> Result<Self, ResourceError> {
         if !link.is_active() {
             return Err(ResourceError::LinkNotActive);
         }
@@ -260,7 +312,7 @@ impl OutgoingResource {
             compressed,
             split: false,
             is_request: false,
-            is_response: false,
+            is_response,
             has_metadata,
         };
 

@@ -524,10 +524,33 @@ impl ReticulumNodeBuilder {
             .map(Some)
             .unwrap_or(config.reticulum.keepalive_interval);
 
+        // Remote management (Codeberg #86): parse the ACL hex hashes into
+        // 16-byte identity hashes, dropping malformed entries with a warning
+        // (Python raises; we tolerate so one bad line does not down the daemon).
+        let remote_management_allowed: Vec<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]> =
+            config
+                .reticulum
+                .remote_management_allowed
+                .iter()
+                .filter_map(|hex| match parse_identity_hash16(hex) {
+                    Some(h) => Some(h),
+                    None => {
+                        tracing::warn!(
+                            "ignoring invalid remote_management_allowed identity hash: {hex:?}"
+                        );
+                        None
+                    }
+                })
+                .collect();
+
         let core_builder = core_builder
             .enable_transport(enable_transport)
             .link_keepalive(link_keepalive_secs)
-            .respond_to_probes(config.reticulum.respond_to_probes);
+            .respond_to_probes(config.reticulum.respond_to_probes)
+            .remote_management(
+                config.reticulum.remote_management_enabled,
+                remote_management_allowed,
+            );
 
         // Build NodeCore (consumes storage, persistent data already loaded)
         let node_core = core_builder.build(rand_core::OsRng, clock, storage);
@@ -579,6 +602,23 @@ fn hex_short(hash: &[u8]) -> String {
             let _ = write!(s, "{b:02x}");
             s
         })
+}
+
+/// Parse a 32-hex-character (16-byte) identity hash. Returns `None` for any
+/// wrong length or non-hex input (matches Python's ACL length check,
+/// Reticulum.py:555-558, but tolerantly instead of raising).
+fn parse_identity_hash16(
+    hex: &str,
+) -> Option<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]> {
+    let hex = hex.trim();
+    if hex.len() != leviculum_core::constants::TRUNCATED_HASHBYTES * 2 {
+        return None;
+    }
+    let mut out = [0u8; leviculum_core::constants::TRUNCATED_HASHBYTES];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Format a full hash as hex for logging

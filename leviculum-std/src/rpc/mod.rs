@@ -11,7 +11,7 @@
 
 pub(crate) mod connection;
 mod error;
-mod handlers;
+pub(crate) mod handlers;
 pub(crate) mod pickle;
 
 use std::sync::{Arc, Mutex};

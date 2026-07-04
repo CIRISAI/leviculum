@@ -62,6 +62,7 @@ mod python_parity_tests;
 mod ratchet_rotation_tests;
 mod ratchet_tests;
 mod relay_integration_tests;
+mod remote_management_server_tests;
 mod remote_management_tests;
 mod request_tests;
 mod resource_tests;
