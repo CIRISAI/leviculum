@@ -944,6 +944,15 @@ impl TestDaemon {
         self.rns_port
     }
 
+    /// OS process id of the underlying `python3` daemon.
+    ///
+    /// Used by the TCP load test to sample the hub's `/proc/<pid>/status`
+    /// VmRSS and `/proc/<pid>/fd` count when a Python `rnsd`-equivalent plays
+    /// the hub role in the A/B comparison against our `lnsd`.
+    pub fn pid(&self) -> u32 {
+        self.process.id()
+    }
+
     /// Get the probe destination hash (hex string), if available.
     ///
     /// Set when the daemon was started with `--respond-to-probes`.
@@ -1169,6 +1178,37 @@ impl TestDaemon {
         }
 
         Ok(packets)
+    }
+
+    /// Fetch the TCP load-test sink tally: for each source `client_id`, the
+    /// number of distinct sequence numbers received and their min/max. Returns
+    /// `(per_source, total)` where `per_source[client_id] = (distinct, min, max)`
+    /// and `total` is the grand sum of distinct seqs across all sources.
+    ///
+    /// See `test_daemon.py::get_loadtest_stats`. Load-test single packets carry
+    /// a `b"LT" + u32_le(client_id) + u32_le(seq)` plaintext header; the sink
+    /// folds them into per-client seq sets rather than the unbounded
+    /// `received_single_packets` list.
+    pub async fn get_loadtest_stats(
+        &self,
+    ) -> Result<(HashMap<u32, (u32, Option<u32>, Option<u32>)>, u64), HarnessError> {
+        let result = self
+            .query("get_loadtest_stats", serde_json::json!({}))
+            .await?;
+        let mut per_source = HashMap::new();
+        let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+        if let Some(serde_json::Value::Object(sources)) = result.get("sources") {
+            for (id_str, entry) in sources {
+                let Ok(client_id) = id_str.parse::<u32>() else {
+                    continue;
+                };
+                let distinct = entry.get("distinct").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let min = entry.get("min").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let max = entry.get("max").and_then(|v| v.as_u64()).map(|v| v as u32);
+                per_source.insert(client_id, (distinct, min, max));
+            }
+        }
+        Ok((per_source, total))
     }
 
     /// Get single packets received at destinations (not via links).

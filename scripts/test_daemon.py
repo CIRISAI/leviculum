@@ -130,6 +130,12 @@ class TestDaemon:
         self.links = {}  # link_hash -> link
         self.received_packets = []  # [(timestamp, link, data)]
         self.received_single_packets = []  # [(timestamp, dest_hash, data_hex)]
+        # TCP load-test sink tally. Load-test single packets carry a
+        # b"LT" + u32_le(client_id) + u32_le(seq) plaintext header. They are
+        # NOT appended to received_single_packets (which would grow unbounded
+        # under soak); instead we fold them into a per-client seq set so the
+        # generator can assert exact, gap-free, dup-free delivery in O(sources).
+        self.loadtest_seqs = {}  # client_id:int -> set(seq:int)
         self.plain_destinations = {}  # hash -> destination (PLAIN type, no identity)
         self.received_plain_packets = []  # [(timestamp, dest_hash, data_hex)]
         self.client_interfaces = {}  # name -> TCPClientInterface
@@ -1378,6 +1384,24 @@ class TestDaemon:
                 })
             return {"result": packets}
 
+        elif method == "get_loadtest_stats":
+            # Per-client delivery tally for the TCP load test. For every source
+            # client_id we return the number of distinct seqs received and their
+            # min/max, so the generator can assert count==distinct==sent,
+            # min==0, max==sent-1 (contiguous, no gaps, no duplicates). "total"
+            # is the grand sum of distinct seqs across all sources.
+            stats = {}
+            total = 0
+            for client_id, seqs in self.loadtest_seqs.items():
+                distinct = len(seqs)
+                total += distinct
+                stats[str(client_id)] = {
+                    "distinct": distinct,
+                    "min": min(seqs) if seqs else None,
+                    "max": max(seqs) if seqs else None,
+                }
+            return {"result": {"sources": stats, "total": total}}
+
         elif method == "shutdown":
             self.running = False
             return {"result": "shutting_down"}
@@ -1389,6 +1413,15 @@ class TestDaemon:
         """Called when a single (non-link) packet is received at a destination."""
         if self.verbose:
             print(f"Single packet received at {dest.hash.hex()}: {len(data)} bytes")
+
+        raw = data if isinstance(data, bytes) else data.encode()
+        # TCP load-test packets: b"LT" + u32_le(client_id) + u32_le(seq).
+        # Fold into the per-client seq set instead of the unbounded list.
+        if len(raw) >= 10 and raw[0:2] == b"LT":
+            client_id = int.from_bytes(raw[2:6], "little")
+            seq = int.from_bytes(raw[6:10], "little")
+            self.loadtest_seqs.setdefault(client_id, set()).add(seq)
+            return
 
         self.received_single_packets.append((
             time.time(),

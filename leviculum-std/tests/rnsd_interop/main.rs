@@ -51,6 +51,7 @@ mod lifecycle_tests;
 mod link_keepalive_close_tests;
 mod link_manager_tests;
 mod link_tests;
+mod loadtest_tcp_hub_tests;
 mod mtu_tests;
 mod multihop_tests;
 mod node_api_tests;
