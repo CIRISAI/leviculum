@@ -3,6 +3,7 @@
 //! Implements the full RNode lifecycle: detect → configure radio → validate →
 //! go online → bidirectional data → reconnect on failure → graceful shutdown.
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -1244,6 +1245,605 @@ pub(crate) fn spawn_rnode_channel_interface(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-interface (multi-vport RNode)
+// ---------------------------------------------------------------------------
+//
+// An `RNodeMultiInterface` drives a single RNode that carries several LoRa
+// transceivers, each exposed as a virtual port (vport). One serial link is
+// shared; every per-vport command is prefixed with a CMD_SEL_INT frame
+// (see `leviculum_core::rnode::build_vport_command`). Each vport is registered
+// with the transport as its own logical interface, so announces and paths work
+// per band exactly as if the radios were separate devices.
+//
+// Layering (matches the single-RNode interface): the carrier-medium specifics
+// (serial framing, vport multiplexing, per-vport radio config push) live here;
+// the transport sees N ordinary interfaces and stays vport-agnostic.
+
+/// Radio + routing parameters for one vport subinterface.
+pub(crate) struct RNodeSubinterfaceParams {
+    /// Transport interface id assigned to this vport.
+    pub id: InterfaceId,
+    /// Display name (`<multi name>[<sub name>]`).
+    pub name: String,
+    /// Virtual port index on the device.
+    pub vport: u8,
+    pub frequency: u32,
+    pub bandwidth: u32,
+    pub tx_power: u8,
+    pub sf: u8,
+    pub cr: u8,
+    pub st_alock: Option<u16>,
+    pub lt_alock: Option<u16>,
+    /// Whether this subinterface may transmit (Python `interface.OUT`).
+    pub outgoing: bool,
+}
+
+impl RNodeSubinterfaceParams {
+    fn radio_params(&self) -> RadioParams {
+        RadioParams {
+            frequency: self.frequency,
+            bandwidth: self.bandwidth,
+            tx_power: self.tx_power,
+            sf: self.sf,
+            cr: self.cr,
+            st_alock: self.st_alock,
+            lt_alock: self.lt_alock,
+        }
+    }
+}
+
+/// Configuration for spawning a multi-vport RNode interface over a serial port.
+pub(crate) struct RNodeMultiInterfaceConfig {
+    /// Name of the parent multi interface.
+    pub name: String,
+    /// Serial port shared by all vports.
+    pub port_path: String,
+    /// One entry per enabled subinterface (vport).
+    pub subinterfaces: Vec<RNodeSubinterfaceParams>,
+    pub flow_control: bool,
+    pub buffer_size: usize,
+    pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+}
+
+/// Per-vport runtime state the shared hub task holds: the radio params to push,
+/// the routing tag, and the channel to deliver received packets to this vport's
+/// logical interface.
+struct VportRuntime {
+    id: InterfaceId,
+    name: String,
+    vport: u8,
+    radio: RadioParams,
+    outgoing: bool,
+    incoming_tx: mpsc::Sender<IncomingPacket>,
+    counters: Arc<InterfaceCounters>,
+}
+
+/// A TX packet after merging all vports' outgoing channels, tagged with the
+/// index into the hub's `VportRuntime` list it came from.
+struct TaggedOutgoing {
+    subint: usize,
+    packet: OutgoingPacket,
+}
+
+/// Detect a multi-vport RNode and read its reported per-vport chip types.
+///
+/// Sends [`build_detect_query_multi`](rnode::build_detect_query_multi) (detect +
+/// firmware + platform + MCU + interfaces) and collects the responses. The
+/// returned `Vec<u8>` holds one chip-type byte per vport in vport order (empty
+/// if the firmware did not report — older single-radio firmware, or a mock).
+async fn detect_multi_on_port<S>(port: &mut S) -> Result<(RNodeDetectResult, Vec<u8>), RNodeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let query = rnode::build_detect_query_multi();
+    port.write_all(&query).await?;
+
+    let mut result = RNodeDetectResult {
+        detected: false,
+        firmware_version: None,
+        platform: None,
+        mcu: None,
+    };
+    let mut chip_types: Vec<u8> = Vec::new();
+
+    read_frames_until_deadline(port, DETECT_TIMEOUT, |command, payload| match command {
+        rnode::CMD_DETECT if payload.first() == Some(&rnode::DETECT_RESP) => {
+            result.detected = true;
+        }
+        rnode::CMD_FW_VERSION => {
+            result.firmware_version = rnode::decode_firmware_version(payload);
+        }
+        rnode::CMD_PLATFORM => {
+            result.platform = payload.first().copied();
+        }
+        rnode::CMD_MCU => {
+            result.mcu = payload.first().copied();
+        }
+        rnode::CMD_INTERFACES => {
+            // One frame can carry several 2-byte records; a device may also
+            // emit multiple frames. Append in arrival (vport) order.
+            chip_types.extend(rnode::decode_interfaces(payload));
+        }
+        _ => {}
+    })
+    .await?;
+
+    if !result.detected {
+        return Err(RNodeError::NotDetected);
+    }
+
+    Ok((result, chip_types))
+}
+
+/// Push per-vport radio configuration: for each vport, a CMD_SEL_INT frame
+/// followed by frequency/bandwidth/txpower/sf/cr/[alock]/radio-on, mirroring
+/// Python `RNodeSubInterface.initRadio` driving the parent's `set*` methods.
+async fn send_multi_radio_config<S>(port: &mut S, vports: &[VportRuntime]) -> Result<(), RNodeError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut bytes = Vec::with_capacity(64 * vports.len());
+    for v in vports {
+        let r = &v.radio;
+        bytes.extend_from_slice(&rnode::build_vport_command(
+            v.vport,
+            &rnode::build_set_frequency(r.frequency),
+        ));
+        bytes.extend_from_slice(&rnode::build_vport_command(
+            v.vport,
+            &rnode::build_set_bandwidth(r.bandwidth),
+        ));
+        bytes.extend_from_slice(&rnode::build_vport_command(
+            v.vport,
+            &rnode::build_set_txpower(r.tx_power),
+        ));
+        bytes.extend_from_slice(&rnode::build_vport_command(
+            v.vport,
+            &rnode::build_set_sf(r.sf),
+        ));
+        bytes.extend_from_slice(&rnode::build_vport_command(
+            v.vport,
+            &rnode::build_set_cr(r.cr),
+        ));
+        if let Some(st) = r.st_alock {
+            bytes.extend_from_slice(&rnode::build_vport_command(
+                v.vport,
+                &rnode::build_set_st_alock(st),
+            ));
+        }
+        if let Some(lt) = r.lt_alock {
+            bytes.extend_from_slice(&rnode::build_vport_command(
+                v.vport,
+                &rnode::build_set_lt_alock(lt),
+            ));
+        }
+        bytes.extend_from_slice(&rnode::build_vport_command(
+            v.vport,
+            &rnode::build_set_radio_state(rnode::RADIO_STATE_ON),
+        ));
+    }
+    port.write_all(&bytes).await?;
+    port.flush().await?;
+    Ok(())
+}
+
+/// Detect + validate firmware + validate vports + push per-vport config over an
+/// already-open, settled channel. The single-RNode analogue is
+/// [`configure_stream`]; this adds the vport dimension.
+async fn configure_multi_stream<S>(
+    port: &mut S,
+    vports: &[VportRuntime],
+    name: &str,
+) -> Result<RNodeDetectResult, RNodeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (detect, chip_types) = detect_multi_on_port(port).await?;
+
+    match detect.firmware_version {
+        Some((maj, min)) if rnode::validate_firmware(maj, min) => {}
+        Some((maj, min)) => {
+            return Err(RNodeError::FirmwareTooOld(
+                maj,
+                min,
+                rnode::REQUIRED_FW_MAJ,
+                rnode::REQUIRED_FW_MIN,
+            ));
+        }
+        None => return Err(RNodeError::NotDetected),
+    }
+
+    // Validate each vport index against the device's report. When the device
+    // reported types (`!chip_types.is_empty()`), a configured vport must exist;
+    // this is Python's hard check. When it reported none (mock or firmware that
+    // does not answer CMD_INTERFACES), proceed best-effort -- the SEL_INT frames
+    // are still correct, and refusing to start would strand a usable radio.
+    for v in vports {
+        rnode::validate_config(
+            v.radio.frequency,
+            v.radio.bandwidth,
+            v.radio.tx_power,
+            v.radio.sf,
+            v.radio.cr,
+        )
+        .map_err(|e| RNodeError::RadioMismatch(format!("{}: {}", v.name, e)))?;
+        if !chip_types.is_empty() && (v.vport as usize) >= chip_types.len() {
+            return Err(RNodeError::RadioMismatch(format!(
+                "vport {} for {} does not exist on device ({} vports reported)",
+                v.vport,
+                v.name,
+                chip_types.len()
+            )));
+        }
+    }
+
+    send_multi_radio_config(port, vports).await?;
+    tokio::time::sleep(CONFIG_PROCESS_WAIT).await;
+
+    // Drain confirmation frames for the settle window. Per-vport strict
+    // validation is deferred (HW gap): unlike the single interface we do not
+    // fail startup on a missing echo, because a partial multi-band device
+    // should still bring up the vports it can. Config correctness is covered by
+    // the byte-level KAT and the mock exchange.
+    let _ = read_frames_until_deadline(port, CONFIG_PROCESS_WAIT, |_, _| {}).await;
+
+    tracing::info!(
+        "{}: multi-vport configured ({} vports, device reported {} chip types)",
+        name,
+        vports.len(),
+        chip_types.len()
+    );
+    Ok(detect)
+}
+
+/// Shared serial I/O loop for a multi-vport RNode.
+///
+/// RX: tracks the selected vport from CMD_SEL_INT frames and routes each
+/// following CMD_DATA frame to that vport's logical interface. TX: pulls
+/// vport-tagged packets from `merged_rx`, prefixes each with its vport's
+/// CMD_SEL_INT, and paces writes with the serial-level spacing floor.
+///
+/// Returns when the channel fails so the reconnect wrapper can retry.
+async fn rnode_multi_io_task<S>(
+    name: &str,
+    port: &mut S,
+    vports: &[VportRuntime],
+    vport_to_subint: &HashMap<u8, usize>,
+    merged_rx: &mut mpsc::Receiver<TaggedOutgoing>,
+    flow_control: bool,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+    let mut buf = [0u8; IO_READ_BUF];
+    let mut selected_vport: u8 = 0;
+    let mut interface_ready = true;
+    let mut send_queue: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
+    let mut send_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+    let mut timer_ready = true;
+
+    loop {
+        tokio::select! {
+            result = port.read(&mut buf) => {
+                match result {
+                    Ok(0) => {
+                        tracing::warn!("{}: serial port EOF", name);
+                        return;
+                    }
+                    Ok(n) => {
+                        for frame in deframer.process(&buf[..n]) {
+                            let KissDeframeResult::Frame { command, payload } = frame else { continue; };
+                            match command {
+                                rnode::CMD_SEL_INT => {
+                                    if let Some(vp) = rnode::decode_select_interface(&payload) {
+                                        selected_vport = vp;
+                                    }
+                                }
+                                rnode::CMD_DATA => {
+                                    match vport_to_subint.get(&selected_vport) {
+                                        Some(&idx) => {
+                                            let v = &vports[idx];
+                                            v.counters.rx_bytes.fetch_add(
+                                                payload.len() as u64,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                            tracing::debug!(
+                                                "{}: RX {} bytes on vport {} -> {}",
+                                                name, payload.len(), selected_vport, v.name
+                                            );
+                                            if v.incoming_tx
+                                                .send(IncomingPacket { data: payload.to_vec() })
+                                                .await
+                                                .is_err()
+                                            {
+                                                // Event loop shut down for this vport.
+                                                return;
+                                            }
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                "{}: RX data for unknown vport {} (dropped)",
+                                                name, selected_vport
+                                            );
+                                        }
+                                    }
+                                }
+                                rnode::CMD_READY if flow_control => {
+                                    interface_ready = true;
+                                }
+                                rnode::CMD_ERROR => {
+                                    match payload.first().copied() {
+                                        Some(rnode::ERROR_INITRADIO) => {
+                                            tracing::error!("{}: radio init failed", name);
+                                            return;
+                                        }
+                                        Some(rnode::ERROR_TXFAILED) => {
+                                            tracing::error!("{}: TX failed", name);
+                                            return;
+                                        }
+                                        Some(code) => {
+                                            tracing::warn!("{}: device error 0x{:02X}", name, code);
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                rnode::CMD_RESET
+                                    if payload.first() == Some(&DEVICE_RESET_MARKER) =>
+                                {
+                                    tracing::warn!("{}: device reset (0xF8)", name);
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("{}: serial read error: {}", name, e);
+                        return;
+                    }
+                }
+            }
+
+            recv = merged_rx.recv() => {
+                match recv {
+                    Some(tagged) => {
+                        // A subinterface with outgoing = false must never transmit
+                        // (Python `interface.OUT = False`). Drop silently.
+                        if !vports[tagged.subint].outgoing {
+                            tracing::debug!(
+                                "{}: dropping TX on non-outgoing vport {}",
+                                name, vports[tagged.subint].vport
+                            );
+                            continue;
+                        }
+                        if send_queue.len() >= FLOW_CONTROL_QUEUE_LIMIT {
+                            tracing::warn!("{}: send queue full, dropping oldest", name);
+                            send_queue.pop_front();
+                        }
+                        send_queue.push_back((tagged.subint, tagged.packet.data));
+                    }
+                    None => {
+                        // All vport senders dropped: interface tearing down.
+                        return;
+                    }
+                }
+            }
+
+            _ = async {
+                if let Some(ref mut timer) = send_timer {
+                    timer.await;
+                }
+            }, if send_timer.is_some() => {
+                send_timer = None;
+                timer_ready = true;
+            }
+        }
+
+        // Send if the spacing gate and the flow-control gate are both open.
+        if timer_ready && (interface_ready || !flow_control) {
+            if let Some((subint, data)) = send_queue.pop_front() {
+                let v = &vports[subint];
+                let frame = rnode::build_vport_data_frame(v.vport, &data);
+                if let Err(e) = port.write_all(&frame).await {
+                    tracing::warn!("{}: write error: {}", name, e);
+                    return;
+                }
+                if let Err(e) = port.flush().await {
+                    tracing::warn!("{}: flush error: {}", name, e);
+                    return;
+                }
+                v.counters
+                    .tx_bytes
+                    .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                tracing::debug!(
+                    "{}: TX {} bytes on vport {} ({})",
+                    name,
+                    data.len(),
+                    v.vport,
+                    v.name
+                );
+                timer_ready = false;
+                if flow_control {
+                    interface_ready = false;
+                }
+                send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                    rnode::MIN_SPACING_MS,
+                ))));
+            }
+            // Nothing queued: leave `timer_ready` set so the next packet ships
+            // immediately without waiting on a fresh spacing timer.
+        }
+    }
+}
+
+/// Reconnect loop for a multi-vport RNode: open channel -> configure all vports
+/// -> shared I/O -> on disconnect notify each vport, wait, retry.
+async fn rnode_multi_reconnect_task<S, C, Fut>(
+    name: String,
+    connect: C,
+    vports: Vec<VportRuntime>,
+    mut merged_rx: mpsc::Receiver<TaggedOutgoing>,
+    flow_control: bool,
+    reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+    C: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<S, RNodeError>>,
+{
+    let vport_to_subint: HashMap<u8, usize> = vports
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.vport, i))
+        .collect();
+    let mut has_connected_before = false;
+
+    loop {
+        let opened = async {
+            let mut port = connect().await?;
+            configure_multi_stream(&mut port, &vports, &name).await?;
+            Ok::<_, RNodeError>(port)
+        }
+        .await;
+
+        match opened {
+            Ok(mut port) => {
+                let is_reconnect = has_connected_before;
+                has_connected_before = true;
+                if is_reconnect {
+                    if let Some(ref notify) = reconnect_notify {
+                        for v in &vports {
+                            if let Err(e) = notify.try_send(v.id) {
+                                tracing::warn!("{}: reconnect notify failed: {}", name, e);
+                            }
+                        }
+                    }
+                }
+
+                rnode_multi_io_task(
+                    &name,
+                    &mut port,
+                    &vports,
+                    &vport_to_subint,
+                    &mut merged_rx,
+                    flow_control,
+                )
+                .await;
+
+                tracing::warn!("{}: disconnected", name);
+            }
+            Err(e) => {
+                tracing::warn!("{}: configuration failed: {}", name, e);
+            }
+        }
+
+        // Stop if every vport's logical interface has been torn down.
+        if vports.iter().all(|v| v.incoming_tx.is_closed()) {
+            tracing::debug!("{}: all vports shut down, stopping reconnect", name);
+            return;
+        }
+
+        tokio::time::sleep(RECONNECT_INTERVAL).await;
+    }
+}
+
+/// Build the per-vport `InterfaceHandle`s and spawn the shared hub task.
+///
+/// Returns one `InterfaceHandle` per subinterface, each registered with the
+/// transport as an independent logical interface. All share the single serial
+/// port via the hub task; a per-vport relay forwards that vport's outgoing
+/// channel into the hub's merged TX channel, tagged so the hub knows which
+/// vport (and CMD_SEL_INT) to emit.
+pub(crate) fn spawn_rnode_multi_interface(
+    config: RNodeMultiInterfaceConfig,
+) -> Vec<InterfaceHandle> {
+    let RNodeMultiInterfaceConfig {
+        name,
+        port_path,
+        subinterfaces,
+        flow_control,
+        buffer_size,
+        reconnect_notify,
+    } = config;
+
+    let (merged_tx, merged_rx) = mpsc::channel::<TaggedOutgoing>(buffer_size.max(1) * 2);
+
+    let mut handles: Vec<InterfaceHandle> = Vec::with_capacity(subinterfaces.len());
+    let mut runtimes: Vec<VportRuntime> = Vec::with_capacity(subinterfaces.len());
+
+    for (subint_idx, sub) in subinterfaces.iter().enumerate() {
+        let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingPacket>(buffer_size);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingPacket>(buffer_size);
+        let counters = Arc::new(InterfaceCounters::new());
+        let bitrate = rnode::compute_bitrate(sub.sf, sub.cr, sub.bandwidth);
+
+        handles.push(InterfaceHandle {
+            info: InterfaceInfo {
+                id: sub.id,
+                name: sub.name.clone(),
+                hw_mtu: Some(rnode::HW_MTU as u32),
+                is_local_client: false,
+                bitrate: Some(bitrate),
+                ifac: None,
+            },
+            incoming: incoming_rx,
+            outgoing: outgoing_tx,
+            counters: Arc::clone(&counters),
+            credit: None,
+            ready: super::ReadySignal::ready_immediate(),
+        });
+
+        // Relay this vport's outgoing packets into the shared merged channel,
+        // tagged with its index. Lives until the handle's outgoing sender drops.
+        let relay_tx = merged_tx.clone();
+        let subint = subint_idx;
+        tokio::spawn(async move {
+            while let Some(pkt) = outgoing_rx.recv().await {
+                if relay_tx
+                    .send(TaggedOutgoing {
+                        subint,
+                        packet: pkt,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        runtimes.push(VportRuntime {
+            id: sub.id,
+            name: sub.name.clone(),
+            vport: sub.vport,
+            radio: sub.radio_params(),
+            outgoing: sub.outgoing,
+            incoming_tx,
+            counters,
+        });
+    }
+    // Drop the hub's own clone so the merged channel closes once every relay
+    // (i.e. every vport handle) is gone.
+    drop(merged_tx);
+
+    tokio::spawn(async move {
+        rnode_multi_reconnect_task(
+            name,
+            move || {
+                let path = port_path.clone();
+                async move { open_serial_port(&path).await }
+            },
+            runtimes,
+            merged_rx,
+            flow_control,
+            reconnect_notify,
+        )
+        .await;
+    });
+
+    handles
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1890,6 +2490,325 @@ mod tests {
 
         drop(outgoing_tx);
         let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-vport (RNodeMultiInterface) tests
+    // -----------------------------------------------------------------------
+
+    /// In-process multi-vport RNode firmware stub over one half of a duplex.
+    ///
+    /// Answers the multi detect probe (detected + firmware + platform + MCU +
+    /// CMD_INTERFACES chip-type report), tracks the selected vport from
+    /// CMD_SEL_INT, records the frequency configured for each vport, and for
+    /// every CMD_DATA it receives records `(vport, payload)` and echoes the same
+    /// payload back tagged with that vport. This lets a test prove both that TX
+    /// frames carry the right vport and that RX frames route to the right
+    /// logical interface.
+    async fn rnode_multi_firmware_stub(
+        mut peer: tokio::io::DuplexStream,
+        chip_types: Vec<u8>,
+        freq_report: tokio::sync::mpsc::Sender<(u8, u32)>,
+        data_report: tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
+    ) {
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut buf = [0u8; 1024];
+        let mut selected: u8 = 0;
+        let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
+            let mut one = Vec::new();
+            kiss::frame(cmd, payload, &mut one);
+            reply.extend_from_slice(&one);
+        };
+        loop {
+            let n = match peer.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let mut reply: Vec<u8> = Vec::new();
+            for f in deframer.process(&buf[..n]) {
+                let KissDeframeResult::Frame { command, payload } = f else {
+                    continue;
+                };
+                match command {
+                    rnode::CMD_DETECT => {
+                        push(&mut reply, rnode::CMD_DETECT, &[rnode::DETECT_RESP]);
+                        push(
+                            &mut reply,
+                            rnode::CMD_FW_VERSION,
+                            &[rnode::REQUIRED_FW_MAJ, rnode::REQUIRED_FW_MIN],
+                        );
+                        push(&mut reply, rnode::CMD_PLATFORM, &[rnode::PLATFORM_NRF52]);
+                        push(&mut reply, rnode::CMD_MCU, &[0x00]);
+                    }
+                    rnode::CMD_INTERFACES => {
+                        // Report one 2-byte record per vport: [0x00, chip_type].
+                        let mut rep = Vec::with_capacity(chip_types.len() * 2);
+                        for &t in &chip_types {
+                            rep.push(0x00);
+                            rep.push(t);
+                        }
+                        push(&mut reply, rnode::CMD_INTERFACES, &rep);
+                    }
+                    rnode::CMD_SEL_INT => {
+                        if let Some(v) = rnode::decode_select_interface(&payload) {
+                            selected = v;
+                        }
+                    }
+                    rnode::CMD_FREQUENCY if payload.len() >= 4 => {
+                        let hz =
+                            u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                        let _ = freq_report.try_send((selected, hz));
+                    }
+                    rnode::CMD_DATA => {
+                        let _ = data_report.try_send((selected, payload.to_vec()));
+                        // Echo the payload back tagged with the same vport, using
+                        // the same SEL_INT + CMD_DATA framing the host uses.
+                        reply.extend_from_slice(&rnode::build_vport_data_frame(selected, &payload));
+                    }
+                    // Drain the rest of the per-vport config commands silently.
+                    _ => {}
+                }
+            }
+            if !reply.is_empty() && peer.write_all(&reply).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Drive the full multi-vport exchange against the mock firmware: configure
+    /// two vports over one shared serial link, then prove that (a) each vport's
+    /// radio config is pushed under the correct CMD_SEL_INT, (b) a packet sent on
+    /// a vport's logical interface reaches the firmware tagged with that vport,
+    /// and (c) a frame the firmware emits tagged with a vport routes back to that
+    /// vport's logical interface and no other.
+    #[tokio::test]
+    async fn test_multi_vport_config_and_routing() {
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+
+        let (freq_tx, mut freq_rx) = tokio::sync::mpsc::channel::<(u8, u32)>(8);
+        let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<(u8, Vec<u8>)>(8);
+        // Two vports: vport 0 = SX127X (sub-GHz), vport 1 = SX128X (2.4 GHz).
+        let stub = tokio::spawn(rnode_multi_firmware_stub(
+            peer,
+            vec![rnode::CHIP_SX127X, rnode::CHIP_SX128X],
+            freq_tx,
+            data_tx,
+        ));
+
+        // Build the two vport runtimes with their own incoming channels.
+        let (in0_tx, mut in0_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (in1_tx, mut in1_rx) = mpsc::channel::<IncomingPacket>(16);
+        let vports = vec![
+            VportRuntime {
+                id: InterfaceId(10),
+                name: "multi[low]".to_string(),
+                vport: 0,
+                radio: RadioParams {
+                    frequency: 865_600_000,
+                    bandwidth: 125_000,
+                    tx_power: 0,
+                    sf: 7,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in0_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+            },
+            VportRuntime {
+                id: InterfaceId(11),
+                name: "multi[high]".to_string(),
+                vport: 1,
+                radio: RadioParams {
+                    frequency: 2_400_000_000,
+                    bandwidth: 500_000,
+                    tx_power: 0,
+                    sf: 5,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in1_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+            },
+        ];
+
+        // A connector that yields the (single) duplex port on first call.
+        let port_holder = std::sync::Mutex::new(Some(port));
+        let connect = move || {
+            let taken = port_holder.lock().unwrap().take();
+            async move { taken.ok_or(RNodeError::NotDetected) }
+        };
+
+        let (merged_tx, merged_rx) = mpsc::channel::<TaggedOutgoing>(16);
+        let hub = tokio::spawn(async move {
+            rnode_multi_reconnect_task(
+                "multi".to_string(),
+                connect,
+                vports,
+                merged_rx,
+                /* flow_control = */ false,
+                None,
+            )
+            .await;
+        });
+
+        // (a) Both vports' frequencies were pushed under their own SEL_INT.
+        let mut freqs = std::collections::HashMap::new();
+        for _ in 0..2 {
+            let (vport, hz) = tokio::time::timeout(Duration::from_secs(5), freq_rx.recv())
+                .await
+                .expect("frequency config must be pushed within 5s")
+                .expect("freq channel open");
+            freqs.insert(vport, hz);
+        }
+        assert_eq!(freqs.get(&0), Some(&865_600_000));
+        assert_eq!(freqs.get(&1), Some(&2_400_000_000));
+
+        // (b) A packet on vport 0's logical interface reaches the firmware
+        // tagged vport 0, and (c) echoes back onto vport 0's incoming channel.
+        merged_tx
+            .send(TaggedOutgoing {
+                subint: 0,
+                packet: OutgoingPacket {
+                    data: b"ping0".to_vec(),
+                    high_priority: false,
+                },
+            })
+            .await
+            .expect("send to hub");
+
+        let (rx_vport0, rx_data0) = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("firmware must receive vport-0 frame within 5s")
+            .expect("data channel open");
+        assert_eq!(rx_vport0, 0, "TX frame must be tagged vport 0");
+        assert_eq!(rx_data0, b"ping0");
+
+        let echoed0 = tokio::time::timeout(Duration::from_secs(5), in0_rx.recv())
+            .await
+            .expect("echo must route to vport-0 interface within 5s")
+            .expect("in0 channel open");
+        assert_eq!(echoed0.data, b"ping0");
+
+        // vport 1 must NOT have received vport 0's echo.
+        assert!(
+            in1_rx.try_recv().is_err(),
+            "vport-0 echo must not leak into vport-1's interface"
+        );
+
+        // (b/c) repeat for vport 1 to prove the routing is per-vport, not fixed.
+        merged_tx
+            .send(TaggedOutgoing {
+                subint: 1,
+                packet: OutgoingPacket {
+                    data: b"ping1".to_vec(),
+                    high_priority: false,
+                },
+            })
+            .await
+            .expect("send to hub");
+
+        let (rx_vport1, rx_data1) = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("firmware must receive vport-1 frame within 5s")
+            .expect("data channel open");
+        assert_eq!(rx_vport1, 1, "TX frame must be tagged vport 1");
+        assert_eq!(rx_data1, b"ping1");
+
+        let echoed1 = tokio::time::timeout(Duration::from_secs(5), in1_rx.recv())
+            .await
+            .expect("echo must route to vport-1 interface within 5s")
+            .expect("in1 channel open");
+        assert_eq!(echoed1.data, b"ping1");
+        assert!(
+            in0_rx.try_recv().is_err(),
+            "vport-1 echo must not leak into vport-0's interface"
+        );
+
+        hub.abort();
+        stub.abort();
+    }
+
+    /// A subinterface with `outgoing = false` must never transmit: a packet
+    /// queued on it is dropped at the hub, never reaching the firmware.
+    #[tokio::test]
+    async fn test_multi_vport_non_outgoing_drops_tx() {
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (freq_tx, mut freq_rx) = tokio::sync::mpsc::channel::<(u8, u32)>(8);
+        let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<(u8, Vec<u8>)>(8);
+        let stub = tokio::spawn(rnode_multi_firmware_stub(
+            peer,
+            vec![rnode::CHIP_SX127X],
+            freq_tx,
+            data_tx,
+        ));
+
+        let (in0_tx, _in0_rx) = mpsc::channel::<IncomingPacket>(16);
+        let vports = vec![VportRuntime {
+            id: InterfaceId(20),
+            name: "multi[rxonly]".to_string(),
+            vport: 0,
+            radio: RadioParams {
+                frequency: 868_000_000,
+                bandwidth: 125_000,
+                tx_power: 0,
+                sf: 7,
+                cr: 5,
+                st_alock: None,
+                lt_alock: None,
+            },
+            outgoing: false,
+            incoming_tx: in0_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+        }];
+
+        let port_holder = std::sync::Mutex::new(Some(port));
+        let connect = move || {
+            let taken = port_holder.lock().unwrap().take();
+            async move { taken.ok_or(RNodeError::NotDetected) }
+        };
+        let (merged_tx, merged_rx) = mpsc::channel::<TaggedOutgoing>(16);
+        let hub = tokio::spawn(async move {
+            rnode_multi_reconnect_task(
+                "multi".to_string(),
+                connect,
+                vports,
+                merged_rx,
+                false,
+                None,
+            )
+            .await;
+        });
+
+        // Wait until configured (frequency pushed) so the io loop is running.
+        tokio::time::timeout(Duration::from_secs(5), freq_rx.recv())
+            .await
+            .expect("configure within 5s")
+            .expect("freq channel");
+
+        merged_tx
+            .send(TaggedOutgoing {
+                subint: 0,
+                packet: OutgoingPacket {
+                    data: b"nope".to_vec(),
+                    high_priority: false,
+                },
+            })
+            .await
+            .expect("send to hub");
+
+        // The non-outgoing vport must drop it: no CMD_DATA ever reaches the stub.
+        let got = tokio::time::timeout(Duration::from_millis(500), data_rx.recv()).await;
+        assert!(
+            got.is_err(),
+            "outgoing=false subinterface must not transmit, but firmware saw data"
+        );
+
+        hub.abort();
+        stub.abort();
     }
 
     /// Document the per-frame stall that hits `flow_control = true` against

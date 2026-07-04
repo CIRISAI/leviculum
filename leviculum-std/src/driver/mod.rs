@@ -1092,6 +1092,137 @@ impl ReticulumNode {
                     );
                         registry.register(handle);
                     }
+                    "RNodeMultiInterface" => {
+                        // One serial port carries several LoRa transceivers as
+                        // virtual ports; each enabled [[[subinterface]]] becomes
+                        // its own logical interface with a fresh InterfaceId.
+                        let port_path = config
+                            .port
+                            .as_ref()
+                            .ok_or_else(|| {
+                                Error::Config("RNodeMultiInterface requires port".to_string())
+                            })?
+                            .clone();
+
+                        let parent_name = format!("rnode_multi_{}", idx);
+                        let flow_control = config.flow_control.unwrap_or(false);
+                        let buffer_size = config
+                            .buffer_size
+                            .unwrap_or(crate::interfaces::rnode::RNODE_DEFAULT_BUFFER_SIZE);
+
+                        let mut subs = Vec::new();
+                        let mut first_id = Some(InterfaceId(idx));
+                        for sub in config.subinterfaces.iter().filter(|s| s.enabled) {
+                            let vport = sub.vport.ok_or_else(|| {
+                                Error::Config(format!(
+                                    "RNodeMultiInterface subinterface '{}' requires vport",
+                                    sub.name
+                                ))
+                            })?;
+                            if vport as u16 >= leviculum_core::rnode::MAX_SUBINTERFACES as u16 {
+                                return Err(Error::Config(format!(
+                                    "RNodeMultiInterface subinterface '{}' vport {} out of range (0-{})",
+                                    sub.name,
+                                    vport,
+                                    leviculum_core::rnode::MAX_SUBINTERFACES - 1
+                                )));
+                            }
+                            let frequency: u32 = sub
+                                .frequency
+                                .ok_or_else(|| {
+                                    Error::Config(format!(
+                                        "RNodeMultiInterface subinterface '{}' requires frequency",
+                                        sub.name
+                                    ))
+                                })
+                                .and_then(|f| {
+                                    u32::try_from(f).map_err(|_| {
+                                        Error::Config(format!("frequency {} exceeds u32 range", f))
+                                    })
+                                })?;
+                            let bandwidth = sub.bandwidth.ok_or_else(|| {
+                                Error::Config(format!(
+                                    "RNodeMultiInterface subinterface '{}' requires bandwidth",
+                                    sub.name
+                                ))
+                            })?;
+                            let sf = sub.spreading_factor.ok_or_else(|| {
+                                Error::Config(format!(
+                                    "RNodeMultiInterface subinterface '{}' requires spreadingfactor",
+                                    sub.name
+                                ))
+                            })?;
+                            let cr = sub.coding_rate.ok_or_else(|| {
+                                Error::Config(format!(
+                                    "RNodeMultiInterface subinterface '{}' requires codingrate",
+                                    sub.name
+                                ))
+                            })?;
+                            let tx_power: u8 =
+                                sub.tx_power.unwrap_or(0).try_into().map_err(|_| {
+                                    Error::Config(format!(
+                                        "tx_power {} out of range (0-37)",
+                                        sub.tx_power.unwrap_or(0)
+                                    ))
+                                })?;
+
+                            leviculum_core::rnode::validate_config(
+                                frequency, bandwidth, tx_power, sf, cr,
+                            )
+                            .map_err(|e| {
+                                Error::Config(format!(
+                                    "RNodeMultiInterface subinterface '{}': {}",
+                                    sub.name, e
+                                ))
+                            })?;
+
+                            let id = first_id.take().unwrap_or_else(|| {
+                                InterfaceId(
+                                    next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                )
+                            });
+                            subs.push(crate::interfaces::rnode::RNodeSubinterfaceParams {
+                                id,
+                                name: format!("{}[{}]", parent_name, sub.name),
+                                vport,
+                                frequency,
+                                bandwidth,
+                                tx_power,
+                                sf,
+                                cr,
+                                st_alock: sub.airtime_limit_short.map(|p| (p * 100.0) as u16),
+                                lt_alock: sub.airtime_limit_long.map(|p| (p * 100.0) as u16),
+                                outgoing: sub.outgoing,
+                            });
+                        }
+
+                        if subs.is_empty() {
+                            return Err(Error::Config(format!(
+                                "RNodeMultiInterface '{}' has no enabled subinterfaces",
+                                parent_name
+                            )));
+                        }
+
+                        let vport_count = subs.len();
+                        let handles = crate::interfaces::rnode::spawn_rnode_multi_interface(
+                            crate::interfaces::rnode::RNodeMultiInterfaceConfig {
+                                name: parent_name.clone(),
+                                port_path: port_path.clone(),
+                                subinterfaces: subs,
+                                flow_control,
+                                buffer_size,
+                                reconnect_notify: Some(reconnect_tx.clone()),
+                            },
+                        );
+                        for handle in handles {
+                            registry.register(handle);
+                        }
+                        tracing::info!(
+                            "RNodeMulti interface on {} ({} vport subinterfaces)",
+                            port_path,
+                            vport_count
+                        );
+                    }
                     "SerialInterface" => {
                         let port_path = config
                             .port

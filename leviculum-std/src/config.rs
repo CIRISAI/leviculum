@@ -291,6 +291,65 @@ pub struct InterfaceConfig {
     pub airtime_limit_long: Option<f64>,
     /// Enable CSMA/CA on the T114 LoRa interface (requires CAD-capable firmware).
     pub csma_enabled: Option<bool>,
+
+    // RNodeMultiInterface only.
+    /// Nested subinterface blocks (`[[[name]]]`) of an `RNodeMultiInterface`.
+    /// Each becomes one vport logical interface. Empty for every other type.
+    #[serde(default)]
+    pub subinterfaces: Vec<SubinterfaceConfig>,
+}
+
+/// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
+/// `[[[name]]]` block nested under the multi interface. Carries only the
+/// per-vport radio + routing keys; the shared serial `port` and `id_*` beacon
+/// keys live on the parent `InterfaceConfig`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubinterfaceConfig {
+    /// Subinterface name (the `[[[name]]]` header).
+    pub name: String,
+    /// Whether this subinterface is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Whether this subinterface may transmit (Python `outgoing`).
+    #[serde(default = "default_true")]
+    pub outgoing: bool,
+    /// Virtual port index on the device.
+    pub vport: Option<u8>,
+    /// LoRa frequency in Hz.
+    pub frequency: Option<u64>,
+    /// LoRa bandwidth in Hz.
+    pub bandwidth: Option<u32>,
+    /// LoRa spreading factor.
+    pub spreading_factor: Option<u8>,
+    /// LoRa coding rate.
+    pub coding_rate: Option<u8>,
+    /// TX power in dBm.
+    pub tx_power: Option<i8>,
+    /// Short-term airtime limit as percent (0.0-100.0).
+    pub airtime_limit_short: Option<f64>,
+    /// Long-term airtime limit as percent (0.0-100.0).
+    pub airtime_limit_long: Option<f64>,
+}
+
+impl Default for SubinterfaceConfig {
+    /// Enabled and outgoing by default (matching the serde `default_*` helpers),
+    /// every radio field unset. The INI parser fills fields from the
+    /// `[[[name]]]` block, leaving these defaults for keys the block omits.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            outgoing: true,
+            vport: None,
+            frequency: None,
+            bandwidth: None,
+            spreading_factor: None,
+            coding_rate: None,
+            tx_power: None,
+            airtime_limit_short: None,
+            airtime_limit_long: None,
+        }
+    }
 }
 
 /// Default interface bitrate in bits/second (matches Python Reticulum default)
@@ -357,6 +416,7 @@ impl Default for InterfaceConfig {
             airtime_limit_short: None,
             airtime_limit_long: None,
             csma_enabled: None,
+            subinterfaces: Vec::new(),
         }
     }
 }

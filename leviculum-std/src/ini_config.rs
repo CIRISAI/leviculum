@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::config::{Config, InterfaceConfig, ReticulumConfig};
+use crate::config::{Config, InterfaceConfig, ReticulumConfig, SubinterfaceConfig};
 
 /// Parse a Python Reticulum INI config string into our `Config` struct.
 pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
@@ -21,6 +21,10 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     let mut current_section = String::new();
     let mut current_subsection: Option<String> = None;
     let mut current_iface: Option<(String, InterfaceConfig)> = None;
+    // A nested `[[[name]]]` block: the vport subinterface of an
+    // `RNodeMultiInterface`. Flushed into the parent interface's
+    // `subinterfaces` when the next header (of any depth) appears.
+    let mut current_subinterface: Option<SubinterfaceConfig> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -30,9 +34,25 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             continue;
         }
 
+        // Sub-subsection header: [[[name]]] (must check BEFORE [[..]], since a
+        // triple bracket also matches the double-bracket test). This is an
+        // RNodeMultiInterface subinterface, nested inside the current [[..]].
+        if trimmed.starts_with("[[[") && trimmed.ends_with("]]]") {
+            // Flush a previous subinterface into its parent interface.
+            flush_subinterface(&mut current_subinterface, &mut current_iface);
+
+            let name = trimmed[3..trimmed.len() - 3].trim().to_string();
+            current_subinterface = Some(SubinterfaceConfig {
+                name,
+                ..Default::default()
+            });
+            continue;
+        }
+
         // Subsection header: [[name]] (must check before section)
         if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
-            // Flush previous interface
+            // Flush any pending subinterface, then the previous interface.
+            flush_subinterface(&mut current_subinterface, &mut current_iface);
             if let Some((name, iface)) = current_iface.take() {
                 interfaces.insert(name, iface);
             }
@@ -51,7 +71,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
 
         // Section header: [name]
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            // Flush previous interface
+            // Flush any pending subinterface, then the previous interface.
+            flush_subinterface(&mut current_subinterface, &mut current_iface);
             if let Some((name, iface)) = current_iface.take() {
                 interfaces.insert(name, iface);
             }
@@ -65,7 +86,10 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             let key = key.trim();
             let value = value.trim();
 
-            if current_subsection.is_some() {
+            if let Some(ref mut sub) = current_subinterface {
+                // Inside a [[[subinterface]]] block.
+                apply_subinterface_key(sub, key, value);
+            } else if current_subsection.is_some() {
                 // Inside an interface subsection
                 if let Some((_, ref mut iface)) = current_iface {
                     apply_interface_key(iface, key, value);
@@ -79,7 +103,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         }
     }
 
-    // Flush last interface
+    // Flush the last subinterface, then the last interface.
+    flush_subinterface(&mut current_subinterface, &mut current_iface);
     if let Some((name, iface)) = current_iface.take() {
         interfaces.insert(name, iface);
     }
@@ -111,7 +136,11 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             let size = iface
                 .ifac_size
                 .unwrap_or(match iface.interface_type.as_str() {
-                    "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface"
+                    "RNodeInterface"
+                    | "RNodeMultiInterface"
+                    | "SerialInterface"
+                    | "PipeInterface"
+                    | "KISSInterface"
                     | "AX25KISSInterface" => 8,
                     _ => 16,
                 });
@@ -150,8 +179,15 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     let supported: HashMap<String, InterfaceConfig> = interfaces
         .into_iter()
         .filter(|(name, iface)| match iface.interface_type.as_str() {
-            "TCPServerInterface" | "TCPClientInterface" | "UDPInterface" | "AutoInterface"
-            | "RNodeInterface" | "SerialInterface" | "PipeInterface" | "KISSInterface"
+            "TCPServerInterface"
+            | "TCPClientInterface"
+            | "UDPInterface"
+            | "AutoInterface"
+            | "RNodeInterface"
+            | "RNodeMultiInterface"
+            | "SerialInterface"
+            | "PipeInterface"
+            | "KISSInterface"
             | "AX25KISSInterface" => true,
             other => {
                 tracing::warn!(
@@ -324,6 +360,42 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // interface a current rnsd would accept.
         _ => {
             tracing::debug!("Ignoring unknown interface key '{}' = '{}'", key, value);
+        }
+    }
+}
+
+/// Flush a pending `[[[subinterface]]]` block into its parent interface's
+/// `subinterfaces` list. A subinterface with no parent (malformed config, a
+/// `[[[..]]]` before any `[[..]]`) is dropped.
+fn flush_subinterface(
+    current_subinterface: &mut Option<SubinterfaceConfig>,
+    current_iface: &mut Option<(String, InterfaceConfig)>,
+) {
+    if let Some(sub) = current_subinterface.take() {
+        if let Some((_, ref mut iface)) = current_iface {
+            iface.subinterfaces.push(sub);
+        }
+    }
+}
+
+/// Apply one `key = value` from a `[[[subinterface]]]` block. Only the per-vport
+/// radio + routing keys are meaningful here (the shared `port` and `id_*` beacon
+/// keys live on the parent). Mirrors the fields Python reads per subinterface in
+/// `RNodeMultiInterface.__init__`.
+fn apply_subinterface_key(sub: &mut SubinterfaceConfig, key: &str, value: &str) {
+    match key {
+        "enabled" | "interface_enabled" => sub.enabled = parse_bool(value),
+        "outgoing" => sub.outgoing = parse_bool(value),
+        "vport" => sub.vport = value.parse().ok(),
+        "frequency" => sub.frequency = value.parse().ok(),
+        "bandwidth" => sub.bandwidth = value.parse().ok(),
+        "spreadingfactor" | "spreading_factor" => sub.spreading_factor = value.parse().ok(),
+        "codingrate" | "coding_rate" => sub.coding_rate = value.parse().ok(),
+        "txpower" | "tx_power" => sub.tx_power = value.parse().ok(),
+        "airtime_limit_short" => sub.airtime_limit_short = value.parse().ok(),
+        "airtime_limit_long" => sub.airtime_limit_long = value.parse().ok(),
+        _ => {
+            tracing::debug!("Ignoring unknown subinterface key '{}' = '{}'", key, value);
         }
     }
 }
@@ -564,6 +636,109 @@ mod tests {
         assert_eq!(iface.callsign.as_deref(), Some("N0CALL"));
         assert_eq!(iface.ssid, Some(3));
         assert_eq!(iface.preamble, Some(150));
+    }
+
+    #[test]
+    fn test_parse_rnode_multi_interface_nested_subinterfaces() {
+        // An RNodeMultiInterface carries several LoRa transceivers as nested
+        // [[[subinterface]]] blocks. Each triple-bracket block must parse into a
+        // SubinterfaceConfig on the parent, with its own vport + radio settings,
+        // while the parent keeps the shared `port` and beacon keys. Mirrors the
+        // docs example (interfaces.rst) with a high- and a low-datarate vport.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[RNode Multi Interface]]
+    type = RNodeMultiInterface
+    enabled = yes
+    port = /dev/ttyACM0
+    id_callsign = MYCALL-0
+    id_interval = 600
+
+    [[[High Datarate]]]
+      enabled = yes
+      frequency = 2400000000
+      bandwidth = 1625000
+      txpower = 0
+      vport = 1
+      spreadingfactor = 5
+      codingrate = 5
+
+    [[[Low Datarate]]]
+      enabled = yes
+      frequency = 865600000
+      vport = 0
+      bandwidth = 125000
+      txpower = 0
+      spreadingfactor = 7
+      codingrate = 5
+      outgoing = no
+"#,
+        )
+        .unwrap();
+
+        let iface = config
+            .interfaces
+            .get("RNode Multi Interface")
+            .expect("rnode multi iface");
+        assert_eq!(iface.interface_type, "RNodeMultiInterface");
+        // Shared parent keys stay on the parent, not on a subinterface.
+        assert_eq!(iface.port.as_deref(), Some("/dev/ttyACM0"));
+        assert_eq!(iface.id_callsign.as_deref(), Some("MYCALL-0"));
+        assert_eq!(iface.id_interval, Some(600));
+
+        // Two nested subinterfaces, in file order.
+        assert_eq!(iface.subinterfaces.len(), 2);
+
+        let high = &iface.subinterfaces[0];
+        assert_eq!(high.name, "High Datarate");
+        assert!(high.enabled);
+        assert!(high.outgoing);
+        assert_eq!(high.vport, Some(1));
+        assert_eq!(high.frequency, Some(2_400_000_000));
+        assert_eq!(high.bandwidth, Some(1_625_000));
+        assert_eq!(high.spreading_factor, Some(5));
+        assert_eq!(high.coding_rate, Some(5));
+        assert_eq!(high.tx_power, Some(0));
+
+        let low = &iface.subinterfaces[1];
+        assert_eq!(low.name, "Low Datarate");
+        assert_eq!(low.vport, Some(0));
+        assert_eq!(low.frequency, Some(865_600_000));
+        assert_eq!(low.bandwidth, Some(125_000));
+        assert_eq!(low.spreading_factor, Some(7));
+        // `outgoing = no` on the low-datarate vport (RX only).
+        assert!(!low.outgoing);
+    }
+
+    #[test]
+    fn test_parse_rnode_multi_interface_survives_filter() {
+        // RNodeMultiInterface is a supported type: it must survive the
+        // unsupported-type filter (unlike I2PInterface) with subinterfaces intact.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Multi]]
+    type = RNodeMultiInterface
+    port = /dev/ttyACM0
+    [[[Band A]]]
+      enabled = yes
+      vport = 0
+      frequency = 868000000
+      bandwidth = 125000
+      spreadingfactor = 7
+      codingrate = 5
+      txpower = 17
+"#,
+        )
+        .unwrap();
+        let iface = config
+            .interfaces
+            .get("Multi")
+            .expect("multi survives filter");
+        assert_eq!(iface.interface_type, "RNodeMultiInterface");
+        assert_eq!(iface.subinterfaces.len(), 1);
+        assert_eq!(iface.subinterfaces[0].vport, Some(0));
     }
 
     #[test]

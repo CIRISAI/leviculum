@@ -351,6 +351,119 @@ pub fn build_leave() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-interface (vport) framing
+// ---------------------------------------------------------------------------
+//
+// A multi-transceiver RNode exposes several LoRa radios as virtual ports
+// (vports). Every per-vport command -- radio config or data -- is preceded by a
+// CMD_SEL_INT frame naming the target vport, so a single serial link multiplexes
+// N logical interfaces. This mirrors Python `RNodeMultiInterface` (the
+// `setFrequency`/`setBandwidth`/.../`process_outgoing` methods and the readLoop
+// CMD_SEL_INT branch). The core stays a pure framing layer; the std interface
+// owns the per-vport routing and lifecycle.
+
+/// Maximum number of subinterfaces (virtual ports) on one RNode.
+/// Matches Python `RNodeMultiInterface.MAX_SUBINTERFACES`.
+pub const MAX_SUBINTERFACES: u8 = 11;
+
+// Transceiver chip type bytes reported by CMD_INTERFACES (one per vport).
+/// SX127x family (sub-GHz)
+pub const CHIP_SX127X: u8 = 0x00;
+/// SX1276
+pub const CHIP_SX1276: u8 = 0x01;
+/// SX1278
+pub const CHIP_SX1278: u8 = 0x02;
+/// SX126x family (sub-GHz)
+pub const CHIP_SX126X: u8 = 0x10;
+/// SX1262
+pub const CHIP_SX1262: u8 = 0x11;
+/// SX128x family (2.4 GHz)
+pub const CHIP_SX128X: u8 = 0x20;
+/// SX1280
+pub const CHIP_SX1280: u8 = 0x21;
+
+/// Map a CMD_INTERFACES chip-type byte to a family name, matching Python
+/// `KISS.interface_type_to_str`. Unknown types fall back to `"SX127X"`.
+pub fn interface_chip_name(chip: u8) -> &'static str {
+    match chip {
+        CHIP_SX126X | CHIP_SX1262 => "SX126X",
+        CHIP_SX128X | CHIP_SX1280 => "SX128X",
+        _ => "SX127X",
+    }
+}
+
+/// Build a "select subinterface" frame: `FEND CMD_SEL_INT index FEND`.
+///
+/// Tells the firmware which vport the following frame targets. The index byte
+/// is emitted raw (not KISS-escaped), byte-for-byte with Python
+/// `RNodeMultiInterface` -- valid vport indices (`0..MAX_SUBINTERFACES`) never
+/// collide with FEND/FESC.
+pub fn build_select_interface(index: u8) -> Vec<u8> {
+    alloc::vec![kiss::FEND, CMD_SEL_INT, index, kiss::FEND]
+}
+
+/// Prefix a complete command frame with a vport-select frame.
+///
+/// `command_frame` is any single KISS frame from the `build_*` family. The
+/// result is `select(index) ++ command_frame`, byte-for-byte identical to the
+/// frames Python's `RNodeMultiInterface` writes for that vport (each of its
+/// setters emits `FEND CMD_SEL_INT idx FEND` immediately followed by the
+/// single-command frame).
+pub fn build_vport_command(index: u8, command_frame: &[u8]) -> Vec<u8> {
+    let mut out = build_select_interface(index);
+    out.extend_from_slice(command_frame);
+    out
+}
+
+/// Build a vport-tagged data frame: `select(index)` followed by a CMD_DATA
+/// frame carrying the KISS-escaped payload. Mirrors
+/// `RNodeMultiInterface.process_outgoing`.
+pub fn build_vport_data_frame(index: u8, data: &[u8]) -> Vec<u8> {
+    build_vport_command(index, &build_data_frame(data))
+}
+
+/// Build the multi-interface detect + query sequence.
+///
+/// Identical to [`build_detect_query`] but appends a CMD_INTERFACES query, so
+/// the device reports its per-vport transceiver types (Python
+/// `RNodeMultiInterface.detect`).
+pub fn build_detect_query_multi() -> Vec<u8> {
+    alloc::vec![
+        kiss::FEND,
+        CMD_DETECT,
+        DETECT_REQ,
+        kiss::FEND,
+        CMD_FW_VERSION,
+        0x00,
+        kiss::FEND,
+        CMD_PLATFORM,
+        0x00,
+        kiss::FEND,
+        CMD_MCU,
+        0x00,
+        kiss::FEND,
+        CMD_INTERFACES,
+        0x00,
+        kiss::FEND,
+    ]
+}
+
+/// Decode a CMD_SEL_INT payload into the selected vport index.
+pub fn decode_select_interface(payload: &[u8]) -> Option<u8> {
+    payload.first().copied()
+}
+
+/// Decode a CMD_INTERFACES report into per-vport chip-type bytes.
+///
+/// The payload is a sequence of 2-byte records in vport order (vport 0 first).
+/// The second byte of each record is the transceiver chip type; the first is
+/// reserved. Mirrors the Python readLoop, which appends one entry per 2-byte
+/// record. A trailing odd byte (malformed frame) is ignored.
+pub fn decode_interfaces(payload: &[u8]) -> Vec<u8> {
+    payload.chunks_exact(2).map(|record| record[1]).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Decoding functions
 // ---------------------------------------------------------------------------
 
@@ -1221,6 +1334,131 @@ mod tests {
         assert_eq!(CMD_INT_DATA[9], 0xD0);
         assert_eq!(CMD_INT_DATA[10], 0xE0);
         assert_eq!(CMD_INT_DATA[11], 0xF0);
+    }
+
+    // --- Multi-interface (vport) framing tests ---
+
+    #[test]
+    fn test_build_select_interface() {
+        // FEND CMD_SEL_INT index FEND, index emitted raw (not escaped)
+        assert_eq!(build_select_interface(0), vec![0xC0, 0x1F, 0x00, 0xC0]);
+        assert_eq!(build_select_interface(1), vec![0xC0, 0x1F, 0x01, 0xC0]);
+        assert_eq!(build_select_interface(10), vec![0xC0, 0x1F, 0x0A, 0xC0]);
+    }
+
+    #[test]
+    fn test_build_vport_command_is_select_plus_frame() {
+        // The vport wrapper is exactly select(index) ++ command_frame.
+        let inner = build_set_sf(5);
+        let composed = build_vport_command(3, &inner);
+        let mut expected = build_select_interface(3);
+        expected.extend_from_slice(&inner);
+        assert_eq!(composed, expected);
+        // And byte-for-byte vs Python RNodeMultiInterface.setSpreadingFactor:
+        // FEND SEL_INT 03 FEND  FEND CMD_SF 05 FEND
+        assert_eq!(
+            composed,
+            vec![0xC0, 0x1F, 0x03, 0xC0, 0xC0, 0x04, 0x05, 0xC0]
+        );
+    }
+
+    #[test]
+    fn test_vport_frequency_kat() {
+        // Python RNodeMultiInterface.setFrequency(2_400_000_000, vport 1):
+        //   FEND SEL_INT 01 FEND  FEND CMD_FREQUENCY <4B BE> FEND
+        // 2_400_000_000 = 0x8F0D1800
+        let composed = build_vport_command(1, &build_set_frequency(2_400_000_000));
+        assert_eq!(
+            composed,
+            vec![0xC0, 0x1F, 0x01, 0xC0, 0xC0, 0x01, 0x8F, 0x0D, 0x18, 0x00, 0xC0]
+        );
+    }
+
+    #[test]
+    fn test_vport_data_frame_kat() {
+        // select(2) ++ CMD_DATA "Hi"
+        assert_eq!(
+            build_vport_data_frame(2, b"Hi"),
+            vec![0xC0, 0x1F, 0x02, 0xC0, 0xC0, 0x00, 0x48, 0x69, 0xC0]
+        );
+    }
+
+    #[test]
+    fn test_vport_command_escapes_inner_payload() {
+        // The vport-select prefix is raw, but the inner command frame is still
+        // KISS-escaped. Frequency 0xC0DB0000 has bytes C0 and DB that must be
+        // escaped inside the CMD_FREQUENCY frame (C0->DB DC, DB->DB DD).
+        let composed = build_vport_command(0, &build_set_frequency(0xC0DB_0000));
+        assert_eq!(
+            composed,
+            vec![
+                0xC0, 0x1F, 0x00, 0xC0, // select(0), raw
+                0xC0, 0x01, 0xDB, 0xDC, 0xDB, 0xDD, 0x00, 0x00, 0xC0, // CMD_FREQUENCY escaped
+            ]
+        );
+    }
+
+    #[test]
+    fn test_vport_command_roundtrips_through_deframer() {
+        // A vport data frame deframes into a CMD_SEL_INT frame (payload = vport)
+        // followed by a CMD_DATA frame (payload = data), which is exactly how the
+        // std RX router recovers the vport tag.
+        let frame = build_vport_data_frame(4, b"payload");
+        let mut deframer = KissDeframer::with_max_payload(HW_MTU);
+        let results = deframer.process(&frame);
+        assert_eq!(results.len(), 2);
+        match &results[0] {
+            KissDeframeResult::Frame { command, payload } => {
+                assert_eq!(*command, CMD_SEL_INT);
+                assert_eq!(decode_select_interface(payload), Some(4));
+            }
+            other => panic!("expected SEL_INT frame, got {other:?}"),
+        }
+        match &results[1] {
+            KissDeframeResult::Frame { command, payload } => {
+                assert_eq!(*command, CMD_DATA);
+                assert_eq!(payload.as_slice(), b"payload");
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_detect_query_multi() {
+        // Same as single detect but with a trailing CMD_INTERFACES query.
+        assert_eq!(
+            build_detect_query_multi(),
+            vec![
+                0xC0, 0x08, 0x73, 0xC0, 0x50, 0x00, 0xC0, 0x48, 0x00, 0xC0, 0x49, 0x00, 0xC0, 0x71,
+                0x00, 0xC0
+            ]
+        );
+    }
+
+    #[test]
+    fn test_decode_interfaces() {
+        // Two vports: vport0 = SX127X (0x00), vport1 = SX128X (0x20).
+        // Records are 2 bytes; second byte is the chip type.
+        assert_eq!(
+            decode_interfaces(&[0x00, 0x00, 0x00, 0x20]),
+            vec![0x00, 0x20]
+        );
+        // Empty report -> no vports.
+        assert_eq!(decode_interfaces(&[]), Vec::<u8>::new());
+        // Trailing odd byte is ignored (malformed frame tolerance).
+        assert_eq!(decode_interfaces(&[0x00, 0x11, 0x00]), vec![0x11]);
+    }
+
+    #[test]
+    fn test_interface_chip_name() {
+        assert_eq!(interface_chip_name(CHIP_SX127X), "SX127X");
+        assert_eq!(interface_chip_name(CHIP_SX1278), "SX127X");
+        assert_eq!(interface_chip_name(CHIP_SX126X), "SX126X");
+        assert_eq!(interface_chip_name(CHIP_SX1262), "SX126X");
+        assert_eq!(interface_chip_name(CHIP_SX128X), "SX128X");
+        assert_eq!(interface_chip_name(CHIP_SX1280), "SX128X");
+        // Unknown -> conservative SX127X fallback (matches Python).
+        assert_eq!(interface_chip_name(0xEE), "SX127X");
     }
 
     // --- Validation tests ---
