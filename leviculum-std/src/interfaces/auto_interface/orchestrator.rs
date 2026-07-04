@@ -633,6 +633,7 @@ fn handle_discovery_packet(
             is_local_client: false,
             bitrate: None,
             ifac: None,
+            mode: leviculum_core::traits::InterfaceMode::default(),
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

@@ -367,6 +367,14 @@ pub(crate) struct InterfaceInfo {
     /// parent's IFAC config so that IFAC verification/application works on the
     /// dynamically-created interface.
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
+    /// Reticulum propagation mode for this interface (Codeberg #91/#104).
+    /// Almost always `Full`; a TCP server listener passes its configured mode
+    /// down to each accepted (spawned) child so the inbound-side mode rules
+    /// apply to peers connecting to an AP/roaming/etc. server, mirroring Python
+    /// `spawned_interface.mode = self.mode` (TCPInterface.py:625). The driver
+    /// hands this value to `Transport::set_interface_mode` when the interface is
+    /// registered.
+    pub mode: InterfaceMode,
 }
 
 /// Event loop's handle to a spawned interface task
@@ -401,7 +409,7 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         leviculum_core::constants::MTU
     }
     fn mode(&self) -> InterfaceMode {
-        InterfaceMode::default()
+        self.info.mode
     }
     fn is_online(&self) -> bool {
         !self.outgoing.is_closed()
@@ -536,6 +544,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: inc_rx,
             outgoing: out_tx,

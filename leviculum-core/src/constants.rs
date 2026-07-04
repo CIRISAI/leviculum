@@ -148,6 +148,12 @@ pub const LINK_TIMEOUT_MS: u64 = 900_000;
 /// Equivalent to Python's PATH_REQUEST_GRACE = 0.4 (seconds)
 pub const PATH_REQUEST_GRACE_MS: u64 = 400;
 
+/// Extra grace period a roaming-mode interface waits before answering a path
+/// request, on top of `PATH_REQUEST_GRACE_MS`, so more well-connected peers can
+/// respond first (Codeberg #104). Equivalent to Python's `PATH_REQUEST_RG = 1.5`
+/// (seconds), Transport.py:82.
+pub const PATH_REQUEST_RG_MS: u64 = 1500;
+
 /// Delay before rebroadcasting a local client's first announce (milliseconds).
 /// Batches multiple registrations during startup. Python Transport.py:2232.
 pub const LOCAL_CLIENT_ANNOUNCE_DELAY_MS: u64 = 250;

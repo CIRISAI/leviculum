@@ -1011,6 +1011,16 @@ impl ReticulumNode {
 
                         let buffer_size = config.buffer_size.unwrap_or(TCP_DEFAULT_BUFFER_SIZE);
                         let ifac = build_ifac_config(config);
+                        // Codeberg #104: resolve the listener's configured mode so
+                        // each accepted child inherits it (the listener itself does
+                        // not register as an interface; only spawned children do).
+                        // An unknown mode string keeps the Full default, matching
+                        // Python.
+                        let mode = config
+                            .mode
+                            .as_deref()
+                            .and_then(leviculum_core::traits::InterfaceMode::from_config_str)
+                            .unwrap_or_default();
                         spawn_tcp_server(
                             addr,
                             next_id.clone(),
@@ -1018,6 +1028,7 @@ impl ReticulumNode {
                             buffer_size,
                             self.corrupt_every,
                             ifac,
+                            mode,
                         )?;
                     }
                     "UDPInterface" => {
@@ -2826,6 +2837,7 @@ async fn run_event_loop(
                 let is_local = handle.info.is_local_client;
                 let iface_idx = handle.info.id.0;
                 let inherited_ifac = handle.info.ifac.clone();
+                let inherited_mode = handle.info.mode;
                 {
                     let mut core = inner.lock().unwrap();
                     core.set_interface_name(iface_idx, handle.info.name.clone());
@@ -2835,6 +2847,11 @@ async fn run_event_loop(
                     if is_local {
                         core.set_interface_local_client(iface_idx, true);
                     }
+                    // Codeberg #104: apply the mode inherited from the parent
+                    // listener (e.g. a TCP server in AP/roaming mode) so the
+                    // spawned-per-connection interface carries the server's mode
+                    // and the inbound-side propagation rules apply to this peer.
+                    core.set_interface_mode(iface_idx, inherited_mode);
                     // Inherit IFAC config from parent interface (e.g., TCP server listener).
                     // Removal path: handle_interface_down removes ifac_config when connection drops.
                     if let Some(ifac) = &inherited_ifac {
@@ -3848,6 +3865,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -3895,6 +3913,7 @@ mod tests {
                     is_local_client: false,
                     bitrate: None,
                     ifac: None,
+                    mode: leviculum_core::traits::InterfaceMode::default(),
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -3959,6 +3978,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: l_inc_rx,
             outgoing: l_out_tx,
@@ -3978,6 +3998,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -4026,6 +4047,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -4093,6 +4115,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: lora_inc_rx,
             outgoing: lora_out_tx,
@@ -4111,6 +4134,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: plain_inc_rx,
             outgoing: plain_out_tx,
@@ -4173,6 +4197,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -4223,6 +4248,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -4273,6 +4299,7 @@ mod tests {
                 is_local_client: false,
                 bitrate: None,
                 ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
             },
             incoming: inc_rx,
             outgoing: out_tx,

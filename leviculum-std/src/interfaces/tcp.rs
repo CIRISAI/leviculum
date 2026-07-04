@@ -210,6 +210,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
             is_local_client: false,
             bitrate: None,
             ifac: None,
+            mode: leviculum_core::traits::InterfaceMode::default(),
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -274,6 +275,7 @@ pub(crate) fn spawn_tcp_server(
     buffer_size: usize,
     corrupt_every: Option<u64>,
     ifac: Option<leviculum_core::ifac::IfacConfig>,
+    mode: leviculum_core::traits::InterfaceMode,
 ) -> Result<(), io::Error> {
     // Bind synchronously so errors propagate to the caller immediately
     let std_listener = std::net::TcpListener::bind(bind_addr)?;
@@ -297,6 +299,12 @@ pub(crate) fn spawn_tcp_server(
                             );
                             // Inherit IFAC config from parent TCP server listener.
                             handle.info.ifac = ifac.clone();
+                            // Codeberg #104: the accepted (spawned) child inherits
+                            // the listener's propagation mode so inbound-side mode
+                            // rules (AP/roaming/etc.) apply to peers connecting to
+                            // this server, mirroring Python
+                            // `spawned_interface.mode = self.mode` (TCPInterface.py:625).
+                            handle.info.mode = mode;
                             tracing::info!("Accepted connection: {} ({})", name, id);
                             if new_interface_tx.send(handle).await.is_err() {
                                 break; // event loop shut down
@@ -365,6 +373,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             is_local_client: false,
             bitrate: None,
             ifac: None,
+            mode: leviculum_core::traits::InterfaceMode::default(),
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -678,7 +687,16 @@ mod tests {
         let bound_addr = std_listener.local_addr().unwrap();
         drop(std_listener); // free the port for spawn_tcp_server
 
-        spawn_tcp_server(bound_addr, next_id.clone(), tx, 16, None, None).unwrap();
+        spawn_tcp_server(
+            bound_addr,
+            next_id.clone(),
+            tx,
+            16,
+            None,
+            None,
+            leviculum_core::traits::InterfaceMode::default(),
+        )
+        .unwrap();
 
         // Connect a raw TCP client
         let _client = tokio::net::TcpStream::connect(bound_addr).await.unwrap();
@@ -692,6 +710,51 @@ mod tests {
         assert!(handle.info.name.starts_with("tcp_server/"));
         assert_eq!(handle.info.id, InterfaceId(0));
         assert!(!handle.outgoing.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_tcp_server_spawned_child_inherits_mode() {
+        // Codeberg #104: an accepted (spawned-per-connection) interface inherits
+        // the listener's propagation mode, mirroring Python
+        // `spawned_interface.mode = self.mode` (TCPInterface.py:625).
+        use leviculum_core::traits::{Interface, InterfaceMode};
+
+        let next_id = Arc::new(AtomicUsize::new(0));
+        let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let std_listener = std::net::TcpListener::bind(addr).unwrap();
+        let bound_addr = std_listener.local_addr().unwrap();
+        drop(std_listener);
+
+        spawn_tcp_server(
+            bound_addr,
+            next_id.clone(),
+            tx,
+            16,
+            None,
+            None,
+            InterfaceMode::AccessPoint,
+        )
+        .unwrap();
+
+        let _client = tokio::net::TcpStream::connect(bound_addr).await.unwrap();
+
+        let handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout waiting for handle")
+            .expect("channel closed");
+
+        assert_eq!(
+            handle.info.mode,
+            InterfaceMode::AccessPoint,
+            "spawned child must carry the listener's configured mode in its info"
+        );
+        assert_eq!(
+            Interface::mode(&handle),
+            InterfaceMode::AccessPoint,
+            "the Interface::mode() trait accessor must report the inherited mode"
+        );
     }
 
     #[tokio::test]

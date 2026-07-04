@@ -104,6 +104,20 @@ impl InterfaceMode {
         self as u8
     }
 
+    /// Whether an interface in this mode triggers an *active* recursive path
+    /// request when it receives a path request for a destination it does not
+    /// know (Codeberg #104). Mirrors Python
+    /// `Interface.DISCOVER_PATHS_FOR = [MODE_ACCESS_POINT, MODE_GATEWAY,
+    /// MODE_ROAMING]` (Interface.py:54). A `Full` (or point-to-point/boundary)
+    /// interface relies on passive announce propagation and does not
+    /// re-originate discovery for unknown destinations.
+    pub fn discovers_paths(self) -> bool {
+        matches!(
+            self,
+            InterfaceMode::AccessPoint | InterfaceMode::Gateway | InterfaceMode::Roaming
+        )
+    }
+
     /// Parse a config `mode` / `interface_mode` value, mirroring the spellings
     /// accepted by Python `Reticulum._synthesize_interface` (Reticulum.py:717-745).
     /// Comparison is case-insensitive; an unrecognised value yields `None` so

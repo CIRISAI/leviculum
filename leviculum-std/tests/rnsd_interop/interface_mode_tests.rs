@@ -16,6 +16,7 @@
 //! cargo test --package leviculum-std --test rnsd_interop interface_mode_tests
 //! ```
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use leviculum_core::identity::Identity;
@@ -23,7 +24,7 @@ use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
 use crate::common::wait_for_path_on_daemon;
-use crate::harness::TestDaemon;
+use crate::harness::{pick_free_tcp_port, TestDaemon};
 
 /// Build a Rust transport node with a single TCP client interface toward the
 /// Python daemon, carrying the given propagation mode.
@@ -128,6 +129,101 @@ async fn test_gateway_interface_propagates_local_announce() {
     assert!(
         learned,
         "gateway interface must propagate announces; Python peer did not learn the path"
+    );
+
+    node.stop().await.ok();
+}
+
+// =========================================================================
+// Codeberg #104: server-side mode stamping.
+//
+// The three tests above configure the mode on a Rust TCP *client* interface.
+// These configure the mode on a Rust TCP *server* interface and let a live
+// Python daemon connect INTO it. The mode must be stamped onto the
+// spawned-per-connection (inbound) interface, so the inbound-side announce
+// rules apply to that Python peer exactly as they would if it had connected to
+// a Python rnsd whose TCPServerInterface carried the same mode
+// (TCPInterface.py:625: `spawned_interface.mode = self.mode`).
+// =========================================================================
+
+/// Build a Rust transport node with a single TCP *server* interface carrying
+/// the given propagation mode, bound on a free local port. Returns the node,
+/// the bound port (so a Python peer can connect into it), and the storage dir.
+async fn start_rust_server_node_with_mode(
+    test_name: &str,
+    mode: &str,
+) -> (leviculum_std::driver::ReticulumNode, u16, tempfile::TempDir) {
+    let storage = crate::common::temp_storage(test_name, "node");
+    let port = pick_free_tcp_port().expect("free tcp port");
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    let mut node = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_server(addr)
+        .interface_mode(mode)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build rust server node");
+    node.start().await.expect("start rust server node");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    (node, port, storage)
+}
+
+/// access_point server: the mode stamped onto the spawned inbound interface
+/// withholds the local announce, so the Python peer that connected into the
+/// Rust AP server never learns the path. This is exactly what an inbound peer
+/// sees from a Python rnsd whose TCPServerInterface is in access_point mode.
+#[tokio::test]
+async fn test_access_point_server_withholds_announce_to_inbound_peer() {
+    let (mut node, port, _storage) =
+        start_rust_server_node_with_mode("mode_ap_server", "access_point").await;
+
+    // Python daemon connects INTO the Rust AP server as a TCP client. On the
+    // Rust side this spawns a per-connection interface that must inherit the
+    // listener's access_point mode.
+    let daemon = TestDaemon::start().await.expect("start daemon");
+    daemon
+        .add_client_interface("127.0.0.1", port, Some("ToRustAP"))
+        .await
+        .expect("python connects to rust AP server");
+    // Let the connection establish and the spawned interface register.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let dest_hash = announce_local_dest(&mut node, "apserver").await;
+
+    let learned = wait_for_path_on_daemon(&daemon, &dest_hash, Duration::from_secs(6)).await;
+    assert!(
+        !learned,
+        "access_point server must withhold announces on the spawned inbound \
+         interface; the Python peer learned the path"
+    );
+
+    node.stop().await.ok();
+}
+
+/// gateway server (positive control): a gateway-mode listener propagates, so
+/// the spawned inbound interface still emits the local announce and the Python
+/// peer learns the path. Distinguishes real mode stamping from a spawned
+/// interface that silently dropped everything.
+#[tokio::test]
+async fn test_gateway_server_propagates_announce_to_inbound_peer() {
+    let (mut node, port, _storage) =
+        start_rust_server_node_with_mode("mode_gw_server", "gateway").await;
+
+    let daemon = TestDaemon::start().await.expect("start daemon");
+    daemon
+        .add_client_interface("127.0.0.1", port, Some("ToRustGW"))
+        .await
+        .expect("python connects to rust gateway server");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let dest_hash = announce_local_dest(&mut node, "gwserver").await;
+
+    let learned = wait_for_path_on_daemon(&daemon, &dest_hash, Duration::from_secs(6)).await;
+    assert!(
+        learned,
+        "gateway server must propagate announces on the spawned inbound \
+         interface; the Python peer did not learn the path"
     );
 
     node.stop().await.ok();

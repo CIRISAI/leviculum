@@ -5241,12 +5241,44 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Send only to the requesting interface (Python Transport.py:1037-1038).
         if self.config.enable_transport {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
+                let mode = self.interface_mode(interface_index);
+
+                // Codeberg #104: a roaming-mode interface does not answer a path
+                // request when the next hop toward the destination sits on the
+                // same roaming interface. Answering would just bounce the request
+                // back into the same roaming segment; a better-connected peer
+                // should respond instead. Mirrors Python
+                // `Transport.path_request` (Transport.py:2951-2952), where
+                // `received_from` is the interface the path was learned on.
+                if mode == InterfaceMode::Roaming {
+                    let received_from = self
+                        .storage
+                        .get_path(&requested_hash)
+                        .map(|e| e.interface_index);
+                    if received_from == Some(interface_index) {
+                        crate::tracing::debug!(
+                            "Not answering path request for <{}> on roaming interface {}, next hop is on the same roaming interface",
+                            HexShort(&requested_hash),
+                            self.iface_name(interface_index)
+                        );
+                        return Ok(());
+                    }
+                }
+
                 crate::tracing::debug!(
                     "Answering path request for <{}> on {}, path is known",
                     HexShort(&requested_hash),
                     self.iface_name(interface_index)
                 );
                 let now = self.clock.now_ms();
+                // Codeberg #104: a roaming-mode interface waits an extra
+                // PATH_REQUEST_RG grace on top of the base grace, letting more
+                // well-connected peers answer first (Python Transport.py:2988-2989).
+                let grace = if mode == InterfaceMode::Roaming {
+                    PATH_REQUEST_GRACE_MS + crate::constants::PATH_REQUEST_RG_MS
+                } else {
+                    PATH_REQUEST_GRACE_MS
+                };
                 // Parse cached announce to get hop count
                 if let Ok(cached_packet) = Packet::unpack(&cached_raw) {
                     self.storage.set_announce(
@@ -5255,7 +5287,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             timestamp_ms: now,
                             hops: cached_packet.hops,
                             retries: 0,
-                            retransmit_at_ms: Some(now + PATH_REQUEST_GRACE_MS),
+                            retransmit_at_ms: Some(now + grace),
                             raw_packet: cached_raw,
                             receiving_interface_index: interface_index,
                             target_interface: Some(interface_index),
@@ -5276,91 +5308,125 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Transport.py:3022-3026 `return`s without recording a discovery
             // request or forwarding). Answering already-known paths above is
             // never limited, so this drops only the excess recursion.
-            if !from_local && pr_burst_limited {
-                crate::tracing::debug!(
-                    dest = %HexShort(&requested_hash),
-                    iface = %self.iface_name(interface_index),
-                    "Not re-originating recursive path request, PR ingress burst limit active"
-                );
-            } else if !from_local {
-                // Python checks attached_interface.mode in DISCOVER_PATHS_FOR here,
-                // which gates discovery on the interface's operational mode. We skip
-                // this check until per-interface modes are implemented.
-                // Currently all our interfaces support path discovery, so this is
-                // functionally equivalent.
-                let now = self.clock.now_ms();
-                if self
-                    .storage
-                    .get_discovery_path_request(&requested_hash)
-                    .is_some()
-                {
+            if !from_local {
+                // Codeberg #104: active recursive path discovery for an unknown
+                // destination happens only when the receiving interface is in a
+                // mode listed in Python `DISCOVER_PATHS_FOR`
+                // (ACCESS_POINT / GATEWAY / ROAMING), matching Python
+                // `Transport.path_request` (Transport.py:2917-2918, 3015). A
+                // non-discovering interface (e.g. `Full`) still forwards the
+                // request to local clients (Python branch 5, Transport.py:3043-3048)
+                // but does not re-originate a recursive network discovery.
+                let discovers = self.interface_mode(interface_index).discovers_paths();
+
+                // Codeberg #87: abort the recursive discovery when the receiving
+                // interface's PR ingress burst limiter is active (Python
+                // Transport.py:3022-3026 `return`s without recording a discovery
+                // request or forwarding). The ingress limit only gates the
+                // discovering path; the non-discovering local-client forward is
+                // unaffected.
+                if discovers && pr_burst_limited {
                     crate::tracing::debug!(
-                        "Already have a pending discovery path request for <{}>",
-                        HexShort(&requested_hash)
+                        dest = %HexShort(&requested_hash),
+                        iface = %self.iface_name(interface_index),
+                        "Not re-originating recursive path request, PR ingress burst limit active"
                     );
                 } else {
-                    self.storage.set_discovery_path_request(
-                        requested_hash,
-                        interface_index,
-                        now + DISCOVERY_TIMEOUT_MS,
-                    );
-                }
+                    let active_discovery = discovers && !pr_burst_limited;
+                    let has_locals = self.has_local_clients();
+                    if active_discovery || has_locals {
+                        if active_discovery {
+                            let now = self.clock.now_ms();
+                            if self
+                                .storage
+                                .get_discovery_path_request(&requested_hash)
+                                .is_some()
+                            {
+                                crate::tracing::debug!(
+                                    "Already have a pending discovery path request for <{}>",
+                                    HexShort(&requested_hash)
+                                );
+                            } else {
+                                self.storage.set_discovery_path_request(
+                                    requested_hash,
+                                    interface_index,
+                                    now + DISCOVERY_TIMEOUT_MS,
+                                );
+                            }
+                            crate::tracing::debug!(
+                                "Attempting to discover unknown path to <{}> on behalf of path request on {}",
+                                HexShort(&requested_hash),
+                                self.iface_name(interface_index)
+                            );
+                        }
 
-                crate::tracing::debug!(
-                    "Attempting to discover unknown path to <{}> on behalf of path request on {}",
-                    HexShort(&requested_hash),
-                    self.iface_name(interface_index)
-                );
+                        // Build a fresh path request packet with hops=0
+                        // (Python Transport.py:2555-2561). Used for both the
+                        // recursive network broadcast and the local-client forward.
+                        let pr_data = if self.config.enable_transport {
+                            let mut d = Vec::with_capacity(48);
+                            d.extend_from_slice(&requested_hash);
+                            d.extend_from_slice(self.identity.hash());
+                            d.extend_from_slice(&tag);
+                            d
+                        } else {
+                            let mut d = Vec::with_capacity(32);
+                            d.extend_from_slice(&requested_hash);
+                            d.extend_from_slice(&tag);
+                            d
+                        };
 
-                // Build a fresh path request packet with hops=0 (Python Transport.py:2555-2561)
-                let pr_data = if self.config.enable_transport {
-                    let mut d = Vec::with_capacity(48);
-                    d.extend_from_slice(&requested_hash);
-                    d.extend_from_slice(self.identity.hash());
-                    d.extend_from_slice(&tag);
-                    d
-                } else {
-                    let mut d = Vec::with_capacity(32);
-                    d.extend_from_slice(&requested_hash);
-                    d.extend_from_slice(&tag);
-                    d
-                };
+                        let fresh_packet = Packet {
+                            flags: PacketFlags {
+                                ifac_flag: false,
+                                header_type: HeaderType::Type1,
+                                context_flag: false,
+                                transport_type: TransportType::Broadcast,
+                                dest_type: crate::destination::DestinationType::Plain,
+                                packet_type: PacketType::Data,
+                            },
+                            hops: 0,
+                            transport_id: None,
+                            destination_hash: self.path_request_hash,
+                            context: PacketContext::None,
+                            data: PacketData::Owned(pr_data),
+                        };
 
-                let fresh_packet = Packet {
-                    flags: PacketFlags {
-                        ifac_flag: false,
-                        header_type: HeaderType::Type1,
-                        context_flag: false,
-                        transport_type: TransportType::Broadcast,
-                        dest_type: crate::destination::DestinationType::Plain,
-                        packet_type: PacketType::Data,
-                    },
-                    hops: 0,
-                    transport_id: None,
-                    destination_hash: self.path_request_hash,
-                    context: PacketContext::None,
-                    data: PacketData::Owned(pr_data),
-                };
+                        let mut buf = [0u8; crate::constants::MTU];
+                        let len = fresh_packet.pack(&mut buf)?;
 
-                let mut buf = [0u8; crate::constants::MTU];
-                let len = fresh_packet.pack(&mut buf)?;
-                self.send_on_all_interfaces_except(interface_index, &buf[..len]);
-                // Outgoing path-request frequency for the re-originated request
-                // (Codeberg #67 Stage 2a). The broadcast plus the local-client
-                // forward below cover every registered interface except the
-                // requester, so a single broadcast record matches.
-                self.record_outgoing_path_request_broadcast(Some(interface_index));
+                        if active_discovery {
+                            self.send_on_all_interfaces_except(interface_index, &buf[..len]);
+                            // Outgoing path-request frequency for the re-originated
+                            // request (Codeberg #67 Stage 2a). The broadcast plus the
+                            // local-client forward below cover every registered
+                            // interface except the requester, so a single broadcast
+                            // record matches.
+                            self.record_outgoing_path_request_broadcast(Some(interface_index));
+                        }
 
-                // Also forward to local clients (Python Transport.py:2808-2813)
-                if self.has_local_clients() {
-                    let local_ifaces: Vec<usize> = self
-                        .local_client_interfaces
-                        .iter()
-                        .copied()
-                        .filter(|&id| id != interface_index)
-                        .collect();
-                    for client_iface in local_ifaces {
-                        let _ = self.send_on_interface(client_iface, &buf[..len]);
+                        // Forward to local clients. In discovery mode this mirrors
+                        // Python branch 4's all-interfaces loop reaching local
+                        // clients (Transport.py:2808-2813); in non-discovery mode it
+                        // is Python branch 5 (Transport.py:3043-3048).
+                        if has_locals {
+                            let local_ifaces: Vec<usize> = self
+                                .local_client_interfaces
+                                .iter()
+                                .copied()
+                                .filter(|&id| id != interface_index)
+                                .collect();
+                            for client_iface in local_ifaces {
+                                if !active_discovery {
+                                    // The discovery broadcast above already recorded
+                                    // outgoing PR frequency for every interface; when
+                                    // only forwarding to local clients, record per
+                                    // client (Codeberg #67 Stage 2a).
+                                    self.record_outgoing_path_request(client_iface);
+                                }
+                                let _ = self.send_on_interface(client_iface, &buf[..len]);
+                            }
+                        }
                     }
                 }
             }
@@ -7435,6 +7501,162 @@ mod tests {
             );
         }
 
+        // ---- Codeberg #104: advanced interface-mode semantics -------------
+        //
+        // Active path discovery (DISCOVER_PATHS_FOR) and the roaming
+        // path-request refinements (same-interface non-answer + RG grace).
+        // Matches Python `Transport.path_request` (Transport.py:2917-2918,
+        // 2951-2952, 2988-2989) and `Interface.DISCOVER_PATHS_FOR`.
+
+        /// Build a network (non-local) path request packet for `dest`, as it
+        /// arrives at `handle_path_request` (dest_hash + transport_id + tag).
+        fn make_network_path_request(
+            transport: &Transport<MockClock, MemoryStorage>,
+            dest: [u8; TRUNCATED_HASHBYTES],
+        ) -> Packet {
+            let mut data = Vec::with_capacity(48);
+            data.extend_from_slice(&dest);
+            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]); // remote transport_id
+            data.extend_from_slice(&[0xCC; TRUNCATED_HASHBYTES]); // tag
+            Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: crate::destination::DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 1,
+                transport_id: None,
+                destination_hash: transport.path_request_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            }
+        }
+
+        #[test]
+        fn mode_discover_paths_for_matches_python() {
+            // Python Interface.DISCOVER_PATHS_FOR = [ACCESS_POINT, GATEWAY, ROAMING].
+            assert!(InterfaceMode::AccessPoint.discovers_paths());
+            assert!(InterfaceMode::Gateway.discovers_paths());
+            assert!(InterfaceMode::Roaming.discovers_paths());
+            assert!(!InterfaceMode::Full.discovers_paths());
+            assert!(!InterfaceMode::PointToPoint.discovers_paths());
+            assert!(!InterfaceMode::Boundary.discovers_paths());
+        }
+
+        #[test]
+        fn mode_discover_paths_for_gates_active_discovery() {
+            // An unknown-destination path request re-originates a recursive
+            // discovery only when the receiving interface is in a
+            // DISCOVER_PATHS_FOR mode. A Full interface ignores it.
+            let unknown = dummy_dest(0x77);
+
+            // Full mode: no discovery broadcast.
+            let mut full_t = make_transport_enabled();
+            let full = full_t.register_interface(Box::new(MockInterface::new("full", 1)));
+            let _other = full_t.register_interface(Box::new(MockInterface::new("other", 2)));
+            full_t.drain_actions();
+            let pkt = make_network_path_request(&full_t, unknown);
+            full_t.handle_path_request(pkt, full).unwrap();
+            assert!(
+                !has_path_request_broadcast(&full_t.drain_actions(), &unknown),
+                "Full-mode interface must not re-originate discovery for an unknown path"
+            );
+            assert!(
+                full_t
+                    .storage()
+                    .get_discovery_path_request(&unknown)
+                    .is_none(),
+                "Full-mode interface must not record a discovery request"
+            );
+
+            // Gateway mode: discovery broadcast + recorded request.
+            let mut gw_t = make_transport_enabled();
+            let gw = gw_t.register_interface(Box::new(MockInterface::new("gw", 1)));
+            let _other = gw_t.register_interface(Box::new(MockInterface::new("other", 2)));
+            gw_t.set_interface_mode(gw, InterfaceMode::Gateway);
+            gw_t.drain_actions();
+            let pkt = make_network_path_request(&gw_t, unknown);
+            gw_t.handle_path_request(pkt, gw).unwrap();
+            assert!(
+                has_path_request_broadcast(&gw_t.drain_actions(), &unknown),
+                "Gateway-mode interface must re-originate discovery for an unknown path"
+            );
+            assert!(
+                gw_t.storage()
+                    .get_discovery_path_request(&unknown)
+                    .is_some(),
+                "Gateway-mode interface must record a discovery request"
+            );
+        }
+
+        #[test]
+        fn mode_roaming_does_not_answer_same_interface_path_request() {
+            // Python Transport.py:2951-2952: a roaming interface does not answer
+            // a path request when the next hop toward the destination is on the
+            // same roaming interface.
+            let mut transport = make_transport_enabled();
+            let roaming = transport.register_interface(Box::new(MockInterface::new("roam", 1)));
+            let _peer = transport.register_interface(Box::new(MockInterface::new("peer", 2)));
+            transport.set_interface_mode(roaming, InterfaceMode::Roaming);
+
+            let (raw, dest) = make_announce_raw(2, PacketContext::None);
+            transport.storage.set_announce_cache(dest, raw);
+            // Path learned on the SAME roaming interface the request arrives on.
+            seed_path(&mut transport, dest, roaming);
+            transport.drain_actions();
+
+            let pkt = make_network_path_request(&transport, dest);
+            transport.handle_path_request(pkt, roaming).unwrap();
+
+            assert!(
+                transport.storage().get_announce(&dest).is_none(),
+                "roaming interface must not schedule a path response when the next \
+                 hop is on the same roaming interface"
+            );
+        }
+
+        #[test]
+        fn mode_roaming_adds_rg_grace_to_path_response() {
+            // Python Transport.py:2988-2989: answering on a roaming interface adds
+            // PATH_REQUEST_RG on top of PATH_REQUEST_GRACE. A Full interface uses
+            // the base grace only.
+            let make = |mode: InterfaceMode| {
+                let mut transport = make_transport_enabled();
+                let recv = transport.register_interface(Box::new(MockInterface::new("recv", 1)));
+                let via = transport.register_interface(Box::new(MockInterface::new("via", 2)));
+                transport.set_interface_mode(recv, mode);
+                let (raw, dest) = make_announce_raw(2, PacketContext::None);
+                transport.storage.set_announce_cache(dest, raw);
+                // Path learned on a DIFFERENT interface so the answer is not
+                // suppressed by the roaming same-interface rule.
+                seed_path(&mut transport, dest, via);
+                transport.drain_actions();
+                let now = transport.clock.now_ms();
+                let pkt = make_network_path_request(&transport, dest);
+                transport.handle_path_request(pkt, recv).unwrap();
+                let entry = transport
+                    .storage()
+                    .get_announce(&dest)
+                    .expect("a path response must be scheduled")
+                    .clone();
+                entry.retransmit_at_ms.unwrap() - now
+            };
+
+            assert_eq!(
+                make(InterfaceMode::Full),
+                PATH_REQUEST_GRACE_MS,
+                "Full interface answers after the base grace"
+            );
+            assert_eq!(
+                make(InterfaceMode::Roaming),
+                PATH_REQUEST_GRACE_MS + crate::constants::PATH_REQUEST_RG_MS,
+                "roaming interface adds PATH_REQUEST_RG on top of the base grace"
+            );
+        }
+
         // ---- OBS-1 / OBS-2 observability ----------------------------------
         //
         // These tests capture structured tracing output, so they require the
@@ -8650,8 +8872,11 @@ mod tests {
         #[test]
         fn test_path_request_unknown_dest_forwarded() {
             let mut transport = make_transport_enabled();
-            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            // Codeberg #104: active recursive discovery only fires when the
+            // receiving interface is in a DISCOVER_PATHS_FOR mode.
+            transport.set_interface_mode(idx0, InterfaceMode::Gateway);
 
             let dest_hash = [0x99; TRUNCATED_HASHBYTES]; // Unknown destination
             let path_req_hash = transport.path_request_hash;
@@ -8728,6 +8953,8 @@ mod tests {
             let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            // Codeberg #104: gate discovery on a DISCOVER_PATHS_FOR mode.
+            transport.set_interface_mode(0, InterfaceMode::Gateway);
 
             let dest_hash = [0x42; TRUNCATED_HASHBYTES];
             let local_transport_id = *transport.identity.hash();
@@ -11711,8 +11938,11 @@ mod tests {
             // A path request arriving on if0 with no cached announce should
             // be forwarded as a Broadcast excluding if0 (transport mode only).
             let mut transport = make_transport_enabled();
-            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            // Codeberg #104: active recursive discovery only fires on a
+            // DISCOVER_PATHS_FOR-mode interface.
+            transport.set_interface_mode(idx0, InterfaceMode::Gateway);
 
             // Build a path request for an unknown destination
             let unknown_hash = [0xBB; TRUNCATED_HASHBYTES];
@@ -18252,6 +18482,9 @@ mod tests {
         #[test]
         fn handle_path_request_reoriginates_at_normal_rate() {
             let mut transport = make_transport();
+            // Codeberg #104: active recursive discovery only fires on a
+            // DISCOVER_PATHS_FOR-mode interface.
+            transport.set_interface_mode(NET_IFACE, InterfaceMode::Gateway);
             transport.drain_actions();
             // A single unknown path request at rest re-originates a discovery.
             let packet = make_path_request(&transport, 1);
