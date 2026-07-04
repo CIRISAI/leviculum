@@ -460,7 +460,14 @@ async fn test_path_table_accessor_lifecycle() {
         .expect("Failed to announce");
 
     let dest_hash = crate::common::parse_dest_hash(&dest.hash);
-    let learned = wait_for(|| node.has_path(&dest_hash), Duration::from_secs(20)).await;
+    let learned = wait_for_path_reannounce(
+        || node.has_path(&dest_hash),
+        &daemon,
+        &dest.hash,
+        b"accessor test",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(learned, "node should learn the relayed path within 20s");
 
     // path_table_entries() reflects the learned path.
@@ -500,7 +507,14 @@ async fn test_path_table_accessor_lifecycle() {
         .announce_destination(&dest.hash, b"accessor test again")
         .await
         .expect("Failed to re-announce");
-    let relearned = wait_for(|| node.has_path(&dest_hash), Duration::from_secs(20)).await;
+    let relearned = wait_for_path_reannounce(
+        || node.has_path(&dest_hash),
+        &daemon,
+        &dest.hash,
+        b"accessor test again",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(relearned, "re-announce must re-learn the evicted path");
 
     // drop_all_paths_via(): bulk-evicts everything routed via the relay.
@@ -516,14 +530,40 @@ async fn test_path_table_accessor_lifecycle() {
     relay.stop().await.expect("Failed to stop relay");
 }
 
-/// Poll a condition until true or timeout.
-async fn wait_for<F: Fn() -> bool>(cond: F, budget: Duration) -> bool {
+/// Wait until `has_path` holds, re-driving the daemon announce on a fixed
+/// cadence.
+///
+/// A Python `Destination.announce()` is a one-shot push to the interfaces
+/// connected at that instant; it is not re-sent. Under a CPU-starved
+/// parallel interop run the daemon can be scheduled through the relay
+/// peer-setup window and drop that lone announce, after which nothing
+/// re-sends it inside a fixed wait budget, so the node never learns the
+/// path and a timing-sensitive test times out (#103). The failure is
+/// bimodal: the path is learned in well under a second or never arrives
+/// at all, so a longer passive wait does not help; the announce has to
+/// be re-driven. Re-announcing mirrors how a live Python peer
+/// periodically re-announces, so the path-learn tolerates load instead of
+/// depending on a single announce landing in a fixed window.
+async fn wait_for_path_reannounce<F: Fn() -> bool>(
+    has_path: F,
+    daemon: &TestDaemon,
+    dest_hash_hex: &str,
+    app_data: &[u8],
+    budget: Duration,
+) -> bool {
+    const REANNOUNCE_EVERY: Duration = Duration::from_secs(3);
     let start = std::time::Instant::now();
+    // The caller already fired the first announce; space the retries.
+    let mut last_announce = std::time::Instant::now();
     while start.elapsed() < budget {
-        if cond() {
+        if has_path() {
             return true;
+        }
+        if last_announce.elapsed() >= REANNOUNCE_EVERY {
+            let _ = daemon.announce_destination(dest_hash_hex, app_data).await;
+            last_announce = std::time::Instant::now();
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    cond()
+    has_path()
 }
