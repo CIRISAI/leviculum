@@ -22,8 +22,13 @@
 //! [`InterfaceDescriptor`]; the protocol ordering and stamping live here, so
 //! the carrier medium stays isolated from discovery mechanics.
 
+mod registry;
 mod stamp;
 
+pub use registry::{
+    DiscoveredInterfaceRecord, DiscoveryStatus, DISCOVERABLE_TYPES, THRESHOLD_REMOVE,
+    THRESHOLD_STALE, THRESHOLD_UNKNOWN,
+};
 pub use stamp::{
     generate_stamp, stamp_valid, stamp_value, stamp_workblock, DEFAULT_STAMP_VALUE, STAMP_SIZE,
     WORKBLOCK_EXPAND_ROUNDS,

@@ -57,6 +57,10 @@ pub(crate) enum RpcRequest {
     GetPathTable {
         max_hops: Option<i64>,
     },
+    /// Discovered-interface registry query (Codeberg #32). Response is a list of
+    /// per-record dicts (see `build_discovered_interfaces`), mirroring Python
+    /// `RNS.Discovery.InterfaceDiscovery.list_discovered_interfaces`.
+    GetDiscoveredInterfaces,
     GetRateTable,
     GetNextHop {
         destination_hash: Vec<u8>,
@@ -150,6 +154,7 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 let max_hops = dict_get_int(&dict, "max_hops");
                 Ok(RpcRequest::GetPathTable { max_hops })
             }
+            "discovered_interfaces" => Ok(RpcRequest::GetDiscoveredInterfaces),
             "rate_table" => Ok(RpcRequest::GetRateTable),
             "next_hop" => {
                 let destination_hash = dict_get_bytes(&dict, "destination_hash")
@@ -529,6 +534,22 @@ mod tests {
         let data = build_get_request("interface_stats");
         let req = parse_request(&data).unwrap().0;
         assert!(matches!(req, RpcRequest::GetInterfaceStats));
+    }
+
+    #[test]
+    fn test_parse_get_discovered_interfaces_pickle() {
+        let data = build_get_request("discovered_interfaces");
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Pickle);
+        assert!(matches!(req, RpcRequest::GetDiscoveredInterfaces));
+    }
+
+    #[test]
+    fn test_parse_get_discovered_interfaces_msgpack() {
+        let data = msgpack_get_request("discovered_interfaces");
+        let (req, codec) = parse_request(&data).unwrap();
+        assert_eq!(codec, Codec::Msgpack);
+        assert!(matches!(req, RpcRequest::GetDiscoveredInterfaces));
     }
 
     #[test]

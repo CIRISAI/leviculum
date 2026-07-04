@@ -298,6 +298,278 @@ pub fn render_json(stats: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// -d / -D  discovered interfaces (rnstatus.py:182-306, Codeberg #32)
+// ---------------------------------------------------------------------------
+
+/// `RNS.prettytime(t, compact=True)`: at most the two most-significant nonzero
+/// components, each as `<n>d/h/m/s` (integer seconds), joined like the
+/// non-compact form.
+fn prettytime_compact(mut t: f64) -> String {
+    let neg = t < 0.0;
+    if neg {
+        t = t.abs();
+    }
+    let days = (t / 86400.0).floor() as i64;
+    t %= 86400.0;
+    let hours = (t / 3600.0).floor() as i64;
+    t %= 3600.0;
+    let minutes = (t / 60.0).floor() as i64;
+    t %= 60.0;
+    let seconds = t.floor() as i64;
+
+    let mut components: Vec<String> = Vec::new();
+    // compact: keep a component only while fewer than two are already shown.
+    let push = |cond: bool, s: String, components: &mut Vec<String>| {
+        if cond && components.len() < 2 {
+            components.push(s);
+        }
+    };
+    push(days > 0, format!("{days}d"), &mut components);
+    push(hours > 0, format!("{hours}h"), &mut components);
+    push(minutes > 0, format!("{minutes}m"), &mut components);
+    push(seconds > 0, format!("{seconds}s"), &mut components);
+
+    if components.is_empty() {
+        return "0s".to_string();
+    }
+    let n = components.len();
+    let mut tstr = String::new();
+    for (i, c) in components.iter().enumerate() {
+        if i == 0 {
+        } else if i < n - 1 {
+            tstr.push_str(", ");
+        } else {
+            tstr.push_str(" and ");
+        }
+        tstr.push_str(c);
+    }
+    if neg {
+        format!("-{tstr}")
+    } else {
+        tstr
+    }
+}
+
+/// Round to at most 4 decimals and strip trailing zeros, matching
+/// `str(round(x, 4))` for the lat/lon display values (keeps one decimal).
+fn py_round4_str(x: f64) -> String {
+    let s = format!("{x:.4}"); // "52.5000", "13.4560", "52.0000"
+    let trimmed = s.trim_end_matches('0'); // "52.", "13.456", "52."
+    if let Some(base) = trimmed.strip_suffix('.') {
+        format!("{base}.0") // "52.0"
+    } else {
+        trimmed.to_string() // "13.456"
+    }
+}
+
+/// Minimal Python-`str(float)` for the height display (integer-valued floats
+/// render with a single trailing zero, e.g. `100.0`).
+fn py_float_str(x: f64) -> String {
+    if x.fract() == 0.0 {
+        format!("{x:.1}")
+    } else {
+        let s = format!("{x:.6}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// Group an integer with commas: `867200000` -> `867,200,000` (Python `{:,}`).
+fn fmt_thousands(n: i64) -> String {
+    let neg = n < 0;
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    let len = digits.len();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if neg {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
+/// The location string for a discovered record's lat/lon (detail vs list vary
+/// only in the "none" placeholder, passed as `absent`).
+fn location_str(rec: &Value, absent: &str, with_height: bool) -> String {
+    if not_null(rec, "latitude") && not_null(rec, "longitude") {
+        let lat = py_round4_str(jf(rec, "latitude").unwrap_or(0.0));
+        let lon = py_round4_str(jf(rec, "longitude").unwrap_or(0.0));
+        if with_height && not_null(rec, "height") {
+            let h = py_float_str(jf(rec, "height").unwrap_or(0.0));
+            format!("{lat}, {lon}, {h}m h")
+        } else {
+            format!("{lat}, {lon}")
+        }
+    } else {
+        absent.to_string()
+    }
+}
+
+/// Render `lnstatus -d` (list) / `-D` (details) for the `discovered_interfaces`
+/// RPC response (a list of per-record dicts). `now_epoch` is the client
+/// wall-clock in Unix seconds; `details` selects the `-D` layout. Output
+/// matches rnstatus.py:182-306.
+pub fn render_discovered(
+    list: &Value,
+    details: bool,
+    name_filter: Option<&str>,
+    now_epoch: f64,
+) -> String {
+    let mut out = String::new();
+    // rnstatus prints a leading blank line before the discovered block.
+    out.push('\n');
+
+    let empty = Vec::new();
+    let records = list.as_array().unwrap_or(&empty);
+
+    // Filter by name substring (case-insensitive), matching rnstatus.
+    let filtered: Vec<&Value> = records
+        .iter()
+        .filter(|r| {
+            let name = js(r, "name").unwrap_or("");
+            match name_filter {
+                Some(f) if !f.is_empty() => name.to_lowercase().contains(&f.to_lowercase()),
+                _ => true,
+            }
+        })
+        .collect();
+
+    if details {
+        for (idx, rec) in filtered.iter().enumerate() {
+            let name = js(rec, "name").unwrap_or("");
+            let if_type = js(rec, "type").unwrap_or("");
+            let status_display = match js(rec, "status").unwrap_or("") {
+                "available" => "Available",
+                "unknown" => "Unknown",
+                "stale" => "Stale",
+                other => other,
+            };
+            let dago = now_epoch - jf(rec, "discovered").unwrap_or(now_epoch);
+            let hago = now_epoch - jf(rec, "last_heard").unwrap_or(now_epoch);
+            let transport_str = if jb(rec, "transport").unwrap_or(false) {
+                "Enabled"
+            } else {
+                "Disabled"
+            };
+            let location = location_str(rec, "Unknown", true);
+
+            let transport_id = js(rec, "transport_id");
+            let network = match (js(rec, "transport_id"), js(rec, "network_id")) {
+                (Some(t), Some(n)) if t != n => Some(n),
+                _ => None,
+            };
+
+            if idx > 0 {
+                out.push_str(&format!("\n{}\n\n", "=".repeat(32)));
+            }
+            if let Some(n) = network {
+                pln(&mut out, &format!("Network   ID : {n}"));
+            }
+            if let Some(t) = transport_id {
+                pln(&mut out, &format!("Transport ID : {t}"));
+            }
+            pln(&mut out, &format!("Name         : {name}"));
+            pln(&mut out, &format!("Type         : {if_type}"));
+            pln(&mut out, &format!("Status       : {status_display}"));
+            pln(&mut out, &format!("Transport    : {transport_str}"));
+            let hops = ji(rec, "hops").unwrap_or(0);
+            let hs = if hops == 1 { "" } else { "s" };
+            pln(&mut out, &format!("Distance     : {hops} hop{hs}"));
+            pln(
+                &mut out,
+                &format!("Discovered   : {} ago", prettytime_compact(dago)),
+            );
+            pln(
+                &mut out,
+                &format!("Last Heard   : {} ago", prettytime_compact(hago)),
+            );
+            pln(&mut out, &format!("Location     : {location}"));
+
+            if let Some(f) = ji(rec, "frequency") {
+                pln(&mut out, &format!("Frequency    : {} Hz", fmt_thousands(f)));
+            }
+            if let Some(b) = ji(rec, "bandwidth") {
+                pln(&mut out, &format!("Bandwidth    : {} Hz", fmt_thousands(b)));
+            }
+            if let Some(sf) = ji(rec, "sf") {
+                pln(&mut out, &format!("Sprd. Factor : {sf}"));
+            }
+            if let Some(cr) = ji(rec, "cr") {
+                pln(&mut out, &format!("Coding Rate  : {cr}"));
+            }
+            if let Some(m) = js(rec, "modulation") {
+                pln(&mut out, &format!("Modulation   : {m}"));
+            }
+            if let Some(a) = js(rec, "reachable_on") {
+                pln(&mut out, &format!("Address      : {a}"));
+            }
+            if let Some(p) = ji(rec, "port") {
+                pln(&mut out, &format!("Port         : {p}"));
+            }
+            let value = ji(rec, "value").unwrap_or(0);
+            pln(&mut out, &format!("Stamp Value  : {value}"));
+
+            pln(&mut out, "\nConfiguration Entry:");
+            if let Some(ce) = js(rec, "config_entry") {
+                for line in ce.split('\n') {
+                    pln(&mut out, &format!("  {line}"));
+                }
+            }
+        }
+    } else {
+        pln(
+            &mut out,
+            &format!(
+                "{:<25} {:<12} {:<12} {:<12} {:<8} {:<15}",
+                "Name", "Type", "Status", "Last Heard", "Value", "Location"
+            ),
+        );
+        pln(&mut out, &"-".repeat(89));
+        for rec in &filtered {
+            let raw_name = js(rec, "name").unwrap_or("");
+            let name = if raw_name.chars().count() > 24 {
+                let head: String = raw_name.chars().take(24).collect();
+                format!("{head}…")
+            } else {
+                raw_name.to_string()
+            };
+            let if_type = js(rec, "type").unwrap_or("").replace("Interface", "");
+            let status_display = match js(rec, "status").unwrap_or("") {
+                "available" => "✓ Available",
+                "unknown" => "? Unknown",
+                "stale" => "× Stale",
+                other => other,
+            };
+            let diff = now_epoch - jf(rec, "last_heard").unwrap_or(now_epoch);
+            let last_heard_display = if diff < 60.0 {
+                "Just now".to_string()
+            } else if diff < 3600.0 {
+                format!("{}m ago", (diff / 60.0) as i64)
+            } else if diff < 86400.0 {
+                format!("{}h ago", (diff / 3600.0) as i64)
+            } else {
+                format!("{}d ago", (diff / 86400.0) as i64)
+            };
+            let value = ji(rec, "value").unwrap_or(0).to_string();
+            let location = location_str(rec, "N/A", false);
+
+            pln(
+                &mut out,
+                &format!(
+                    "{name:<25} {if_type:<12} {status_display:<12} {last_heard_display:<12} {value:<8} {location:<15}"
+                ),
+            );
+        }
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Local-mode render (rnstatus.py:361-671)
 // ---------------------------------------------------------------------------
 

@@ -108,6 +108,7 @@ pub(crate) fn spawn_rpc_server(
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
     auto_peer_count_rx: Option<watch::Receiver<usize>>,
+    discovery_storage: Option<std::path::PathBuf>,
 ) -> Result<(), std::io::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
 
@@ -126,6 +127,7 @@ pub(crate) fn spawn_rpc_server(
             iface_stats_map,
             iface_online_map,
             auto_peer_count_rx,
+            discovery_storage,
         )
         .await;
     });
@@ -143,6 +145,7 @@ async fn rpc_accept_loop(
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
     auto_peer_count_rx: Option<watch::Receiver<usize>>,
+    discovery_storage: Option<std::path::PathBuf>,
 ) {
     loop {
         let (stream, _addr) = match listener.accept().await {
@@ -157,6 +160,7 @@ async fn rpc_accept_loop(
         let stats_map = Arc::clone(&iface_stats_map);
         let online_map = Arc::clone(&iface_online_map);
         let peer_count_rx = auto_peer_count_rx.clone();
+        let discovery_storage = discovery_storage.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_rpc_connection(
                 stream,
@@ -166,6 +170,7 @@ async fn rpc_accept_loop(
                 &stats_map,
                 &online_map,
                 &peer_count_rx,
+                discovery_storage.as_deref(),
             )
             .await
             {
@@ -185,6 +190,7 @@ async fn handle_rpc_connection(
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
     auto_peer_count_rx: &Option<watch::Receiver<usize>>,
+    discovery_storage: Option<&std::path::Path>,
 ) -> Result<(), RpcError> {
     server_handshake(&mut stream, authkey).await?;
 
@@ -206,6 +212,7 @@ async fn handle_rpc_connection(
             iface_stats_map,
             iface_online_map,
             peer_count,
+            discovery_storage,
             codec,
         )?
     };
@@ -530,6 +537,7 @@ mod tests {
             empty_stats_map(),
             empty_online_map(),
             None,
+            None,
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -648,6 +656,7 @@ mod tests {
             empty_stats_map(),
             empty_online_map(),
             None,
+            None,
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -709,6 +718,7 @@ mod tests {
             empty_stats_map(),
             empty_online_map(),
             None,
+            None,
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -766,6 +776,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            None,
             None,
         )
         .unwrap();
@@ -872,6 +883,7 @@ mod tests {
             empty_stats_map(),
             empty_online_map(),
             None,
+            None,
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -899,6 +911,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            None,
             None,
         )
         .unwrap();
@@ -934,6 +947,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            None,
             None,
         )
         .unwrap();
@@ -1044,6 +1058,7 @@ mod tests {
             empty_stats_map(),
             empty_online_map(),
             None,
+            None,
         )
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1055,6 +1070,80 @@ mod tests {
             .as_array()
             .expect("link_table response should be a JSON array");
         assert!(arr.is_empty(), "fresh test core has no links: {arr:?}");
+    }
+
+    /// `rpc_query("discovered_interfaces")` round-trips: a record persisted into
+    /// the server's discovery storage comes back over the RPC as a per-record
+    /// dict with the announce fields, `status`, and the `config_entry`
+    /// (Codeberg #32).
+    #[tokio::test]
+    async fn test_rpc_query_discovered_interfaces_round_trip() {
+        use leviculum_core::discovery::{DiscoveredInterface, STAMP_SIZE};
+
+        let td = tempfile::tempdir().unwrap();
+        let di = DiscoveredInterface {
+            interface_type: "RNodeInterface".to_string(),
+            transport: true,
+            name: "Node A".to_string(),
+            transport_id: [0xAB; 16],
+            network_id: [0xCD; 16],
+            value: 15,
+            stamp: [0x11; STAMP_SIZE],
+            latitude: Some(52.5),
+            longitude: Some(13.4),
+            height: None,
+            reachable_on: None,
+            port: None,
+            frequency: Some(867_200_000),
+            bandwidth: Some(125_000),
+            spreadingfactor: Some(8),
+            codingrate: Some(5),
+            ifac_netname: None,
+            ifac_netkey: None,
+            discovery_hash: [0x22; STAMP_SIZE],
+        };
+        // Persist at the current wall-clock so the server's query (which uses
+        // real `now`) sees the record as fresh rather than expired.
+        let now = crate::discovery::now_unix_secs();
+        crate::discovery::persist_discovered(td.path(), &di, 2, now).unwrap();
+
+        let core = make_test_core(true);
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+        let instance_name = format!("rpctest_disc_{}", std::process::id());
+
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            empty_online_map(),
+            None,
+            Some(td.path().to_path_buf()),
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let json = rpc_query(&instance_name, &authkey, "discovered_interfaces")
+            .await
+            .expect("discovered_interfaces query should succeed");
+        let arr = json.as_array().expect("response should be a JSON array");
+        assert_eq!(arr.len(), 1, "one persisted record");
+        let rec = &arr[0];
+        assert_eq!(rec["type"].as_str(), Some("RNodeInterface"));
+        assert_eq!(rec["name"].as_str(), Some("Node A"));
+        assert_eq!(rec["hops"].as_i64(), Some(2));
+        assert_eq!(rec["value"].as_i64(), Some(15));
+        assert_eq!(rec["status"].as_str(), Some("available"));
+        assert_eq!(
+            rec["transport_id"].as_str(),
+            Some("abababababababababababababababab")
+        );
+        assert!(rec["config_entry"]
+            .as_str()
+            .unwrap()
+            .contains("type = RNodeInterface"));
     }
 
     /// Codeberg #56: the `status` field of each per-interface dict must
@@ -1099,6 +1188,7 @@ mod tests {
                 start_time,
                 empty_stats_map(),
                 Arc::clone(&online_map),
+                None,
                 None,
             )
             .unwrap();

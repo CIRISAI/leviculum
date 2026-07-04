@@ -6,7 +6,8 @@
 //! remote transport instance's status over a link the way Python `rnstatus -R`
 //! does; the flow lives in [`leviculum_std::remote_status`] and its result is
 //! fed to the same renderer, so remote and local output match. Discovered
-//! interfaces (`-d/-D`) are deferred (#32) and print a clear notice.
+//! interfaces (`-d/-D`, #32) read the local discovered-interface registry over
+//! the RPC and render the rnstatus discovered layout.
 //!
 //! Output parity is the point: the same `interface_stats` dict fed to this
 //! renderer and to Python rnstatus yields byte-identical output, so a
@@ -86,11 +87,11 @@ struct Args {
     #[arg(short = 'w')]
     timeout: Option<f64>,
 
-    /// list discovered interfaces (DEFERRED: depends on #32)
+    /// list discovered interfaces
     #[arg(short = 'd', long = "discovered", default_value_t = false)]
     discovered: bool,
 
-    /// show details and config entries for discovered interfaces (DEFERRED: depends on #32)
+    /// show details and config entries for discovered interfaces
     #[arg(short = 'D', default_value_t = false)]
     discovered_details: bool,
 
@@ -186,15 +187,6 @@ async fn fetch_status(
 async fn main() {
     let args = Args::parse();
 
-    // --- Deferred features: clear notices, no silent no-op. ---
-    if args.discovered || args.discovered_details {
-        eprintln!(
-            "lnstatus: discovered interfaces (-d/-D) are not supported yet \
-             (depends on Codeberg #32)."
-        );
-        std::process::exit(2);
-    }
-
     // --- Resolve config dir / instance name. ---
     let config_dir = args
         .config
@@ -215,6 +207,14 @@ async fn main() {
                 .map(|c| c.reticulum.instance_name.clone())
         })
         .unwrap_or_else(|| "default".to_string());
+
+    // --- Discovered interfaces (-d/-D): read the local registry over the
+    // shared-instance RPC and render it. Matches rnstatus, which handles the
+    // discovered block before remote management and exits. ---
+    if args.discovered || args.discovered_details {
+        run_discovered(&args, &config_dir, loaded_config.as_ref(), &instance_name).await;
+        return;
+    }
 
     // --- Remote management (-R/-i/-w): query a remote transport instance. ---
     if args.remote.is_some() {
@@ -255,6 +255,52 @@ async fn main() {
             eprintln!("({e})");
             std::process::exit(2);
         }
+    }
+}
+
+/// `-d/--discovered` (list) and `-D` (details + config entries): read the
+/// discovered-interface registry from the local shared instance over the RPC
+/// and render it. Mirrors `rnstatus -d/-D`, which reads the local storage
+/// directly; we go through the RPC so the daemon owns the storage lifecycle.
+async fn run_discovered(
+    args: &Args,
+    config_dir: &Path,
+    config: Option<&Config>,
+    instance_name: &str,
+) {
+    let authkey = match resolve_authkey(config_dir, config) {
+        Ok(k) => k,
+        Err(msg) => {
+            eprintln!("No shared RNS instance available to get status from");
+            eprintln!("(cannot derive RPC authkey: {msg})");
+            std::process::exit(1);
+        }
+    };
+
+    let list =
+        match leviculum_std::rpc_query(instance_name, &authkey, "discovered_interfaces").await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Could not get RNS status");
+                eprintln!("({e})");
+                std::process::exit(2);
+            }
+        };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+
+    if args.json {
+        println!("{}", lnstatus_render::render_json(&list));
+    } else {
+        // -D selects the detailed layout with config entries; -d the summary.
+        let details = args.discovered_details;
+        print!(
+            "{}",
+            lnstatus_render::render_discovered(&list, details, args.filter.as_deref(), now)
+        );
     }
 }
 

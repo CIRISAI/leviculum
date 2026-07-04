@@ -11,6 +11,7 @@ use crate::driver::StdNodeCore;
 use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
 
 /// Dispatch an RPC request against node state and return the pickle-encoded response.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_request(
     request: &RpcRequest,
     core: &mut StdNodeCore,
@@ -18,6 +19,7 @@ pub(super) fn handle_request(
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
     auto_peer_count: usize,
+    discovery_storage: Option<&std::path::Path>,
     codec: Codec,
 ) -> Result<Vec<u8>, RpcError> {
     let response = match request {
@@ -31,6 +33,7 @@ pub(super) fn handle_request(
         ),
         RpcRequest::GetLinkCount => pickle_int(core.active_link_count() as i64),
         RpcRequest::GetLinkTable => build_link_table(core),
+        RpcRequest::GetDiscoveredInterfaces => build_discovered_interfaces(discovery_storage),
         RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
         RpcRequest::GetRateTable => build_rate_table(core, start_time),
         RpcRequest::GetNextHop { destination_hash } => get_next_hop(core, destination_hash),
@@ -113,6 +116,99 @@ pub(super) fn handle_request(
     };
 
     serialize_response(&response, codec)
+}
+
+// Discovered interfaces (rnstatus -d/-D, Codeberg #32)
+/// Build the `discovered_interfaces` response: a list of per-record dicts read
+/// from the persisted registry under `<storage>/discovery/interfaces`.
+///
+/// Each dict mirrors Python `list_discovered_interfaces`: the announce fields
+/// plus `status`/`status_code` derived from `last_heard`. `transport_id` /
+/// `network_id` are hex strings; `stamp` / `discovery_hash` are bytes; optional
+/// type-specific fields are present only when the record carries them. When no
+/// storage path is configured the list is empty (no discovery registry).
+fn build_discovered_interfaces(discovery_storage: Option<&std::path::Path>) -> Value {
+    let Some(storage_root) = discovery_storage else {
+        return pickle_list(vec![]);
+    };
+    let now = crate::discovery::now_unix_secs();
+    let records = crate::discovery::list_discovered_interfaces(storage_root, now);
+
+    let items = records
+        .into_iter()
+        .map(|r| {
+            let status = r.status(now);
+            let mut entries: Vec<(HashableValue, Value)> = vec![
+                (pickle_str_key("type"), pickle_str(&r.interface_type)),
+                (pickle_str_key("transport"), pickle_bool(r.transport)),
+                (pickle_str_key("name"), pickle_str(&r.name)),
+                (pickle_str_key("received"), pickle_float(r.received)),
+                (pickle_str_key("stamp"), pickle_bytes(&r.stamp)),
+                (pickle_str_key("value"), pickle_int(r.value as i64)),
+                (pickle_str_key("transport_id"), pickle_str(&r.transport_id)),
+                (pickle_str_key("network_id"), pickle_str(&r.network_id)),
+                (pickle_str_key("hops"), pickle_int(r.hops as i64)),
+                (pickle_str_key("latitude"), opt_float(r.latitude)),
+                (pickle_str_key("longitude"), opt_float(r.longitude)),
+                (pickle_str_key("height"), opt_float(r.height)),
+                (
+                    pickle_str_key("discovery_hash"),
+                    pickle_bytes(&r.discovery_hash),
+                ),
+                (pickle_str_key("discovered"), pickle_float(r.discovered)),
+                (pickle_str_key("last_heard"), pickle_float(r.last_heard)),
+                (
+                    pickle_str_key("heard_count"),
+                    pickle_int(r.heard_count as i64),
+                ),
+                (pickle_str_key("status"), pickle_str(status.as_str())),
+                (
+                    pickle_str_key("status_code"),
+                    pickle_int(status.code() as i64),
+                ),
+            ];
+            // Type-specific fields present only when the record carries them,
+            // matching Python (which sets keys conditionally per interface type).
+            if let Some(v) = &r.ifac_netname {
+                entries.push((pickle_str_key("ifac_netname"), pickle_str(v)));
+            }
+            if let Some(v) = &r.ifac_netkey {
+                entries.push((pickle_str_key("ifac_netkey"), pickle_str(v)));
+            }
+            if let Some(v) = &r.reachable_on {
+                entries.push((pickle_str_key("reachable_on"), pickle_str(v)));
+            }
+            if let Some(v) = r.port {
+                entries.push((pickle_str_key("port"), pickle_int(v as i64)));
+            }
+            if let Some(v) = r.frequency {
+                entries.push((pickle_str_key("frequency"), pickle_int(v as i64)));
+            }
+            if let Some(v) = r.bandwidth {
+                entries.push((pickle_str_key("bandwidth"), pickle_int(v as i64)));
+            }
+            if let Some(v) = r.sf {
+                entries.push((pickle_str_key("sf"), pickle_int(v as i64)));
+            }
+            if let Some(v) = r.cr {
+                entries.push((pickle_str_key("cr"), pickle_int(v as i64)));
+            }
+            if let Some(v) = &r.config_entry {
+                entries.push((pickle_str_key("config_entry"), pickle_str(v)));
+            }
+            pickle_dict(entries)
+        })
+        .collect();
+
+    pickle_list(items)
+}
+
+/// A float pickle value or Python `None` for an absent optional.
+fn opt_float(v: Option<f64>) -> Value {
+    match v {
+        Some(f) => pickle_float(f),
+        None => pickle_none(),
+    }
 }
 
 // Interface Stats (rnstatus)
@@ -898,8 +994,8 @@ mod tests {
                     identity_hash: vec![0x22u8; 16],
                 },
             ] {
-                let bytes =
-                    handle_request(&req, &mut core, start, &stats, &online, 0, codec).unwrap();
+                let bytes = handle_request(&req, &mut core, start, &stats, &online, 0, None, codec)
+                    .unwrap();
                 let value = decode(&bytes, codec);
                 assert!(
                     matches!(value, Value::Bool(false)),
@@ -938,7 +1034,7 @@ mod tests {
             }
         };
         let dispatch = |core: &mut StdNodeCore, req: &RpcRequest, codec: Codec| -> Value {
-            let bytes = handle_request(req, core, start, &stats, &online, 0, codec).unwrap();
+            let bytes = handle_request(req, core, start, &stats, &online, 0, None, codec).unwrap();
             decode(&bytes, codec)
         };
 

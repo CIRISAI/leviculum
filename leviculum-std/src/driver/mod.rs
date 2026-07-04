@@ -60,7 +60,7 @@ pub use stream::LinkHandle;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -658,6 +658,16 @@ impl ReticulumNode {
         self.storage_path = Some(path);
     }
 
+    /// The storage root under which the discovered-interface registry lives
+    /// (`<storage>/discovery/interfaces`). Falls back to the default config
+    /// dir's `storage` when no explicit path was configured, matching the
+    /// resolution used elsewhere in the run loop.
+    pub(crate) fn discovery_storage_root(&self) -> PathBuf {
+        self.storage_path
+            .clone()
+            .unwrap_or_else(|| crate::config::Config::default_config_dir().join("storage"))
+    }
+
     /// Start the node
     ///
     /// This spawns the internal event loop and initializes interfaces.
@@ -874,6 +884,11 @@ impl ReticulumNode {
                 )
             });
 
+        // Storage root for the discovered-interface registry: the event loop
+        // persists validated discovery announces under
+        // `<storage>/discovery/interfaces` (Codeberg #32).
+        let discovery_storage = Some(self.discovery_storage_root());
+
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
             run_event_loop(
@@ -890,6 +905,7 @@ impl ReticulumNode {
                 iface_online_map,
                 flush_interval_secs,
                 remote_mgmt,
+                discovery_storage,
             )
             .await;
         });
@@ -1705,6 +1721,7 @@ impl ReticulumNode {
                 Arc::clone(&self.iface_stats_map),
                 Arc::clone(&self.iface_online_map),
                 self.auto_peer_count_rx.as_ref().cloned(),
+                Some(self.discovery_storage_root()),
             ) {
                 tracing::warn!("Failed to start RPC server: {}", e);
             }
@@ -2612,6 +2629,7 @@ async fn recv_any(registry: &mut InterfaceRegistry) -> RecvEvent {
 /// The driver owns the interfaces and acts as the I/O bridge between the
 /// pure state machine (`NodeCore`) and the actual network. Uses `select!`
 /// to wake immediately on socket readability, outgoing data, or timer expiry.
+#[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     inner: Arc<Mutex<StdNodeCore>>,
     mut registry: InterfaceRegistry,
@@ -2620,6 +2638,7 @@ async fn run_event_loop(
     iface_online_map: InterfaceOnlineMap,
     flush_interval_secs: u64,
     remote_mgmt: Option<RemoteMgmtResponder>,
+    discovery_storage: Option<PathBuf>,
 ) {
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
@@ -2716,6 +2735,7 @@ async fn run_event_loop(
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                             remote_mgmt.as_ref(),
+                            discovery_storage.as_deref(),
                         );
                     }
                     RecvEvent::Disconnected(iface_id) => {
@@ -2731,6 +2751,7 @@ async fn run_event_loop(
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                             remote_mgmt.as_ref(),
+                            discovery_storage.as_deref(),
                         );
                         // Clear retry queue for disconnected interface. The legacy
                         // is_interface_congested flag was removed in Phase F;
@@ -2761,6 +2782,7 @@ async fn run_event_loop(
                     &inner,
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                     remote_mgmt.as_ref(),
+                    discovery_storage.as_deref(),
                 );
             }
 
@@ -2789,6 +2811,7 @@ async fn run_event_loop(
                     &inner,
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                     remote_mgmt.as_ref(),
+                    discovery_storage.as_deref(),
                 );
 
                 // Advance next_poll based on next_deadline_ms
@@ -2820,6 +2843,7 @@ async fn run_event_loop(
                             &inner,
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                             remote_mgmt.as_ref(),
+                            discovery_storage.as_deref(),
                         );
                     }
                     // Bounded graceful flush: dispatch only pushes onto the
@@ -2880,7 +2904,7 @@ async fn run_event_loop(
                         let mut core = inner.lock().unwrap();
                         core.handle_interface_up(iface_idx)
                     };
-                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref());
+                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref());
                 }
             }
 
@@ -2901,7 +2925,7 @@ async fn run_event_loop(
                     let mut core = inner.lock().unwrap();
                     core.handle_interface_up(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref());
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref());
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
@@ -2977,6 +3001,7 @@ fn dispatch_output(
     retry_queue_max_depth: &mut BTreeMap<usize, usize>,
     ifac_configs: &BTreeMap<usize, leviculum_core::ifac::IfacConfig>,
     remote_mgmt: Option<&RemoteMgmtResponder>,
+    discovery_storage: Option<&Path>,
 ) {
     // Drain retry queues before dispatching new actions
     let drain_now_ms = inner.lock().unwrap().now_ms();
@@ -3073,6 +3098,20 @@ fn dispatch_output(
         }
     }
 
+    // Discovered-interface registry (Codeberg #32): a validated announce on the
+    // `rnstransport.discovery.interface` destination is persisted as a
+    // discovered-interface record. Detection is by the destination's name hash,
+    // so it stays independent of the announcing node's identity (like Python's
+    // aspect-filtered announce handler). Reads the same raw `output.events` as
+    // the mgmt responder, so it works in daemon mode (no app event sink).
+    if let Some(storage_root) = discovery_storage {
+        for event in &output.events {
+            if let NodeEvent::AnnounceReceived { announce, .. } = event {
+                record_discovery_announce(inner, storage_root, announce);
+            }
+        }
+    }
+
     // Forward events to the application via the split-plane EventSink:
     // control events lossless-by-default (overflow surfaced via
     // ControlPlaneOverflow), data events droppable under load (Codeberg #71).
@@ -3102,6 +3141,59 @@ fn dispatch_output(
             retry_queue_max_depth,
             ifac_configs,
             None,
+            // Management responses carry no announces; no discovery persistence.
+            None,
+        );
+    }
+}
+
+/// Persist a discovery announce into the discovered-interface registry, if it
+/// is one. Filters by the `rnstransport.discovery.interface` destination name
+/// hash, validates+decodes the announce `app_data` (PoW stamp check), and
+/// writes the record under `<storage>/discovery/interfaces` (Codeberg #32).
+///
+/// Non-discovery announces (the overwhelming majority) are rejected by the
+/// name-hash compare before any parsing, so this stays cheap on the hot path.
+fn record_discovery_announce(
+    inner: &Arc<Mutex<StdNodeCore>>,
+    storage_root: &Path,
+    announce: &leviculum_core::ReceivedAnnounce,
+) {
+    use leviculum_core::discovery::{APP_NAME, DEFAULT_STAMP_VALUE, DISCOVERY_ASPECTS};
+
+    let discovery_name_hash =
+        leviculum_core::Destination::compute_name_hash(APP_NAME, &DISCOVERY_ASPECTS);
+    if announce.name_hash() != &discovery_name_hash {
+        return;
+    }
+
+    let network_id = announce.computed_identity_hash();
+    let Some(di) = leviculum_core::discovery::parse_announce_app_data(
+        announce.app_data(),
+        &network_id,
+        DEFAULT_STAMP_VALUE,
+    ) else {
+        tracing::debug!("discovery: announce on discovery destination failed validation");
+        return;
+    };
+
+    let hops = inner
+        .lock()
+        .unwrap()
+        .hops_to(announce.destination_hash())
+        .map(|h| h as u32)
+        .unwrap_or(1);
+    let now = crate::discovery::now_unix_secs();
+
+    if let Err(e) = crate::discovery::persist_discovered(storage_root, &di, hops, now) {
+        tracing::warn!("discovery: failed to persist discovered interface: {e}");
+    } else {
+        tracing::debug!(
+            "discovery: stored {} \"{}\" ({} hop(s), stamp value {})",
+            di.interface_type,
+            di.name,
+            hops,
+            di.value
         );
     }
 }
@@ -3448,6 +3540,7 @@ mod tests {
             &mut retry_queue_warned,
             &mut retry_queue_max_depth,
             &ifac_configs,
+            None,
             None,
         );
     }

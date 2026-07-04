@@ -15,6 +15,7 @@
 pub mod api;
 pub(crate) mod clock;
 pub mod config;
+pub(crate) mod discovery;
 pub mod driver;
 pub mod error;
 pub mod event_log;

@@ -280,3 +280,123 @@ fn default_hides_local_and_client_interfaces() {
     );
     assert!(shown.contains("LocalInterface[shared]"));
 }
+
+// ---------------------------------------------------------------------------
+// -d / -D discovered interfaces (Codeberg #32)
+// ---------------------------------------------------------------------------
+
+/// One RNode discovered-interface record as `rpc_query` yields it (bytes are
+/// already hex strings; ids as hex; timestamps as epoch seconds).
+fn rnode_record() -> Value {
+    serde_json::json!({
+        "type": "RNodeInterface",
+        "transport": true,
+        "name": "Node A",
+        "received": 1000.0,
+        "value": 15,
+        "transport_id": "abababababababababababababababab",
+        "network_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "hops": 2,
+        "latitude": 52.5,
+        "longitude": 13.4,
+        "height": null,
+        "frequency": 867200000,
+        "bandwidth": 125000,
+        "sf": 8,
+        "cr": 5,
+        "config_entry": "[[Node A]]\n  type = RNodeInterface\n  enabled = yes\n  port = \n  frequency = 867200000\n  bandwidth = 125000\n  spreadingfactor = 8\n  codingrate = 5\n  txpower = ",
+        "discovered": 1000.0,
+        "last_heard": 1000.0,
+        "heard_count": 0,
+        "status": "available",
+        "status_code": 1000
+    })
+}
+
+#[test]
+fn discovered_detail_renders_python_lines() {
+    let list = Value::Array(vec![rnode_record()]);
+    let out = render_discovered(&list, true, None, 1000.0);
+    // transport_id != network_id -> both shown.
+    assert!(out.contains("Network   ID : cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\n"));
+    assert!(out.contains("Transport ID : abababababababababababababababab\n"));
+    assert!(out.contains("Name         : Node A\n"));
+    assert!(out.contains("Type         : RNodeInterface\n"));
+    assert!(out.contains("Status       : Available\n"));
+    assert!(out.contains("Transport    : Enabled\n"));
+    assert!(out.contains("Distance     : 2 hops\n"));
+    assert!(out.contains("Discovered   : 0s ago\n"));
+    assert!(out.contains("Last Heard   : 0s ago\n"));
+    assert!(out.contains("Location     : 52.5, 13.4\n"));
+    // {:,} thousands grouping.
+    assert!(out.contains("Frequency    : 867,200,000 Hz\n"));
+    assert!(out.contains("Bandwidth    : 125,000 Hz\n"));
+    assert!(out.contains("Sprd. Factor : 8\n"));
+    assert!(out.contains("Coding Rate  : 5\n"));
+    assert!(out.contains("Stamp Value  : 15\n"));
+    // Config entry indented by two spaces per line.
+    assert!(out.contains("\nConfiguration Entry:\n"));
+    assert!(out.contains("  [[Node A]]\n"));
+    assert!(out.contains("  spreadingfactor = 8\n"));
+}
+
+#[test]
+fn discovered_list_renders_python_columns() {
+    let list = Value::Array(vec![rnode_record()]);
+    let out = render_discovered(&list, false, None, 1000.0);
+    assert!(out.contains(
+        "Name                      Type         Status       Last Heard   Value    Location       "
+    ));
+    assert!(out.contains(&"-".repeat(89)));
+    // Type drops the "Interface" suffix; status carries the ✓ glyph; last heard
+    // "Just now" for a sub-minute delta.
+    assert!(out.contains("Node A"));
+    assert!(out.contains("RNode"));
+    assert!(out.contains("✓ Available"));
+    assert!(out.contains("Just now"));
+}
+
+#[test]
+fn discovered_list_last_heard_buckets() {
+    let mut r = rnode_record();
+    r["last_heard"] = serde_json::json!(0.0);
+    let list = Value::Array(vec![r]);
+    // 2h since last_heard -> "2h ago".
+    let out = render_discovered(&list, false, None, 7200.0);
+    assert!(out.contains("2h ago"), "got: {out}");
+    // 3 days -> "3d ago".
+    let mut r2 = rnode_record();
+    r2["last_heard"] = serde_json::json!(0.0);
+    let out2 = render_discovered(&Value::Array(vec![r2]), false, None, 3.0 * 86400.0);
+    assert!(out2.contains("3d ago"));
+}
+
+#[test]
+fn discovered_name_filter_applies() {
+    let mut other = rnode_record();
+    other["name"] = serde_json::json!("Other");
+    let list = Value::Array(vec![rnode_record(), other]);
+    let out = render_discovered(&list, true, Some("node"), 1000.0);
+    assert!(out.contains("Name         : Node A\n"));
+    assert!(!out.contains("Name         : Other\n"));
+}
+
+#[test]
+fn discovered_json_passthrough() {
+    let list = Value::Array(vec![rnode_record()]);
+    let s = render_json(&list);
+    let back: Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(back, list);
+}
+
+#[test]
+fn thousands_and_compact_time_match_python() {
+    assert_eq!(fmt_thousands(867200000), "867,200,000");
+    assert_eq!(fmt_thousands(125000), "125,000");
+    assert_eq!(fmt_thousands(5), "5");
+    assert_eq!(prettytime_compact(0.0), "0s");
+    assert_eq!(prettytime_compact(90.0), "1m and 30s");
+    assert_eq!(prettytime_compact(3661.0), "1h and 1m");
+    // Compact keeps only the two most-significant components.
+    assert_eq!(prettytime_compact(90061.0), "1d and 1h");
+}

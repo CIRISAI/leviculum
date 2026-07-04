@@ -505,3 +505,132 @@ async fn test_announce_hash_derivation_match() {
     println!("  Packet hash:   {}", hex::encode(packet.destination_hash));
     println!("  Computed hash: {}", hex::encode(computed_dest_hash));
 }
+
+// =========================================================================
+// Discovered-interface registry wire interop (Codeberg #32, sub-task c)
+// =========================================================================
+
+/// The persisted discovered-interface record is a string-keyed msgpack map that
+/// must be drop-in compatible with Python `RNS.Discovery.InterfaceDiscovery`
+/// (shared storage: `rnstatus -d` reads our files and vice versa). This drives
+/// the REAL vendored `RNS.vendor.umsgpack`:
+///
+/// 1. Rust encodes a record; Python `umsgpack.unpackb` reads it and reports the
+///    fields back (Python can decode our layout).
+/// 2. Python `umsgpack.packb` builds the equivalent record dict; Rust
+///    `decode_msgpack` reads it back into an identical record (we can decode
+///    Python's layout).
+#[test]
+fn discovered_record_msgpack_interops_with_python_umsgpack() {
+    use leviculum_core::discovery::{DiscoveredInterface, DiscoveredInterfaceRecord, STAMP_SIZE};
+    use std::process::Command;
+
+    // Shared fixture: an RNode discovery record with fixed timestamps.
+    let di = DiscoveredInterface {
+        interface_type: "RNodeInterface".to_string(),
+        transport: true,
+        name: "Node A".to_string(),
+        transport_id: [0xAB; 16],
+        network_id: [0xCD; 16],
+        value: 15,
+        stamp: [0x11; STAMP_SIZE],
+        latitude: Some(52.5),
+        longitude: Some(13.4),
+        height: None,
+        reachable_on: None,
+        port: None,
+        frequency: Some(867_200_000),
+        bandwidth: Some(125_000),
+        spreadingfactor: Some(8),
+        codingrate: Some(5),
+        ifac_netname: None,
+        ifac_netkey: None,
+        discovery_hash: [0x22; STAMP_SIZE],
+    };
+    let ts = 1_700_000_000.0_f64;
+    let record = DiscoveredInterfaceRecord::from_discovered(&di, 2, ts, ts, ts, 0);
+    let rust_bytes = record.encode_msgpack();
+
+    let workdir = tempfile::tempdir().unwrap();
+    let rust_bytes_path = workdir.path().join("rust_record.mp");
+    let out_json_path = workdir.path().join("python_decoded.json");
+    let py_pack_path = workdir.path().join("python_record.mp");
+    std::fs::write(&rust_bytes_path, &rust_bytes).unwrap();
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let vendor_dir = manifest_dir.join("../vendor/Reticulum");
+
+    // Python: unpack our bytes with the real umsgpack, dump the fields (bytes ->
+    // hex) as JSON, then build the equivalent record dict and pack it back.
+    let script = r#"
+import sys, json
+from RNS.vendor import umsgpack
+
+rust_bytes_path, out_json_path, py_pack_path = sys.argv[1:4]
+
+with open(rust_bytes_path, "rb") as f:
+    info = umsgpack.unpackb(f.read())
+
+def jsonable(v):
+    if isinstance(v, bytes):
+        return v.hex()
+    return v
+
+with open(out_json_path, "w") as f:
+    json.dump({k: jsonable(v) for k, v in info.items()}, f)
+
+name = "Node A"; freq = 867200000; bw = 125000; sf = 8; cr = 5
+config_entry = (f"[[{name}]]\n  type = RNodeInterface\n  enabled = yes\n  port = \n"
+                f"  frequency = {freq}\n  bandwidth = {bw}\n  spreadingfactor = {sf}\n"
+                f"  codingrate = {cr}\n  txpower = ")
+py_info = {
+    "type": "RNodeInterface", "transport": True, "name": name,
+    "received": 1700000000.0, "stamp": bytes([0x11])*32, "value": 15,
+    "transport_id": "ab"*16, "network_id": "cd"*16, "hops": 2,
+    "latitude": 52.5, "longitude": 13.4, "height": None,
+    "frequency": freq, "bandwidth": bw, "sf": sf, "cr": cr,
+    "config_entry": config_entry, "discovery_hash": bytes([0x22])*32,
+    "discovered": 1700000000.0, "last_heard": 1700000000.0, "heard_count": 0,
+}
+with open(py_pack_path, "wb") as f:
+    f.write(umsgpack.packb(py_info))
+"#;
+
+    let status = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(&rust_bytes_path)
+        .arg(&out_json_path)
+        .arg(&py_pack_path)
+        .env("PYTHONPATH", &vendor_dir)
+        .status()
+        .expect("failed to run python3 (needed for umsgpack interop)");
+    assert!(status.success(), "python umsgpack interop script failed");
+
+    // (1) Python decoded our record correctly.
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&out_json_path).unwrap()).unwrap();
+    assert_eq!(decoded["type"], "RNodeInterface");
+    assert_eq!(decoded["name"], "Node A");
+    assert_eq!(decoded["transport_id"], "abababababababababababababababab");
+    assert_eq!(decoded["hops"], 2);
+    assert_eq!(decoded["value"], 15);
+    assert_eq!(decoded["sf"], 8);
+    assert_eq!(decoded["discovered"], 1_700_000_000.0);
+    assert_eq!(
+        decoded["config_entry"].as_str().unwrap(),
+        record.config_entry.as_deref().unwrap()
+    );
+    // stamp / discovery_hash survive as bytes (hex-dumped here).
+    assert_eq!(decoded["stamp"], "11".repeat(32));
+    assert_eq!(decoded["discovery_hash"], "22".repeat(32));
+
+    // (2) We decode Python's packed record back into an identical record.
+    let py_bytes = std::fs::read(&py_pack_path).unwrap();
+    let from_python = DiscoveredInterfaceRecord::decode_msgpack(&py_bytes)
+        .expect("must decode Python-packed record");
+    assert_eq!(
+        from_python, record,
+        "record from Python umsgpack must equal the Rust-built record"
+    );
+}
