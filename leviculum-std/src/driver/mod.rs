@@ -2790,6 +2790,57 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
 mod tests {
     use super::*;
 
+    /// Codeberg #90: build_ifac_config derives an IFAC only when a
+    /// network_name and/or passphrase is present, picks the Python per-type
+    /// DEFAULT_IFAC_SIZE when ifac_size is unset (16 bytes for network
+    /// interfaces, 8 for serial/RNode), and honours an explicit size.
+    #[test]
+    fn build_ifac_config_semantics() {
+        // Neither network_name nor passphrase → no IFAC (a lone ifac_size is a
+        // no-op, matching Python which needs a netname or netkey).
+        let cfg = InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            ifac_size: Some(16),
+            ..Default::default()
+        };
+        assert!(build_ifac_config(&cfg).is_none());
+
+        // network_name only, no explicit size → TCP default of 16 bytes, and
+        // the derived identity matches a direct construction at that size.
+        let cfg = InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            networkname: Some("mynet".to_string()),
+            ..Default::default()
+        };
+        let built = build_ifac_config(&cfg).expect("IFAC built");
+        assert_eq!(built.ifac_size(), 16);
+        let expected =
+            leviculum_core::ifac::IfacConfig::new(Some("mynet"), None, 16).expect("valid");
+        assert_eq!(built.identity().hash(), expected.identity().hash());
+
+        // RNode default size is 8 bytes.
+        let cfg = InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            passphrase: Some("s3cret".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(build_ifac_config(&cfg).expect("IFAC built").ifac_size(), 8);
+
+        // Explicit ifac_size (bytes) overrides the default.
+        let cfg = InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            networkname: Some("mynet".to_string()),
+            passphrase: Some("s3cret".to_string()),
+            ifac_size: Some(8),
+            ..Default::default()
+        };
+        let built = build_ifac_config(&cfg).expect("IFAC built");
+        assert_eq!(built.ifac_size(), 8);
+        let expected =
+            leviculum_core::ifac::IfacConfig::new(Some("mynet"), Some("s3cret"), 8).expect("valid");
+        assert_eq!(built.identity().hash(), expected.identity().hash());
+    }
+
     /// Codeberg #67 Stage 2a: build_announce_rate_config mirrors Python's
     /// validation (Reticulum.py:798-821): target kept only when > 0, a set
     /// target defaults an unset penalty/grace to 0, and no keys → None.

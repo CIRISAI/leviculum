@@ -106,8 +106,13 @@ class TestDaemon:
                  share_instance: bool = False, instance_name: str = None,
                  echo_channel: bool = False, respond_to_probes: bool = False,
                  enable_remote_management: bool = False,
-                 remote_management_allowed: list = None):
+                 remote_management_allowed: list = None,
+                 ifac_netname: str = None, ifac_passphrase: str = None,
+                 ifac_size: int = None):
         self.rns_port = rns_port
+        self.ifac_netname = ifac_netname
+        self.ifac_passphrase = ifac_passphrase
+        self.ifac_size = ifac_size
         self.cmd_port = cmd_port
         self.udp_listen_port = udp_listen_port
         self.udp_forward_port = udp_forward_port
@@ -200,6 +205,16 @@ class TestDaemon:
     listen_port = {self.rns_port}
     mode = gateway
 """
+        # IFAC (Interface Access Code) on the TCP server. Python derives the
+        # ifac_identity/ifac_key natively from these keys (Reticulum.py:747-766,
+        # 923-935), so this daemon is the byte-for-byte reference for the Rust
+        # IFAC implementation.
+        if self.ifac_netname is not None:
+            config += f"    network_name = {self.ifac_netname}\n"
+        if self.ifac_passphrase is not None:
+            config += f"    passphrase = {self.ifac_passphrase}\n"
+        if self.ifac_size is not None:
+            config += f"    ifac_size = {self.ifac_size}\n"
         if self.udp_listen_port and self.udp_forward_port:
             config += f"""
   [[Test UDP Interface]]
@@ -1560,6 +1575,12 @@ def main():
     parser.add_argument("--remote-management-allowed", type=str, action="append",
                         default=None,
                         help="Hex identity hash allowed to remote-manage (repeatable)")
+    parser.add_argument("--ifac-netname", type=str, default=None,
+                        help="IFAC network_name for the TCP server interface")
+    parser.add_argument("--ifac-passphrase", type=str, default=None,
+                        help="IFAC passphrase for the TCP server interface")
+    parser.add_argument("--ifac-size", type=int, default=None,
+                        help="IFAC size in bits for the TCP server interface")
 
     args = parser.parse_args()
 
@@ -1583,6 +1604,9 @@ def main():
         respond_to_probes=args.respond_to_probes,
         enable_remote_management=args.enable_remote_management,
         remote_management_allowed=args.remote_management_allowed,
+        ifac_netname=args.ifac_netname,
+        ifac_passphrase=args.ifac_passphrase,
+        ifac_size=args.ifac_size,
     )
     daemon.run()
 

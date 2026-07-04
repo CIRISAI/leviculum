@@ -695,6 +695,131 @@ impl TestDaemon {
         }
     }
 
+    /// Start a daemon whose TCPServerInterface is IFAC-protected with the
+    /// given `network_name` / `passphrase` (and optional `ifac_size` in bits),
+    /// with `respond_to_probes` on so the inbound announce direction is
+    /// observable. Python derives the IFAC identity/key natively from these
+    /// config keys, making this daemon the byte-for-byte reference for the
+    /// Rust IFAC apply/verify path (Codeberg #90).
+    pub async fn start_with_ifac(
+        netname: &str,
+        passphrase: &str,
+        ifac_size_bits: Option<u32>,
+    ) -> Result<Self, HarnessError> {
+        ensure_reticulum_submodule()?;
+
+        let mut last_error = HarnessError::StartupTimeout;
+
+        for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            let (rns_port, cmd_port) = find_two_available_ports()?;
+
+            match Self::start_with_ifac_ports(
+                rns_port,
+                cmd_port,
+                netname,
+                passphrase,
+                ifac_size_bits,
+            )
+            .await
+            {
+                Ok(daemon) => return Ok(daemon),
+                Err(HarnessError::StartupTimeout) => {
+                    if attempt + 1 < Self::MAX_STARTUP_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    last_error = HarnessError::StartupTimeout;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_error)
+    }
+
+    async fn start_with_ifac_ports(
+        rns_port: u16,
+        cmd_port: u16,
+        netname: &str,
+        passphrase: &str,
+        ifac_size_bits: Option<u32>,
+    ) -> Result<Self, HarnessError> {
+        let rns_port_s = rns_port.to_string();
+        let cmd_port_s = cmd_port.to_string();
+        let mut args: Vec<String> = vec![
+            Self::DAEMON_SCRIPT.to_string(),
+            "--rns-port".to_string(),
+            rns_port_s,
+            "--cmd-port".to_string(),
+            cmd_port_s,
+            "--respond-to-probes".to_string(),
+            "--ifac-netname".to_string(),
+            netname.to_string(),
+            "--ifac-passphrase".to_string(),
+            passphrase.to_string(),
+        ];
+        if let Some(bits) = ifac_size_bits {
+            args.push("--ifac-size".to_string());
+            args.push(bits.to_string());
+        }
+
+        let mut process = Command::new("python3")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(HarnessError::SpawnFailed)?;
+
+        let stdout = process.stdout.take().expect("stdout should be captured");
+        let reader = BufReader::new(stdout);
+
+        let ready_result = tokio::task::spawn_blocking(move || {
+            let mut probe_hash = None;
+            for line in reader.lines() {
+                match line {
+                    Ok(line) if line.starts_with("PROBE_DEST:") => {
+                        probe_hash = Some(line["PROBE_DEST:".len()..].trim().to_string());
+                    }
+                    Ok(line) if line.starts_with("READY ") => {
+                        return Ok((line, probe_hash));
+                    }
+                    Ok(_) => continue,
+                    Err(e) => return Err(HarnessError::ParseError(e.to_string())),
+                }
+            }
+            Err(HarnessError::StartupTimeout)
+        });
+
+        let (ready_line, probe_dest_hash) = timeout(Self::STARTUP_TIMEOUT, ready_result)
+            .await
+            .map_err(|_| HarnessError::StartupTimeout)?
+            .map_err(|_| HarnessError::StartupTimeout)??;
+
+        let cmd_port = Self::parse_ready_cmd_port(&ready_line)?;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut daemon = Self {
+            process,
+            rns_port,
+            cmd_port,
+            udp_listen_port: None,
+            udp_forward_port: None,
+            probe_dest_hash,
+            initial_peer_count: 0,
+        };
+
+        match daemon.ping().await {
+            Ok(_) => {
+                daemon.snapshot_initial_peer_count().await;
+                Ok(daemon)
+            }
+            Err(e) => {
+                drop(daemon);
+                Err(e)
+            }
+        }
+    }
+
     /// Kill this daemon and restart it on the same ports.
     ///
     /// The new daemon is a fresh Python process with empty state, all

@@ -132,18 +132,44 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     }
 
     // IFAC keys (network_name/networkname/passphrase/pass_phrase/ifac_size) are
-    // parsed and retained but NOT yet enforced by lnsd (Codeberg #90). An
-    // interface that configures them will run UNAUTHENTICATED, so a config that
-    // relies on IFAC to gate the network would silently admit us in the clear.
-    // Warn loudly, once per affected interface, rather than dropping the keys
-    // silently. The interface is still accepted (parsed) so drop-in loading of a
-    // stock rnsd config keeps working.
+    // now enforced by lnsd (Codeberg #90): the driver derives an IfacConfig and
+    // the transport applies the HMAC on TX and verifies + drops on RX. A VALID
+    // IFAC config must therefore NOT warn -- it is authenticated on the air.
+    //
+    // Two cases still deserve a warning:
+    //   1. IFAC is requested (network_name and/or passphrase) but the derived
+    //      IfacConfig would be INVALID (e.g. an out-of-range ifac_size), which
+    //      would silently leave the interface unauthenticated.
+    //   2. `ifac_size` is set with NEITHER network_name nor passphrase. Python
+    //      needs a netname or netkey to enable IFAC (Reticulum.py:923-926), so
+    //      a lone ifac_size is a no-op -- flag the likely misconfiguration.
     for (name, iface) in interfaces.iter() {
-        if iface.networkname.is_some() || iface.passphrase.is_some() || iface.ifac_size.is_some() {
+        let has_ident = iface.networkname.is_some() || iface.passphrase.is_some();
+        if has_ident {
+            let size = iface
+                .ifac_size
+                .unwrap_or(match iface.interface_type.as_str() {
+                    "RNodeInterface" | "SerialInterface" => 8,
+                    _ => 16,
+                });
+            if leviculum_core::ifac::IfacConfig::new(
+                iface.networkname.as_deref(),
+                iface.passphrase.as_deref(),
+                size,
+            )
+            .is_err()
+            {
+                tracing::warn!(
+                    "interface '{}': IFAC (network_name/passphrase) is configured but the \
+                     derived access code is INVALID (check ifac_size) -- this interface will \
+                     run UNAUTHENTICATED and cannot join the IFAC-protected network.",
+                    name
+                );
+            }
+        } else if iface.ifac_size.is_some() {
             tracing::warn!(
-                "interface '{}': IFAC (network_name/passphrase) is configured but NOT yet \
-                 enforced by lnsd (see Codeberg #90) -- this interface will run UNAUTHENTICATED \
-                 and cannot join the IFAC-protected network.",
+                "interface '{}': ifac_size is set without network_name or passphrase -- IFAC \
+                 needs one of those to be enabled, so ifac_size alone has no effect.",
                 name
             );
         }
@@ -300,7 +326,19 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "announce_rate_grace" => iface.announce_rate_grace = value.parse().ok(),
         "networkname" | "network_name" => iface.networkname = Some(value.to_string()),
         "passphrase" | "pass_phrase" => iface.passphrase = Some(value.to_string()),
-        "ifac_size" => iface.ifac_size = value.parse::<usize>().ok().map(|bits| bits / 8),
+        // `ifac_size` is specified in BITS and stored in BYTES. Python only
+        // honours it when it is at least `IFAC_MIN_SIZE*8` bits (= 8 bits =
+        // 1 byte); a smaller value is dropped so the interface falls back to
+        // its per-type DEFAULT_IFAC_SIZE (Reticulum.py:747-750). Mirror that
+        // guard exactly, otherwise a sub-8-bit value would round down to 0
+        // bytes and silently disable IFAC where Python keeps it enabled.
+        "ifac_size" => {
+            iface.ifac_size = value
+                .parse::<usize>()
+                .ok()
+                .filter(|&bits| bits >= 8)
+                .map(|bits| bits / 8)
+        }
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
@@ -420,6 +458,120 @@ mod tests {
         assert!(client.enabled);
         assert_eq!(client.target_host, Some("127.0.0.1".to_string()));
         assert_eq!(client.target_port, Some(4243));
+    }
+
+    #[test]
+    fn test_parse_ifac_keys() {
+        // network_name + passphrase + ifac_size (in BITS) parse into the
+        // interface config; ifac_size is stored in BYTES.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Secure TCP]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4242
+    network_name = mynet
+    passphrase = s3cret
+    ifac_size = 128
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Secure TCP").expect("iface");
+        assert_eq!(iface.networkname.as_deref(), Some("mynet"));
+        assert_eq!(iface.passphrase.as_deref(), Some("s3cret"));
+        // 128 bits / 8 = 16 bytes
+        assert_eq!(iface.ifac_size, Some(16));
+    }
+
+    #[test]
+    fn test_parse_ifac_alt_spellings() {
+        // The Python config accepts both `networkname`/`network_name` and
+        // `passphrase`/`pass_phrase`. Both spellings must populate the same
+        // field so a drop-in rnsd config authenticates identically.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Alt Spelling]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4242
+    networkname = altnet
+    pass_phrase = altpass
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Alt Spelling").expect("iface");
+        assert_eq!(iface.networkname.as_deref(), Some("altnet"));
+        assert_eq!(iface.passphrase.as_deref(), Some("altpass"));
+    }
+
+    #[test]
+    fn test_parse_ifac_size_below_min_dropped() {
+        // Python drops an ifac_size below IFAC_MIN_SIZE*8 (= 8 bits) so the
+        // interface falls back to its per-type default. We must do the same:
+        // a value of 4 bits must NOT round down to 0 bytes.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Tiny IFAC]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4242
+    network_name = mynet
+    ifac_size = 4
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Tiny IFAC").expect("iface");
+        assert_eq!(
+            iface.ifac_size, None,
+            "sub-8-bit ifac_size must be dropped, not stored as 0 bytes"
+        );
+        // A valid IFAC config is still derivable from network_name alone, using
+        // the interface default size (16 bytes for TCP).
+        let ifac = leviculum_core::ifac::IfacConfig::new(iface.networkname.as_deref(), None, 16);
+        assert!(ifac.is_ok());
+    }
+
+    #[test]
+    fn test_parse_ifac_config_builds_expected_identity() {
+        // The parsed keys must derive the SAME IFAC identity as constructing
+        // the IfacConfig directly from those values -- this is what the driver
+        // does when it enforces IFAC, so it pins the config-to-crypto path.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Secure]]
+    type = TCPClientInterface
+    target_host = 127.0.0.1
+    target_port = 4242
+    network_name = mynet
+    passphrase = s3cret
+    ifac_size = 128
+"#,
+        )
+        .unwrap();
+        let iface = config.interfaces.get("Secure").expect("iface");
+
+        let from_parsed = leviculum_core::ifac::IfacConfig::new(
+            iface.networkname.as_deref(),
+            iface.passphrase.as_deref(),
+            iface.ifac_size.unwrap(),
+        )
+        .expect("valid IFAC config");
+        let direct = leviculum_core::ifac::IfacConfig::new(Some("mynet"), Some("s3cret"), 16)
+            .expect("valid IFAC config");
+
+        assert_eq!(from_parsed.ifac_size(), 16);
+        assert_eq!(
+            from_parsed.identity().hash(),
+            direct.identity().hash(),
+            "parsed IFAC keys must derive the canonical IFAC identity"
+        );
     }
 
     #[test]
