@@ -244,7 +244,37 @@ impl TestDaemon {
 
     /// Start a daemon with specific ports (useful for debugging).
     pub async fn start_with_ports(rns_port: u16, cmd_port: u16) -> Result<Self, HarnessError> {
-        Self::start_with_ports_and_options(rns_port, cmd_port, None).await
+        Self::start_with_ports_and_options(rns_port, cmd_port, Vec::new()).await
+    }
+
+    /// Start a daemon with remote management (`rnstatus -R`) enabled, allowing
+    /// the given hex identity hash to query `/status`. Mirrors Python's
+    /// `enable_remote_management = yes` + `remote_management_allowed = <hash>`
+    /// config (`Reticulum.py:548-561`, `Transport.py:253-259`). The daemon's own
+    /// transport identity hash (needed to derive the management destination)
+    /// is read via [`Self::get_transport_status`].
+    pub async fn start_with_remote_management(allowed_hash: &str) -> Result<Self, HarnessError> {
+        ensure_reticulum_submodule()?;
+        let extra = vec![
+            "--enable-remote-management".to_string(),
+            "--remote-management-allowed".to_string(),
+            allowed_hash.to_string(),
+        ];
+        let mut last_error = HarnessError::StartupTimeout;
+        for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            let (rns_port, cmd_port) = find_two_available_ports()?;
+            match Self::start_with_ports_and_options(rns_port, cmd_port, extra.clone()).await {
+                Ok(daemon) => return Ok(daemon),
+                Err(HarnessError::StartupTimeout) => {
+                    if attempt + 1 < Self::MAX_STARTUP_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    last_error = HarnessError::StartupTimeout;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_error)
     }
 
     /// Start a daemon with an override of Python's
@@ -258,8 +288,11 @@ impl TestDaemon {
         let mut last_error = HarnessError::StartupTimeout;
         for attempt in 0..Self::MAX_STARTUP_RETRIES {
             let (rns_port, cmd_port) = find_two_available_ports()?;
-            match Self::start_with_ports_and_options(rns_port, cmd_port, Some(interval_secs)).await
-            {
+            let extra = vec![
+                "--mgmt-announce-interval-seconds".to_string(),
+                interval_secs.to_string(),
+            ];
+            match Self::start_with_ports_and_options(rns_port, cmd_port, extra).await {
                 Ok(daemon) => return Ok(daemon),
                 Err(HarnessError::StartupTimeout) => {
                     if attempt + 1 < Self::MAX_STARTUP_RETRIES {
@@ -276,7 +309,7 @@ impl TestDaemon {
     async fn start_with_ports_and_options(
         rns_port: u16,
         cmd_port: u16,
-        mgmt_announce_interval_secs: Option<u32>,
+        extra_args: Vec<String>,
     ) -> Result<Self, HarnessError> {
         let mut args: Vec<String> = vec![
             Self::DAEMON_SCRIPT.to_string(),
@@ -285,10 +318,7 @@ impl TestDaemon {
             "--cmd-port".to_string(),
             cmd_port.to_string(),
         ];
-        if let Some(secs) = mgmt_announce_interval_secs {
-            args.push("--mgmt-announce-interval-seconds".to_string());
-            args.push(secs.to_string());
-        }
+        args.extend(extra_args);
         let mut process = Command::new("python3")
             .args(&args)
             .stdout(Stdio::piped())

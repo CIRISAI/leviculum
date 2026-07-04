@@ -377,6 +377,16 @@ pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
                 Some(())
             }
         }
+        // str32
+        0xdb => {
+            let len = read_be_u32(data, pos)? as usize;
+            *pos += len;
+            if *pos > data.len() {
+                None
+            } else {
+                Some(())
+            }
+        }
         // bin8
         0xc4 => {
             let len = read_byte(data, pos)? as usize;
@@ -407,9 +417,45 @@ pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
                 Some(())
             }
         }
+        // fixext1 / fixext2 / fixext4 / fixext8 / fixext16: 1 type byte + N data bytes
+        0xd4..=0xd8 => {
+            let n = 1usize << (tag - 0xd4); // 1, 2, 4, 8, 16
+            *pos += 1 + n; // type byte + payload
+            if *pos > data.len() {
+                None
+            } else {
+                Some(())
+            }
+        }
+        // ext8 / ext16 / ext32: length prefix + 1 type byte + data
+        0xc7..=0xc9 => {
+            let len = match tag {
+                0xc7 => read_byte(data, pos)? as usize,
+                0xc8 => read_be_u16(data, pos)? as usize,
+                _ => read_be_u32(data, pos)? as usize,
+            };
+            *pos += 1 + len; // type byte + payload
+            if *pos > data.len() {
+                None
+            } else {
+                Some(())
+            }
+        }
         // fixarray
         tag if tag & 0xf0 == 0x90 => {
             let count = (tag & 0x0f) as usize;
+            for _ in 0..count {
+                skip_msgpack_value(data, pos)?;
+            }
+            Some(())
+        }
+        // array16 / array32
+        0xdc | 0xdd => {
+            let count = if tag == 0xdc {
+                read_be_u16(data, pos)? as usize
+            } else {
+                read_be_u32(data, pos)? as usize
+            };
             for _ in 0..count {
                 skip_msgpack_value(data, pos)?;
             }
@@ -424,6 +470,19 @@ pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
             }
             Some(())
         }
+        // map16 / map32
+        0xde | 0xdf => {
+            let count = if tag == 0xde {
+                read_be_u16(data, pos)? as usize
+            } else {
+                read_be_u32(data, pos)? as usize
+            };
+            for _ in 0..count {
+                skip_msgpack_value(data, pos)?; // key
+                skip_msgpack_value(data, pos)?; // value
+            }
+            Some(())
+        }
         _ => None,
     }
 }
@@ -431,6 +490,53 @@ pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (Codeberg #86): `skip_msgpack_value` must handle containers
+    /// larger than a fixmap/fixarray (>15 entries → map16/array16). Python
+    /// `get_interface_stats()` returns a 28-key map per interface, which is
+    /// map16-encoded; the request/response layer skips over it to read the
+    /// response value. Before the fix, map16/array16/str32/ext fell through to
+    /// `None`, so a large `/status` response was rejected as "invalid response
+    /// data".
+    #[test]
+    fn skip_handles_map16_and_array16() {
+        // map16 with 20 entries: key_i -> i (all fixstr keys, fixint values).
+        let mut buf = Vec::new();
+        buf.push(0xde); // map16
+        buf.extend_from_slice(&20u16.to_be_bytes());
+        for i in 0..20u8 {
+            write_fixstr(&mut buf, "k");
+            buf.push(i); // positive fixint value
+        }
+        // array16 with 20 fixint entries, appended after the map.
+        buf.push(0xdc); // array16
+        buf.extend_from_slice(&20u16.to_be_bytes());
+        for i in 0..20u8 {
+            buf.push(i);
+        }
+
+        let mut pos = 0;
+        skip_msgpack_value(&buf, &mut pos).expect("skip map16");
+        skip_msgpack_value(&buf, &mut pos).expect("skip array16");
+        assert_eq!(pos, buf.len(), "both large containers fully consumed");
+    }
+
+    #[test]
+    fn skip_handles_str32_and_ext() {
+        let mut buf = Vec::new();
+        // str32 of length 3
+        buf.push(0xdb);
+        buf.extend_from_slice(&3u32.to_be_bytes());
+        buf.extend_from_slice(b"abc");
+        // fixext4 (type byte + 4 data bytes)
+        buf.push(0xd6);
+        buf.push(0x01);
+        buf.extend_from_slice(&[9, 9, 9, 9]);
+        let mut pos = 0;
+        skip_msgpack_value(&buf, &mut pos).expect("skip str32");
+        skip_msgpack_value(&buf, &mut pos).expect("skip fixext4");
+        assert_eq!(pos, buf.len());
+    }
 
     #[test]
     fn test_uint_encoding_fixint() {

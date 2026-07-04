@@ -26,6 +26,7 @@ pub(crate) mod ini_config;
 pub mod interfaces;
 pub(crate) mod known_destinations;
 pub(crate) mod packet_hashlist;
+pub mod remote_status;
 pub mod reticulum;
 pub(crate) mod rpc;
 pub(crate) mod storage;

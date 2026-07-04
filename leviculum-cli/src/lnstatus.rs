@@ -1,10 +1,12 @@
 //! `lnstatus` — native Rust drop-in for Python `rnstatus` (Codeberg #86).
 //!
-//! Stage 1 implements LOCAL mode: it drives a running `lnsd` (or Python `rnsd`)
-//! over the shared-instance RPC (`interface_stats`, and `link_count` for `-l`),
-//! then renders the exact rnstatus per-interface layout. Remote management
-//! (`-R/-i/-w`) and discovered interfaces (`-d/-D`) are deferred (Stage 3 / #32)
-//! and print a clear "not supported yet" notice.
+//! LOCAL mode drives a running `lnsd` (or Python `rnsd`) over the shared-instance
+//! RPC (`interface_stats`, and `link_count` for `-l`), then renders the exact
+//! rnstatus per-interface layout. REMOTE mode (`-R/-i/-w`, Stage 3) queries a
+//! remote transport instance's status over a link the way Python `rnstatus -R`
+//! does; the flow lives in [`leviculum_std::remote_status`] and its result is
+//! fed to the same renderer, so remote and local output match. Discovered
+//! interfaces (`-d/-D`) are deferred (#32) and print a clear notice.
 //!
 //! Output parity is the point: the same `interface_stats` dict fed to this
 //! renderer and to Python rnstatus yields byte-identical output, so a
@@ -12,10 +14,14 @@
 //! `lnstatus_render` for the format port and the golden-output tests.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Parser;
 
 use leviculum_std::config::Config;
+use leviculum_std::driver::ReticulumNodeBuilder;
+use leviculum_std::remote_status;
+use leviculum_std::Identity;
 
 mod lnstatus_render;
 use lnstatus_render::StatusOptions;
@@ -68,15 +74,15 @@ struct Args {
     #[arg(short = 'j', long = "json", default_value_t = false)]
     json: bool,
 
-    /// transport identity hash of remote instance to get status from (DEFERRED: #86 Stage 3)
+    /// transport identity hash of remote instance to get status from
     #[arg(short = 'R')]
     remote: Option<String>,
 
-    /// path to identity used for remote management (DEFERRED: #86 Stage 3)
+    /// path to identity used for remote management
     #[arg(short = 'i')]
     identity: Option<PathBuf>,
 
-    /// timeout before giving up on remote queries (DEFERRED: #86 Stage 3)
+    /// timeout before giving up on remote queries
     #[arg(short = 'w')]
     timeout: Option<f64>,
 
@@ -181,13 +187,6 @@ async fn main() {
     let args = Args::parse();
 
     // --- Deferred features: clear notices, no silent no-op. ---
-    if args.remote.is_some() || args.identity.is_some() {
-        eprintln!(
-            "lnstatus: remote management (-R/-i/-w) is not supported yet \
-             (Codeberg #86 Stage 3); only local shared-instance status is available."
-        );
-        std::process::exit(2);
-    }
     if args.discovered || args.discovered_details {
         eprintln!(
             "lnstatus: discovered interfaces (-d/-D) are not supported yet \
@@ -196,7 +195,7 @@ async fn main() {
         std::process::exit(2);
     }
 
-    // --- Resolve config dir / instance name / authkey. ---
+    // --- Resolve config dir / instance name. ---
     let config_dir = args
         .config
         .clone()
@@ -217,6 +216,13 @@ async fn main() {
         })
         .unwrap_or_else(|| "default".to_string());
 
+    // --- Remote management (-R/-i/-w): query a remote transport instance. ---
+    if args.remote.is_some() {
+        run_remote(&args, &config_dir, &instance_name).await;
+        return;
+    }
+
+    // --- Local mode: resolve authkey and drive the shared-instance RPC. ---
     let authkey = match resolve_authkey(&config_dir, loaded_config.as_ref()) {
         Ok(k) => k,
         Err(msg) => {
@@ -250,6 +256,144 @@ async fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// Default remote-query timeout, matching Python's
+/// `RNS.Transport.PATH_REQUEST_TIMEOUT` (15 s, `Transport.py:79`).
+const DEFAULT_REMOTE_TIMEOUT_SECS: f64 = 15.0;
+
+/// `-R/-i/-w`: query a remote transport instance's status over a link, the way
+/// Python `rnstatus -R` does. Connects to the local shared instance for
+/// transport (like `lncp`), then drives the remote flow in
+/// `leviculum_std::remote_status::fetch_remote_status`.
+async fn run_remote(args: &Args, config_dir: &Path, instance_name: &str) {
+    // -R is required to reach this path; -i (management identity) is mandatory,
+    // matching Python (rnstatus.py:313).
+    let remote_hex = args.remote.as_deref().unwrap_or_default();
+    let Some(identity_path) = args.identity.as_ref() else {
+        eprintln!(
+            "Remote management requires an identity file. Use -i to specify the path \
+             to a management identity."
+        );
+        std::process::exit(20);
+    };
+
+    // -R is a 16-byte (32 hex char) transport identity hash.
+    let identity_hash = match parse_identity_hash(remote_hex) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(20);
+        }
+    };
+
+    // Load the management identity from its RNS identity file (64 raw private
+    // key bytes), matching `RNS.Identity.from_file`.
+    let identity = match std::fs::read(identity_path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| Identity::from_private_key_bytes(&b).map_err(|e| e.to_string()))
+    {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!(
+                "Could not load management identity from {}: {e}",
+                identity_path.display()
+            );
+            std::process::exit(20);
+        }
+    };
+
+    let timeout = Duration::from_secs_f64(
+        args.timeout
+            .filter(|t| *t > 0.0)
+            .unwrap_or(DEFAULT_REMOTE_TIMEOUT_SECS),
+    );
+
+    // Connect to the shared instance for transport (no local authkey needed;
+    // this uses the shared-instance IPC socket, like `lncp`).
+    let mut node = match ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .connect_to_shared_instance(instance_name)
+        .storage_path(config_dir.join("storage"))
+        .build_sync()
+    {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("No shared RNS instance available to get status from");
+            eprintln!("({e})");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = node.start().await {
+        eprintln!("No shared RNS instance available to get status from");
+        eprintln!("({e})");
+        std::process::exit(1);
+    }
+    let mut events = match node.take_event_receiver() {
+        Some(rx) => rx,
+        None => {
+            eprintln!("Internal error: event receiver unavailable");
+            std::process::exit(1);
+        }
+    };
+
+    let opts = args.status_options();
+    let quiet = args.json;
+
+    loop {
+        match remote_status::fetch_remote_status(
+            &node,
+            &mut events,
+            &identity_hash,
+            &identity,
+            args.link_stats,
+            timeout,
+            quiet,
+        )
+        .await
+        {
+            Ok((stats, link_count)) => {
+                let rendered = if args.json {
+                    lnstatus_render::render_json(&stats) + "\n"
+                } else {
+                    lnstatus_render::render_status(&stats, link_count, &opts)
+                };
+                if args.monitor {
+                    print!("\x1b[H\x1b[2J{rendered}");
+                    use std::io::Write as _;
+                    let _ = std::io::stdout().flush();
+                } else {
+                    print!("{rendered}");
+                    return;
+                }
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                if !args.monitor {
+                    std::process::exit(20);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs_f64(args.monitor_interval.max(0.2))).await;
+    }
+}
+
+/// Parse a 32-hex-char transport identity hash into 16 bytes.
+fn parse_identity_hash(hex: &str) -> Result<[u8; 16], String> {
+    if hex.len() != 32 {
+        return Err(format!(
+            "Destination length is invalid, must be 32 hexadecimal characters (16 bytes), got {}.",
+            hex.len()
+        ));
+    }
+    let mut out = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s =
+            std::str::from_utf8(chunk).map_err(|_| "Invalid destination entered.".to_string())?;
+        out[i] =
+            u8::from_str_radix(s, 16).map_err(|_| "Invalid destination entered.".to_string())?;
+    }
+    Ok(out)
 }
 
 /// `-m/--monitor`: clear the screen and re-render on each interval. The redraw
@@ -372,6 +516,15 @@ mod cli_tests {
             parse(&["--instance-name", "foo"]).instance_name.as_deref(),
             Some("foo")
         );
+    }
+
+    #[test]
+    fn identity_hash_parsing() {
+        let h = super::parse_identity_hash("000102030405060708090a0b0c0d0e0f").unwrap();
+        assert_eq!(h, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        // Wrong length and non-hex are rejected.
+        assert!(super::parse_identity_hash("abcd").is_err());
+        assert!(super::parse_identity_hash(&"z".repeat(32)).is_err());
     }
 
     #[test]

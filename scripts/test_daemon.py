@@ -103,7 +103,9 @@ class TestDaemon:
                  udp_listen_port: int = None, udp_forward_port: int = None,
                  auto_interface: bool = False, group_id: str = None,
                  share_instance: bool = False, instance_name: str = None,
-                 echo_channel: bool = False, respond_to_probes: bool = False):
+                 echo_channel: bool = False, respond_to_probes: bool = False,
+                 enable_remote_management: bool = False,
+                 remote_management_allowed: list = None):
         self.rns_port = rns_port
         self.cmd_port = cmd_port
         self.udp_listen_port = udp_listen_port
@@ -114,6 +116,8 @@ class TestDaemon:
         self.instance_name = instance_name or "default"
         self.echo_channel = echo_channel
         self.respond_to_probes = respond_to_probes
+        self.enable_remote_management = enable_remote_management
+        self.remote_management_allowed = remote_management_allowed or []
         self.verbose = verbose
         self.running = True
         self.destinations = {}  # hash -> (identity, destination)
@@ -179,6 +183,12 @@ class TestDaemon:
 """
         if self.share_instance:
             config += f"  instance_name = {self.instance_name}\n"
+
+        if self.enable_remote_management:
+            config += "  enable_remote_management = yes\n"
+            if self.remote_management_allowed:
+                allowed = ", ".join(self.remote_management_allowed)
+                config += f"  remote_management_allowed = {allowed}\n"
 
         config += f"""
 [interfaces]
@@ -1489,6 +1499,11 @@ def main():
                         help="Enable verbose output")
     parser.add_argument("--mgmt-announce-interval-seconds", type=int, default=None,
                         help="Override Transport.mgmt_announce_interval for keepalive tests")
+    parser.add_argument("--enable-remote-management", action="store_true",
+                        help="Enable remote management (rnstatus -R) destination")
+    parser.add_argument("--remote-management-allowed", type=str, action="append",
+                        default=None,
+                        help="Hex identity hash allowed to remote-manage (repeatable)")
 
     args = parser.parse_args()
 
@@ -1510,6 +1525,8 @@ def main():
         instance_name=args.instance_name,
         echo_channel=args.echo_channel,
         respond_to_probes=args.respond_to_probes,
+        enable_remote_management=args.enable_remote_management,
+        remote_management_allowed=args.remote_management_allowed,
     )
     daemon.run()
 
