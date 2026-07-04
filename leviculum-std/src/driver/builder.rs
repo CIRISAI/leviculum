@@ -283,6 +283,23 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add a PipeInterface that bridges packets through an external program.
+    ///
+    /// `command` is a shell-style command line spawned as a subprocess;
+    /// HDLC-framed packets are written to its stdin and read from its stdout.
+    /// `respawn_delay_secs` sets how long to wait before relaunching the child
+    /// after it exits (`None` → the 5s Python default). Mirrors Python
+    /// Reticulum's `PipeInterface`.
+    pub fn add_pipe_interface(mut self, command: String, respawn_delay_secs: Option<f64>) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "PipeInterface".to_string(),
+            command: Some(command),
+            respawn_delay: respawn_delay_secs,
+            ..Default::default()
+        });
+        self
+    }
+
     /// Add an AutoInterface with default configuration
     ///
     /// Zero-configuration LAN discovery via IPv6 multicast.

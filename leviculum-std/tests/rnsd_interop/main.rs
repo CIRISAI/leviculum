@@ -57,6 +57,7 @@ mod multihop_tests;
 mod node_api_tests;
 mod path_gap_tests;
 mod path_recovery_tests;
+mod pipe_interop_tests;
 mod plain_broadcast_tests;
 mod probe_tests;
 mod proof_tests;

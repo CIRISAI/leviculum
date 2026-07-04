@@ -13,6 +13,7 @@ pub(crate) mod airtime;
 pub mod auto_interface;
 pub mod hdlc;
 pub(crate) mod local;
+pub(crate) mod pipe;
 pub(crate) mod rnode;
 pub use rnode::{
     RNodeChannelConfig, RNodeChannelFactory, RNodeChannelHalves, RNodeChannelHandle,

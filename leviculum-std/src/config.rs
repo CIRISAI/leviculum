@@ -205,6 +205,12 @@ pub struct InterfaceConfig {
     /// Stop bits
     pub stopbits: Option<u8>,
 
+    // PipeInterface specific
+    /// External command to spawn (HDLC-over-stdio bridge). Split shell-style.
+    pub command: Option<String>,
+    /// Delay in seconds before respawning the child after it exits (default: 5).
+    pub respawn_delay: Option<f64>,
+
     // Reconnection / buffer tuning
     /// Channel buffer size for this interface (default: per interface type)
     pub buffer_size: Option<usize>,
@@ -296,6 +302,8 @@ impl Default for InterfaceConfig {
             databits: None,
             parity: None,
             stopbits: None,
+            command: None,
+            respawn_delay: None,
             buffer_size: None,
             reconnect_interval_secs: None,
             max_reconnect_tries: None,

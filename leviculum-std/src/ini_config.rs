@@ -57,6 +57,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                     databits: None,
                     parity: None,
                     stopbits: None,
+                    command: None,
+                    respawn_delay: None,
                     buffer_size: None,
                     reconnect_interval_secs: None,
                     max_reconnect_tries: None,
@@ -149,7 +151,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             let size = iface
                 .ifac_size
                 .unwrap_or(match iface.interface_type.as_str() {
-                    "RNodeInterface" | "SerialInterface" => 8,
+                    "RNodeInterface" | "SerialInterface" | "PipeInterface" => 8,
                     _ => 16,
                 });
             if leviculum_core::ifac::IfacConfig::new(
@@ -188,7 +190,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         .into_iter()
         .filter(|(name, iface)| match iface.interface_type.as_str() {
             "TCPServerInterface" | "TCPClientInterface" | "UDPInterface" | "AutoInterface"
-            | "RNodeInterface" | "SerialInterface" => true,
+            | "RNodeInterface" | "SerialInterface" | "PipeInterface" => true,
             other => {
                 tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
@@ -293,6 +295,10 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "databits" => iface.databits = value.parse().ok(),
         "parity" => iface.parity = Some(value.to_string()),
         "stopbits" => iface.stopbits = value.parse().ok(),
+        // PipeInterface: external command + optional respawn delay
+        // (PipeInterface.py:67-68). `command` is a plain shell-style string.
+        "command" => iface.command = Some(value.to_string()),
+        "respawn_delay" => iface.respawn_delay = value.parse().ok(),
         "bitrate" => {
             if let Ok(v) = value.parse() {
                 iface.bitrate = v;
@@ -483,6 +489,31 @@ mod tests {
         assert_eq!(iface.passphrase.as_deref(), Some("s3cret"));
         // 128 bits / 8 = 16 bytes
         assert_eq!(iface.ifac_size, Some(16));
+    }
+
+    #[test]
+    fn test_parse_pipe_interface() {
+        // A PipeInterface config maps `command` + `respawn_delay` onto the
+        // interface, is recognised as a supported type, and survives the
+        // filter (Codeberg #95).
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[My Pipe]]
+    type = PipeInterface
+    command = /usr/bin/socat - TCP:host:4242
+    respawn_delay = 3
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("My Pipe").expect("pipe iface");
+        assert_eq!(iface.interface_type, "PipeInterface");
+        assert_eq!(
+            iface.command.as_deref(),
+            Some("/usr/bin/socat - TCP:host:4242")
+        );
+        assert_eq!(iface.respawn_delay, Some(3.0));
     }
 
     #[test]
