@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
-use serde_pickle::value::Value;
+use serde_pickle::value::{HashableValue, Value};
 
 use super::error::RpcError;
 use super::pickle::*;
@@ -125,6 +125,54 @@ fn ar_value(v: Option<u32>) -> Value {
     }
 }
 
+/// Build the RNode radio-stats key/value entries for one interface's
+/// `interface_stats` dict (Codeberg #25).
+///
+/// Field names and units match Python `Reticulum.get_interface_stats`
+/// (Reticulum.py:1371-1420) so rnstatus/lnstatus render the radio rows without
+/// special-casing:
+///   - `airtime_short`/`airtime_long`, `channel_load_short`/`channel_load_long`
+///     -> float percent
+///   - `noise_floor` -> int dBm, or `None`
+///   - `cpu_temp` -> int Celsius (from `CMD_STAT_TEMP`), or `None`
+///   - `battery_state` (string) / `battery_percent` (int) -> only once the
+///     reported state leaves `Unknown` (Python emits these keys only when
+///     `r_battery_state != 0x00`).
+fn radio_stat_fields(r: &crate::interfaces::RadioStats) -> Vec<(HashableValue, Value)> {
+    let opt_int = |v: Option<i16>| match v {
+        Some(x) => pickle_int(x as i64),
+        None => pickle_none(),
+    };
+    let mut fields = vec![
+        (
+            pickle_str_key("airtime_short"),
+            pickle_float(r.airtime_short),
+        ),
+        (pickle_str_key("airtime_long"), pickle_float(r.airtime_long)),
+        (
+            pickle_str_key("channel_load_short"),
+            pickle_float(r.channel_load_short),
+        ),
+        (
+            pickle_str_key("channel_load_long"),
+            pickle_float(r.channel_load_long),
+        ),
+        (pickle_str_key("noise_floor"), opt_int(r.noise_floor)),
+        (pickle_str_key("cpu_temp"), opt_int(r.cpu_temp)),
+    ];
+    if r.battery_state != leviculum_core::rnode::BatteryState::Unknown {
+        fields.push((
+            pickle_str_key("battery_state"),
+            pickle_str(r.battery_state.as_str()),
+        ));
+        fields.push((
+            pickle_str_key("battery_percent"),
+            pickle_int(r.battery_percent as i64),
+        ));
+    }
+    fields
+}
+
 /// Build the `interface_stats` response dict matching Python's format.
 /// `core` is mutable because frequency reads pop decayed samples, exactly
 /// like Python's get_interface_stats (Python parity, Codeberg #67/#87).
@@ -181,6 +229,9 @@ pub(crate) fn build_interface_stats(
         total_rxs += rxs;
         total_txs += txs;
 
+        // Codeberg #25: latest RNode radio stats (None for non-radio interfaces).
+        let radio = counters_map.get(&entry.id).and_then(|c| c.radio_stats());
+
         // Bitrate reporting (Codeberg #93). A configured `bitrate` (fed into the
         // announce cap) overrides the per-type BITRATE_GUESS, matching Python's
         // `configured_bitrate` override (Reticulum.py:887/1421-1423). Unset falls
@@ -207,7 +258,7 @@ pub(crate) fn build_interface_stats(
             pickle_none()
         };
 
-        let iface_dict = pickle_dict(vec![
+        let mut iface_fields = vec![
             (pickle_str_key("name"), pickle_str(&entry.name)),
             (
                 pickle_str_key("short_name"),
@@ -318,7 +369,16 @@ pub(crate) fn build_interface_stats(
                 },
             ),
             (pickle_str_key("ifac_netname"), pickle_none()),
-        ]);
+        ];
+
+        // Codeberg #25: RNode radio stats. Emitted only for radio interfaces
+        // (Python gates each key on hasattr(interface, "r_*"), which is true
+        // only for RNodeInterface).
+        if let Some(r) = radio {
+            iface_fields.extend(radio_stat_fields(&r));
+        }
+
+        let iface_dict = pickle_dict(iface_fields);
 
         iface_list.push(iface_dict);
     }
@@ -974,5 +1034,118 @@ mod tests {
                 Value::Bool(true)
             ));
         }
+    }
+
+    // Codeberg #25: the radio-stats field builder emits the Python field
+    // names/units and gates battery_state/battery_percent on a known state.
+    #[test]
+    fn radio_stat_fields_names_units_and_gating() {
+        use crate::interfaces::RadioStats;
+        use leviculum_core::rnode::BatteryState;
+
+        let get = |fields: &[(HashableValue, Value)], key: &str| -> Option<Value> {
+            fields
+                .iter()
+                .find(|(k, _)| *k == HashableValue::String(key.into()))
+                .map(|(_, v)| v.clone())
+        };
+
+        // Unknown battery + no reports: airtime/channel-load default to 0.0,
+        // noise_floor/cpu_temp are None, battery_* keys are omitted.
+        let f = radio_stat_fields(&RadioStats::default());
+        assert_eq!(get(&f, "airtime_short"), Some(Value::F64(0.0)));
+        assert_eq!(get(&f, "airtime_long"), Some(Value::F64(0.0)));
+        assert_eq!(get(&f, "channel_load_short"), Some(Value::F64(0.0)));
+        assert_eq!(get(&f, "channel_load_long"), Some(Value::F64(0.0)));
+        assert_eq!(get(&f, "noise_floor"), Some(Value::None));
+        assert_eq!(get(&f, "cpu_temp"), Some(Value::None));
+        assert!(get(&f, "battery_state").is_none());
+        assert!(get(&f, "battery_percent").is_none());
+
+        // Populated values, charging battery.
+        let r = RadioStats {
+            airtime_short: 3.0,
+            airtime_long: 10.0,
+            channel_load_short: 2.0,
+            channel_load_long: 6.0,
+            noise_floor: Some(-57),
+            cpu_temp: Some(25),
+            battery_state: BatteryState::Charging,
+            battery_percent: 85,
+            last_rssi: Some(-57),
+            last_snr: Some(10.0),
+        };
+        let f = radio_stat_fields(&r);
+        assert_eq!(get(&f, "airtime_short"), Some(Value::F64(3.0)));
+        assert_eq!(get(&f, "airtime_long"), Some(Value::F64(10.0)));
+        assert_eq!(get(&f, "channel_load_short"), Some(Value::F64(2.0)));
+        assert_eq!(get(&f, "channel_load_long"), Some(Value::F64(6.0)));
+        assert_eq!(get(&f, "noise_floor"), Some(Value::I64(-57)));
+        assert_eq!(get(&f, "cpu_temp"), Some(Value::I64(25)));
+        assert_eq!(
+            get(&f, "battery_state"),
+            Some(Value::String("charging".into()))
+        );
+        assert_eq!(get(&f, "battery_percent"), Some(Value::I64(85)));
+        // RSSI/SNR are stored on state but not surfaced in interface_stats
+        // (Python does not place them in the dict either).
+        assert!(get(&f, "last_rssi").is_none());
+        assert!(get(&f, "r_stat_rssi").is_none());
+    }
+
+    // Codeberg #25: end-to-end through build_interface_stats — a radio
+    // interface's response dict carries the radio rows with the right
+    // fields/units.
+    #[test]
+    fn build_interface_stats_emits_radio_rows_for_rnode() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::{InterfaceCounters, InterfaceOnlineMap, InterfaceStatsMap};
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::rnode::BatteryState;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-radio-stats-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        core.set_interface_name(0, "RNodeInterface[/dev/ttyUSB0]".into());
+
+        let counters = Arc::new(InterfaceCounters::new());
+        counters.enable_radio_stats();
+        counters.update_radio(|r| {
+            r.airtime_short = 3.0;
+            r.noise_floor = Some(-57);
+            r.cpu_temp = Some(25);
+            r.battery_state = BatteryState::Charging;
+            r.battery_percent = 85;
+        });
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(0usize, counters)])));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let value = build_interface_stats(&mut core, std::time::Instant::now(), &stats, &online, 0);
+
+        let Value::Dict(top) = value else {
+            panic!("interface_stats must be a dict")
+        };
+        let ifaces = top
+            .get(&HashableValue::String("interfaces".into()))
+            .expect("interfaces key");
+        let Value::List(list) = ifaces else {
+            panic!("interfaces must be a list")
+        };
+        assert_eq!(list.len(), 1, "the one registered interface must appear");
+        let Value::Dict(iface) = &list[0] else {
+            panic!("interface entry must be a dict")
+        };
+        let get = |k: &str| iface.get(&HashableValue::String(k.into())).cloned();
+        assert_eq!(get("airtime_short"), Some(Value::F64(3.0)));
+        assert_eq!(get("noise_floor"), Some(Value::I64(-57)));
+        assert_eq!(get("cpu_temp"), Some(Value::I64(25)));
+        assert_eq!(get("battery_state"), Some(Value::String("charging".into())));
+        assert_eq!(get("battery_percent"), Some(Value::I64(85)));
     }
 }

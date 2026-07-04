@@ -474,6 +474,72 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Radio stats (Codeberg #25)
+// ---------------------------------------------------------------------------
+
+/// Parse an RNode `CMD_STAT_*` frame and fold the values into the interface's
+/// shared radio stats (Codeberg #25).
+///
+/// Decoding uses the shared `leviculum_core::rnode` decoders; the scaling and
+/// clamping applied here match Python `RNodeInterface.process_incoming`
+/// (RNodeInterface.py:878-1066) so the stored values carry the same units
+/// Python exposes through `get_interface_stats`:
+///
+/// - RSSI: dBm (`raw - 157`), stored as `last_rssi`.
+/// - SNR: dB (`signed raw * 0.25`), stored as `last_snr`.
+/// - CHTM: airtime/channel-load are `raw_u16 / 100.0` percent; `noise_floor`
+///   is dBm (only present on single-interface 11-byte frames).
+/// - BAT: `(state, percent)`.
+/// - TEMP: Celsius (`raw - 120`), clamped to `[-30, 90]`, else `None`.
+///
+/// Returns `true` if `command` was a recognised stat frame. Shared by the I/O
+/// task and unit tests so the parse/state path is exercised without a serial
+/// port.
+fn apply_radio_stat(counters: &InterfaceCounters, command: u8, payload: &[u8]) -> bool {
+    match command {
+        rnode::CMD_STAT_RSSI => {
+            if let Some(rssi) = rnode::decode_rssi(payload) {
+                counters.update_radio(|r| r.last_rssi = Some(rssi));
+            }
+        }
+        rnode::CMD_STAT_SNR => {
+            if let Some(raw) = rnode::decode_snr(payload) {
+                counters.update_radio(|r| r.last_snr = Some(raw as f64 * 0.25));
+            }
+        }
+        rnode::CMD_STAT_CHTM => {
+            if let Some(cs) = rnode::decode_channel_stats(payload) {
+                counters.update_radio(|r| {
+                    r.airtime_short = cs.airtime_short as f64 / 100.0;
+                    r.airtime_long = cs.airtime_long as f64 / 100.0;
+                    r.channel_load_short = cs.channel_load_short as f64 / 100.0;
+                    r.channel_load_long = cs.channel_load_long as f64 / 100.0;
+                    if let Some(nf) = cs.noise_floor {
+                        r.noise_floor = Some(nf);
+                    }
+                });
+            }
+        }
+        rnode::CMD_STAT_BAT => {
+            if let Some((state, percent)) = rnode::decode_battery(payload) {
+                counters.update_radio(|r| {
+                    r.battery_state = state;
+                    r.battery_percent = percent;
+                });
+            }
+        }
+        rnode::CMD_STAT_TEMP => {
+            if let Some(temp) = rnode::decode_temperature(payload) {
+                let clamped = (-30..=90).contains(&temp).then_some(temp);
+                counters.update_radio(|r| r.cpu_temp = clamped);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
 // I/O task
 // ---------------------------------------------------------------------------
 
@@ -661,19 +727,18 @@ where
                                             );
                                         }
                                     }
-                                    // Statistics, log at trace level
-                                    // TODO: Parse stat values (RSSI, SNR, channel time,
-                                    // battery, temperature) and store for rnstatus reporting
-                                    //, see Codeberg issue #25
-                                    rnode::CMD_STAT_RSSI
+                                    // Radio statistics (Codeberg #25): parse and
+                                    // store on the shared counters so `interface_stats`
+                                    // surfaces the RNode radio rows (airtime, channel
+                                    // load, noise floor, temperature, battery) to
+                                    // rnstatus/lnstatus. Field names/units mirror
+                                    // Python RNodeInterface's `r_*` attributes.
+                                    cmd @ (rnode::CMD_STAT_RSSI
                                     | rnode::CMD_STAT_SNR
                                     | rnode::CMD_STAT_CHTM
                                     | rnode::CMD_STAT_BAT
-                                    | rnode::CMD_STAT_TEMP => {
-                                        tracing::trace!(
-                                            "{}: stat cmd 0x{:02X} ({} bytes)",
-                                            name, command, payload.len()
-                                        );
+                                    | rnode::CMD_STAT_TEMP) => {
+                                        apply_radio_stat(&counters, cmd, &payload);
                                     }
                                     _ => {
                                         tracing::trace!(
@@ -1114,6 +1179,10 @@ where
     let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
+    // Codeberg #25: RNode reports radio stats via CMD_STAT_*; mark the counters
+    // radio-capable so interface_stats always emits the radio keys (with their
+    // defaults) even before the first frame arrives.
+    counters.enable_radio_stats();
 
     let id = ctx.id;
     let name = ctx.name.clone();
@@ -2887,5 +2956,119 @@ mod tests {
 
         drop(outgoing_tx);
         let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Radio stats parse/state path (Codeberg #25)
+    // -----------------------------------------------------------------------
+
+    /// A fresh RNode interface is marked radio-capable so `radio_stats()`
+    /// returns the default record (0.0 airtime/channel-load, None noise/temp,
+    /// Unknown battery) even before any `CMD_STAT_*` frame arrives — mirroring
+    /// Python's `hasattr(interface, "r_airtime_short")` always being true for an
+    /// RNodeInterface. A non-radio interface stays `None`.
+    #[test]
+    fn radio_stats_default_present_after_enable() {
+        let c = InterfaceCounters::new();
+        assert!(
+            c.radio_stats().is_none(),
+            "non-radio interface has no stats"
+        );
+
+        c.enable_radio_stats();
+        let r = c.radio_stats().expect("radio stats present after enable");
+        assert_eq!(r.airtime_short, 0.0);
+        assert_eq!(r.airtime_long, 0.0);
+        assert_eq!(r.channel_load_short, 0.0);
+        assert_eq!(r.channel_load_long, 0.0);
+        assert_eq!(r.noise_floor, None);
+        assert_eq!(r.cpu_temp, None);
+        assert_eq!(r.battery_state, rnode::BatteryState::Unknown);
+        assert_eq!(r.last_rssi, None);
+        assert_eq!(r.last_snr, None);
+    }
+
+    /// CMD_STAT_RSSI payload is a single raw byte; stored value is dBm
+    /// (`raw - 157`), matching Python `r_stat_rssi = byte - RSSI_OFFSET`.
+    #[test]
+    fn apply_radio_stat_rssi_dbm() {
+        let c = InterfaceCounters::new();
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_RSSI, &[100]));
+        assert_eq!(c.radio_stats().unwrap().last_rssi, Some(-57));
+    }
+
+    /// CMD_STAT_SNR payload is one signed byte scaled by 0.25 dB, matching
+    /// Python `r_stat_snr = signed_byte * 0.25`.
+    #[test]
+    fn apply_radio_stat_snr_scaled() {
+        let c = InterfaceCounters::new();
+        // 0x28 = 40 -> 10.0 dB
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_SNR, &[0x28]));
+        assert_eq!(c.radio_stats().unwrap().last_snr, Some(10.0));
+        // 0xF0 = -16 (signed) -> -4.0 dB
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_SNR, &[0xF0]));
+        assert_eq!(c.radio_stats().unwrap().last_snr, Some(-4.0));
+    }
+
+    /// CMD_STAT_CHTM (single-interface, 11 bytes): four big-endian u16 airtime/
+    /// channel-load fields scaled to percent (`raw / 100.0`), plus RSSI, noise
+    /// floor (`raw - 157` dBm), and interference. Matches Python's
+    /// `ats/100.0 ... nfl - RSSI_OFFSET`.
+    #[test]
+    fn apply_radio_stat_chtm_scale_and_noise_floor() {
+        let c = InterfaceCounters::new();
+        let payload = [
+            0x01, 0x2C, // airtime_short = 300 -> 3.0%
+            0x03, 0xE8, // airtime_long = 1000 -> 10.0%
+            0x00, 0xC8, // channel_load_short = 200 -> 2.0%
+            0x02, 0x58, // channel_load_long = 600 -> 6.0%
+            0xC8, // current_rssi raw 200
+            100,  // noise_floor raw 100 -> -57 dBm
+            0xFF, // interference none
+        ];
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_CHTM, &payload));
+        let r = c.radio_stats().unwrap();
+        assert_eq!(r.airtime_short, 3.0);
+        assert_eq!(r.airtime_long, 10.0);
+        assert_eq!(r.channel_load_short, 2.0);
+        assert_eq!(r.channel_load_long, 6.0);
+        assert_eq!(r.noise_floor, Some(-57));
+    }
+
+    /// CMD_STAT_BAT payload is `[state, percent]`; percent is 0..=100. Matches
+    /// Python `r_battery_state`/`r_battery_percent`.
+    #[test]
+    fn apply_radio_stat_battery() {
+        let c = InterfaceCounters::new();
+        // 0x02 = Charging, 85%
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_BAT, &[0x02, 85]));
+        let r = c.radio_stats().unwrap();
+        assert_eq!(r.battery_state, rnode::BatteryState::Charging);
+        assert_eq!(r.battery_percent, 85);
+    }
+
+    /// CMD_STAT_TEMP payload is one byte; temperature is `raw - 120` Celsius,
+    /// clamped to `[-30, 90]` and `None` outside that range, matching Python's
+    /// `if temp >= -30 and temp <= 90 ... else None`.
+    #[test]
+    fn apply_radio_stat_temperature_clamped() {
+        let c = InterfaceCounters::new();
+        // 145 - 120 = 25 C (in range)
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_TEMP, &[145]));
+        assert_eq!(c.radio_stats().unwrap().cpu_temp, Some(25));
+        // 250 - 120 = 130 C (> 90) -> None
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_TEMP, &[250]));
+        assert_eq!(c.radio_stats().unwrap().cpu_temp, None);
+        // 80 - 120 = -40 C (< -30) -> None
+        assert!(apply_radio_stat(&c, rnode::CMD_STAT_TEMP, &[80]));
+        assert_eq!(c.radio_stats().unwrap().cpu_temp, None);
+    }
+
+    /// A non-stat command is not consumed by the stats parser.
+    #[test]
+    fn apply_radio_stat_ignores_non_stat_command() {
+        let c = InterfaceCounters::new();
+        assert!(!apply_radio_stat(&c, rnode::CMD_DATA, &[1, 2, 3]));
+        assert!(c.radio_stats().is_none());
     }
 }

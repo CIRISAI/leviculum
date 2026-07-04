@@ -79,6 +79,38 @@ struct SpeedState {
     cached_txs: f64,
 }
 
+/// Latest radio statistics reported by an RNode over KISS `CMD_STAT_*`
+/// (Codeberg #25).
+///
+/// Field names and units mirror Python `RNodeInterface`'s `r_*` attributes as
+/// surfaced through `Reticulum.get_interface_stats()` (Reticulum.py:1371-1420),
+/// so rnstatus/lnstatus render the radio rows without special-casing:
+///
+/// - `airtime_short`/`airtime_long`, `channel_load_short`/`channel_load_long`:
+///   percent (raw device u16 / 100.0), default `0.0` before the first report.
+/// - `noise_floor`: dBm (`raw - 157`), `None` until the device reports it.
+/// - `cpu_temp`: temperature in Celsius (`raw - 120`), clamped to `[-30, 90]`
+///   and `None` outside that range (Python `r_temperature`/`cpu_temp`).
+/// - `battery_state`/`battery_percent`: only surfaced once the state leaves
+///   `Unknown` (Python only emits the keys when `r_battery_state != 0x00`).
+/// - `last_rssi`/`last_snr`: most recent `CMD_STAT_RSSI` (dBm) and
+///   `CMD_STAT_SNR` (dB, `raw * 0.25`). Stored for completeness; Python does
+///   not place these in the `interface_stats` dict (they feed per-packet RSSI/
+///   SNR reporting), so they are not emitted there either.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RadioStats {
+    pub airtime_short: f64,
+    pub airtime_long: f64,
+    pub channel_load_short: f64,
+    pub channel_load_long: f64,
+    pub noise_floor: Option<i16>,
+    pub cpu_temp: Option<i16>,
+    pub battery_state: leviculum_core::rnode::BatteryState,
+    pub battery_percent: u8,
+    pub last_rssi: Option<i16>,
+    pub last_snr: Option<f64>,
+}
+
 /// Shared I/O counters for an interface, readable from the RPC handler.
 ///
 /// Created by each interface spawn function, cloned into the I/O task.
@@ -87,10 +119,16 @@ struct SpeedState {
 /// `rx_bytes`/`tx_bytes` are written by I/O tasks (lock-free atomics).
 /// `speed` is updated every second by a background task (see
 /// `spawn_traffic_counter`) and read by the RPC handler.
+///
+/// `radio` holds the latest RNode `CMD_STAT_*` values (Codeberg #25). It is
+/// `None` for non-radio interfaces (TCP/UDP/Auto/Local); RNode interfaces set
+/// it to `Some(RadioStats::default())` at spawn so the stats keys are always
+/// present (mirroring Python's `hasattr(interface, "r_airtime_short")` gate).
 pub(crate) struct InterfaceCounters {
     pub rx_bytes: AtomicU64,
     pub tx_bytes: AtomicU64,
     speed: std::sync::Mutex<SpeedState>,
+    radio: std::sync::Mutex<Option<RadioStats>>,
 }
 
 impl InterfaceCounters {
@@ -105,7 +143,31 @@ impl InterfaceCounters {
                 cached_rxs: 0.0,
                 cached_txs: 0.0,
             }),
+            radio: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Mark this interface as radio-capable so `interface_stats` always emits
+    /// the RNode radio keys (with their `0.0`/`None` defaults) even before the
+    /// first `CMD_STAT_*` frame arrives. Called once at RNode spawn.
+    pub(crate) fn enable_radio_stats(&self) {
+        let mut guard = self.radio.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(RadioStats::default());
+        }
+    }
+
+    /// Apply an update to the stored radio stats, creating the record if the
+    /// interface was not pre-marked. Called by the RNode I/O task on each
+    /// parsed `CMD_STAT_*` frame.
+    pub(crate) fn update_radio(&self, f: impl FnOnce(&mut RadioStats)) {
+        let mut guard = self.radio.lock().unwrap();
+        f(guard.get_or_insert_with(RadioStats::default));
+    }
+
+    /// Snapshot the latest radio stats, or `None` for non-radio interfaces.
+    pub(crate) fn radio_stats(&self) -> Option<RadioStats> {
+        *self.radio.lock().unwrap()
     }
 
     /// Sample current byte counters and recompute cached speeds.

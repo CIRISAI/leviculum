@@ -208,12 +208,27 @@ const LEAVE_PAYLOAD: u8 = 0xFF;
 // ---------------------------------------------------------------------------
 
 /// Battery state reported by the device
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BatteryState {
+    #[default]
     Unknown,
     Discharging,
     Charging,
     Charged,
+}
+
+impl BatteryState {
+    /// Lowercase label matching Python `RNodeInterface.get_battery_state_string()`
+    /// (`"charged"` / `"charging"` / `"discharging"` / `"unknown"`), reported in
+    /// the `battery_state` field of `interface_stats` for rnstatus/lnstatus.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BatteryState::Unknown => "unknown",
+            BatteryState::Discharging => "discharging",
+            BatteryState::Charging => "charging",
+            BatteryState::Charged => "charged",
+        }
+    }
 }
 
 /// Channel time/utilization statistics from CMD_STAT_CHTM
@@ -1103,6 +1118,16 @@ mod tests {
         // Too short
         assert_eq!(decode_battery(&[0x02]), None);
         assert_eq!(decode_battery(&[]), None);
+    }
+
+    #[test]
+    fn test_battery_state_as_str() {
+        // Matches Python RNodeInterface.get_battery_state_string() (Codeberg #25).
+        assert_eq!(BatteryState::Unknown.as_str(), "unknown");
+        assert_eq!(BatteryState::Discharging.as_str(), "discharging");
+        assert_eq!(BatteryState::Charging.as_str(), "charging");
+        assert_eq!(BatteryState::Charged.as_str(), "charged");
+        assert_eq!(BatteryState::default(), BatteryState::Unknown);
     }
 
     #[test]
