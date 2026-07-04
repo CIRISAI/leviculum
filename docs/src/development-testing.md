@@ -11,6 +11,23 @@ automation details.
 - **Daily**: Tier 2 (12:30, 18:30) and Tier 3 (02:00) run via systemd.
 - **Suite overview**: `just status`.
 
+## Prerequisites (system tools)
+
+The interop and integration tests shell out to real external tools, so these
+system packages must be installed (all apt-installable on Debian):
+
+- **docker** — the Tier 2 integ suite.
+- **python3** + **Python RNS** (`rns`) — the `rnsd_interop` tests drive a real
+  Python `rnsd`/`rnstatus` as the compatibility reference.
+- **socat** — bridges a virtual serial pty pair so the serial-family interfaces
+  (KISS, AX.25, Pipe) can be interop-tested against a real Python peer.
+- **just**, **cargo**, **flock**, **notify-send** — build/CI plumbing.
+
+`scripts/install-ci.sh` checks for these at setup and prints the `sudo apt
+install` hint for any that are missing. Whenever a test starts depending on a
+new tool, add it BOTH here and to that check list so a fresh machine can be set
+up from scratch.
+
 ## The four tiers
 
 | Tier | When                              | Command         | Time      | Scope |

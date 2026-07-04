@@ -26,7 +26,7 @@ echo "[install-ci] Installing CI pipeline in $REPO_DIR (vm-mode=$VM_MODE)"
 
 # 1. Dependency check
 MISSING=()
-for cmd in just docker notify-send cargo python3 flock; do
+for cmd in just docker notify-send cargo python3 flock socat; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi
