@@ -353,6 +353,15 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "announce_rate_target" => iface.announce_rate_target = value.parse().ok(),
         "announce_rate_penalty" => iface.announce_rate_penalty = value.parse().ok(),
         "announce_rate_grace" => iface.announce_rate_grace = value.parse().ok(),
+        // Interface propagation mode (Codeberg #91). Both `mode` and
+        // `interface_mode` spellings map here; the value string is resolved to
+        // an `InterfaceMode` at registration via `InterfaceMode::from_config_str`
+        // (all spellings from Reticulum.py:717-745). Stored verbatim so an
+        // unknown value can be logged there rather than silently dropped. Note:
+        // Python has a copy/paste bug where `interface_mode = gateway` checks
+        // `c["mode"]` (Reticulum.py:729); we accept `gateway` under either key,
+        // a strict superset that never rejects a config Python would honour.
+        "mode" | "interface_mode" => iface.mode = Some(value.to_string()),
         "networkname" | "network_name" => iface.networkname = Some(value.to_string()),
         "passphrase" | "pass_phrase" => iface.passphrase = Some(value.to_string()),
         // `ifac_size` is specified in BITS and stored in BYTES. Python only
@@ -548,6 +557,57 @@ mod tests {
         assert_eq!(iface.passphrase.as_deref(), Some("s3cret"));
         // 128 bits / 8 = 16 bytes
         assert_eq!(iface.ifac_size, Some(16));
+    }
+
+    #[test]
+    fn test_parse_interface_mode_all_spellings() {
+        // Codeberg #91: `mode` / `interface_mode` on each interface parses into
+        // the raw config string and resolves to the right InterfaceMode via
+        // InterfaceMode::from_config_str (all Reticulum.py:717-745 spellings).
+        use leviculum_core::traits::InterfaceMode;
+        let cases = [
+            ("gw", InterfaceMode::Gateway),
+            ("access_point", InterfaceMode::AccessPoint),
+            ("ap", InterfaceMode::AccessPoint),
+            ("ptp", InterfaceMode::PointToPoint),
+            ("roaming", InterfaceMode::Roaming),
+            ("boundary", InterfaceMode::Boundary),
+            ("full", InterfaceMode::Full),
+        ];
+        for (spelling, expected) in cases {
+            // `mode = ...`
+            let cfg = parse_ini(&format!(
+                "[interfaces]\n  [[If]]\n    type = TCPClientInterface\n    mode = {spelling}\n"
+            ))
+            .unwrap();
+            let raw = cfg.interfaces.get("If").unwrap().mode.clone();
+            assert_eq!(
+                InterfaceMode::from_config_str(raw.as_deref().unwrap()),
+                Some(expected),
+                "mode = {spelling}"
+            );
+            // `interface_mode = ...` (alias)
+            let cfg2 = parse_ini(&format!(
+                "[interfaces]\n  [[If]]\n    type = TCPClientInterface\n    interface_mode = {spelling}\n"
+            ))
+            .unwrap();
+            let raw2 = cfg2.interfaces.get("If").unwrap().mode.clone();
+            assert_eq!(
+                InterfaceMode::from_config_str(raw2.as_deref().unwrap()),
+                Some(expected),
+                "interface_mode = {spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_interface_mode_absent_defaults_full() {
+        // No mode key -> None -> the Full default applies at registration.
+        let cfg = parse_ini(
+            "[interfaces]\n  [[If]]\n    type = TCPClientInterface\n    target_host = 127.0.0.1\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.interfaces.get("If").unwrap().mode, None);
     }
 
     #[test]

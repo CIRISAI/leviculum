@@ -379,6 +379,7 @@ async fn main(spawner: Spawner) {
                             Action::Broadcast {
                                 exclude_iface,
                                 data,
+                                ..
                             } => {
                                 let excl = exclude_iface.map(|i| i.0 as i16).unwrap_or(-1);
                                 info!("ACT Broadcast excl={} len={}", excl, data.len());

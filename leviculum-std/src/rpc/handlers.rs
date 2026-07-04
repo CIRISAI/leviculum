@@ -221,14 +221,14 @@ pub(crate) fn build_interface_stats(
                 pickle_str_key("status"),
                 pickle_bool(online_map.get(&entry.id).copied().unwrap_or(true)),
             ),
-            // mode: hardcoded MODE_FULL (0x01). The Rust `InterfaceMode` is a
-            // three-bool struct (broadcast/local/multiple_access) with no
-            // direct mapping to Python's discrete mode enum — and every
-            // `InterfaceHandle::mode()` impl returns the default. Threading a
-            // meaningful per-interface mode needs Codeberg #11 (Python-parity
-            // mode enum) to land first; until then MODE_FULL matches what
-            // every interface effectively is from Python's POV.
-            (pickle_str_key("mode"), pickle_int(0x01)),
+            // mode: real Reticulum propagation mode (Codeberg #91), carried
+            // per-interface by transport from the parsed config and reported
+            // as the Python `Interface.MODE_*` value so rnstatus/lnstatus print
+            // the right label (Utilities/rnstatus.py:421-427).
+            (
+                pickle_str_key("mode"),
+                pickle_int(entry.mode.as_u8() as i64),
+            ),
             (pickle_str_key("bitrate"), bitrate),
             (pickle_str_key("clients"), clients),
             (pickle_str_key("peers"), peers),

@@ -769,6 +769,29 @@ impl ReticulumNode {
                 if let Some(ar) = build_announce_rate_config(iface_config) {
                     core.set_announce_rate_config(idx, ar);
                 }
+                // Interface propagation mode (Codeberg #91). Resolve the config
+                // string to an InterfaceMode and hand it to transport, which
+                // owns the per-interface mode map and applies the propagation
+                // rules. An unrecognised value logs and keeps the Full default,
+                // matching Python (which leaves the mode unchanged on an
+                // unknown string).
+                if let Some(mode_str) = iface_config.mode.as_deref() {
+                    match leviculum_core::traits::InterfaceMode::from_config_str(mode_str) {
+                        Some(mode) => {
+                            core.set_interface_mode(idx, mode);
+                            if mode != leviculum_core::traits::InterfaceMode::Full {
+                                tracing::info!("Interface {} mode: {}", idx, mode);
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                "Interface {}: unknown mode '{}', using Full",
+                                idx,
+                                mode_str
+                            );
+                        }
+                    }
+                }
             }
 
             let transport_enabled = core.transport_config().enable_transport;

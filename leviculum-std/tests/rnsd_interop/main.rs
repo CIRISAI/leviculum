@@ -47,6 +47,7 @@ mod group_crypto_tests;
 mod harness;
 mod held_announce_interop_tests;
 mod ifac_interop_tests;
+mod interface_mode_tests;
 mod lifecycle_tests;
 mod link_keepalive_close_tests;
 mod link_manager_tests;

@@ -1409,6 +1409,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.remove_ifac_config(id);
     }
 
+    /// Set the Reticulum propagation mode for an interface (Codeberg #91). The
+    /// driver calls this during setup from the parsed config; transport applies
+    /// the per-mode announce-propagation and path-expiry rules.
+    pub fn set_interface_mode(&mut self, id: usize, mode: crate::traits::InterfaceMode) {
+        self.transport.set_interface_mode(id, mode);
+    }
+
+    /// Propagation mode for an interface (`Full` when unset).
+    pub fn interface_mode(&self, id: usize) -> crate::traits::InterfaceMode {
+        self.transport.interface_mode(id)
+    }
+
     /// Clone all IFAC configurations (for passing to dispatch_actions outside the lock).
     pub fn clone_ifac_configs(
         &self,
@@ -1483,6 +1495,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // (after logging so the name is still available above)
         self.transport.set_local_client(iface_idx, false);
         self.transport.remove_interface_name(iface_idx);
+        self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
 
         // Emit the InterfaceDown event

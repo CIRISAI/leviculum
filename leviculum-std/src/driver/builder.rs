@@ -327,6 +327,18 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Set the Reticulum propagation mode (Codeberg #91) on the most recently
+    /// added interface. The string uses the same spellings as the config file
+    /// (`full`, `gateway`/`gw`, `access_point`/`ap`, `pointtopoint`/`ptp`,
+    /// `roaming`, `boundary`); it is resolved to an `InterfaceMode` at
+    /// registration. No-op if no interface has been added yet.
+    pub fn interface_mode(mut self, mode: &str) -> Self {
+        if let Some(last) = self.interfaces.last_mut() {
+            last.mode = Some(mode.to_string());
+        }
+        self
+    }
+
     /// Add an AutoInterface with default configuration
     ///
     /// Zero-configuration LAN discovery via IPv6 multicast.

@@ -68,7 +68,7 @@ pub use crate::storage_types::PathEntry;
 use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathState, ReverseEntry,
 };
-use crate::traits::{Clock, Storage};
+use crate::traits::{Clock, InterfaceMode, Storage};
 
 /// Number of announce timestamp samples per interface for frequency computation
 /// (Python Interface.py IA_FREQ_SAMPLES / OA_FREQ_SAMPLES = 48).
@@ -186,6 +186,11 @@ pub enum Action {
         data: Vec<u8>,
         /// Interface to skip (typically the one the packet arrived on)
         exclude_iface: Option<InterfaceId>,
+        /// Additional interfaces to skip (Codeberg #91: interfaces whose
+        /// Reticulum mode withholds this announce, e.g. access-point or a
+        /// roaming/boundary interface whose next-hop rule blocks it). Empty in
+        /// the common case; dispatch skips any interface in this set.
+        exclude_ifaces: Vec<InterfaceId>,
     },
 }
 
@@ -311,9 +316,13 @@ pub fn dispatch_actions(
             Action::Broadcast {
                 data,
                 exclude_iface,
+                exclude_ifaces,
             } => {
                 for iface_obj in interfaces.iter_mut() {
                     if Some(iface_obj.id()) == exclude_iface {
+                        continue;
+                    }
+                    if exclude_ifaces.contains(&iface_obj.id()) {
                         continue;
                     }
                     let iface_idx = iface_obj.id().0;
@@ -526,6 +535,9 @@ pub struct InterfaceStatEntry {
     pub name: String,
     /// Whether this is a local IPC client interface
     pub is_local_client: bool,
+    /// Reticulum propagation mode (Python `Interface.mode`, Codeberg #91).
+    /// Reported over the shared-instance IPC so `rnstatus`/`lnstatus` show it.
+    pub mode: InterfaceMode,
     /// Incoming announce frequency in Hz (Python ia_freq_deque)
     pub incoming_announce_frequency: f64,
     /// Outgoing announce frequency in Hz (Python oa_freq_deque)
@@ -1031,6 +1043,13 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Populated by the driver at registration time, removed on interface down.
     interface_names: BTreeMap<usize, String>,
 
+    /// Per-interface Reticulum propagation mode (Python `Interface.mode`).
+    /// Keyed by interface index. Only non-`Full` interfaces are stored; a
+    /// missing entry means `InterfaceMode::Full` (the default). Set from config
+    /// by the driver at registration; drives the per-mode announce-propagation
+    /// and path-expiry rules (Python Transport.py:1193-1245, 773-778, 1875-1880).
+    interface_modes: BTreeMap<usize, InterfaceMode>,
+
     /// Hardware MTU per interface (for link MTU negotiation).
     /// Keyed by interface index. Set by driver at registration, removed on interface down.
     interface_hw_mtus: BTreeMap<usize, u32>,
@@ -1156,6 +1175,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // announce_rate_table: migrated to Storage
             interface_announce_caps: BTreeMap::new(),
             interface_names: BTreeMap::new(),
+            interface_modes: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
             interface_incoming_announce_times: BTreeMap::new(),
@@ -1752,9 +1772,31 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.storage.add_packet_hash(cache_hash);
 
         self.stats.packets_sent += 1;
+
+        // Codeberg #91: apply the per-mode announce-propagation gate to
+        // locally originated announce broadcasts (Python routes these through
+        // Transport.outbound(), Transport.py:1193-1245). Only pays the unpack
+        // cost when a non-Full interface exists; with an all-Full stack the
+        // blocked set is empty and behaviour is identical to before.
+        let exclude_ifaces: Vec<InterfaceId> = if self.interface_modes.is_empty() {
+            Vec::new()
+        } else {
+            match Packet::unpack(data) {
+                Ok(pkt) if pkt.flags.packet_type == PacketType::Announce => {
+                    let is_local = self.local_destinations.contains(&pkt.destination_hash);
+                    self.announce_mode_blocked_ifaces(&pkt.destination_hash, is_local)
+                        .into_iter()
+                        .map(InterfaceId)
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        };
+
         self.pending_actions.push(Action::Broadcast {
             data: data.to_vec(),
             exclude_iface: None,
+            exclude_ifaces,
         });
     }
 
@@ -2664,7 +2706,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 dest_hash,
                 PathEntry {
                     hops: packet.hops,
-                    expires_ms: now + (self.config.path_expiry_secs * 1000),
+                    // Per-mode path expiry (Codeberg #91, Transport.py:1875-1880):
+                    // access-point paths live 1 day, roaming paths 6 hours, the
+                    // configured default otherwise, keyed by the receiving iface.
+                    expires_ms: now + self.path_expiry_ms_for_interface(interface_index),
                     interface_index,
                     random_blobs,
                     next_hop: packet.transport_id,
@@ -3039,10 +3084,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 },
             );
 
-            // Refresh path expiry on link request forward (Python Transport.py:1504)
+            // Refresh path expiry on link request forward (Python Transport.py:1504).
+            // Per-mode lifetime keyed by the path's learning interface (Codeberg #91).
             if let Some(path) = self.storage.get_path(&dest_hash) {
                 let mut path = path.clone();
-                path.expires_ms = now + (self.config.path_expiry_secs * 1000);
+                path.expires_ms = now + self.path_expiry_ms_for_interface(path.interface_index);
                 self.storage.set_path(dest_hash, path);
             }
 
@@ -3754,10 +3800,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         let now = self.clock.now_ms();
 
-        // Refresh path expiry on forward (Python Transport.py:990)
+        // Refresh path expiry on forward (Python Transport.py:990). Per-mode
+        // lifetime keyed by the path's learning interface (Codeberg #91).
         if let Some(path) = self.storage.get_path(&packet.destination_hash) {
             let mut path = path.clone();
-            path.expires_ms = now + (self.config.path_expiry_secs * 1000);
+            path.expires_ms = now + self.path_expiry_ms_for_interface(path.interface_index);
             self.storage.set_path(packet.destination_hash, path);
         }
 
@@ -3960,9 +4007,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // LoRa antenna). Matches the add_packet_hash path already used
             // by send_on_all_interfaces / send_on_all_interfaces_except.
             self.storage.add_packet_hash(packet_hash(&buf[..len]));
+
+            // Per-mode announce-propagation gate (Codeberg #91). This path
+            // carries relayed/local announces; access-point interfaces never
+            // emit them and roaming/boundary interfaces withhold transit
+            // announces per next-hop mode (Transport.py:1193-1245). In the
+            // common all-`Full` case the blocked set is empty and the single
+            // Broadcast reaches every interface as before.
+            let exclude_ifaces = if packet.flags.packet_type == PacketType::Announce {
+                let is_local = self.local_destinations.contains(&packet.destination_hash);
+                self.announce_mode_blocked_ifaces(&packet.destination_hash, is_local)
+                    .into_iter()
+                    .map(InterfaceId)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             self.pending_actions.push(Action::Broadcast {
                 data: buf[..len].to_vec(),
                 exclude_iface: None,
+                exclude_ifaces,
             });
             self.stats.packets_forwarded += 1;
         }
@@ -4120,6 +4185,113 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Remove interface name (called during handle_interface_down cleanup).
     pub fn remove_interface_name(&mut self, id: usize) {
         self.interface_names.remove(&id);
+    }
+
+    // Public: Interface Mode API (Codeberg #91)
+    /// Set the Reticulum propagation mode for an interface (called by the driver
+    /// at registration from the parsed config). `Full` is the default, so a
+    /// `Full` mode is stored as an explicit removal to keep the map sparse.
+    pub fn set_interface_mode(&mut self, id: usize, mode: InterfaceMode) {
+        if mode == InterfaceMode::Full {
+            self.interface_modes.remove(&id);
+        } else {
+            self.interface_modes.insert(id, mode);
+        }
+    }
+
+    /// Remove interface mode (called during handle_interface_down cleanup).
+    pub fn remove_interface_mode(&mut self, id: usize) {
+        self.interface_modes.remove(&id);
+    }
+
+    /// Propagation mode for an interface (`Full` when unset).
+    pub fn interface_mode(&self, id: usize) -> InterfaceMode {
+        self.interface_modes
+            .get(&id)
+            .copied()
+            .unwrap_or(InterfaceMode::Full)
+    }
+
+    /// Per-mode announce-propagation gate, mirroring Python
+    /// `Transport.outbound()` for ANNOUNCE packets with no attached interface
+    /// (Transport.py:1193-1245). Returns `true` if the announce for `dest_hash`
+    /// may be (re)broadcast out on `out_iface`.
+    ///
+    /// `is_local` is whether the announce originates from an instance-local
+    /// destination (Python's `destinations_map` membership).
+    ///
+    /// - `AccessPoint`: never emits announces (absorbs only).
+    /// - `Roaming`: emits local-origin announces; for transit announces, blocks
+    ///   unless a next-hop path exists whose learning interface is neither
+    ///   roaming nor boundary.
+    /// - `Boundary`: like roaming, but only a roaming next-hop blocks (a
+    ///   boundary next-hop is still relayed).
+    /// - `Full` / `Gateway` / `PointToPoint`: always allowed here (bandwidth
+    ///   caps are applied separately).
+    fn announce_allowed_on_interface(
+        &self,
+        out_iface: usize,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        is_local: bool,
+    ) -> bool {
+        match self.interface_mode(out_iface) {
+            InterfaceMode::AccessPoint => false,
+            InterfaceMode::Roaming => {
+                if is_local {
+                    return true;
+                }
+                match self.storage.get_path(dest_hash).map(|p| p.interface_index) {
+                    None => false,
+                    Some(from_iface) => !matches!(
+                        self.interface_mode(from_iface),
+                        InterfaceMode::Roaming | InterfaceMode::Boundary
+                    ),
+                }
+            }
+            InterfaceMode::Boundary => {
+                if is_local {
+                    return true;
+                }
+                match self.storage.get_path(dest_hash).map(|p| p.interface_index) {
+                    None => false,
+                    Some(from_iface) => {
+                        !matches!(self.interface_mode(from_iface), InterfaceMode::Roaming)
+                    }
+                }
+            }
+            InterfaceMode::Full | InterfaceMode::Gateway | InterfaceMode::PointToPoint => true,
+        }
+    }
+
+    /// Interface indices that must NOT receive the announce for `dest_hash`
+    /// because of their mode (see [`Self::announce_allowed_on_interface`]).
+    /// Empty in the common all-`Full` case, so the fast broadcast path is
+    /// unchanged. Only consulted for announce broadcasts.
+    fn announce_mode_blocked_ifaces(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        is_local: bool,
+    ) -> Vec<usize> {
+        if self.interface_modes.is_empty() {
+            return Vec::new();
+        }
+        self.interface_modes
+            .keys()
+            .copied()
+            .filter(|&idx| !self.announce_allowed_on_interface(idx, dest_hash, is_local))
+            .collect()
+    }
+
+    /// Path-table entry lifetime (ms) for a destination learned through
+    /// `recv_iface`, mirroring Python's per-mode expiry (Transport.py:773-778,
+    /// 1875-1880): 1 day for access-point paths, 6 hours for roaming paths,
+    /// the configured default otherwise.
+    fn path_expiry_ms_for_interface(&self, recv_iface: usize) -> u64 {
+        match self.interface_mode(recv_iface) {
+            InterfaceMode::AccessPoint => crate::constants::AP_PATH_TIME_SECS * 1000,
+            InterfaceMode::Roaming => crate::constants::ROAMING_PATH_TIME_SECS * 1000,
+            _ => self.config.path_expiry_secs * 1000,
+        }
     }
 
     /// Returns a displayable interface name for logging.
@@ -4857,6 +5029,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     id,
                     name: name.clone(),
                     is_local_client: self.local_client_interfaces.contains(&id),
+                    mode: self.interface_mode(id),
                     incoming_announce_frequency: ia_freq,
                     outgoing_announce_frequency: oa_freq,
                     incoming_pr_frequency: ip_freq,
@@ -4906,6 +5079,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.pending_actions.push(Action::Broadcast {
             data: data.to_vec(),
             exclude_iface: Some(InterfaceId(except_index)),
+            exclude_ifaces: Vec::new(),
         });
     }
 
@@ -5498,6 +5672,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // on packet_hashlist (Transport.py:1227) to absorb the echo.
         self.storage.add_packet_hash(packet_hash(&raw));
 
+        // Per-mode announce-propagation gate (Codeberg #91, Transport.py:1193-
+        // 1245): access-point interfaces never emit announces; roaming/boundary
+        // interfaces withhold transit announces per next-hop mode. Empty in the
+        // all-`Full` case.
+        let is_local = self.local_destinations.contains(&packet.destination_hash);
+        let mode_blocked = self.announce_mode_blocked_ifaces(&packet.destination_hash, is_local);
+
         // Handle capped interfaces individually.
         //
         // OBS-1 outcomes are collected here and emitted after the mutable
@@ -5511,6 +5692,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut ann_suppressed: Vec<(usize, &'static str)> = Vec::new();
 
         for iface_idx in &capped_ifaces {
+            if mode_blocked.contains(iface_idx) {
+                ann_suppressed.push((*iface_idx, "interface_mode"));
+                continue;
+            }
             let cap = self
                 .interface_announce_caps
                 .get_mut(iface_idx)
@@ -5546,6 +5731,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // double-send to capped interfaces that already got a SendPacket.
         for &iface_idx in self.interface_names.keys() {
             if self.interface_announce_caps.contains_key(&iface_idx) {
+                continue;
+            }
+            if mode_blocked.contains(&iface_idx) {
+                ann_suppressed.push((iface_idx, "interface_mode"));
                 continue;
             }
             self.pending_actions.push(Action::SendPacket {
@@ -5994,10 +6183,12 @@ mod tests {
             let action_no_exclude = Action::Broadcast {
                 data: vec![10, 20],
                 exclude_iface: None,
+                exclude_ifaces: Vec::new(),
             };
             let action_with_exclude = Action::Broadcast {
                 data: vec![10, 20],
                 exclude_iface: Some(InterfaceId(2)),
+                exclude_ifaces: Vec::new(),
             };
 
             assert_ne!(action_no_exclude, action_with_exclude);
@@ -6006,6 +6197,7 @@ mod tests {
             let action_no_exclude2 = Action::Broadcast {
                 data: vec![10, 20],
                 exclude_iface: None,
+                exclude_ifaces: Vec::new(),
             };
             assert_eq!(action_no_exclude, action_no_exclude2);
         }
@@ -6019,6 +6211,7 @@ mod tests {
             let broadcast = Action::Broadcast {
                 data: vec![1],
                 exclude_iface: None,
+                exclude_ifaces: Vec::new(),
             };
             assert_ne!(send, broadcast);
         }
@@ -6056,6 +6249,7 @@ mod tests {
                     Action::Broadcast {
                         data: vec![2],
                         exclude_iface: None,
+                        exclude_ifaces: Vec::new(),
                     },
                 ],
                 events: Vec::new(),
@@ -6951,6 +7145,248 @@ mod tests {
                 .advance(transport.announce_jitter_max_ms() + 100);
             transport.poll();
             assert!(transport.stats().packets_forwarded > 0);
+        }
+
+        // ---- Codeberg #91: interface-mode announce propagation ------------
+        //
+        // These exercise the per-mode gate against the Python rules in
+        // Transport.outbound() (Transport.py:1193-1245). The gate helpers are
+        // private, so the tests live in-module.
+
+        fn dummy_dest(byte: u8) -> [u8; TRUNCATED_HASHBYTES] {
+            [byte; TRUNCATED_HASHBYTES]
+        }
+
+        fn seed_path(
+            transport: &mut Transport<MockClock, MemoryStorage>,
+            dest: [u8; TRUNCATED_HASHBYTES],
+            learned_on_iface: usize,
+        ) {
+            transport.storage.set_path(
+                dest,
+                PathEntry {
+                    hops: 2,
+                    expires_ms: TEST_TIME_MS + 1_000_000,
+                    interface_index: learned_on_iface,
+                    random_blobs: Vec::new(),
+                    next_hop: Some(dummy_dest(0xEE)),
+                },
+            );
+        }
+
+        #[test]
+        fn mode_access_point_never_emits_announces() {
+            let mut transport = make_transport_enabled();
+            let full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let ap = transport.register_interface(Box::new(MockInterface::new("ap", 2)));
+            transport.set_interface_mode(ap, InterfaceMode::AccessPoint);
+            let dest = dummy_dest(0x01);
+
+            // AP blocks both local-origin and transit announces; Full allows both.
+            assert!(transport.announce_allowed_on_interface(full, &dest, true));
+            assert!(transport.announce_allowed_on_interface(full, &dest, false));
+            assert!(!transport.announce_allowed_on_interface(ap, &dest, true));
+            assert!(!transport.announce_allowed_on_interface(ap, &dest, false));
+
+            assert_eq!(
+                transport.announce_mode_blocked_ifaces(&dest, true),
+                alloc::vec![ap]
+            );
+        }
+
+        #[test]
+        fn mode_roaming_local_allowed_transit_by_next_hop() {
+            let mut transport = make_transport_enabled();
+            let full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let roaming = transport.register_interface(Box::new(MockInterface::new("roam", 2)));
+            let roaming2 = transport.register_interface(Box::new(MockInterface::new("roam2", 3)));
+            transport.set_interface_mode(roaming, InterfaceMode::Roaming);
+            transport.set_interface_mode(roaming2, InterfaceMode::Roaming);
+            let dest = dummy_dest(0x02);
+
+            // Local-origin announce is always allowed out on a roaming iface.
+            assert!(transport.announce_allowed_on_interface(roaming, &dest, true));
+
+            // Transit announce with no known next hop: blocked.
+            assert!(!transport.announce_allowed_on_interface(roaming, &dest, false));
+
+            // Transit announce whose next hop was learned on a Full iface: allowed.
+            seed_path(&mut transport, dest, full);
+            assert!(transport.announce_allowed_on_interface(roaming, &dest, false));
+
+            // Transit announce whose next hop is itself a roaming iface: blocked.
+            seed_path(&mut transport, dest, roaming2);
+            assert!(!transport.announce_allowed_on_interface(roaming, &dest, false));
+        }
+
+        #[test]
+        fn mode_boundary_relays_boundary_next_hop_but_not_roaming() {
+            let mut transport = make_transport_enabled();
+            let full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let boundary = transport.register_interface(Box::new(MockInterface::new("bound", 2)));
+            let roaming = transport.register_interface(Box::new(MockInterface::new("roam", 3)));
+            let boundary2 = transport.register_interface(Box::new(MockInterface::new("bound2", 4)));
+            transport.set_interface_mode(boundary, InterfaceMode::Boundary);
+            transport.set_interface_mode(roaming, InterfaceMode::Roaming);
+            transport.set_interface_mode(boundary2, InterfaceMode::Boundary);
+            let dest = dummy_dest(0x03);
+
+            // Local-origin allowed; no-path transit blocked.
+            assert!(transport.announce_allowed_on_interface(boundary, &dest, true));
+            assert!(!transport.announce_allowed_on_interface(boundary, &dest, false));
+
+            // Boundary blocks only a roaming next hop.
+            seed_path(&mut transport, dest, roaming);
+            assert!(!transport.announce_allowed_on_interface(boundary, &dest, false));
+
+            // A boundary next hop is still relayed (unlike roaming mode).
+            seed_path(&mut transport, dest, boundary2);
+            assert!(transport.announce_allowed_on_interface(boundary, &dest, false));
+
+            // And a Full next hop is relayed.
+            seed_path(&mut transport, dest, full);
+            assert!(transport.announce_allowed_on_interface(boundary, &dest, false));
+        }
+
+        #[test]
+        fn mode_full_gateway_ptp_always_allow() {
+            let mut transport = make_transport_enabled();
+            let gw = transport.register_interface(Box::new(MockInterface::new("gw", 1)));
+            let ptp = transport.register_interface(Box::new(MockInterface::new("ptp", 2)));
+            transport.set_interface_mode(gw, InterfaceMode::Gateway);
+            transport.set_interface_mode(ptp, InterfaceMode::PointToPoint);
+            let dest = dummy_dest(0x04);
+
+            for &iface in &[gw, ptp] {
+                assert!(transport.announce_allowed_on_interface(iface, &dest, true));
+                assert!(transport.announce_allowed_on_interface(iface, &dest, false));
+            }
+            // No mode blocks anything here.
+            assert!(transport
+                .announce_mode_blocked_ifaces(&dest, false)
+                .is_empty());
+        }
+
+        #[test]
+        fn mode_broadcast_with_caps_suppresses_access_point() {
+            // End-to-end through broadcast_announce_with_caps: a capped AP
+            // interface is suppressed while a capped Full interface still sends.
+            let mut transport = make_transport_enabled();
+            let full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let ap = transport.register_interface(Box::new(MockInterface::new("ap", 2)));
+            transport.set_interface_name(full, "full".into());
+            transport.set_interface_name(ap, "ap".into());
+            transport.register_interface_bitrate(full, 1200);
+            transport.register_interface_bitrate(ap, 1200);
+            transport.set_interface_mode(ap, InterfaceMode::AccessPoint);
+
+            let (raw, _dest) = make_announce_raw(1, PacketContext::None);
+            let mut packet = Packet::unpack(&raw).unwrap();
+            packet.hops = 1;
+            transport.broadcast_announce_with_caps(&mut packet);
+
+            let sent_ifaces: Vec<usize> = transport
+                .pending_actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::SendPacket { iface, .. } => Some(iface.0),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                sent_ifaces.contains(&full),
+                "Full iface must get the announce"
+            );
+            assert!(
+                !sent_ifaces.contains(&ap),
+                "AP iface must be suppressed; sent={sent_ifaces:?}"
+            );
+        }
+
+        #[test]
+        fn mode_forward_on_all_excludes_access_point() {
+            // The uncapped broadcast path (forward_on_all) must carry the
+            // AP-mode interface in the Broadcast exclude set.
+            let mut transport = make_transport_enabled();
+            let _full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let ap = transport.register_interface(Box::new(MockInterface::new("ap", 2)));
+            transport.set_interface_mode(ap, InterfaceMode::AccessPoint);
+
+            let (raw, _dest) = make_announce_raw(0, PacketContext::None);
+            let mut packet = Packet::unpack(&raw).unwrap();
+            transport.forward_on_all(&mut packet);
+
+            let broadcast = transport
+                .pending_actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { exclude_ifaces, .. } => Some(exclude_ifaces.clone()),
+                    _ => None,
+                })
+                .expect("a Broadcast action");
+            assert!(
+                broadcast.contains(&InterfaceId(ap)),
+                "AP iface must be excluded from the announce broadcast; got {broadcast:?}"
+            );
+        }
+
+        #[test]
+        fn mode_local_announce_gated_in_send_on_all() {
+            // A locally originated announce broadcast (send_on_all_interfaces,
+            // the Destination.announce path) must carry the AP interface in the
+            // Broadcast exclude set, while a roaming interface (which allows
+            // local-origin announces) is NOT excluded.
+            let mut transport = make_transport_enabled();
+            let _full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let ap = transport.register_interface(Box::new(MockInterface::new("ap", 2)));
+            let roaming = transport.register_interface(Box::new(MockInterface::new("roam", 3)));
+            transport.set_interface_mode(ap, InterfaceMode::AccessPoint);
+            transport.set_interface_mode(roaming, InterfaceMode::Roaming);
+
+            let (raw, dest) = make_announce_raw(0, PacketContext::None);
+            // Mark the announced destination as instance-local (is_local=true).
+            transport.register_destination(dest);
+            transport.send_on_all_interfaces(&raw);
+
+            let excl = transport
+                .pending_actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { exclude_ifaces, .. } => Some(exclude_ifaces.clone()),
+                    _ => None,
+                })
+                .expect("a Broadcast action");
+            assert!(
+                excl.contains(&InterfaceId(ap)),
+                "AP must be excluded: {excl:?}"
+            );
+            assert!(
+                !excl.contains(&InterfaceId(roaming)),
+                "roaming allows local-origin announces: {excl:?}"
+            );
+        }
+
+        #[test]
+        fn mode_path_expiry_per_mode() {
+            let mut transport = make_transport_enabled();
+            let full = transport.register_interface(Box::new(MockInterface::new("full", 1)));
+            let ap = transport.register_interface(Box::new(MockInterface::new("ap", 2)));
+            let roaming = transport.register_interface(Box::new(MockInterface::new("roam", 3)));
+            transport.set_interface_mode(ap, InterfaceMode::AccessPoint);
+            transport.set_interface_mode(roaming, InterfaceMode::Roaming);
+
+            assert_eq!(
+                transport.path_expiry_ms_for_interface(full),
+                transport.config.path_expiry_secs * 1000
+            );
+            assert_eq!(
+                transport.path_expiry_ms_for_interface(ap),
+                crate::constants::AP_PATH_TIME_SECS * 1000
+            );
+            assert_eq!(
+                transport.path_expiry_ms_for_interface(roaming),
+                crate::constants::ROAMING_PATH_TIME_SECS * 1000
+            );
         }
 
         // ---- OBS-1 / OBS-2 observability ----------------------------------
@@ -10597,6 +11033,7 @@ mod tests {
                 Action::Broadcast {
                     data: data.to_vec(),
                     exclude_iface: None,
+                    exclude_ifaces: Vec::new(),
                 }
             );
         }
@@ -10618,6 +11055,7 @@ mod tests {
                 Action::Broadcast {
                     data: data.to_vec(),
                     exclude_iface: Some(InterfaceId(1)),
+                    exclude_ifaces: Vec::new(),
                 }
             );
         }
@@ -10871,6 +11309,7 @@ mod tests {
                 Action::Broadcast {
                     data: b"broadcast".to_vec(),
                     exclude_iface: None,
+                    exclude_ifaces: Vec::new(),
                 }
             );
             assert_eq!(
@@ -10885,6 +11324,7 @@ mod tests {
                 Action::Broadcast {
                     data: b"selective".to_vec(),
                     exclude_iface: Some(InterfaceId(0)),
+                    exclude_ifaces: Vec::new(),
                 }
             );
         }
@@ -10931,6 +11371,7 @@ mod tests {
                     Action::Broadcast {
                         exclude_iface,
                         data,
+                        ..
                     } => {
                         assert_eq!(
                             *exclude_iface, None,
@@ -18760,6 +19201,7 @@ mod tests {
             let actions = vec![Action::Broadcast {
                 data: vec![1, 2, 3],
                 exclude_iface: None,
+                exclude_ifaces: Vec::new(),
             }];
 
             let no_ifac = BTreeMap::new();
@@ -18973,6 +19415,7 @@ mod tests {
             let actions = vec![Action::Broadcast {
                 data: raw.clone(),
                 exclude_iface: None,
+                exclude_ifaces: Vec::new(),
             }];
 
             let result = dispatch_actions(&mut interfaces, actions, &ifac_configs);

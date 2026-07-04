@@ -115,6 +115,13 @@ pub const PATHFINDER_MAX_HOPS: u8 = 128;
 pub const PATHFINDER_RETRIES: u8 = 1;
 pub const PATHFINDER_EXPIRY_SECS: u64 = 60 * 60 * 24 * 7; // 7 days
 
+/// Path expiry for destinations learned through an `AccessPoint`-mode
+/// interface (Python `Transport.AP_PATH_TIME`, Transport.py:72 = 1 day).
+pub const AP_PATH_TIME_SECS: u64 = 60 * 60 * 24; // 1 day
+/// Path expiry for destinations learned through a `Roaming`-mode interface
+/// (Python `Transport.ROAMING_PATH_TIME`, Transport.py:73 = 6 hours).
+pub const ROAMING_PATH_TIME_SECS: u64 = 60 * 60 * 6; // 6 hours
+
 /// Retry grace period for announce rebroadcast (milliseconds)
 pub const PATHFINDER_G_MS: u64 = 5_000;
 /// Random window added to retry grace period (milliseconds, Python PATHFINDER_RW = 0.5)

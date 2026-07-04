@@ -64,15 +64,77 @@ impl core::fmt::Display for InterfaceError {
     }
 }
 
-/// Interface mode flags
+/// Reticulum interface propagation mode.
+///
+/// Governs how announces are (re)broadcast on the interface and how paths
+/// learned through it are treated. The discriminants match Python-RNS
+/// (`RNS/Interfaces/Interface.py:45-50`) so the value can be reported over the
+/// shared-instance IPC (`rnstatus`/`lnstatus`) without translation.
+///
+/// The mode is a config property carried by core/transport; the interface
+/// driver itself stays media-agnostic and never inspects it. Only the
+/// announce-propagation and path-selection logic in `transport` reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct InterfaceMode {
-    /// Interface uses broadcast (all nodes see all packets)
-    pub broadcast: bool,
-    /// Interface is local-only (loopback, IPC)
-    pub local: bool,
-    /// Interface supports multiple access (shared medium)
-    pub multiple_access: bool,
+#[repr(u8)]
+pub enum InterfaceMode {
+    /// Full participation: announce, relay, and discover paths normally.
+    #[default]
+    Full = 0x01,
+    /// Point-to-point link. Behaves like `Full` for announce propagation;
+    /// carried for reporting parity only.
+    PointToPoint = 0x02,
+    /// Access point: never (re)broadcasts announces out on this interface,
+    /// and paths learned through it expire quickly (`AP_PATH_TIME`).
+    AccessPoint = 0x03,
+    /// Roaming: withholds transit announces unless the origin is instance-local
+    /// or the next hop is a well-connected (non-roaming/boundary) interface;
+    /// paths learned through it expire quickly (`ROAMING_PATH_TIME`).
+    Roaming = 0x04,
+    /// Boundary: like `Roaming` but only withholds when the next hop is a
+    /// roaming interface (a boundary next hop is still relayed).
+    Boundary = 0x05,
+    /// Gateway: behaves like `Full` for announce propagation; participates in
+    /// path discovery for unknown destinations.
+    Gateway = 0x06,
+}
+
+impl InterfaceMode {
+    /// Wire/IPC value (matches Python `Interface.MODE_*`).
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Parse a config `mode` / `interface_mode` value, mirroring the spellings
+    /// accepted by Python `Reticulum._synthesize_interface` (Reticulum.py:717-745).
+    /// Comparison is case-insensitive; an unrecognised value yields `None` so
+    /// the caller can keep the `Full` default (matching Python, which leaves the
+    /// mode unchanged on an unknown string).
+    pub fn from_config_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(InterfaceMode::Full),
+            "access_point" | "accesspoint" | "ap" => Some(InterfaceMode::AccessPoint),
+            "pointtopoint" | "ptp" => Some(InterfaceMode::PointToPoint),
+            "roaming" => Some(InterfaceMode::Roaming),
+            "boundary" => Some(InterfaceMode::Boundary),
+            "gateway" | "gw" => Some(InterfaceMode::Gateway),
+            _ => None,
+        }
+    }
+}
+
+impl core::fmt::Display for InterfaceMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Matches the labels `rnstatus` prints (Utilities/rnstatus.py:421-427).
+        let s = match self {
+            InterfaceMode::Full => "Full",
+            InterfaceMode::PointToPoint => "Point-to-Point",
+            InterfaceMode::AccessPoint => "Access Point",
+            InterfaceMode::Roaming => "Roaming",
+            InterfaceMode::Boundary => "Boundary",
+            InterfaceMode::Gateway => "Gateway",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 /// A network interface that can send packets (sync, non-blocking)
@@ -104,7 +166,11 @@ pub trait Interface {
     /// Maximum transmission unit (max packet payload size)
     fn mtu(&self) -> usize;
 
-    /// Interface mode flags (broadcast, local, multiple_access)
+    /// Default propagation mode for this interface.
+    ///
+    /// Almost always `Full`; the effective mode is set from config and held by
+    /// `transport` (see `Transport::set_interface_mode`), so drivers stay
+    /// media-agnostic and need not override this.
     fn mode(&self) -> InterfaceMode {
         InterfaceMode::default()
     }
@@ -837,10 +903,36 @@ mod tests {
 
     #[test]
     fn test_interface_mode_default() {
-        let mode = InterfaceMode::default();
-        assert!(!mode.broadcast);
-        assert!(!mode.local);
-        assert!(!mode.multiple_access);
+        // Default matches Python MODE_FULL (0x01).
+        assert_eq!(InterfaceMode::default(), InterfaceMode::Full);
+        assert_eq!(InterfaceMode::Full.as_u8(), 0x01);
+        assert_eq!(InterfaceMode::PointToPoint.as_u8(), 0x02);
+        assert_eq!(InterfaceMode::AccessPoint.as_u8(), 0x03);
+        assert_eq!(InterfaceMode::Roaming.as_u8(), 0x04);
+        assert_eq!(InterfaceMode::Boundary.as_u8(), 0x05);
+        assert_eq!(InterfaceMode::Gateway.as_u8(), 0x06);
+    }
+
+    #[test]
+    fn test_interface_mode_from_config_str() {
+        use InterfaceMode::*;
+        // Every spelling accepted by Python Reticulum.py:717-745.
+        for (s, m) in [
+            ("full", Full),
+            ("access_point", AccessPoint),
+            ("accesspoint", AccessPoint),
+            ("ap", AccessPoint),
+            ("AP", AccessPoint),
+            ("pointtopoint", PointToPoint),
+            ("ptp", PointToPoint),
+            ("roaming", Roaming),
+            ("Boundary", Boundary),
+            ("gateway", Gateway),
+            ("gw", Gateway),
+        ] {
+            assert_eq!(InterfaceMode::from_config_str(s), Some(m), "spelling {s}");
+        }
+        assert_eq!(InterfaceMode::from_config_str("nonsense"), None);
     }
 
     #[test]

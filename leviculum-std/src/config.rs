@@ -172,6 +172,13 @@ pub struct InterfaceConfig {
     /// Whether the interface is enabled
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Reticulum propagation mode (Codeberg #91). Raw config string as written
+    /// (`full`, `gateway`/`gw`, `access_point`/`accesspoint`/`ap`,
+    /// `pointtopoint`/`ptp`, `roaming`, `boundary`); resolved to
+    /// `InterfaceMode` at registration. `interface_mode` is accepted as an
+    /// alias (Reticulum.py:717-745). `None` means the `Full` default.
+    #[serde(default, alias = "interface_mode")]
+    pub mode: Option<String>,
     /// Can send outgoing packets
     #[serde(default = "default_true")]
     pub outgoing: bool,
@@ -376,6 +383,7 @@ impl Default for InterfaceConfig {
         Self {
             interface_type: String::new(),
             enabled: true,
+            mode: None,
             outgoing: true,
             bitrate: DEFAULT_BITRATE_BPS,
             listen_ip: None,
