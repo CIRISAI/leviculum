@@ -306,6 +306,97 @@ impl TestDaemon {
         Err(last_error)
     }
 
+    /// Retry-wrapped start with arbitrary extra daemon args. Allocates a fresh
+    /// `(rns_port, cmd_port)` pair per attempt.
+    async fn start_with_retry_args(extra_args: Vec<String>) -> Result<Self, HarnessError> {
+        ensure_reticulum_submodule()?;
+        let mut last_error = HarnessError::StartupTimeout;
+        for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            let (rns_port, cmd_port) = find_two_available_ports()?;
+            match Self::start_with_ports_and_options(rns_port, cmd_port, extra_args.clone()).await {
+                Ok(daemon) => return Ok(daemon),
+                Err(HarnessError::StartupTimeout) => {
+                    if attempt + 1 < Self::MAX_STARTUP_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    last_error = HarnessError::StartupTimeout;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_error)
+    }
+
+    /// Common discovery args: a discoverable interface named `name` with the
+    /// default stamp value (14) and a short announcer job interval so the REAL
+    /// `RNS.Discovery.InterfaceAnnouncer` fires promptly (Codeberg #32).
+    fn discovery_args(name: &str) -> Vec<String> {
+        vec![
+            "--discoverable".to_string(),
+            "--discovery-name".to_string(),
+            name.to_string(),
+            "--discovery-stamp-value".to_string(),
+            "14".to_string(),
+            "--discovery-job-interval".to_string(),
+            "2".to_string(),
+        ]
+    }
+
+    /// Start a daemon whose main TCP server is discoverable (Codeberg #32). Its
+    /// `reachable_on`/port advertise the main `rns_port` endpoint.
+    pub async fn start_discoverable(name: &str) -> Result<Self, HarnessError> {
+        Self::start_with_retry_args(Self::discovery_args(name)).await
+    }
+
+    /// Start a daemon that advertises encrypted discovery announces keyed by the
+    /// shared 64-byte network identity at `network_identity_path` (Codeberg #32,
+    /// sub-task d). Python generates the identity file if it does not yet exist.
+    pub async fn start_discoverable_encrypted(
+        name: &str,
+        network_identity_path: &str,
+    ) -> Result<Self, HarnessError> {
+        let mut extra = Self::discovery_args(name);
+        extra.push("--discovery-encrypt".to_string());
+        extra.push("--network-identity".to_string());
+        extra.push(network_identity_path.to_string());
+        Self::start_with_retry_args(extra).await
+    }
+
+    /// Start a daemon with a discoverable SECOND TCP server on a distinct port,
+    /// returned alongside the daemon. The main `rns_port` is a plain bootstrap
+    /// link a peer connects to to hear the announce; the announce advertises the
+    /// returned port, so an auto-connecting peer opens a genuinely new link to
+    /// it. Mirrors the two-port topology of the Rust<->Rust auto-connect test.
+    pub async fn start_discoverable_backbone(name: &str) -> Result<(Self, u16), HarnessError> {
+        ensure_reticulum_submodule()?;
+        let mut last_error = HarnessError::StartupTimeout;
+        for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            let (rns_port, cmd_port) = find_two_available_ports()?;
+            let backbone_port = pick_free_tcp_port()?;
+            let mut extra = Self::discovery_args(name);
+            extra.push("--discovery-port".to_string());
+            extra.push(backbone_port.to_string());
+            match Self::start_with_ports_and_options(rns_port, cmd_port, extra).await {
+                Ok(daemon) => return Ok((daemon, backbone_port)),
+                Err(HarnessError::StartupTimeout) => {
+                    if attempt + 1 < Self::MAX_STARTUP_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    last_error = HarnessError::StartupTimeout;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_error)
+    }
+
+    /// Start a daemon running the InterfaceDiscovery *listener* (reverse
+    /// direction): it populates its own discovered-interface registry from
+    /// received discovery announces (`get_discovered_interfaces`). Plaintext.
+    pub async fn start_discovering() -> Result<Self, HarnessError> {
+        Self::start_with_retry_args(vec!["--discover-interfaces".to_string()]).await
+    }
+
     async fn start_with_ports_and_options(
         rns_port: u16,
         cmd_port: u16,
@@ -1215,6 +1306,26 @@ impl TestDaemon {
         )
         .await?;
         Ok(())
+    }
+
+    /// Drive the REAL `RNS.Discovery.InterfaceAnnouncer` to emit one
+    /// interface-discovery announce immediately (Codeberg #32). Returns the
+    /// announcer's result map (`transport_id`, `network_id`, `bind_port`, ...).
+    pub async fn emit_discovery_announce(&self) -> Result<serde_json::Value, HarnessError> {
+        self.query("emit_discovery_announce", serde_json::json!({}))
+            .await
+    }
+
+    /// Return this daemon's own discovered-interface registry (the `rnstatus -d`
+    /// view), populated by its InterfaceDiscovery listener (Codeberg #32).
+    pub async fn get_discovered_interfaces(&self) -> Result<Vec<serde_json::Value>, HarnessError> {
+        let result = self
+            .query("get_discovered_interfaces", serde_json::json!({}))
+            .await?;
+        match result {
+            serde_json::Value::Array(a) => Ok(a),
+            _ => Ok(Vec::new()),
+        }
     }
 
     /// Get established links from the daemon.

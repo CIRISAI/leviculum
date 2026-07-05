@@ -70,6 +70,32 @@ RETICULUM_PATH = find_reticulum_path()
 if RETICULUM_PATH:
     sys.path.insert(0, RETICULUM_PATH)
 
+
+def find_lxmf_path():
+    """Locate the vendored LXMF (needed by the real InterfaceAnnouncer).
+
+    On-network interface discovery (Codeberg #32) builds proof-of-work stamps
+    with LXMF.LXStamper. RNS.Discovery imports LXMF at InterfaceAnnouncer /
+    InterfaceAnnounceHandler construction time, so the module must be importable
+    before Reticulum starts. Prefer the vendored copy so the daemon stays
+    byte-for-byte pinned to the tree the Rust stack ports from.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    candidates = [
+        os.environ.get("LXMF_PATH"),
+        os.path.join(project_root, "vendor", "LXMF"),
+    ]
+    for path in candidates:
+        if path and os.path.isdir(path) and os.path.exists(os.path.join(path, "LXMF")):
+            return path
+    return None
+
+
+LXMF_PATH = find_lxmf_path()
+if LXMF_PATH:
+    sys.path.insert(0, LXMF_PATH)
+
 try:
     import RNS
     import RNS.Channel
@@ -111,7 +137,30 @@ class TestDaemon:
                  ifac_size: int = None,
                  serial_kind: str = None, serial_port: str = None,
                  serial_speed: int = 9600, ax25_callsign: str = None,
-                 ax25_ssid: int = None, pipe_command: str = None):
+                 ax25_ssid: int = None, pipe_command: str = None,
+                 discoverable: bool = False, discovery_name: str = None,
+                 discovery_stamp_value: int = None, discovery_encrypt: bool = False,
+                 discovery_port: int = None, discover_interfaces: bool = False,
+                 network_identity: str = None, discovery_job_interval: float = None):
+        # Interface auto-discovery (Codeberg #32): drive the REAL Python
+        # RNS.Discovery.InterfaceAnnouncer / InterfaceDiscovery. `discoverable`
+        # marks a TCPServer interface discoverable so the daemon emits announces
+        # on `rnstransport.discovery.interface`; `discovery_port`, when set, adds
+        # a SECOND discoverable TCPServer on that port (the main server then acts
+        # as a bootstrap link the peer connects to to hear the announce, while
+        # the announce advertises the second port -- the endpoint an auto-connect
+        # targets). `discover_interfaces` starts the listener so the daemon
+        # populates its own discovered-interface registry (reverse direction).
+        # `network_identity` points at a raw 64-byte identity file shared with
+        # the peer for encrypted discovery.
+        self.discoverable = discoverable
+        self.discovery_name = discovery_name or "Test Discoverable"
+        self.discovery_stamp_value = discovery_stamp_value
+        self.discovery_encrypt = discovery_encrypt
+        self.discovery_port = discovery_port
+        self.discover_interfaces = discover_interfaces
+        self.network_identity = network_identity
+        self.discovery_job_interval = discovery_job_interval
         # Serial-family interface (Codeberg #102): a KISSInterface,
         # AX25KISSInterface or PipeInterface driven over a socat pty pair (or,
         # for Pipe, a subprocess bridge command). Off by default; when set, the
@@ -183,6 +232,22 @@ class TestDaemon:
         if self.verbose:
             print("Reticulum initialized")
 
+        # Speed up the REAL InterfaceAnnouncer background job for tests. The
+        # config-parsed announce interval has a 5-minute floor and the job
+        # thread sleeps a full JOB_INTERVAL (60 s) between passes, so without
+        # this a discovery announce is minutes away. Dropping the interface's
+        # per-announce interval to 0 and the job interval to a few seconds makes
+        # the real announcer fire promptly; `emit_discovery_announce` remains a
+        # deterministic on-demand trigger driving the same announcer code.
+        if self.discoverable and self.discovery_job_interval is not None:
+            announcer = getattr(Transport, "interface_announcer", None)
+            if announcer is not None:
+                announcer.job_interval = self.discovery_job_interval
+            for iface in Transport.interfaces:
+                if getattr(iface, "discoverable", False):
+                    iface.discovery_announce_interval = 0
+                    iface.last_discovery_announce = 0
+
         # Print probe destination hash if respond_to_probes is enabled.
         # Reticulum auto-creates the probe destination when the config option
         # is set, so we read it from Transport.probe_destination directly.
@@ -196,6 +261,25 @@ class TestDaemon:
 
         # Start JSON-RPC command server
         self._start_cmd_server()
+
+    def _discovery_keys(self):
+        """Discovery config keys appended to a discoverable TCPServer block.
+
+        `reachable_on` is the address peers dial to auto-connect; `announce_interval`
+        is in minutes and clamped by Reticulum to a 5-minute floor, so tests drive
+        the announce out-of-band (short `discovery_job_interval` and/or the
+        `emit_discovery_announce` RPC) rather than waiting for the cadence.
+        """
+        keys = """    discoverable = yes
+    reachable_on = 127.0.0.1
+    announce_interval = 5
+"""
+        keys += f"    discovery_name = {self.discovery_name}\n"
+        if self.discovery_stamp_value is not None:
+            keys += f"    discovery_stamp_value = {self.discovery_stamp_value}\n"
+        if self.discovery_encrypt:
+            keys += "    discovery_encrypt = yes\n"
+        return keys
 
     def _write_config(self):
         """Write minimal Reticulum config."""
@@ -216,6 +300,14 @@ class TestDaemon:
                 allowed = ", ".join(self.remote_management_allowed)
                 config += f"  remote_management_allowed = {allowed}\n"
 
+        # Interface discovery (Codeberg #32). A shared network_identity keys
+        # encrypted discovery; discover_interfaces starts the listener that
+        # populates the discovered-interface registry from received announces.
+        if self.network_identity is not None:
+            config += f"  network_identity = {self.network_identity}\n"
+        if self.discover_interfaces:
+            config += "  discover_interfaces = yes\n"
+
         config += f"""
 [interfaces]
   [[Test TCP Server]]
@@ -225,6 +317,21 @@ class TestDaemon:
     listen_port = {self.rns_port}
     mode = gateway
 """
+        # Make the main server discoverable in place unless a dedicated
+        # discovery_port is requested (then the main server is a plain bootstrap
+        # link and the second block below is the discoverable endpoint).
+        if self.discoverable and self.discovery_port is None:
+            config += self._discovery_keys()
+        elif self.discoverable and self.discovery_port is not None:
+            config += f"""
+  [[Discoverable Backbone]]
+    type = TCPServerInterface
+    enabled = yes
+    listen_ip = 127.0.0.1
+    listen_port = {self.discovery_port}
+    mode = gateway
+"""
+            config += self._discovery_keys()
         # IFAC (Interface Access Code) on the TCP server. Python derives the
         # ifac_identity/ifac_key natively from these keys (Reticulum.py:747-766,
         # 923-935), so this daemon is the byte-for-byte reference for the Rust
@@ -1472,6 +1579,63 @@ class TestDaemon:
                 }
             return {"result": {"sources": stats, "total": total}}
 
+        elif method == "emit_discovery_announce":
+            # Drive the REAL InterfaceAnnouncer to emit one interface-discovery
+            # announce immediately (Codeberg #32), bypassing the minutes-long
+            # cadence. Uses the announcer's own get_interface_announce_data
+            # (real PoW stamp via LXMF.LXStamper, real network-identity
+            # encryption) and its discovery_destination.announce -- the same
+            # code the background job runs.
+            announcer = getattr(Transport, "interface_announcer", None)
+            if announcer is None:
+                return {"error": "InterfaceAnnouncer not running (daemon not discoverable?)"}
+            disc = [i for i in Transport.interfaces
+                    if getattr(i, "supports_discovery", False)
+                    and getattr(i, "discoverable", False)]
+            if not disc:
+                return {"error": "no discoverable interface registered"}
+            iface = disc[0]
+            try:
+                app_data = announcer.get_interface_announce_data(iface)
+            except Exception as e:
+                return {"error": f"get_interface_announce_data failed: {e}"}
+            if not app_data:
+                return {"error": "get_interface_announce_data returned no data"}
+            announcer.discovery_destination.announce(app_data=app_data)
+            return {"result": {
+                "announced": True,
+                "app_data_len": len(app_data),
+                "discovery_dest_hash": announcer.discovery_destination.hash.hex(),
+                "transport_id": Transport.identity.hash.hex() if Transport.identity else None,
+                "network_id": announcer.discovery_destination.identity.hash.hex(),
+                "bind_port": getattr(iface, "bind_port", None),
+            }}
+
+        elif method == "get_discovered_interfaces":
+            # Return this daemon's own discovered-interface registry (the
+            # `rnstatus -d` view), reading the shared storage via the real
+            # RNS.Discovery.InterfaceDiscovery. Bytes fields are dropped/hex'd
+            # so the result is JSON-safe.
+            try:
+                infos = RNS.Reticulum.discovered_interfaces()
+            except Exception as e:
+                return {"error": f"discovered_interfaces failed: {e}"}
+            out = []
+            for info in infos:
+                out.append({
+                    "type": info.get("type"),
+                    "name": info.get("name"),
+                    "transport_id": info.get("transport_id"),
+                    "network_id": info.get("network_id"),
+                    "reachable_on": info.get("reachable_on"),
+                    "port": info.get("port"),
+                    "value": info.get("value"),
+                    "hops": info.get("hops"),
+                    "status": info.get("status"),
+                    "config_entry": info.get("config_entry"),
+                })
+            return {"result": out}
+
         elif method == "shutdown":
             self.running = False
             return {"result": "shutting_down"}
@@ -1697,6 +1861,23 @@ def main():
                         help="Source SSID for the ax25kiss interface")
     parser.add_argument("--pipe-command", type=str, default=None,
                         help="Bridge command for the pipe interface")
+    parser.add_argument("--discoverable", action="store_true",
+                        help="Mark a TCPServer interface discoverable (#32)")
+    parser.add_argument("--discovery-name", type=str, default=None,
+                        help="Discovery name advertised for the interface")
+    parser.add_argument("--discovery-stamp-value", type=int, default=None,
+                        help="Required PoW stamp value for the discovery announce")
+    parser.add_argument("--discovery-encrypt", action="store_true",
+                        help="Encrypt discovery announces with the network identity")
+    parser.add_argument("--discovery-port", type=int, default=None,
+                        help="Add a second discoverable TCPServer on this port "
+                             "(main server becomes a plain bootstrap link)")
+    parser.add_argument("--discover-interfaces", action="store_true",
+                        help="Start the InterfaceDiscovery listener (reverse direction)")
+    parser.add_argument("--network-identity", type=str, default=None,
+                        help="Path to a shared 64-byte network identity file")
+    parser.add_argument("--discovery-job-interval", type=float, default=None,
+                        help="Reduce the InterfaceAnnouncer job interval (seconds)")
 
     args = parser.parse_args()
 
@@ -1729,6 +1910,14 @@ def main():
         ax25_callsign=args.ax25_callsign,
         ax25_ssid=args.ax25_ssid,
         pipe_command=args.pipe_command,
+        discoverable=args.discoverable,
+        discovery_name=args.discovery_name,
+        discovery_stamp_value=args.discovery_stamp_value,
+        discovery_encrypt=args.discovery_encrypt,
+        discovery_port=args.discovery_port,
+        discover_interfaces=args.discover_interfaces,
+        network_identity=args.network_identity,
+        discovery_job_interval=args.discovery_job_interval,
     )
     daemon.run()
 

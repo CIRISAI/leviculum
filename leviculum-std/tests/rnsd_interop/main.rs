@@ -38,6 +38,7 @@ mod blackhole_interop_tests;
 mod channel_tests;
 mod common;
 mod comprehensive_network_test;
+mod discovery_interop_tests;
 mod discovery_tests;
 mod edge_case_tests;
 mod encryption_tests;
