@@ -51,6 +51,25 @@ pub struct ReticulumConfig {
     /// `shared_instance_type = tcp`, since tcp disables AF_UNIX upstream.
     #[serde(default)]
     pub shared_instance_socket: Option<String>,
+    /// TCP-loopback port for the shared-instance data channel (Python
+    /// `shared_instance_port`, `local_interface_port`, default 37428;
+    /// `Reticulum.py:501-503`).
+    ///
+    /// Only the AF_INET path uses this port: `shared_instance_type = tcp`, or a
+    /// platform without AF_UNIX (Windows). On the default AF_UNIX path the
+    /// shared instance is keyed by `instance_name` (`\0rns/{instance_name}`) and
+    /// the port is unused, exactly as in Python. `None` keeps the 37428 default.
+    #[serde(default)]
+    pub shared_instance_port: Option<u16>,
+    /// TCP-loopback port for the shared-instance RPC control channel (Python
+    /// `instance_control_port`, `local_control_port`, default 37429;
+    /// `Reticulum.py:505-507`).
+    ///
+    /// Same AF_INET-only semantics as [`Self::shared_instance_port`]: on the
+    /// default AF_UNIX path the RPC socket is `\0rns/{instance_name}/rpc` and the
+    /// port is unused. `None` keeps the 37429 default.
+    #[serde(default)]
+    pub instance_control_port: Option<u16>,
     /// Respond to rnprobe requests
     ///
     /// When enabled, creates a probe destination (`rnstransport.probe`) with
@@ -181,6 +200,8 @@ impl Default for ReticulumConfig {
             instance_name: default_instance_name(),
             shared_instance_type: None,
             shared_instance_socket: None,
+            shared_instance_port: None,
+            instance_control_port: None,
             respond_to_probes: false,
             remote_management_enabled: false,
             remote_management_allowed: Vec::new(),

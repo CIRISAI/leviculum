@@ -9,7 +9,7 @@
 //! Uses the same HDLC framing as TCP interfaces.
 
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use leviculum_core::constants::MTU;
@@ -91,6 +91,67 @@ fn connect_local(abstract_name: &str) -> Result<std::net::TcpStream, io::Error> 
     std::net::TcpStream::connect(loopback_addr(abstract_name))
 }
 
+/// Configured TCP-loopback ports for the shared-instance data (`.0`) and RPC
+/// (`.1`) channels (`shared_instance_port` / `instance_control_port`). `0`
+/// means unset, so `loopback_addr` falls back to the Python defaults. Set once
+/// at process startup from the parsed config (see `set_loopback_ports`).
+///
+/// Only the AF_INET (Windows / `shared_instance_type = tcp`) path reads these;
+/// the AF_UNIX path keys the socket by `instance_name` and ignores the ports,
+/// matching Python. The store is unconditional so the config value is captured
+/// on every platform; only the Windows reader consults it.
+static CONFIGURED_LOOPBACK_PORTS: (AtomicU32, AtomicU32) = (AtomicU32::new(0), AtomicU32::new(0));
+
+/// Record the configured shared-instance TCP-loopback ports for later binds.
+///
+/// Called from the node builder with the parsed `shared_instance_port` /
+/// `instance_control_port`. `None` leaves the Python default in force. A no-op
+/// on the AF_UNIX path (the ports are never read there).
+pub(crate) fn set_loopback_ports(
+    shared_instance_port: Option<u16>,
+    instance_control_port: Option<u16>,
+) {
+    CONFIGURED_LOOPBACK_PORTS.0.store(
+        u32::from(shared_instance_port.unwrap_or(0)),
+        Ordering::Relaxed,
+    );
+    CONFIGURED_LOOPBACK_PORTS.1.store(
+        u32::from(instance_control_port.unwrap_or(0)),
+        Ordering::Relaxed,
+    );
+}
+
+/// Resolve the TCP-loopback port for an abstract shared-instance name.
+///
+/// A configured override (`shared_instance_port` for the data channel,
+/// `instance_control_port` for the `/rpc` channel) wins. Otherwise the Python
+/// defaults hold — 37428 (`local_interface_port`) for the data channel, 37429
+/// (`local_control_port`) for RPC — and a non-default instance name derives a
+/// stable FNV-1a port so independent *leviculum* peers agree without config
+/// (a leviculum-local convention that does not match Python's port for the same
+/// name). Kept platform-agnostic so the resolution is unit-testable off Windows.
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+pub(crate) fn resolve_loopback_port(
+    abstract_name: &str,
+    configured_data: u16,
+    configured_control: u16,
+) -> u16 {
+    let is_rpc = abstract_name.ends_with("/rpc");
+    let configured = if is_rpc {
+        configured_control
+    } else {
+        configured_data
+    };
+    if configured != 0 {
+        return configured;
+    }
+    match abstract_name {
+        "rns/default" => 37428,
+        "rns/default/rpc" => 37429,
+        other => name_to_port(other),
+    }
+}
+
 /// Map an abstract instance name to a TCP loopback address (Windows).
 ///
 /// Python-RNS, when AF_UNIX is unavailable, binds fixed ports — 37428
@@ -101,27 +162,27 @@ fn connect_local(abstract_name: &str) -> Result<std::net::TcpStream, io::Error> 
 /// instances by setting `shared_instance_port`/`instance_control_port`
 /// explicitly, not by hashing the name.
 ///
-/// So for the **default** instance we match 37428/37429 and interop cleanly
-/// with a Windows `rnsd`. For a **non-default** instance name we derive a
-/// stable FNV-1a port: this lets independent *leviculum* peers on one host
-/// agree without config, which is what our multi-instance test isolation
-/// needs. It is deliberately a leviculum-local convention — it does **not**
-/// match Python's port for the same name, so cross-stack multi-instance on a
-/// single Windows host requires matching explicit ports on both sides. The
-/// default-instance path (the real drop-in surface) is unaffected.
+/// A configured `shared_instance_port` / `instance_control_port` (captured by
+/// `set_loopback_ports`) overrides the default; otherwise the default-instance
+/// path matches 37428/37429 and interops cleanly with a Windows `rnsd`, and a
+/// non-default instance name derives a stable FNV-1a port (see
+/// `resolve_loopback_port`).
 #[cfg(windows)]
 pub(crate) fn loopback_addr(abstract_name: &str) -> std::net::SocketAddr {
     use std::net::{Ipv4Addr, SocketAddr};
-    let port: u16 = match abstract_name {
-        "rns/default" => 37428,
-        "rns/default/rpc" => 37429,
-        other => name_to_port(other),
-    };
+    let port = resolve_loopback_port(
+        abstract_name,
+        CONFIGURED_LOOPBACK_PORTS.0.load(Ordering::Relaxed) as u16,
+        CONFIGURED_LOOPBACK_PORTS.1.load(Ordering::Relaxed) as u16,
+    );
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
 
 /// Stable FNV-1a hash of a name into the unprivileged 37430..=65534 range.
-#[cfg(windows)]
+///
+/// Only reached via the Windows loopback path (or its unit tests); allowed to
+/// be dead on the non-test AF_UNIX build.
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
 pub(crate) fn name_to_port(name: &str) -> u16 {
     let mut h: u32 = 0x811c_9dc5;
     for b in name.as_bytes() {
@@ -602,6 +663,63 @@ mod tests {
             .expect("timeout waiting for client packet")
             .expect("channel closed");
         assert_eq!(pkt.data, b"server-to-client");
+    }
+
+    #[test]
+    fn test_resolve_loopback_port_defaults_and_overrides() {
+        // Codeberg #112: the AF_INET bind port resolution. Unset (0) keeps the
+        // Python defaults; a configured port wins for the matching channel.
+        assert_eq!(resolve_loopback_port("rns/default", 0, 0), 37428);
+        assert_eq!(resolve_loopback_port("rns/default/rpc", 0, 0), 37429);
+
+        // Configured data port applies to the data channel, control to /rpc.
+        assert_eq!(resolve_loopback_port("rns/default", 37500, 37501), 37500);
+        assert_eq!(
+            resolve_loopback_port("rns/default/rpc", 37500, 37501),
+            37501
+        );
+
+        // The data override does not leak onto the RPC channel and vice versa.
+        assert_eq!(resolve_loopback_port("rns/default/rpc", 37500, 0), 37429);
+        assert_eq!(resolve_loopback_port("rns/default", 0, 37501), 37428);
+
+        // A non-default instance name without an override derives a stable port.
+        let a = resolve_loopback_port("rns/alpha", 0, 0);
+        let b = resolve_loopback_port("rns/beta", 0, 0);
+        assert_ne!(a, b);
+        assert_eq!(a, resolve_loopback_port("rns/alpha", 0, 0), "stable");
+        assert!((37430..=65534).contains(&a));
+    }
+
+    #[tokio::test]
+    async fn test_two_instances_different_names_no_collision() {
+        // Codeberg #112, functional: two shared-instance servers on one host
+        // start without an AddrInUse collision when they use different instance
+        // names. On Linux the shared instance is an abstract AF_UNIX socket
+        // keyed by `instance_name` (`\0rns/{instance_name}`), so the instance
+        // name -- not `shared_instance_port` -- is what separates two daemons,
+        // matching Python's AF_UNIX behaviour (the port is only bound on the
+        // AF_INET / `shared_instance_type = tcp` path).
+        let next_id = Arc::new(AtomicUsize::new(600));
+        let (tx1, _rx1) = mpsc::channel::<InterfaceHandle>(4);
+        let (tx2, _rx2) = mpsc::channel::<InterfaceHandle>(4);
+
+        let base = std::process::id();
+        let name_a = format!("test_collide_a_{base}");
+        let name_b = format!("test_collide_b_{base}");
+
+        spawn_local_server(&name_a, next_id.clone(), tx1, 16).expect("first instance binds");
+        // A second instance under a different name must not hit AddrInUse.
+        spawn_local_server(&name_b, next_id.clone(), tx2, 16)
+            .expect("second instance under a different name must bind");
+
+        // Sanity: reusing the first name does collide (proves the bind is real).
+        let (tx3, _rx3) = mpsc::channel::<InterfaceHandle>(4);
+        let dup = spawn_local_server(&name_a, next_id, tx3, 16);
+        assert!(
+            dup.is_err(),
+            "re-binding the same instance name must fail with AddrInUse"
+        );
     }
 
     #[tokio::test]

@@ -786,6 +786,16 @@ impl ReticulumNodeBuilder {
             control_channel_capacity,
             data_channel_capacity,
         );
+        // Capture the configured shared-instance TCP-loopback ports
+        // (`shared_instance_port` / `instance_control_port`, Codeberg #112) for
+        // the AF_INET bind path. Unconditional: the AF_UNIX path never reads
+        // them (it keys by `instance_name`), so this is a no-op there, matching
+        // Python, which only honours the ports when AF_UNIX is unavailable or
+        // `shared_instance_type = tcp`.
+        crate::interfaces::local::set_loopback_ports(
+            config.reticulum.shared_instance_port,
+            config.reticulum.instance_control_port,
+        );
         if share_instance {
             node.set_share_instance(instance_name);
         }

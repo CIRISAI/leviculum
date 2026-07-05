@@ -231,6 +231,18 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         "shared_instance_socket" => {
             config.shared_instance_socket = Some(value.trim().to_string());
         }
+        // TCP-loopback ports for the shared-instance data + RPC channels
+        // (Python casts `int(value)`, Reticulum.py:501-507). Only the AF_INET
+        // path binds these (`shared_instance_type = tcp`, or Windows); on the
+        // default AF_UNIX path the sockets are keyed by `instance_name` and the
+        // ports are unused, matching Python. A non-numeric or out-of-u16-range
+        // value is left unset rather than aborting the parse.
+        "shared_instance_port" => {
+            config.shared_instance_port = value.trim().parse().ok();
+        }
+        "instance_control_port" => {
+            config.instance_control_port = value.trim().parse().ok();
+        }
         "respond_to_probes" => {
             config.respond_to_probes = parse_bool(value);
         }
@@ -280,8 +292,8 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         // Tolerate (accept without error) RNS 1.2.2..1.3.5 reticulum-level
         // keys we don't implement: blackhole_update_interval, default_ar_*,
         // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control
-        // tuning knobs, shared_instance_port, etc. An unknown key must never
-        // make lnsd reject a config a current rnsd would accept.
+        // tuning knobs, etc. An unknown key must never make lnsd reject a
+        // config a current rnsd would accept.
         _ => {}
     }
 }
@@ -364,6 +376,13 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // key catch-all and were silently dropped, so a config-file-driven
         // deployment could never make an interface discoverable.
         "discoverable" => iface.discoverable = parse_bool(value),
+        // Emit ENCRYPTED discovery announces for a private discovery network
+        // (Python `discovery_encrypt`, Reticulum.py:859). The announcer
+        // (`driver::mod`) already reads this field to pick the encrypted vs
+        // plaintext app_data; it needs a configured `network_identity` to take
+        // effect. Before this it fell into the unknown-key catch-all, so a
+        // config-file deployment could never turn on encrypted discovery.
+        "discovery_encrypt" => iface.discovery_encrypt = parse_bool(value),
         "discovery_name" => iface.discovery_name = Some(value.to_string()),
         "reachable_on" => iface.reachable_on = Some(value.to_string()),
         // Python config key is `announce_interval` in MINUTES (as_int, *60 with a
@@ -1475,6 +1494,154 @@ mod tests {
         assert_eq!(
             config.reticulum.shared_instance_socket, None,
             "tcp must override (clear) a configured socket path"
+        );
+    }
+
+    #[test]
+    fn test_shared_instance_ports_parsed() {
+        // Codeberg #112: both TCP-loopback ports parse into config instead of
+        // falling into the unknown-key catch-all (previously silently dropped).
+        let config = parse_ini(
+            r#"
+[reticulum]
+  shared_instance_port = 37500
+  instance_control_port = 37501
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.reticulum.shared_instance_port, Some(37500));
+        assert_eq!(config.reticulum.instance_control_port, Some(37501));
+    }
+
+    #[test]
+    fn test_shared_instance_ports_default_none() {
+        let config = parse_ini("[reticulum]\n").unwrap();
+        assert_eq!(config.reticulum.shared_instance_port, None);
+        assert_eq!(config.reticulum.instance_control_port, None);
+    }
+
+    #[test]
+    fn test_shared_instance_port_out_of_range_left_unset() {
+        // 70000 does not fit u16; a bad value must not abort the parse, and the
+        // key stays unset (Python casts int() but our bind wants a u16 port).
+        let config = parse_ini(
+            r#"
+[reticulum]
+  shared_instance_port = 70000
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.reticulum.shared_instance_port, None);
+    }
+
+    #[test]
+    fn test_discovery_encrypt_parsed() {
+        // Codeberg #112: `discovery_encrypt` reaches the interface field the
+        // announcer reads, rather than being dropped by the catch-all.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Private TCP]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    discoverable = yes
+    discovery_encrypt = yes
+"#,
+        )
+        .unwrap();
+        let iface = config
+            .interfaces
+            .values()
+            .find(|c| c.discoverable)
+            .expect("discoverable interface");
+        assert!(iface.discovery_encrypt);
+    }
+
+    #[test]
+    fn test_discovery_encrypt_defaults_false() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Public TCP]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    discoverable = yes
+"#,
+        )
+        .unwrap();
+        let iface = config
+            .interfaces
+            .values()
+            .find(|c| c.discoverable)
+            .expect("discoverable interface");
+        assert!(!iface.discovery_encrypt);
+    }
+
+    #[test]
+    fn test_discovery_encrypt_end_to_end_from_config() {
+        // Functional (Codeberg #112): a `discovery_encrypt = yes` interface
+        // sourced entirely from a config file yields an ENCRYPTED announce that
+        // only a matching network identity decodes; a foreign identity and the
+        // plaintext parser both reject it. This exercises the config -> field ->
+        // descriptor -> encrypted-announce path the daemon's announcer runs.
+        use leviculum_core::discovery::{
+            build_announce_app_data_encrypted, parse_announce_app_data,
+            parse_announce_app_data_decrypt, DEFAULT_STAMP_VALUE,
+        };
+        use leviculum_core::identity::Identity;
+
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Private RNode]]
+    type = RNodeInterface
+    discoverable = yes
+    discovery_encrypt = yes
+    discovery_name = secret
+    frequency = 868000000
+    bandwidth = 125000
+    spreadingfactor = 8
+    codingrate = 5
+"#,
+        )
+        .unwrap();
+        let iface = config
+            .interfaces
+            .values()
+            .find(|c| c.discoverable)
+            .expect("discoverable interface");
+        assert!(iface.discovery_encrypt, "config must enable encryption");
+
+        let desc =
+            crate::discovery::descriptor_from_config(iface).expect("descriptor for RNode iface");
+
+        let mut rng = rand_core::OsRng;
+        let net_id = Identity::generate(&mut rng);
+        let transport_id = [0u8; 16];
+        let network_id = [0u8; 16];
+
+        let app = build_announce_app_data_encrypted(&desc, &transport_id, true, &net_id, &mut rng)
+            .expect("built encrypted announce");
+
+        // Matching identity decodes it.
+        assert!(
+            parse_announce_app_data_decrypt(&app, &network_id, DEFAULT_STAMP_VALUE, &net_id)
+                .is_some(),
+            "matching network identity must decode the encrypted announce"
+        );
+        // A foreign identity does not.
+        let other = Identity::generate(&mut rng);
+        assert!(
+            parse_announce_app_data_decrypt(&app, &network_id, DEFAULT_STAMP_VALUE, &other)
+                .is_none(),
+            "foreign identity must not decode the announce"
+        );
+        // Neither does the plaintext parser.
+        assert!(
+            parse_announce_app_data(&app, &network_id, DEFAULT_STAMP_VALUE).is_none(),
+            "plaintext parser must reject an encrypted announce"
         );
     }
 
