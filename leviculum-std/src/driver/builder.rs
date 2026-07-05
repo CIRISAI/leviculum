@@ -61,6 +61,9 @@ pub struct ReticulumNodeBuilder {
     data_channel_capacity_explicit: Option<usize>,
     /// Explicit link keepalive override in seconds (takes priority over config)
     link_keepalive_secs_explicit: Option<u64>,
+    /// Explicit auto-connect cap override (takes priority over config value).
+    /// `0` disables runtime auto-connect; `N > 0` enables it capped at `N`.
+    autoconnect_discovered_interfaces_explicit: Option<usize>,
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
@@ -95,6 +98,7 @@ impl ReticulumNodeBuilder {
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
+            autoconnect_discovered_interfaces_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
         }
@@ -507,6 +511,17 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Enable runtime auto-connect of discovered interfaces (Codeberg #32).
+    ///
+    /// `max` is both the on/off flag and the concurrency cap, matching Python's
+    /// `autoconnect_discovered_interfaces`: `0` disables it (the default);
+    /// `N > 0` enables it and auto-connects at most `N` discovered
+    /// (Backbone/TCP) endpoints at a time. Overrides the loaded config value.
+    pub fn autoconnect_discovered_interfaces(mut self, max: usize) -> Self {
+        self.autoconnect_discovered_interfaces_explicit = Some(max);
+        self
+    }
+
     /// Set the capacity of the lossless control-plane event channel
     /// (Codeberg #71).
     ///
@@ -580,6 +595,11 @@ impl ReticulumNodeBuilder {
         let flush_interval_secs = self
             .flush_interval_secs_explicit
             .unwrap_or(config.reticulum.flush_interval_secs);
+
+        // Apply auto-connect cap: explicit override > config value (Codeberg #32).
+        let autoconnect_max = self
+            .autoconnect_discovered_interfaces_explicit
+            .unwrap_or(config.reticulum.autoconnect_discovered_interfaces);
 
         // Apply event-channel capacities: explicit override > config value
         // (Codeberg #71).
@@ -701,6 +721,7 @@ impl ReticulumNodeBuilder {
         }
         node.set_storage_path(storage_path.clone());
         node.set_rnode_channels(rnode_channels);
+        node.set_autoconnect_max(autoconnect_max);
 
         Ok(node)
     }

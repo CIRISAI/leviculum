@@ -13,6 +13,7 @@
 #![warn(unreachable_pub)]
 
 pub mod api;
+pub(crate) mod autoconnect;
 pub(crate) mod clock;
 pub mod config;
 pub(crate) mod discovery;

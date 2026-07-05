@@ -140,6 +140,13 @@ const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(1);
 /// latency on a loaded CI worker.
 const SHUTDOWN_FLUSH_MARGIN: Duration = Duration::from_millis(25);
 
+/// How often the event loop reconciles auto-connected interfaces against the
+/// live discovered-interface registry (Codeberg #32, sub-task b). Python's
+/// monitor job polls every 5 s; we poll faster so a discovered peer is
+/// auto-connected promptly after its announce lands (local timing only, no
+/// wire or semantic change).
+const AUTOCONNECT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Total wall-clock budget the `Drop` path waits for the event loop to finish
 /// its graceful drain+flush before aborting the runtime. Slightly larger than
 /// the loop's own `SHUTDOWN_FLUSH_BOUND` + `SHUTDOWN_FLUSH_MARGIN` so the
@@ -389,6 +396,22 @@ struct EventLoopChannels {
     shutdown: watch::Receiver<bool>,
 }
 
+/// Runtime auto-connect wiring handed to the event loop (Codeberg #32).
+///
+/// Bundles the interface-id allocator and registration channels the loop's
+/// auto-connect poll uses to spawn discovered TCP endpoints at runtime, so a
+/// discovered [`AutoConnectManager`](crate::autoconnect::AutoConnectManager)
+/// registers interfaces through the exact same path as the static and
+/// hot-plug interfaces.
+struct AutoConnectWiring {
+    /// Auto-connect cap; `0` leaves the feature disabled.
+    max: usize,
+    new_iface_tx: mpsc::Sender<InterfaceHandle>,
+    reconnect_tx: mpsc::Sender<InterfaceId>,
+    next_id: Arc<AtomicUsize>,
+    corrupt_every: Option<u64>,
+}
+
 /// Event received from any interface
 enum RecvEvent {
     /// A complete packet from an interface
@@ -550,6 +573,10 @@ pub struct ReticulumNode {
     /// private key so its `.b32.i2p` address survives restarts). Set by the
     /// builder; `None` falls back to the default config dir.
     storage_path: Option<PathBuf>,
+    /// Runtime auto-connect cap (Codeberg #32, sub-task b). `0` disables
+    /// auto-connect of discovered interfaces; `N > 0` enables it capped at `N`.
+    /// Set by the builder.
+    autoconnect_max: usize,
 }
 
 impl Drop for ReticulumNode {
@@ -649,6 +676,7 @@ impl ReticulumNode {
             iface_id_counter: None,
             reconnect_tx: None,
             storage_path: None,
+            autoconnect_max: 0,
         }
     }
 
@@ -656,6 +684,11 @@ impl ReticulumNode {
     /// types that persist per-interface state under `<storage>/i2p/`.
     pub(crate) fn set_storage_path(&mut self, path: PathBuf) {
         self.storage_path = Some(path);
+    }
+
+    /// Set the runtime auto-connect cap (called by the builder, Codeberg #32).
+    pub(crate) fn set_autoconnect_max(&mut self, max: usize) {
+        self.autoconnect_max = max;
     }
 
     /// The storage root under which the discovered-interface registry lives
@@ -889,6 +922,15 @@ impl ReticulumNode {
         // `<storage>/discovery/interfaces` (Codeberg #32).
         let discovery_storage = Some(self.discovery_storage_root());
 
+        // Auto-connect wiring (Codeberg #32, sub-task b): the event loop spawns
+        // discovered TCP endpoints at runtime through the same interface-id
+        // allocator and registration channel the static/hot-plug paths use.
+        let autoconnect_max = self.autoconnect_max;
+        let autoconnect_new_iface_tx = new_iface_tx.clone();
+        let autoconnect_reconnect_tx = reconnect_tx.clone();
+        let autoconnect_next_id = Arc::clone(&next_id);
+        let autoconnect_corrupt_every = self.corrupt_every;
+
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
             run_event_loop(
@@ -906,6 +948,13 @@ impl ReticulumNode {
                 flush_interval_secs,
                 remote_mgmt,
                 discovery_storage,
+                AutoConnectWiring {
+                    max: autoconnect_max,
+                    new_iface_tx: autoconnect_new_iface_tx,
+                    reconnect_tx: autoconnect_reconnect_tx,
+                    next_id: autoconnect_next_id,
+                    corrupt_every: autoconnect_corrupt_every,
+                },
             )
             .await;
         });
@@ -2639,6 +2688,7 @@ async fn run_event_loop(
     flush_interval_secs: u64,
     remote_mgmt: Option<RemoteMgmtResponder>,
     discovery_storage: Option<PathBuf>,
+    autoconnect_wiring: AutoConnectWiring,
 ) {
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
@@ -2667,7 +2717,18 @@ async fn run_event_loop(
         core.clone_ifac_configs()
     };
 
+    // Runtime auto-connect (Codeberg #32, sub-task b). The manager owns the
+    // spawn/register/teardown lifecycle; `poll` runs periodically off the live
+    // discovered-interface registry. `None` when disabled (cap 0) or when there
+    // is no storage root to read discovered records from.
+    let mut autoconnect = (autoconnect_wiring.max > 0 && discovery_storage.is_some())
+        .then(|| crate::autoconnect::AutoConnectManager::new(autoconnect_wiring.max));
+    let mut next_autoconnect = tokio::time::Instant::now() + AUTOCONNECT_POLL_INTERVAL;
+
     loop {
+        // Auto-connect poll wake — only armed while the feature is enabled.
+        let autoconnect_wake = autoconnect.as_ref().map(|_| next_autoconnect);
+
         // Event-driven retry-queue drain. Any non-empty queue whose
         // front packet is currently ineligible for a slot contributes a
         // wake deadline; the earliest of those becomes the
@@ -2767,6 +2828,11 @@ async fn run_event_loop(
                         {
                             let mut online = iface_online_map.lock().unwrap();
                             online.remove(&iface_id.0);
+                        }
+                        // Drop auto-connect tracking so a later rediscovery may
+                        // re-establish this endpoint (Codeberg #32).
+                        if let Some(manager) = autoconnect.as_mut() {
+                            manager.on_interface_removed(iface_id);
                         }
                     }
                 }
@@ -2937,7 +3003,132 @@ async fn run_event_loop(
                 }
                 next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
             }
+
+            // Branch 8: Runtime auto-connect of discovered interfaces (#32b).
+            //
+            // Reconcile the auto-connected interface set against the live
+            // discovered-interface registry: spawn new auto-connectable
+            // (Backbone/TCP) endpoints, and tear down interfaces whose backing
+            // record is gone or that have stayed offline past the detach
+            // threshold. Armed only while auto-connect is enabled.
+            _ = async {
+                match autoconnect_wake {
+                    Some(t) => tokio::time::sleep_until(t).await,
+                    None => core::future::pending::<()>().await,
+                }
+            } => {
+                if let (Some(manager), Some(storage_root)) =
+                    (autoconnect.as_mut(), discovery_storage.as_deref())
+                {
+                    let now_unix = crate::discovery::now_unix_secs();
+                    let live = crate::discovery::list_discovered_interfaces(storage_root, now_unix);
+
+                    let mut spawner = AutoConnectLiveSpawner {
+                        next_id: &autoconnect_wiring.next_id,
+                        new_iface_tx: &autoconnect_wiring.new_iface_tx,
+                        reconnect_tx: &autoconnect_wiring.reconnect_tx,
+                        corrupt_every: autoconnect_wiring.corrupt_every,
+                        online: &iface_online_map,
+                        teardown_ids: Vec::new(),
+                    };
+                    manager.poll(&live, now_unix, &mut spawner);
+                    let teardown_ids = spawner.teardown_ids;
+
+                    // Complete each requested teardown through the same cleanup
+                    // path a hard `Disconnected` uses, so path/link state and
+                    // the per-interface maps are consistently torn down.
+                    for iface_id in teardown_ids {
+                        tracing::info!(
+                            "discovery: tearing down auto-connected interface {} ({})",
+                            iface_id,
+                            registry.name_of(iface_id),
+                        );
+                        let output = {
+                            let mut core = inner.lock().unwrap();
+                            core.handle_interface_down(iface_id)
+                        };
+                        dispatch_output(
+                            output,
+                            &mut registry,
+                            event_sink.as_mut(),
+                            &inner,
+                            &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                            remote_mgmt.as_ref(),
+                            discovery_storage.as_deref(),
+                        );
+                        retry_queues.remove(&iface_id.0);
+                        registry.remove(iface_id);
+                        {
+                            let mut stats = iface_stats_map.lock().unwrap();
+                            stats.remove(&iface_id.0);
+                        }
+                        {
+                            let mut online = iface_online_map.lock().unwrap();
+                            online.remove(&iface_id.0);
+                        }
+                    }
+                }
+                next_autoconnect = tokio::time::Instant::now() + AUTOCONNECT_POLL_INTERVAL;
+            }
         }
+    }
+}
+
+/// Production [`AutoConnectSpawner`](crate::autoconnect::AutoConnectSpawner):
+/// spawns discovered TCP endpoints as reconnecting TCP-client interfaces and
+/// registers them with the running event loop via `new_iface_tx`, exactly like
+/// the static and hot-plug interface paths. Teardown is deferred: the manager
+/// records the ids and the event loop completes removal through the shared
+/// `Disconnected` cleanup so path/link state stays consistent.
+struct AutoConnectLiveSpawner<'a> {
+    next_id: &'a Arc<AtomicUsize>,
+    new_iface_tx: &'a mpsc::Sender<InterfaceHandle>,
+    reconnect_tx: &'a mpsc::Sender<InterfaceId>,
+    corrupt_every: Option<u64>,
+    online: &'a InterfaceOnlineMap,
+    teardown_ids: Vec<InterfaceId>,
+}
+
+impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
+    fn spawn_tcp_client(&mut self, name: &str, host: &str, port: u16) -> Option<InterfaceId> {
+        // Fast path: a literal IP endpoint (the common discovery case) parses
+        // without touching the resolver. Fall back to a name lookup otherwise.
+        let addr: SocketAddr = match format!("{host}:{port}").parse() {
+            Ok(a) => a,
+            Err(_) => (host, port).to_socket_addrs().ok()?.next()?,
+        };
+        let id = InterfaceId(
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
+            id,
+            name: name.to_string(),
+            addr,
+            buffer_size: TCP_DEFAULT_BUFFER_SIZE,
+            corrupt_every: self.corrupt_every,
+            reconnect_interval: Duration::from_secs(5),
+            max_reconnect_tries: None,
+            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
+            reconnect_notify: Some(self.reconnect_tx.clone()),
+        });
+        // Register with the running loop; the `new_interface_rx` branch does
+        // the map/announce bookkeeping on the next iteration.
+        self.new_iface_tx.try_send(handle).ok()?;
+        Some(id)
+    }
+
+    fn teardown(&mut self, id: InterfaceId) {
+        self.teardown_ids.push(id);
+    }
+
+    fn is_online(&self, id: InterfaceId) -> bool {
+        self.online
+            .lock()
+            .unwrap()
+            .get(&id.0)
+            .copied()
+            .unwrap_or(false)
     }
 }
 

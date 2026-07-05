@@ -259,6 +259,14 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
                 config.keepalive_interval = Some(v);
             }
         }
+        // Codeberg #32 sub-task b: opt-in runtime auto-connect. An integer that
+        // both enables the feature and caps concurrent auto-connections (Python
+        // `autoconnect_discovered_interfaces`). Only positive values enable it.
+        "autoconnect_discovered_interfaces" => {
+            if let Ok(v) = value.trim().parse::<i64>() {
+                config.autoconnect_discovered_interfaces = v.max(0) as usize;
+            }
+        }
         // Tolerate (accept without error) RNS 1.2.2..1.3.5 reticulum-level
         // keys we don't implement: blackhole_update_interval, default_ar_*,
         // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control

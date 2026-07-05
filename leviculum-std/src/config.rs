@@ -104,6 +104,14 @@ pub struct ReticulumConfig {
     /// semantic change. `None` (default) keeps RTT-driven behaviour.
     #[serde(default)]
     pub keepalive_interval: Option<u64>,
+    /// Auto-connect discovered interfaces (Codeberg #32, sub-task b).
+    ///
+    /// A single integer that both gates and bounds runtime auto-connect,
+    /// matching Python's `autoconnect_discovered_interfaces` option: `0`
+    /// (default) disables it; `N > 0` enables it and caps concurrently
+    /// auto-connected interfaces at `N`. Opt-in, like Python.
+    #[serde(default)]
+    pub autoconnect_discovered_interfaces: usize,
 }
 
 /// Default interval between periodic storage flushes (seconds)
@@ -159,6 +167,7 @@ impl Default for ReticulumConfig {
             control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             keepalive_interval: None,
+            autoconnect_discovered_interfaces: 0,
         }
     }
 }
