@@ -357,6 +357,25 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
                 }
             }
         }
+        // Interface discovery producer keys (Codeberg #109; Python
+        // Reticulum.py:848-860). A `discoverable = yes` interface self-advertises
+        // via `descriptor_from_config` + the autonomous announcer, which read
+        // these `InterfaceConfig` fields. Before this they fell into the unknown-
+        // key catch-all and were silently dropped, so a config-file-driven
+        // deployment could never make an interface discoverable.
+        "discoverable" => iface.discoverable = parse_bool(value),
+        "discovery_name" => iface.discovery_name = Some(value.to_string()),
+        "reachable_on" => iface.reachable_on = Some(value.to_string()),
+        // Python config key is `announce_interval` in MINUTES (as_int, *60 with a
+        // 5-minute floor, Reticulum.py:852-854); the minutes->seconds conversion
+        // and floor live in `resolve_announce_interval_secs`. Stored verbatim.
+        "announce_interval" => iface.announce_interval = value.parse().ok(),
+        // Leviculum-only fast-test extension (no Python equivalent): a raw-seconds
+        // interval that bypasses the 5-minute floor. Takes priority over
+        // `announce_interval` in `resolve_announce_interval_secs`.
+        "discovery_announce_interval_secs" => {
+            iface.discovery_announce_interval_secs = value.parse().ok()
+        }
         "buffer_size" => iface.buffer_size = value.parse().ok(),
         "reconnect_interval" => iface.reconnect_interval_secs = value.parse().ok(),
         "max_reconnect_tries" => iface.max_reconnect_tries = value.parse().ok(),
@@ -1854,5 +1873,64 @@ loglevel = 4
         assert_eq!(iface.interface_type, "TCPServerInterface");
         assert_eq!(iface.listen_port, Some(4242));
         assert_eq!(iface.listen_ip, Some("0.0.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_discovery_producer_keys() {
+        // Codeberg #109: the discovery producer keys must parse from the config
+        // FILE, not just the builder. Before the arms were added they fell into
+        // the unknown-key catch-all and were silently dropped, so
+        // `descriptor_from_config` always saw `discoverable == false` and
+        // returned None.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Advertised Server]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    discoverable = yes
+    reachable_on = 1.2.3.4
+    discovery_name = My Node
+    announce_interval = 30
+
+  [[Fast Test Server]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4343
+    discoverable = yes
+    discovery_announce_interval_secs = 5
+"#,
+        )
+        .unwrap();
+
+        let adv = config.interfaces.get("Advertised Server").expect("iface");
+        assert!(adv.discoverable);
+        assert_eq!(adv.reachable_on, Some("1.2.3.4".to_string()));
+        assert_eq!(adv.discovery_name, Some("My Node".to_string()));
+        assert_eq!(adv.announce_interval, Some(30));
+        assert_eq!(adv.discovery_announce_interval_secs, None);
+
+        // The parse now feeds the producer path: a config-file-driven interface
+        // yields a discovery descriptor (returned None before the arms existed).
+        let desc =
+            crate::discovery::descriptor_from_config(adv).expect("descriptor for discoverable");
+        assert_eq!(desc.interface_type, "TCPServerInterface");
+        assert_eq!(desc.name, Some("My Node".to_string()));
+        assert_eq!(desc.reachable_on, Some("1.2.3.4".to_string()));
+        assert_eq!(desc.port, Some(4242));
+
+        // `announce_interval` minutes -> seconds (no floor hit at 30 min).
+        assert_eq!(
+            crate::discovery::resolve_announce_interval_secs(adv),
+            30 * 60
+        );
+
+        // The Leviculum raw-seconds override parses and wins over the floor.
+        let fast = config.interfaces.get("Fast Test Server").expect("iface");
+        assert!(fast.discoverable);
+        assert_eq!(fast.discovery_announce_interval_secs, Some(5));
+        assert_eq!(crate::discovery::resolve_announce_interval_secs(fast), 5);
+        assert!(crate::discovery::descriptor_from_config(fast).is_some());
     }
 }
