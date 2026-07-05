@@ -321,10 +321,31 @@ pub(crate) fn read_fixarray_len(data: &[u8], pos: &mut usize) -> Option<usize> {
     }
 }
 
+/// Maximum msgpack container nesting depth accepted by `skip_msgpack_value`.
+///
+/// Bounds the recursion so a maliciously deep nested container in untrusted
+/// wire bytes cannot overflow the stack (a DoS: `ResourceAdvertisement::unpack`
+/// and the discovery-announce decoder both skip unknown-key values off the
+/// wire with no proof-of-work gate). Reticulum's own advertisement / interface-
+/// stats payloads nest only a couple of levels; 64 is far above any legitimate
+/// use, so this rejects the attack without touching real traffic.
+const MAX_SKIP_DEPTH: usize = 64;
+
 /// Skip a single msgpack value at the current position.
 ///
 /// Needed for forward-compatibility: unknown keys in a map are skipped.
+///
+/// Nesting is capped at `MAX_SKIP_DEPTH`: a container nested deeper returns
+/// `None` (treated as malformed) rather than recursing until the stack
+/// overflows.
 pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
+    skip_msgpack_value_depth(data, pos, MAX_SKIP_DEPTH)
+}
+
+/// Depth-limited body of `skip_msgpack_value`. `depth` is the remaining
+/// nesting budget; each container level recurses with `depth - 1` and a value
+/// found at `depth == 0` is rejected.
+fn skip_msgpack_value_depth(data: &[u8], pos: &mut usize, depth: usize) -> Option<()> {
     let tag = read_byte(data, pos)?;
 
     match tag {
@@ -467,8 +488,9 @@ pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
         // fixarray
         tag if tag & 0xf0 == 0x90 => {
             let count = (tag & 0x0f) as usize;
+            let inner = depth.checked_sub(1)?;
             for _ in 0..count {
-                skip_msgpack_value(data, pos)?;
+                skip_msgpack_value_depth(data, pos, inner)?;
             }
             Some(())
         }
@@ -479,17 +501,19 @@ pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
             } else {
                 read_be_u32(data, pos)? as usize
             };
+            let inner = depth.checked_sub(1)?;
             for _ in 0..count {
-                skip_msgpack_value(data, pos)?;
+                skip_msgpack_value_depth(data, pos, inner)?;
             }
             Some(())
         }
         // fixmap
         tag if tag & 0xf0 == 0x80 => {
             let count = (tag & 0x0f) as usize;
+            let inner = depth.checked_sub(1)?;
             for _ in 0..count {
-                skip_msgpack_value(data, pos)?; // key
-                skip_msgpack_value(data, pos)?; // value
+                skip_msgpack_value_depth(data, pos, inner)?; // key
+                skip_msgpack_value_depth(data, pos, inner)?; // value
             }
             Some(())
         }
@@ -500,9 +524,10 @@ pub(crate) fn skip_msgpack_value(data: &[u8], pos: &mut usize) -> Option<()> {
             } else {
                 read_be_u32(data, pos)? as usize
             };
+            let inner = depth.checked_sub(1)?;
             for _ in 0..count {
-                skip_msgpack_value(data, pos)?; // key
-                skip_msgpack_value(data, pos)?; // value
+                skip_msgpack_value_depth(data, pos, inner)?; // key
+                skip_msgpack_value_depth(data, pos, inner)?; // value
             }
             Some(())
         }
@@ -542,6 +567,36 @@ mod tests {
         skip_msgpack_value(&buf, &mut pos).expect("skip map16");
         skip_msgpack_value(&buf, &mut pos).expect("skip array16");
         assert_eq!(pos, buf.len(), "both large containers fully consumed");
+    }
+
+    /// Regression (Codeberg #23, found by fuzzing `resource_advertisement_unpack`):
+    /// a deeply nested container must NOT recurse until the stack overflows.
+    /// Before the depth cap, a chain of fixarray-len-1 tags (`0x91 0x91 ...`)
+    /// recursed one frame per byte; ~200 KiB of untrusted wire bytes aborted
+    /// the process (a remote DoS, since the resource-advertisement and
+    /// discovery-announce decoders skip unknown values off the wire).
+    #[test]
+    fn skip_rejects_deeply_nested_container() {
+        // Chain of fixarray-len-1 far deeper than MAX_SKIP_DEPTH.
+        let mut buf = Vec::new();
+        buf.resize(100_000, 0x91u8);
+        buf.push(0x90); // innermost: empty array
+        let mut pos = 0;
+        // Must return None (malformed / too deep), not overflow the stack.
+        assert_eq!(skip_msgpack_value(&buf, &mut pos), None);
+    }
+
+    /// A container nested exactly at the depth limit is still accepted, so the
+    /// cap does not reject legitimate (shallow) payloads.
+    #[test]
+    fn skip_accepts_nesting_at_depth_limit() {
+        // Exactly MAX_SKIP_DEPTH nested fixarray-len-1 wrappers around a nil.
+        let mut buf = Vec::new();
+        buf.resize(MAX_SKIP_DEPTH, 0x91u8);
+        buf.push(0xc0); // innermost value: nil
+        let mut pos = 0;
+        skip_msgpack_value(&buf, &mut pos).expect("nesting at the limit is accepted");
+        assert_eq!(pos, buf.len(), "fully consumed");
     }
 
     #[test]

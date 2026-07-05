@@ -640,6 +640,24 @@ mod tests {
         );
     }
 
+    /// Regression (Codeberg #23, found by fuzzing): a resource advertisement
+    /// whose unknown-key value is a deeply nested msgpack container must be
+    /// rejected as malformed, not recurse until the stack overflows. This is
+    /// the exact wire-level reproducer of the DoS the fuzzer found — an
+    /// attacker-supplied advertisement arriving over an established link.
+    #[test]
+    fn test_advertisement_unpack_rejects_deeply_nested_value() {
+        // fixmap(1): unknown key "z" -> deeply nested fixarray chain.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0x81u8, 0xa1, b'z']);
+        buf.resize(buf.len() + 100_000, 0x91u8);
+        buf.push(0x90); // innermost: empty array
+        assert_eq!(
+            ResourceAdvertisement::unpack(&buf),
+            Err(ResourceError::InvalidAdvertisement)
+        );
+    }
+
     #[test]
     fn test_advertisement_unpack_wrong_hash_size() {
         // Build a minimal map with wrong-sized "h" field

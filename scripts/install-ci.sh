@@ -49,6 +49,16 @@ for cmd in i2pd; do
     fi
 done
 
+# Optional test dependency: cargo-fuzz (+ nightly) drives the wire-format
+# parser fuzz harness under leviculum-core/fuzz (Codeberg #23). Not part of
+# `just standard` — the regression tests for any crash it finds live in the
+# normal unit suite — so warn rather than fail when it is absent.
+if ! command -v cargo-fuzz >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'cargo-fuzz' not found"
+    echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
+    echo "[install-ci]       (needed only for the leviculum-core/fuzz targets; see docs/src/development-testing.md)"
+fi
+
 # 2. Activate git hooks (developer-machine mode only)
 if [[ "$VM_MODE" -eq 0 ]]; then
     git config core.hooksPath .githooks
