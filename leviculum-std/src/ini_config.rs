@@ -1253,6 +1253,49 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_two_auto_interface_sections() {
+        // Codeberg #7: two AutoInterface sections (distinct group_id + distinct
+        // discovery_port/data_port) parse into two independent configs.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Auto Home]]
+    type = AutoInterface
+    group_id = home_net
+    discovery_port = 29716
+    data_port = 42671
+
+  [[Auto Lab]]
+    type = AutoInterface
+    group_id = lab_net
+    discovery_port = 30000
+    data_port = 43000
+"#,
+        )
+        .unwrap();
+
+        let home = config.interfaces.get("Auto Home").expect("home iface");
+        assert_eq!(home.interface_type, "AutoInterface");
+        assert_eq!(home.group_id, Some("home_net".to_string()));
+        assert_eq!(home.discovery_port, Some(29716));
+        assert_eq!(home.data_port, Some(42671));
+
+        let lab = config.interfaces.get("Auto Lab").expect("lab iface");
+        assert_eq!(lab.interface_type, "AutoInterface");
+        assert_eq!(lab.group_id, Some("lab_net".to_string()));
+        assert_eq!(lab.discovery_port, Some(30000));
+        assert_eq!(lab.data_port, Some(43000));
+
+        // Both sections are present as distinct AutoInterface configs.
+        let auto_count = config
+            .interfaces
+            .values()
+            .filter(|c| c.interface_type == "AutoInterface")
+            .count();
+        assert_eq!(auto_count, 2);
+    }
+
+    #[test]
     fn test_parse_udp_interface() {
         let config = parse_ini(
             r#"

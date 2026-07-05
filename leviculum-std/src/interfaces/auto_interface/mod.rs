@@ -435,6 +435,23 @@ pub(crate) fn reverse_peering_interval_secs() -> f64 {
     ANNOUNCE_INTERVAL_SECS * 3.25
 }
 
+/// Short hex tag identifying a non-default discovery group.
+///
+/// Multiple `[[AutoInterface]]` sections run on the same LAN as isolated
+/// discovery domains. A peer reachable in two groups shares one link-local
+/// address, so without a per-group tag its interface name (`auto/<nic>/<ip>`)
+/// would be identical in both groups and the two entries would be
+/// indistinguishable in `rnstatus`. Appending this tag keeps the names unique
+/// per group. Returns `None` for the default group so a single-section node's
+/// interface names are unchanged.
+pub(crate) fn group_name_tag(group_id: &[u8]) -> Option<String> {
+    if group_id == DEFAULT_GROUP_ID {
+        return None;
+    }
+    let h = full_hash(group_id);
+    Some(format!("{:02x}{:02x}{:02x}{:02x}", h[0], h[1], h[2], h[3]))
+}
+
 // Socket binding helpers
 /// Bind a multicast discovery socket on a specific NIC.
 ///
@@ -639,6 +656,52 @@ mod tests {
         let default_addr = derive_multicast_address(b"reticulum", "link").unwrap();
         let custom_addr = derive_multicast_address(b"my_custom_network", "link").unwrap();
         assert_ne!(default_addr, custom_addr);
+    }
+
+    #[test]
+    fn test_derive_multicast_address_group_isolation() {
+        // Codeberg #7: multiple AutoInterface sections with distinct group_ids
+        // form isolated discovery domains. Isolation at the multicast layer
+        // means each group derives a DIFFERENT multicast address, so a section
+        // only ever receives its own group's discovery traffic. Same group_id
+        // is deterministic (peers must agree on the address).
+        let groups: [&[u8]; 3] = [b"reticulum", b"groupA", b"groupB"];
+        let addrs: Vec<Ipv6Addr> = groups
+            .iter()
+            .map(|g| derive_multicast_address(g, "link").unwrap())
+            .collect();
+
+        // All pairwise-distinct.
+        for i in 0..addrs.len() {
+            for j in (i + 1)..addrs.len() {
+                assert_ne!(
+                    addrs[i], addrs[j],
+                    "groups {:?} and {:?} must derive different multicast addresses",
+                    groups[i], groups[j]
+                );
+            }
+        }
+
+        // Deterministic: same group_id → same address.
+        assert_eq!(
+            derive_multicast_address(b"groupA", "link").unwrap(),
+            derive_multicast_address(b"groupA", "link").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_group_name_tag() {
+        // Default group is untagged so single-section naming is unchanged.
+        assert_eq!(group_name_tag(DEFAULT_GROUP_ID), None);
+        assert_eq!(group_name_tag(b"reticulum"), None);
+
+        // Non-default groups get a stable 8-hex-char tag.
+        let tag_a = group_name_tag(b"groupA").expect("non-default group tagged");
+        let tag_b = group_name_tag(b"groupB").expect("non-default group tagged");
+        assert_eq!(tag_a.len(), 8);
+        assert_ne!(tag_a, tag_b, "distinct groups get distinct tags");
+        // Deterministic.
+        assert_eq!(group_name_tag(b"groupA").unwrap(), tag_a);
     }
 
     #[test]

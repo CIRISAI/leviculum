@@ -32,9 +32,8 @@ use tokio::net::TcpStream as RpcStream;
 use tokio::net::UnixListener as RpcListener;
 #[cfg(unix)]
 use tokio::net::UnixStream as RpcStream;
-use tokio::sync::watch;
 
-use crate::driver::StdNodeCore;
+use crate::driver::{AutoPeerCount, StdNodeCore};
 use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
 use connection::{read_message, server_handshake, write_message};
 use error::RpcError;
@@ -107,7 +106,7 @@ pub(crate) fn spawn_rpc_server(
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
-    auto_peer_count_rx: Option<watch::Receiver<usize>>,
+    auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
 ) -> Result<(), std::io::Error> {
     let abstract_name = format!("rns/{}/rpc", instance_name);
@@ -126,7 +125,7 @@ pub(crate) fn spawn_rpc_server(
             start_time,
             iface_stats_map,
             iface_online_map,
-            auto_peer_count_rx,
+            auto_peer_count,
             discovery_storage,
         )
         .await;
@@ -144,7 +143,7 @@ async fn rpc_accept_loop(
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
-    auto_peer_count_rx: Option<watch::Receiver<usize>>,
+    auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
 ) {
     loop {
@@ -159,7 +158,7 @@ async fn rpc_accept_loop(
         let core = Arc::clone(&core);
         let stats_map = Arc::clone(&iface_stats_map);
         let online_map = Arc::clone(&iface_online_map);
-        let peer_count_rx = auto_peer_count_rx.clone();
+        let peer_count = auto_peer_count.clone();
         let discovery_storage = discovery_storage.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_rpc_connection(
@@ -169,7 +168,7 @@ async fn rpc_accept_loop(
                 start_time,
                 &stats_map,
                 &online_map,
-                &peer_count_rx,
+                &peer_count,
                 discovery_storage.as_deref(),
             )
             .await
@@ -189,7 +188,7 @@ async fn handle_rpc_connection(
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
-    auto_peer_count_rx: &Option<watch::Receiver<usize>>,
+    auto_peer_count: &AutoPeerCount,
     discovery_storage: Option<&std::path::Path>,
 ) -> Result<(), RpcError> {
     server_handshake(&mut stream, authkey).await?;
@@ -201,10 +200,7 @@ async fn handle_rpc_connection(
 
     let response_bytes = {
         let mut core = core.lock().unwrap();
-        let peer_count = auto_peer_count_rx
-            .as_ref()
-            .map(|rx| *rx.borrow())
-            .unwrap_or(0);
+        let peer_count = auto_peer_count.total();
         handle_request(
             &request,
             &mut core,
@@ -536,7 +532,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -655,7 +651,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -717,7 +713,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -776,7 +772,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -882,7 +878,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -911,7 +907,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -947,7 +943,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -1057,7 +1053,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             None,
         )
         .unwrap();
@@ -1119,7 +1115,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
-            None,
+            AutoPeerCount::default(),
             Some(td.path().to_path_buf()),
         )
         .unwrap();
@@ -1188,7 +1184,7 @@ mod tests {
                 start_time,
                 empty_stats_map(),
                 Arc::clone(&online_map),
-                None,
+                AutoPeerCount::default(),
                 None,
             )
             .unwrap();

@@ -26,7 +26,6 @@ use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::link::LinkId;
 use leviculum_core::{RequestError, TickOutput};
 use serde_pickle::value::Value;
-use tokio::sync::watch;
 
 use super::StdNodeCore;
 use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
@@ -47,8 +46,9 @@ pub(crate) struct RemoteMgmtResponder {
     iface_online_map: InterfaceOnlineMap,
     /// Node start time, for the `transport_uptime` field.
     start_time: Instant,
-    /// AutoInterface peer count, for the `peers` field (0 when absent).
-    auto_peer_count_rx: Option<watch::Receiver<usize>>,
+    /// Aggregated AutoInterface peer count across all sections, for the
+    /// `peers` field (0 when no AutoInterface is configured).
+    auto_peer_count: super::AutoPeerCount,
 }
 
 impl RemoteMgmtResponder {
@@ -56,13 +56,13 @@ impl RemoteMgmtResponder {
         iface_stats_map: InterfaceStatsMap,
         iface_online_map: InterfaceOnlineMap,
         start_time: Instant,
-        auto_peer_count_rx: Option<watch::Receiver<usize>>,
+        auto_peer_count: super::AutoPeerCount,
     ) -> Self {
         Self {
             iface_stats_map,
             iface_online_map,
             start_time,
-            auto_peer_count_rx,
+            auto_peer_count,
         }
     }
 
@@ -85,11 +85,7 @@ impl RemoteMgmtResponder {
         }
 
         let include_lstats = decode_include_lstats(data);
-        let auto_peer_count = self
-            .auto_peer_count_rx
-            .as_ref()
-            .map(|rx| *rx.borrow())
-            .unwrap_or(0);
+        let auto_peer_count = self.auto_peer_count.total();
 
         let mut core = inner.lock().unwrap();
 

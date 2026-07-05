@@ -514,6 +514,78 @@ pub struct InterfaceStatusSnapshot {
     pub configured_bitrate: Option<u32>,
 }
 
+/// Aggregated AutoInterface peer count across every configured section.
+///
+/// Each `[[AutoInterface]]` section spawns its own orchestrator (its own
+/// `group_id`, multicast address and ports), and each publishes its live peer
+/// count over a `watch` channel. This holds one receiver per section and sums
+/// them on demand, so `peers` in `rnstatus` reflects all discovery domains
+/// rather than only the last section to be initialised.
+#[derive(Clone, Default)]
+pub(crate) struct AutoPeerCount {
+    receivers: Vec<watch::Receiver<usize>>,
+}
+
+impl AutoPeerCount {
+    /// Register another section's peer-count receiver.
+    fn push(&mut self, rx: watch::Receiver<usize>) {
+        self.receivers.push(rx);
+    }
+
+    /// Sum the current peer count across all AutoInterface sections.
+    pub(crate) fn total(&self) -> usize {
+        self.receivers.iter().map(|rx| *rx.borrow()).sum()
+    }
+}
+
+/// Reject configs where two `[[AutoInterface]]` sections share a unicast
+/// discovery port or a data port (Codeberg #7).
+///
+/// Distinct `group_id`s already isolate multicast discovery (distinct multicast
+/// addresses), so N sections can coexist as separate discovery domains. But the
+/// unicast discovery socket (`discovery_port + 1`) and the data socket bind the
+/// NIC's link-local address, not the multicast address; two sections reusing
+/// either port bind the same `(link-local, port)` with `SO_REUSEPORT`, and the
+/// kernel then load-balances incoming unicast/data datagrams between the two
+/// orchestrators, silently splitting traffic. Fail fast with a clear message
+/// instead. Disabled sections are ignored.
+fn validate_auto_interface_ports(interfaces: &[InterfaceConfig]) -> Result<(), Error> {
+    use crate::interfaces::auto_interface::{
+        unicast_discovery_port, DEFAULT_DATA_PORT, DEFAULT_DISCOVERY_PORT,
+    };
+
+    let mut seen_discovery: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    let mut seen_data: std::collections::HashSet<u16> = std::collections::HashSet::new();
+
+    for config in interfaces
+        .iter()
+        .filter(|c| c.enabled && c.interface_type == "AutoInterface")
+    {
+        let discovery_port = config.discovery_port.unwrap_or(DEFAULT_DISCOVERY_PORT);
+        let data_port = config.data_port.unwrap_or(DEFAULT_DATA_PORT);
+
+        if !seen_discovery.insert(discovery_port) {
+            return Err(Error::Config(format!(
+                "AutoInterface: discovery_port {} is used by more than one AutoInterface \
+                 section; each section needs a distinct discovery_port (its unicast port {} \
+                 would otherwise be split between sections by SO_REUSEPORT)",
+                discovery_port,
+                unicast_discovery_port(discovery_port),
+            )));
+        }
+        if !seen_data.insert(data_port) {
+            return Err(Error::Config(format!(
+                "AutoInterface: data_port {} is used by more than one AutoInterface section; \
+                 each section needs a distinct data_port (it would otherwise be split between \
+                 sections by SO_REUSEPORT)",
+                data_port,
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// High-level async Reticulum node
 ///
 /// `ReticulumNode` provides an async API for interacting with the Reticulum
@@ -553,8 +625,9 @@ pub struct ReticulumNode {
     /// Crash protection only, normal shutdown calls flush() via signal handler.
     /// Lost data from a crash is recovered via fresh announces.
     flush_interval_secs: u64,
-    /// Peer count from AutoInterface orchestrator (if configured)
-    auto_peer_count_rx: Option<watch::Receiver<usize>>,
+    /// Aggregated peer count across all AutoInterface sections (if any
+    /// configured). Empty when no AutoInterface is present.
+    auto_peer_count: AutoPeerCount,
     /// Shared instance name (if enabled). When Some, the daemon listens on
     /// abstract Unix socket `\0rns/{name}` for local IPC clients.
     share_instance_name: Option<String>,
@@ -703,7 +776,7 @@ impl ReticulumNode {
             action_dispatch_tx,
             corrupt_every,
             flush_interval_secs,
-            auto_peer_count_rx: None,
+            auto_peer_count: AutoPeerCount::default(),
             share_instance_name: None,
             connect_instance_name: None,
             start_time: std::time::Instant::now(),
@@ -1093,7 +1166,7 @@ impl ReticulumNode {
                     Arc::clone(&self.iface_stats_map),
                     Arc::clone(&self.iface_online_map),
                     self.start_time,
-                    self.auto_peer_count_rx.as_ref().cloned(),
+                    self.auto_peer_count.clone(),
                 )
             });
 
@@ -1187,6 +1260,14 @@ impl ReticulumNode {
         }
 
         if !is_client_mode {
+            // Reject overlapping AutoInterface ports before spawning any
+            // orchestrator (Codeberg #7). Different `group_id`s keep multicast
+            // discovery isolated, but two sections sharing a unicast discovery
+            // port or data port bind the same (link-local, port) with
+            // SO_REUSEPORT and the kernel splits incoming datagrams between the
+            // orchestrators, mis-delivering traffic.
+            validate_auto_interface_ports(&self.interfaces)?;
+
             for (idx, config) in self.interfaces.iter().enumerate() {
                 if !config.enabled {
                     continue;
@@ -1352,6 +1433,13 @@ impl ReticulumNode {
                         registry.register(handle);
                     }
                     "AutoInterface" => {
+                        let discovery_port = config
+                            .discovery_port
+                            .unwrap_or(crate::interfaces::auto_interface::DEFAULT_DISCOVERY_PORT);
+                        let data_port = config
+                            .data_port
+                            .unwrap_or(crate::interfaces::auto_interface::DEFAULT_DATA_PORT);
+
                         let auto_config = AutoInterfaceConfig {
                             group_id: config
                                 .group_id
@@ -1360,12 +1448,8 @@ impl ReticulumNode {
                                 .unwrap_or_else(|| {
                                     crate::interfaces::auto_interface::DEFAULT_GROUP_ID.to_vec()
                                 }),
-                            discovery_port: config.discovery_port.unwrap_or(
-                                crate::interfaces::auto_interface::DEFAULT_DISCOVERY_PORT,
-                            ),
-                            data_port: config
-                                .data_port
-                                .unwrap_or(crate::interfaces::auto_interface::DEFAULT_DATA_PORT),
+                            discovery_port,
+                            data_port,
                             discovery_scope: config
                                 .discovery_scope
                                 .clone()
@@ -1379,8 +1463,12 @@ impl ReticulumNode {
                             new_iface_tx.clone(),
                             auto_config,
                         );
-                        self.auto_peer_count_rx = Some(peer_count_rx);
-                        tracing::info!("AutoInterface: starting orchestrator");
+                        self.auto_peer_count.push(peer_count_rx);
+                        tracing::info!(
+                            "AutoInterface: starting orchestrator (discovery_port={}, data_port={})",
+                            discovery_port,
+                            data_port
+                        );
                     }
                     "RNodeInterface" => {
                         let port_path = config
@@ -1961,7 +2049,7 @@ impl ReticulumNode {
                 self.start_time,
                 Arc::clone(&self.iface_stats_map),
                 Arc::clone(&self.iface_online_map),
-                self.auto_peer_count_rx.as_ref().cloned(),
+                self.auto_peer_count.clone(),
                 Some(self.discovery_storage_root()),
             ) {
                 tracing::warn!("Failed to start RPC server: {}", e);
@@ -2820,10 +2908,7 @@ impl ReticulumNode {
     ///
     /// Returns 0 if no AutoInterface is configured.
     pub fn auto_interface_peer_count(&self) -> usize {
-        self.auto_peer_count_rx
-            .as_ref()
-            .map(|rx| *rx.borrow())
-            .unwrap_or(0)
+        self.auto_peer_count.total()
     }
 }
 
@@ -3847,6 +3932,83 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn auto_iface(
+        discovery_port: Option<u16>,
+        data_port: Option<u16>,
+        enabled: bool,
+    ) -> InterfaceConfig {
+        InterfaceConfig {
+            interface_type: "AutoInterface".to_string(),
+            enabled,
+            discovery_port,
+            data_port,
+            ..Default::default()
+        }
+    }
+
+    /// Codeberg #7: distinct AutoInterface sections with distinct ports pass;
+    /// a single section (default ports) passes; non-AutoInterface sections are
+    /// ignored.
+    #[test]
+    fn validate_auto_ports_accepts_distinct_sections() {
+        // Single default section.
+        assert!(validate_auto_interface_ports(&[auto_iface(None, None, true)]).is_ok());
+
+        // Two sections with distinct ports.
+        let ok = vec![
+            auto_iface(Some(29716), Some(42671), true),
+            auto_iface(Some(30000), Some(43000), true),
+        ];
+        assert!(validate_auto_interface_ports(&ok).is_ok());
+
+        // A default section plus an explicitly-distinct one.
+        let ok2 = vec![
+            auto_iface(None, None, true),
+            auto_iface(Some(30000), Some(43000), true),
+        ];
+        assert!(validate_auto_interface_ports(&ok2).is_ok());
+    }
+
+    /// Codeberg #7: two sections sharing a discovery port (unicast split) are
+    /// rejected with a clear message naming the port.
+    #[test]
+    fn validate_auto_ports_rejects_shared_discovery_port() {
+        let bad = vec![
+            auto_iface(Some(29716), Some(42671), true),
+            auto_iface(Some(29716), Some(43000), true),
+        ];
+        let err = validate_auto_interface_ports(&bad).expect_err("shared discovery_port rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("discovery_port 29716"), "message: {msg}");
+        assert!(msg.contains("SO_REUSEPORT"), "message: {msg}");
+    }
+
+    /// Codeberg #7: two sections sharing a data port (data split) are rejected.
+    /// This also covers the default-vs-default collision (both omit ports).
+    #[test]
+    fn validate_auto_ports_rejects_shared_data_port() {
+        let bad = vec![
+            auto_iface(Some(29716), Some(42671), true),
+            auto_iface(Some(30000), Some(42671), true),
+        ];
+        let err = validate_auto_interface_ports(&bad).expect_err("shared data_port rejected");
+        assert!(format!("{err}").contains("data_port 42671"));
+
+        // Two default sections collide on both ports (discovery reported first).
+        let both_default = vec![auto_iface(None, None, true), auto_iface(None, None, true)];
+        assert!(validate_auto_interface_ports(&both_default).is_err());
+    }
+
+    /// Codeberg #7: a disabled colliding section is ignored.
+    #[test]
+    fn validate_auto_ports_ignores_disabled_sections() {
+        let cfgs = vec![
+            auto_iface(Some(29716), Some(42671), true),
+            auto_iface(Some(29716), Some(42671), false),
+        ];
+        assert!(validate_auto_interface_ports(&cfgs).is_ok());
+    }
 
     /// Codeberg #90: build_ifac_config derives an IFAC only when a
     /// network_name and/or passphrase is present, picks the Python per-type

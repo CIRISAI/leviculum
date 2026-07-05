@@ -15,10 +15,11 @@ use tokio::sync::{mpsc, watch};
 
 use super::{
     bind_data_socket, bind_multicast_socket, bind_unicast_socket, build_discovery_packet,
-    derive_multicast_address, enumerate_nics, make_discovery_token, parse_discovery_packet,
-    recv_from_any, unicast_discovery_port, verify_discovery_token, AdoptedNic, AutoInterfaceConfig,
-    DeduplicationCache, ANNOUNCE_INTERVAL_SECS, AUTO_HW_MTU, DISCOVERY_PACKET_SIZE,
-    MCAST_ECHO_TIMEOUT_SECS, NONCE_SIZE, PEERING_TIMEOUT_SECS, PEER_JOB_INTERVAL_SECS,
+    derive_multicast_address, enumerate_nics, group_name_tag, make_discovery_token,
+    parse_discovery_packet, recv_from_any, unicast_discovery_port, verify_discovery_token,
+    AdoptedNic, AutoInterfaceConfig, DeduplicationCache, ANNOUNCE_INTERVAL_SECS, AUTO_HW_MTU,
+    DISCOVERY_PACKET_SIZE, MCAST_ECHO_TIMEOUT_SECS, NONCE_SIZE, PEERING_TIMEOUT_SECS,
+    PEER_JOB_INTERVAL_SECS,
 };
 use crate::interfaces::{
     IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket,
@@ -148,6 +149,10 @@ async fn run_auto_interface(
 
     let mcast_addr = derive_multicast_address(&config.group_id, &config.discovery_scope)?;
     let unicast_port = unicast_discovery_port(config.discovery_port);
+    // Per-group tag appended to peer interface names so peers reachable in
+    // multiple groups do not collide in the registry / rnstatus. `None` for
+    // the default group keeps single-section naming unchanged.
+    let group_tag = group_name_tag(&config.group_id);
 
     tracing::info!(
         "AutoInterface: {} NIC(s), multicast={}, discovery_port={}, data_port={}",
@@ -306,6 +311,7 @@ async fn run_auto_interface(
                     src_addr,
                     nic,
                     &config,
+                    &group_tag,
                     &instance_nonce,
                     &mut nic_states,
                     &mut peers,
@@ -335,6 +341,7 @@ async fn run_auto_interface(
                     src_addr,
                     nic,
                     &config,
+                    &group_tag,
                     &instance_nonce,
                     &mut nic_states,
                     &mut peers,
@@ -535,6 +542,7 @@ fn handle_discovery_packet(
     src_addr: Ipv6Addr,
     nic: &AdoptedNic,
     config: &AutoInterfaceConfig,
+    group_tag: &Option<String>,
     instance_nonce: &[u8; NONCE_SIZE],
     nic_states: &mut HashMap<String, NicState>,
     peers: &mut HashMap<(Ipv6Addr, u16), PeerInfo>,
@@ -616,13 +624,19 @@ fn handle_discovery_packet(
         peer_send_task(outgoing_rx, send_socket, peer_dest, send_counters).await;
     });
 
-    // Format interface name: IP suffix + port (to distinguish same-IP peers)
+    // Format interface name: IP suffix + port (to distinguish same-IP peers),
+    // plus a per-group tag so the same peer discovered in two groups does not
+    // collide (empty for the default group).
     let o = src_addr.octets();
     let addr_short = format!("{:02x}{:02x}{:02x}{:02x}", o[12], o[13], o[14], o[15]);
-    let iface_name = if peer_data_port == config.data_port {
+    let base_name = if peer_data_port == config.data_port {
         format!("auto/{}/{}", nic.name, addr_short)
     } else {
         format!("auto/{}/{}:{}", nic.name, addr_short, peer_data_port)
+    };
+    let iface_name = match group_tag {
+        Some(tag) => format!("{}#{}", base_name, tag),
+        None => base_name,
     };
 
     let handle = InterfaceHandle {
@@ -927,6 +941,7 @@ mod tests {
         new_iface_rx: mpsc::Receiver<InterfaceHandle>,
         data_socket: Arc<UdpSocket>,
         our_nonce: [u8; NONCE_SIZE],
+        group_tag: Option<String>,
     }
 
     impl DiscoveryTestCtx {
@@ -950,8 +965,10 @@ mod tests {
                 socket.bind(&SockAddr::from(bind_addr)).unwrap();
                 Arc::new(UdpSocket::from_std(socket.into()).unwrap())
             };
+            let config = AutoInterfaceConfig::default();
+            let group_tag = group_name_tag(&config.group_id);
             Self {
-                config: AutoInterfaceConfig::default(),
+                config,
                 nic: AdoptedNic {
                     name: "eth0".to_string(),
                     link_local: "fe80::1".parse().unwrap(),
@@ -966,6 +983,7 @@ mod tests {
                 new_iface_rx,
                 data_socket,
                 our_nonce: [0x42u8; NONCE_SIZE],
+                group_tag,
             }
         }
 
@@ -975,6 +993,7 @@ mod tests {
                 src_addr,
                 &self.nic,
                 &self.config,
+                &self.group_tag,
                 &self.our_nonce,
                 &mut self.nic_states,
                 &mut self.peers,
@@ -1117,6 +1136,92 @@ mod tests {
             .new_iface_rx
             .try_recv()
             .expect("should register interface");
+    }
+
+    #[tokio::test]
+    async fn test_peer_name_tagged_in_non_default_group() {
+        // Codeberg #7: a peer discovered in a non-default group carries the
+        // group tag in its interface name so it does not collide with the same
+        // peer discovered in another group.
+        let mut ctx = DiscoveryTestCtx::new();
+        ctx.next_id = Arc::new(AtomicUsize::new(0));
+        ctx.config.group_id = b"groupA".to_vec();
+        ctx.group_tag = group_name_tag(&ctx.config.group_id);
+        let expected_tag = ctx.group_tag.clone().expect("non-default group is tagged");
+
+        let peer_nonce = [0x99u8; NONCE_SIZE];
+        let peer_addr: Ipv6Addr = "fe80::2".parse().unwrap();
+        let token = make_discovery_token(&ctx.config.group_id, &peer_addr.to_string());
+        let pkt = build_discovery_packet(&token, &peer_nonce, ctx.config.data_port);
+
+        ctx.call(&pkt, peer_addr);
+
+        let handle = ctx.new_iface_rx.try_recv().expect("should register handle");
+        assert!(
+            handle.info.name.ends_with(&format!("#{}", expected_tag)),
+            "non-default-group peer name should carry the group tag, got {}",
+            handle.info.name
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_name_untagged_in_default_group() {
+        // Default group keeps the historical untagged name.
+        let mut ctx = DiscoveryTestCtx::new();
+        ctx.next_id = Arc::new(AtomicUsize::new(0));
+
+        let peer_nonce = [0x99u8; NONCE_SIZE];
+        let peer_addr: Ipv6Addr = "fe80::2".parse().unwrap();
+        let token = make_discovery_token(&ctx.config.group_id, &peer_addr.to_string());
+        let pkt = build_discovery_packet(&token, &peer_nonce, ctx.config.data_port);
+
+        ctx.call(&pkt, peer_addr);
+
+        let handle = ctx.new_iface_rx.try_recv().expect("should register handle");
+        assert!(
+            !handle.info.name.contains('#'),
+            "default-group peer name must not carry a group tag, got {}",
+            handle.info.name
+        );
+        assert!(handle.info.name.starts_with("auto/eth0/"));
+    }
+
+    /// Two AutoInterface sections with distinct group_ids AND distinct ports
+    /// must spawn without an `AddrInUse` panic. On a CI host without a suitable
+    /// link-local NIC each orchestrator exits cleanly after enumeration; on a
+    /// host with one they bind real (distinct) sockets. Either way the spawn
+    /// path must not panic and both peer-count channels start at 0.
+    ///
+    /// Real cross-group multicast isolation (a peer announced in group A must
+    /// not appear in group B) needs an actual multi-NIC LAN and is not
+    /// reproducible in CI; it is validated at the address layer by
+    /// `test_derive_multicast_address_group_isolation`.
+    #[tokio::test]
+    async fn test_two_sections_distinct_ports_spawn_without_conflict() {
+        let next_id = Arc::new(AtomicUsize::new(0));
+        let (new_iface_tx, _new_iface_rx) = mpsc::channel(16);
+
+        let cfg_a = AutoInterfaceConfig {
+            group_id: b"groupA".to_vec(),
+            discovery_port: 39716,
+            data_port: 42671,
+            ..AutoInterfaceConfig::default()
+        };
+        let cfg_b = AutoInterfaceConfig {
+            group_id: b"groupB".to_vec(),
+            discovery_port: 39816,
+            data_port: 42771,
+            ..AutoInterfaceConfig::default()
+        };
+
+        let rx_a = spawn_auto_interface(next_id.clone(), new_iface_tx.clone(), cfg_a);
+        let rx_b = spawn_auto_interface(next_id.clone(), new_iface_tx.clone(), cfg_b);
+
+        // Give the orchestrators a moment to bind or exit cleanly.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(*rx_a.borrow(), 0);
+        assert_eq!(*rx_b.borrow(), 0);
     }
 
     #[tokio::test]
