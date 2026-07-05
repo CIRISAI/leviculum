@@ -36,9 +36,10 @@ use serde_json::Value;
 
 use leviculum_core::identity::Identity;
 use leviculum_std::config::Config;
-use leviculum_std::driver::ReticulumNodeBuilder;
+use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
+use leviculum_std::remote_status::mgmt_destination_hash;
 
-use crate::harness::run_python_rnstatus_remote;
+use crate::harness::{run_python_rnstatus_remote, RnstatusRemoteResult};
 
 /// Lowercase hex without external deps.
 fn hex_lower(bytes: &[u8]) -> String {
@@ -64,6 +65,59 @@ fn server_config(allowed: Vec<String>) -> Config {
     cfg.reticulum.remote_management_enabled = true;
     cfg.reticulum.remote_management_allowed = allowed;
     cfg
+}
+
+/// Drive the Python `rnstatus -R` subprocess while re-announcing the server's
+/// management destination on a short cadence, then return its captured outcome.
+///
+/// `rnstatus` learns the path to `rnstransport.remote.management` from a SINGLE
+/// one-shot `RNS.Transport.request_path` and then waits passively up to its
+/// timeout with no re-request (`rnstatus.py` `get_remote_status`). Under a
+/// CPU-starved `just standard` run that lone path round-trip can slip past the
+/// window, and the server's own periodic management announce does not fire
+/// until `MGMT_ANNOUNCE_INITIAL_DELAY_MS` (~15s) after startup, leaving a
+/// fragile margin inside the 20s budget (Codeberg #110). A live Python peer
+/// periodically re-announces its management destination; mirror that here by
+/// re-driving the announce every couple of seconds for the lifetime of the
+/// subprocess, so a dropped one-shot is retried rather than lost. This is the
+/// proven #103/#105 re-drive, applied on the announcer (server) side because
+/// the learner is an external subprocess whose `has_path` we cannot poll. It
+/// does not touch the 20s timeout.
+async fn run_rnstatus_with_reannounce(
+    server: &ReticulumNode,
+    server_addr: std::net::SocketAddr,
+    server_id_hash: [u8; 16],
+    mgmt_prv: Vec<u8>,
+    include_lstats: bool,
+    timeout_secs: u64,
+) -> RnstatusRemoteResult {
+    const REANNOUNCE_EVERY: Duration = Duration::from_secs(2);
+    let mgmt_hash = mgmt_destination_hash(&server_id_hash);
+
+    // Blocking subprocess, so run it off the reactor; the reactor stays free to
+    // re-drive the announce while it runs.
+    let mut task = tokio::task::spawn_blocking(move || {
+        run_python_rnstatus_remote(
+            server_addr,
+            &server_id_hash,
+            &mgmt_prv,
+            include_lstats,
+            timeout_secs,
+        )
+    });
+
+    loop {
+        tokio::select! {
+            joined = &mut task => {
+                return joined
+                    .expect("join rnstatus task")
+                    .expect("run rnstatus subprocess");
+            }
+            _ = tokio::time::sleep(REANNOUNCE_EVERY) => {
+                let _ = server.announce_destination(&mgmt_hash, None).await;
+            }
+        }
+    }
 }
 
 /// Happy path: the real Python `rnstatus -R` gets a populated status bundle
@@ -100,20 +154,18 @@ async fn test_python_rnstatus_R_against_our_lnsd() {
     // Let the TCP server interface bind and start listening.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Drive the real Python status CLI against our server. Blocking subprocess,
-    // so run it off the reactor.
-    let result = tokio::task::spawn_blocking(move || {
-        run_python_rnstatus_remote(
-            server_addr,
-            &server_id_hash,
-            &mgmt_prv,
-            /* include_lstats = */ true,
-            /* timeout_secs = */ 20,
-        )
-    })
-    .await
-    .expect("join rnstatus task")
-    .expect("run rnstatus subprocess");
+    // Drive the real Python status CLI against our server, re-driving the
+    // management-destination announce for the lifetime of the subprocess so the
+    // one-shot path-learn is rescued under load (Codeberg #110/#103).
+    let result = run_rnstatus_with_reannounce(
+        &server,
+        server_addr,
+        server_id_hash,
+        mgmt_prv.to_vec(),
+        /* include_lstats = */ true,
+        /* timeout_secs = */ 20,
+    )
+    .await;
 
     assert_eq!(
         result.code(),
@@ -200,18 +252,20 @@ async fn test_python_rnstatus_R_rejected_when_not_allowed() {
     let server_id_hash = server.identity_hash();
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let result = tokio::task::spawn_blocking(move || {
-        run_python_rnstatus_remote(
-            server_addr,
-            &server_id_hash,
-            &client_prv,
-            /* include_lstats = */ false,
-            /* timeout_secs = */ 8,
-        )
-    })
-    .await
-    .expect("join rnstatus task")
-    .expect("run rnstatus subprocess");
+    // Re-drive the management-destination announce here too: the rejection this
+    // test asserts only happens AFTER path + link succeed, so a load-starved
+    // one-shot path-learn would make the test pass for the wrong reason (a path
+    // timeout, not an auth rejection). Re-announcing keeps it exercising the
+    // real reject path (Codeberg #110/#103).
+    let result = run_rnstatus_with_reannounce(
+        &server,
+        server_addr,
+        server_id_hash,
+        client_prv.to_vec(),
+        /* include_lstats = */ false,
+        /* timeout_secs = */ 8,
+    )
+    .await;
 
     // Path + link succeed (those are not gated), but the `/status` request from
     // a disallowed identity is dropped, so rnstatus exits non-zero and prints
