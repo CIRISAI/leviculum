@@ -18,6 +18,7 @@
 //! stamps and encryption are genuine); the Rust node persists validated records
 //! under `<storage>/discovery/interfaces`, exactly as `lnstatus -d` reads them.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,7 @@ use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::Config;
 
 use crate::common::temp_storage;
-use crate::harness::TestDaemon;
+use crate::harness::{pick_free_tcp_port, TestDaemon};
 
 /// Read all persisted discovered-interface records from a node's storage dir
 /// (`<storage>/discovery/interfaces`), the same files `lnstatus -d` lists.
@@ -524,4 +525,211 @@ async fn test_python_discovers_rust_announced_interface() {
     );
 
     node.stop().await.expect("stop node");
+}
+
+/// Poll the daemon's discovered-interface registry until it lists `name`, or the
+/// deadline passes. No manual emit: only lnsd's own periodic announcer drives
+/// the announce.
+async fn wait_for_python_discovery(daemon: &TestDaemon, name: &str, deadline: Duration) -> bool {
+    let end = Instant::now() + deadline;
+    while Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Ok(listed) = daemon.get_discovered_interfaces().await {
+            if listed
+                .iter()
+                .any(|i| i.get("name").and_then(|v| v.as_str()) == Some(name))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// =========================================================================
+// Test 7: reverse, AUTONOMOUS -- a real Python rnsd discovers OUR lnsd with
+// NO manual emit; lnsd's own periodic InterfaceAnnouncer advertises (#107).
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_python_autonomously_discovers_lnsd_announcer() {
+    let daemon = TestDaemon::start_discovering()
+        .await
+        .expect("start discovering daemon");
+
+    let advertised_port = pick_free_tcp_port().expect("free advertised port");
+    let server_addr = SocketAddr::from(([127, 0, 0, 1], advertised_port));
+
+    let storage = temp_storage("disco_reverse_auto", "node");
+    // A TCP client link carries the announce to the daemon; a discoverable
+    // TCPServer is the endpoint lnsd self-advertises. The announcer job interval
+    // is dropped to 1 s and the per-interface interval to 0 so the periodic job
+    // fires promptly -- there is NO emit_discovery_announce anywhere.
+    let mut node = ReticulumNodeBuilder::new()
+        .add_tcp_client(daemon.rns_addr())
+        .add_discoverable_tcp_server(server_addr, "AutoRustNode", 0, false)
+        .discovery_announce_job_interval_secs(1)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build node");
+    node.start().await.expect("start node");
+    node.wait_for_interfaces_ready(Duration::from_secs(5))
+        .await
+        .expect("interfaces ready");
+    daemon
+        .wait_for_peer_count(1, Duration::from_secs(5))
+        .await
+        .expect("daemon registers peer");
+
+    let discovered =
+        wait_for_python_discovery(&daemon, "AutoRustNode", Duration::from_secs(30)).await;
+    assert!(
+        discovered,
+        "Python rnsd did not autonomously discover lnsd's self-advertised interface"
+    );
+
+    let listed = daemon
+        .get_discovered_interfaces()
+        .await
+        .expect("query discovered interfaces");
+    let info = listed
+        .iter()
+        .find(|i| i.get("name").and_then(|v| v.as_str()) == Some("AutoRustNode"))
+        .expect("record present");
+    assert_eq!(
+        info.get("type").and_then(|v| v.as_str()),
+        Some("TCPServerInterface")
+    );
+    assert_eq!(
+        info.get("reachable_on").and_then(|v| v.as_str()),
+        Some("127.0.0.1")
+    );
+    assert_eq!(
+        info.get("port").and_then(|v| v.as_u64()),
+        Some(advertised_port as u64)
+    );
+
+    node.stop().await.expect("stop node");
+}
+
+// =========================================================================
+// Test 8: reverse ENCRYPTED (the #106-uncovered case) -- a real Python rnsd
+// with the MATCHING network identity autonomously discovers our encrypted
+// self-announce, while a MISMATCHED identity does not (#107).
+// =========================================================================
+
+/// Build a node that autonomously self-advertises a discoverable TCPServer,
+/// encrypting the announce with the network identity at `netid_path`.
+async fn build_encrypted_announcer_node(
+    daemon: &TestDaemon,
+    storage: &tempfile::TempDir,
+    netid_path: &Path,
+    name: &str,
+    advertised_port: u16,
+) -> leviculum_std::driver::ReticulumNode {
+    let mut config = Config::default();
+    config.reticulum.network_identity = Some(netid_path.to_path_buf());
+    let server_addr = SocketAddr::from(([127, 0, 0, 1], advertised_port));
+    let mut node = ReticulumNodeBuilder::new()
+        .config(config)
+        .add_tcp_client(daemon.rns_addr())
+        .add_discoverable_tcp_server(server_addr, name, 0, true)
+        .discovery_announce_job_interval_secs(1)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build node");
+    node.start().await.expect("start node");
+    node.wait_for_interfaces_ready(Duration::from_secs(5))
+        .await
+        .expect("interfaces ready");
+    node
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_python_discovers_lnsd_encrypted_announcer() {
+    // Shared network identity: Python generates it on startup; the matching node
+    // loads the same file to encrypt its self-announce.
+    let netid_dir = tempfile::tempdir().expect("netid dir");
+    let netid_path = netid_dir.path().join("network_identity");
+
+    let daemon = TestDaemon::start_discovering_encrypted(netid_path.to_str().expect("utf8 path"))
+        .await
+        .expect("start encrypted discovering daemon");
+
+    // Matching node: same network identity as the daemon.
+    let match_port = pick_free_tcp_port().expect("match port");
+    let storage_match = temp_storage("disco_reverse_enc_match", "node");
+    let mut node_match = build_encrypted_announcer_node(
+        &daemon,
+        &storage_match,
+        &netid_path,
+        "EncMatch",
+        match_port,
+    )
+    .await;
+
+    // Mismatched node: a DIFFERENT network identity (only variable that differs).
+    let wrong_dir = tempfile::tempdir().expect("wrong netid dir");
+    let wrong_path = wrong_dir.path().join("network_identity");
+    std::fs::write(
+        &wrong_path,
+        Identity::generate(&mut rand_core::OsRng)
+            .private_key_bytes()
+            .expect("private key bytes"),
+    )
+    .expect("write wrong identity");
+    let mismatch_port = pick_free_tcp_port().expect("mismatch port");
+    let storage_mismatch = temp_storage("disco_reverse_enc_mismatch", "node");
+    let mut node_mismatch = build_encrypted_announcer_node(
+        &daemon,
+        &storage_mismatch,
+        &wrong_path,
+        "EncMismatch",
+        mismatch_port,
+    )
+    .await;
+
+    // Both client links up: proves the mismatched node's announce also reaches
+    // the daemon, so a missing record is a decrypt rejection, not a delivery gap.
+    daemon
+        .wait_for_peer_count(2, Duration::from_secs(10))
+        .await
+        .expect("daemon registers both peers");
+
+    // The matching identity's encrypted self-announce decrypts and surfaces.
+    let matched = wait_for_python_discovery(&daemon, "EncMatch", Duration::from_secs(30)).await;
+    assert!(
+        matched,
+        "matching network identity must decrypt and discover the encrypted self-announce"
+    );
+
+    // Give any (incorrect) mismatched persistence ample extra time to appear.
+    let mismatched =
+        wait_for_python_discovery(&daemon, "EncMismatch", Duration::from_secs(6)).await;
+    assert!(
+        !mismatched,
+        "mismatched network identity must NOT decrypt/discover the encrypted self-announce"
+    );
+
+    let listed = daemon
+        .get_discovered_interfaces()
+        .await
+        .expect("query discovered interfaces");
+    let info = listed
+        .iter()
+        .find(|i| i.get("name").and_then(|v| v.as_str()) == Some("EncMatch"))
+        .expect("matching record present");
+    assert_eq!(
+        info.get("type").and_then(|v| v.as_str()),
+        Some("TCPServerInterface")
+    );
+    assert_eq!(
+        info.get("port").and_then(|v| v.as_u64()),
+        Some(match_port as u64)
+    );
+
+    node_match.stop().await.expect("stop matching node");
+    node_mismatch.stop().await.expect("stop mismatched node");
 }

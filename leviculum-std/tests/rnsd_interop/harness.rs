@@ -397,6 +397,22 @@ impl TestDaemon {
         Self::start_with_retry_args(vec!["--discover-interfaces".to_string()]).await
     }
 
+    /// Start a daemon running the InterfaceDiscovery listener keyed by the
+    /// shared 64-byte network identity at `network_identity_path` (Codeberg
+    /// #107, encrypted-reverse). Only encrypted announces sealed for this
+    /// identity decrypt and surface; Python generates the identity file if it
+    /// does not yet exist, so the Rust node can load the same file to encrypt.
+    pub async fn start_discovering_encrypted(
+        network_identity_path: &str,
+    ) -> Result<Self, HarnessError> {
+        Self::start_with_retry_args(vec![
+            "--discover-interfaces".to_string(),
+            "--network-identity".to_string(),
+            network_identity_path.to_string(),
+        ])
+        .await
+    }
+
     async fn start_with_ports_and_options(
         rns_port: u16,
         cmd_port: u16,

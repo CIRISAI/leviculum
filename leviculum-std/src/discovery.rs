@@ -19,6 +19,67 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::discovery::DiscoveredInterface;
 use leviculum_core::discovery::DiscoveredInterfaceRecord;
+use leviculum_core::discovery::InterfaceDescriptor;
+
+use crate::config::InterfaceConfig;
+
+/// Python default per-interface discovery announce interval: 6 hours
+/// (Reticulum.py:856).
+pub(crate) const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// Python floor on a configured `announce_interval`: 5 minutes
+/// (Reticulum.py:854).
+pub(crate) const MIN_ANNOUNCE_INTERVAL_SECS: u64 = 5 * 60;
+
+/// Resolve the per-interface discovery announce interval in seconds
+/// (Reticulum.py:852-856), with a Leviculum direct-seconds override for fast
+/// tests. Priority: `discovery_announce_interval_secs` (raw seconds, no floor) >
+/// `announce_interval` (minutes, 5-minute floor) > 6-hour default.
+pub(crate) fn resolve_announce_interval_secs(cfg: &InterfaceConfig) -> u64 {
+    if let Some(secs) = cfg.discovery_announce_interval_secs {
+        secs
+    } else if let Some(mins) = cfg.announce_interval {
+        mins.saturating_mul(60).max(MIN_ANNOUNCE_INTERVAL_SECS)
+    } else {
+        DEFAULT_ANNOUNCE_INTERVAL_SECS
+    }
+}
+
+/// Build the discovery [`InterfaceDescriptor`] for a discoverable interface from
+/// its own configuration.
+///
+/// Interface-isolation rule: the descriptor is sourced from the interface's own
+/// declaration, never synthesised by transport. Returns `None` for a
+/// non-discoverable interface, an unsupported type, or a descriptor missing a
+/// field its type requires (matching Python `get_interface_announce_data`, which
+/// aborts the announce in that case).
+pub(crate) fn descriptor_from_config(cfg: &InterfaceConfig) -> Option<InterfaceDescriptor> {
+    if !cfg.discoverable {
+        return None;
+    }
+    let mut desc = InterfaceDescriptor {
+        interface_type: cfg.interface_type.clone(),
+        name: cfg.discovery_name.clone(),
+        ..Default::default()
+    };
+    match cfg.interface_type.as_str() {
+        "TCPServerInterface" | "BackboneInterface" => {
+            desc.reachable_on = Some(cfg.reachable_on.clone().or_else(|| cfg.listen_ip.clone())?);
+            desc.port = Some(cfg.listen_port? as u64);
+        }
+        "RNodeInterface" => {
+            desc.frequency = Some(cfg.frequency?);
+            desc.bandwidth = Some(cfg.bandwidth? as u64);
+            desc.spreadingfactor = Some(cfg.spreading_factor? as u64);
+            desc.codingrate = Some(cfg.coding_rate? as u64);
+        }
+        other => {
+            tracing::warn!("discovery: interface type {other} is not discoverable, skipping");
+            return None;
+        }
+    }
+    Some(desc)
+}
 
 /// Current wall-clock as Unix-epoch seconds (matches Python `time.time()`).
 pub(crate) fn now_unix_secs() -> f64 {

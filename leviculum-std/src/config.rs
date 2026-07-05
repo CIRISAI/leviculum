@@ -120,6 +120,20 @@ pub struct ReticulumConfig {
     /// against the config directory / storage root by the builder.
     #[serde(default)]
     pub network_identity: Option<PathBuf>,
+    /// Discovery announcer job interval in seconds (Python
+    /// `InterfaceAnnouncer.JOB_INTERVAL`, default 60). Each tick advertises the
+    /// most-overdue discoverable interface. Lower it for fast tests (Codeberg
+    /// #107).
+    #[serde(default = "default_discovery_job_interval_secs")]
+    pub discovery_job_interval_secs: u64,
+}
+
+/// Default discovery announcer job interval (seconds), Python
+/// `InterfaceAnnouncer.JOB_INTERVAL`.
+pub const DEFAULT_DISCOVERY_JOB_INTERVAL_SECS: u64 = 60;
+
+fn default_discovery_job_interval_secs() -> u64 {
+    DEFAULT_DISCOVERY_JOB_INTERVAL_SECS
 }
 
 /// Default interval between periodic storage flushes (seconds)
@@ -177,6 +191,7 @@ impl Default for ReticulumConfig {
             keepalive_interval: None,
             autoconnect_discovered_interfaces: 0,
             network_identity: None,
+            discovery_job_interval_secs: DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,
         }
     }
 }
@@ -206,6 +221,37 @@ pub struct InterfaceConfig {
     /// interface's default and feeds announce bandwidth capping / timing.
     #[serde(default)]
     pub bitrate: Option<u64>,
+
+    // Interface discovery producer (Codeberg #32 / #107). A `discoverable = yes`
+    // interface periodically self-advertises on
+    // `rnstransport.discovery.interface` (Python Reticulum.py:848-905). The
+    // interface supplies the descriptor; the announcer owns cadence + stamping.
+    /// Advertise this interface via on-network discovery (Python `discoverable`).
+    #[serde(default)]
+    pub discoverable: bool,
+    /// Human-readable name published in the discovery announce (Python
+    /// `discovery_name`). The receiver falls back to `Discovered <type>`.
+    #[serde(default)]
+    pub discovery_name: Option<String>,
+    /// Address peers should connect to, published for TCP/Backbone interfaces
+    /// (Python `reachable_on`). Defaults to `listen_ip` when unset.
+    #[serde(default)]
+    pub reachable_on: Option<String>,
+    /// Encrypt the discovery announce with the node's network identity (Python
+    /// `discovery_encrypt`). Requires `network_identity` to be configured; an
+    /// encrypt request without one skips the interface.
+    #[serde(default)]
+    pub discovery_encrypt: bool,
+    /// Discovery announce interval in minutes (Python `announce_interval`,
+    /// clamped to a 5-minute floor, default 6 hours). Superseded by
+    /// `discovery_announce_interval_secs` when that is set.
+    #[serde(default)]
+    pub announce_interval: Option<u64>,
+    /// Direct per-interface discovery announce interval in seconds. Leviculum
+    /// override that bypasses the Python 5-minute floor so fast tests can drive
+    /// the announcer on a short cadence. Takes priority over `announce_interval`.
+    #[serde(default)]
+    pub discovery_announce_interval_secs: Option<u64>,
 
     // TCP/UDP specific
     /// Kernel network interface name to bind to (Python `device`,
@@ -418,6 +464,12 @@ impl Default for InterfaceConfig {
             mode: None,
             outgoing: true,
             bitrate: None,
+            discoverable: false,
+            discovery_name: None,
+            reachable_on: None,
+            discovery_encrypt: false,
+            announce_interval: None,
+            discovery_announce_interval_secs: None,
             device: None,
             prefer_ipv6: None,
             listen_ip: None,

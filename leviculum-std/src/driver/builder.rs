@@ -72,6 +72,9 @@ pub struct ReticulumNodeBuilder {
     /// to consume `NodeEvent`s should set this to false via
     /// `without_events()`.
     events_enabled: bool,
+    /// Explicit discovery announcer job interval in seconds (Codeberg #107).
+    /// Takes priority over the config value; fast tests lower it.
+    discovery_job_interval_secs_explicit: Option<u64>,
 }
 
 impl Default for ReticulumNodeBuilder {
@@ -101,6 +104,7 @@ impl ReticulumNodeBuilder {
             autoconnect_discovered_interfaces_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
+            discovery_job_interval_secs_explicit: None,
         }
     }
 
@@ -225,6 +229,47 @@ impl ReticulumNodeBuilder {
             listen_port: Some(addr.port()),
             ..Default::default()
         });
+        self
+    }
+
+    /// Add a discoverable TCP server interface (Codeberg #107).
+    ///
+    /// Equivalent to a `[[TCPServerInterface]]` block that sets `discoverable =
+    /// yes` plus the discovery keys: the node's periodic
+    /// [`InterfaceAnnouncer`](leviculum_core::discovery) self-advertises this
+    /// endpoint on `rnstransport.discovery.interface`, so a Python `rnsd`
+    /// discovers it autonomously. `reachable_on` is the advertised host
+    /// (defaults to the listen IP); `announce_interval_secs` is the per-interface
+    /// cadence (test-friendly seconds, no Python 5-minute floor); `encrypt`
+    /// requests network-identity encryption (requires a configured network
+    /// identity).
+    pub fn add_discoverable_tcp_server(
+        mut self,
+        addr: SocketAddr,
+        name: impl Into<String>,
+        announce_interval_secs: u64,
+        encrypt: bool,
+    ) -> Self {
+        let ip = addr.ip().to_string();
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: Some(ip.clone()),
+            listen_port: Some(addr.port()),
+            discoverable: true,
+            discovery_name: Some(name.into()),
+            reachable_on: Some(ip),
+            discovery_encrypt: encrypt,
+            discovery_announce_interval_secs: Some(announce_interval_secs),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Override the discovery announcer job interval in seconds (Codeberg #107,
+    /// Python `InterfaceAnnouncer.JOB_INTERVAL`, default 60). Takes priority over
+    /// the config value; fast tests lower it so the announcer fires promptly.
+    pub fn discovery_announce_job_interval_secs(mut self, secs: u64) -> Self {
+        self.discovery_job_interval_secs_explicit = Some(secs);
         self
     }
 
@@ -751,6 +796,10 @@ impl ReticulumNodeBuilder {
         node.set_rnode_channels(rnode_channels);
         node.set_autoconnect_max(autoconnect_max);
         node.set_discovery_network_identity(discovery_network_identity);
+        node.set_discovery_job_interval_secs(
+            self.discovery_job_interval_secs_explicit
+                .unwrap_or(config.reticulum.discovery_job_interval_secs),
+        );
 
         Ok(node)
     }

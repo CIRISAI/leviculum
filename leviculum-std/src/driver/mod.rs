@@ -412,6 +412,35 @@ struct AutoConnectWiring {
     corrupt_every: Option<u64>,
 }
 
+/// One periodic self-advertise job (Codeberg #107): a discoverable interface's
+/// pre-stamped discovery announce `app_data` and its cadence. The `app_data` is
+/// built once at start (PoW stamp + optional network-identity encryption via
+/// [`build_announce_app_data`](leviculum_core::discovery::build_announce_app_data))
+/// so the announcer arm never runs a proof-of-work stamp on the event loop.
+struct DiscoveryAnnounceJob {
+    /// Ready-to-announce `flags + msgpack(info) + stamp` payload.
+    app_data: Vec<u8>,
+    /// Minimum spacing between this interface's announces.
+    interval: Duration,
+    /// When this interface last self-advertised; `None` until the first emit.
+    last_announce: Option<tokio::time::Instant>,
+    /// Interface name, for the announce log line.
+    label: String,
+}
+
+/// Producer-side discovery wiring (Codeberg #107): the registered discovery
+/// destination and one announce job per discoverable interface, driven on the
+/// `job_interval` cadence. `None` when no interface is `discoverable`.
+struct DiscoveryAnnounceWiring {
+    /// The `rnstransport.discovery.interface` destination, keyed by the network
+    /// identity (encrypted network) or the node identity (plaintext).
+    dest_hash: leviculum_core::DestinationHash,
+    /// Announcer job interval (Python `InterfaceAnnouncer.JOB_INTERVAL`).
+    job_interval: Duration,
+    /// One job per discoverable interface, most-overdue picked each tick.
+    jobs: Vec<DiscoveryAnnounceJob>,
+}
+
 /// Event received from any interface
 enum RecvEvent {
     /// A complete packet from an interface
@@ -582,6 +611,11 @@ pub struct ReticulumNode {
     /// event loop uses it to decrypt encrypted discovery announces before
     /// stamp validation. `None` keeps the plaintext discovery path.
     discovery_network_identity: Option<Arc<leviculum_core::Identity>>,
+    /// Discovery announcer job interval in seconds (Codeberg #107, Python
+    /// `InterfaceAnnouncer.JOB_INTERVAL`). Each tick self-advertises the most-
+    /// overdue discoverable interface. Set by the builder from config; lowered
+    /// by fast tests. Default 60.
+    discovery_job_interval_secs: u64,
 }
 
 impl Drop for ReticulumNode {
@@ -683,6 +717,7 @@ impl ReticulumNode {
             storage_path: None,
             autoconnect_max: 0,
             discovery_network_identity: None,
+            discovery_job_interval_secs: crate::config::DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,
         }
     }
 
@@ -707,6 +742,12 @@ impl ReticulumNode {
         self.discovery_network_identity = identity;
     }
 
+    /// Set the discovery announcer job interval in seconds (called by the
+    /// builder, Codeberg #107). Python `InterfaceAnnouncer.JOB_INTERVAL`.
+    pub(crate) fn set_discovery_job_interval_secs(&mut self, secs: u64) {
+        self.discovery_job_interval_secs = secs;
+    }
+
     /// The storage root under which the discovered-interface registry lives
     /// (`<storage>/discovery/interfaces`). Falls back to the default config
     /// dir's `storage` when no explicit path was configured, matching the
@@ -715,6 +756,129 @@ impl ReticulumNode {
         self.storage_path
             .clone()
             .unwrap_or_else(|| crate::config::Config::default_config_dir().join("storage"))
+    }
+
+    /// Build the producer-side discovery wiring (Codeberg #107): register the
+    /// `rnstransport.discovery.interface` destination and pre-stamp one announce
+    /// job per `discoverable` interface.
+    ///
+    /// Returns `None` when no enabled interface is `discoverable`. The discovery
+    /// destination is owned by the network identity on an encrypted network,
+    /// else by the node identity (Python `Discovery.py` `InterfaceAnnouncer`).
+    /// Each job's `app_data` is stamped (and optionally network-identity
+    /// encrypted) once here, reusing
+    /// [`build_announce_app_data`](leviculum_core::discovery::build_announce_app_data),
+    /// so the announcer arm never runs proof-of-work on the event loop.
+    fn build_discovery_announce_wiring(&self) -> Option<DiscoveryAnnounceWiring> {
+        let discoverable: Vec<(
+            &InterfaceConfig,
+            leviculum_core::discovery::InterfaceDescriptor,
+        )> = self
+            .interfaces
+            .iter()
+            .filter(|c| c.enabled && c.discoverable)
+            .filter_map(|c| crate::discovery::descriptor_from_config(c).map(|d| (c, d)))
+            .collect();
+        if discoverable.is_empty() {
+            return None;
+        }
+
+        let network_identity = self.discovery_network_identity.clone();
+
+        // Register the discovery destination, keyed by the network identity
+        // (encrypted network) or the node identity (plaintext). Snapshot the
+        // node's transport identity hash + transport-enabled flag for the
+        // descriptors while the lock is held.
+        let (dest_hash, transport_id, transport_enabled) = {
+            let mut core = self.inner.lock().unwrap();
+            let transport_enabled = core.transport_config().enable_transport;
+            let transport_id: [u8; TRUNCATED_HASHBYTES] = *core.identity().hash();
+            let dest_identity: leviculum_core::Identity = match &network_identity {
+                Some(id) => (**id).clone(),
+                None => core.identity().clone(),
+            };
+            let dest = match Destination::new(
+                Some(dest_identity),
+                leviculum_core::Direction::In,
+                leviculum_core::DestinationType::Single,
+                leviculum_core::discovery::APP_NAME,
+                &leviculum_core::discovery::DISCOVERY_ASPECTS,
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("discovery: failed to build discovery destination: {e:?}");
+                    return None;
+                }
+            };
+            let dest_hash = *dest.hash();
+            core.register_destination(dest);
+            (dest_hash, transport_id, transport_enabled)
+        };
+
+        let mut rng = rand_core::OsRng;
+        let mut jobs = Vec::new();
+        for (cfg, desc) in discoverable {
+            let interval =
+                Duration::from_secs(crate::discovery::resolve_announce_interval_secs(cfg));
+            let app_data = if cfg.discovery_encrypt {
+                match &network_identity {
+                    Some(id) => leviculum_core::discovery::build_announce_app_data_encrypted(
+                        &desc,
+                        &transport_id,
+                        transport_enabled,
+                        id,
+                        &mut rng,
+                    ),
+                    None => {
+                        tracing::error!(
+                            "discovery: interface {:?} requests discovery_encrypt but no \
+                             network_identity is configured, skipping",
+                            desc.name
+                        );
+                        None
+                    }
+                }
+            } else {
+                leviculum_core::discovery::build_announce_app_data(
+                    &desc,
+                    &transport_id,
+                    transport_enabled,
+                    &mut rng,
+                )
+            };
+            let Some(app_data) = app_data else {
+                tracing::warn!(
+                    "discovery: could not build announce data for {} interface, skipping",
+                    desc.interface_type
+                );
+                continue;
+            };
+            let label = desc
+                .name
+                .clone()
+                .unwrap_or_else(|| desc.interface_type.clone());
+            jobs.push(DiscoveryAnnounceJob {
+                app_data,
+                interval,
+                last_announce: None,
+                label,
+            });
+        }
+        if jobs.is_empty() {
+            return None;
+        }
+
+        tracing::info!(
+            "discovery: self-advertising {} interface(s) on {} every {}s",
+            jobs.len(),
+            leviculum_core::discovery::DISCOVERY_ASPECT_FILTER,
+            self.discovery_job_interval_secs.max(1),
+        );
+        Some(DiscoveryAnnounceWiring {
+            dest_hash,
+            job_interval: Duration::from_secs(self.discovery_job_interval_secs.max(1)),
+            jobs,
+        })
     }
 
     /// Start the node
@@ -943,6 +1107,11 @@ impl ReticulumNode {
         // plaintext path.
         let discovery_network_identity = self.discovery_network_identity.clone();
 
+        // Producer-side discovery (Codeberg #107): register the discovery
+        // destination and pre-stamp one self-advertise job per discoverable
+        // interface. `None` leaves the announcer arm dormant.
+        let discovery_announce = self.build_discovery_announce_wiring();
+
         // Auto-connect wiring (Codeberg #32, sub-task b): the event loop spawns
         // discovered TCP endpoints at runtime through the same interface-id
         // allocator and registration channel the static/hot-plug paths use.
@@ -977,6 +1146,7 @@ impl ReticulumNode {
                     next_id: autoconnect_next_id,
                     corrupt_every: autoconnect_corrupt_every,
                 },
+                discovery_announce,
             )
             .await;
         });
@@ -2712,6 +2882,7 @@ async fn run_event_loop(
     discovery_storage: Option<PathBuf>,
     discovery_network_identity: Option<Arc<leviculum_core::Identity>>,
     autoconnect_wiring: AutoConnectWiring,
+    discovery_announce: Option<DiscoveryAnnounceWiring>,
 ) {
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
@@ -2748,9 +2919,23 @@ async fn run_event_loop(
         .then(|| crate::autoconnect::AutoConnectManager::new(autoconnect_wiring.max));
     let mut next_autoconnect = tokio::time::Instant::now() + AUTOCONNECT_POLL_INTERVAL;
 
+    // Periodic interface-discovery announcer (Codeberg #107, Python
+    // `InterfaceAnnouncer`). `None` when no interface is discoverable. Each tick
+    // self-advertises the most-overdue discoverable interface on
+    // `rnstransport.discovery.interface`. The first tick fires one job interval
+    // in (Python sleeps first).
+    let mut discovery_announce = discovery_announce;
+    let mut next_discovery_announce = discovery_announce
+        .as_ref()
+        .map(|d| tokio::time::Instant::now() + d.job_interval);
+
     loop {
         // Auto-connect poll wake — only armed while the feature is enabled.
         let autoconnect_wake = autoconnect.as_ref().map(|_| next_autoconnect);
+
+        // Discovery announcer wake — only armed while at least one interface is
+        // discoverable.
+        let discovery_announce_wake = next_discovery_announce;
 
         // Event-driven retry-queue drain. Any non-empty queue whose
         // front packet is currently ineligible for a slot contributes a
@@ -3098,6 +3283,76 @@ async fn run_event_loop(
                     }
                 }
                 next_autoconnect = tokio::time::Instant::now() + AUTOCONNECT_POLL_INTERVAL;
+            }
+
+            // Branch 9: Periodic interface-discovery announcer (Codeberg #107).
+            //
+            // Self-advertise discoverable interfaces on
+            // `rnstransport.discovery.interface` so a Python `rnsd` (or another
+            // lnsd) discovers this node autonomously. Every job interval, pick
+            // the most-overdue due interface and announce its pre-stamped
+            // payload -- one interface per tick, matching Python
+            // `InterfaceAnnouncer.job`. Armed only while discovery is enabled.
+            _ = async {
+                match discovery_announce_wake {
+                    Some(t) => tokio::time::sleep_until(t).await,
+                    None => core::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(wiring) = discovery_announce.as_mut() {
+                    let now = tokio::time::Instant::now();
+                    // Due = never announced, or spacing elapsed. Pick the most
+                    // overdue (largest time since last announce), like Python's
+                    // `sort(key=now-last, reverse=True)[0]`.
+                    let selected = wiring
+                        .jobs
+                        .iter_mut()
+                        .filter(|j| match j.last_announce {
+                            None => true,
+                            Some(last) => now.duration_since(last) >= j.interval,
+                        })
+                        .max_by_key(|j| match j.last_announce {
+                            None => Duration::MAX,
+                            Some(last) => now.duration_since(last),
+                        });
+
+                    if let Some(job) = selected {
+                        job.last_announce = Some(now);
+                        let app_data = job.app_data.clone();
+                        let label = job.label.clone();
+                        let output = {
+                            let mut core = inner.lock().unwrap();
+                            core.announce_destination(&wiring.dest_hash, Some(&app_data))
+                        };
+                        match output {
+                            Ok(output) => {
+                                tracing::debug!(
+                                    "discovery: self-advertised interface \"{}\" ({}B)",
+                                    label,
+                                    app_data.len(),
+                                );
+                                dispatch_output(
+                                    output,
+                                    &mut registry,
+                                    event_sink.as_mut(),
+                                    &inner,
+                                    &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                                    remote_mgmt.as_ref(),
+                                    discovery_storage.as_deref(),
+                                    discovery_network_identity.as_deref(),
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "discovery: self-advertise announce for \"{}\" failed: {e:?}",
+                                    label,
+                                );
+                            }
+                        }
+                    }
+
+                    next_discovery_announce = Some(tokio::time::Instant::now() + wiring.job_interval);
+                }
             }
         }
     }
