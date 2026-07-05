@@ -33,7 +33,7 @@ use leviculum_std::driver::ReticulumNodeBuilder;
 use crate::common::{
     collect_messages, extract_signing_key, parse_dest_hash, wait_for_data_event,
     wait_for_delivery_confirmations, wait_for_link_closed_event, wait_for_link_established,
-    wait_for_link_on_daemon, wait_for_path_on_node,
+    wait_for_link_on_daemon,
 };
 use crate::harness::TestDaemon;
 
@@ -86,7 +86,14 @@ async fn test_full_link_lifecycle_through_relay() {
 
     // Step 5: Wait for path propagation: Dest → Relay → Rust
     assert!(
-        wait_for_path_on_node(&rust_node, &dest_hash, Duration::from_secs(20)).await,
+        crate::common::wait_for_path_reannounce(
+            || rust_node.has_path(&dest_hash),
+            &py_dest,
+            &dest_info.hash,
+            b"lifecycle-target",
+            Duration::from_secs(20),
+        )
+        .await,
         "Rust node should learn path to Py-Dest through Relay"
     );
 

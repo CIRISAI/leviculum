@@ -134,16 +134,17 @@ async fn setup_link(
         .await
         .expect("Failed to announce destination");
 
-    // Wait for path to propagate to initiator
-    let path_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    let mut has_path = false;
-    while tokio::time::Instant::now() < path_deadline {
-        if py_initiator.has_path(dest_hash.as_bytes()).await {
-            has_path = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    // Wait for path to propagate to initiator, re-driving the one-shot announce
+    // on a fixed cadence so a single lost announce under load does not fail the
+    // test (Codeberg #105).
+    let has_path = crate::common::wait_for_node_reannounce_on_daemon(
+        &py_initiator,
+        &dest_hash,
+        &rust_node,
+        b"resource-test",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(
         has_path,
         "Py-Initiator should learn path to Rust destination"

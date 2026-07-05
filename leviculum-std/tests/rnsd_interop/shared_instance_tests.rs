@@ -19,8 +19,7 @@ use leviculum_core::{Destination, DestinationType, Direction};
 
 use crate::common::{
     build_announce_raw, extract_signing_key, init_tracing, parse_dest_hash, wait_for_data_event,
-    wait_for_event, wait_for_path_on_node, wait_for_responder_established_link,
-    DAEMON_PROCESS_TIME,
+    wait_for_event, wait_for_responder_established_link, DAEMON_PROCESS_TIME,
 };
 use crate::harness::{find_available_ports, TestDaemon};
 
@@ -258,7 +257,14 @@ async fn test_shared_instance_link_through_daemon() {
 
     // Wait for announce to propagate: Python → Unix → daemon → TCP → Rust A
     assert!(
-        wait_for_path_on_node(&rust_a, &dest_hash, Duration::from_secs(15)).await,
+        crate::common::wait_for_path_reannounce(
+            || rust_a.has_path(&dest_hash),
+            &py_client,
+            &dest_info.hash,
+            b"link-test",
+            Duration::from_secs(15),
+        )
+        .await,
         "Rust A should learn path to Python destination through daemon"
     );
 
@@ -439,17 +445,17 @@ async fn test_local_client_initiates_link_through_daemon() {
         .expect("Failed to announce on Python B");
 
     // Announce flow: Python B → TCP → daemon → Unix → Python A
-    let dest_hash_bytes = hex::decode(&dest_info.hash).expect("Invalid hex");
-    let mut a_has_path = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if py_a.has_path(&dest_hash_bytes).await {
-            a_has_path = true;
-            break;
-        }
-    }
+    let dest_hash = parse_dest_hash(&dest_info.hash);
     assert!(
-        a_has_path,
+        crate::common::wait_for_path_reannounce_on_daemon(
+            &py_a,
+            &dest_hash,
+            &py_b,
+            &dest_info.hash,
+            b"issue24-link-test",
+            Duration::from_secs(15),
+        )
+        .await,
         "Python A should discover Python B's destination through the daemon"
     );
 
@@ -599,17 +605,17 @@ async fn test_non_transport_daemon_relays_local_client_link() {
     py_b.announce_destination(&dest_info.hash, b"no-transport-test")
         .await
         .expect("Failed to announce on Python B");
-    let dest_hash_bytes = hex::decode(&dest_info.hash).expect("Invalid hex");
-    let mut a_has_path = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if py_a.has_path(&dest_hash_bytes).await {
-            a_has_path = true;
-            break;
-        }
-    }
+    let dest_hash = parse_dest_hash(&dest_info.hash);
     assert!(
-        a_has_path,
+        crate::common::wait_for_path_reannounce_on_daemon(
+            &py_a,
+            &dest_hash,
+            &py_b,
+            &dest_info.hash,
+            b"no-transport-test",
+            Duration::from_secs(15),
+        )
+        .await,
         "Python A should discover Python B even with non-transport daemon"
     );
 
@@ -775,7 +781,14 @@ async fn test_local_client_builder_link_through_daemon() {
     rust_a.start().await.expect("Failed to start Rust node A");
 
     assert!(
-        wait_for_path_on_node(&rust_a, &dest_hash, Duration::from_secs(15)).await,
+        crate::common::wait_for_node_reannounce(
+            || rust_a.has_path(&dest_hash),
+            &client_b,
+            &dest_hash,
+            b"client-b-test",
+            Duration::from_secs(15),
+        )
+        .await,
         "Rust A should learn path to client B's destination through daemon"
     );
 

@@ -1135,6 +1135,143 @@ pub async fn wait_for_path_on_node(
     false
 }
 
+/// Wait until `has_path` holds, re-driving the daemon announce on a fixed
+/// cadence.
+///
+/// A Python `Destination.announce()` is a one-shot push to the interfaces
+/// connected at that instant; it is not re-sent. Under a CPU-starved
+/// parallel interop run the daemon can be scheduled through a relay or
+/// fresh-connection setup window and drop that lone announce, after which
+/// nothing re-sends it inside a fixed wait budget, so the learner never
+/// learns the path and a timing-sensitive test times out (Codeberg #103).
+/// The failure is bimodal: the path is learned in well under a second or
+/// never arrives at all, so a longer passive wait does not help; the
+/// announce has to be re-driven. Re-announcing mirrors how a live Python
+/// peer periodically re-announces, so the path-learn tolerates load instead
+/// of depending on a single announce landing in a fixed window.
+///
+/// `has_path` is any synchronous learner-side predicate (typically
+/// `|| node.has_path(&dest_hash)`); `daemon` is the announcer whose
+/// `announce_destination` RPC is re-driven with the same `app_data`.
+pub async fn wait_for_path_reannounce<F: Fn() -> bool>(
+    has_path: F,
+    daemon: &TestDaemon,
+    dest_hash_hex: &str,
+    app_data: &[u8],
+    budget: Duration,
+) -> bool {
+    const REANNOUNCE_EVERY: Duration = Duration::from_secs(3);
+    let start = std::time::Instant::now();
+    // The caller already fired the first announce; space the retries.
+    let mut last_announce = std::time::Instant::now();
+    while start.elapsed() < budget {
+        if has_path() {
+            return true;
+        }
+        if last_announce.elapsed() >= REANNOUNCE_EVERY {
+            let _ = daemon.announce_destination(dest_hash_hex, app_data).await;
+            last_announce = std::time::Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    has_path()
+}
+
+/// Like [`wait_for_path_reannounce`] but for a daemon-side learner whose
+/// `has_path` is an async RPC. Polls `learner.has_path(dest_hash)` while
+/// re-driving `announcer.announce_destination` on the same fixed cadence,
+/// hardening daemon-to-daemon path-learn against a lost one-shot announce
+/// under load (Codeberg #103/#105).
+pub async fn wait_for_path_reannounce_on_daemon(
+    learner: &TestDaemon,
+    dest_hash: &DestinationHash,
+    announcer: &TestDaemon,
+    dest_hash_hex: &str,
+    app_data: &[u8],
+    budget: Duration,
+) -> bool {
+    const REANNOUNCE_EVERY: Duration = Duration::from_secs(3);
+    let start = std::time::Instant::now();
+    // The caller already fired the first announce; space the retries.
+    let mut last_announce = std::time::Instant::now();
+    while start.elapsed() < budget {
+        if learner.has_path(dest_hash).await {
+            return true;
+        }
+        if last_announce.elapsed() >= REANNOUNCE_EVERY {
+            let _ = announcer
+                .announce_destination(dest_hash_hex, app_data)
+                .await;
+            last_announce = std::time::Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    learner.has_path(dest_hash).await
+}
+
+/// Like [`wait_for_path_reannounce`] but the announcer is a Rust
+/// [`ReticulumNode`](leviculum_std::driver::ReticulumNode) announcing its own
+/// destination and the learner is a daemon (async `has_path`). A Rust node's
+/// `announce_destination` is likewise a one-shot dispatch with no scheduled
+/// retransmit for its own destination, so the same #103/#105 loss window
+/// applies; re-driving it on the fixed cadence hardens the daemon-side
+/// path-learn against a lost announce under load.
+pub async fn wait_for_node_reannounce_on_daemon(
+    learner: &TestDaemon,
+    dest_hash: &DestinationHash,
+    announcer: &leviculum_std::driver::ReticulumNode,
+    app_data: &[u8],
+    budget: Duration,
+) -> bool {
+    const REANNOUNCE_EVERY: Duration = Duration::from_secs(3);
+    let start = std::time::Instant::now();
+    // The caller already fired the first announce; space the retries.
+    let mut last_announce = std::time::Instant::now();
+    while start.elapsed() < budget {
+        if learner.has_path(dest_hash).await {
+            return true;
+        }
+        if last_announce.elapsed() >= REANNOUNCE_EVERY {
+            let _ = announcer
+                .announce_destination(dest_hash, Some(app_data))
+                .await;
+            last_announce = std::time::Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    learner.has_path(dest_hash).await
+}
+
+/// Like [`wait_for_node_reannounce_on_daemon`] but for a node-side learner
+/// whose `has_path` is synchronous (`|| node.has_path(&dest_hash)`), with a
+/// Rust [`ReticulumNode`](leviculum_std::driver::ReticulumNode) announcer
+/// re-driving its own destination on the fixed cadence (#103/#105).
+pub async fn wait_for_node_reannounce<F: Fn() -> bool>(
+    has_path: F,
+    announcer: &leviculum_std::driver::ReticulumNode,
+    dest_hash: &DestinationHash,
+    app_data: &[u8],
+    budget: Duration,
+) -> bool {
+    const REANNOUNCE_EVERY: Duration = Duration::from_secs(3);
+    let start = std::time::Instant::now();
+    // The caller already fired the first announce; space the retries.
+    let mut last_announce = std::time::Instant::now();
+    while start.elapsed() < budget {
+        if has_path() {
+            return true;
+        }
+        if last_announce.elapsed() >= REANNOUNCE_EVERY {
+            let _ = announcer
+                .announce_destination(dest_hash, Some(app_data))
+                .await;
+            last_announce = std::time::Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    has_path()
+}
+
 /// Poll a daemon for messages matching a prefix, collecting unique messages.
 /// Returns when `expected_count` unique messages are found or the deadline expires.
 pub async fn collect_messages(

@@ -13,7 +13,6 @@ use std::time::Duration;
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_std::driver::ReticulumNodeBuilder;
 
-use crate::common::wait_for_path_on_daemon;
 use crate::harness::TestDaemon;
 
 // Gap 1: Path timestamp refresh on forward
@@ -62,8 +61,15 @@ async fn test_path_refresh_keeps_route_alive() {
         hex::decode(&dest_a_info.hash).unwrap().try_into().unwrap();
     let dest_a_hash = leviculum_core::DestinationHash::new(dest_a_hash_bytes);
 
-    let b_has_path =
-        wait_for_path_on_daemon(&daemon_b, &dest_a_hash, Duration::from_secs(20)).await;
+    let b_has_path = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_b,
+        &dest_a_hash,
+        &daemon_a,
+        &dest_a_info.hash,
+        b"refresh-test",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(b_has_path, "B should see dest_A via relay");
     assert!(
         relay.has_path(&dest_a_hash),
@@ -137,8 +143,15 @@ async fn test_path_expires_when_idle() {
         hex::decode(&dest_a_info.hash).unwrap().try_into().unwrap();
     let dest_a_hash = leviculum_core::DestinationHash::new(dest_a_hash_bytes);
 
-    let b_has_path =
-        wait_for_path_on_daemon(&daemon_b, &dest_a_hash, Duration::from_secs(20)).await;
+    let b_has_path = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_b,
+        &dest_a_hash,
+        &daemon_a,
+        &dest_a_info.hash,
+        b"idle-test",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(b_has_path, "B should see dest_A via relay");
 
     // Relay should have path now
@@ -195,8 +208,15 @@ async fn test_path_request_through_python_relay() {
         hex::decode(&dest_info.hash).unwrap().try_into().unwrap();
     let dest_hash = leviculum_core::DestinationHash::new(dest_hash_bytes);
 
-    let relay_has_path =
-        wait_for_path_on_daemon(&py_relay, &dest_hash, Duration::from_secs(15)).await;
+    let relay_has_path = crate::common::wait_for_path_reannounce_on_daemon(
+        &py_relay,
+        &dest_hash,
+        &py_dest,
+        &dest_info.hash,
+        b"target-data",
+        Duration::from_secs(15),
+    )
+    .await;
     assert!(relay_has_path, "Python relay should learn path to target");
 
     // Build Rust non-transport node connected to relay
@@ -215,15 +235,14 @@ async fn test_path_request_through_python_relay() {
     // The Rust node doesn't have a path to the target yet.
     // The announce should have propagated from relay to us as well,
     // but let's verify it arrives.
-    let mut rust_has_path = rust_node.has_path(&dest_hash);
-    if !rust_has_path {
-        // Wait for announce propagation
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        while !rust_has_path && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            rust_has_path = rust_node.has_path(&dest_hash);
-        }
-    }
+    let rust_has_path = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&dest_hash),
+        &py_dest,
+        &dest_info.hash,
+        b"target-data",
+        Duration::from_secs(15),
+    )
+    .await;
 
     assert!(
         rust_has_path,
@@ -324,8 +343,24 @@ async fn test_announces_forwarded_through_transport() {
     let dest_b_hash = leviculum_core::DestinationHash::new(dest_b_hash_bytes);
 
     // Both daemons should see each other's destinations through relay
-    let a_sees_b = wait_for_path_on_daemon(&daemon_a, &dest_b_hash, Duration::from_secs(20)).await;
-    let b_sees_a = wait_for_path_on_daemon(&daemon_b, &dest_a_hash, Duration::from_secs(20)).await;
+    let a_sees_b = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_a,
+        &dest_b_hash,
+        &daemon_b,
+        &dest_b_info.hash,
+        b"from-B",
+        Duration::from_secs(20),
+    )
+    .await;
+    let b_sees_a = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_b,
+        &dest_a_hash,
+        &daemon_a,
+        &dest_a_info.hash,
+        b"from-A",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(a_sees_b, "A should see B via relay");
     assert!(b_sees_a, "B should see A via relay");
@@ -377,8 +412,16 @@ async fn test_burst_announces_not_lost() {
 
     // Wait for all paths to propagate to daemon B (generous timeout)
     let mut all_visible = true;
-    for dest_hash in &dest_hashes {
-        let visible = wait_for_path_on_daemon(&daemon_b, dest_hash, Duration::from_secs(30)).await;
+    for (i, dest_hash) in dest_hashes.iter().enumerate() {
+        let visible = crate::common::wait_for_path_reannounce_on_daemon(
+            &daemon_b,
+            dest_hash,
+            &daemon_a,
+            &hex::encode(dest_hash.as_bytes()),
+            format!("burst-{}", i).as_bytes(),
+            Duration::from_secs(30),
+        )
+        .await;
         if !visible {
             all_visible = false;
             eprintln!(

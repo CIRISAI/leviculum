@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use leviculum_std::driver::ReticulumNodeBuilder;
 
-use crate::common::{collect_messages, parse_dest_hash, wait_for_path_on_daemon};
+use crate::common::{collect_messages, parse_dest_hash};
 use crate::harness::TestDaemon;
 
 /// Test: Diamond relay topology with failure recovery.
@@ -92,8 +92,24 @@ async fn test_diamond_relay_and_failure_recovery() {
         .expect("Failed to announce dest_b");
 
     // Step 6: Wait for cross-visibility via R1
-    let a_sees_b = wait_for_path_on_daemon(&daemon_a, &dest_b_hash, Duration::from_secs(20)).await;
-    let b_sees_a = wait_for_path_on_daemon(&daemon_b, &dest_a_hash, Duration::from_secs(20)).await;
+    let a_sees_b = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_a,
+        &dest_b_hash,
+        &daemon_b,
+        &dest_b_info.hash,
+        b"diamond-B",
+        Duration::from_secs(20),
+    )
+    .await;
+    let b_sees_a = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_b,
+        &dest_a_hash,
+        &daemon_a,
+        &dest_a_info.hash,
+        b"diamond-A",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(a_sees_b, "A should see B via R1 within 20s");
     assert!(b_sees_a, "B should see A via R1 within 20s");
@@ -230,14 +246,28 @@ async fn test_diamond_relay_and_failure_recovery() {
         .expect("Failed to re-announce dest_b");
 
     // Step 18: Wait for B to learn path via R2
-    let b_sees_a_again =
-        wait_for_path_on_daemon(&daemon_b, &dest_a_hash, Duration::from_secs(15)).await;
+    let b_sees_a_again = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_b,
+        &dest_a_hash,
+        &daemon_a,
+        &dest_a_info.hash,
+        b"diamond-A-fresh",
+        Duration::from_secs(15),
+    )
+    .await;
     assert!(b_sees_a_again, "B should see A again via R2");
 
     // A must also have learned B's fresh R2 path before step 19's
     // LinkRequest arrives, otherwise A's LRPROOF has no path to B.
-    let a_sees_b_again =
-        wait_for_path_on_daemon(&daemon_a, &dest_b_hash, Duration::from_secs(15)).await;
+    let a_sees_b_again = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_a,
+        &dest_b_hash,
+        &daemon_b,
+        &dest_b_info.hash,
+        b"diamond-B-fresh",
+        Duration::from_secs(15),
+    )
+    .await;
     assert!(a_sees_b_again, "A should see B again via R2");
 
     // Step 19: B creates link to A via R2, should succeed
@@ -367,7 +397,15 @@ async fn test_mixed_python_rust_relay_chain() {
     );
 
     // M should see A via R's rebroadcast
-    let m_sees_a = wait_for_path_on_daemon(&daemon_m, &dest_a_hash, Duration::from_secs(15)).await;
+    let m_sees_a = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_m,
+        &dest_a_hash,
+        &daemon_a,
+        &dest_a_info.hash,
+        b"mixed-A",
+        Duration::from_secs(15),
+    )
+    .await;
     assert!(
         m_sees_a,
         "M should see A (R rebroadcasts to M's server interface)"
@@ -380,7 +418,15 @@ async fn test_mixed_python_rust_relay_chain() {
     );
 
     // A should see B through the full chain
-    let a_sees_b = wait_for_path_on_daemon(&daemon_a, &dest_b_hash, Duration::from_secs(20)).await;
+    let a_sees_b = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_a,
+        &dest_b_hash,
+        &daemon_b,
+        &dest_b_info.hash,
+        b"mixed-B",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(
         a_sees_b,
         "A should see B through mixed chain (B → M → R → A)"

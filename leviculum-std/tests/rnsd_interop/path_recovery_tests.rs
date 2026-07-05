@@ -32,7 +32,7 @@ use leviculum_std::driver::ReticulumNodeBuilder;
 
 use crate::common::{
     collect_messages, extract_signing_key, parse_dest_hash, wait_for_link_closed_event,
-    wait_for_link_established, wait_for_path_on_daemon, wait_for_path_on_node,
+    wait_for_link_established, wait_for_path_on_node,
 };
 use crate::harness::TestDaemon;
 
@@ -64,7 +64,15 @@ async fn test_announce_propagation_between_daemons() {
         .expect("Failed to announce");
 
     // B should learn the path
-    let found = wait_for_path_on_daemon(&daemon_b, &dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_b,
+        &dest_hash,
+        &daemon_a,
+        &dest_info.hash,
+        b"smoke",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Daemon B should see daemon A's announce");
 }
 
@@ -126,12 +134,27 @@ async fn test_rust_node_path_recovery_on_link_timeout() {
 
     // Step 5: Wait for announce propagation: Dest → Relay → Rust node
     assert!(
-        wait_for_path_on_daemon(&py_relay, &dest_hash, Duration::from_secs(10)).await,
+        crate::common::wait_for_path_reannounce_on_daemon(
+            &py_relay,
+            &dest_hash,
+            &py_dest,
+            &dest_info.hash,
+            b"recovery-target",
+            Duration::from_secs(10),
+        )
+        .await,
         "Relay should learn path to Py-Dest"
     );
 
     assert!(
-        wait_for_path_on_node(&rust_node, &dest_hash, Duration::from_secs(20)).await,
+        crate::common::wait_for_path_reannounce(
+            || rust_node.has_path(&dest_hash),
+            &py_dest,
+            &dest_info.hash,
+            b"recovery-target",
+            Duration::from_secs(20),
+        )
+        .await,
         "Rust node should learn path to Py-Dest through Relay within 20s"
     );
 
@@ -239,7 +262,14 @@ async fn test_rust_node_path_recovery_on_link_timeout() {
 
         // Step 18: Wait for path on Rust node
         assert!(
-            wait_for_path_on_node(&rust_node, &dest_hash, Duration::from_secs(20)).await,
+            crate::common::wait_for_path_reannounce(
+                || rust_node.has_path(&dest_hash),
+                &py_dest,
+                &dest_info.hash,
+                b"recovery-target-v2",
+                Duration::from_secs(20),
+            )
+            .await,
             "Rust node should learn new path to Py-Dest after re-announce"
         );
     }

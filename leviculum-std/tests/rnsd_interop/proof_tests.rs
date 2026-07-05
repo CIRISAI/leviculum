@@ -260,7 +260,7 @@ async fn test_single_packet_proof_round_trip_via_node() {
     use leviculum_core::NodeEvent;
     use leviculum_std::driver::ReticulumNodeBuilder;
 
-    use crate::common::{parse_dest_hash, wait_for_path_on_node};
+    use crate::common::parse_dest_hash;
 
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
 
@@ -313,7 +313,14 @@ async fn test_single_packet_proof_round_trip_via_node() {
         .await
         .expect("Python announce should succeed");
 
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"roundtrip-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust node should learn path to Python destination");
 
     // 5. Send an encrypted single packet from Rust to Python

@@ -149,15 +149,14 @@ async fn test_ifac_matching_passphrase_announces_flow() {
         .await
         .expect("announce Rust destination");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    let mut py_has_path = false;
-    while tokio::time::Instant::now() < deadline {
-        if py.has_path(dest_hash.as_bytes()).await {
-            py_has_path = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    let py_has_path = crate::common::wait_for_node_reannounce_on_daemon(
+        &py,
+        &dest_hash,
+        &node,
+        b"rust-ifac",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(
         py_has_path,
         "with a matching IFAC passphrase the Python daemon must learn a path to \

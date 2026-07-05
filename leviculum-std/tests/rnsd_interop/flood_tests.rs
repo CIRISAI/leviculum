@@ -23,7 +23,6 @@ use leviculum_core::identity::Identity;
 use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
-use crate::common::wait_for_path_on_daemon;
 use crate::harness::TestDaemon;
 
 // =========================================================================
@@ -76,7 +75,14 @@ async fn test_announce_destination_smoke() {
         .expect("announce_destination should succeed");
 
     // Wait for Python daemon to learn the path
-    let found = wait_for_path_on_daemon(&py_a, &dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_node_reannounce_on_daemon(
+        &py_a,
+        &dest_hash,
+        &rust_node,
+        b"smoke-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Python daemon should learn path to Rust destination");
 
     // Verify hop count is 1 (direct. Python increments hops by 1 on reception)
@@ -167,8 +173,22 @@ async fn test_triangle_echo_prevention() {
 
     // Wait for propagation: both Python daemons should learn the path
     // (PATHFINDER_G + jitter + processing)
-    let a_found = wait_for_path_on_daemon(&py_a, &dest_hash, Duration::from_secs(20)).await;
-    let b_found = wait_for_path_on_daemon(&py_b, &dest_hash, Duration::from_secs(20)).await;
+    let a_found = crate::common::wait_for_node_reannounce_on_daemon(
+        &py_a,
+        &dest_hash,
+        &rust_node,
+        b"triangle-test",
+        Duration::from_secs(20),
+    )
+    .await;
+    let b_found = crate::common::wait_for_node_reannounce_on_daemon(
+        &py_b,
+        &dest_hash,
+        &rust_node,
+        b"triangle-test",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(a_found, "Py-A should learn path to Rust destination");
     assert!(b_found, "Py-B should learn path to Rust destination");
@@ -305,8 +325,22 @@ async fn test_diamond_originator_echo() {
         .expect("announce_destination should succeed");
 
     // Wait for Entry and Exit to learn the path (direct from Rust-Node)
-    let entry_found = wait_for_path_on_daemon(&py_entry, &dest_hash, Duration::from_secs(20)).await;
-    let exit_found = wait_for_path_on_daemon(&py_exit, &dest_hash, Duration::from_secs(20)).await;
+    let entry_found = crate::common::wait_for_node_reannounce_on_daemon(
+        &py_entry,
+        &dest_hash,
+        &rust_node,
+        b"diamond-test",
+        Duration::from_secs(20),
+    )
+    .await;
+    let exit_found = crate::common::wait_for_node_reannounce_on_daemon(
+        &py_exit,
+        &dest_hash,
+        &rust_node,
+        b"diamond-test",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(
         entry_found,
@@ -454,7 +488,15 @@ async fn test_diamond_link_redundant_paths() {
         .expect("Failed to announce destination");
 
     // Wait for Py-Src to learn the path (via Hub or Rust-Relay)
-    let src_found = wait_for_path_on_daemon(&py_src, &dest_hash, Duration::from_secs(20)).await;
+    let src_found = crate::common::wait_for_path_reannounce_on_daemon(
+        &py_src,
+        &dest_hash,
+        &py_dst,
+        &dest_info.hash,
+        b"diamond-link-test",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(src_found, "Py-Src should learn path to Py-Dst destination");
 
     // Verify Rust relay also has the path

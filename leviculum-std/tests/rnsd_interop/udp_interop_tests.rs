@@ -11,7 +11,6 @@ use tokio::time::timeout;
 
 use crate::common::{
     extract_signing_key, generate_test_payload, parse_dest_hash, wait_for_link_established,
-    wait_for_path_on_node,
 };
 use crate::harness::TestDaemon;
 
@@ -137,15 +136,14 @@ async fn test_python_receives_announce_from_rust_over_udp() {
         .expect("Failed to announce");
 
     // Wait for Python to process the announce and register the path
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut found = false;
-    while tokio::time::Instant::now() < deadline {
-        if daemon.has_path(dest_hash.as_bytes()).await {
-            found = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    let found = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &node,
+        b"rust-udp-data",
+        Duration::from_secs(5),
+    )
+    .await;
     assert!(
         found,
         "Python should have path to Rust destination announced over UDP (hash: {})",
@@ -207,7 +205,14 @@ async fn test_rust_to_python_link_over_udp() {
     // Wait for Rust to learn the path
     let dest_hash = parse_dest_hash(&dest_info.hash);
     assert!(
-        wait_for_path_on_node(&node, &dest_hash, Duration::from_secs(5)).await,
+        crate::common::wait_for_path_reannounce(
+            || node.has_path(&dest_hash),
+            &daemon,
+            &dest_info.hash,
+            b"udp-link-test",
+            Duration::from_secs(5),
+        )
+        .await,
         "Rust should learn path to Python destination over UDP"
     );
 

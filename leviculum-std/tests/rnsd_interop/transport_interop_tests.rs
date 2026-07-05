@@ -301,8 +301,15 @@ async fn test_announce_rebroadcast_hop_count_accuracy() {
     let propagation_timeout = Duration::from_secs(35);
 
     // Wait for the furthest daemon to have the path
-    let d0_has_path =
-        wait_for_path_on_daemon(topology.entry_daemon(), &dest_hash, propagation_timeout).await;
+    let d0_has_path = wait_for_path_reannounce_on_daemon(
+        topology.entry_daemon(),
+        &dest_hash,
+        topology.exit_daemon(),
+        &dest_info.hash,
+        b"hop-accuracy",
+        propagation_timeout,
+    )
+    .await;
 
     // Print hop counts at each daemon for diagnostics
     for i in 0..5 {
@@ -846,8 +853,15 @@ async fn test_path_request_known_destination() {
     );
 
     // Wait for D0 to cache the announce
-    let d0_has_path =
-        wait_for_path_on_daemon(topology.entry_daemon(), &dest_hash, Duration::from_secs(20)).await;
+    let d0_has_path = wait_for_path_reannounce_on_daemon(
+        topology.entry_daemon(),
+        &dest_hash,
+        topology.exit_daemon(),
+        &dest_info.hash,
+        b"path-req-test",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(
         d0_has_path,
@@ -927,8 +941,15 @@ async fn test_path_request_forwarding() {
     );
 
     // Wait for D0 to receive the announce (two hops: D2->D1->D0)
-    let d0_has_path =
-        wait_for_path_on_daemon(topology.entry_daemon(), &dest_hash, Duration::from_secs(25)).await;
+    let d0_has_path = wait_for_path_reannounce_on_daemon(
+        topology.entry_daemon(),
+        &dest_hash,
+        topology.exit_daemon(),
+        &dest_info.hash,
+        b"path-forward-test",
+        Duration::from_secs(25),
+    )
+    .await;
 
     assert!(
         d0_has_path,
@@ -1264,8 +1285,15 @@ async fn test_path_discovery_then_link() {
     );
 
     // Wait for D0 to cache the announce
-    let d0_has_path =
-        wait_for_path_on_daemon(topology.entry_daemon(), &dest_hash, Duration::from_secs(20)).await;
+    let d0_has_path = wait_for_path_reannounce_on_daemon(
+        topology.entry_daemon(),
+        &dest_hash,
+        topology.exit_daemon(),
+        &dest_info.hash,
+        b"pathdisc-link",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(
         d0_has_path,
@@ -1730,8 +1758,15 @@ async fn test_announce_rebroadcast_timing_accuracy() {
     );
 
     // Poll D0 for path appearance
-    let has_path =
-        wait_for_path_on_daemon(topology.entry_daemon(), &dest_hash, Duration::from_secs(15)).await;
+    let has_path = wait_for_path_reannounce_on_daemon(
+        topology.entry_daemon(),
+        &dest_hash,
+        topology.exit_daemon(),
+        &dest_info.hash,
+        b"timing-data",
+        Duration::from_secs(15),
+    )
+    .await;
 
     let elapsed = start.elapsed();
 
@@ -1885,8 +1920,15 @@ async fn test_path_request_dedup() {
     );
 
     // Wait for D0 to cache the announce
-    let d0_has_path =
-        wait_for_path_on_daemon(topology.entry_daemon(), &dest_hash, Duration::from_secs(20)).await;
+    let d0_has_path = wait_for_path_reannounce_on_daemon(
+        topology.entry_daemon(),
+        &dest_hash,
+        topology.exit_daemon(),
+        &dest_info.hash,
+        b"dedup-path-req",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(
         d0_has_path,

@@ -17,7 +17,6 @@ use leviculum_core::identity::Identity;
 use leviculum_core::{Destination, DestinationType, Direction};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
-use crate::common::wait_for_path_on_daemon;
 use crate::harness::TestDaemon;
 
 /// Parse a hex destination-hash string into the fixed-size array.
@@ -77,9 +76,11 @@ async fn test_rust_announce_received_by_python_matches_spec() {
         .await
         .expect("announce");
 
-    let saw = wait_for_path_on_daemon(
+    let saw = crate::common::wait_for_node_reannounce_on_daemon(
         &daemon,
-        &leviculum_core::DestinationHash::new(*dest_hash.as_bytes()),
+        &dest_hash,
+        &rust_node,
+        b"rust-parity",
         Duration::from_secs(5),
     )
     .await;
@@ -128,15 +129,19 @@ async fn test_python_announce_received_by_rust_matches_spec() {
         .await
         .expect("announce");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        if rust_node.has_path(&leviculum_core::DestinationHash::new(dest_hash)) {
-            rust_node.stop().await.ok();
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    panic!("rust node did not learn the python announce within the deadline");
+    let learned = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&leviculum_core::DestinationHash::new(dest_hash)),
+        &daemon,
+        &dest_info.hash,
+        b"python-parity",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        learned,
+        "rust node did not learn the python announce within the deadline"
+    );
+    rust_node.stop().await.ok();
 }
 
 /// 3. A received announce produces a bounded number of Broadcast
@@ -166,13 +171,19 @@ async fn test_rust_broadcast_dedup_on_receive() {
         .await
         .expect("announce 1");
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(
-        rust_node.has_path(&leviculum_core::DestinationHash::new(parse_hash(
-            &dest_info.hash
-        ))),
-        "first announce must be learned"
-    );
+    let learned = crate::common::wait_for_path_reannounce(
+        || {
+            rust_node.has_path(&leviculum_core::DestinationHash::new(parse_hash(
+                &dest_info.hash,
+            )))
+        },
+        &daemon,
+        &dest_info.hash,
+        b"first",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(learned, "first announce must be learned");
 
     // Trigger three more fresh announces for the same destination (each
     // has a new random_hash on the Python side, so Python's identity
@@ -243,9 +254,12 @@ async fn test_rust_forwards_python_announce_once() {
         .expect("announce A");
 
     // C must learn the path via the relay.
-    let saw = wait_for_path_on_daemon(
+    let saw = crate::common::wait_for_path_reannounce_on_daemon(
         &daemon_c,
         &leviculum_core::DestinationHash::new(parse_hash(&dest_a_info.hash)),
+        &daemon_a,
+        &dest_a_info.hash,
+        b"chain-A",
         Duration::from_secs(10),
     )
     .await;
@@ -346,13 +360,19 @@ async fn test_mgmt_announce_keepalive_fires() {
         .await
         .expect("announce");
 
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(
-        rust_node.has_path(&leviculum_core::DestinationHash::new(parse_hash(
-            &dest_info.hash
-        ))),
-        "initial announce should be visible to rust"
-    );
+    let learned = crate::common::wait_for_path_reannounce(
+        || {
+            rust_node.has_path(&leviculum_core::DestinationHash::new(parse_hash(
+                &dest_info.hash,
+            )))
+        },
+        &daemon,
+        &dest_info.hash,
+        b"ka",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(learned, "initial announce should be visible to rust");
 
     // Look at Python's announce-table timestamp for the probe destination
     // (if respond_to_probes is off, use a different observable). Here we

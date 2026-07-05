@@ -27,7 +27,7 @@ use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
 
 use crate::common::{
     build_rust_node, extract_signing_key, parse_dest_hash, wait_for_data_event, wait_for_event,
-    wait_for_link_established, wait_for_path_on_node,
+    wait_for_link_established,
 };
 use crate::harness::TestDaemon;
 
@@ -78,7 +78,14 @@ async fn setup_python_dest(
         .await
         .expect("Python announce should succeed");
 
-    let found = wait_for_path_on_node(rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        daemon,
+        &dest_info.hash,
+        app_data,
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust node should learn path to Python destination");
 
     (py_dest_hash, dest_info.public_key)
@@ -119,17 +126,15 @@ async fn setup_rust_dest_for_receiving(
         .expect("Announce should succeed");
 
     // Wait for Python daemon to learn the path
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        if daemon.has_path(&dest_hash).await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert!(
-        daemon.has_path(&dest_hash).await,
-        "Python daemon should learn path to Rust destination"
-    );
+    let found = crate::common::wait_for_node_reannounce_on_daemon(
+        daemon,
+        &dest_hash,
+        rust_node,
+        app_data,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(found, "Python daemon should learn path to Rust destination");
 
     dest_hash_hex
 }
@@ -323,7 +328,14 @@ async fn test_link_data_rust_to_python_payload_match() {
         .expect("Announce failed");
 
     let py_dest_hash = parse_dest_hash(&dest_info.hash);
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"linkdata-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust should learn path");
 
     let signing_key = extract_signing_key(&dest_info.public_key);
@@ -383,7 +395,14 @@ async fn test_link_data_python_to_rust_payload_match() {
         .expect("Announce failed");
 
     let py_dest_hash = parse_dest_hash(&dest_info.hash);
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"linkrecv-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust should learn path");
 
     let signing_key = extract_signing_key(&dest_info.public_key);
@@ -448,7 +467,14 @@ async fn test_channel_message_bidirectional() {
         .expect("Announce failed");
 
     let py_dest_hash = parse_dest_hash(&dest_info.hash);
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"bidir-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust should learn path");
 
     let signing_key = extract_signing_key(&dest_info.public_key);
@@ -546,7 +572,14 @@ async fn test_wrong_key_packet_silently_dropped_by_python() {
         .await
         .expect("Announce failed");
 
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"wrongkey-data",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Path should be found");
 
     // Override known_identities with a WRONG identity
@@ -740,7 +773,14 @@ async fn test_100_channel_messages_ordered() {
         .expect("Announce failed");
 
     let py_dest_hash = parse_dest_hash(&dest_info.hash);
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"chan100-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust should learn path");
 
     let signing_key = extract_signing_key(&dest_info.public_key);
@@ -836,7 +876,14 @@ async fn test_interleaved_single_and_link_no_cross_contamination() {
         .await
         .expect("Announce failed");
 
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"interleave-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust should learn path");
 
     // Establish link
@@ -1049,7 +1096,14 @@ async fn test_link_reconnect_channel_survives() {
         .expect("Announce failed");
 
     let py_dest_hash = parse_dest_hash(&dest_info.hash);
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        &daemon,
+        &dest_info.hash,
+        b"reconnect-test",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust should learn path");
 
     let signing_key = extract_signing_key(&dest_info.public_key);

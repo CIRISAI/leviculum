@@ -93,17 +93,17 @@ async fn test_rust_node_as_responder() {
         .await
         .expect("Failed to announce destination");
 
-    // Wait for the announce to propagate through relay to initiator
-    // Poll the initiator daemon until it has a path
-    let path_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    let mut initiator_has_path = false;
-    while tokio::time::Instant::now() < path_deadline {
-        if py_initiator.has_path(dest_hash.as_bytes()).await {
-            initiator_has_path = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    // Wait for the announce to propagate through relay to initiator, re-driving
+    // the one-shot announce on a fixed cadence so a single lost announce under
+    // load does not fail the test (Codeberg #105).
+    let initiator_has_path = crate::common::wait_for_node_reannounce_on_daemon(
+        &py_initiator,
+        &dest_hash,
+        &rust_node,
+        b"rust-responder",
+        Duration::from_secs(20),
+    )
+    .await;
     assert!(
         initiator_has_path,
         "Py-Initiator should learn path to Rust destination through Relay"

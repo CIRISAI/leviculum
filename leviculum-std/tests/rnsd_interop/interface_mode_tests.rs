@@ -104,7 +104,14 @@ async fn test_roaming_interface_propagates_local_announce() {
 
     let dest_hash = announce_local_dest(&mut node, "roam").await;
 
-    let learned = wait_for_path_on_daemon(&daemon, &dest_hash, Duration::from_secs(6)).await;
+    let learned = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &node,
+        b"mode-test",
+        Duration::from_secs(6),
+    )
+    .await;
     assert!(
         learned,
         "roaming interface must emit local-origin announces; Python peer did not learn the path"
@@ -125,7 +132,14 @@ async fn test_gateway_interface_propagates_local_announce() {
 
     let dest_hash = announce_local_dest(&mut node, "gw").await;
 
-    let learned = wait_for_path_on_daemon(&daemon, &dest_hash, Duration::from_secs(6)).await;
+    let learned = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &node,
+        b"mode-test",
+        Duration::from_secs(6),
+    )
+    .await;
     assert!(
         learned,
         "gateway interface must propagate announces; Python peer did not learn the path"
@@ -219,7 +233,14 @@ async fn test_gateway_server_propagates_announce_to_inbound_peer() {
 
     let dest_hash = announce_local_dest(&mut node, "gwserver").await;
 
-    let learned = wait_for_path_on_daemon(&daemon, &dest_hash, Duration::from_secs(6)).await;
+    let learned = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &node,
+        b"mode-test",
+        Duration::from_secs(6),
+    )
+    .await;
     assert!(
         learned,
         "gateway server must propagate announces on the spawned inbound \

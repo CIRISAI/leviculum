@@ -34,8 +34,8 @@ use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
 use leviculum_std::interfaces::hdlc::{frame, DeframeResult, Deframer};
 
 use crate::common::{
-    build_rust_node, connect_to_daemon, now_ms, parse_dest_hash, wait_for_event,
-    wait_for_path_on_node, ParsedAnnounce, DAEMON_PROCESS_TIME,
+    build_rust_node, connect_to_daemon, now_ms, parse_dest_hash, wait_for_event, ParsedAnnounce,
+    DAEMON_PROCESS_TIME,
 };
 use crate::harness::{DaemonTopology, TestDaemon};
 
@@ -558,7 +558,14 @@ async fn setup_ratcheted_python_dest(
         .await
         .expect("Python announce should succeed");
 
-    let found = wait_for_path_on_node(rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        daemon,
+        &dest_info.hash,
+        app_data,
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(found, "Rust node should learn path to Python destination");
 
     (py_dest_hash, dest_info.public_key)
@@ -644,17 +651,15 @@ async fn test_rust_decrypts_ratcheted_packet_from_python() {
         .expect("Announce should succeed");
 
     // Wait for Python daemon to learn the path + ratchet
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        if daemon.has_path(&dest_hash).await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert!(
-        daemon.has_path(&dest_hash).await,
-        "Python daemon should learn path to Rust destination"
-    );
+    let found = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &rust_node,
+        b"ratchet-p2r",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(found, "Python daemon should learn path to Rust destination");
 
     // Python sends single packet, should use ratchet key from Rust's announce
     let payload = b"ratchet encrypted from python";
@@ -730,15 +735,17 @@ async fn test_ratcheted_packet_through_relay() {
 
     // Wait for announce to propagate to entry daemon
     let py_dest_hash = parse_dest_hash(&dest_info.hash);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        if entry_daemon.has_path(&py_dest_hash).await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    let found = crate::common::wait_for_path_reannounce_on_daemon(
+        entry_daemon,
+        &py_dest_hash,
+        exit_daemon,
+        &dest_info.hash,
+        b"ratchet-relay",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(
-        entry_daemon.has_path(&py_dest_hash).await,
+        found,
         "Entry daemon should learn path to exit daemon's destination"
     );
 
@@ -760,7 +767,14 @@ async fn test_ratcheted_packet_through_relay() {
     rust_node.register_destination(py_dest_on_rust);
 
     // Wait for Rust to learn path from entry daemon's rebroadcast
-    let found = wait_for_path_on_node(&rust_node, &py_dest_hash, Duration::from_secs(10)).await;
+    let found = crate::common::wait_for_path_reannounce(
+        || rust_node.has_path(&py_dest_hash),
+        exit_daemon,
+        &dest_info.hash,
+        b"ratchet-relay",
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(
         found,
         "Rust should learn path to exit daemon's destination via relay"

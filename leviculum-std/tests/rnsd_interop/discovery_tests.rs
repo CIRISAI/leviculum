@@ -358,6 +358,42 @@ async fn test_multiple_daemon_announces() {
         .await
         .expect("Failed to announce C");
 
+    // Harden each one-shot announce: re-drive it on a fixed cadence until the
+    // node learns the path, so a single lost announce under load does not fail
+    // the test (Codeberg #105). Re-driven announces also feed the
+    // AnnounceReceived event stream drained by the collection loop below.
+    let hash_a: [u8; TRUNCATED_HASHBYTES] = hex::decode(&dest_a.hash).unwrap().try_into().unwrap();
+    let hash_b: [u8; TRUNCATED_HASHBYTES] = hex::decode(&dest_b.hash).unwrap().try_into().unwrap();
+    let hash_c: [u8; TRUNCATED_HASHBYTES] = hex::decode(&dest_c.hash).unwrap().try_into().unwrap();
+
+    let learned_a = crate::common::wait_for_path_reannounce(
+        || node.has_path(&DestinationHash::new(hash_a)),
+        &daemon,
+        &dest_a.hash,
+        b"data-a",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(learned_a, "Node must learn path A");
+    let learned_b = crate::common::wait_for_path_reannounce(
+        || node.has_path(&DestinationHash::new(hash_b)),
+        &daemon,
+        &dest_b.hash,
+        b"data-b",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(learned_b, "Node must learn path B");
+    let learned_c = crate::common::wait_for_path_reannounce(
+        || node.has_path(&DestinationHash::new(hash_c)),
+        &daemon,
+        &dest_c.hash,
+        b"data-c",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(learned_c, "Node must learn path C");
+
     println!("All destinations announced, collecting events...");
 
     // Collect AnnounceReceived events
@@ -398,11 +434,8 @@ async fn test_multiple_daemon_announces() {
         "Should receive announce C"
     );
 
-    // Verify all paths exist in the node
-    let hash_a: [u8; TRUNCATED_HASHBYTES] = hex::decode(&dest_a.hash).unwrap().try_into().unwrap();
-    let hash_b: [u8; TRUNCATED_HASHBYTES] = hex::decode(&dest_b.hash).unwrap().try_into().unwrap();
-    let hash_c: [u8; TRUNCATED_HASHBYTES] = hex::decode(&dest_c.hash).unwrap().try_into().unwrap();
-
+    // Verify all paths exist in the node (hashes decoded above for the
+    // re-announce hardening).
     assert!(
         node.has_path(&DestinationHash::new(hash_a)),
         "Path A must exist"

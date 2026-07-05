@@ -16,7 +16,6 @@ use std::time::Duration;
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_std::driver::ReticulumNodeBuilder;
 
-use crate::common::wait_for_path_on_daemon;
 use crate::harness::TestDaemon;
 
 /// Test: Rust relay forwards announces and routes link data between two Python daemons.
@@ -91,8 +90,24 @@ async fn test_rust_relay_announce_and_link_data() {
         .expect("Failed to announce dest_B");
 
     // Step 5: Wait for cross-visibility via Rust relay
-    let a_sees_b = wait_for_path_on_daemon(&daemon_a, &dest_b_hash, Duration::from_secs(20)).await;
-    let b_sees_a = wait_for_path_on_daemon(&daemon_b, &dest_a_hash, Duration::from_secs(20)).await;
+    let a_sees_b = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_a,
+        &dest_b_hash,
+        &daemon_b,
+        &dest_b_info.hash,
+        b"hello-from-B",
+        Duration::from_secs(20),
+    )
+    .await;
+    let b_sees_a = crate::common::wait_for_path_reannounce_on_daemon(
+        &daemon_b,
+        &dest_a_hash,
+        &daemon_a,
+        &dest_a_info.hash,
+        b"hello-from-A",
+        Duration::from_secs(20),
+    )
+    .await;
 
     assert!(
         a_sees_b,

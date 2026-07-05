@@ -45,10 +45,10 @@ use crate::common::{
     connect_to_daemon, generate_test_payload, receive_raw_proof_for_link, send_framed,
     setup_rust_destination, verify_test_payload, wait_for_any_announce_with_route_info,
     wait_for_data_event, wait_for_link_data_packet, wait_for_link_established,
-    wait_for_link_request, wait_for_path_on_node, wait_for_responder_established_link,
-    wait_for_rtt_packet, TestClock, DAEMON_TCP_LINK_MDU, DAEMON_TCP_MAX_CHANNEL_PAYLOAD,
-    DAEMON_TCP_NEGOTIATED_MTU, DIRECT_TCP_LINK_MDU, DIRECT_TCP_MAX_CHANNEL_PAYLOAD, TCP_HW_MTU,
-    UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
+    wait_for_link_request, wait_for_responder_established_link, wait_for_rtt_packet, TestClock,
+    DAEMON_TCP_LINK_MDU, DAEMON_TCP_MAX_CHANNEL_PAYLOAD, DAEMON_TCP_NEGOTIATED_MTU,
+    DIRECT_TCP_LINK_MDU, DIRECT_TCP_MAX_CHANNEL_PAYLOAD, TCP_HW_MTU, UDP_HW_MTU, UDP_LINK_MDU,
+    UDP_MAX_CHANNEL_PAYLOAD,
 };
 use crate::harness::TestDaemon;
 
@@ -726,7 +726,14 @@ async fn test_mtu_a0_direct_tcp_full_mtu() {
 
     // Wait for B to learn path to A
     assert!(
-        wait_for_path_on_node(&node_b, &dest_hash_a, Duration::from_secs(5)).await,
+        crate::common::wait_for_node_reannounce(
+            || node_b.has_path(&dest_hash_a),
+            &node_a,
+            &dest_hash_a,
+            b"responder",
+            Duration::from_secs(5),
+        )
+        .await,
         "B should learn path to A"
     );
 
@@ -851,17 +858,19 @@ async fn test_mtu_b0_python_to_python_udp_baseline() {
         .expect("Failed to announce on daemon B");
 
     // Wait for daemon A to learn the path
-    let dest_hash_bytes = hex::decode(&dest_info.hash).expect("Invalid dest hash hex");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut path_found = false;
-    while tokio::time::Instant::now() < deadline {
-        if daemon_a.has_path(&dest_hash_bytes).await {
-            path_found = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(path_found, "Daemon A should learn path to daemon B");
+    let dest_hash = crate::common::parse_dest_hash(&dest_info.hash);
+    assert!(
+        crate::common::wait_for_path_reannounce_on_daemon(
+            &daemon_a,
+            &dest_hash,
+            &daemon_b,
+            &dest_info.hash,
+            b"python-udp-b0",
+            Duration::from_secs(5),
+        )
+        .await,
+        "Daemon A should learn path to daemon B"
+    );
 
     // Daemon A creates a link to B
     let link_hash = daemon_a
@@ -910,8 +919,8 @@ async fn test_mtu_b0_python_to_python_udp_baseline() {
 #[tokio::test]
 async fn test_mtu_b1_rust_to_rust_udp_mtu() {
     use crate::common::{
-        wait_for_data_event, wait_for_link_established, wait_for_path_on_node,
-        wait_for_responder_established_link, UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
+        wait_for_data_event, wait_for_link_established, wait_for_responder_established_link,
+        UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
     };
     use leviculum_core::identity::Identity;
     use leviculum_std::driver::ReticulumNodeBuilder;
@@ -981,7 +990,14 @@ async fn test_mtu_b1_rust_to_rust_udp_mtu() {
 
     // Wait for B to learn path to A
     assert!(
-        wait_for_path_on_node(&node_b, &dest_hash_a, Duration::from_secs(5)).await,
+        crate::common::wait_for_node_reannounce(
+            || node_b.has_path(&dest_hash_a),
+            &node_a,
+            &dest_hash_a,
+            b"responder",
+            Duration::from_secs(5),
+        )
+        .await,
         "B should learn path to A"
     );
 
@@ -1057,8 +1073,8 @@ async fn test_mtu_b1_rust_to_rust_udp_mtu() {
 #[tokio::test]
 async fn test_mtu_b2_rust_to_python_udp() {
     use crate::common::{
-        extract_signing_key, parse_dest_hash, wait_for_link_established, wait_for_path_on_node,
-        DAEMON_UDP_LINK_MDU, DAEMON_UDP_MAX_CHANNEL_PAYLOAD, DAEMON_UDP_NEGOTIATED_MTU,
+        extract_signing_key, parse_dest_hash, wait_for_link_established, DAEMON_UDP_LINK_MDU,
+        DAEMON_UDP_MAX_CHANNEL_PAYLOAD, DAEMON_UDP_NEGOTIATED_MTU,
     };
     use leviculum_std::driver::ReticulumNodeBuilder;
 
@@ -1104,7 +1120,14 @@ async fn test_mtu_b2_rust_to_python_udp() {
     // Wait for Rust to learn the path
     let dest_hash = parse_dest_hash(&dest_info.hash);
     assert!(
-        wait_for_path_on_node(&node, &dest_hash, Duration::from_secs(5)).await,
+        crate::common::wait_for_path_reannounce(
+            || node.has_path(&dest_hash),
+            &daemon,
+            &dest_info.hash,
+            b"python-udp-responder",
+            Duration::from_secs(5),
+        )
+        .await,
         "Rust should learn path to Python destination over UDP"
     );
 
@@ -1250,16 +1273,17 @@ async fn test_mtu_b3_python_to_rust_udp() {
 
     // Wait for Python daemon to learn the path
     let dest_hash_hex = hex::encode(dest_hash.as_bytes());
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut path_found = false;
-    while tokio::time::Instant::now() < deadline {
-        if daemon.has_path(dest_hash.as_bytes()).await {
-            path_found = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(path_found, "Python should learn path to Rust destination");
+    assert!(
+        crate::common::wait_for_node_reannounce_on_daemon(
+            &daemon,
+            &dest_hash,
+            &node,
+            b"rust-udp-responder",
+            Duration::from_secs(5),
+        )
+        .await,
+        "Python should learn path to Rust destination"
+    );
 
     // Spawn create_link in background, it blocks until link is ACTIVE
     let daemon_create_link = {
@@ -1664,7 +1688,14 @@ async fn test_mtu_d1_tcp_relay_udp_clamp() {
 
     // Wait for A to learn path (through relay)
     assert!(
-        wait_for_path_on_node(&node_a, &dest_hash_b, Duration::from_secs(10)).await,
+        crate::common::wait_for_node_reannounce(
+            || node_a.has_path(&dest_hash_b),
+            &node_b,
+            &dest_hash_b,
+            b"responder",
+            Duration::from_secs(10),
+        )
+        .await,
         "A should learn path to B via relay"
     );
 
@@ -1832,7 +1863,14 @@ async fn test_mtu_d2_udp_relay_tcp() {
 
     // Wait for A to learn path (through relay)
     assert!(
-        wait_for_path_on_node(&node_a, &dest_hash_b, Duration::from_secs(10)).await,
+        crate::common::wait_for_node_reannounce(
+            || node_a.has_path(&dest_hash_b),
+            &node_b,
+            &dest_hash_b,
+            b"responder",
+            Duration::from_secs(10),
+        )
+        .await,
         "A should learn path to B via relay"
     );
 

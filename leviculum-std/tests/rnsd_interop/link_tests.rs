@@ -836,14 +836,17 @@ async fn test_link_identify_from_python() {
         .await
         .expect("announce");
 
-    // Wait for daemon to learn the path
-    let path_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < path_deadline {
-        if daemon.has_path(dest_hash.as_bytes()).await {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // Wait for daemon to learn the path, re-driving the one-shot announce on a
+    // fixed cadence so a single lost announce under load does not stall the test
+    // (Codeberg #105).
+    let _ = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &rust_node,
+        b"identify-test",
+        Duration::from_secs(10),
+    )
+    .await;
 
     // Python creates a link to Rust (blocks until ACTIVE). Rust auto-accepts and
     // proves the incoming link, so this runs concurrently with establishment.
