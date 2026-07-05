@@ -53,6 +53,8 @@ mod mvr_establishment_loss;
 mod mvr_link_rekey_alias;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_obs_endpoint;
 #[cfg(test)]
 mod mvr_teardown_resource_fail;
 pub mod request;
@@ -918,6 +920,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let raw_packet = link
             .build_data_packet_with_context(&packed, PacketContext::Response, &mut self.rng)
             .map_err(|_| request::RequestError::EncryptionFailed)?;
+
+        // OBS-3 (Codeberg #114): endpoint response send. Pairs with REQUEST_RX
+        // so a full remote-management (`rnstatus -R`) round trip is observable
+        // at the responder. `len` is the msgpack [request_id, response] payload
+        // length (pre-encryption), the meaningful response size.
+        crate::tracing::debug!(
+            event = "RESPONSE_TX",
+            link = %HexShort(link_id.as_bytes()),
+            request_id = %HexShort(request_id),
+            len = packed.len(),
+        );
 
         // Route the packet
         self.route_link_packet(link_id, &raw_packet);

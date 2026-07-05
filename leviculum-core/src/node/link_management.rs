@@ -314,6 +314,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             proof_sent_at_ms: now_ms,
         });
 
+        // OBS-3 (Codeberg #114): endpoint proof generation. The link
+        // establishment proof is the endpoint's proof path; it never reaches
+        // Transport::send_proof (that is only the single-packet delivery proof),
+        // so without this the responder proved links invisibly. `for_pkt` is the
+        // link id (= truncated hash of the link request being proved), matching
+        // the single-packet PROOF_GEN semantics; `to_dst` is the destination the
+        // link is for.
+        crate::tracing::debug!(
+            event = "PROOF_GEN",
+            for_pkt = %HexShort(link_id.as_bytes()),
+            to_dst = %HexShort(dest_hash.as_bytes()),
+        );
+
         // Establishment packet-level instrumentation (responder proof TX).
         crate::tracing::debug!(
             target: "leviculum_core::link",
@@ -332,6 +345,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id
         );
         if let Some(iface_idx) = attached {
+            // OBS-3 (Codeberg #114): endpoint proof send. `pkt` is the link id
+            // (the proof packet's target), matching PROOF_SEND semantics.
+            crate::tracing::debug!(
+                event = "PROOF_SEND",
+                pkt = %HexShort(link_id.as_bytes()),
+                iface = %self.transport.iface_name(iface_idx),
+            );
             if let Err(e) = self.transport.send_on_interface(iface_idx, &proof) {
                 crate::tracing::debug!(%e, "send_on_interface failed");
             }
@@ -718,6 +738,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             HexShort(link_id.as_bytes()),
             HexShort(dest_hash.as_bytes()),
             self.transport.iface_name(interface_index)
+        );
+
+        // OBS-3 (Codeberg #114): endpoint link acceptance. Distinct from the
+        // relay-side LINK_ENTRY_SET (transport.rs), which fires only when we
+        // forward a link request for someone else. This marks that WE are the
+        // endpoint terminating the link, so an endpoint node is observable.
+        crate::tracing::debug!(
+            event = "LINK_LOCAL",
+            link = %HexShort(link_id.as_bytes()),
+            dst = %HexShort(dest_hash.as_bytes()),
+            iface = %self.transport.iface_name(interface_index),
         );
 
         // Establishment packet-level instrumentation (responder request RX).
@@ -1675,6 +1706,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
         }
+
+        // OBS-3 (Codeberg #114): endpoint request dispatch (e.g. the
+        // remote-management `/status` responder). Fires only after the auth
+        // policy passes, so it marks a request the endpoint actually answers.
+        // `path` is deliberately omitted (it is a name-type string, #113); the
+        // stable `path_hash` identifies the handler.
+        crate::tracing::debug!(
+            event = "REQUEST_RX",
+            link = %HexShort(link_id.as_bytes()),
+            path_hash = %HexShort(&path_hash),
+            request_id = %HexShort(&request_id),
+        );
 
         self.events.push(NodeEvent::RequestReceived {
             link_id,

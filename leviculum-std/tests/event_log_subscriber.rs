@@ -627,6 +627,112 @@ fn test_catalogue_proof_send() {
     assert_catalogue_round_trip(&handle, "PROOF_SEND", &["iface", "pkt"]);
 }
 
+// OBS-3 (Codeberg #114): endpoint observability catalogue entries. One
+// round-trip test each — emit with all required keys (no violation) then with
+// one missing (schema violation) — proving the catalogue entry is wired.
+
+#[test]
+fn test_catalogue_link_local() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "LINK_LOCAL",
+        link = "aabb",
+        dst = "ccdd",
+        iface = "lora0",
+    );
+    tracing::debug!(event = "LINK_LOCAL", link = "aabb"); // missing dst, iface
+    assert_catalogue_round_trip(&handle, "LINK_LOCAL", &["dst", "iface", "link"]);
+}
+
+#[test]
+fn test_catalogue_request_rx() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "REQUEST_RX",
+        link = "aabb",
+        path_hash = "1122",
+        request_id = "3344",
+    );
+    tracing::debug!(event = "REQUEST_RX", link = "aabb"); // missing path_hash, request_id
+    assert_catalogue_round_trip(&handle, "REQUEST_RX", &["link", "path_hash", "request_id"]);
+}
+
+#[test]
+fn test_catalogue_response_tx() {
+    let handle = init_event_log();
+    tracing::debug!(
+        event = "RESPONSE_TX",
+        link = "aabb",
+        request_id = "3344",
+        len = 12_usize,
+    );
+    tracing::debug!(event = "RESPONSE_TX", link = "aabb"); // missing request_id, len
+    assert_catalogue_round_trip(&handle, "RESPONSE_TX", &["len", "link", "request_id"]);
+}
+
+/// Schema-health: emit every OBS-3 endpoint event with the EXACT keys the
+/// production sites (transport.rs / node/link_management.rs / node/mod.rs) pass,
+/// and assert none of them produces an EVENT_SCHEMA_VIOLATION (a required key is
+/// missing -> undeclared/mis-declared) or EVENT_FIELD_VIOLATION (a value is not
+/// a scalar token). Reused names (PROOF_GEN/PROOF_SEND/PKT_LOCAL) are included
+/// because #114 wires them from new call sites.
+#[test]
+fn obs3_endpoint_events_clean_under_layer() {
+    let handle = init_event_log();
+
+    tracing::debug!(
+        event = "LINK_LOCAL",
+        link = "aabb",
+        dst = "ccdd",
+        iface = "lora0"
+    );
+    tracing::debug!(event = "PROOF_GEN", for_pkt = "aabb", to_dst = "ccdd");
+    tracing::debug!(event = "PROOF_SEND", pkt = "aabb", iface = "lora0");
+    tracing::debug!(
+        event = "PKT_LOCAL",
+        dst = "ccdd",
+        iface = "lora0",
+        matched = true
+    );
+    tracing::debug!(
+        event = "REQUEST_RX",
+        link = "aabb",
+        path_hash = "1122",
+        request_id = "3344"
+    );
+    tracing::debug!(
+        event = "RESPONSE_TX",
+        link = "aabb",
+        request_id = "3344",
+        len = 12_usize
+    );
+
+    let dump = handle.dump();
+    for name in [
+        "LINK_LOCAL",
+        "PROOF_GEN",
+        "PROOF_SEND",
+        "PKT_LOCAL",
+        "REQUEST_RX",
+        "RESPONSE_TX",
+    ] {
+        // The canonical line must be present...
+        assert!(
+            dump.iter().any(|l| l.starts_with(&format!("{name} "))),
+            "missing canonical line for {name}"
+        );
+        // ...and no violation line may reference it.
+        for l in &dump {
+            if l.starts_with("EVENT_SCHEMA_VIOLATION") || l.starts_with("EVENT_FIELD_VIOLATION") {
+                assert!(
+                    !l.contains(&format!("event={name} ")),
+                    "OBS-3 event {name} produced a violation: {l}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn test_catalogue_reverse_add() {
     let handle = init_event_log();

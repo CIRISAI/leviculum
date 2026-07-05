@@ -3605,6 +3605,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 HexShort(&dest_hash),
                 self.iface_name(interface_index)
             );
+            // OBS-3 (Codeberg #114): local delivery of a data packet addressed
+            // to one of our own destinations (a registered SINGLE dest, or an
+            // established local link whose id is registered). This is the
+            // endpoint delivery the RELAY-only PKT_FORWARD instrumentation
+            // never covered. The PLAIN-broadcast branch above already emits
+            // PKT_LOCAL; this makes the encrypted/link delivery observable too.
+            crate::tracing::debug!(
+                event = "PKT_LOCAL",
+                dst = %HexShort(&dest_hash),
+                iface = %self.iface_name(interface_index),
+                matched = true,
+            );
             self.events.push(TransportEvent::PacketReceived {
                 destination_hash: dest_hash,
                 packet: Box::new(packet),
@@ -3731,6 +3743,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // On transport nodes, relayed links are handled via link_table above;
         // only packets for our own local links reach this point.
         if packet.flags.dest_type == DestinationType::Link {
+            // OBS-3 (Codeberg #114): local delivery of a link-addressed data
+            // packet to one of our own links whose id is not in
+            // local_destinations (edge of the branch above). Same endpoint
+            // observability as the registered-destination delivery.
+            crate::tracing::debug!(
+                event = "PKT_LOCAL",
+                dst = %HexShort(&dest_hash),
+                iface = %self.iface_name(interface_index),
+                matched = true,
+            );
             self.storage.add_packet_hash(full_packet_hash);
             self.events.push(TransportEvent::PacketReceived {
                 destination_hash: dest_hash,

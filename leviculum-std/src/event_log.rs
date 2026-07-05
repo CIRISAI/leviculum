@@ -234,6 +234,31 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_TX_SUPPRESSED",
         required_keys: &["dst", "hops", "iface", "suppressed", "reason"],
     },
+    // OBS-3 (Codeberg #114): endpoint observability. A node acting as the
+    // ENDPOINT of a link (accepting an inbound link, delivering locally,
+    // generating the establishment proof, answering a remote-management
+    // request) previously emitted no structured events -- only the RELAY path
+    // (PKT_FORWARD, relay-side LINK_ENTRY_SET) was instrumented. LINK_LOCAL is
+    // the endpoint counterpart to LINK_ENTRY_SET: it fires when we accept an
+    // inbound link for one of our own destinations (never for a relayed link).
+    // The establishment proof reuses PROOF_GEN/PROOF_SEND, and local delivery
+    // reuses PKT_LOCAL (all already catalogued above).
+    EventSchema {
+        name: "LINK_LOCAL",
+        required_keys: &["dst", "iface", "link"],
+    },
+    // OBS-3: the remote-management (and any request/response) responder path.
+    // REQUEST_RX fires when an authorized request is dispatched to a handler
+    // (pairs with the RequestReceived NodeEvent); RESPONSE_TX fires when the
+    // responder sends the single-packet reply back over the link.
+    EventSchema {
+        name: "REQUEST_RX",
+        required_keys: &["link", "path_hash", "request_id"],
+    },
+    EventSchema {
+        name: "RESPONSE_TX",
+        required_keys: &["len", "link", "request_id"],
+    },
     // OBS-2: periodic per-reason drop summary at the PATH_TABLE cadence (~10s).
     // Surfaces the always-on drop counters (including the high-volume overheard
     // path) without per-packet flooding.
