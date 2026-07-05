@@ -329,6 +329,64 @@ fn test_field_value_sanitized_to_scalar() {
     );
 }
 
+/// #113 positive — a name-type field (`iface`) whose value carries
+/// legitimate whitespace (auto-connect names an interface after a
+/// discovered node, e.g. `autoconnect/Dark Doodad 23`) is coerced into a
+/// tokenizable scalar for the line but emits NO `EVENT_FIELD_VIOLATION`.
+/// This is the false-positive flood that poisoned the miauhaus self-alarm.
+#[test]
+fn test_name_field_whitespace_no_violation() {
+    let handle = init_event_log();
+    tracing::debug!(event = "EV_IFACE", iface = "autoconnect/Dark Doodad 23");
+
+    let lines = lines_for(&handle, "EV_IFACE");
+    let canonical = lines
+        .iter()
+        .find(|l| l.starts_with("EV_IFACE "))
+        .unwrap_or_else(|| panic!("missing EV_IFACE canonical line: {lines:?}"));
+
+    // The line is still well-formed: iface is a single scalar token with
+    // the whitespace coerced away.
+    let iface_tokens: Vec<&str> = canonical
+        .split_whitespace()
+        .filter(|t| t.starts_with("iface="))
+        .collect();
+    assert_eq!(
+        iface_tokens.len(),
+        1,
+        "iface must be a single scalar token: {canonical}"
+    );
+    assert!(
+        canonical.contains("iface=autoconnect/Dark_Doodad_23"),
+        "iface whitespace should be coerced to `_`: {canonical}"
+    );
+
+    // The crux of #113: NO violation for the legitimate spaced name.
+    assert!(
+        !lines.iter().any(|l| l.starts_with("EVENT_FIELD_VIOLATION")),
+        "name-type field must not emit EVENT_FIELD_VIOLATION: {lines:?}"
+    );
+}
+
+/// #113 negative — the detector keeps its BUG-1 value. A genuinely
+/// structured field (not a name field) with unexpected whitespace STILL
+/// emits `EVENT_FIELD_VIOLATION`, so real freetext-leak bugs are still
+/// surfaced.
+#[test]
+fn test_structured_field_whitespace_still_violates() {
+    let handle = init_event_log();
+    tracing::debug!(event = "EV_STRUCT", reason = "no route found");
+
+    let lines = lines_for(&handle, "EV_STRUCT");
+    assert!(
+        lines.iter().any(|l| l.starts_with("EVENT_FIELD_VIOLATION")
+            && l.contains("event=EV_STRUCT")
+            && l.contains("field=reason")
+            && l.contains("value_problem=whitespace")),
+        "structured field with whitespace must still emit a violation: {lines:?}"
+    );
+}
+
 /// BUG-2 — `Debug`-recorded values render as bare scalars. An
 /// `Option`-wrapped value must not leak Rust Debug wrapper syntax
 /// (`Some("…")`) or quotes into the line. `None` stays the bare scalar

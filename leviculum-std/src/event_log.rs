@@ -570,6 +570,23 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
     }
 }
 
+/// Fields whose value is a human/discovery-provided *name* rather than a
+/// structured token.  Interface names legitimately carry whitespace
+/// (auto-connect names a discovered node's interface after it, e.g.
+/// `autoconnect/Dark Doodad 23`), so a space in one of these is expected
+/// input, not a source-bug symptom.  Their values are still coerced into a
+/// tokenizable scalar for the line, but the advisory
+/// `EVENT_FIELD_VIOLATION` is suppressed so the legitimate case does not
+/// flood the log or poison the self-alarm metric (Codeberg #113).  Genuinely
+/// structured fields keep the detector (still catches freetext-leak bugs
+/// like BUG-1).
+fn is_name_field(field: &str) -> bool {
+    matches!(
+        field,
+        "iface" | "iface_in" | "iface_out" | "in_iface" | "out_iface"
+    )
+}
+
 /// Detect non-scalar values that would break a whitespace/`=`-token
 /// parser.  Returns the kind of problem, or `None` if safe.
 fn field_value_problem(value: &str) -> Option<&'static str> {
@@ -646,10 +663,17 @@ impl EventVisitor {
         // BUG-3: a non-scalar value is reported AND sanitized, so the
         // canonical line stays well-formed by construction even when an
         // emission site passes whitespace or an embedded `=`.
+        //
+        // #113: name-type fields (interface names) legitimately carry
+        // whitespace, so they are coerced SILENTLY -- sanitized for the
+        // line, but no violation, to keep the false-positive flood out of
+        // the log.  Structured fields keep the detector.
         let value = match field_value_problem(&value) {
             Some(problem) => {
-                self.field_violations
-                    .push((field.name().to_string(), problem));
+                if !is_name_field(field.name()) {
+                    self.field_violations
+                        .push((field.name().to_string(), problem));
+                }
                 sanitize_scalar(&value)
             }
             None => value,
