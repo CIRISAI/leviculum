@@ -77,3 +77,26 @@ print("=== PRIM ===")
 print("material      ", mat.hex())
 print("wb_full_hash  ", full_hash(wb).hex())
 print("zero_stamp_val", LXStamper.stamp_value(wb, bytes(32)))
+
+# Encrypted discovery announce (Codeberg #32 sub-task d). A private discovery
+# network shares a `network_identity` and encrypts `packed+stamp` with it
+# (Discovery.py get_interface_announce_data). The ephemeral key is random per
+# run, so A_ENC_APP is not reproducible byte-for-byte; decryption is
+# deterministic, so it decodes to vector A on any stack holding the identity.
+from RNS.Discovery import InterfaceAnnounceHandler
+
+NET_PRV = bytes(range(64))  # fixed 32 X25519 + 32 Ed25519 private key
+net = RNS.Identity(create_keys=False)
+net.load_private_key(NET_PRV)
+
+A_PACKED = bytes.fromhex(
+    "8b00ae524e6f6465496e7465726661636501c3ccfec41000112233445566778899aabbccddeeff"
+    "ccffaa5465737420524e6f646503c004c005c009ce33bca1000ace0001e8480b080c05"
+)
+A_STAMP = bytes.fromhex("b429796794e50f63f5c02a4e4a458434399a6d356f43e35a26d654bcfd1e583e")
+enc_app = bytes([InterfaceAnnounceHandler.FLAG_ENCRYPTED]) + net.encrypt(A_PACKED + A_STAMP)
+print("=== ENC (A) ===")
+print("net_prv       ", NET_PRV.hex())
+print("net_hash      ", net.hash.hex())
+print("flag_encrypted", InterfaceAnnounceHandler.FLAG_ENCRYPTED)
+print("enc_app       ", enc_app.hex())

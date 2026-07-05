@@ -234,3 +234,139 @@ fn aspect_filter_is_python_compatible() {
     assert_eq!(APP_NAME, "rnstransport");
     assert_eq!(DISCOVERY_ASPECTS, ["discovery", "interface"]);
 }
+
+// ==================== encrypted discovery (private network) ====================
+//
+// A private discovery network shares a `network_identity` and encrypts the
+// `msgpack(info)+stamp` tail so only holders of that identity can decode
+// discoverable neighbours (Discovery.py `get_interface_announce_data` /
+// `received_announce`). The flags byte stays in the clear; the encryption
+// primitive is `Identity::encrypt`, matching Python `Identity.encrypt`.
+
+use crate::identity::Identity;
+
+// Fixed network identity private key (32 X25519 + 32 Ed25519), bytes 0x00..0x3f.
+const NET_PRV_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\
+                           202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+// Its identity hash, captured from Python `Identity.load_private_key` (parity
+// check that our key derivation matches Python's).
+const NET_HASH_HEX: &str = "aca31af0441d81dbec71e82da0b4b5f5";
+
+// A Python-produced encrypted discovery announce for vector A's `packed+stamp`,
+// encrypted with the network identity above. Captured from the vendored
+// Python reference (RNS.Identity.encrypt); the ephemeral key is random per
+// run, so this is one valid ciphertext, not reproducible byte-for-byte -- but
+// decryption is deterministic, so our decrypt path must recover vector A.
+const A_ENC_APP: &str = "023f0efbe991e2c773ccb8b894895935724a9fb0777fcf88b1c7739c44e137092267\
+                         801a620765a83b0dd611c3337ccbe5a176c7f46b020b625dcce42c5ec69322b4ac04\
+                         0ad440eef0f713a8560b637171574b65f74cf89d8b6089a8cdc1ffb194cbc2459eec7\
+                         8b6c16f210ae58fde2ca9cd81f5b57d93484d63835c0f9790d60489546b1623a43b67\
+                         428e169a3bf80f6792388b9f41206b7fecb9858107f2520650cadae574fb2b4365b5c\
+                         7aa5951162103ac3dc7a101565dd23bb1610bfe43ea";
+
+fn net_identity() -> Identity {
+    Identity::from_private_key_bytes(&hx(NET_PRV_HEX)).expect("valid network identity")
+}
+
+#[test]
+fn network_identity_hash_matches_python() {
+    // Guards that our 64-byte private-key layout / key derivation matches
+    // Python's, so a network identity configured on either stack is the same.
+    assert_eq!(net_identity().hash(), &arr16(NET_HASH_HEX));
+}
+
+#[test]
+fn flag_encrypted_matches_python() {
+    // Discovery.py InterfaceAnnounceHandler.FLAG_ENCRYPTED = 0b00000010.
+    assert_eq!(FLAG_ENCRYPTED, 0b0000_0010);
+}
+
+#[test]
+fn parse_python_encrypted_vector_a() {
+    // Python -> ours parity: a Python-encrypted announce decodes on our side
+    // when we hold the same network identity.
+    let net = arr16(NETID_HEX);
+    let d =
+        parse_announce_app_data_decrypt(&hx(A_ENC_APP), &net, DEFAULT_STAMP_VALUE, &net_identity())
+            .expect("decrypts + validates");
+    assert_eq!(d.interface_type, "RNodeInterface");
+    assert_eq!(d.name, "Test RNode");
+    assert_eq!(d.transport_id, arr16(TID_HEX));
+    assert_eq!(d.value, A_VALUE);
+    assert_eq!(d.stamp, arr32(A_STAMP));
+    assert_eq!(d.frequency, Some(868_000_000));
+    assert_eq!(d.discovery_hash, arr32(A_DISCOVERY_HASH));
+}
+
+#[test]
+fn encrypted_roundtrip_same_identity() {
+    use rand_core::OsRng;
+    let tid = arr16(TID_HEX);
+    let net_id = net_identity();
+    let net_hash = arr16(NETID_HEX);
+
+    let app = build_announce_app_data_encrypted(&desc_a(), &tid, true, &net_id, &mut OsRng)
+        .expect("built encrypted");
+
+    // Flags byte set, and the plaintext info is NOT visible on the wire.
+    assert_eq!(app[0], FLAG_ENCRYPTED);
+    assert!(
+        !app[1..]
+            .windows(hx(A_PACKED).len())
+            .any(|w| w == hx(A_PACKED)),
+        "encrypted app_data must not contain the plaintext info map"
+    );
+
+    let d = parse_announce_app_data_decrypt(&app, &net_hash, DEFAULT_STAMP_VALUE, &net_id)
+        .expect("decrypts + validates");
+    assert_eq!(d.interface_type, "RNodeInterface");
+    assert_eq!(d.name, "Test RNode");
+    assert_eq!(d.transport_id, tid);
+    assert!(d.value >= DEFAULT_STAMP_VALUE);
+    assert_eq!(d.discovery_hash, arr32(A_DISCOVERY_HASH));
+    assert_eq!(d.frequency, Some(868_000_000));
+}
+
+#[test]
+fn encrypted_rejects_wrong_identity() {
+    use rand_core::OsRng;
+    let tid = arr16(TID_HEX);
+    let net_id = net_identity();
+    let net_hash = arr16(NETID_HEX);
+
+    let app = build_announce_app_data_encrypted(&desc_a(), &tid, true, &net_id, &mut OsRng)
+        .expect("built encrypted");
+
+    // A different network identity cannot decode the announce.
+    let other = Identity::generate(&mut OsRng);
+    assert!(
+        parse_announce_app_data_decrypt(&app, &net_hash, DEFAULT_STAMP_VALUE, &other).is_none(),
+        "a foreign network identity must not decode the announce"
+    );
+}
+
+#[test]
+fn encrypted_rejects_absent_identity() {
+    use rand_core::OsRng;
+    let tid = arr16(TID_HEX);
+    let net_id = net_identity();
+    let net_hash = arr16(NETID_HEX);
+
+    let app = build_announce_app_data_encrypted(&desc_a(), &tid, true, &net_id, &mut OsRng)
+        .expect("built encrypted");
+
+    // The plaintext parser (no network identity) rejects an encrypted announce.
+    assert!(parse_announce_app_data(&app, &net_hash, DEFAULT_STAMP_VALUE).is_none());
+}
+
+#[test]
+fn plaintext_unaffected_by_decrypt_parser() {
+    // Passing a network identity to the decrypting parser must not disturb the
+    // plaintext path: an unencrypted announce still decodes normally.
+    let net = arr16(NETID_HEX);
+    let d = parse_announce_app_data_decrypt(&hx(A_APP), &net, DEFAULT_STAMP_VALUE, &net_identity())
+        .expect("plaintext still decodes");
+    assert_eq!(d.interface_type, "RNodeInterface");
+    assert_eq!(d.name, "Test RNode");
+    assert_eq!(d.stamp, arr32(A_STAMP));
+}

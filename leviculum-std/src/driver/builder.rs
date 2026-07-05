@@ -616,6 +616,34 @@ impl ReticulumNodeBuilder {
             .or_else(|| config.reticulum.storage_path.clone())
             .unwrap_or_else(|| Config::default_config_dir().join("storage"));
 
+        // Network identity for a private (encrypted) discovery network (Codeberg
+        // #32, sub-task d). When configured, load (or generate + persist, like
+        // Python Reticulum.py:521-542) the shared 64-byte identity so encrypted
+        // discovery announces can be decrypted on receive. A load failure
+        // downgrades to plaintext discovery rather than aborting the daemon.
+        let discovery_network_identity =
+            config.reticulum.network_identity.clone().and_then(|path| {
+                let resolved = resolve_network_identity_path(&path, &storage_path);
+                match load_or_create_network_identity(&resolved) {
+                    Ok(id) => {
+                        tracing::info!(
+                            "Discovery network identity loaded: {} ({})",
+                            hex_short(id.hash()),
+                            resolved.display()
+                        );
+                        Some(Arc::new(id))
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to load discovery network identity from {}: {e}; \
+                                 falling back to plaintext discovery",
+                            resolved.display()
+                        );
+                        None
+                    }
+                }
+            });
+
         // Storage::new() loads persistent data (known_destinations, packet_hashlist)
         // into its inner MemoryStorage automatically.
         let storage = Storage::new(&storage_path)?;
@@ -722,6 +750,7 @@ impl ReticulumNodeBuilder {
         node.set_storage_path(storage_path.clone());
         node.set_rnode_channels(rnode_channels);
         node.set_autoconnect_max(autoconnect_max);
+        node.set_discovery_network_identity(discovery_network_identity);
 
         Ok(node)
     }
@@ -770,6 +799,59 @@ fn parse_identity_hash16(
         *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+/// Resolve a configured `network_identity` path (Codeberg #32, sub-task d).
+///
+/// Expands a leading `~/` against `$HOME` (Python `os.path.expanduser`); a
+/// still-relative path is resolved against the storage directory so the
+/// identity lives alongside the node's other state.
+fn resolve_network_identity_path(
+    path: &std::path::Path,
+    storage_path: &std::path::Path,
+) -> PathBuf {
+    let expanded = match path.strip_prefix("~") {
+        Ok(rest) => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => path.to_path_buf(),
+        },
+        Err(_) => path.to_path_buf(),
+    };
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        storage_path.join(expanded)
+    }
+}
+
+/// Load a network identity from a raw 64-byte file, generating and persisting a
+/// fresh one when the file is absent (Python Reticulum.py:521-542).
+fn load_or_create_network_identity(path: &std::path::Path) -> std::io::Result<Identity> {
+    use leviculum_core::constants::IDENTITY_KEY_SIZE;
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.len() == IDENTITY_KEY_SIZE => Identity::from_private_key_bytes(&bytes)
+            .map_err(|e| std::io::Error::other(format!("{e:?}"))),
+        Ok(bytes) => Err(std::io::Error::other(format!(
+            "network identity file has wrong size: {} (expected {IDENTITY_KEY_SIZE})",
+            bytes.len()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let id = Identity::generate(&mut rand_core::OsRng);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let key_bytes = id
+                .private_key_bytes()
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+            std::fs::write(path, key_bytes)?;
+            tracing::info!(
+                "Network identity generated and persisted to {}",
+                path.display()
+            );
+            Ok(id)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Format a full hash as hex for logging
@@ -1131,6 +1213,51 @@ mod tests {
         let msg = b"test message";
         let sig = id.sign(msg).unwrap();
         assert!(id.verify(msg, &sig).unwrap());
+    }
+
+    #[test]
+    fn test_network_identity_loaded_and_persisted() {
+        // Codeberg #32 sub-task d: a configured network_identity is resolved,
+        // generated-on-missing, persisted, and wired onto the node so the
+        // event loop can decrypt encrypted discovery announces.
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        // Relative path resolves against the storage directory.
+        config.reticulum.network_identity = Some(PathBuf::from("discovery/network_identity"));
+        let node = ReticulumNodeBuilder::new()
+            .config(config)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync with network_identity failed");
+
+        assert!(
+            node.discovery_network_identity.is_some(),
+            "network identity should be loaded onto the node"
+        );
+
+        // The 64-byte identity file was created and reloads to the same hash.
+        let id_path = td.path().join("discovery/network_identity");
+        let bytes = std::fs::read(&id_path).expect("network identity persisted");
+        assert_eq!(bytes.len(), 64, "network identity is a raw 64-byte file");
+        let reloaded = Identity::from_private_key_bytes(&bytes).unwrap();
+        assert_eq!(
+            reloaded.hash(),
+            node.discovery_network_identity.as_ref().unwrap().hash(),
+            "persisted identity matches the loaded one"
+        );
+    }
+
+    #[test]
+    fn test_no_network_identity_leaves_node_plaintext() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let node = ReticulumNodeBuilder::new()
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        assert!(
+            node.discovery_network_identity.is_none(),
+            "no network identity configured => plaintext discovery path"
+        );
     }
 
     #[test]

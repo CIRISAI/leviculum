@@ -267,6 +267,16 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
                 config.autoconnect_discovered_interfaces = v.max(0) as usize;
             }
         }
+        // Codeberg #32 sub-task d: path to the network identity for a private
+        // (encrypted) discovery network (Python `network_identity`,
+        // Reticulum.py:521). When set, encrypted discovery announces are
+        // decrypted with this identity before validation.
+        "network_identity" => {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                config.network_identity = Some(std::path::PathBuf::from(trimmed));
+            }
+        }
         // Tolerate (accept without error) RNS 1.2.2..1.3.5 reticulum-level
         // keys we don't implement: blackhole_update_interval, default_ar_*,
         // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control
@@ -1403,6 +1413,28 @@ mod tests {
     fn test_instance_name_defaults_to_default() {
         let config = parse_ini("[reticulum]\n").unwrap();
         assert_eq!(config.reticulum.instance_name, "default");
+    }
+
+    #[test]
+    fn test_network_identity_parsed() {
+        // Codeberg #32 sub-task d: private discovery network identity path.
+        let config = parse_ini(
+            r#"
+[reticulum]
+  network_identity = ~/.reticulum/network_identity
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.reticulum.network_identity,
+            Some(std::path::PathBuf::from("~/.reticulum/network_identity"))
+        );
+    }
+
+    #[test]
+    fn test_network_identity_defaults_to_none() {
+        let config = parse_ini("[reticulum]\n").unwrap();
+        assert!(config.reticulum.network_identity.is_none());
     }
 
     #[test]

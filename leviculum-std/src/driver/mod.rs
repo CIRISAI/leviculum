@@ -577,6 +577,11 @@ pub struct ReticulumNode {
     /// auto-connect of discovered interfaces; `N > 0` enables it capped at `N`.
     /// Set by the builder.
     autoconnect_max: usize,
+    /// Network identity for a private (encrypted) discovery network (Codeberg
+    /// #32, sub-task d). `Some` when `network_identity` is configured; the
+    /// event loop uses it to decrypt encrypted discovery announces before
+    /// stamp validation. `None` keeps the plaintext discovery path.
+    discovery_network_identity: Option<Arc<leviculum_core::Identity>>,
 }
 
 impl Drop for ReticulumNode {
@@ -677,6 +682,7 @@ impl ReticulumNode {
             reconnect_tx: None,
             storage_path: None,
             autoconnect_max: 0,
+            discovery_network_identity: None,
         }
     }
 
@@ -689,6 +695,16 @@ impl ReticulumNode {
     /// Set the runtime auto-connect cap (called by the builder, Codeberg #32).
     pub(crate) fn set_autoconnect_max(&mut self, max: usize) {
         self.autoconnect_max = max;
+    }
+
+    /// Set the discovery network identity (called by the builder, Codeberg #32
+    /// sub-task d). `Some` enables decrypt-on-receive for a private discovery
+    /// network; `None` keeps the plaintext path.
+    pub(crate) fn set_discovery_network_identity(
+        &mut self,
+        identity: Option<Arc<leviculum_core::Identity>>,
+    ) {
+        self.discovery_network_identity = identity;
     }
 
     /// The storage root under which the discovered-interface registry lives
@@ -922,6 +938,11 @@ impl ReticulumNode {
         // `<storage>/discovery/interfaces` (Codeberg #32).
         let discovery_storage = Some(self.discovery_storage_root());
 
+        // Network identity for decrypting encrypted discovery announces on a
+        // private discovery network (Codeberg #32, sub-task d). `None` keeps the
+        // plaintext path.
+        let discovery_network_identity = self.discovery_network_identity.clone();
+
         // Auto-connect wiring (Codeberg #32, sub-task b): the event loop spawns
         // discovered TCP endpoints at runtime through the same interface-id
         // allocator and registration channel the static/hot-plug paths use.
@@ -948,6 +969,7 @@ impl ReticulumNode {
                 flush_interval_secs,
                 remote_mgmt,
                 discovery_storage,
+                discovery_network_identity,
                 AutoConnectWiring {
                     max: autoconnect_max,
                     new_iface_tx: autoconnect_new_iface_tx,
@@ -2688,6 +2710,7 @@ async fn run_event_loop(
     flush_interval_secs: u64,
     remote_mgmt: Option<RemoteMgmtResponder>,
     discovery_storage: Option<PathBuf>,
+    discovery_network_identity: Option<Arc<leviculum_core::Identity>>,
     autoconnect_wiring: AutoConnectWiring,
 ) {
     let mut event_sink = channels.event_sink;
@@ -2797,6 +2820,7 @@ async fn run_event_loop(
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
+                            discovery_network_identity.as_deref(),
                         );
                     }
                     RecvEvent::Disconnected(iface_id) => {
@@ -2813,6 +2837,7 @@ async fn run_event_loop(
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
+                            discovery_network_identity.as_deref(),
                         );
                         // Clear retry queue for disconnected interface. The legacy
                         // is_interface_congested flag was removed in Phase F;
@@ -2849,6 +2874,7 @@ async fn run_event_loop(
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                     remote_mgmt.as_ref(),
                     discovery_storage.as_deref(),
+                    discovery_network_identity.as_deref(),
                 );
             }
 
@@ -2878,6 +2904,7 @@ async fn run_event_loop(
                     &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                     remote_mgmt.as_ref(),
                     discovery_storage.as_deref(),
+                    discovery_network_identity.as_deref(),
                 );
 
                 // Advance next_poll based on next_deadline_ms
@@ -2910,6 +2937,7 @@ async fn run_event_loop(
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
+                            discovery_network_identity.as_deref(),
                         );
                     }
                     // Bounded graceful flush: dispatch only pushes onto the
@@ -2970,7 +2998,7 @@ async fn run_event_loop(
                         let mut core = inner.lock().unwrap();
                         core.handle_interface_up(iface_idx)
                     };
-                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref());
+                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
                 }
             }
 
@@ -2991,7 +3019,7 @@ async fn run_event_loop(
                     let mut core = inner.lock().unwrap();
                     core.handle_interface_up(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref());
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
@@ -3055,6 +3083,7 @@ async fn run_event_loop(
                             &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
+                            discovery_network_identity.as_deref(),
                         );
                         retry_queues.remove(&iface_id.0);
                         registry.remove(iface_id);
@@ -3193,6 +3222,7 @@ fn dispatch_output(
     ifac_configs: &BTreeMap<usize, leviculum_core::ifac::IfacConfig>,
     remote_mgmt: Option<&RemoteMgmtResponder>,
     discovery_storage: Option<&Path>,
+    discovery_network_identity: Option<&leviculum_core::Identity>,
 ) {
     // Drain retry queues before dispatching new actions
     let drain_now_ms = inner.lock().unwrap().now_ms();
@@ -3298,7 +3328,12 @@ fn dispatch_output(
     if let Some(storage_root) = discovery_storage {
         for event in &output.events {
             if let NodeEvent::AnnounceReceived { announce, .. } = event {
-                record_discovery_announce(inner, storage_root, announce);
+                record_discovery_announce(
+                    inner,
+                    storage_root,
+                    announce,
+                    discovery_network_identity,
+                );
             }
         }
     }
@@ -3334,6 +3369,7 @@ fn dispatch_output(
             None,
             // Management responses carry no announces; no discovery persistence.
             None,
+            None,
         );
     }
 }
@@ -3349,6 +3385,7 @@ fn record_discovery_announce(
     inner: &Arc<Mutex<StdNodeCore>>,
     storage_root: &Path,
     announce: &leviculum_core::ReceivedAnnounce,
+    network_identity: Option<&leviculum_core::Identity>,
 ) {
     use leviculum_core::discovery::{APP_NAME, DEFAULT_STAMP_VALUE, DISCOVERY_ASPECTS};
 
@@ -3359,11 +3396,23 @@ fn record_discovery_announce(
     }
 
     let network_id = announce.computed_identity_hash();
-    let Some(di) = leviculum_core::discovery::parse_announce_app_data(
-        announce.app_data(),
-        &network_id,
-        DEFAULT_STAMP_VALUE,
-    ) else {
+    // On a private discovery network, decrypt encrypted announces with the
+    // configured network identity before validation (Codeberg #32, sub-task d);
+    // without one, only plaintext announces decode.
+    let parsed = match network_identity {
+        Some(identity) => leviculum_core::discovery::parse_announce_app_data_decrypt(
+            announce.app_data(),
+            &network_id,
+            DEFAULT_STAMP_VALUE,
+            identity,
+        ),
+        None => leviculum_core::discovery::parse_announce_app_data(
+            announce.app_data(),
+            &network_id,
+            DEFAULT_STAMP_VALUE,
+        ),
+    };
+    let Some(di) = parsed else {
         tracing::debug!("discovery: announce on discovery destination failed validation");
         return;
     };
@@ -3731,6 +3780,7 @@ mod tests {
             &mut retry_queue_warned,
             &mut retry_queue_max_depth,
             &ifac_configs,
+            None,
             None,
             None,
         );

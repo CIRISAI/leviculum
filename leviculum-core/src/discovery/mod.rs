@@ -15,7 +15,15 @@
 //!
 //! # Wire format
 //!
-//! `app_data = flags(1) + msgpack(info) + stamp(32)`
+//! Plaintext: `app_data = flags(1) + msgpack(info) + stamp(32)`
+//!
+//! Encrypted (private discovery network): the flags byte is left unencrypted
+//! and the `msgpack(info) + stamp(32)` tail is encrypted with a shared network
+//! identity, giving `app_data = flags(1) + network_identity.encrypt(msgpack(info) + stamp(32))`.
+//! The `FLAG_ENCRYPTED` bit signals this. The encryption primitive is the same
+//! `Identity::encrypt` used everywhere else (X25519 ephemeral + HKDF + token),
+//! matching Python `Identity.encrypt` byte-for-byte, so only holders of the
+//! network identity's private key can decode discoverable neighbours.
 //!
 //! `info` is an integer-keyed msgpack map (see the `key` constants). The stamp
 //! covers `full_hash(msgpack(info))`. The interface supplies only its
@@ -41,6 +49,7 @@ use rand_core::CryptoRngCore;
 
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::crypto::full_hash;
+use crate::identity::Identity;
 use crate::resource::msgpack;
 
 /// Application name for the discovery destination.
@@ -296,15 +305,61 @@ fn write_map_header(buf: &mut Vec<u8>, count: u32) {
 /// Build the discovery announce `app_data` for one interface.
 ///
 /// Produces `flags(0x00) + msgpack(info) + stamp(32)`, generating a fresh PoW
-/// stamp at [`DEFAULT_STAMP_VALUE`]. This is the "emit" half: hand the result
-/// to `Destination::announce(app_data = ...)` on the discovery destination.
+/// stamp at [`DEFAULT_STAMP_VALUE`]. This is the plaintext "emit" half: hand
+/// the result to `Destination::announce(app_data = ...)` on the discovery
+/// destination. For a private (encrypted) discovery network, use
+/// [`build_announce_app_data_encrypted`] instead.
 ///
-/// Returns `None` if the descriptor is missing a field its type requires. Only
-/// unencrypted, unsigned announces are emitted in sub-task (a).
+/// Returns `None` if the descriptor is missing a field its type requires.
 pub fn build_announce_app_data(
     desc: &InterfaceDescriptor,
     transport_id: &[u8; TRUNCATED_HASHBYTES],
     transport_enabled: bool,
+    rng: &mut impl CryptoRngCore,
+) -> Option<Vec<u8>> {
+    build_announce_app_data_inner(desc, transport_id, transport_enabled, None, rng)
+}
+
+/// Build an ENCRYPTED discovery announce `app_data` for a private discovery
+/// network.
+///
+/// Produces `flags(FLAG_ENCRYPTED) + network_identity.encrypt(msgpack(info) + stamp(32))`.
+/// The stamp is generated over the plaintext `msgpack(info)` exactly as in the
+/// plaintext path, then the whole `msgpack(info) + stamp(32)` tail is encrypted
+/// with `network_identity` (Python `Discovery.py` `get_interface_announce_data`:
+/// `payload = self.owner.network_identity.encrypt(packed+stamp)`). Only nodes
+/// holding the same network identity's private key can [decrypt and
+/// decode][parse_announce_app_data_decrypt] the announce.
+///
+/// Returns `None` if the descriptor is missing a required field or encryption
+/// fails.
+pub fn build_announce_app_data_encrypted(
+    desc: &InterfaceDescriptor,
+    transport_id: &[u8; TRUNCATED_HASHBYTES],
+    transport_enabled: bool,
+    network_identity: &Identity,
+    rng: &mut impl CryptoRngCore,
+) -> Option<Vec<u8>> {
+    build_announce_app_data_inner(
+        desc,
+        transport_id,
+        transport_enabled,
+        Some(network_identity),
+        rng,
+    )
+}
+
+/// Shared emit path for the plaintext and encrypted variants.
+///
+/// `network_identity == None` reproduces the sub-task (a) plaintext wire format
+/// unchanged; `Some` sets `FLAG_ENCRYPTED` and encrypts the `packed + stamp`
+/// tail (Python encrypts `packed+stamp` together, leaving the flags byte in the
+/// clear).
+fn build_announce_app_data_inner(
+    desc: &InterfaceDescriptor,
+    transport_id: &[u8; TRUNCATED_HASHBYTES],
+    transport_enabled: bool,
+    network_identity: Option<&Identity>,
     rng: &mut impl CryptoRngCore,
 ) -> Option<Vec<u8>> {
     let packed = encode_info(desc, transport_id, transport_enabled)?;
@@ -312,11 +367,25 @@ pub fn build_announce_app_data(
     let (stamp, _value) =
         stamp::generate_stamp(&infohash, DEFAULT_STAMP_VALUE, WORKBLOCK_EXPAND_ROUNDS, rng);
 
-    let mut out = Vec::with_capacity(1 + packed.len() + STAMP_SIZE);
-    out.push(0x00); // unencrypted, unsigned
-    out.extend_from_slice(&packed);
-    out.extend_from_slice(&stamp);
-    Some(out)
+    let mut tail = Vec::with_capacity(packed.len() + STAMP_SIZE);
+    tail.extend_from_slice(&packed);
+    tail.extend_from_slice(&stamp);
+
+    match network_identity {
+        None => {
+            let mut out = Vec::with_capacity(1 + tail.len());
+            out.push(0x00); // unencrypted, unsigned
+            out.extend_from_slice(&tail);
+            Some(out)
+        }
+        Some(identity) => {
+            let ciphertext = identity.encrypt(&tail, rng).ok()?;
+            let mut out = Vec::with_capacity(1 + ciphertext.len());
+            out.push(FLAG_ENCRYPTED);
+            out.extend_from_slice(&ciphertext);
+            Some(out)
+        }
+    }
 }
 
 /// Read a msgpack string, or `None` for msgpack nil.
@@ -348,12 +417,48 @@ fn read_float_or_nil(data: &[u8], pos: &mut usize) -> Option<Option<f64>> {
 /// handler swallows such announces).
 ///
 /// `network_id` is the hash of the announce's own identity (the announcing
-/// node). Encrypted announces are not handled in sub-task (a) and return
-/// `None`.
+/// node). Encrypted announces (the `FLAG_ENCRYPTED` bit) cannot be decoded
+/// without the network identity and return `None`; use
+/// [`parse_announce_app_data_decrypt`] on a private discovery network.
 pub fn parse_announce_app_data(
     app_data: &[u8],
     network_id: &[u8; TRUNCATED_HASHBYTES],
     required_value: u32,
+) -> Option<DiscoveredInterface> {
+    parse_announce_app_data_inner(app_data, network_id, required_value, None)
+}
+
+/// Decode and validate a discovery announce `app_data`, decrypting it with a
+/// network identity when it is encrypted.
+///
+/// This is the receive half for a private (encrypted) discovery network. A
+/// plaintext announce is decoded exactly as by [`parse_announce_app_data`]; an
+/// encrypted announce (`FLAG_ENCRYPTED`) is first decrypted with
+/// `network_identity` and then stamp-validated and parsed (Python `Discovery.py`
+/// `received_announce`: `app_data = RNS.Transport.network_identity.decrypt(app_data)`
+/// before the stamp check). An encrypted announce that does not decrypt under
+/// this identity (a foreign network, or a tampered payload) returns `None` --
+/// the security property that only shared-identity nodes can decode the
+/// network.
+pub fn parse_announce_app_data_decrypt(
+    app_data: &[u8],
+    network_id: &[u8; TRUNCATED_HASHBYTES],
+    required_value: u32,
+    network_identity: &Identity,
+) -> Option<DiscoveredInterface> {
+    parse_announce_app_data_inner(app_data, network_id, required_value, Some(network_identity))
+}
+
+/// Shared receive path for the plaintext and decrypting variants.
+///
+/// `network_identity == None` reproduces the sub-task (a) behaviour (encrypted
+/// announces are rejected); `Some` decrypts the `FLAG_ENCRYPTED` tail before
+/// stamp validation and parse.
+fn parse_announce_app_data_inner(
+    app_data: &[u8],
+    network_id: &[u8; TRUNCATED_HASHBYTES],
+    required_value: u32,
+    network_identity: Option<&Identity>,
 ) -> Option<DiscoveredInterface> {
     if app_data.len() <= STAMP_SIZE + 1 {
         return None;
@@ -361,16 +466,26 @@ pub fn parse_announce_app_data(
 
     let flags = app_data[0];
     let rest = &app_data[1..];
-    if flags & FLAG_ENCRYPTED != 0 {
-        // Encrypted discovery is deferred to a later sub-task (needs the
-        // network identity to decrypt).
-        return None;
-    }
-    let _ = FLAG_SIGNED; // signed variant unused in (a)
+    let _ = FLAG_SIGNED; // signed variant unused here
 
-    let split = rest.len() - STAMP_SIZE;
-    let packed = &rest[..split];
-    let stamp: [u8; STAMP_SIZE] = rest[split..].try_into().ok()?;
+    // Decrypted bytes must outlive `body` when the encrypted path is taken.
+    let decrypted;
+    let body: &[u8] = if flags & FLAG_ENCRYPTED != 0 {
+        // Python: `if not RNS.Transport.has_network_identity(): return`, then
+        // `app_data = network_identity.decrypt(app_data); if not app_data: return`.
+        let identity = network_identity?;
+        decrypted = identity.decrypt(rest).ok()?;
+        if decrypted.len() <= STAMP_SIZE {
+            return None;
+        }
+        &decrypted
+    } else {
+        rest
+    };
+
+    let split = body.len() - STAMP_SIZE;
+    let packed = &body[..split];
+    let stamp: [u8; STAMP_SIZE] = body[split..].try_into().ok()?;
 
     let infohash = full_hash(packed);
     let workblock = stamp::stamp_workblock(&infohash, WORKBLOCK_EXPAND_ROUNDS);

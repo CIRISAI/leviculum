@@ -112,6 +112,14 @@ pub struct ReticulumConfig {
     /// auto-connected interfaces at `N`. Opt-in, like Python.
     #[serde(default)]
     pub autoconnect_discovered_interfaces: usize,
+    /// Network identity for a private (encrypted) discovery network (Codeberg
+    /// #32, sub-task d). Path to a raw 64-byte identity file (Python
+    /// `network_identity`, Reticulum.py:521-542). When set, received discovery
+    /// announces encrypted for this identity are decrypted before validation;
+    /// unset keeps the plaintext discovery path. A relative path is resolved
+    /// against the config directory / storage root by the builder.
+    #[serde(default)]
+    pub network_identity: Option<PathBuf>,
 }
 
 /// Default interval between periodic storage flushes (seconds)
@@ -168,6 +176,7 @@ impl Default for ReticulumConfig {
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             keepalive_interval: None,
             autoconnect_discovered_interfaces: 0,
+            network_identity: None,
         }
     }
 }
