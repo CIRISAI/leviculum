@@ -423,11 +423,9 @@ pub struct InterfaceConfig {
     /// Enable CSMA/CA on the T114 LoRa interface (requires CAD-capable firmware).
     pub csma_enabled: Option<bool>,
     /// Regulatory duty-cycle policy for this LoRa interface (Codeberg #55).
-    /// `off`/`none`/`unlimited` disables gating for unregulated bands;
-    /// `eu868`/`etsi-eu868` forces the ETSI EN 300 220-2 sub-band caps; a
-    /// numeric percentage (`5%`, `5`, `0.5`) sets a flat custom cap. Unset (or
-    /// `auto`) is frequency-aware and lawful-by-default: an EU 863-870 MHz TX
-    /// frequency enforces the matching ETSI cap, other bands stay off.
+    /// `off`/`none`/`unlimited` (default) disables gating for unregulated
+    /// bands; `eu868`/`etsi-eu868` enforces the ETSI EN 300 220-2 sub-band
+    /// caps. Unset means unlimited.
     pub duty_cycle: Option<String>,
 
     // RNodeMultiInterface only.

@@ -21,12 +21,9 @@
 //! is a regulatory deviation from a thin serial writer that improves
 //! Priority 1 (lawful operation) with no compatibility cost.
 //!
-//! Nothing here is EU-only: [`Region`] is a data table and the policy has an
-//! explicit off/unlimited mode for unregulated bands. The default is
-//! frequency-aware (`Auto`): an EU 863-870 MHz TX frequency enforces the ETSI
-//! caps lawfully-by-default, a US 902-928 MHz or out-of-band frequency stays
-//! off. Operators can also force `eu868`, force `off`, or set a custom flat
-//! percentage cap. No band is hardcoded as an unconditional assumption.
+//! Nothing here is EU-only: [`Region`] is a data table and the policy has
+//! an explicit off/unlimited mode for unregulated bands. `etsi-eu868` is
+//! the documented default set, not a hardcoded assumption.
 
 use std::collections::VecDeque;
 
@@ -135,68 +132,20 @@ pub(crate) const REGION_ETSI_EU868: Region = Region {
     default_cap_bp: 10,
 };
 
-/// Inclusive lower / exclusive upper bounds (Hz) of the EU 863-870 MHz
-/// licence-exempt range, used by the frequency-aware `Auto` default to decide
-/// whether a TX frequency falls under ETSI duty-cycle regulation.
-const EU_863_870_LOW_HZ: u32 = 863_000_000;
-const EU_863_870_HIGH_HZ: u32 = 870_000_000;
-
-/// Build a flat-cap region with no sub-band table: every frequency prices at
-/// `cap_bp` over the ETSI one-hour window. Used for a custom numeric
-/// `duty_cycle` value (e.g. `5%`), a single cap applied to all TX regardless
-/// of sub-band.
-fn custom_region(cap_bp: u32) -> Region {
-    Region {
-        name: "custom",
-        window_ms: ETSI_WINDOW_MS,
-        // Empty table: `resolve` falls every frequency through to the default.
-        sub_bands: &[],
-        default_cap_bp: cap_bp,
-    }
-}
-
-/// Parse a numeric duty-cycle value into a cap in basis points, or `None` if
-/// it is not a valid percentage.
-///
-/// A bare or `%`-suffixed number is always read as a **percentage**:
-/// `5%`, `5` and `5.0` all mean 5% (500 bp); `0.5` means 0.5% (50 bp);
-/// `10%` means 10% (1000 bp). The value must be in `(0, 100]`.
-fn parse_custom_percent(s: &str) -> Option<u32> {
-    let num = s.strip_suffix('%').unwrap_or(s).trim();
-    let pct: f64 = num.parse().ok()?;
-    if !(pct.is_finite() && pct > 0.0 && pct <= 100.0) {
-        return None;
-    }
-    let bp = (pct * 100.0).round() as u32;
-    (bp > 0).then_some(bp)
-}
-
-/// Duty-cycle policy for a LoRa interface.
-///
-/// `Auto` is the resolved-later default: the concrete policy depends on the TX
-/// frequency, which the interface knows but the config parser does not, so it
-/// is resolved via `resolve_for_frequency` once the radio is up. `Unlimited`
-/// and `Enforced` are fully determined.
+/// Duty-cycle policy for a LoRa interface: either off (unregulated band) or
+/// enforcing a named region's caps.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum DutyCyclePolicy {
     /// No duty-cycle limit. For unregulated bands or lab/off configs.
     Unlimited,
-    /// Frequency-aware default (lawful-by-default). Resolved from the TX
-    /// frequency: an EU 863-870 MHz frequency enforces the ETSI sub-band caps,
-    /// anything else (US 902-928 MHz, out-of-band) stays off. Never reaches the
-    /// accountant directly; `resolve_for_frequency` turns it into `Unlimited`
-    /// or `Enforced` first.
-    Auto,
-    /// Enforce the given region's per-sub-band caps. A custom numeric config
-    /// value produces an `Enforced` with a synthetic flat-cap region.
+    /// Enforce the given region's per-sub-band caps.
     Enforced(Region),
 }
 
 impl Default for DutyCyclePolicy {
-    /// Off by default for programmatic construction (phone-attached channel
-    /// radios, tests) where no region is implied. The config path uses `Auto`
-    /// (frequency-aware) for an absent `duty_cycle`; see the driver's
-    /// `parse_duty_cycle`.
+    /// Off by default: the band/region is deployment-specific and we do not
+    /// hardcode an EU-only assumption. Operators opt into their region via
+    /// config (`duty_cycle = eu868`).
     fn default() -> Self {
         DutyCyclePolicy::Unlimited
     }
@@ -206,49 +155,23 @@ impl DutyCyclePolicy {
     /// Parse a config value into a policy. Case-insensitive.
     ///
     /// Off:      `off`, `none`, `unlimited`, `false`, `0`, `disabled`
-    /// Auto:     `auto`, `default` (frequency-aware, lawful-by-default)
     /// EU 868:   `eu868`, `eu-868`, `etsi-eu868`, `etsi_eu868`, `etsi`, `eu`
-    /// Custom:   any percentage `5%` / `5` / `0.5` (flat cap, all sub-bands)
     ///
     /// Returns `None` for an unrecognised value so the caller can surface a
     /// config error rather than silently defaulting.
     pub(crate) fn from_config_str(s: &str) -> Option<Self> {
-        let t = s.trim().to_ascii_lowercase();
-        match t.as_str() {
+        match s.trim().to_ascii_lowercase().as_str() {
             "off" | "none" | "unlimited" | "false" | "0" | "disabled" => {
                 Some(DutyCyclePolicy::Unlimited)
             }
-            "auto" | "default" => Some(DutyCyclePolicy::Auto),
             "eu868" | "eu-868" | "etsi-eu868" | "etsi_eu868" | "etsi" | "eu" => {
                 Some(DutyCyclePolicy::Enforced(REGION_ETSI_EU868))
             }
-            // Fall through to a numeric percentage -> flat custom cap.
-            _ => parse_custom_percent(&t).map(|bp| DutyCyclePolicy::Enforced(custom_region(bp))),
+            _ => None,
         }
     }
 
-    /// Resolve the frequency-aware `Auto` default against a concrete TX
-    /// frequency. `Unlimited` and `Enforced` pass through unchanged.
-    ///
-    /// EU 863-870 MHz -> enforce the ETSI sub-band caps (so 869.525 MHz lands
-    /// in sub-band P at 10%). US 902-928 MHz (FCC has no duty-cycle percentage)
-    /// and any other frequency -> off; we do not invent a cap for a band we do
-    /// not have a table for.
-    pub(crate) fn resolve_for_frequency(self, freq_hz: u32) -> DutyCyclePolicy {
-        match self {
-            DutyCyclePolicy::Auto => {
-                if (EU_863_870_LOW_HZ..EU_863_870_HIGH_HZ).contains(&freq_hz) {
-                    DutyCyclePolicy::Enforced(REGION_ETSI_EU868)
-                } else {
-                    DutyCyclePolicy::Unlimited
-                }
-            }
-            other => other,
-        }
-    }
-
-    /// Whether this policy enforces any cap. `Auto` is not (yet) enforcing; it
-    /// must be resolved to a concrete policy first.
+    /// Whether this policy enforces any cap.
     pub(crate) fn is_enforced(&self) -> bool {
         matches!(self, DutyCyclePolicy::Enforced(_))
     }
@@ -279,9 +202,7 @@ impl DutyCycleAccountant {
     /// per-band state and admits every TX.
     pub(crate) fn new(policy: DutyCyclePolicy) -> Self {
         let buckets = match policy {
-            // `Auto` should be resolved to a concrete policy before it reaches
-            // the accountant; treat any stray `Auto` as off rather than panic.
-            DutyCyclePolicy::Unlimited | DutyCyclePolicy::Auto => 0,
+            DutyCyclePolicy::Unlimited => 0,
             // One queue per sub-band plus one for out-of-band frequencies.
             DutyCyclePolicy::Enforced(region) => region.sub_bands.len() + 1,
         };
@@ -295,8 +216,7 @@ impl DutyCycleAccountant {
     /// when the policy is `Unlimited`.
     fn resolve(&self, freq_hz: u32) -> Option<(usize, u32, u64)> {
         match self.policy {
-            // Unresolved `Auto` prices as off (see `new`).
-            DutyCyclePolicy::Unlimited | DutyCyclePolicy::Auto => None,
+            DutyCyclePolicy::Unlimited => None,
             DutyCyclePolicy::Enforced(region) => {
                 let idx = region.sub_bands.iter().position(|b| b.contains(freq_hz));
                 match idx {
@@ -595,122 +515,5 @@ mod tests {
     #[test]
     fn default_policy_is_unlimited() {
         assert!(!DutyCyclePolicy::default().is_enforced());
-    }
-
-    // --- frequency-aware Auto default -------------------------------------
-
-    #[test]
-    fn auto_enforces_at_eu_frequency() {
-        // Absent config (Auto) at 869.525 MHz -> ETSI enforcement, sub-band P
-        // (10%). This is the lawful-by-default case.
-        let resolved = DutyCyclePolicy::Auto.resolve_for_frequency(F_P_869_5);
-        assert!(resolved.is_enforced());
-        let acct = DutyCycleAccountant::new(resolved);
-        assert_eq!(acct.cap_bp_for(F_P_869_5), Some(1000)); // P = 10%
-    }
-
-    #[test]
-    fn auto_is_off_at_us_frequency() {
-        // 915 MHz is US ISM (FCC: no duty-cycle %); Auto must NOT throttle.
-        let resolved = DutyCyclePolicy::Auto.resolve_for_frequency(F_OUT_915);
-        assert!(!resolved.is_enforced());
-    }
-
-    #[test]
-    fn auto_is_off_out_of_known_bands() {
-        // 433 MHz and 2.4 GHz have no table here -> off, no invented cap.
-        assert!(!DutyCyclePolicy::Auto
-            .resolve_for_frequency(433_000_000)
-            .is_enforced());
-        // u32 caps at ~4.29 GHz; use a high in-range value for 2.4 GHz.
-        assert!(!DutyCyclePolicy::Auto
-            .resolve_for_frequency(2_400_000_000)
-            .is_enforced());
-    }
-
-    #[test]
-    fn auto_covers_whole_eu_band_edges() {
-        // Lower edge inclusive, upper edge exclusive.
-        assert!(DutyCyclePolicy::Auto
-            .resolve_for_frequency(863_000_000)
-            .is_enforced());
-        assert!(DutyCyclePolicy::Auto
-            .resolve_for_frequency(869_999_999)
-            .is_enforced());
-        assert!(!DutyCyclePolicy::Auto
-            .resolve_for_frequency(870_000_000)
-            .is_enforced());
-        assert!(!DutyCyclePolicy::Auto
-            .resolve_for_frequency(862_999_999)
-            .is_enforced());
-    }
-
-    #[test]
-    fn resolve_passes_through_non_auto() {
-        // Unlimited and Enforced are frequency-independent.
-        assert!(!DutyCyclePolicy::Unlimited
-            .resolve_for_frequency(F_P_869_5)
-            .is_enforced());
-        assert!(DutyCyclePolicy::Enforced(REGION_ETSI_EU868)
-            .resolve_for_frequency(F_OUT_915)
-            .is_enforced());
-    }
-
-    #[test]
-    fn config_str_parses_auto() {
-        assert!(matches!(
-            DutyCyclePolicy::from_config_str("auto"),
-            Some(DutyCyclePolicy::Auto)
-        ));
-        assert!(matches!(
-            DutyCyclePolicy::from_config_str(" DEFAULT "),
-            Some(DutyCyclePolicy::Auto)
-        ));
-    }
-
-    // --- custom numeric percentage cap ------------------------------------
-
-    /// A custom percentage flattens to one cap over every frequency.
-    fn custom_cap_bp(s: &str, freq: u32) -> Option<u32> {
-        match DutyCyclePolicy::from_config_str(s)? {
-            DutyCyclePolicy::Enforced(region) => {
-                DutyCycleAccountant::new(DutyCyclePolicy::Enforced(region)).cap_bp_for(freq)
-            }
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn custom_percent_parses_to_flat_cap() {
-        // 5% -> 500 bp, applied flat regardless of sub-band.
-        assert_eq!(custom_cap_bp("5%", F_P_869_5), Some(500));
-        assert_eq!(custom_cap_bp("5%", F_OUT_915), Some(500));
-        // Bare number is a percentage too.
-        assert_eq!(custom_cap_bp("5", F_M_868_1), Some(500));
-        // Fractional percent.
-        assert_eq!(custom_cap_bp("0.5", F_M_868_1), Some(50)); // 0.5% -> 50 bp
-        assert_eq!(custom_cap_bp("0.1%", F_M_868_1), Some(10)); // 0.1% -> 10 bp
-        assert_eq!(custom_cap_bp("10%", F_M_868_1), Some(1000)); // 10% -> 1000 bp
-        assert_eq!(custom_cap_bp("100", F_M_868_1), Some(10_000)); // 100% -> 10000 bp
-    }
-
-    #[test]
-    fn custom_percent_budget_is_correct() {
-        // A 5% custom cap admits 5% * 3_600_000 = 180_000 ms per hour on any
-        // frequency, then defers.
-        let policy = DutyCyclePolicy::from_config_str("5%").unwrap();
-        let mut acct = DutyCycleAccountant::new(policy);
-        assert!(acct.try_charge(F_OUT_915, 180_000, 0).is_ok());
-        assert!(acct.try_charge(F_OUT_915, 1, 0).is_err());
-    }
-
-    #[test]
-    fn invalid_custom_percent_is_rejected() {
-        // Out of (0, 100], non-numeric, or empty -> config error (None).
-        assert!(DutyCyclePolicy::from_config_str("0%").is_none());
-        assert!(DutyCyclePolicy::from_config_str("-5").is_none());
-        assert!(DutyCyclePolicy::from_config_str("101%").is_none());
-        assert!(DutyCyclePolicy::from_config_str("mars").is_none());
-        assert!(DutyCyclePolicy::from_config_str("5x").is_none());
     }
 }
