@@ -760,6 +760,14 @@ pub fn render_config(
         writeln!(out, "    codingrate = {}", radio.coding_rate).ok();
         writeln!(out, "    txpower = {}", radio.tx_power).ok();
         writeln!(out, "    ingress_control = false").ok();
+        // Codeberg #55: the regulatory duty-cycle default is frequency-aware
+        // (lawful-by-default), so our test frequency 869.525 MHz would enforce
+        // the ETSI P sub-band at 10% and throttle the run. Automated tests
+        // measure the stack, not the regulator, so pin the gate off. Rust-only:
+        // Python peers are never throttled by our gate.
+        if node.node_type == "rust" {
+            writeln!(out, "    duty_cycle = off").ok();
+        }
     }
 
     // Multi-interface: render one [[RNode Interface N]] per entry.
@@ -776,6 +784,11 @@ pub fn render_config(
             writeln!(out, "    codingrate = {}", iface.coding_rate).ok();
             writeln!(out, "    txpower = {}", iface.tx_power).ok();
             writeln!(out, "    ingress_control = false").ok();
+            // Codeberg #55: pin the regulatory duty-cycle gate off for tests
+            // (see the single-interface note above).
+            if node.node_type == "rust" {
+                writeln!(out, "    duty_cycle = off").ok();
+            }
         }
     }
 
@@ -800,6 +813,11 @@ pub fn render_config(
                 if r.csma_enabled { "yes" } else { "no" }
             )
             .ok();
+            // Codeberg #55: pin the regulatory duty-cycle gate off for tests
+            // (see the single-interface note above).
+            if node.node_type == "rust" {
+                writeln!(out, "    duty_cycle = off").ok();
+            }
         }
     }
 
@@ -1249,6 +1267,46 @@ rnode = true
         assert!(config.contains("codingrate = 5"));
         assert!(config.contains("txpower = 17"));
         assert!(config.contains("ingress_control = false"));
+        // Codeberg #55: the RNode block pins the regulatory duty-cycle gate off
+        // so the lawful-by-default frequency-aware policy does not throttle the
+        // test at 869.525 MHz (ETSI P sub-band, 10%).
+        assert!(
+            config.contains("duty_cycle = off"),
+            "rust RNode config must pin duty_cycle off for tests"
+        );
+    }
+
+    #[test]
+    fn python_rnode_config_omits_duty_cycle() {
+        // Python peers run RNS, which has no duty-cycle gate; do not inject the
+        // key into their config. Only our own rust nodes get `duty_cycle = off`.
+        let node = NodeDef {
+            node_type: "python".into(),
+            respond_to_probes: true,
+            enable_transport: true,
+            rnode: true,
+            rnode_proxy: false,
+            listen_port: None,
+            rnode_interfaces: None,
+            serial: false,
+            rnode_path: Some("/dev/ttyACM0".into()),
+            serial_path: None,
+            debug_serial_path: None,
+        };
+        let radio = RadioConfig {
+            frequency: 869525000,
+            bandwidth: 500000,
+            spreading_factor: 7,
+            coding_rate: 5,
+            tx_power: 17,
+            csma_enabled: false,
+        };
+        let config = render_config(&node, &[], Some(&radio));
+        assert!(config.contains("[[RNode Interface]]"));
+        assert!(
+            !config.contains("duty_cycle"),
+            "python config must not carry a duty_cycle key"
+        );
     }
 
     #[test]

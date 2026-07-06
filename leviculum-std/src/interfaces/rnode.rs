@@ -1288,11 +1288,14 @@ fn reconnect_ctx_from_radio(
     duty_cycle: DutyCyclePolicy,
 ) -> RNodeReconnectCtx {
     let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.bandwidth);
-    // Build the accountant once and share it across reconnects. Unlimited
-    // policy -> no accountant, so the gate is a no-op on unregulated bands.
-    let duty_cycle = duty_cycle
+    // Resolve the frequency-aware `Auto` default now that the TX frequency is
+    // known: EU 863-870 MHz -> ETSI enforcement, otherwise off. Build the
+    // accountant once and share it across reconnects. A non-enforcing policy
+    // -> no accountant, so the gate is a no-op on unregulated bands.
+    let policy = duty_cycle.resolve_for_frequency(radio.frequency);
+    let duty_cycle = policy
         .is_enforced()
-        .then(|| Arc::new(Mutex::new(DutyCycleAccountant::new(duty_cycle))));
+        .then(|| Arc::new(Mutex::new(DutyCycleAccountant::new(policy))));
     RNodeReconnectCtx {
         id,
         name,

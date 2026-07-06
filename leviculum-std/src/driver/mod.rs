@@ -101,14 +101,17 @@ use crate::interfaces::{
 use crate::storage::Storage;
 
 /// Resolve a `duty_cycle` config value into a [`DutyCyclePolicy`] (Codeberg
-/// #55). `None`/absent defaults to unlimited (off) so unregulated bands and
-/// legacy configs are unaffected; an unrecognised value is a config error.
+/// #55). `None`/absent resolves to the frequency-aware `Auto` default
+/// (lawful-by-default: EU 863-870 MHz enforces the ETSI caps, other bands stay
+/// off), resolved once the TX frequency is known. Explicit `off` disables,
+/// `eu868` forces ETSI, and a numeric percentage sets a flat custom cap. An
+/// unrecognised value is a config error.
 fn parse_duty_cycle(value: Option<&str>) -> Result<DutyCyclePolicy, Error> {
     match value {
-        None => Ok(DutyCyclePolicy::default()),
+        None => Ok(DutyCyclePolicy::Auto),
         Some(s) => DutyCyclePolicy::from_config_str(s).ok_or_else(|| {
             Error::Config(format!(
-                "unknown duty_cycle '{s}' (expected off/none/unlimited or eu868/etsi-eu868)"
+                "unknown duty_cycle '{s}' (expected off/auto/eu868 or a percent like 5%)"
             ))
         }),
     }
@@ -4089,17 +4092,30 @@ mod tests {
 
     #[test]
     fn parse_duty_cycle_resolves_config_values() {
-        // Absent -> unlimited (off) so legacy configs and unregulated bands
-        // are unaffected.
-        assert!(!parse_duty_cycle(None).unwrap().is_enforced());
-        // Explicit off spellings.
+        use crate::interfaces::duty_cycle::DutyCyclePolicy;
+        // Absent -> frequency-aware Auto (lawful-by-default): enforces at an EU
+        // frequency, stays off at a US frequency.
+        let auto = parse_duty_cycle(None).unwrap();
+        assert!(matches!(auto, DutyCyclePolicy::Auto));
+        assert!(auto.resolve_for_frequency(869_525_000).is_enforced()); // EU P 10%
+        assert!(!auto.resolve_for_frequency(915_000_000).is_enforced()); // US off
+                                                                         // Explicit off spellings.
         assert!(!parse_duty_cycle(Some("off")).unwrap().is_enforced());
         assert!(!parse_duty_cycle(Some("unlimited")).unwrap().is_enforced());
-        // ETSI EU868 enforces.
+        // Explicit auto keyword.
+        assert!(matches!(
+            parse_duty_cycle(Some("auto")).unwrap(),
+            DutyCyclePolicy::Auto
+        ));
+        // ETSI EU868 forces enforcement regardless of band.
         assert!(parse_duty_cycle(Some("eu868")).unwrap().is_enforced());
         assert!(parse_duty_cycle(Some("etsi-eu868")).unwrap().is_enforced());
-        // Unknown value is a config error, not a silent default.
+        // Custom numeric percentage -> flat enforced cap.
+        assert!(parse_duty_cycle(Some("5%")).unwrap().is_enforced());
+        assert!(parse_duty_cycle(Some("0.5")).unwrap().is_enforced());
+        // Unknown / invalid value is a config error, not a silent default.
         assert!(parse_duty_cycle(Some("nonsense")).is_err());
+        assert!(parse_duty_cycle(Some("101%")).is_err());
     }
 
     fn auto_iface(
