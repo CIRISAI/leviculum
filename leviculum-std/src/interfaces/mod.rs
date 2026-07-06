@@ -11,7 +11,6 @@
 
 pub(crate) mod airtime;
 pub mod auto_interface;
-pub(crate) mod duty_cycle;
 pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod kiss;
@@ -66,7 +65,7 @@ pub(crate) fn init_clock_anchor(anchor: Instant) {
     let _ = CLOCK_ANCHOR.set(anchor);
 }
 
-pub(crate) fn now_ms() -> u64 {
+fn now_ms() -> u64 {
     let boot = CLOCK_ANCHOR.get_or_init(Instant::now);
     boot.elapsed().as_millis() as u64
 }

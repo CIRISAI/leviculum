@@ -6,11 +6,9 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use super::duty_cycle::{DutyCycleAccountant, DutyCyclePolicy};
-use super::now_ms;
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::rnode;
 use leviculum_core::transport::InterfaceId;
@@ -107,8 +105,6 @@ pub(crate) struct RNodeInterfaceConfig {
     pub flow_control: bool,
     pub buffer_size: usize,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
-    /// Regulatory duty-cycle policy for this LoRa interface (Codeberg #55).
-    pub duty_cycle: DutyCyclePolicy,
 }
 
 impl RNodeInterfaceConfig {
@@ -565,11 +561,9 @@ async fn rnode_io_task<S>(
     counters: Arc<InterfaceCounters>,
     flow_control: bool,
     jitter_max_ms: u64,
-    bandwidth_hz: u32,
-    sf: u8,
-    cr: u8,
-    frequency: u32,
-    duty_cycle: Option<Arc<Mutex<DutyCycleAccountant>>>,
+    _bandwidth_hz: u32,
+    _sf: u8,
+    _cr: u8,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -854,38 +848,7 @@ where
         //   Gate 1: timer_ready (jitter/spacing delay elapsed)
         //   Gate 2: interface_ready || !flow_control
         if timer_ready && (interface_ready || !flow_control) {
-            // Gate 3 (Codeberg #55): regulatory duty-cycle. Peek the next
-            // frame's on-air time and ask the per-sub-band accountant whether
-            // the sub-band's rolling budget admits it. If not, HOLD the packet
-            // (re-arm the send timer to the defer time) instead of transmitting
-            // over the legal limit. Media-specific to the LoRa interface; the
-            // accountant is skipped entirely under an unlimited policy.
-            let duty_defer = match (&duty_cycle, send_queue.front()) {
-                (Some(acct), Some(front)) => {
-                    let air = rnode::airtime_ms(front.payload_len as u32, bandwidth_hz, sf, cr);
-                    let now = now_ms();
-                    let mut a = acct.lock().expect("duty-cycle accountant mutex poisoned");
-                    match a.try_charge(frequency, air, now) {
-                        Ok(()) => None,
-                        Err(defer_until) => {
-                            let cap_bp = a.cap_bp_for(frequency);
-                            Some((defer_until.saturating_sub(now).max(1), cap_bp))
-                        }
-                    }
-                }
-                _ => None,
-            };
-            if let Some((wait, cap_bp)) = duty_defer {
-                tracing::debug!(
-                    "{}: duty-cycle hold {}ms (freq={}Hz cap={:?}bp budget spent)",
-                    name,
-                    wait,
-                    frequency,
-                    cap_bp
-                );
-                send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(wait))));
-                timer_ready = false;
-            } else if let Some(queued) = send_queue.pop_front() {
+            if let Some(queued) = send_queue.pop_front() {
                 if let Err(e) = port.write_all(&queued.data).await {
                     tracing::warn!("{}: write error: {}", name, e);
                     return outgoing_rx;
@@ -961,11 +924,6 @@ struct RNodeReconnectCtx {
     flow_control: bool,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     jitter_max_ms: u64,
-    /// Rolling per-sub-band airtime accountant (Codeberg #55). Shared across
-    /// reconnects so the duty-cycle window is not reset when the serial link
-    /// drops and re-opens. `None` when the policy is unlimited/off, so the
-    /// gate is skipped entirely on unregulated bands.
-    duty_cycle: Option<Arc<Mutex<DutyCycleAccountant>>>,
 }
 
 /// Reconnect loop: open channel → configure → I/O → on disconnect → wait → retry.
@@ -1046,8 +1004,6 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     radio.bandwidth,
                     radio.sf,
                     radio.cr,
-                    radio.frequency,
-                    ctx.duty_cycle.clone(),
                 )
                 .await;
 
@@ -1123,8 +1079,6 @@ pub(crate) struct RNodeChannelInterfaceConfig {
     pub flow_control: bool,
     pub buffer_size: usize,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
-    /// Regulatory duty-cycle policy for this LoRa interface (Codeberg #55).
-    pub duty_cycle: DutyCyclePolicy,
 }
 
 impl RNodeChannelInterfaceConfig {
@@ -1285,14 +1239,8 @@ fn reconnect_ctx_from_radio(
     radio: RadioParams,
     flow_control: bool,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
-    duty_cycle: DutyCyclePolicy,
 ) -> RNodeReconnectCtx {
     let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.bandwidth);
-    // Build the accountant once and share it across reconnects. Unlimited
-    // policy -> no accountant, so the gate is a no-op on unregulated bands.
-    let duty_cycle = duty_cycle
-        .is_enforced()
-        .then(|| Arc::new(Mutex::new(DutyCycleAccountant::new(duty_cycle))));
     RNodeReconnectCtx {
         id,
         name,
@@ -1300,7 +1248,6 @@ fn reconnect_ctx_from_radio(
         flow_control,
         reconnect_notify,
         jitter_max_ms,
-        duty_cycle,
     }
 }
 
@@ -1316,7 +1263,6 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
         config.radio_params(),
         config.flow_control,
         config.reconnect_notify,
-        config.duty_cycle,
     );
     let buffer_size = config.buffer_size;
     let port_path = config.port_path;
@@ -1346,7 +1292,6 @@ pub(crate) fn spawn_rnode_channel_interface(
         config.radio_params(),
         config.flow_control,
         config.reconnect_notify,
-        config.duty_cycle,
     );
     let buffer_size = config.buffer_size;
     let factory = config.channel_factory;
@@ -2086,7 +2031,6 @@ mod tests {
                 flow_control: false,
                 buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
                 reconnect_notify: None,
-                duty_cycle: DutyCyclePolicy::default(),
             },
             None,
         );
@@ -2306,7 +2250,6 @@ mod tests {
             flow_control: true,
             buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
-            duty_cycle: DutyCyclePolicy::default(),
         };
 
         let mut handle = spawn_rnode_interface(config);
@@ -2387,8 +2330,6 @@ mod tests {
                 125_000,
                 7,
                 5,
-                /* frequency = */ 868_000_000,
-                /* duty_cycle = */ None,
             )
             .await;
         });
@@ -2426,110 +2367,6 @@ mod tests {
 
         drop(outgoing_tx);
         let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
-    }
-
-    /// Codeberg #55: the pre-TX duty-cycle gate HOLDS a packet back when the
-    /// TX frequency's sub-band budget is spent. Pre-saturate sub-band M's
-    /// (868.1 MHz, 1%) rolling window, then verify the io task transmits no
-    /// CMD_DATA within a short window (it defers ~1 h), while an unregulated
-    /// (`None`) interface with the same input transmits immediately.
-    #[tokio::test]
-    async fn test_duty_cycle_gate_holds_when_subband_spent() {
-        // --- Saturated accountant: packet must be held. ---
-        let (port, mut peer) = tokio::io::duplex(8192);
-        let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
-        let counters = Arc::new(InterfaceCounters::new());
-        let task_counters = Arc::clone(&counters);
-
-        // Fill sub-band M's 1% budget (36_000 ms over the hour window) at the
-        // current clock so the very next charge on 868.1 MHz is refused.
-        let acct = Arc::new(Mutex::new(DutyCycleAccountant::new(
-            DutyCyclePolicy::Enforced(crate::interfaces::duty_cycle::REGION_ETSI_EU868),
-        )));
-        {
-            let now = now_ms();
-            let mut a = acct.lock().unwrap();
-            a.try_charge(868_100_000, 36_000, now)
-                .expect("cap-filling charge admitted");
-        }
-
-        let task = tokio::spawn(async move {
-            rnode_io_task(
-                "test_rnode".to_string(),
-                port,
-                incoming_tx,
-                outgoing_rx,
-                task_counters,
-                /* flow_control = */ false,
-                /* jitter_max_ms = */ 1,
-                125_000,
-                7,
-                5,
-                /* frequency = */ 868_100_000,
-                /* duty_cycle = */ Some(Arc::clone(&acct)),
-            )
-            .await;
-        });
-
-        outgoing_tx
-            .send(OutgoingPacket {
-                data: b"held".to_vec(),
-                high_priority: false,
-            })
-            .await
-            .expect("enqueue");
-
-        // Over-budget: no CMD_DATA should reach the peer in this window.
-        let frames = drain_kiss_frames(&mut peer, Duration::from_millis(400)).await;
-        let data = frames.iter().filter(|(c, _)| *c == rnode::CMD_DATA).count();
-        assert_eq!(data, 0, "duty-cycle gate must hold the packet back");
-        assert_eq!(
-            counters.tx_bytes.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "no bytes should be charged as TX while held"
-        );
-        drop(outgoing_tx);
-        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
-
-        // --- Unregulated (None): same packet transmits immediately. ---
-        let (port2, mut peer2) = tokio::io::duplex(8192);
-        let (incoming_tx2, _incoming_rx2) = mpsc::channel::<IncomingPacket>(16);
-        let (outgoing_tx2, outgoing_rx2) = mpsc::channel::<OutgoingPacket>(16);
-        let counters2 = Arc::new(InterfaceCounters::new());
-        let task_counters2 = Arc::clone(&counters2);
-        let task2 = tokio::spawn(async move {
-            rnode_io_task(
-                "test_rnode".to_string(),
-                port2,
-                incoming_tx2,
-                outgoing_rx2,
-                task_counters2,
-                /* flow_control = */ false,
-                /* jitter_max_ms = */ 1,
-                125_000,
-                7,
-                5,
-                /* frequency = */ 868_100_000,
-                /* duty_cycle = */ None,
-            )
-            .await;
-        });
-        outgoing_tx2
-            .send(OutgoingPacket {
-                data: b"sent".to_vec(),
-                high_priority: false,
-            })
-            .await
-            .expect("enqueue");
-        let frames2 = drain_kiss_frames(&mut peer2, Duration::from_millis(400)).await;
-        let data2 = frames2
-            .iter()
-            .filter(|(c, _)| *c == rnode::CMD_DATA)
-            .count();
-        assert_eq!(data2, 1, "unregulated interface must transmit the packet");
-        drop(outgoing_tx2);
-        let _ = tokio::time::timeout(Duration::from_secs(1), task2).await;
     }
 
     /// Read KISS frames from `peer` until `timeout` elapses or no more bytes
@@ -2589,8 +2426,6 @@ mod tests {
                 125_000,
                 7,
                 5,
-                /* frequency = */ 868_000_000,
-                /* duty_cycle = */ None,
             )
             .await;
         });
@@ -2669,8 +2504,6 @@ mod tests {
                 125_000,
                 7,
                 5,
-                /* frequency = */ 868_000_000,
-                /* duty_cycle = */ None,
             )
             .await;
         });
@@ -3079,8 +2912,6 @@ mod tests {
                 125_000,
                 7,
                 5,
-                /* frequency = */ 868_000_000,
-                /* duty_cycle = */ None,
             )
             .await;
         });

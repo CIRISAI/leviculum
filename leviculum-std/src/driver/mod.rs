@@ -85,7 +85,6 @@ use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::auto_interface::orchestrator::spawn_auto_interface;
 use crate::interfaces::auto_interface::AutoInterfaceConfig;
-use crate::interfaces::duty_cycle::DutyCyclePolicy;
 use crate::interfaces::i2p::{
     spawn_i2p_client, spawn_i2p_server, I2pClientConfig, I2pServerConfig, I2P_DEFAULT_BUFFER_SIZE,
     I2P_DEFAULT_RECONNECT_WAIT,
@@ -99,20 +98,6 @@ use crate::interfaces::{
     InterfaceHandle, InterfaceOnlineMap, InterfaceRegistry, InterfaceStatsMap,
 };
 use crate::storage::Storage;
-
-/// Resolve a `duty_cycle` config value into a [`DutyCyclePolicy`] (Codeberg
-/// #55). `None`/absent defaults to unlimited (off) so unregulated bands and
-/// legacy configs are unaffected; an unrecognised value is a config error.
-fn parse_duty_cycle(value: Option<&str>) -> Result<DutyCyclePolicy, Error> {
-    match value {
-        None => Ok(DutyCyclePolicy::default()),
-        Some(s) => DutyCyclePolicy::from_config_str(s).ok_or_else(|| {
-            Error::Config(format!(
-                "unknown duty_cycle '{s}' (expected off/none/unlimited or eu868/etsi-eu868)"
-            ))
-        }),
-    }
-}
 
 /// Type alias for the concrete NodeCore used by std platforms
 pub(crate) type StdNodeCore = NodeCore<rand_core::OsRng, SystemClock, Storage>;
@@ -1577,7 +1562,6 @@ impl ReticulumNode {
                         let buffer_size = config
                             .buffer_size
                             .unwrap_or(crate::interfaces::rnode::RNODE_DEFAULT_BUFFER_SIZE);
-                        let duty_cycle = parse_duty_cycle(config.duty_cycle.as_deref())?;
 
                         let iface_name = format!("rnode_{}", idx);
                         let id = InterfaceId(idx);
@@ -1597,7 +1581,6 @@ impl ReticulumNode {
                                 flow_control,
                                 buffer_size,
                                 reconnect_notify: Some(reconnect_tx.clone()),
-                                duty_cycle,
                             },
                         );
 
@@ -2055,9 +2038,6 @@ impl ReticulumNode {
                         flow_control: spec.flow_control,
                         buffer_size: spec.buffer_size,
                         reconnect_notify: Some(reconnect_tx.clone()),
-                        // Host-supplied channel radios (phone-attached) default
-                        // to unlimited; the region is not known at this layer.
-                        duty_cycle: DutyCyclePolicy::default(),
                     },
                     // Construction-time interface: lives for the node's
                     // lifetime, no caller-driven shutdown handle.
@@ -2265,9 +2245,6 @@ impl ReticulumNode {
                     flow_control: config.flow_control,
                     buffer_size: config.buffer_size,
                     reconnect_notify: reconnect_tx,
-                    // Host-supplied channel radios (phone-attached) default to
-                    // unlimited; the region is not known at this layer.
-                    duty_cycle: DutyCyclePolicy::default(),
                 },
                 Some(shutdown_rx),
             )
@@ -4086,21 +4063,6 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_duty_cycle_resolves_config_values() {
-        // Absent -> unlimited (off) so legacy configs and unregulated bands
-        // are unaffected.
-        assert!(!parse_duty_cycle(None).unwrap().is_enforced());
-        // Explicit off spellings.
-        assert!(!parse_duty_cycle(Some("off")).unwrap().is_enforced());
-        assert!(!parse_duty_cycle(Some("unlimited")).unwrap().is_enforced());
-        // ETSI EU868 enforces.
-        assert!(parse_duty_cycle(Some("eu868")).unwrap().is_enforced());
-        assert!(parse_duty_cycle(Some("etsi-eu868")).unwrap().is_enforced());
-        // Unknown value is a config error, not a silent default.
-        assert!(parse_duty_cycle(Some("nonsense")).is_err());
-    }
 
     fn auto_iface(
         discovery_port: Option<u16>,

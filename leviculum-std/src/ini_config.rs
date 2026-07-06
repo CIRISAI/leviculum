@@ -415,9 +415,6 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),
         "csma_enabled" => iface.csma_enabled = Some(parse_bool(value)),
-        // Regulatory duty-cycle policy (Codeberg #55): `off`/`eu868`/etc.
-        // Stored verbatim; parsed and validated in the driver.
-        "duty_cycle" => iface.duty_cycle = Some(value.to_string()),
         // Ingress control (Codeberg #8, Python `ingress_control`,
         // Reticulum.py:768-769). An explicit value overrides the medium-class
         // default; unset (None) resolves per medium at registration.
