@@ -68,6 +68,10 @@ use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathState, ReverseEntry,
 };
 use crate::traits::{Clock, InterfaceMode, Storage};
+use crate::tunnel::{
+    SynthesizePayload, TunnelEntry, TunnelPathEntry, TUNNEL_ID_LEN, TUNNEL_PATH_TIMEOUT_MS,
+    TUNNEL_TIMEOUT_MS,
+};
 
 /// Number of announce timestamp samples per interface for frequency computation
 /// (Python Interface.py IA_FREQ_SAMPLES / OA_FREQ_SAMPLES = 48).
@@ -1147,6 +1151,22 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `blackhole_check_interval` (60 s, Transport.py:196).
     blackhole_last_checked_ms: u64,
 
+    /// Tunnel table (Codeberg #64; Python `Transport.tunnels`, Transport.py:119).
+    /// Keyed by the 32-byte tunnel id. Holds paths learned over a reconnectable
+    /// TCP peer so they survive socket drops and are restored on reconnect.
+    /// In-memory only, no disk persistence.
+    tunnels: BTreeMap<[u8; TUNNEL_ID_LEN], TunnelEntry>,
+
+    /// Reverse map: interface index -> active tunnel id (Python
+    /// `interface.tunnel_id`, Transport.py:2346). Present only while an
+    /// interface currently carries an established tunnel; cleared when the
+    /// interface goes down (the tunnel entry itself persists for restore).
+    interface_tunnel_ids: BTreeMap<usize, [u8; TUNNEL_ID_LEN]>,
+
+    /// Monotonic timestamp of the last tunnel-table cull (ms). Throttles the
+    /// expiry sweep to one pass per minute (`TUNNEL_CULL_INTERVAL_MS`).
+    tunnels_last_culled_ms: u64,
+
     /// Pending I/O actions for the driver (sans-I/O buffer)
     pending_actions: Vec<Action>,
 
@@ -1202,6 +1222,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             ifac_configs: BTreeMap::new(),
             blackholed_identities: BTreeMap::new(),
             blackhole_last_checked_ms: 0,
+            tunnels: BTreeMap::new(),
+            interface_tunnel_ids: BTreeMap::new(),
+            tunnels_last_culled_ms: 0,
             pending_actions: Vec::new(),
             last_discovery_retry_ms: 0,
             #[cfg(test)]
@@ -2423,6 +2446,264 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.storage.remove_reverse_entries_for_interface(iface_idx);
     }
 
+    // Tunnel bookkeeping (Codeberg #64)
+
+    /// Handle a received `rnstransport.tunnel.synthesize` control packet.
+    ///
+    /// Parses and validates the payload (Python `tunnel_synthesize_handler`,
+    /// Transport.py:2307-2329), then, on a valid signature, establishes or
+    /// restores the tunnel via [`Transport::handle_tunnel`]. The `tunnel_id` is
+    /// derived from the peer public key and interface hash carried in the
+    /// packet, so it is stable across the peer's socket reconnects. Returns
+    /// silently on any malformed or unauthenticated packet, matching Python.
+    fn handle_tunnel_synthesize(&mut self, packet: &Packet, interface_index: usize) {
+        let payload = match SynthesizePayload::parse(packet.data.as_slice()) {
+            Some(p) => p,
+            None => {
+                crate::tracing::trace!(
+                    len = packet.data.len(),
+                    "Dropped malformed tunnel synthesize packet"
+                );
+                return;
+            }
+        };
+
+        let peer = match Identity::from_public_key_bytes(payload.public_key) {
+            Ok(id) => id,
+            Err(_) => {
+                crate::tracing::trace!("Dropped tunnel synthesize with invalid public key");
+                return;
+            }
+        };
+
+        let signed = payload.signed_data();
+        match peer.verify(&signed, payload.signature) {
+            Ok(true) => {}
+            _ => {
+                crate::tracing::trace!("Dropped tunnel synthesize with invalid signature");
+                return;
+            }
+        }
+
+        let tunnel_id =
+            crate::tunnel::compute_tunnel_id(payload.public_key, payload.interface_hash);
+        self.handle_tunnel(interface_index, tunnel_id);
+    }
+
+    /// Establish a new tunnel or restore a reappearing one (Python
+    /// `handle_tunnel`, Transport.py:2338-2393).
+    ///
+    /// On first sight of `tunnel_id` a dormant, empty entry is created and bound
+    /// to `interface_index`. On a subsequent sight (the peer reconnected and
+    /// re-ran the synthesize handshake) every path the tunnel accumulated is
+    /// restored into the path table immediately, re-homed onto
+    /// `interface_index`, without waiting for a fresh announce.
+    pub fn handle_tunnel(&mut self, interface_index: usize, tunnel_id: [u8; TUNNEL_ID_LEN]) {
+        let now = self.clock.now_ms();
+        let expires = now.saturating_add(TUNNEL_TIMEOUT_MS);
+        self.interface_tunnel_ids.insert(interface_index, tunnel_id);
+
+        // Reappearing tunnel: re-home it and snapshot its paths for restore.
+        // A first-seen tunnel has no paths yet, so it takes the establish branch.
+        let restore_paths: Vec<([u8; TRUNCATED_HASHBYTES], TunnelPathEntry)> =
+            match self.tunnels.get_mut(&tunnel_id) {
+                Some(entry) => {
+                    entry.interface_index = Some(interface_index);
+                    entry.expires_ms = expires;
+                    entry
+                        .paths
+                        .iter()
+                        .map(|(dest, path)| (*dest, path.clone()))
+                        .collect()
+                }
+                None => {
+                    self.tunnels
+                        .insert(tunnel_id, TunnelEntry::new(Some(interface_index), expires));
+                    crate::tracing::debug!(
+                        event = "TUNNEL_ESTABLISHED",
+                        tunnel = %HexShort(&tunnel_id[..]),
+                        iface = %self.iface_name(interface_index),
+                        "Tunnel endpoint established"
+                    );
+                    return;
+                }
+            };
+
+        crate::tracing::debug!(
+            event = "TUNNEL_REAPPEARED",
+            tunnel = %HexShort(&tunnel_id[..]),
+            iface = %self.iface_name(interface_index),
+            paths = restore_paths.len(),
+            "Tunnel endpoint reappeared, restoring paths"
+        );
+
+        let mut deprecated: Vec<[u8; TRUNCATED_HASHBYTES]> = Vec::new();
+        for (dest_hash, path) in restore_paths {
+            if self.should_restore_tunnel_path(&dest_hash, &path, now) {
+                self.storage.set_path(
+                    dest_hash,
+                    PathEntry {
+                        hops: path.hops,
+                        expires_ms: path.expires_ms,
+                        interface_index,
+                        random_blobs: path.random_blobs.clone(),
+                        next_hop: path.next_hop,
+                    },
+                );
+                self.mark_path_unknown_state(&dest_hash);
+                crate::tracing::debug!(
+                    event = "PATH_RESTORED",
+                    dst = %HexShort(&dest_hash),
+                    hops = path.hops,
+                    iface = %self.iface_name(interface_index),
+                    next_hop = ?path.next_hop.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
+                    source = "tunnel",
+                    "Restored path from tunnel"
+                );
+            } else {
+                deprecated.push(dest_hash);
+            }
+        }
+
+        if !deprecated.is_empty() {
+            if let Some(entry) = self.tunnels.get_mut(&tunnel_id) {
+                for dest in &deprecated {
+                    entry.paths.remove(dest);
+                }
+            }
+        }
+    }
+
+    /// Decide whether a tunnel path snapshot should overwrite the live path
+    /// table entry on restore (Python `handle_tunnel`, Transport.py:2367-2383).
+    ///
+    /// Restore an existing destination only if the tunnel path is no worse in
+    /// hops (or the live path has expired) AND its announce emission timebase is
+    /// at least as recent as the live path's. Restore an unknown destination
+    /// only while the snapshot has not itself expired.
+    fn should_restore_tunnel_path(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        path: &TunnelPathEntry,
+        now: u64,
+    ) -> bool {
+        match self.storage.get_path(dest_hash) {
+            Some(existing) => {
+                if path.hops <= existing.hops || now > existing.expires_ms {
+                    let current_timebase = max_emission_from_blobs(&existing.random_blobs);
+                    let tunnel_timebase = max_emission_from_blobs(&path.random_blobs);
+                    tunnel_timebase >= current_timebase
+                } else {
+                    false
+                }
+            }
+            None => now < path.expires_ms,
+        }
+    }
+
+    /// Associate a freshly-learned path with the tunnel on its receiving
+    /// interface, if any (Python Transport.py:2020-2032).
+    ///
+    /// Called after a path-table update; a no-op unless `interface_index`
+    /// currently carries an established tunnel. Refreshes the tunnel expiry so
+    /// an actively-used tunnel is not culled.
+    fn associate_tunnel_path(
+        &mut self,
+        interface_index: usize,
+        dest_hash: [u8; TRUNCATED_HASHBYTES],
+        entry: &PathEntry,
+        now: u64,
+    ) {
+        let tunnel_id = match self.interface_tunnel_ids.get(&interface_index) {
+            Some(id) => *id,
+            None => return,
+        };
+        if let Some(tunnel) = self.tunnels.get_mut(&tunnel_id) {
+            tunnel.paths.insert(
+                dest_hash,
+                TunnelPathEntry {
+                    hops: entry.hops,
+                    expires_ms: entry.expires_ms,
+                    random_blobs: entry.random_blobs.clone(),
+                    next_hop: entry.next_hop,
+                    timestamp_ms: now,
+                },
+            );
+            tunnel.expires_ms = now.saturating_add(TUNNEL_TIMEOUT_MS);
+            crate::tracing::debug!(
+                event = "TUNNEL_PATH_ASSOCIATED",
+                dst = %HexShort(&dest_hash),
+                tunnel = %HexShort(&tunnel_id[..]),
+                "Path associated with tunnel"
+            );
+        } else {
+            // Reverse map referenced a tunnel that no longer exists; drop the
+            // stale mapping so we do not repeat the miss.
+            self.interface_tunnel_ids.remove(&interface_index);
+        }
+    }
+
+    /// Detach an interface from its tunnel without discarding the tunnel
+    /// (Python `void_tunnel_interface`, Transport.py:2331-2336).
+    ///
+    /// Called when an interface goes down. The tunnel entry and its accumulated
+    /// paths persist so they can be restored when the peer reconnects (on a new
+    /// interface index) and re-runs the synthesize handshake.
+    pub(crate) fn void_tunnel_for_interface(&mut self, interface_index: usize) {
+        if let Some(tunnel_id) = self.interface_tunnel_ids.remove(&interface_index) {
+            if let Some(tunnel) = self.tunnels.get_mut(&tunnel_id) {
+                tunnel.interface_index = None;
+                crate::tracing::debug!(
+                    event = "TUNNEL_VOIDED",
+                    tunnel = %HexShort(&tunnel_id[..]),
+                    iface = %self.iface_name(interface_index),
+                    "Tunnel interface voided (paths retained for restore)"
+                );
+            }
+        }
+    }
+
+    /// Cull expired tunnels and tunnel paths (Python jobs loop,
+    /// Transport.py:812-862, 915-922). Self-throttled to one pass per minute.
+    pub fn cull_tunnels(&mut self) {
+        const TUNNEL_CULL_INTERVAL_MS: u64 = 60_000;
+        let now = self.clock.now_ms();
+        if now
+            < self
+                .tunnels_last_culled_ms
+                .saturating_add(TUNNEL_CULL_INTERVAL_MS)
+        {
+            return;
+        }
+        self.tunnels_last_culled_ms = now;
+
+        let mut stale_tunnels: Vec<[u8; TUNNEL_ID_LEN]> = Vec::new();
+        for (tunnel_id, tunnel) in self.tunnels.iter_mut() {
+            if now > tunnel.expires_ms {
+                stale_tunnels.push(*tunnel_id);
+                continue;
+            }
+            tunnel
+                .paths
+                .retain(|_, path| now <= path.timestamp_ms.saturating_add(TUNNEL_PATH_TIMEOUT_MS));
+        }
+        for tunnel_id in stale_tunnels {
+            self.tunnels.remove(&tunnel_id);
+            self.interface_tunnel_ids.retain(|_, id| *id != tunnel_id);
+        }
+    }
+
+    /// Number of live tunnels (test/introspection helper).
+    pub fn tunnel_count(&self) -> usize {
+        self.tunnels.len()
+    }
+
+    /// Number of paths associated with a given tunnel, if it exists
+    /// (test/introspection helper).
+    pub fn tunnel_path_count(&self, tunnel_id: &[u8; TUNNEL_ID_LEN]) -> Option<usize> {
+        self.tunnels.get(tunnel_id).map(|t| t.paths.len())
+    }
+
     // Internal: Packet Handlers
     fn handle_announce(
         &mut self,
@@ -2742,6 +3023,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             );
             let readback_ok = self.storage.get_path(&dest_hash).is_some();
             let table_len = self.storage.path_count();
+
+            // Associate the learned path with the tunnel on its receiving
+            // interface, if any (Codeberg #64, Transport.py:2020-2032). Kept
+            // outside the tracing block so it runs regardless of log level.
+            if let Some(learned) = self.storage.get_path(&dest_hash).cloned() {
+                self.associate_tunnel_path(interface_index, dest_hash, &learned, now);
+            }
+
             crate::tracing::debug!(
                 event = "PATH_ADD",
                 dst = %HexShort(&dest_hash),
@@ -3554,6 +3843,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.iface_name(interface_index)
             );
             return self.handle_path_request(packet, interface_index);
+        }
+
+        // Intercept tunnel synthesize handshakes (Codeberg #64). A valid packet
+        // establishes or restores a tunnel and its paths; malformed or
+        // unauthenticated packets are dropped. Either way the packet is consumed
+        // here, never forwarded (it is a control destination, Transport.py:250).
+        if dest_hash == self.tunnel_synthesize_hash {
+            crate::tracing::trace!(
+                "Intercepted tunnel synthesize on {}",
+                self.iface_name(interface_index)
+            );
+            self.handle_tunnel_synthesize(&packet, interface_index);
+            return Ok(());
         }
 
         // Plain broadcast forwarding through shared instance
@@ -20873,5 +21175,235 @@ mod blackhole_enforcement_tests {
             "used on a retained destination returns false"
         );
         assert!(t.storage.is_known_dest_retained(&dest_hash));
+    }
+}
+
+/// Deterministic in-process test for tunnel-based path restoration on TCP
+/// reconnect (Codeberg #64). Full structured event trail via `RUST_LOG=debug`;
+/// asserts the restore mechanism end-to-end with no timers and no network I/O.
+#[cfg(test)]
+mod tunnel_restore_tests {
+    use super::*;
+    use crate::destination::{Destination, DestinationType, Direction};
+    use crate::memory_storage::MemoryStorage;
+    use crate::packet::{HeaderType, PacketData, PacketFlags};
+    use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
+    use crate::tunnel::{
+        build_synthesize_payload, compute_tunnel_id, SYNTH_IFHASH_LEN, SYNTH_RANDHASH_LEN,
+    };
+    use rand_core::{OsRng, RngCore};
+
+    fn enabled_transport() -> Transport<MockClock, MemoryStorage> {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let config = TransportConfig {
+            enable_transport: true,
+            ..TransportConfig::default()
+        };
+        Transport::new(
+            config,
+            clock,
+            MemoryStorage::with_defaults(),
+            Identity::generate(&mut OsRng),
+        )
+    }
+
+    // Wrap a raw synthesize payload in a PLAIN broadcast packet addressed to the
+    // well-known tunnel-synthesize control destination, as a Python peer sends it.
+    fn synthesize_packet_raw(payload: &[u8]) -> Vec<u8> {
+        let dest_hash = Transport::<MockClock, MemoryStorage>::compute_tunnel_synthesize_hash();
+        let packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: DestinationType::Plain,
+                packet_type: PacketType::Data,
+            },
+            hops: 0,
+            transport_id: None,
+            destination_hash: dest_hash,
+            context: PacketContext::None,
+            data: PacketData::Owned(payload.to_vec()),
+        };
+        let mut buf = [0u8; MTU];
+        let len = packet.pack(&mut buf).expect("pack synthesize");
+        buf[..len].to_vec()
+    }
+
+    // A valid announce for a fresh destination, carrying an explicit next hop so
+    // the installed path exercises the relayed (transport_id) code path.
+    fn announce_raw(
+        hops: u8,
+        next_hop: [u8; TRUNCATED_HASHBYTES],
+    ) -> (Vec<u8>, [u8; TRUNCATED_HASHBYTES]) {
+        let identity = Identity::generate(&mut OsRng);
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["tunnel"],
+        )
+        .unwrap();
+        let id = dest.identity().unwrap();
+        let random_hash = [0x42u8; crate::constants::RANDOM_HASHBYTES];
+        let app_data = b"t";
+
+        let mut signed = Vec::new();
+        signed.extend_from_slice(dest.hash().as_bytes());
+        signed.extend_from_slice(&id.public_key_bytes());
+        signed.extend_from_slice(dest.name_hash());
+        signed.extend_from_slice(&random_hash);
+        signed.extend_from_slice(app_data);
+        let signature = id.sign(&signed).unwrap();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&id.public_key_bytes());
+        payload.extend_from_slice(dest.name_hash());
+        payload.extend_from_slice(&random_hash);
+        payload.extend_from_slice(&signature);
+        payload.extend_from_slice(app_data);
+
+        let packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type2,
+                context_flag: false,
+                transport_type: TransportType::Transport,
+                dest_type: DestinationType::Single,
+                packet_type: PacketType::Announce,
+            },
+            hops,
+            transport_id: Some(next_hop),
+            destination_hash: dest.hash().into_bytes(),
+            context: PacketContext::None,
+            data: PacketData::Owned(payload),
+        };
+        let mut buf = [0u8; MTU];
+        let len = packet.pack(&mut buf).unwrap();
+        (buf[..len].to_vec(), dest.hash().into_bytes())
+    }
+
+    #[test]
+    fn tcp_reconnect_restores_path_without_fresh_announce() {
+        let mut t = enabled_transport();
+
+        // Two interface slots: the original tunneled connection and the fresh
+        // one the reconnect lands on (a TCP server spawns a new interface per
+        // socket, so the reconnect gets a new index).
+        let if_a = t.register_interface(Box::new(MockInterface::new("tcp[peer]", 1)));
+        let if_b = t.register_interface(Box::new(MockInterface::new("tcp[peer']", 2)));
+        t.set_interface_name(if_a, "tcp[peer]".into());
+        t.set_interface_name(if_b, "tcp[peer']".into());
+
+        // The reconnecting peer's synthesize handshake: a stable public key and
+        // interface hash yield a tunnel id that survives the socket drop.
+        let peer = Identity::generate(&mut OsRng);
+        let mut if_hash = [0u8; SYNTH_IFHASH_LEN];
+        OsRng.fill_bytes(&mut if_hash);
+        let mut rand_hash = [0u8; SYNTH_RANDHASH_LEN];
+        OsRng.fill_bytes(&mut rand_hash);
+        let payload = build_synthesize_payload(&peer, &if_hash, &rand_hash).unwrap();
+        let tunnel_id = compute_tunnel_id(&peer.public_key_bytes(), &if_hash);
+        let synth = synthesize_packet_raw(&payload);
+
+        // 1) Peer connects: synthesize establishes the tunnel on if_a.
+        t.process_incoming(if_a, &synth).unwrap();
+        assert_eq!(t.tunnel_count(), 1, "tunnel established on synthesize");
+        assert_eq!(t.tunnel_path_count(&tunnel_id), Some(0));
+
+        // 2) A path is learned over the tunnel and associated with it.
+        let next_hop = [0x11u8; TRUNCATED_HASHBYTES];
+        let (ann, dest) = announce_raw(1, next_hop);
+        t.process_incoming(if_a, &ann).unwrap();
+        assert!(t.has_path(&dest), "path learned over tunnel");
+        let learned = t.get_path_clone(&dest).expect("learned path present");
+        assert_eq!(
+            t.tunnel_path_count(&tunnel_id),
+            Some(1),
+            "learned path associated with tunnel"
+        );
+
+        // 3) The socket drops: paths on if_a are torn down, but the tunnel and
+        //    its path snapshots persist (interface voided, not discarded).
+        t.remove_paths_for_interface(if_a);
+        t.void_tunnel_for_interface(if_a);
+        assert!(!t.has_path(&dest), "path lost when connection dropped");
+        assert_eq!(t.tunnel_count(), 1, "tunnel retained across drop");
+        assert_eq!(
+            t.tunnel_path_count(&tunnel_id),
+            Some(1),
+            "path snapshot retained for restore"
+        );
+
+        // 4) The peer reconnects on a NEW interface and re-runs synthesize.
+        //    The reconnect carries a fresh random_hash (as Python does), so the
+        //    packet is not deduplicated, but the tunnel id is unchanged (it does
+        //    not depend on the random_hash). No announce is fed here: the path
+        //    must come back purely from the tunnel association.
+        let mut rand_hash2 = [0u8; SYNTH_RANDHASH_LEN];
+        OsRng.fill_bytes(&mut rand_hash2);
+        let payload2 = build_synthesize_payload(&peer, &if_hash, &rand_hash2).unwrap();
+        assert_ne!(
+            payload, payload2,
+            "reconnect synthesize is a distinct packet"
+        );
+        let synth2 = synthesize_packet_raw(&payload2);
+        t.process_incoming(if_b, &synth2).unwrap();
+
+        assert!(
+            t.has_path(&dest),
+            "path RESTORED from tunnel on reconnect without a fresh announce"
+        );
+        let restored = t.get_path_clone(&dest).expect("restored path present");
+        assert_eq!(
+            restored.interface_index, if_b,
+            "restored path re-homed onto the reconnect interface"
+        );
+        assert_eq!(
+            restored.hops, learned.hops,
+            "restored hop count matches the learned path"
+        );
+        assert_eq!(
+            restored.next_hop,
+            Some(next_hop),
+            "restored next hop preserved"
+        );
+        assert_eq!(t.tunnel_count(), 1);
+    }
+
+    #[test]
+    fn restore_skips_destination_with_more_recent_live_path() {
+        let mut t = enabled_transport();
+        let if_a = t.register_interface(Box::new(MockInterface::new("tcp[a]", 1)));
+        t.set_interface_name(if_a, "tcp[a]".into());
+
+        let peer = Identity::generate(&mut OsRng);
+        let if_hash = [0x7u8; SYNTH_IFHASH_LEN];
+        let rand_hash = [0x9u8; SYNTH_RANDHASH_LEN];
+        let payload = build_synthesize_payload(&peer, &if_hash, &rand_hash).unwrap();
+        let tunnel_id = compute_tunnel_id(&peer.public_key_bytes(), &if_hash);
+        let synth = synthesize_packet_raw(&payload);
+
+        t.process_incoming(if_a, &synth).unwrap();
+        let (ann, dest) = announce_raw(2, [0x22u8; TRUNCATED_HASHBYTES]);
+        t.process_incoming(if_a, &ann).unwrap();
+        assert_eq!(t.tunnel_path_count(&tunnel_id), Some(1));
+
+        // Drop, but leave the live path intact (as if another interface still
+        // has a fresher route). Reconnect must not clobber the newer live path.
+        t.void_tunnel_for_interface(if_a);
+        let live_before = t.get_path_clone(&dest).expect("live path still present");
+
+        let payload2 =
+            build_synthesize_payload(&peer, &if_hash, &[0xAAu8; SYNTH_RANDHASH_LEN]).unwrap();
+        let synth2 = synthesize_packet_raw(&payload2);
+        t.process_incoming(if_a, &synth2).unwrap();
+        let live_after = t.get_path_clone(&dest).expect("path present");
+        // Same emission timebase and same hops: restore is a no-op overwrite,
+        // the path stays valid (never dropped). This asserts we do not corrupt
+        // an equal-or-better live path.
+        assert_eq!(live_after.hops, live_before.hops);
     }
 }

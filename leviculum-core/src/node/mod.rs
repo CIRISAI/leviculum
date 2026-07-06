@@ -1552,6 +1552,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport
             .remove_reverse_entries_for_interface(iface_idx);
 
+        // Detach any tunnel from this interface without discarding it, so its
+        // paths survive for restore when the peer reconnects (Codeberg #64,
+        // Python `void_tunnel_interface`, Transport.py:2331-2336).
+        self.transport.void_tunnel_for_interface(iface_idx);
+
         // Remove announce cap state for this interface
         self.transport.unregister_interface_announce_cap(iface_idx);
 
@@ -1882,6 +1887,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// to one pass per 60 s like Python's jobs loop (Transport.py:973-994).
     pub fn expire_blackholed_identities(&mut self, now_unix_secs: f64) -> usize {
         self.transport.expire_blackholed_identities(now_unix_secs)
+    }
+
+    /// Cull expired tunnels and tunnel paths (Codeberg #64). Self-throttled to
+    /// one pass per minute like Python's jobs loop (Transport.py:812-922).
+    pub fn cull_tunnels(&mut self) {
+        self.transport.cull_tunnels();
     }
 
     /// Pin a known destination against cache eviction (Codeberg #84).

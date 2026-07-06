@@ -3220,6 +3220,9 @@ async fn run_event_loop(
                         .map(|d| d.as_secs_f64())
                         .unwrap_or(0.0);
                     core.expire_blackholed_identities(unix_now);
+                    // Cull expired tunnels/tunnel paths (Codeberg #64); the
+                    // call self-throttles to one pass per minute.
+                    core.cull_tunnels();
                     let now_ms = core.now_ms();
                     (output, now_ms)
                 };

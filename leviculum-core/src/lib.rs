@@ -123,6 +123,7 @@ pub mod storage_types;
 pub(crate) mod test_utils;
 pub mod traits;
 pub mod transport;
+pub mod tunnel;
 
 // Re-export key types
 pub use announce::{AnnounceControl, AnnounceError, ReceivedAnnounce};
