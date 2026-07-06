@@ -1,0 +1,23 @@
+[package]
+name = "lnomad"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Terminal browser and ANSI renderer for NomadNet micron pages"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+leviculum-micron = { path = "../leviculum-micron" }
+
+[lib]
+name = "lnomad"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lnomad"
+path = "src/main.rs"
