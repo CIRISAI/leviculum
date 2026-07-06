@@ -83,4 +83,5 @@ mod shared_instance_tests;
 mod status_parity_tests;
 mod stress_tests;
 mod transport_interop_tests;
+mod tunnel_interop_tests;
 mod udp_interop_tests;

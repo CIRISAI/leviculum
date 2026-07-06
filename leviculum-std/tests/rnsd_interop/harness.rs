@@ -1866,6 +1866,21 @@ impl TestDaemon {
         Ok(link_table)
     }
 
+    /// Fetch the Python transport tunnel table (Codeberg #64). Maps each
+    /// `tunnel_id` (hex) to `{interface, path_count, expires}`. A non-empty
+    /// entry proves Python validated a synthesize we sent and (re)established
+    /// the tunnel.
+    pub async fn get_tunnels(&self) -> Result<HashMap<String, serde_json::Value>, HarnessError> {
+        let result = self.query("get_tunnels", serde_json::json!({})).await?;
+        let mut tunnels = HashMap::new();
+        if let serde_json::Value::Object(map) = result {
+            for (tunnel_id, entry) in map {
+                tunnels.insert(tunnel_id, entry);
+            }
+        }
+        Ok(tunnels)
+    }
+
     /// Rotate the ratchet for a destination.
     ///
     /// # Arguments

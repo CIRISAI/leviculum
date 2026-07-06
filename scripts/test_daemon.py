@@ -1026,6 +1026,25 @@ class TestDaemon:
             except Exception as e:
                 return {"error": f"Failed to get transport status: {str(e)}"}
 
+        elif method == "get_tunnels":
+            # Get the transport tunnel table (Codeberg #64). Each entry proves
+            # Python validated a synthesize and (re)established the tunnel.
+            # Structure: Transport.tunnels[tunnel_id] = [tunnel_id, interface,
+            # paths(dict), expires] (IDX_TT_* in Transport.py).
+            try:
+                tunnels = {}
+                for tunnel_id, entry in Transport.tunnels.items():
+                    interface = entry[1] if len(entry) > 1 else None
+                    paths = entry[2] if len(entry) > 2 else {}
+                    tunnels[tunnel_id.hex()] = {
+                        "interface": str(interface) if interface is not None else None,
+                        "path_count": len(paths),
+                        "expires": entry[3] if len(entry) > 3 else None,
+                    }
+                return {"result": tunnels}
+            except Exception as e:
+                return {"error": f"Failed to get tunnels: {str(e)}"}
+
         elif method == "get_link_table":
             # Get link table for relay verification
             try:

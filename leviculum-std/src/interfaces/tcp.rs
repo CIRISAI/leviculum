@@ -120,6 +120,14 @@ pub(crate) struct TcpClientConfig {
     /// interface owns this carrier-medium quirk so the driver need not.
     pub connect_timeout: Duration,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// Tunnel-synthesize signal (Codeberg #64 initiator side). When present, the
+    /// interface fires its `InterfaceId` here on every successful connect (the
+    /// initial one AND every reconnect), so the driver initiates the tunnel
+    /// synthesize handshake. `None` for KISS-framed or non-tunnel clients, which
+    /// mirrors Python's `if not self.kiss_framing: wants_tunnel = True`. The
+    /// presence of the channel is the `wants_tunnel` flag; interface isolation
+    /// keeps the medium-specific "when to want a tunnel" decision here.
+    pub tunnel_notify: Option<mpsc::Sender<InterfaceId>>,
 }
 
 /// Default per-attempt connect timeout for reconnecting TCP clients.
@@ -360,6 +368,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             config.connect_timeout,
             task_counters,
             config.reconnect_notify,
+            config.tunnel_notify,
             task_ready,
         )
         .await;
@@ -403,6 +412,7 @@ async fn tcp_client_reconnect_task(
     connect_timeout: Duration,
     counters: Arc<InterfaceCounters>,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    tunnel_notify: Option<mpsc::Sender<InterfaceId>>,
     ready: Arc<ReadySignal>,
 ) {
     let mut attempt = 0u64;
@@ -442,6 +452,14 @@ async fn tcp_client_reconnect_task(
                     if let Some(ref notify) = reconnect_notify {
                         let _ = notify.try_send(id);
                     }
+                }
+
+                // Initiate the tunnel synthesize handshake on every successful
+                // connect (initial AND reconnect), matching Python's
+                // synthesize_tunnel on connect (:179) and reconnect (:297-298).
+                // Codeberg #64 initiator side.
+                if let Some(ref notify) = tunnel_notify {
+                    let _ = notify.try_send(id);
                 }
 
                 // Packets queued in outgoing_rx during disconnect will be sent on
@@ -776,6 +794,7 @@ mod tests {
             max_reconnect_tries: Some(10),
             connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
             reconnect_notify: None,
+            tunnel_notify: None,
         });
 
         // 3. Accept first connection, send an HDLC-framed packet
@@ -847,6 +866,7 @@ mod tests {
             // + 100ms interval) stays well under the 3s test budget everywhere.
             connect_timeout: Duration::from_millis(300),
             reconnect_notify: None,
+            tunnel_notify: None,
         });
 
         // Wait for the reconnect task to give up (2 attempts * 100ms + overhead)

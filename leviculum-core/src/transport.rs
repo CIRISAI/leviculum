@@ -69,8 +69,8 @@ use crate::storage_types::{
 };
 use crate::traits::{Clock, InterfaceMode, Storage};
 use crate::tunnel::{
-    SynthesizePayload, TunnelEntry, TunnelPathEntry, TUNNEL_ID_LEN, TUNNEL_PATH_TIMEOUT_MS,
-    TUNNEL_TIMEOUT_MS,
+    build_synthesize_payload, compute_tunnel_id, SynthesizePayload, TunnelEntry, TunnelPathEntry,
+    SYNTH_IFHASH_LEN, SYNTH_RANDHASH_LEN, TUNNEL_ID_LEN, TUNNEL_PATH_TIMEOUT_MS, TUNNEL_TIMEOUT_MS,
 };
 
 /// Number of announce timestamp samples per interface for frequency computation
@@ -1167,6 +1167,22 @@ pub struct Transport<C: Clock, S: Storage> {
     /// expiry sweep to one pass per minute (`TUNNEL_CULL_INTERVAL_MS`).
     tunnels_last_culled_ms: u64,
 
+    /// Tunnel-capable interfaces and the opaque interface hash each one supplies
+    /// (Codeberg #64 initiator side). Populated by `register_tunnel_interface`
+    /// when a TCP client interface comes up; the transport branches on presence
+    /// in this map, never on the carrier medium (interface isolation). The hash
+    /// is the peer-opaque `interface_hash` field of the synthesize payload
+    /// (Python `interface.get_hash()`, Transport.py:2286); it need only be
+    /// stable across the interface's reconnects so the derived tunnel id is too.
+    tunnel_interface_hashes: BTreeMap<usize, [u8; SYNTH_IFHASH_LEN]>,
+
+    /// The tunnel id WE last advertised as initiator on each interface (Python
+    /// computes but does not persist this; we keep it for observability and for
+    /// tests to assert the initiator derived the same id a responder will).
+    /// This is distinct from `interface_tunnel_ids`, which holds tunnel ids of
+    /// *peers* whose paths we restore.
+    own_tunnel_ids: BTreeMap<usize, [u8; TUNNEL_ID_LEN]>,
+
     /// Pending I/O actions for the driver (sans-I/O buffer)
     pending_actions: Vec<Action>,
 
@@ -1225,6 +1241,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             tunnels: BTreeMap::new(),
             interface_tunnel_ids: BTreeMap::new(),
             tunnels_last_culled_ms: 0,
+            tunnel_interface_hashes: BTreeMap::new(),
+            own_tunnel_ids: BTreeMap::new(),
             pending_actions: Vec::new(),
             last_discovery_retry_ms: 0,
             #[cfg(test)]
@@ -2661,6 +2679,114 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
             }
         }
+    }
+
+    /// Mark an interface as tunnel-capable and record the opaque interface hash
+    /// it supplies (Codeberg #64 initiator side).
+    ///
+    /// The driver calls this when a tunnel-capable interface (a non-KISS TCP
+    /// client) is registered. Only interfaces registered here initiate the
+    /// synthesize handshake; every other interface is left untouched, so there
+    /// is no behaviour change for non-tunnel media. Interface isolation: the
+    /// interface owns its `interface_hash` (Python `interface.get_hash()`); the
+    /// transport treats it as opaque bytes.
+    pub fn register_tunnel_interface(
+        &mut self,
+        interface_index: usize,
+        interface_hash: [u8; SYNTH_IFHASH_LEN],
+    ) {
+        self.tunnel_interface_hashes
+            .insert(interface_index, interface_hash);
+    }
+
+    /// Drop an interface's tunnel-capable registration (called during
+    /// `handle_interface_down` cleanup). Does not touch the peer tunnel table:
+    /// that is handled by [`Transport::void_tunnel_for_interface`].
+    pub(crate) fn unregister_tunnel_interface(&mut self, interface_index: usize) {
+        self.tunnel_interface_hashes.remove(&interface_index);
+        self.own_tunnel_ids.remove(&interface_index);
+    }
+
+    /// Initiate the `rnstransport.tunnel.synthesize` handshake toward the peer
+    /// on `interface_index` (Python `synthesize_tunnel`, Transport.py:2284-2305).
+    ///
+    /// Builds `public_key || interface_hash || random_hash || signature`, wraps
+    /// it in a PLAIN broadcast to the well-known tunnel-synthesize destination,
+    /// and queues it for transmission on that one interface. Sent on both the
+    /// initial connect and every reconnect so a Python (or Rust) responder can
+    /// (re)establish the tunnel and restore the paths it learned from us.
+    ///
+    /// A no-op returning `Ok(None)` when the interface is not tunnel-capable
+    /// (not registered via [`Transport::register_tunnel_interface`]). On success
+    /// returns the `tunnel_id` a responder will derive, and records it as our
+    /// own tunnel id for this interface. `random_hash` is a fresh anti-replay
+    /// nonce supplied by the caller (media-agnostic, so kept out of the
+    /// interface).
+    pub fn send_tunnel_synthesize(
+        &mut self,
+        interface_index: usize,
+        random_hash: &[u8; SYNTH_RANDHASH_LEN],
+    ) -> Result<Option<[u8; TUNNEL_ID_LEN]>, TransportError> {
+        let interface_hash = match self.tunnel_interface_hashes.get(&interface_index) {
+            Some(h) => *h,
+            None => return Ok(None),
+        };
+
+        let payload = match build_synthesize_payload(&self.identity, &interface_hash, random_hash) {
+            Ok(p) => p,
+            Err(e) => {
+                crate::tracing::warn!(
+                    "Could not synthesize tunnel on {}: {:?}",
+                    self.iface_name(interface_index),
+                    e
+                );
+                return Ok(None);
+            }
+        };
+
+        let packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: crate::destination::DestinationType::Plain,
+                packet_type: PacketType::Data,
+            },
+            hops: 0,
+            transport_id: None,
+            destination_hash: self.tunnel_synthesize_hash,
+            context: PacketContext::None,
+            data: PacketData::Owned(payload),
+        };
+
+        let mut buf = [0u8; crate::constants::MTU];
+        let len = packet.pack(&mut buf)?;
+        self.send_on_interface(interface_index, &buf[..len])?;
+
+        let tunnel_id = compute_tunnel_id(&self.identity.public_key_bytes(), &interface_hash);
+        self.own_tunnel_ids.insert(interface_index, tunnel_id);
+
+        crate::tracing::debug!(
+            event = "TUNNEL_SYNTHESIZE_SENT",
+            tunnel = %HexShort(&tunnel_id[..]),
+            iface = %self.iface_name(interface_index),
+            "Sent tunnel synthesize to peer"
+        );
+        Ok(Some(tunnel_id))
+    }
+
+    /// The tunnel id we last advertised as initiator on `interface_index`, if
+    /// any (Codeberg #64). Observability / test hook; see `own_tunnel_ids`.
+    pub fn own_tunnel_id(&self, interface_index: usize) -> Option<[u8; TUNNEL_ID_LEN]> {
+        self.own_tunnel_ids.get(&interface_index).copied()
+    }
+
+    /// Every tunnel id we have advertised as initiator, across all interfaces
+    /// (Codeberg #64). Observability / interop-test hook: a responder that
+    /// validated our synthesize keys its tunnel table by one of these ids.
+    pub fn own_tunnel_ids(&self) -> Vec<[u8; TUNNEL_ID_LEN]> {
+        self.own_tunnel_ids.values().copied().collect()
     }
 
     /// Cull expired tunnels and tunnel paths (Python jobs loop,
@@ -21405,5 +21531,145 @@ mod tunnel_restore_tests {
         // the path stays valid (never dropped). This asserts we do not corrupt
         // an equal-or-better live path.
         assert_eq!(live_after.hops, live_before.hops);
+    }
+
+    // Drain actions and return the payload of the single SendPacket queued on
+    // `iface` (the synthesize the initiator just emitted). Panics if there is not
+    // exactly one, so the test also guards against stray broadcasts.
+    fn take_send_packet(t: &mut Transport<MockClock, MemoryStorage>, iface: usize) -> Vec<u8> {
+        let mut found: Option<Vec<u8>> = None;
+        for action in t.drain_actions() {
+            if let Action::SendPacket { iface: id, data } = action {
+                if id.0 == iface {
+                    assert!(
+                        found.is_none(),
+                        "more than one SendPacket queued on interface"
+                    );
+                    found = Some(data);
+                }
+            }
+        }
+        found.expect("a SendPacket was queued on the interface")
+    }
+
+    /// Full bidirectional tunnel: the INITIATOR (Codeberg #64) drives it.
+    ///
+    /// A (a tunnel-capable TCP client) synthesizes a tunnel toward B (the
+    /// responder/server side). B learns a path over the tunnel, the socket drops
+    /// and A reconnects onto a fresh interface index, A re-initiates the
+    /// synthesize, and B restores the path — with no fresh announce. Two separate
+    /// transports, deterministic, no timers or network I/O.
+    #[test]
+    fn initiator_synthesize_reconnect_restores_path_end_to_end() {
+        let mut a = enabled_transport();
+        let mut b = enabled_transport();
+
+        // A's tunnel-capable interface toward B. The interface hash is stable
+        // across reconnects (the driver derives it from the interface's stable
+        // name); we mirror that with a fixed value here.
+        let a_if = a.register_interface(Box::new(MockInterface::new("tcp[a->b]", 1)));
+        a.set_interface_name(a_if, "tcp[a->b]".into());
+        let if_hash = crate::crypto::full_hash(b"tcp_client_0");
+        a.register_tunnel_interface(a_if, if_hash);
+
+        // B's receiving interface (a server accepts A's socket).
+        let b_if = b.register_interface(Box::new(MockInterface::new("tcp[from-a]", 2)));
+        b.set_interface_name(b_if, "tcp[from-a]".into());
+
+        // 1) A connects and initiates the synthesize handshake.
+        let mut r1 = [0u8; SYNTH_RANDHASH_LEN];
+        OsRng.fill_bytes(&mut r1);
+        let a_tunnel = a
+            .send_tunnel_synthesize(a_if, &r1)
+            .unwrap()
+            .expect("tunnel-capable interface initiates synthesize");
+        let synth1 = take_send_packet(&mut a, a_if);
+
+        // The tunnel id A advertised is recorded and matches what any responder
+        // derives from A's public key + interface hash.
+        assert_eq!(a.own_tunnel_id(a_if), Some(a_tunnel));
+        assert_eq!(
+            a_tunnel,
+            compute_tunnel_id(&a.identity().public_key_bytes(), &if_hash),
+            "advertised tunnel id derives from pubkey || interface_hash"
+        );
+
+        // 2) B receives the synthesize and establishes the tunnel, keyed on the
+        //    exact id A advertised (wire-compatible construction).
+        b.process_incoming(b_if, &synth1).unwrap();
+        assert_eq!(b.tunnel_count(), 1, "responder established tunnel");
+        assert_eq!(
+            b.tunnel_path_count(&a_tunnel),
+            Some(0),
+            "tunnel keyed on the initiator's advertised id"
+        );
+
+        // 3) A path is learned over the tunnel on B and associated with it.
+        let next_hop = [0x11u8; TRUNCATED_HASHBYTES];
+        let (ann, dest) = announce_raw(1, next_hop);
+        b.process_incoming(b_if, &ann).unwrap();
+        assert!(b.has_path(&dest), "path learned over tunnel");
+        assert_eq!(b.tunnel_path_count(&a_tunnel), Some(1));
+
+        // 4) The socket drops: B tears down the path but retains the tunnel.
+        b.remove_paths_for_interface(b_if);
+        b.void_tunnel_for_interface(b_if);
+        assert!(!b.has_path(&dest), "path lost on drop");
+        assert_eq!(b.tunnel_count(), 1, "tunnel retained across drop");
+
+        // 5) A reconnects on a NEW interface index (a fresh socket) and
+        //    re-initiates the synthesize with a fresh nonce. The interface hash
+        //    is unchanged, so the tunnel id is stable, but the packet differs.
+        let a_if2 = a.register_interface(Box::new(MockInterface::new("tcp[a->b']", 3)));
+        a.set_interface_name(a_if2, "tcp[a->b']".into());
+        a.register_tunnel_interface(a_if2, if_hash);
+        let mut r2 = [0u8; SYNTH_RANDHASH_LEN];
+        OsRng.fill_bytes(&mut r2);
+        let a_tunnel2 = a.send_tunnel_synthesize(a_if2, &r2).unwrap().unwrap();
+        assert_eq!(a_tunnel2, a_tunnel, "tunnel id stable across reconnect");
+        let synth2 = take_send_packet(&mut a, a_if2);
+        assert_ne!(
+            synth1, synth2,
+            "reconnect synthesize is a distinct packet (fresh nonce)"
+        );
+
+        // 6) B receives the reconnect synthesize on a fresh interface and
+        //    restores the path with no announce.
+        let b_if2 = b.register_interface(Box::new(MockInterface::new("tcp[from-a']", 4)));
+        b.set_interface_name(b_if2, "tcp[from-a']".into());
+        b.process_incoming(b_if2, &synth2).unwrap();
+        assert!(
+            b.has_path(&dest),
+            "path RESTORED from tunnel on reconnect without a fresh announce"
+        );
+        let restored = b.get_path_clone(&dest).expect("restored path present");
+        assert_eq!(
+            restored.interface_index, b_if2,
+            "restored path re-homed onto the reconnect interface"
+        );
+        assert_eq!(
+            restored.next_hop,
+            Some(next_hop),
+            "restored next hop preserved"
+        );
+    }
+
+    /// A non-tunnel interface never initiates a synthesize (no behaviour change
+    /// for non-tunnel media).
+    #[test]
+    fn non_tunnel_interface_does_not_synthesize() {
+        let mut t = enabled_transport();
+        let if_a = t.register_interface(Box::new(MockInterface::new("udp[a]", 1)));
+        t.set_interface_name(if_a, "udp[a]".into());
+
+        let mut r = [0u8; SYNTH_RANDHASH_LEN];
+        OsRng.fill_bytes(&mut r);
+        // Not registered as tunnel-capable: no-op, nothing queued.
+        assert_eq!(t.send_tunnel_synthesize(if_a, &r).unwrap(), None);
+        assert!(
+            t.drain_actions().is_empty(),
+            "no packet queued for a non-tunnel interface"
+        );
+        assert_eq!(t.own_tunnel_id(if_a), None);
     }
 }

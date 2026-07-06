@@ -393,6 +393,10 @@ struct EventLoopChannels {
     action_dispatch_rx: mpsc::Receiver<TickOutput>,
     new_interface_rx: mpsc::Receiver<InterfaceHandle>,
     reconnect_rx: mpsc::Receiver<InterfaceId>,
+    /// Tunnel-synthesize initiation signal (Codeberg #64). A tunnel-capable TCP
+    /// client fires its id here on every connect; the loop initiates the
+    /// synthesize handshake toward the peer.
+    tunnel_notify_rx: mpsc::Receiver<InterfaceId>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -1000,6 +1004,12 @@ impl ReticulumNode {
         // to re-announce destinations on the recovered link.
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<InterfaceId>(16);
 
+        // Channel for tunnel-synthesize initiation (Codeberg #64 initiator side).
+        // A tunnel-capable TCP client fires its InterfaceId here on every
+        // successful connect (initial AND reconnect); the event loop then calls
+        // core.send_tunnel_synthesize() to initiate the handshake toward the peer.
+        let (tunnel_notify_tx, tunnel_notify_rx) = mpsc::channel::<InterfaceId>(16);
+
         // Retain clones so the node can attach interfaces at runtime (hot-plug),
         // not just at construction. Used by `spawn_rnode_channel_interface`.
         self.new_iface_tx = Some(new_iface_tx.clone());
@@ -1012,7 +1022,12 @@ impl ReticulumNode {
         // down with shutdown_background() before propagating — a bare `?` would
         // drop the live Runtime here, and a blocking Runtime drop inside the
         // caller's async context panics, masking the real interface error.
-        let registry = match self.initialize_interfaces(&next_id, &new_iface_tx, &reconnect_tx) {
+        let registry = match self.initialize_interfaces(
+            &next_id,
+            &new_iface_tx,
+            &reconnect_tx,
+            &tunnel_notify_tx,
+        ) {
             Ok(registry) => registry,
             Err(e) => {
                 drop(enter_guard);
@@ -1053,6 +1068,20 @@ impl ReticulumNode {
                 }
                 if iface_config.interface_type == "TCPServerInterface" {
                     continue; // IFAC passed to spawn_tcp_server in initialize_interfaces
+                }
+                // Tunnel-capable interfaces (Codeberg #64 initiator side): a
+                // static TCP client registers a stable, peer-opaque interface
+                // hash so it can initiate the synthesize handshake on connect and
+                // reconnect. The hash is derived from the interface's stable name
+                // (mirrors Python `interface.get_hash() = full_hash(str(self))`);
+                // it only needs to stay constant across the interface's
+                // reconnects so the derived tunnel id is stable. The medium
+                // decision ("a non-KISS TCP client wants a tunnel") lives here in
+                // the driver; transport treats the hash as opaque bytes.
+                if iface_config.interface_type == "TCPClientInterface" {
+                    let iface_name = format!("tcp_client_{}", idx);
+                    let interface_hash = leviculum_core::crypto::full_hash(iface_name.as_bytes());
+                    core.register_tunnel_interface(idx, interface_hash);
                 }
                 if let Some(ifac) = build_ifac_config(iface_config) {
                     core.set_ifac_config(idx, ifac);
@@ -1214,6 +1243,7 @@ impl ReticulumNode {
                     action_dispatch_rx,
                     new_interface_rx: new_iface_rx,
                     reconnect_rx,
+                    tunnel_notify_rx,
                     shutdown: shutdown_rx,
                 },
                 iface_stats_map,
@@ -1253,6 +1283,7 @@ impl ReticulumNode {
         next_id: &Arc<AtomicUsize>,
         new_iface_tx: &mpsc::Sender<InterfaceHandle>,
         reconnect_tx: &mpsc::Sender<InterfaceId>,
+        tunnel_notify_tx: &mpsc::Sender<InterfaceId>,
     ) -> Result<InterfaceRegistry, Error> {
         if self.share_instance_name.is_some() && self.connect_instance_name.is_some() {
             return Err(Error::Config(
@@ -1324,6 +1355,11 @@ impl ReticulumNode {
                             max_reconnect_tries: config.max_reconnect_tries,
                             connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
                             reconnect_notify: Some(reconnect_tx.clone()),
+                            // Tunnel-capable: a non-KISS TCP client initiates the
+                            // synthesize handshake on connect + reconnect
+                            // (Codeberg #64). The core-side interface hash is
+                            // registered below in the per-interface config loop.
+                            tunnel_notify: Some(tunnel_notify_tx.clone()),
                         });
                         tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
                         registry.register(handle);
@@ -2398,6 +2434,13 @@ impl ReticulumNode {
         *self.inner.lock().unwrap().identity().hash()
     }
 
+    /// Every tunnel id this node has advertised as a tunnel initiator (Codeberg
+    /// #64). A peer that validated our synthesize keys its tunnel table by one
+    /// of these ids. Observability / interop-test hook.
+    pub fn tunnel_ids(&self) -> Vec<[u8; 32]> {
+        self.inner.lock().unwrap().own_tunnel_ids()
+    }
+
     /// Get the negotiated MTU for a link
     ///
     /// Returns `None` if the link does not exist.
@@ -3031,6 +3074,7 @@ async fn run_event_loop(
     let mut action_dispatch_rx = channels.action_dispatch_rx;
     let mut new_interface_rx = channels.new_interface_rx;
     let mut reconnect_rx = channels.reconnect_rx;
+    let mut tunnel_notify_rx = channels.tunnel_notify_rx;
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
@@ -3360,6 +3404,20 @@ async fn run_event_loop(
                 dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
             }
 
+            // Branch 6b: Tunnel synthesize initiation (Codeberg #64).
+            //
+            // A tunnel-capable TCP client fires here on every successful connect
+            // (initial AND reconnect). We initiate the synthesize handshake
+            // toward the peer so it (re)establishes the tunnel and restores the
+            // paths it learned from us. A no-op for non-tunnel interfaces.
+            Some(iface_id) = tunnel_notify_rx.recv() => {
+                let output = {
+                    let mut core = inner.lock().unwrap();
+                    core.send_tunnel_synthesize(iface_id.0)
+                };
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
+            }
+
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
             _ = tokio::time::sleep_until(next_flush) => {
                 {
@@ -3548,6 +3606,11 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             max_reconnect_tries: None,
             connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
             reconnect_notify: Some(self.reconnect_tx.clone()),
+            // Auto-connected (discovered) TCP clients do not yet initiate the
+            // tunnel synthesize handshake: their core-side interface hash is not
+            // registered on this dynamic path (Codeberg #64 covers static TCP
+            // clients). They still respond to peer-initiated tunnels.
+            tunnel_notify: None,
         });
         // Register with the running loop; the `new_interface_rx` branch does
         // the map/announce bookkeeping on the next iteration.

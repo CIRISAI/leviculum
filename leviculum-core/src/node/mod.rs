@@ -1517,6 +1517,44 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.register_interface_bitrate(id, bitrate_bps);
     }
 
+    /// Mark an interface as tunnel-capable (Codeberg #64 initiator side).
+    ///
+    /// The driver calls this when it brings up a tunnel-capable TCP client,
+    /// passing the opaque `interface_hash` the interface derives from its stable
+    /// identity (Python `interface.get_hash()`). Thereafter [`NodeCore::send_tunnel_synthesize`]
+    /// initiates the synthesize handshake on that interface's connect/reconnect.
+    pub fn register_tunnel_interface(
+        &mut self,
+        id: usize,
+        interface_hash: [u8; crate::tunnel::SYNTH_IFHASH_LEN],
+    ) {
+        self.transport.register_tunnel_interface(id, interface_hash);
+    }
+
+    /// Initiate the tunnel synthesize handshake on `id`, if it is tunnel-capable
+    /// (Codeberg #64). Called by the driver on a tunnel interface's connect and
+    /// every reconnect. Draws a fresh anti-replay `random_hash` from the node
+    /// RNG and delegates to the transport. A no-op for non-tunnel interfaces.
+    pub fn send_tunnel_synthesize(&mut self, id: usize) -> crate::transport::TickOutput {
+        let mut random_hash = [0u8; crate::tunnel::SYNTH_RANDHASH_LEN];
+        self.rng.fill_bytes(&mut random_hash);
+        if let Err(e) = self.transport.send_tunnel_synthesize(id, &random_hash) {
+            crate::tracing::warn!(
+                "Failed to send tunnel synthesize on interface {}: {}",
+                id,
+                e
+            );
+        }
+        self.process_events_and_actions()
+    }
+
+    /// Every tunnel id this node has advertised as a tunnel initiator (Codeberg
+    /// #64). A responder that validated our synthesize keys its tunnel by one of
+    /// these. Observability / interop-test hook.
+    pub fn own_tunnel_ids(&self) -> Vec<[u8; crate::tunnel::TUNNEL_ID_LEN]> {
+        self.transport.own_tunnel_ids()
+    }
+
     /// Notify core that an interface has gone offline (sans-I/O)
     ///
     /// The driver should call this when it detects that an interface is no
@@ -1556,6 +1594,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // paths survive for restore when the peer reconnects (Codeberg #64,
         // Python `void_tunnel_interface`, Transport.py:2331-2336).
         self.transport.void_tunnel_for_interface(iface_idx);
+
+        // Drop the interface's tunnel-capable registration (Codeberg #64
+        // initiator side). The peer tunnel table is preserved above; this only
+        // clears our own initiator bookkeeping for the departed interface.
+        self.transport.unregister_tunnel_interface(iface_idx);
 
         // Remove announce cap state for this interface
         self.transport.unregister_interface_announce_cap(iface_idx);
