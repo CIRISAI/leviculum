@@ -385,6 +385,16 @@ pub struct InterfaceConfig {
     /// keep the raw percentage.
     pub announce_cap: Option<f32>,
 
+    // Ingress control (Codeberg #8). Python: `ingress_control` config key
+    // (Reticulum.py:768-769), a flat per-interface bool defaulting True.
+    /// Enable the announce/path-request ingress burst limiter for this interface
+    /// (Python `ingress_control`). `None` resolves to the medium-class default
+    /// via [`InterfaceConfig::resolve_ingress_control`]: off for point-to-point
+    /// media (TCP/UDP/I2P), on for shared/broadcast media (RNode/Serial/KISS/
+    /// AX25/Auto). An explicit value overrides the default in either direction.
+    #[serde(default)]
+    pub ingress_control: Option<bool>,
+
     // IFAC (Interface Access Code)
     /// Network name for IFAC authentication
     pub networkname: Option<String>,
@@ -530,6 +540,7 @@ impl Default for InterfaceConfig {
             announce_rate_penalty: None,
             announce_rate_grace: None,
             announce_cap: None,
+            ingress_control: None,
             networkname: None,
             passphrase: None,
             ifac_size: None,
@@ -544,6 +555,39 @@ impl Default for InterfaceConfig {
             csma_enabled: None,
             subinterfaces: Vec::new(),
         }
+    }
+}
+
+/// Whether ingress control defaults on for an interface of `interface_type`
+/// (Codeberg #8). The interface's carrier medium decides the default: shared /
+/// broadcast RF media (RNode, Serial, KISS, AX25, AutoInterface, Pipe) suffer
+/// announce storms, so the burst limiter defaults on there; point-to-point IP
+/// tunnels (TCP client/server, Backbone, UDP, I2P) do not, and the limiter
+/// there only silently holds legitimate startup announces (the #44 flake on our
+/// side), so it defaults off.
+///
+/// Python uses a flat `ingress_control = True` for every medium
+/// (Reticulum.py:768); defaulting it off for point-to-point media is a
+/// receiver-local policy deviation that changes no wire bytes and no behaviour a
+/// peer observes, and it recovers otherwise-suppressed announces (the deviation
+/// rule's Priority-1 gain). An explicit config value still restores Python's
+/// behaviour on either medium. Unknown types default on, the conservative
+/// (unchanged) choice.
+pub fn ingress_control_default_for_type(interface_type: &str) -> bool {
+    let point_to_point = interface_type.starts_with("TCP")
+        || interface_type == "BackboneInterface"
+        || interface_type == "UDPInterface"
+        || interface_type.starts_with("I2P");
+    !point_to_point
+}
+
+impl InterfaceConfig {
+    /// Resolve the effective ingress-control flag for this interface (Codeberg
+    /// #8): an explicit `ingress_control` value wins, otherwise the medium-class
+    /// default from [`ingress_control_default_for_type`].
+    pub fn resolve_ingress_control(&self) -> bool {
+        self.ingress_control
+            .unwrap_or_else(|| ingress_control_default_for_type(&self.interface_type))
     }
 }
 
@@ -651,6 +695,77 @@ mod tests {
         let config = Config::default();
         assert!(config.reticulum.enable_transport);
         assert!(config.reticulum.use_implicit_proof);
+    }
+
+    #[test]
+    fn test_ingress_control_defaults_by_medium_class() {
+        // Codeberg #8: without an explicit setting, point-to-point media resolve
+        // OFF and shared/broadcast media resolve ON.
+        let off_by_default = [
+            "TCPClientInterface",
+            "TCPServerInterface",
+            "BackboneInterface",
+            "UDPInterface",
+            "I2PInterface",
+        ];
+        for t in off_by_default {
+            assert!(
+                !ingress_control_default_for_type(t),
+                "{t} (point-to-point) must default ingress control OFF"
+            );
+            let cfg = InterfaceConfig {
+                interface_type: t.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                !cfg.resolve_ingress_control(),
+                "{t} resolves OFF when unset"
+            );
+        }
+        let on_by_default = [
+            "RNodeInterface",
+            "RNodeMultiInterface",
+            "SerialInterface",
+            "KISSInterface",
+            "AX25KISSInterface",
+            "AutoInterface",
+            "PipeInterface",
+            "SomeUnknownInterface",
+        ];
+        for t in on_by_default {
+            assert!(
+                ingress_control_default_for_type(t),
+                "{t} (shared/broadcast or unknown) must default ingress control ON"
+            );
+            let cfg = InterfaceConfig {
+                interface_type: t.to_string(),
+                ..Default::default()
+            };
+            assert!(cfg.resolve_ingress_control(), "{t} resolves ON when unset");
+        }
+    }
+
+    #[test]
+    fn test_ingress_control_explicit_overrides_medium_default() {
+        // An explicit value wins over the medium default in either direction.
+        let tcp_on = InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            ingress_control: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            tcp_on.resolve_ingress_control(),
+            "explicit on restores the limiter on a point-to-point iface"
+        );
+        let lora_off = InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            ingress_control: Some(false),
+            ..Default::default()
+        };
+        assert!(
+            !lora_off.resolve_ingress_control(),
+            "explicit off disables the limiter on a shared-medium iface"
+        );
     }
 
     #[test]

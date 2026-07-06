@@ -1104,6 +1104,16 @@ impl ReticulumNode {
                         }
                     }
                 }
+                // Ingress control (Codeberg #8). The interface's medium decides
+                // the default (point-to-point off, shared/broadcast on); an
+                // explicit config value overrides it. The driver (media-aware)
+                // resolves the flag and hands it to transport, which owns the
+                // per-interface map and stays interface-type agnostic.
+                let ingress_on = iface_config.resolve_ingress_control();
+                core.set_interface_ingress_control(idx, ingress_on);
+                if !ingress_on {
+                    tracing::info!("Interface {} ingress control: off", idx);
+                }
             }
 
             let transport_enabled = core.transport_config().enable_transport;
@@ -3288,6 +3298,13 @@ async fn run_event_loop(
                     // spawned-per-connection interface carries the server's mode
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
+                    // Ingress control (Codeberg #8): dynamically-spawned
+                    // interfaces here are TCP-server-accepted connections or
+                    // local IPC clients, both point-to-point, so ingress control
+                    // defaults off (no announce storms on a single TCP/IPC peer;
+                    // leaving it on would silently hold the peer's startup
+                    // announces, the #44 flake).
+                    core.set_interface_ingress_control(iface_idx, false);
                     // Inherit IFAC config from parent interface (e.g., TCP server listener).
                     // Removal path: handle_interface_down removes ifac_config when connection drops.
                     if let Some(ifac) = &inherited_ifac {

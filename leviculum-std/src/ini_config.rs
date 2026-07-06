@@ -415,6 +415,10 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),
         "csma_enabled" => iface.csma_enabled = Some(parse_bool(value)),
+        // Ingress control (Codeberg #8, Python `ingress_control`,
+        // Reticulum.py:768-769). An explicit value overrides the medium-class
+        // default; unset (None) resolves per medium at registration.
+        "ingress_control" => iface.ingress_control = Some(parse_bool(value)),
         // Announce-rate keys (Codeberg #92). Parsed as unsigned, so a
         // negative value fails to parse and stays None; Python's >0 (target) /
         // >=0 (grace, penalty) validation is applied later in the driver.
@@ -721,6 +725,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.interfaces.get("If").unwrap().mode, None);
+    }
+
+    #[test]
+    fn test_parse_ingress_control_key_and_medium_defaults() {
+        use crate::config::ingress_control_default_for_type;
+        // Explicit `ingress_control` parses (yes/no spellings) and overrides.
+        let on = parse_ini(
+            "[interfaces]\n  [[If]]\n    type = TCPClientInterface\n    ingress_control = yes\n",
+        )
+        .unwrap();
+        let tcp_on = on.interfaces.get("If").unwrap();
+        assert_eq!(tcp_on.ingress_control, Some(true));
+        assert!(
+            tcp_on.resolve_ingress_control(),
+            "explicit yes restores the limiter on TCP"
+        );
+
+        let off = parse_ini(
+            "[interfaces]\n  [[If]]\n    type = RNodeInterface\n    ingress_control = no\n",
+        )
+        .unwrap();
+        let lora_off = off.interfaces.get("If").unwrap();
+        assert_eq!(lora_off.ingress_control, Some(false));
+        assert!(!lora_off.resolve_ingress_control());
+
+        // Absent key -> None -> medium-class default resolves at registration:
+        // TCP off, RNode on.
+        let tcp = parse_ini("[interfaces]\n  [[If]]\n    type = TCPClientInterface\n").unwrap();
+        let tcp_cfg = tcp.interfaces.get("If").unwrap();
+        assert_eq!(tcp_cfg.ingress_control, None);
+        assert!(
+            !tcp_cfg.resolve_ingress_control(),
+            "unset TCP resolves ingress control OFF"
+        );
+        assert!(!ingress_control_default_for_type("TCPClientInterface"));
+
+        let lora = parse_ini("[interfaces]\n  [[If]]\n    type = RNodeInterface\n").unwrap();
+        let lora_cfg = lora.interfaces.get("If").unwrap();
+        assert_eq!(lora_cfg.ingress_control, None);
+        assert!(
+            lora_cfg.resolve_ingress_control(),
+            "unset RNode resolves ingress control ON"
+        );
+        assert!(ingress_control_default_for_type("RNodeInterface"));
     }
 
     #[test]

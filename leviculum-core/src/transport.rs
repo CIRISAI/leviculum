@@ -1049,6 +1049,18 @@ pub struct Transport<C: Clock, S: Storage> {
     /// and path-expiry rules (Python Transport.py:1193-1245, 773-778, 1875-1880).
     interface_modes: BTreeMap<usize, InterfaceMode>,
 
+    /// Per-interface ingress-control enable flag (Codeberg #8; Python
+    /// `Interface.ingress_control`, Reticulum.py:768-769, Interface.py:112).
+    /// Keyed by interface index. A missing entry means enabled (the safe
+    /// shared-medium default, matching prior behaviour); only interfaces whose
+    /// policy is *disabled* are stored, keeping the map sparse. The value is set
+    /// by the media-aware driver at registration (point-to-point media such as
+    /// TCP/UDP/I2P default off, shared/broadcast media default on) and may be
+    /// overridden per interface from config. Transport carries no interface-type
+    /// awareness: it only reads this flag to decide whether the announce/path-
+    /// request burst limiter runs for a given interface.
+    interface_ingress_control: BTreeMap<usize, bool>,
+
     /// Hardware MTU per interface (for link MTU negotiation).
     /// Keyed by interface index. Set by driver at registration, removed on interface down.
     interface_hw_mtus: BTreeMap<usize, u32>,
@@ -1175,6 +1187,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_announce_caps: BTreeMap::new(),
             interface_names: BTreeMap::new(),
             interface_modes: BTreeMap::new(),
+            interface_ingress_control: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
             interface_incoming_announce_times: BTreeMap::new(),
@@ -1896,8 +1909,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // here; only the state transition matters.
         let ingress_ifaces: Vec<usize> = self.interface_ingress_burst.keys().copied().collect();
         for iface in ingress_ifaces {
-            self.should_ingress_limit(iface);
-            self.should_ingress_limit_pr(iface);
+            // Skip interfaces whose ingress control is off (Codeberg #8): they
+            // never limit, so their burst state must not advance on the cadence.
+            if self.interface_ingress_control(iface) {
+                self.should_ingress_limit(iface);
+                self.should_ingress_limit_pr(iface);
+            }
         }
 
         // Codeberg #87: release held announces on the poll cadence (Python runs
@@ -2487,7 +2504,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // should_ingress_limit returns True but simultaneously clears the burst
         // flag on the release pass, Interface.py:150-154); skipping the check here
         // reaches the same end state without the extra bounce.
-        if !from_held && dest_unknown && !awaiting_pr && self.should_ingress_limit(interface_index)
+        // Ingress control is a per-interface policy (Codeberg #8): point-to-point
+        // media (TCP/UDP/I2P) default it off, where the burst limiter would
+        // otherwise silently hold legitimate startup announces (the #44 flake on
+        // our side). When off, the limiter never runs and `should_ingress_limit`
+        // is short-circuited so no burst state advances for this interface.
+        if !from_held
+            && dest_unknown
+            && !awaiting_pr
+            && self.interface_ingress_control(interface_index)
+            && self.should_ingress_limit(interface_index)
         {
             // HOLD, do not drop (Codeberg #87; Python Transport.py:1705-1707 calls
             // interface.hold_announce(packet) instead of dropping). The announce
@@ -4229,6 +4255,37 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_modes.remove(&id);
     }
 
+    // Public: Interface Ingress-Control API (Codeberg #8)
+    /// Set whether the announce/path-request ingress burst limiter runs for an
+    /// interface (called by the media-aware driver at registration). The medium
+    /// decides the default (point-to-point off, shared/broadcast on) and config
+    /// may override it; transport only stores the resolved flag. Enabled is the
+    /// baseline, so an `enabled` flag is stored as an explicit removal to keep
+    /// the map sparse.
+    pub fn set_interface_ingress_control(&mut self, id: usize, enabled: bool) {
+        if enabled {
+            self.interface_ingress_control.remove(&id);
+        } else {
+            self.interface_ingress_control.insert(id, false);
+        }
+    }
+
+    /// Remove ingress-control override (called during handle_interface_down
+    /// cleanup).
+    pub fn remove_interface_ingress_control(&mut self, id: usize) {
+        self.interface_ingress_control.remove(&id);
+    }
+
+    /// Whether ingress control is enabled for an interface (enabled when unset).
+    /// Read at the announce/path-request gates and the poll cadence to decide
+    /// whether the burst limiter runs at all for this interface.
+    pub fn interface_ingress_control(&self, id: usize) -> bool {
+        self.interface_ingress_control
+            .get(&id)
+            .copied()
+            .unwrap_or(true)
+    }
+
     /// Propagation mode for an interface (`Full` when unset).
     pub fn interface_mode(&self, id: usize) -> InterfaceMode {
         self.interface_modes
@@ -4727,9 +4784,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ///
     /// Advances/clears the receiving interface's announce burst state and
     /// returns whether an incoming announce should be limited (dropped) right
-    /// now. Ingress control is always enabled for our interfaces (Python
-    /// default `ingress_control = True`). Idempotent state transition: safe to
-    /// call from both the ingest path and the poll cadence.
+    /// now. Callers gate this on `interface_ingress_control` (Codeberg #8), so
+    /// this only runs for interfaces whose policy is on; it never inspects the
+    /// flag itself. Idempotent state transition: safe to call from both the
+    /// ingest path and the poll cadence.
     fn should_ingress_limit(&mut self, iface: usize) -> bool {
         let now = self.clock.now_ms();
         let ia_freq =
@@ -4954,6 +5012,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_outgoing_pr_times.remove(&iface);
         self.interface_ingress_burst.remove(&iface);
         self.interface_held_announces.remove(&iface);
+        self.interface_ingress_control.remove(&iface);
     }
 
     // Public: Announce-Rate Config API (Codeberg #67 Stage 2a)
@@ -5171,7 +5230,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Transport.py:2916). The limit only suppresses the *recursive discovery*
         // of an unknown destination below (Transport.py:3015-3026); answering
         // local or already-known paths is never limited.
-        let pr_burst_limited = self.should_ingress_limit_pr(interface_index);
+        // Gated by the per-interface ingress-control flag (Codeberg #8): a
+        // point-to-point interface with ingress control off never rate-limits
+        // recursive path-request discovery. Short-circuits so no PR burst state
+        // advances when the policy is off.
+        let pr_burst_limited = self.interface_ingress_control(interface_index)
+            && self.should_ingress_limit_pr(interface_index);
 
         // 1. Check if it's a local destination
         if self.local_destinations.contains(&requested_hash) {
@@ -18452,6 +18516,100 @@ mod tests {
                 held < 12,
                 "the burst must not hold every announce; the first ones pass"
             );
+        }
+
+        #[test]
+        fn ingress_control_off_passes_startup_announce_burst() {
+            // Codeberg #8: an interface with ingress control OFF (the
+            // point-to-point / TCP default) must NOT hold a startup announce
+            // burst the uniform limiter would have held (the #44 suppress-on-TCP
+            // case). The identical flood on a shared-medium interface (ingress
+            // ON, the default) still holds, so shared-medium behaviour is
+            // unchanged.
+            let mut transport = make_transport();
+            const P2P_IFACE: usize = NET_IFACE; // ingress off (e.g. a TCP link)
+            const SHARED_IFACE: usize = 1; // ingress on (default; e.g. LoRa)
+            transport.set_interface_ingress_control(P2P_IFACE, false);
+            assert!(
+                transport.interface_ingress_control(SHARED_IFACE),
+                "shared-medium iface must default to ingress control ON"
+            );
+            assert!(
+                !transport.interface_ingress_control(P2P_IFACE),
+                "point-to-point iface must be ingress control OFF"
+            );
+
+            // The same sustained flood (12 announces, 100 ms apart) that
+            // handle_announce_holds_excess_during_burst proves the limiter holds.
+            let mut p2p_dests = Vec::new();
+            for _ in 0..12 {
+                let (raw, dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, P2P_IFACE, &raw, false)
+                    .unwrap();
+                p2p_dests.push(dest);
+                transport.clock.advance(100);
+            }
+            // Nothing held, no burst, nothing dropped: every announce passed
+            // through and was learned.
+            assert_eq!(
+                held_count(&transport, P2P_IFACE),
+                0,
+                "ingress-off iface must hold no announce"
+            );
+            assert!(
+                !burst_active(&transport, P2P_IFACE),
+                "ingress-off iface must not activate a burst"
+            );
+            assert_eq!(transport.stats().drops_ingress_burst_announce, 0);
+            for dest in &p2p_dests {
+                assert!(
+                    transport.has_path(dest),
+                    "every announce on the ingress-off iface must be learned"
+                );
+            }
+
+            // Control: the identical flood on the shared-medium (ingress-on)
+            // iface still bursts and holds the excess (default unchanged).
+            for _ in 0..12 {
+                let (raw, _dest) = make_announce_raw();
+                let packet = Packet::unpack(&raw).unwrap();
+                transport
+                    .handle_announce(packet, SHARED_IFACE, &raw, false)
+                    .unwrap();
+                transport.clock.advance(100);
+            }
+            assert!(
+                burst_active(&transport, SHARED_IFACE),
+                "shared-medium iface must still burst (behaviour unchanged)"
+            );
+            assert!(
+                held_count(&transport, SHARED_IFACE) > 0,
+                "shared-medium iface must still hold excess (behaviour unchanged)"
+            );
+        }
+
+        #[test]
+        fn ingress_control_flag_defaults_on_and_toggles() {
+            // The transport-side flag defaults enabled (missing entry) and stores
+            // only the disabled state, keeping the map sparse.
+            let mut transport = make_transport();
+            assert!(
+                transport.interface_ingress_control(NET_IFACE),
+                "unset ingress control must read as enabled"
+            );
+            transport.set_interface_ingress_control(NET_IFACE, false);
+            assert!(!transport.interface_ingress_control(NET_IFACE));
+            assert!(transport.interface_ingress_control.contains_key(&NET_IFACE));
+            // Re-enabling clears the sparse entry.
+            transport.set_interface_ingress_control(NET_IFACE, true);
+            assert!(transport.interface_ingress_control(NET_IFACE));
+            assert!(!transport.interface_ingress_control.contains_key(&NET_IFACE));
+            // Cleanup on interface down removes any override.
+            transport.set_interface_ingress_control(NET_IFACE, false);
+            transport.remove_announce_freq_tracking(NET_IFACE);
+            assert!(transport.interface_ingress_control(NET_IFACE));
         }
 
         #[test]

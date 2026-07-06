@@ -1436,6 +1436,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_mode(id)
     }
 
+    /// Set whether the ingress burst limiter runs for an interface (Codeberg
+    /// #8). The media-aware driver resolves the flag (point-to-point off,
+    /// shared/broadcast on, config-overridable) and calls this at registration.
+    pub fn set_interface_ingress_control(&mut self, id: usize, enabled: bool) {
+        self.transport.set_interface_ingress_control(id, enabled);
+    }
+
+    /// Whether ingress control is enabled for an interface (enabled when unset).
+    pub fn interface_ingress_control(&self, id: usize) -> bool {
+        self.transport.interface_ingress_control(id)
+    }
+
     /// Clone all IFAC configurations (for passing to dispatch_actions outside the lock).
     pub fn clone_ifac_configs(
         &self,
