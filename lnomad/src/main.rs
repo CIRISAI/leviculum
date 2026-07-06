@@ -14,6 +14,7 @@ use clap::Parser;
 
 use leviculum_std::config::Config;
 use lnomad::browser::{self, BrowserOptions};
+use lnomad::cli::{resolve_args, Mode};
 use lnomad::fetch::Session;
 use lnomad::url::parse_url;
 
@@ -28,7 +29,8 @@ const FALLBACK_WIDTH: usize = 80;
 )]
 struct Args {
     /// Page URL: `<dest_hash>[:/page/x.mu[`f=v|...]]` (a bare hash opens the
-    /// default page). Optional in `--discover` mode.
+    /// default page). In `--discover` mode it is instead an optional listen
+    /// duration in seconds (equivalent to `--duration`).
     url: Option<String>,
 
     /// Shared-instance name to connect to (overrides the config file's).
@@ -60,10 +62,14 @@ struct Args {
     #[arg(long)]
     discover: bool,
 
-    /// How long to listen in `--discover` mode, in seconds.
-    #[arg(long, default_value_t = 30)]
-    duration: u64,
+    /// How long to listen in `--discover` mode, in seconds. Alternatively pass
+    /// the seconds as the bare positional: `lnomad --discover [seconds]`.
+    #[arg(long)]
+    duration: Option<u64>,
 }
+
+/// Default listen duration in `--discover` mode, in seconds.
+const DEFAULT_DISCOVER_DURATION: u64 = 30;
 
 /// Detect the terminal width in columns, falling back to [`FALLBACK_WIDTH`].
 fn detect_width() -> usize {
@@ -77,23 +83,31 @@ fn detect_width() -> usize {
 async fn main() -> ExitCode {
     let args = Args::parse();
 
-    // In page mode the URL is required; in --discover mode it is ignored.
-    let target = if args.discover {
-        None
-    } else {
-        match args.url.as_deref() {
-            Some(url) => match parse_url(url, None) {
-                Ok(target) => Some(target),
-                Err(err) => {
-                    eprintln!("lnomad: {err}: {url}");
-                    return ExitCode::from(2);
-                }
-            },
-            None => {
-                eprintln!("lnomad: a page URL is required (or pass --discover)");
+    // Resolve the positional: in page mode it is the URL, in --discover mode it
+    // is an optional listen duration in seconds.
+    let mode = match resolve_args(
+        args.discover,
+        args.url.as_deref(),
+        args.duration,
+        DEFAULT_DISCOVER_DURATION,
+    ) {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("lnomad: {err}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // In page mode, parse and validate the URL up front.
+    let (target, discover_duration) = match &mode {
+        Mode::Discover { duration } => (None, *duration),
+        Mode::Page { url } => match parse_url(url, None) {
+            Ok(target) => (Some(target), DEFAULT_DISCOVER_DURATION),
+            Err(err) => {
+                eprintln!("lnomad: {err}: {url}");
                 return ExitCode::from(2);
             }
-        }
+        },
     };
 
     let opts = BrowserOptions {
@@ -124,7 +138,7 @@ async fn main() -> ExitCode {
     // piped/redirected invocation never blocks on the REPL.
     let interactive =
         !args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let duration = Duration::from_secs(args.duration);
+    let duration = Duration::from_secs(discover_duration);
 
     let code = if args.discover {
         let mut out = std::io::stdout();

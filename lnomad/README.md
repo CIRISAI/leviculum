@@ -30,8 +30,14 @@ destination hash and display name collected without knowing anything in advance:
 
 ```
 lnomad --discover                 listen (default 30s) and list nodes found
-lnomad --discover --duration 60   listen for 60 seconds
+lnomad --discover 60              listen for 60 seconds (bare positional)
+lnomad --discover --duration 60   listen for 60 seconds (explicit flag)
 ```
+
+In `--discover` mode the positional argument is the listen duration in seconds,
+not a page URL: `lnomad --discover 5` and `lnomad --discover --duration 5` are
+equivalent. A non-numeric positional is rejected, and giving both a positional
+and a `--duration` that disagree is an error.
 
 On a terminal, each node is printed as it is first seen, then a list is shown:
 
@@ -53,7 +59,8 @@ the browser with the `d` (`nodes`) command, and `o <N>` opens a listed node.
 - `--timeout <s>`      per-request timeout in seconds (default 30)
 - `--print`            fetch, render and print once, then exit
 - `--discover`         list NomadNet nodes seen from announces (no URL needed)
-- `--duration <s>`     `--discover` listen window in seconds (default 30)
+- `--duration <s>`     `--discover` listen window in seconds (default 30); may
+  also be given as the bare positional, e.g. `lnomad --discover <s>`
 
 When stdout is not a terminal, `lnomad` prints once and exits even without
 `--print`, so piping and redirection never block on the prompt.

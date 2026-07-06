@@ -25,12 +25,14 @@
 //! `lnomad` binary drives.
 
 pub mod browser;
+pub mod cli;
 pub mod discovery;
 pub mod fetch;
 pub mod render;
 pub mod url;
 
 pub use browser::{parse_command, resolve_link, BrowserOptions, Command, Nav};
+pub use cli::{resolve_args, Mode};
 pub use discovery::{
     is_nomad_node_announce, name_hash_is_nomad_node, nomad_node_name_hash, DiscoveredNode,
     NomadNodeRegistry,
