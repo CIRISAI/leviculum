@@ -192,7 +192,12 @@ pub async fn fetch_remote_status(
 ) -> Result<(serde_json::Value, Option<i64>), String> {
     let dest_hash = mgmt_destination_hash(identity_hash);
 
-    // 1. Ensure a path to the remote management destination.
+    // 1. Ensure a path to the remote management destination. Issue the initial
+    // request immediately (the leaf is explicitly asking), then let
+    // `wait_for_path` re-request on a bounded cadence so a delayed answer — e.g.
+    // an upstream Python `rnsd` holding a forwarded announce under ingress
+    // limiting (Codeberg #44) — still resolves within the timeout instead of
+    // failing outright.
     if !node.has_path(&dest_hash) {
         if !quiet {
             eprintln!("Path to {} requested", hex_lower(identity_hash));
@@ -200,12 +205,13 @@ pub async fn fetch_remote_status(
         node.request_path(&dest_hash)
             .await
             .map_err(|e| e.to_string())?;
-        let deadline = Instant::now() + timeout;
-        while !node.has_path(&dest_hash) {
-            if Instant::now() > deadline {
-                return Err("Path request timed out".to_string());
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        let retry_interval = Duration::from_secs(2).min(timeout);
+        if !node
+            .wait_for_path(&dest_hash, timeout, retry_interval)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err("Path request timed out".to_string());
         }
     }
 

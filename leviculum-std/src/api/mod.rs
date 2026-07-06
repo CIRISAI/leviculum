@@ -333,6 +333,27 @@ impl Node {
         self.inner.request_path(dest_hash).await
     }
 
+    /// Wait until a path to `dest_hash` is known, actively re-issuing a
+    /// PATH_REQUEST on a bounded cadence if it does not arrive passively.
+    ///
+    /// Returns `Ok(true)` once a path is known, or `Ok(false)` if `timeout`
+    /// elapses first. The path arriving passively within the first
+    /// `retry_interval` never triggers a PATH_REQUEST, so the common case is
+    /// unchanged; a delayed announce (e.g. an upstream Python `rnsd` holding a
+    /// forwarded announce under ingress limiting, Codeberg #44) is recovered by
+    /// the explicit request, which is answered over the path-response path that
+    /// bypasses the hold. Client-side only, with no medium awareness.
+    pub async fn wait_for_path(
+        &self,
+        dest_hash: &DestinationHash,
+        timeout: std::time::Duration,
+        retry_interval: std::time::Duration,
+    ) -> Result<bool> {
+        self.inner
+            .wait_for_path(dest_hash, timeout, retry_interval)
+            .await
+    }
+
     /// Open a link to a destination, given its Ed25519 signing key.
     pub async fn connect_with_key(
         &self,

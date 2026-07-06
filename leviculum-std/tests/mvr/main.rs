@@ -18,6 +18,7 @@
 #[allow(dead_code)]
 pub mod harness;
 
+mod client_wait_for_path_request_fallback;
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
 mod responder_close_delivery;

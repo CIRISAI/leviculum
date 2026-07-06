@@ -2469,6 +2469,54 @@ impl ReticulumNode {
         Ok(())
     }
 
+    /// Wait until a path to `dest_hash` is known, actively re-issuing a
+    /// PATH_REQUEST if it has not arrived passively within `retry_interval`.
+    ///
+    /// Returns `Ok(true)` as soon as `has_path` is satisfied, or `Ok(false)`
+    /// if `timeout` elapses first. The common case (path already known, or an
+    /// inbound announce installs it within the first `retry_interval`) never
+    /// emits a PATH_REQUEST, so healthy behaviour is unchanged.
+    ///
+    /// When the passive announce is delayed the explicit PATH_REQUEST forces
+    /// the upstream to answer over its path-response code path, which a Python
+    /// `rnsd` does not subject to the `inbound()` announce-forward ingress hold
+    /// (Codeberg #44): a young daemon-to-daemon peer interface under the
+    /// stricter burst rate can hold a forwarded peer announce for
+    /// `IC_BURST_HOLD` seconds, well past a client path-wait budget. A
+    /// client-issued PATH_REQUEST both registers a waiting path request (which
+    /// skips the ingress-limit check on the next inbound announce) and is
+    /// answered directly from the daemon's path table, so it bypasses the hold.
+    ///
+    /// This is purely client-side: it issues the same PATH_REQUEST the stack
+    /// already sends on demand and carries no medium awareness, so it stays
+    /// within the interface-isolation rule. `retry_interval` should be well
+    /// under `timeout` so several requests can be attempted before the
+    /// deadline.
+    pub async fn wait_for_path(
+        &self,
+        dest_hash: &leviculum_core::DestinationHash,
+        timeout: Duration,
+        retry_interval: Duration,
+    ) -> Result<bool, Error> {
+        const POLL_INTERVAL: Duration = Duration::from_millis(100);
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut next_request = tokio::time::Instant::now() + retry_interval;
+        loop {
+            if self.has_path(dest_hash) {
+                return Ok(true);
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(false);
+            }
+            if now >= next_request {
+                self.request_path(dest_hash).await?;
+                next_request = now + retry_interval;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     /// Get hop count to a destination
     pub fn hops_to(&self, dest_hash: &leviculum_core::DestinationHash) -> Option<u8> {
         self.inner.lock().unwrap().hops_to(dest_hash)

@@ -47,26 +47,36 @@ fn parse_dest_hash(hex_str: &str) -> DestinationHash {
     DestinationHash::new(bytes)
 }
 
-/// Ignored because this test exposes a race in Python-RNS
-/// `Transport.inbound()` forward-dispatch (see
-/// `~/.claude/bugs/27.md`). ~25 % of runs fail because daemon B
-/// silently skips the TCP-forward of A's relayed peer announce
-/// to its connected Rust client. The Rust side is provably
-/// innocent: `packets_received` at
-/// `leviculum-core/src/transport.rs:1000` does not tick for the
-/// peer announce on failing runs.
+/// Formerly `#[ignore]`: ~25 % of runs failed because the Python
+/// relay (daemon B) held A's forwarded peer announce under ingress
+/// limiting. When B's daemon-to-daemon peer interface is younger
+/// than `IC_NEW_TIME` it uses the stricter `IC_BURST_FREQ_NEW`
+/// rate, and if the client own-echo and the upstream peer announce
+/// arrive within one burst window on loopback TCP, Python
+/// `Transport.inbound()` routes the peer announce through
+/// `hold_announce()`. The held announce is only released after
+/// `IC_BURST_HOLD` (tens of seconds), well past the client 10 s path
+/// budget (Codeberg #44). The Rust side was provably innocent:
+/// `packets_received` did not tick for the held announce.
 ///
-/// Kept in the tree because (a) the `Instant`-based instrumentation
-/// below documents the symptom for future debugging, (b) when the
-/// upstream race is addressed the test should start passing without
-/// modification, and (c) it is a canonical reproduction of the
-/// Bug #27 symptom on pure TCP over loopback.
+/// The fix is client-side: the path-wait now falls back to an
+/// explicit PATH_REQUEST when the announce does not arrive
+/// passively (see `ReticulumNode::wait_for_path`). Python answers a
+/// PATH_REQUEST over its path-response code path, which is not
+/// subject to the `inbound()` announce-forward hold, so the path is
+/// delivered inside the budget. This test now passes reliably.
+///
+/// Note: the current vendored Python (`IC_BURST_HOLD`,
+/// `IC_BURST_MIN_SAMPLES=6`) only rarely activates the burst hold on
+/// the two announces this two-node topology emits, so on most runs
+/// the path installs passively and the fallback is not exercised
+/// here. The fallback itself is proven directly, in isolation, by
+/// `client_wait_for_path_request_fallback`.
 ///
 /// To run manually:
 ///   cargo test -p leviculum-std --test mvr \
 ///     rust_client_path_install_with_own_echo \
-///     -- --ignored --test-threads=1
-#[ignore]
+///     -- --test-threads=1
 #[tokio::test]
 async fn rust_client_installs_peer_path_while_own_echoes() {
     let t0 = Instant::now();
@@ -155,18 +165,14 @@ async fn rust_client_installs_peer_path_while_own_echoes() {
     cps.push(("peer_announce_emitted", t0.elapsed()));
 
     // Wait up to 10 s for the Rust client to install the peer path.
+    // `wait_for_path` waits passively first and only falls back to an
+    // explicit PATH_REQUEST (every 1 s) if the announce is held upstream
+    // (Codeberg #44), so the healthy path is unchanged.
     cps.push(("wait_for_path_start", t0.elapsed()));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut installed = false;
-    let mut poll_idx: u32 = 0;
-    while tokio::time::Instant::now() < deadline {
-        if node.has_path(&peer_hash) {
-            installed = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        poll_idx += 1;
-    }
+    let installed = node
+        .wait_for_path(&peer_hash, Duration::from_secs(10), Duration::from_secs(1))
+        .await
+        .expect("wait_for_path");
     cps.push((
         if installed {
             "wait_for_path_end_installed"
@@ -201,7 +207,7 @@ async fn rust_client_installs_peer_path_while_own_echoes() {
         stats_end.packets_dropped(),
         paths_end
     );
-    eprintln!("TOTAL_POLLS={poll_idx} INSTALLED={installed}");
+    eprintln!("INSTALLED={installed}");
 
     assert!(
         installed,
