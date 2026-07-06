@@ -150,6 +150,9 @@ async fn send_radio_config(
         // separate follow-on (the firmware honours whatever it receives here).
         st_alock: 0,
         lt_alock: 0,
+        // Send-side only; `build_radio_config_frame` always emits the full
+        // 21-byte frame, so the receiver parses the lt_alock field as present.
+        lt_alock_present: true,
     };
     let payload = leviculum_core::rnode::build_radio_config_frame(&wire);
     let mut frame_buf = Vec::new();

@@ -1598,6 +1598,9 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
         // No airtime limit for silenced nodes (they never transmit anyway).
         st_alock: 0,
         lt_alock: 0,
+        // Send-side only (cosmetic): the built frame is always full-length, so
+        // the receiver parses the lt_alock field as present regardless.
+        lt_alock_present: true,
     };
     let payload = build_radio_config_frame(&wire);
     let mut framed = Vec::new();

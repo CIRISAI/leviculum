@@ -805,6 +805,13 @@ pub struct RadioConfigWire {
     /// Long-term airtime limit, RNode `CMD_LT_ALOCK` u16 encoding
     /// (`percent * 100`, see [`alock_u16_to_fraction`]). `0` = unlimited.
     pub lt_alock: u16,
+    /// Whether the parsed frame actually carried the `lt_alock` field (new
+    /// 21-byte frame) rather than defaulting it to 0 (old backward-compat
+    /// frame). Lets a standalone LNode tell "host set an explicit long-term
+    /// airtime lock (including an explicit 0 = off)" apart from "no long-term
+    /// lock was provided", so it can fall back to the ETSI lawful default
+    /// derived from its own TX frequency (see [`firmware_default_lt_alock`]).
+    pub lt_alock_present: bool,
 }
 
 /// Parse a radio config from wire bytes (13 to 19 bytes, after magic stripped).
@@ -831,7 +838,8 @@ pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
     } else {
         0
     };
-    let lt_alock = if data.len() >= 19 {
+    let lt_alock_present = data.len() >= 19;
+    let lt_alock = if lt_alock_present {
         u16::from_be_bytes([data[17], data[18]])
     } else {
         0
@@ -855,6 +863,7 @@ pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
         radio_silent,
         st_alock,
         lt_alock,
+        lt_alock_present,
     })
 }
 
@@ -959,6 +968,31 @@ pub fn etsi_eu868_duty_cycle(freq_hz: u64) -> Option<f64> {
         869_400_000..=869_649_999 => Some(0.10),  // P 869.4-869.65: 10%
         869_700_000..=869_999_999 => Some(0.01),  // Q 869.7-870.0: 1%
         _ => None,                                // guard gaps + out-of-band
+    }
+}
+
+/// Resolve the long-term airtime lock (`lt_alock` u16) a standalone LNode's
+/// firmware should enforce, given its TX `freq_hz` and any `explicit` value the
+/// host provided on the radio-config frame.
+///
+/// An explicit value always wins, including an explicit `0` (which the airtime
+/// lock reads as "unlimited"): a Part-3-aware host already resolves the right
+/// long-term cap and sends it verbatim, so the firmware must not second-guess
+/// it. When no explicit value was provided (`None`, e.g. the standalone
+/// compiled default or an old-format frame that predates the alock field), the
+/// firmware derives the ETSI EU868 lawful default from its own frequency via
+/// [`etsi_eu868_duty_cycle`], mapped to the `fraction * 10000` u16 encoding.
+/// Non-EU / out-of-band frequencies with no explicit value stay off (`0`).
+///
+/// This mirrors the host-side resolution so a standalone LNode on an EU
+/// 863-870 MHz channel is lawful out of the box even though no host ever runs
+/// its Part-3 helper.
+pub fn firmware_default_lt_alock(freq_hz: u64, explicit: Option<u16>) -> u16 {
+    match explicit {
+        Some(v) => v,
+        None => etsi_eu868_duty_cycle(freq_hz)
+            .map(|fraction| (fraction * 10000.0) as u16)
+            .unwrap_or(0),
     }
 }
 
@@ -2202,6 +2236,9 @@ mod tests {
             radio_silent: false,
             st_alock: 0,
             lt_alock: 0,
+            // These profiles are built into full 21-byte frames, so the parsed
+            // round-trip sees the lt_alock field present.
+            lt_alock_present: true,
         }
     }
 
@@ -2217,6 +2254,7 @@ mod tests {
             radio_silent: false,
             st_alock: 0,
             lt_alock: 0,
+            lt_alock_present: true,
         }
     }
 
@@ -2232,6 +2270,7 @@ mod tests {
             radio_silent: false,
             st_alock: 0,
             lt_alock: 0,
+            lt_alock_present: true,
         }
     }
 
@@ -2313,6 +2352,7 @@ mod tests {
         assert!(!parsed.radio_silent);
         assert_eq!(parsed.st_alock, 0);
         assert_eq!(parsed.lt_alock, 0);
+        assert!(!parsed.lt_alock_present); // old frame carried no alock field
         assert_eq!(parsed.sf, 7);
     }
 
@@ -2332,6 +2372,7 @@ mod tests {
         assert!(!parsed.radio_silent);
         assert_eq!(parsed.st_alock, 0);
         assert_eq!(parsed.lt_alock, 0);
+        assert!(!parsed.lt_alock_present);
     }
 
     #[test]
@@ -2351,6 +2392,7 @@ mod tests {
         assert!(parsed.radio_silent);
         assert_eq!(parsed.st_alock, 0);
         assert_eq!(parsed.lt_alock, 0);
+        assert!(!parsed.lt_alock_present); // 15-byte frame stops before alock
     }
 
     #[test]
@@ -2477,6 +2519,30 @@ mod tests {
         assert_eq!(parsed, cfg);
         assert_eq!(parsed.st_alock, 5000);
         assert_eq!(parsed.lt_alock, 1000);
+        assert!(parsed.lt_alock_present); // full frame carried the alock field
+    }
+
+    #[test]
+    fn firmware_default_lt_alock_derives_from_frequency() {
+        // Standalone default (no explicit host value): the ETSI P sub-band at
+        // 869.525 MHz maps to the 10% cap -> lt_alock 1000 (0.10 * 10000).
+        assert_eq!(firmware_default_lt_alock(869_525_000, None), 1000);
+        // Other EU sub-bands derive their own lawful caps.
+        assert_eq!(firmware_default_lt_alock(868_100_000, None), 100); // M: 1%
+        assert_eq!(firmware_default_lt_alock(864_000_000, None), 10); // K: 0.1%
+                                                                      // A US 915 MHz / out-of-band frequency with no explicit value stays off.
+        assert_eq!(firmware_default_lt_alock(915_000_000, None), 0);
+        assert_eq!(firmware_default_lt_alock(869_300_000, None), 0); // guard gap
+    }
+
+    #[test]
+    fn firmware_default_lt_alock_explicit_wins() {
+        // An explicit host value is used verbatim even on an EU frequency where
+        // the lawful default would otherwise apply...
+        assert_eq!(firmware_default_lt_alock(869_525_000, Some(5000)), 5000);
+        // ...including an explicit 0 (host chose "unlimited"), which must NOT be
+        // overridden by the frequency-derived default.
+        assert_eq!(firmware_default_lt_alock(869_525_000, Some(0)), 0);
     }
 
     // -----------------------------------------------------------------------

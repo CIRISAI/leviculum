@@ -124,6 +124,12 @@ pub struct RadioConfig {
     /// Long-term airtime limit, RNode `CMD_LT_ALOCK` u16 encoding
     /// (`percent * 100`). `0` = unlimited. Enforced by the airtime lock.
     pub lt_alock: u16,
+    /// Whether `lt_alock` came from an explicit host value (new-format radio
+    /// config frame) rather than the compiled default. When `false`, a
+    /// standalone LNode derives the lawful long-term cap from its own TX
+    /// frequency via [`effective_lt_alock`](Self::effective_lt_alock); when
+    /// `true`, the host value wins verbatim (including an explicit `0` = off).
+    pub lt_alock_present: bool,
 }
 
 impl RadioConfig {
@@ -142,7 +148,27 @@ impl RadioConfig {
             radio_silent: false,
             st_alock: 0,
             lt_alock: 0,
+            // Compiled default: no host ever set an explicit long-term lock, so
+            // a standalone LNode derives the ETSI lawful cap from its frequency.
+            lt_alock_present: false,
         }
+    }
+
+    /// Effective long-term airtime lock (`lt_alock` u16) this config enforces.
+    ///
+    /// When the host provided an explicit `lt_alock` (new-format frame,
+    /// [`lt_alock_present`](Self::lt_alock_present) is `true`) that value wins,
+    /// including an explicit `0` = unlimited. Otherwise the firmware derives the
+    /// ETSI EU868 lawful default from [`frequency_hz`](Self::frequency_hz) so a
+    /// standalone LNode on an EU 863-870 MHz channel is lawful out of the box;
+    /// out-of-band frequencies stay off (`0`).
+    pub fn effective_lt_alock(&self) -> u16 {
+        let explicit = if self.lt_alock_present {
+            Some(self.lt_alock)
+        } else {
+            None
+        };
+        leviculum_core::rnode::firmware_default_lt_alock(self.frequency_hz as u64, explicit)
     }
 
     /// Parse a radio config from wire format (13 bytes, after 2-byte magic stripped).
@@ -182,6 +208,7 @@ impl RadioConfig {
             radio_silent: wire.radio_silent,
             st_alock: wire.st_alock,
             lt_alock: wire.lt_alock,
+            lt_alock_present: wire.lt_alock_present,
         })
     }
 }
@@ -237,6 +264,29 @@ fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
     let turnaround = leviculum_core::rnode::PACING_MARGIN_MS + 2 * compute_slot_ms(cfg);
     // Clamp to >=1ms (the SX1262 needs a non-zero timeout) and a sane ceiling.
     (reply_airtime + turnaround).clamp(1, 10_000) as u32
+}
+
+/// Apply a config's airtime limits to the tracker, deriving the lawful
+/// long-term cap from the TX frequency when the host set no explicit `lt_alock`
+/// (see [`RadioConfig::effective_lt_alock`]). Emits a one-line log when the
+/// firmware applies its own lawful default so the derived cap is visible in the
+/// debug capture.
+fn apply_airtime_limits(
+    airtime: &mut leviculum_core::rnode::AirtimeTracker,
+    config: &RadioConfig,
+) {
+    let lt_alock = config.effective_lt_alock();
+    airtime.set_st_limit_u16(config.st_alock);
+    airtime.set_lt_limit_u16(lt_alock);
+    if !config.lt_alock_present {
+        crate::log::log_fmt(
+            "[LORA_AIRTIME_LOCK] ",
+            format_args!(
+                "lawful default freq={} lt_alock={}",
+                config.frequency_hz, lt_alock
+            ),
+        );
+    }
 }
 
 /// Transmit one or two LoRa frames back-to-back. For split packets, both
@@ -519,8 +569,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
     // lives in the task's static future, off the heap (960 bytes). Limits of 0
     // mean unlimited, so unconfigured devices and tests are never throttled.
     let mut airtime = leviculum_core::rnode::AirtimeTracker::new();
-    airtime.set_st_limit_u16(config.st_alock);
-    airtime.set_lt_limit_u16(config.lt_alock);
+    apply_airtime_limits(&mut airtime, &config);
 
     loop {
         // Check for runtime radio config override (test infrastructure)
@@ -551,8 +600,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     );
                     config = new_cfg;
                     slot_ms = compute_slot_ms(&config);
-                    airtime.set_st_limit_u16(config.st_alock);
-                    airtime.set_lt_limit_u16(config.lt_alock);
+                    apply_airtime_limits(&mut airtime, &config);
                 }
                 Err(e) => crate::log::log_fmt("[LORA] ", format_args!("reconfig FAILED: {:?}", e)),
             }
