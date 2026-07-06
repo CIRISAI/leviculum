@@ -433,6 +433,10 @@ pub struct Link {
     /// Outgoing resource transfer (sender side).
     /// Removed when transfer completes or fails.
     outgoing_resource: Option<crate::resource::outgoing::OutgoingResource>,
+    /// Plan for the remaining segments of a split outgoing transfer (files
+    /// whose combined metadata+data exceeds RESOURCE_MAX_EFFICIENT_SIZE).
+    /// `None` for single-segment transfers. Cleared with the outgoing resource.
+    outgoing_segments: Option<crate::resource::outgoing::OutgoingSegmentPlan>,
     /// Incoming resource transfer (receiver side).
     /// Removed when transfer completes or fails.
     incoming_resource: Option<crate::resource::incoming::IncomingResource>,
@@ -518,6 +522,7 @@ impl Link {
             rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
             outgoing_resource: None,
+            outgoing_segments: None,
             incoming_resource: None,
             pending_resource_adv: None,
             resource_strategy: crate::resource::ResourceStrategy::AcceptNone,
@@ -629,6 +634,7 @@ impl Link {
             rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
             outgoing_resource: None,
+            outgoing_segments: None,
             incoming_resource: None,
             pending_resource_adv: None,
             resource_strategy: crate::resource::ResourceStrategy::AcceptNone,
@@ -1451,9 +1457,29 @@ impl Link {
         self.outgoing_resource.take()
     }
 
-    /// Clear the outgoing resource.
+    /// Clear the outgoing resource (and any remaining segment plan).
+    ///
+    /// Called on transfer failure/cancellation, so the segment plan of a split
+    /// transfer is dropped with it. Between-segment transitions use
+    /// take/set_outgoing_resource instead, which leave the plan intact.
     pub(crate) fn clear_outgoing_resource(&mut self) {
         self.outgoing_resource = None;
+        self.outgoing_segments = None;
+    }
+
+    /// Set the outgoing segment plan for a split transfer.
+    pub(crate) fn set_outgoing_segments(
+        &mut self,
+        plan: crate::resource::outgoing::OutgoingSegmentPlan,
+    ) {
+        self.outgoing_segments = Some(plan);
+    }
+
+    /// Take the outgoing segment plan out of the link (leaving None).
+    pub(crate) fn take_outgoing_segments(
+        &mut self,
+    ) -> Option<crate::resource::outgoing::OutgoingSegmentPlan> {
+        self.outgoing_segments.take()
     }
 
     /// Get a reference to the incoming resource.

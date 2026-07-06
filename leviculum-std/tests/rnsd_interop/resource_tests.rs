@@ -423,6 +423,64 @@ async fn test_rust_sends_large_resource() {
     assert_eq!(received[0].data, data, "Data content should match");
 }
 
+/// TEST 5b: Rust sends a resource LARGER than RESOURCE_MAX_EFFICIENT_SIZE
+/// (Codeberg #27), so our sender must split it into multiple segments and a
+/// Python `rncp`-style receiver must reassemble the whole file intact.
+///
+/// This is the real send-direction interop gap: before sender-side
+/// segmentation, `lncp` could not send files >1 MiB and Python never received
+/// the segments past the first. Varied (position-dependent) data makes any
+/// boundary/offset error change the reassembled bytes. Python's Resource
+/// machinery reassembles the segments by `original_hash` and fires its
+/// resource-concluded callback exactly once with the full file.
+#[tokio::test]
+async fn test_rust_sends_over_max_efficient_resource_python_receives() {
+    use leviculum_core::resource::RESOURCE_MAX_EFFICIENT_SIZE;
+
+    let (
+        rust_node,
+        mut event_rx,
+        py_initiator,
+        _py_relay,
+        link_id,
+        _py_link_hash,
+        _dest_hash,
+        _storage,
+    ) = setup_link(true).await;
+
+    // ~2.2x MAX -> 3 segments. Position-dependent but compressible, so the
+    // transfer stays fast while still catching any segment misalignment.
+    let size = RESOURCE_MAX_EFFICIENT_SIZE * 2 + RESOURCE_MAX_EFFICIENT_SIZE / 5;
+    assert!(size > 1_048_575, "must exceed one segment");
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+
+    rust_node
+        .send_resource(&link_id, &data, None, true)
+        .await
+        .expect("send_resource should succeed");
+
+    // Multi-segment transfer over a real TCP hop: allow generous time.
+    assert!(
+        wait_for_resource_sender_completed(&mut event_rx, &link_id, Duration::from_secs(120)).await,
+        "Rust sender should get ResourceCompleted after all segments"
+    );
+
+    let received = wait_for_python_resource(&py_initiator, Duration::from_secs(120)).await;
+    assert!(
+        !received.is_empty(),
+        "Python should receive the reassembled multi-segment resource"
+    );
+    assert_eq!(
+        received[0].data.len(),
+        data.len(),
+        "reassembled length must match the source file"
+    );
+    assert_eq!(
+        received[0].data, data,
+        "reassembled bytes must match the source file exactly"
+    );
+}
+
 /// TEST 6: Python sends a large resource (51KB of varied data), Rust receives it.
 #[tokio::test]
 async fn test_python_sends_large_resource_to_rust() {

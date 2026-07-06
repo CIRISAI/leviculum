@@ -32,6 +32,17 @@ pub(super) struct LinkRetryState {
     pub remaining: u8,
 }
 
+/// Outcome of trying to advance a split outgoing resource transfer after a
+/// segment's proof arrives.
+enum SegmentAdvance {
+    /// The next segment was built and advertised; the transfer continues.
+    Sent,
+    /// No more segments; the transfer is complete. Carries the transfer's total
+    /// segment count for the sender's ResourceCompleted event (1 when the
+    /// transfer was never split).
+    Done { total_segments: u32 },
+}
+
 /// Simple message type for sending raw bytes over a channel
 struct RawBytesMessage<'a>(&'a [u8]);
 
@@ -806,7 +817,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
 
         if packet.context == PacketContext::ResourcePrf {
-            self.handle_resource_proof(link_id, proof_data);
+            self.handle_resource_proof(link_id, proof_data, now_ms);
             return;
         }
 
@@ -2363,7 +2374,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle a resource proof (sender receives completion proof).
-    fn handle_resource_proof(&mut self, link_id: LinkId, proof_data: &[u8]) {
+    fn handle_resource_proof(&mut self, link_id: LinkId, proof_data: &[u8], now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -2379,17 +2390,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         match res.handle_proof(proof_data) {
             Ok(crate::resource::ResourceStatus::Complete) => {
                 let resource_hash = *res.resource_hash();
-                // Don't put back, transfer is complete
+                // Segment complete. If this is a split transfer with more
+                // segments to send, advertise the next one instead of signalling
+                // completion (mirrors Python's next_segment.advertise()). Only
+                // the final segment emits the sender's ResourceCompleted.
+                let total_segments = match self.advance_outgoing_segments(&link_id, now_ms) {
+                    SegmentAdvance::Sent => return,
+                    SegmentAdvance::Done { total_segments } => total_segments,
+                };
+
+                // Don't put the resource back, transfer is complete.
                 self.events.push(NodeEvent::ResourceCompleted {
                     link_id,
                     resource_hash,
                     data: Vec::new(), // sender doesn't return data
                     metadata: None,
                     is_sender: true,
-                    // Rust send_resource() always creates single-segment resources.
-                    // Multi-segment sending is not yet implemented.
-                    segment_index: 1,
-                    total_segments: 1,
+                    segment_index: total_segments,
+                    total_segments,
                 });
             }
             Ok(_) => {
@@ -2398,6 +2416,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             Err(e) => {
                 let resource_hash = *res.resource_hash();
                 crate::tracing::debug!("Resource proof validation failed: {e}");
+                // Drop any remaining segment plan on failure.
+                if let Some(link) = self.links.get_mut(&link_id) {
+                    let _ = link.take_outgoing_segments();
+                }
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,
@@ -2406,6 +2428,75 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
         }
+    }
+
+    /// After a segment's proof, build and advertise the next segment of a split
+    /// transfer, if any.
+    ///
+    /// The completed segment's OutgoingResource has already been taken by the
+    /// caller and is not put back; when a next segment exists it replaces the
+    /// resource on the link. Returns [`SegmentAdvance::Sent`] when the next
+    /// segment was advertised (the caller must not emit ResourceCompleted yet),
+    /// or [`SegmentAdvance::Done`] with the transfer's total segment count when
+    /// there are no more segments (single-segment transfers report 1).
+    fn advance_outgoing_segments(&mut self, link_id: &LinkId, now_ms: u64) -> SegmentAdvance {
+        use crate::packet::PacketContext;
+
+        let mut plan = match self
+            .links
+            .get_mut(link_id)
+            .and_then(|l| l.take_outgoing_segments())
+        {
+            Some(p) => p,
+            None => return SegmentAdvance::Done { total_segments: 1 },
+        };
+
+        if !plan.has_next() {
+            // Last segment just completed; drop the plan and signal completion.
+            return SegmentAdvance::Done {
+                total_segments: plan.total_segments(),
+            };
+        }
+
+        let index = plan.next_index();
+        let total_segments = plan.total_segments();
+
+        // Build the next segment. Needs an immutable link borrow plus rng.
+        let build = {
+            let Some(link) = self.links.get(link_id) else {
+                return SegmentAdvance::Done { total_segments };
+            };
+            plan.build_segment(index, link, &mut self.rng, now_ms)
+        };
+
+        let outgoing = match build {
+            Ok(o) => o,
+            Err(e) => {
+                crate::tracing::debug!("Failed to build resource segment {index}: {e}");
+                if let Some(link) = self.links.get_mut(link_id) {
+                    link.clear_outgoing_resource();
+                }
+                return SegmentAdvance::Done { total_segments };
+            }
+        };
+
+        let adv_bytes = outgoing.adv_packet().to_vec();
+        plan.advance();
+
+        let Some(link) = self.links.get_mut(link_id) else {
+            return SegmentAdvance::Done { total_segments };
+        };
+        link.set_outgoing_resource(outgoing);
+        link.set_outgoing_segments(plan);
+
+        let adv_pkt = self.links.get_mut(link_id).and_then(|l| {
+            l.build_data_packet_with_context(&adv_bytes, PacketContext::ResourceAdv, &mut self.rng)
+                .ok()
+        });
+        if let Some(pkt) = adv_pkt {
+            self.route_link_packet(link_id, &pkt);
+        }
+        SegmentAdvance::Sent
     }
 
     // Internal: Timeout / Polling

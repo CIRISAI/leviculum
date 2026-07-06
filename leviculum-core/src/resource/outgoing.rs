@@ -20,9 +20,53 @@ use crate::resource::{
     resource_sdu, ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus,
     COLLISION_GUARD_SIZE, HASHMAP_IS_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
     PART_TIMEOUT_FACTOR_INITIAL, PER_RETRY_DELAY_MS, PROCESSING_GRACE_MS, PROOF_TIMEOUT_FACTOR,
-    RESOURCE_MAX_ADV_RETRIES, RESOURCE_MAX_RETRIES, RESOURCE_RANDOM_HASH_SIZE,
-    SENDER_GRACE_TIME_MS,
+    RESOURCE_MAX_ADV_RETRIES, RESOURCE_MAX_EFFICIENT_SIZE, RESOURCE_MAX_RETRIES,
+    RESOURCE_RANDOM_HASH_SIZE, SENDER_GRACE_TIME_MS,
 };
+
+/// Per-segment parameters for a (possibly multi-segment) outgoing resource.
+///
+/// A resource whose combined `metadata + data` exceeds
+/// [`RESOURCE_MAX_EFFICIENT_SIZE`](crate::resource::RESOURCE_MAX_EFFICIENT_SIZE)
+/// is split into `total_segments` independent resource transfers, each with its
+/// own hash, hashmap and proof. All segments carry the same `original_hash`
+/// (the first segment's resource hash) and the same total `data_size`, matching
+/// Python `RNS.Resource` segmentation so a Python `rncp` receiver reassembles
+/// the file.
+pub(crate) struct SegmentParams {
+    /// 1-based index of this segment.
+    pub segment_index: u32,
+    /// Total number of segments in the transfer.
+    pub total_segments: u32,
+    /// Shared `o` advertisement field for the whole transfer.
+    ///
+    /// `None` for a single-segment resource, which keeps the legacy content
+    /// hash of the combined payload. `Some(h)` pins the split-resource group
+    /// key to the first segment's resource hash (what a Python receiver uses as
+    /// the on-disk reassembly filename).
+    pub original_hash: Option<[u8; 32]>,
+    /// Total logical stream size (`metadata_size + full data size`) for the `d`
+    /// advertisement field. `None` uses this segment's own combined length
+    /// (single-segment behaviour).
+    pub total_data_size: Option<u64>,
+    /// Force the `has_metadata` advertisement flag on even when no metadata
+    /// bytes are prepended. Python sets it for every segment of a split
+    /// resource; the receiver only strips metadata on segment 1.
+    pub force_has_metadata: bool,
+}
+
+impl SegmentParams {
+    /// Parameters for a standalone, single-segment resource (legacy behaviour).
+    pub(crate) fn single() -> Self {
+        Self {
+            segment_index: 1,
+            total_segments: 1,
+            original_hash: None,
+            total_data_size: None,
+            force_has_metadata: false,
+        }
+    }
+}
 
 /// Result of polling an outgoing resource for timeout.
 #[derive(Debug)]
@@ -100,6 +144,35 @@ impl OutgoingResource {
             rng,
             now_ms,
             false,
+            SegmentParams::single(),
+        )
+    }
+
+    /// Create one segment of a multi-segment resource transfer.
+    ///
+    /// `data` is this segment's slice of the file (metadata is prepended only
+    /// on segment 1, driven by `metadata` being `Some`). `seg` carries the
+    /// shared advertisement fields (`o`, `d`, `l`) and this segment's index so
+    /// a Python `rncp` receiver reassembles the file across segments.
+    pub(crate) fn new_segment(
+        data: &[u8],
+        metadata: Option<&[u8]>,
+        link: &Link,
+        auto_compress: bool,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+        seg: SegmentParams,
+    ) -> Result<Self, ResourceError> {
+        Self::new_with_flags(
+            data,
+            metadata,
+            None,
+            link,
+            auto_compress,
+            rng,
+            now_ms,
+            false,
+            seg,
         )
     }
 
@@ -129,6 +202,7 @@ impl OutgoingResource {
             rng,
             now_ms,
             true,
+            SegmentParams::single(),
         )
     }
 
@@ -142,6 +216,7 @@ impl OutgoingResource {
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
         is_response: bool,
+        seg: SegmentParams,
     ) -> Result<Self, ResourceError> {
         if !link.is_active() {
             return Err(ResourceError::LinkNotActive);
@@ -153,7 +228,11 @@ impl OutgoingResource {
         // Build combined = metadata_prefix + data
         // Python line 264: struct.pack(">I", metadata_size)[1:] + packed_metadata
         let mut combined = Vec::new();
-        let has_metadata = metadata.is_some();
+        // Metadata bytes are prepended only when present (segment 1). The
+        // has_metadata *flag* may still be set on later segments of a split
+        // resource (Python sets it for every segment); the receiver only strips
+        // metadata on segment 1.
+        let has_metadata = metadata.is_some() || seg.force_has_metadata;
         if let Some(meta) = metadata {
             let meta_len = meta.len();
             // 3-byte big-endian length (high 3 bytes of u32)
@@ -166,10 +245,13 @@ impl OutgoingResource {
 
         let uncompressed_size = combined.len() as u64;
 
-        // Compute original_hash over unencrypted combined data
-        let original_hash_full = full_hash(&combined);
-        let mut original_hash = [0u8; 32];
-        original_hash.copy_from_slice(&original_hash_full);
+        // Legacy content hash over the unencrypted combined data. Used as the
+        // `o` advertisement field for single-segment resources (preserves
+        // existing behaviour). Split resources instead pin `o` to segment 1's
+        // resource hash (decided after the collision loop below).
+        let content_hash_full = full_hash(&combined);
+        let mut content_hash = [0u8; 32];
+        content_hash.copy_from_slice(&content_hash_full);
 
         // Try compression
         #[allow(unused_mut)]
@@ -292,6 +374,22 @@ impl OutgoingResource {
             }
         };
 
+        // Decide the shared `o` field now that resource_hash is final.
+        // - explicit override: a later segment carrying segment 1's hash.
+        // - split, no override: segment 1 of a split resource -> its own hash
+        //   (matches Python, which sets original_hash = self.hash).
+        // - single segment: legacy content hash (unchanged behaviour).
+        let original_hash = match seg.original_hash {
+            Some(h) => h,
+            None if seg.total_segments > 1 => resource_hash,
+            None => content_hash,
+        };
+
+        // Advertisement `d` field: total logical size across all segments
+        // (Python sends total_size on every segment), or this segment's own
+        // combined length for a single-segment transfer.
+        let adv_data_size = seg.total_data_size.unwrap_or(uncompressed_size);
+
         // Calculate hashmap segments
         let total_hashmap_segments = if hashmap_max == 0 {
             1
@@ -310,7 +408,7 @@ impl OutgoingResource {
         let flags = ResourceFlags {
             encrypted: true,
             compressed,
-            split: false,
+            split: seg.total_segments > 1,
             is_request: false,
             is_response,
             has_metadata,
@@ -319,13 +417,13 @@ impl OutgoingResource {
         // Build and cache advertisement
         let adv = ResourceAdvertisement {
             transfer_size: encrypted.len() as u64,
-            data_size: uncompressed_size,
+            data_size: adv_data_size,
             num_parts,
             resource_hash,
             random_hash,
             original_hash,
-            segment_index: 1,
-            total_segments: 1,
+            segment_index: seg.segment_index,
+            total_segments: seg.total_segments,
             request_id: request_id.map(|r| r.to_vec()),
             flags,
             hashmap_data,
@@ -692,6 +790,151 @@ impl OutgoingResource {
     }
 }
 
+/// Number of segments needed to carry `total_size` bytes, where each segment
+/// holds at most [`RESOURCE_MAX_EFFICIENT_SIZE`] bytes of the logical stream.
+///
+/// Matches Python `((total_size-1)//MAX_EFFICIENT_SIZE)+1`. `total_size` is the
+/// combined `metadata_size + data` length. Returns 1 for `total_size == 0`.
+pub(crate) fn segment_count(total_size: usize) -> u32 {
+    if total_size == 0 {
+        return 1;
+    }
+    ((total_size - 1) / RESOURCE_MAX_EFFICIENT_SIZE) as u32 + 1
+}
+
+/// Plan for sending the remaining segments of a split resource transfer.
+///
+/// Held on the [`Link`] alongside the in-flight [`OutgoingResource`]. Segment 1
+/// is advertised immediately by `send_resource`; each subsequent segment is
+/// built and advertised only after the previous segment's proof arrives, which
+/// mirrors Python `Resource.validate_proof` advertising `next_segment`.
+pub(crate) struct OutgoingSegmentPlan {
+    /// Full application data (the whole file). Metadata is stored separately.
+    data: Vec<u8>,
+    /// Segment-1 metadata bytes (msgpack, as passed by the caller).
+    metadata: Option<Vec<u8>>,
+    /// Length of the metadata block prepended to segment 1, i.e.
+    /// `3 + metadata.len()` (the 3-byte length prefix plus the bytes), or 0.
+    /// Matches Python `metadata_size`.
+    metadata_size: usize,
+    /// Total number of segments in this transfer.
+    total_segments: u32,
+    /// Index (1-based) of the next segment to build and advertise.
+    next_index: u32,
+    /// Shared `o` advertisement field: segment 1's resource hash.
+    original_hash: [u8; 32],
+    /// Total logical size (`metadata_size + data.len()`) for the `d` field.
+    total_data_size: u64,
+    /// Whether resource data should be auto-compressed per segment.
+    auto_compress: bool,
+}
+
+impl OutgoingSegmentPlan {
+    /// Create a plan for a transfer whose combined `metadata + data` exceeds
+    /// [`RESOURCE_MAX_EFFICIENT_SIZE`]. `next_index` starts at 2 because the
+    /// caller advertises segment 1 directly.
+    pub(crate) fn new(
+        data: Vec<u8>,
+        metadata: Option<Vec<u8>>,
+        metadata_size: usize,
+        total_segments: u32,
+        auto_compress: bool,
+    ) -> Self {
+        let total_data_size = (metadata_size + data.len()) as u64;
+        Self {
+            data,
+            metadata,
+            metadata_size,
+            total_segments,
+            next_index: 2,
+            original_hash: [0u8; 32],
+            total_data_size,
+            auto_compress,
+        }
+    }
+
+    /// Record segment 1's resource hash as the shared `o` field for all later
+    /// segments.
+    pub(crate) fn set_original_hash(&mut self, hash: [u8; 32]) {
+        self.original_hash = hash;
+    }
+
+    /// Whether there is still a segment left to advertise.
+    pub(crate) fn has_next(&self) -> bool {
+        self.next_index <= self.total_segments
+    }
+
+    /// The byte range of `data` carried by segment `index` (1-based).
+    ///
+    /// Segment 1 carries `MAX - metadata_size` data bytes after the metadata
+    /// block; each later segment carries up to `MAX` data bytes. Matches
+    /// Python's `seek_position` / `segment_read_size`.
+    fn data_range(&self, index: u32) -> core::ops::Range<usize> {
+        let first_read_size = RESOURCE_MAX_EFFICIENT_SIZE.saturating_sub(self.metadata_size);
+        let start = if index <= 1 {
+            0
+        } else {
+            first_read_size + (index as usize - 2) * RESOURCE_MAX_EFFICIENT_SIZE
+        };
+        let want = if index <= 1 {
+            first_read_size
+        } else {
+            RESOURCE_MAX_EFFICIENT_SIZE
+        };
+        let start = start.min(self.data.len());
+        let end = start.saturating_add(want).min(self.data.len());
+        start..end
+    }
+
+    /// Build the [`OutgoingResource`] for segment `index` (1-based).
+    ///
+    /// For segment 1 the metadata block is prepended and `o` is set to the
+    /// segment's own resource hash; later segments carry the recorded
+    /// `original_hash` and no metadata bytes (but keep the `has_metadata` flag
+    /// when the transfer has metadata, matching Python).
+    pub(crate) fn build_segment(
+        &self,
+        index: u32,
+        link: &Link,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+    ) -> Result<OutgoingResource, ResourceError> {
+        let range = self.data_range(index);
+        let slice = &self.data[range];
+
+        let (metadata, original_hash): (Option<&[u8]>, Option<[u8; 32]>) = if index <= 1 {
+            (self.metadata.as_deref(), None)
+        } else {
+            (None, Some(self.original_hash))
+        };
+
+        let seg = SegmentParams {
+            segment_index: index,
+            total_segments: self.total_segments,
+            original_hash,
+            total_data_size: Some(self.total_data_size),
+            force_has_metadata: self.metadata_size > 0,
+        };
+
+        OutgoingResource::new_segment(slice, metadata, link, self.auto_compress, rng, now_ms, seg)
+    }
+
+    /// Advance the plan to the next segment after one has been advertised.
+    pub(crate) fn advance(&mut self) {
+        self.next_index += 1;
+    }
+
+    /// Index of the next segment to advertise.
+    pub(crate) fn next_index(&self) -> u32 {
+        self.next_index
+    }
+
+    /// Total number of segments in the transfer.
+    pub(crate) fn total_segments(&self) -> u32 {
+        self.total_segments
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,5 +1281,89 @@ mod tests {
             }
             other => panic!("expected RequestProof, got {other:?}"),
         }
+    }
+
+    // ---- Segmentation (Codeberg #27) ----
+
+    const MAX: usize = RESOURCE_MAX_EFFICIENT_SIZE;
+
+    #[test]
+    fn test_segment_count_boundaries() {
+        // Matches Python ((total_size-1)//MAX)+1, with 0 -> 1 segment.
+        assert_eq!(segment_count(0), 1);
+        assert_eq!(segment_count(1), 1);
+        assert_eq!(segment_count(MAX - 1), 1);
+        assert_eq!(segment_count(MAX), 1); // exactly MAX: single segment
+        assert_eq!(segment_count(MAX + 1), 2); // one over: split
+        assert_eq!(segment_count(2 * MAX), 2);
+        assert_eq!(segment_count(2 * MAX + 1), 3);
+        assert_eq!(segment_count(7 * MAX / 2), 4); // ~3.5x -> 4 segments
+    }
+
+    /// Every segment's data range must tile `data` exactly: start at 0, no gaps
+    /// or overlaps, and cover the whole buffer. This is the byte-boundary math a
+    /// Python receiver relies on to reassemble the file.
+    fn assert_ranges_tile(metadata_size: usize, data_len: usize) {
+        let total_size = metadata_size + data_len;
+        let total_segments = segment_count(total_size);
+        let plan = OutgoingSegmentPlan::new(
+            vec![0u8; data_len],
+            (metadata_size > 0).then(|| vec![0u8; metadata_size.saturating_sub(3)]),
+            metadata_size,
+            total_segments,
+            false,
+        );
+
+        let first_read_size = MAX.saturating_sub(metadata_size);
+        let mut expected_start = 0usize;
+        for index in 1..=total_segments {
+            let r = plan.data_range(index);
+            assert_eq!(
+                r.start, expected_start,
+                "segment {index} start (meta={metadata_size}, len={data_len})"
+            );
+            let want = if index == 1 { first_read_size } else { MAX };
+            let expected_end = (expected_start + want).min(data_len);
+            assert_eq!(
+                r.end, expected_end,
+                "segment {index} end (meta={metadata_size}, len={data_len})"
+            );
+            expected_start = r.end;
+        }
+        assert_eq!(
+            expected_start, data_len,
+            "segments must cover all data bytes (meta={metadata_size}, len={data_len})"
+        );
+    }
+
+    #[test]
+    fn test_plan_data_ranges_tile_data() {
+        // Just over MAX, no metadata: 2 segments.
+        assert_ranges_tile(0, MAX + 1);
+        // Metadata pushes an exactly-MAX data buffer over the boundary: the
+        // first segment's data slice shrinks by metadata_size.
+        assert_ranges_tile(20, MAX);
+        // ~3.5x, no metadata.
+        assert_ranges_tile(0, 7 * MAX / 2);
+        // ~3.5x with metadata.
+        assert_ranges_tile(37, 7 * MAX / 2);
+        assert_ranges_tile(100, MAX);
+    }
+
+    #[test]
+    fn test_plan_first_segment_offsets_by_metadata() {
+        // With metadata present, segment 1 carries MAX - metadata_size data
+        // bytes so the combined (metadata_block + data) is exactly MAX.
+        let metadata_size = 13;
+        let data_len = 2 * MAX;
+        let plan = OutgoingSegmentPlan::new(
+            vec![0u8; data_len],
+            Some(vec![0u8; metadata_size - 3]),
+            metadata_size,
+            segment_count(metadata_size + data_len),
+            false,
+        );
+        assert_eq!(plan.data_range(1).len(), MAX - metadata_size);
+        assert_eq!(plan.total_data_size, (metadata_size + data_len) as u64);
     }
 }

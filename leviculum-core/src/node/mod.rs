@@ -57,6 +57,8 @@ mod mvr_link_rekey_alias;
 mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_obs_endpoint;
+#[cfg(all(test, feature = "compression"))]
+mod mvr_send_segmentation;
 #[cfg(test)]
 mod mvr_teardown_resource_fail;
 pub mod request;
@@ -961,8 +963,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         auto_compress: bool,
     ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
         use crate::packet::PacketContext;
-        use crate::resource::outgoing::OutgoingResource;
-        use crate::resource::ResourceError;
+        use crate::resource::outgoing::{segment_count, OutgoingResource, OutgoingSegmentPlan};
+        use crate::resource::{ResourceError, RESOURCE_MAX_EFFICIENT_SIZE};
 
         let now_ms = self.transport.clock().now_ms();
 
@@ -979,31 +981,67 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return Err(ResourceError::TransferInProgress);
         }
 
-        let outgoing = OutgoingResource::new(
-            data,
-            metadata,
-            None,
-            link,
-            auto_compress,
-            &mut self.rng,
-            now_ms,
-        )?;
-        let resource_hash = *outgoing.resource_hash();
-        let adv_bytes = outgoing.adv_packet().to_vec();
+        // The split boundary is the combined metadata+data length, matching
+        // Python (`metadata_size + len(data) > MAX_EFFICIENT_SIZE`). The
+        // metadata block is a 3-byte length prefix plus the metadata bytes.
+        let metadata_size = metadata.map(|m| 3 + m.len()).unwrap_or(0);
+        let total_size = metadata_size + data.len();
 
-        // Store the outgoing resource on the link
-        let link = self
-            .links
-            .get_mut(link_id)
-            .ok_or(ResourceError::InvalidRequest)?;
-        link.set_outgoing_resource(outgoing);
+        let (resource_hash, adv_bytes) = if total_size <= RESOURCE_MAX_EFFICIENT_SIZE {
+            // Single-segment transfer (unchanged behaviour for small files).
+            let outgoing = OutgoingResource::new(
+                data,
+                metadata,
+                None,
+                link,
+                auto_compress,
+                &mut self.rng,
+                now_ms,
+            )?;
+            let resource_hash = *outgoing.resource_hash();
+            let adv_bytes = outgoing.adv_packet().to_vec();
+
+            let link = self
+                .links
+                .get_mut(link_id)
+                .ok_or(ResourceError::InvalidRequest)?;
+            link.set_outgoing_resource(outgoing);
+            (resource_hash, adv_bytes)
+        } else {
+            // Split transfer: build and advertise segment 1 now, and store a
+            // plan so each later segment is advertised after the previous
+            // segment's proof arrives (see advance_outgoing_segments()).
+            let total_segments = segment_count(total_size);
+            let mut plan = OutgoingSegmentPlan::new(
+                data.to_vec(),
+                metadata.map(|m| m.to_vec()),
+                metadata_size,
+                total_segments,
+                auto_compress,
+            );
+
+            let segment1 = plan.build_segment(1, link, &mut self.rng, now_ms)?;
+            let resource_hash = *segment1.resource_hash();
+            let adv_bytes = segment1.adv_packet().to_vec();
+            // All later segments carry segment 1's resource hash as `o`.
+            plan.set_original_hash(resource_hash);
+
+            let link = self
+                .links
+                .get_mut(link_id)
+                .ok_or(ResourceError::InvalidRequest)?;
+            link.set_outgoing_resource(segment1);
+            link.set_outgoing_segments(plan);
+            (resource_hash, adv_bytes)
+        };
 
         // Send the advertisement (encrypted)
-        match link.build_data_packet_with_context(
-            &adv_bytes,
-            PacketContext::ResourceAdv,
-            &mut self.rng,
-        ) {
+        let adv_pkt = self
+            .links
+            .get_mut(link_id)
+            .ok_or(ResourceError::InvalidRequest)?
+            .build_data_packet_with_context(&adv_bytes, PacketContext::ResourceAdv, &mut self.rng);
+        match adv_pkt {
             Ok(pkt) => {
                 self.route_link_packet(link_id, &pkt);
             }
