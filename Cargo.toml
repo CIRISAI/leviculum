@@ -11,6 +11,21 @@ members = [
     "leviculum-proxy",
 ]
 
+# leviculum-ffi is a gnu-target cdylib (built via the `build-ffi` alias). It is
+# excluded from the default musl build (default target per .cargo/config.toml)
+# because cdylib is unsupported on musl, which otherwise emits
+# `warning: dropping unsupported crate type cdylib` on a bare build. It stays a
+# member so `-p leviculum-ffi`, `--workspace`, and `build-ffi` still work.
+default-members = [
+    "leviculum-core",
+    "leviculum-micron",
+    "lnomad",
+    "leviculum-std",
+    "leviculum-cli",
+    "reticulum-integ",
+    "leviculum-proxy",
+]
+
 # leviculum-nrf requires cross-compilation (thumbv7em-none-eabihf) and
 # cannot build with --workspace on the host.
 # Build with: cargo build -p leviculum-nrf --target thumbv7em-none-eabihf
