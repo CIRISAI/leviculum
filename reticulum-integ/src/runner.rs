@@ -1595,6 +1595,9 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
         // producing an alternating-timeout pattern even with csma=on.
         // radio_silent makes the idle T114 a listen-only neighbour.
         radio_silent: true,
+        // No airtime limit for silenced nodes (they never transmit anyway).
+        st_alock: 0,
+        lt_alock: 0,
     };
     let payload = build_radio_config_frame(&wire);
     let mut framed = Vec::new();

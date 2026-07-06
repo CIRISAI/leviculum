@@ -776,8 +776,8 @@ pub fn compute_spacing_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8)
 /// Magic prefix for radio config frames (distinguishes from Reticulum packets).
 pub const RADIO_CONFIG_MAGIC: [u8; 2] = [0xA4, 0xA4];
 
-/// Total config frame payload length (2 magic + 14 parameter bytes).
-pub const RADIO_CONFIG_FRAME_LEN: usize = 17;
+/// Total config frame payload length (2 magic + 19 parameter bytes).
+pub const RADIO_CONFIG_FRAME_LEN: usize = 21;
 
 /// ACK payload sent by T114 after applying radio config.
 pub const RADIO_CONFIG_ACK: [u8; 3] = [0xA4, 0xA4, 0x01];
@@ -799,15 +799,23 @@ pub struct RadioConfigWire {
     /// bind, so they cannot pollute the benchmark channel with their own
     /// Reticulum announces.
     pub radio_silent: bool,
+    /// Short-term airtime limit, RNode `CMD_ST_ALOCK` u16 encoding
+    /// (`percent * 100`, see [`alock_u16_to_fraction`]). `0` = unlimited.
+    pub st_alock: u16,
+    /// Long-term airtime limit, RNode `CMD_LT_ALOCK` u16 encoding
+    /// (`percent * 100`, see [`alock_u16_to_fraction`]). `0` = unlimited.
+    pub lt_alock: u16,
 }
 
-/// Parse a radio config from wire bytes (13, 14, or 15 bytes, after magic stripped).
+/// Parse a radio config from wire bytes (13 to 19 bytes, after magic stripped).
 ///
 /// Wire layout: freq_hz(4 BE) + bw_hz(4 BE) + sf(1) + cr(1) + tx_power(1) + preamble(2 BE)
 /// + csma_enabled(1, optional, defaults to false if absent for backward compat)
 /// + radio_silent(1, optional, defaults to false if absent for backward compat)
+/// + st_alock(2 BE, optional, defaults to 0 if absent for backward compat)
+/// + lt_alock(2 BE, optional, defaults to 0 if absent for backward compat)
 pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
-    if !(13..=15).contains(&data.len()) {
+    if !(13..=19).contains(&data.len()) {
         return None;
     }
     let frequency_hz = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -818,6 +826,16 @@ pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
     let preamble_len = u16::from_be_bytes([data[11], data[12]]);
     let csma_enabled = data.len() >= 14 && data[13] != 0;
     let radio_silent = data.len() >= 15 && data[14] != 0;
+    let st_alock = if data.len() >= 17 {
+        u16::from_be_bytes([data[15], data[16]])
+    } else {
+        0
+    };
+    let lt_alock = if data.len() >= 19 {
+        u16::from_be_bytes([data[17], data[18]])
+    } else {
+        0
+    };
 
     if !(5..=12).contains(&sf) {
         return None;
@@ -835,10 +853,12 @@ pub fn parse_radio_config(data: &[u8]) -> Option<RadioConfigWire> {
         preamble_len,
         csma_enabled,
         radio_silent,
+        st_alock,
+        lt_alock,
     })
 }
 
-/// Build a radio config frame payload (17 bytes including magic prefix).
+/// Build a radio config frame payload (21 bytes including magic prefix).
 pub fn build_radio_config_frame(cfg: &RadioConfigWire) -> Vec<u8> {
     let mut out = Vec::with_capacity(RADIO_CONFIG_FRAME_LEN);
     out.extend_from_slice(&RADIO_CONFIG_MAGIC);
@@ -850,7 +870,199 @@ pub fn build_radio_config_frame(cfg: &RadioConfigWire) -> Vec<u8> {
     out.extend_from_slice(&cfg.preamble_len.to_be_bytes());
     out.push(cfg.csma_enabled as u8);
     out.push(cfg.radio_silent as u8);
+    out.extend_from_slice(&cfg.st_alock.to_be_bytes());
+    out.extend_from_slice(&cfg.lt_alock.to_be_bytes());
     out
+}
+
+// ---------------------------------------------------------------------------
+// Airtime lock (regulatory duty-cycle enforcement)
+// ---------------------------------------------------------------------------
+//
+// Mirrors the airtime lock in Mark Qvist's RNode firmware so the same host
+// airtime-limit value produces the same enforced fraction on our standalone
+// LNode as on a stock RNode. Reference (vendor/RNode_Firmware):
+//   * Config.h:181-198  AIRTIME_LONGTERM / AIRTIME_BINLEN_MS / AIRTIME_BINS,
+//                       airtime_bins[], st_airtime_limit, lt_airtime_limit,
+//                       airtime_lock, current_airtime_bin().
+//   * RNode_Firmware.ino:654-714  add_airtime() / update_airtime().
+//   * RNode_Firmware.ino:1673-1696  the lock computation.
+//   * RNode_Firmware.ino:932-977  CMD_ST_ALOCK / CMD_LT_ALOCK u16 parsing.
+//   * Utilities.h:941-957  the u16 report encoding.
+//
+// The airtime accounting itself (which frames, how they are keyed) belongs to
+// the interface layer; core only provides the medium-agnostic bookkeeping and
+// the exact wire-compatible u16<->fraction mapping.
+
+/// Long-term airtime window, in seconds (Config.h:181 `AIRTIME_LONGTERM`).
+pub const AIRTIME_LONGTERM_S: u64 = 3600;
+/// Long-term airtime window, in milliseconds (Config.h:182).
+pub const AIRTIME_LONGTERM_MS: u64 = AIRTIME_LONGTERM_S * 1000;
+/// Length of one airtime histogram bin, in milliseconds. Mark derives this from
+/// `STATUS_INTERVAL_MS * DCD_SAMPLES = 3 * 2500` (Config.h:176,178,183).
+pub const AIRTIME_BINLEN_MS: u64 = 7500;
+/// Number of histogram bins spanning the long-term window (Config.h:184):
+/// `3_600_000 / 7500 = 480`. A `[u16; 480]` bin array is 960 bytes.
+pub const AIRTIME_BINS: usize = (AIRTIME_LONGTERM_MS / AIRTIME_BINLEN_MS) as usize;
+
+/// Convert a `CMD_ST_ALOCK` / `CMD_LT_ALOCK` u16 into an airtime-limit fraction.
+///
+/// Byte-for-byte compatible with the RNode firmware
+/// (`RNode_Firmware.ino:950` `st_airtime_limit = (float)at/(100.0*100.0)`):
+/// the fraction is `at / 10000`. `at == 0` means "unlimited" (0.0), and any
+/// value mapping to `>= 1.0` is also treated as unlimited (0.0), matching
+/// `RNode_Firmware.ino:951`. The host sends `at = percent * 100`
+/// (`build_set_st_alock`), so e.g. `5000 -> 0.5` (50% duty cycle).
+pub fn alock_u16_to_fraction(at: u16) -> f32 {
+    if at == 0 {
+        return 0.0;
+    }
+    let f = at as f32 / (100.0 * 100.0);
+    if f >= 1.0 {
+        0.0
+    } else {
+        f
+    }
+}
+
+/// Total on-air time, in milliseconds, of the LoRa frame(s) carrying a
+/// Reticulum packet of `data_len` bytes.
+///
+/// Mirrors [`build_lora_frames`]: a payload over [`MAX_SINGLE_PAYLOAD`] is sent
+/// as two frames, each with a 1-byte header; otherwise one frame with a 1-byte
+/// header. Uses [`airtime_ms`] so the accounting stays consistent with the
+/// interface's pacing math.
+pub fn packet_airtime_ms(data_len: usize, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
+    if data_len > MAX_SINGLE_PAYLOAD {
+        let f1 = (1 + MAX_SINGLE_PAYLOAD) as u32;
+        let f2 = (1 + data_len - MAX_SINGLE_PAYLOAD) as u32;
+        airtime_ms(f1, bandwidth_hz, sf, cr) + airtime_ms(f2, bandwidth_hz, sf, cr)
+    } else {
+        airtime_ms((1 + data_len) as u32, bandwidth_hz, sf, cr)
+    }
+}
+
+/// Rolling airtime histogram + duty-cycle lock, mirroring the RNode firmware.
+///
+/// Holds a fixed `[u16; AIRTIME_BINS]` bin array (960 bytes, no heap), the
+/// short/long-term limit fractions, and the derived lock state. The interface
+/// records every keyed frame with [`add_airtime`](Self::add_airtime), calls
+/// [`update`](Self::update) before draining its TX queue, and holds any queued
+/// frame while [`is_locked`](Self::is_locked) is true, exactly as
+/// `RNode_Firmware.ino:1624` gates `tx_queue_handler` on `!airtime_lock`.
+#[derive(Clone)]
+pub struct AirtimeTracker {
+    bins: [u16; AIRTIME_BINS],
+    st_limit: f32,
+    lt_limit: f32,
+    short_term: f32,
+    long_term: f32,
+    locked: bool,
+}
+
+impl Default for AirtimeTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AirtimeTracker {
+    /// A tracker with an empty histogram and both limits unset (unlimited).
+    pub const fn new() -> Self {
+        Self {
+            bins: [0; AIRTIME_BINS],
+            st_limit: 0.0,
+            lt_limit: 0.0,
+            short_term: 0.0,
+            long_term: 0.0,
+            locked: false,
+        }
+    }
+
+    /// Set the short-term limit from a `CMD_ST_ALOCK` u16 (see
+    /// [`alock_u16_to_fraction`]). `0` disables the short-term lock.
+    pub fn set_st_limit_u16(&mut self, at: u16) {
+        self.st_limit = alock_u16_to_fraction(at);
+    }
+
+    /// Set the long-term limit from a `CMD_LT_ALOCK` u16 (see
+    /// [`alock_u16_to_fraction`]). `0` disables the long-term lock.
+    pub fn set_lt_limit_u16(&mut self, at: u16) {
+        self.lt_limit = alock_u16_to_fraction(at);
+    }
+
+    /// Current histogram bin for a monotonic `now_ms`
+    /// (Config.h:194 `current_airtime_bin`).
+    fn current_bin(now_ms: u64) -> usize {
+        ((now_ms % AIRTIME_LONGTERM_MS) / AIRTIME_BINLEN_MS) as usize
+    }
+
+    /// Record `cost_ms` of on-air time for a frame keyed at `now_ms`
+    /// (RNode_Firmware.ino:685-688). Adds to the current bin and clears the
+    /// next bin so it starts clean when time rolls into it.
+    pub fn add_airtime(&mut self, now_ms: u64, cost_ms: u64) {
+        let cb = Self::current_bin(now_ms);
+        let nb = (cb + 1) % AIRTIME_BINS;
+        let add = cost_ms.min(u16::MAX as u64) as u16;
+        self.bins[cb] = self.bins[cb].saturating_add(add);
+        self.bins[nb] = 0;
+    }
+
+    /// Recompute short-term airtime, long-term airtime, and the lock state for a
+    /// monotonic `now_ms` (RNode_Firmware.ino:693-702 + 1673-1696).
+    ///
+    /// Short-term airtime is the fraction of channel time used across the
+    /// current and previous bins; long-term airtime is total keyed airtime over
+    /// the whole 1-hour window. The lock engages when either fraction meets or
+    /// exceeds its (non-zero) limit.
+    pub fn update(&mut self, now_ms: u64) {
+        let cb = Self::current_bin(now_ms);
+        let pb = (cb + AIRTIME_BINS - 1) % AIRTIME_BINS;
+        let nb = (cb + 1) % AIRTIME_BINS;
+        self.bins[nb] = 0;
+
+        self.short_term =
+            (self.bins[cb] as f32 + self.bins[pb] as f32) / (2.0 * AIRTIME_BINLEN_MS as f32);
+
+        let mut sum: u32 = 0;
+        for &b in self.bins.iter() {
+            sum += b as u32;
+        }
+        self.long_term = sum as f32 / AIRTIME_LONGTERM_MS as f32;
+
+        self.locked = false;
+        if self.st_limit != 0.0 && self.short_term >= self.st_limit {
+            self.locked = true;
+        }
+        if self.lt_limit != 0.0 && self.long_term >= self.lt_limit {
+            self.locked = true;
+        }
+    }
+
+    /// Whether the airtime lock currently holds TX (last [`update`](Self::update)).
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Short-term airtime fraction from the last [`update`](Self::update).
+    pub fn short_term_airtime(&self) -> f32 {
+        self.short_term
+    }
+
+    /// Long-term airtime fraction from the last [`update`](Self::update).
+    pub fn long_term_airtime(&self) -> f32 {
+        self.long_term
+    }
+
+    /// Current short-term limit fraction (0.0 = unlimited).
+    pub fn st_limit(&self) -> f32 {
+        self.st_limit
+    }
+
+    /// Current long-term limit fraction (0.0 = unlimited).
+    pub fn lt_limit(&self) -> f32 {
+        self.lt_limit
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1924,6 +2136,8 @@ mod tests {
             preamble_len: 24,
             csma_enabled: false,
             radio_silent: false,
+            st_alock: 0,
+            lt_alock: 0,
         }
     }
 
@@ -1937,6 +2151,8 @@ mod tests {
             preamble_len: 24,
             csma_enabled: false,
             radio_silent: false,
+            st_alock: 0,
+            lt_alock: 0,
         }
     }
 
@@ -1950,6 +2166,8 @@ mod tests {
             preamble_len: 24,
             csma_enabled: false,
             radio_silent: false,
+            st_alock: 0,
+            lt_alock: 0,
         }
     }
 
@@ -2000,6 +2218,11 @@ mod tests {
         assert_eq!(frame[15], 0);
         // radio_silent = false
         assert_eq!(frame[16], 0);
+        // st_alock = 0 (2 BE)
+        assert_eq!(&frame[17..19], &[0x00, 0x00]);
+        // lt_alock = 0 (2 BE)
+        assert_eq!(&frame[19..21], &[0x00, 0x00]);
+        assert_eq!(frame.len(), RADIO_CONFIG_FRAME_LEN);
     }
 
     #[test]
@@ -2009,21 +2232,23 @@ mod tests {
 
     #[test]
     fn radio_config_parse_too_long() {
-        assert!(parse_radio_config(&[0; 16]).is_none());
+        assert!(parse_radio_config(&[0; 20]).is_none());
     }
 
     #[test]
     fn radio_config_parse_13_byte_backward_compat() {
-        // Old 13-byte payload (no csma, no radio_silent) must still parse,
-        // defaulting both flags to false.
+        // Old 13-byte payload (no csma, radio_silent, or alock) must still
+        // parse, defaulting the flags to false and the alock limits to 0.
         let cfg = medium_profile();
         let frame = build_radio_config_frame(&cfg);
-        // Drop magic (2) and the trailing 2 flag bytes -> exactly 13 bytes
-        let legacy = &frame[2..frame.len() - 2];
+        // Keep magic-stripped payload's first 13 bytes only.
+        let legacy = &frame[2..2 + 13];
         assert_eq!(legacy.len(), 13);
         let parsed = parse_radio_config(legacy).unwrap();
         assert!(!parsed.csma_enabled);
         assert!(!parsed.radio_silent);
+        assert_eq!(parsed.st_alock, 0);
+        assert_eq!(parsed.lt_alock, 0);
         assert_eq!(parsed.sf, 7);
     }
 
@@ -2036,11 +2261,32 @@ mod tests {
             ..medium_profile()
         };
         let frame = build_radio_config_frame(&cfg);
-        let legacy = &frame[2..frame.len() - 1];
+        let legacy = &frame[2..2 + 14];
         assert_eq!(legacy.len(), 14);
         let parsed = parse_radio_config(legacy).unwrap();
         assert!(parsed.csma_enabled);
         assert!(!parsed.radio_silent);
+        assert_eq!(parsed.st_alock, 0);
+        assert_eq!(parsed.lt_alock, 0);
+    }
+
+    #[test]
+    fn radio_config_parse_15_byte_backward_compat() {
+        // 15-byte payload (csma + radio_silent, no alock) must parse with the
+        // alock limits defaulting to 0.
+        let cfg = RadioConfigWire {
+            csma_enabled: true,
+            radio_silent: true,
+            ..medium_profile()
+        };
+        let frame = build_radio_config_frame(&cfg);
+        let legacy = &frame[2..2 + 15];
+        assert_eq!(legacy.len(), 15);
+        let parsed = parse_radio_config(legacy).unwrap();
+        assert!(parsed.csma_enabled);
+        assert!(parsed.radio_silent);
+        assert_eq!(parsed.st_alock, 0);
+        assert_eq!(parsed.lt_alock, 0);
     }
 
     #[test]
@@ -2148,5 +2394,148 @@ mod tests {
     #[test]
     fn radio_config_ack_format() {
         assert_eq!(RADIO_CONFIG_ACK, [0xA4, 0xA4, 0x01]);
+    }
+
+    #[test]
+    fn radio_config_round_trip_alock() {
+        // 50% short-term, 10% long-term limits survive the wire round-trip.
+        let cfg = RadioConfigWire {
+            st_alock: 5000,
+            lt_alock: 1000,
+            ..medium_profile()
+        };
+        let frame = build_radio_config_frame(&cfg);
+        assert_eq!(frame.len(), RADIO_CONFIG_FRAME_LEN);
+        // st_alock 5000 = 0x1388, lt_alock 1000 = 0x03E8, both big-endian.
+        assert_eq!(&frame[17..19], &[0x13, 0x88]);
+        assert_eq!(&frame[19..21], &[0x03, 0xE8]);
+        let parsed = parse_radio_config(&frame[2..]).unwrap();
+        assert_eq!(parsed, cfg);
+        assert_eq!(parsed.st_alock, 5000);
+        assert_eq!(parsed.lt_alock, 1000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Airtime lock tests
+    // -----------------------------------------------------------------------
+
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-6, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn alock_u16_mapping_matches_rnode() {
+        // RNode firmware: st_airtime_limit = at / (100.0 * 100.0).
+        approx(alock_u16_to_fraction(0), 0.0); // unlimited
+        approx(alock_u16_to_fraction(100), 0.01); // 1%
+        approx(alock_u16_to_fraction(1000), 0.1); // 10%
+        approx(alock_u16_to_fraction(5000), 0.5); // 50%
+        approx(alock_u16_to_fraction(9999), 0.9999);
+        // >= 1.0 is treated as unlimited, matching RNode_Firmware.ino:951.
+        approx(alock_u16_to_fraction(10000), 0.0);
+        approx(alock_u16_to_fraction(20000), 0.0);
+    }
+
+    #[test]
+    fn airtime_bins_size_matches_rnode() {
+        // 3_600_000 ms / 7500 ms = 480 bins.
+        assert_eq!(AIRTIME_BINS, 480);
+        assert_eq!(AIRTIME_LONGTERM_MS, 3_600_000);
+        assert_eq!(AIRTIME_BINLEN_MS, 7500);
+    }
+
+    #[test]
+    fn airtime_add_and_update_fractions() {
+        let mut t = AirtimeTracker::new();
+        // Key 3000 ms of airtime into bin 0 at t=0.
+        t.add_airtime(0, 3000);
+        t.update(0);
+        // short-term = (bin0 + prev) / (2 * binlen) = 3000 / 15000 = 0.2
+        approx(t.short_term_airtime(), 0.2);
+        // long-term = 3000 / 3_600_000
+        approx(t.long_term_airtime(), 3000.0 / 3_600_000.0);
+        assert!(!t.is_locked());
+    }
+
+    #[test]
+    fn airtime_accumulates_within_bin() {
+        let mut t = AirtimeTracker::new();
+        t.add_airtime(0, 1000);
+        t.add_airtime(100, 1500); // same bin (bin 0)
+        t.update(200);
+        // 2500 ms in bin 0 -> short-term 2500/15000
+        approx(t.short_term_airtime(), 2500.0 / 15000.0);
+        approx(t.long_term_airtime(), 2500.0 / 3_600_000.0);
+    }
+
+    #[test]
+    fn airtime_zero_limit_never_locks() {
+        let mut t = AirtimeTracker::new();
+        // Saturate the current window with airtime but leave both limits at 0.
+        t.add_airtime(0, u16::MAX as u64);
+        t.update(0);
+        assert!(t.short_term_airtime() > 0.0);
+        assert!(!t.is_locked(), "limit 0.0 must never lock");
+    }
+
+    #[test]
+    fn airtime_short_term_lock_boundary() {
+        let mut t = AirtimeTracker::new();
+        t.set_st_limit_u16(2000); // 20%
+                                  // Just below: 20% of the 15000 ms two-bin window = 3000 ms.
+        t.add_airtime(0, 2999);
+        t.update(0);
+        assert!(!t.is_locked());
+        // Meets the limit -> locks (>= comparison, matching RNode).
+        t.add_airtime(0, 1);
+        t.update(0);
+        approx(t.short_term_airtime(), 0.2);
+        assert!(t.is_locked());
+    }
+
+    #[test]
+    fn airtime_long_term_lock_boundary() {
+        let mut t = AirtimeTracker::new();
+        t.set_lt_limit_u16(100); // 1% of the 1-hour window = 36_000 ms
+                                 // Spread airtime across distinct bins to build up the long-term sum
+                                 // without tripping the short-term (unset) limit.
+        for i in 0..11u64 {
+            let now = i * AIRTIME_BINLEN_MS;
+            t.add_airtime(now, 3000);
+        }
+        // 11 * 3000 = 33_000 ms < 36_000 ms -> below limit
+        t.update(11 * AIRTIME_BINLEN_MS);
+        assert!(!t.is_locked());
+        // Add two more bins to cross 36_000 ms.
+        t.add_airtime(11 * AIRTIME_BINLEN_MS, 3000);
+        t.add_airtime(12 * AIRTIME_BINLEN_MS, 3000);
+        t.update(12 * AIRTIME_BINLEN_MS);
+        assert!(t.long_term_airtime() >= 0.01);
+        assert!(t.is_locked());
+    }
+
+    #[test]
+    fn airtime_lock_clears_when_window_empties() {
+        let mut t = AirtimeTracker::new();
+        t.set_st_limit_u16(2000); // 20%
+        t.add_airtime(0, 3000);
+        t.update(0);
+        assert!(t.is_locked());
+        // Advance two bins so the loaded bins are neither current nor previous;
+        // the short-term window is empty again and the lock clears.
+        let later = 3 * AIRTIME_BINLEN_MS;
+        t.update(later);
+        approx(t.short_term_airtime(), 0.0);
+        assert!(!t.is_locked());
+    }
+
+    #[test]
+    fn packet_airtime_single_vs_split() {
+        // A <=254-byte payload is one frame; a larger one is two frames.
+        let single = packet_airtime_ms(100, 125_000, 7, 5);
+        assert_eq!(single, airtime_ms(101, 125_000, 7, 5));
+        let split = packet_airtime_ms(300, 125_000, 7, 5);
+        let expected = airtime_ms(255, 125_000, 7, 5) + airtime_ms(1 + 300 - 254, 125_000, 7, 5);
+        assert_eq!(split, expected);
     }
 }

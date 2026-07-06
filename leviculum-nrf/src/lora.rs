@@ -118,6 +118,12 @@ pub struct RadioConfig {
     /// integration-test runner to neutralize T114s it does not bind, so the
     /// test channel is not polluted by their Reticulum announces.
     pub radio_silent: bool,
+    /// Short-term airtime limit, RNode `CMD_ST_ALOCK` u16 encoding
+    /// (`percent * 100`). `0` = unlimited. Enforced by the airtime lock.
+    pub st_alock: u16,
+    /// Long-term airtime limit, RNode `CMD_LT_ALOCK` u16 encoding
+    /// (`percent * 100`). `0` = unlimited. Enforced by the airtime lock.
+    pub lt_alock: u16,
 }
 
 impl RadioConfig {
@@ -134,6 +140,8 @@ impl RadioConfig {
             cr_denom: 5,
             csma_enabled: true,
             radio_silent: false,
+            st_alock: 0,
+            lt_alock: 0,
         }
     }
 
@@ -172,6 +180,8 @@ impl RadioConfig {
             cr_denom: wire.cr,
             csma_enabled: wire.csma_enabled,
             radio_silent: wire.radio_silent,
+            st_alock: wire.st_alock,
+            lt_alock: wire.lt_alock,
         })
     }
 }
@@ -232,7 +242,17 @@ fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
 /// Transmit one or two LoRa frames back-to-back. For split packets, both
 /// frames go out without any CSMA/CAD between them, the receiver's
 /// SplitReassembler expects this.
-async fn transmit_all_frames(radio: &mut Radio, data: &[u8], rng_state: &mut u32) {
+///
+/// Every successfully keyed frame's on-air time is recorded into `airtime`
+/// (mirrors the RNode firmware's `add_airtime()` on each `transmit()`), which
+/// drives the regulatory airtime lock enforced in `lora_task`.
+async fn transmit_all_frames(
+    radio: &mut Radio,
+    data: &[u8],
+    rng_state: &mut u32,
+    config: &RadioConfig,
+    airtime: &mut leviculum_core::rnode::AirtimeTracker,
+) {
     let tx_start = embassy_time::Instant::now();
     let seq_nibble = (xorshift32(rng_state) as u8) & 0xF0;
     let frames = leviculum_core::rnode::build_lora_frames(data, seq_nibble);
@@ -254,7 +274,18 @@ async fn transmit_all_frames(radio: &mut Radio, data: &[u8], rng_state: &mut u32
     let mut tx_ok = true;
     for (i, frame) in frames.iter().enumerate() {
         match radio.transmit(frame, 5000).await {
-            Ok(()) => {}
+            Ok(()) => {
+                // Record this frame's on-air time (header included, matching
+                // the RNode firmware's `add_airtime(written)`).
+                let now_ms = embassy_time::Instant::now().as_millis();
+                let cost = leviculum_core::rnode::airtime_ms(
+                    frame.len() as u32,
+                    config.bw_hz,
+                    config.sf,
+                    config.cr_denom,
+                );
+                airtime.add_airtime(now_ms, cost);
+            }
             Err(e) => {
                 crate::log::log_fmt("[LORA] ", format_args!("TX err frame {}: {:?}", i, e));
                 tx_ok = false;
@@ -484,6 +515,13 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
     let mut csma_cw: u8 = CSMA_CW_INITIAL;
     let mut slot_ms: u64 = compute_slot_ms(&config);
 
+    // Regulatory airtime lock (mirrors the RNode firmware). The bin histogram
+    // lives in the task's static future, off the heap (960 bytes). Limits of 0
+    // mean unlimited, so unconfigured devices and tests are never throttled.
+    let mut airtime = leviculum_core::rnode::AirtimeTracker::new();
+    airtime.set_st_limit_u16(config.st_alock);
+    airtime.set_lt_limit_u16(config.lt_alock);
+
     loop {
         // Check for runtime radio config override (test infrastructure)
         if let Ok(new_cfg) = config_rx.try_receive() {
@@ -513,6 +551,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     );
                     config = new_cfg;
                     slot_ms = compute_slot_ms(&config);
+                    airtime.set_st_limit_u16(config.st_alock);
+                    airtime.set_lt_limit_u16(config.lt_alock);
                 }
                 Err(e) => crate::log::log_fmt("[LORA] ", format_args!("reconfig FAILED: {:?}", e)),
             }
@@ -536,8 +576,38 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
         }
 
         if let Some(data) = pending_tx.as_ref() {
+            // Regulatory airtime lock: recompute short/long-term airtime and, if
+            // over the configured limit, hold this queued frame instead of
+            // keying the radio (mirrors the RNode firmware's
+            // `if (!airtime_lock && queue_height > 0)` TX gate). We keep
+            // listening during the hold so RX is not starved, then retry.
+            let now_ms = embassy_time::Instant::now().as_millis();
+            airtime.update(now_ms);
+            if airtime.is_locked() {
+                crate::log::log_fmt(
+                    "[LORA_AIRTIME_LOCK] ",
+                    format_args!(
+                        "st={} lt={} holding",
+                        airtime.short_term_airtime(),
+                        airtime.long_term_airtime()
+                    ),
+                );
+                let hold_ms = post_tx_rx_window_ms(&config);
+                reassembler.check_timeout(rx_timeout_count, 10);
+                rx_once(
+                    &mut radio,
+                    &mut rx_buf,
+                    hold_ms,
+                    &mut reassembler,
+                    &incoming_tx,
+                    &mut rx_timeout_count,
+                )
+                .await;
+                continue;
+            }
+
             if !config.csma_enabled {
-                transmit_all_frames(&mut radio, data, &mut rng_state).await;
+                transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut airtime).await;
                 pending_tx = None;
             } else {
                 match radio.cad(config.sf).await {
@@ -555,7 +625,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                                 csma_attempt, slot_ms
                             ),
                         );
-                        transmit_all_frames(&mut radio, data, &mut rng_state).await;
+                        transmit_all_frames(
+                            &mut radio,
+                            data,
+                            &mut rng_state,
+                            &config,
+                            &mut airtime,
+                        )
+                        .await;
                         pending_tx = None;
                     }
                     Ok(true) => {
@@ -572,7 +649,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                                     csma_attempt, slot_ms
                                 ),
                             );
-                            transmit_all_frames(&mut radio, data, &mut rng_state).await;
+                            transmit_all_frames(
+                                &mut radio,
+                                data,
+                                &mut rng_state,
+                                &config,
+                                &mut airtime,
+                            )
+                            .await;
                             pending_tx = None;
                         } else {
                             let slots = (xorshift32(&mut rng_state) as u64) % (csma_cw as u64);
@@ -608,7 +692,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                                     csma_attempt, slot_ms
                                 ),
                             );
-                            transmit_all_frames(&mut radio, data, &mut rng_state).await;
+                            transmit_all_frames(
+                                &mut radio,
+                                data,
+                                &mut rng_state,
+                                &config,
+                                &mut airtime,
+                            )
+                            .await;
                             pending_tx = None;
                         }
                         continue;

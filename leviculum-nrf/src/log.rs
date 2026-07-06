@@ -93,7 +93,8 @@ impl LogRing {
         // If writer has lapped reader, advance reader to oldest available data
         let rp = self.read_pos.load(Ordering::Relaxed);
         if wp.wrapping_sub(rp) > LOG_RING_SIZE {
-            self.read_pos.store(wp.wrapping_sub(LOG_RING_SIZE), Ordering::Release);
+            self.read_pos
+                .store(wp.wrapping_sub(LOG_RING_SIZE), Ordering::Release);
         }
     }
 

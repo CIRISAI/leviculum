@@ -145,6 +145,11 @@ async fn send_radio_config(
         preamble_len: config.preamble_len,
         csma_enabled: config.csma_enabled,
         radio_silent: false,
+        // Airtime limits are enforced by the LNode firmware's airtime lock.
+        // 0 = unlimited; host-config plumbing of a non-zero limit is a
+        // separate follow-on (the firmware honours whatever it receives here).
+        st_alock: 0,
+        lt_alock: 0,
     };
     let payload = leviculum_core::rnode::build_radio_config_frame(&wire);
     let mut frame_buf = Vec::new();
