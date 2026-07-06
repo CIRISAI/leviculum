@@ -58,7 +58,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::DestinationHash;
-use leviculum_std::driver::ReticulumNodeBuilder;
+use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 use crate::common::{
     temp_storage, wait_for_link_established, wait_for_path_on_node, wait_for_path_reannounce,
@@ -215,17 +215,31 @@ async fn spawn_undercount_shim(relay2_addr: SocketAddr) -> (SocketAddr, Arc<Atom
 }
 
 // ----------------------------------------------------------------------------
-// The reproduction.
+// Shared topology: two Rust relays with the undercount shim between them, a
+// Python responder B behind relay-2, relay-1 having learned B UNDERCOUNTED.
 // ----------------------------------------------------------------------------
 
-/// Full #38 fix proof: Python initiator AND Rust initiator both establish the
-/// link on the identical hop-undercount relay chain that previously timed the
-/// Python client out.
-#[tokio::test]
-async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
-    let log_buf = captured_logs();
-    log_buf.lock().unwrap().clear();
+/// A running hop-undercount relay chain, ready for an initiator to link through
+/// relay-1 to the Python responder B. Callers must keep this alive for the whole
+/// test (dropping it stops the relays and deletes their storage).
+struct UndercountChain {
+    responder: TestDaemon,
+    dest_b_hash: String,
+    dest_b_public_key: String,
+    dest_b_hash_typed: DestinationHash,
+    dest_b_signing_key: [u8; 32],
+    relay1: ReticulumNode,
+    relay2: ReticulumNode,
+    relay1_addr: SocketAddr,
+    relay1_port: u16,
+    _relay1_storage: tempfile::TempDir,
+    _relay2_storage: tempfile::TempDir,
+}
 
+/// Build and start the shared topology and drive B's announce down the chain
+/// until relay-1 has learned an UNDERCOUNTED path to B. Panics on any setup
+/// failure. Same chain used by both the establish and the data-transfer tests.
+async fn setup_undercount_chain() -> UndercountChain {
     // --- Ports for the two Rust relay servers (the shim binds :0 itself). ---
     let relay1_port = pick_free_tcp_port().expect("relay-1 port");
     let relay2_port = pick_free_tcp_port().expect("relay-2 port");
@@ -244,7 +258,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
         .expect("responder PROVE_ALL");
 
     let dest_b_hash_bytes: [u8; 16] = hex::decode(&dest_b.hash).unwrap().try_into().unwrap();
-    let dest_b_hash = DestinationHash::new(dest_b_hash_bytes);
+    let dest_b_hash_typed = DestinationHash::new(dest_b_hash_bytes);
     // Ed25519 signing (verifying) key = second half of the 64-byte public key.
     let dest_b_key_bytes = hex::decode(&dest_b.public_key).unwrap();
     let mut dest_b_signing_key = [0u8; 32];
@@ -286,7 +300,8 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
         .announce_destination(&dest_b.hash, b"mvr38-responder")
         .await
         .expect("announce B");
-    let relay1_has_b = wait_for_path_on_node(&relay1, &dest_b_hash, Duration::from_secs(30)).await;
+    let relay1_has_b =
+        wait_for_path_on_node(&relay1, &dest_b_hash_typed, Duration::from_secs(30)).await;
     assert!(
         relay1_has_b,
         "relay-1 must learn a path to the responder within 30s"
@@ -311,6 +326,46 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
         "relay-1's path to B must be undercounted (< 2 hops); got {relay1_hops_to_b:?}"
     );
 
+    UndercountChain {
+        responder,
+        dest_b_hash: dest_b.hash,
+        dest_b_public_key: dest_b.public_key,
+        dest_b_hash_typed,
+        dest_b_signing_key,
+        relay1,
+        relay2,
+        relay1_addr,
+        relay1_port,
+        _relay1_storage,
+        _relay2_storage,
+    }
+}
+
+// ----------------------------------------------------------------------------
+// The reproduction.
+// ----------------------------------------------------------------------------
+
+/// Full #38 fix proof: Python initiator AND Rust initiator both establish the
+/// link on the identical hop-undercount relay chain that previously timed the
+/// Python client out.
+#[tokio::test]
+async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
+    let log_buf = captured_logs();
+    log_buf.lock().unwrap().clear();
+
+    let UndercountChain {
+        responder,
+        dest_b_hash: dest_b_hash_str,
+        dest_b_public_key,
+        dest_b_hash_typed: dest_b_hash,
+        dest_b_signing_key,
+        mut relay1,
+        mut relay2,
+        relay1_addr,
+        relay1_port,
+        ..
+    } = setup_undercount_chain().await;
+
     // ========================================================================
     // (A) PYTHON initiator: create_link must now ESTABLISH (no timeout).
     // ========================================================================
@@ -326,7 +381,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
         &initiator_py,
         &dest_b_hash,
         &responder,
-        &dest_b.hash,
+        &dest_b_hash_str,
         b"mvr38-responder",
         Duration::from_secs(30),
     )
@@ -337,7 +392,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
     );
 
     let py_link = initiator_py
-        .create_link(&dest_b.hash, &dest_b.public_key, 15)
+        .create_link(&dest_b_hash_str, &dest_b_public_key, 15)
         .await;
     let logs = log_snapshot(&log_buf);
     assert!(
@@ -375,7 +430,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
     let rs_has_b = wait_for_path_reannounce(
         || initiator_rs.has_path(&dest_b_hash),
         &responder,
-        &dest_b.hash,
+        &dest_b_hash_str,
         b"mvr38-responder",
         Duration::from_secs(30),
     )
@@ -402,6 +457,125 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
 
     // Tidy up async nodes.
     let _ = initiator_rs.stop().await;
+    let _ = relay1.stop().await;
+    let _ = relay2.stop().await;
+}
+
+/// #38 completion: the link established over the hop-undercount asymmetry must
+/// actually CARRY DATA both ways (the user's real goal is loading a NomadNet
+/// page = establish + transfer). A Python initiator links to the Python
+/// responder B through our two relays, then sends a payload and receives B's
+/// echo. Both traverse the relay link-DATA forward-anyway site
+/// (transport.rs, "Link data hop asymmetry, forwarding anyway"), the mirror of
+/// the LRPROOF site fixed in 5d0833d.
+///
+/// Note on scope: Python's strict per-hop check (Transport.py:1656) gates only
+/// LINK-DATA that Python *relays* (destination in its link_table). Here the
+/// Python nodes are the link ENDPOINTS, so they deliver local link data without
+/// that check; the only relays are our Rust nodes. This test therefore proves
+/// end-to-end data delivery over the asymmetric link; a Python-relay-in-the-
+/// middle drop would need a different topology.
+#[tokio::test]
+async fn lrproof_hop_undercount_data_transfer_both_ways() {
+    let log_buf = captured_logs();
+    log_buf.lock().unwrap().clear();
+
+    let UndercountChain {
+        responder,
+        dest_b_hash: dest_b_hash_str,
+        dest_b_public_key,
+        dest_b_hash_typed: dest_b_hash,
+        mut relay1,
+        mut relay2,
+        relay1_port,
+        ..
+    } = setup_undercount_chain().await;
+
+    // --- Python initiator A links to B through the asymmetric relay chain. ---
+    let initiator_py = TestDaemon::start().await.expect("start Python initiator A");
+    initiator_py
+        .add_client_interface("127.0.0.1", relay1_port, Some("to-relay1"))
+        .await
+        .expect("Python A dials relay-1");
+
+    let py_has_b = wait_for_path_reannounce_on_daemon(
+        &initiator_py,
+        &dest_b_hash,
+        &responder,
+        &dest_b_hash_str,
+        b"mvr38-responder",
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        py_has_b,
+        "Python initiator A must learn a path to B before create_link"
+    );
+
+    let link_hash = initiator_py
+        .create_link(&dest_b_hash_str, &dest_b_public_key, 15)
+        .await
+        .expect("Python A create_link must establish over the asymmetric chain");
+
+    // Let both ends settle the link (RTT/keepalive) before pushing data.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // ========================================================================
+    // A -> B: the initiator sends a payload over the link; B records it (and
+    // its _on_packet echoes it straight back).
+    // ========================================================================
+    let payload = b"nomadnet page fetch over the asymmetric link";
+    initiator_py
+        .send_on_link(&link_hash, payload)
+        .await
+        .expect("Python A send_on_link");
+
+    // B must RECEIVE the payload (A -> B direction through the relay chain).
+    let mut b_got = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let recv = responder
+            .get_received_packets()
+            .await
+            .expect("responder get_received_packets");
+        if recv.iter().any(|p| p.data == payload) {
+            b_got = true;
+            break;
+        }
+    }
+    let logs = log_snapshot(&log_buf);
+    assert!(
+        b_got,
+        "A->B: responder B must receive the payload sent over the asymmetric \
+         link (relay forwards link data despite the hop mismatch).\n\
+         --- relay logs ---\n{logs}"
+    );
+
+    // ========================================================================
+    // B -> A: A must RECEIVE B's echo of the same payload (return direction
+    // through the relay chain). A's create_link packet callback records it.
+    // ========================================================================
+    let mut a_got_echo = false;
+    for _ in 0..40 {
+        let recv = initiator_py
+            .get_received_packets()
+            .await
+            .expect("initiator get_received_packets");
+        if recv.iter().any(|p| p.data == payload) {
+            a_got_echo = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let logs = log_snapshot(&log_buf);
+    assert!(
+        a_got_echo,
+        "B->A: Python initiator A must receive B's echo over the asymmetric \
+         link (relay forwards the return link data despite the hop \
+         mismatch).\n--- relay logs ---\n{logs}"
+    );
+
+    // Tidy up async nodes.
     let _ = relay1.stop().await;
     let _ = relay2.stop().await;
 }
