@@ -224,12 +224,27 @@ struct ParityDaemon {
     config_dir: PathBuf,
     instance_name: String,
     authkey: [u8; 32],
+    /// Listen ports of the configured TCP server interfaces. `tcp_port` is the
+    /// first; the multi-interface parity test uses all of them.
+    tcp_ports: Vec<u16>,
     tcp_port: u16,
     child: Child,
 }
 
 impl ParityDaemon {
     async fn start(stack: Stack) -> ParityDaemon {
+        Self::start_n(stack, 1).await
+    }
+
+    /// Start a daemon with `n_interfaces` TCP server interfaces (1 or 2). The
+    /// single-interface form is what the 2x2 matrix uses; the two-interface
+    /// form backs the multi-interface sort/`-a` parity test, where more than
+    /// one visible interface is required for ordering to be observable.
+    async fn start_n(stack: Stack, n_interfaces: usize) -> ParityDaemon {
+        assert!(
+            (1..=2).contains(&n_interfaces),
+            "parity daemon supports 1 or 2 interfaces"
+        );
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let instance_name = format!(
             "parity_{}_{}_{}",
@@ -237,10 +252,11 @@ impl ParityDaemon {
             std::process::id(),
             test_id
         );
-        // The harness allocator hands out a minimum of two ports; only the
-        // first is used (the daemon's TCP server bind).
+        // The harness allocator hands out a minimum of two ports; the
+        // single-interface form uses only the first.
         let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate port");
-        let tcp_port = ports[0];
+        let tcp_ports: Vec<u16> = ports[..n_interfaces].to_vec();
+        let tcp_port = tcp_ports[0];
 
         let config_dir = std::env::temp_dir().join(format!("status_parity_{instance_name}"));
         let _ = std::fs::remove_dir_all(&config_dir);
@@ -260,8 +276,18 @@ impl ParityDaemon {
         authkey.copy_from_slice(&sha2::Sha256::digest(identity_bytes));
 
         // One config template for BOTH stacks: transport node, shared
-        // instance, a single TCP server. No `mode` override so both stacks
+        // instance, one or two TCP servers. No `mode` override so both stacks
         // report the default MODE_FULL.
+        let mut iface_blocks = String::new();
+        for (idx, port) in tcp_ports.iter().enumerate() {
+            iface_blocks.push_str(&format!(
+                "\x20 [[Parity TCP Server {idx}]]\n\
+                 \x20   type = TCPServerInterface\n\
+                 \x20   enabled = yes\n\
+                 \x20   listen_ip = 127.0.0.1\n\
+                 \x20   listen_port = {port}\n"
+            ));
+        }
         let config = format!(
             "[reticulum]\n\
              \x20 enable_transport = yes\n\
@@ -273,11 +299,7 @@ impl ParityDaemon {
              \x20 loglevel = 3\n\
              \n\
              [interfaces]\n\
-             \x20 [[Parity TCP Server]]\n\
-             \x20   type = TCPServerInterface\n\
-             \x20   enabled = yes\n\
-             \x20   listen_ip = 127.0.0.1\n\
-             \x20   listen_port = {tcp_port}\n"
+             {iface_blocks}"
         );
         std::fs::write(config_dir.join("config"), config).expect("write config");
 
@@ -310,6 +332,7 @@ impl ParityDaemon {
             config_dir,
             instance_name,
             authkey,
+            tcp_ports,
             tcp_port,
             child,
         };
@@ -1437,7 +1460,11 @@ async fn status_parity_matrix_2x2() {
 }
 
 async fn connect_injector(daemon: &ParityDaemon) -> TcpStream {
-    let addr = format!("127.0.0.1:{}", daemon.tcp_port);
+    connect_injector_port(daemon, daemon.tcp_port).await
+}
+
+async fn connect_injector_port(daemon: &ParityDaemon, port: u16) -> TcpStream {
+    let addr = format!("127.0.0.1:{port}");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match TcpStream::connect(&addr).await {
@@ -1450,6 +1477,156 @@ async fn connect_injector(daemon: &ParityDaemon) -> TcpStream {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+// =========================================================================
+// Multi-interface sort / -a parity (complements the single-interface 2x2)
+// =========================================================================
+
+/// Non-local visible interface entries (the spawned per-connection ones).
+fn visible_ifaces(stats: &Value) -> Vec<Value> {
+    ifaces(stats)
+        .into_iter()
+        .filter(|i| {
+            let t = i.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            t != "LocalServerInterface" && t != "LocalClientInterface"
+        })
+        .collect()
+}
+
+/// Drop the volatile uptime value so two sequential reads of the same frozen
+/// daemon are byte-comparable. Every other line is stable in the idle state
+/// (speeds render `0 bps`, byte counters are pinned by the readiness poll),
+/// so the uptime trailer is the only thing that can differ between the two
+/// clients' invocations.
+fn normalize_idle_text(text: &str) -> String {
+    let re_uptime = Regex::new(r"Uptime is .*").unwrap();
+    text.lines()
+        .map(|l| {
+            if l.contains("Uptime is") {
+                re_uptime.replace(l, "Uptime is <T>").into_owned()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// lnstatus vs rnstatus (the drop-in A/B) against ONE lnsd carrying TWO
+/// traffic interfaces with unequal received-byte counts. This pins the parity
+/// surface the single-interface 2x2 cannot exercise: the default multi-entry
+/// ordering, every `-s <field>` sort direction, `-r` reverse, and the `-a`
+/// spawned-interface block. Both clients read the SAME frozen daemon state, so
+/// after blanking only the uptime line their output must be byte-identical for
+/// a user or script switching between the tools.
+///
+/// Determinism: the two injectors send different byte volumes on one raw TCP
+/// connection each, so the spawned interfaces have distinct rxb; the test then
+/// polls interface_stats until exactly two visible interfaces exist with
+/// unequal, non-zero rxb AND every speed has decayed to 0 (frozen), so sort
+/// order is well-defined and no live rate can differ between the two reads.
+#[tokio::test]
+#[ignore = "spawns lnsd + python rnstatus; run via --include-ignored after the tier3"]
+async fn lnstatus_rnstatus_multi_interface_sort_parity() {
+    init_tracing();
+
+    let lnsd = ParityDaemon::start_n(Stack::Lnsd, 2).await;
+
+    // One raw connection per TCP server; send more bytes on the first so the
+    // two spawned interfaces end with clearly unequal rxb (deterministic sort
+    // order). The connections stay open for the whole test so the interface
+    // set never changes underneath the comparison.
+    let mut inj_a = connect_injector_port(&lnsd, lnsd.tcp_ports[0]).await;
+    let mut inj_b = connect_injector_port(&lnsd, lnsd.tcp_ports[1]).await;
+    use tokio::io::AsyncWriteExt as _;
+    // HDLC flag-delimited noise; the exact contents are irrelevant, only that
+    // interface A receives strictly more on-wire bytes than interface B.
+    inj_a
+        .write_all(&[0x7e, 0x00, 0x11, 0x22, 0x33, 0x7e])
+        .await
+        .expect("write inj_a");
+    inj_b.write_all(&[0x7e, 0x7e]).await.expect("write inj_b");
+    inj_a.flush().await.expect("flush a");
+    inj_b.flush().await.expect("flush b");
+
+    // Readiness + freeze: exactly two visible interfaces, unequal non-zero
+    // rxb, and all speeds decayed to 0 so nothing live can differ between the
+    // two sequential client reads.
+    wait_stats(
+        &lnsd,
+        "two frozen interfaces with unequal rxb",
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        |stats| {
+            let vis = visible_ifaces(stats);
+            if vis.len() != 2 {
+                return false;
+            }
+            let (r0, r1) = (num(&vis[0], "rxb"), num(&vis[1], "rxb"));
+            r0 > 0.0 && r1 > 0.0 && r0 != r1 && is_quiet(stats)
+        },
+    )
+    .await;
+
+    // The A/B matrix: same daemon, two clients, byte-identical output after
+    // blanking only the uptime. `-a` is included on every set because the
+    // spawned TCP connections are hidden by default (the `TCPInterface[Client`
+    // name prefix) and the sort/order surface is only visible once shown.
+    let flag_sets: &[&[&str]] = &[
+        &["-a"],
+        &["-a", "-s", "rx"],
+        &["-a", "-s", "rx", "-r"],
+        &["-a", "-s", "tx"],
+        &["-a", "-s", "traffic"],
+        &["-a", "-s", "rate"],
+        &["-a", "-s", "traffic", "-r"],
+        &["-a", "-t"],
+        &["-a", "-l"],
+        &["-a", "-A", "-P"],
+        &["-a", "tcp"],
+    ];
+    for flags in flag_sets {
+        let rn = run_status(StatusClient::Rnstatus, &lnsd, flags).await;
+        let ln = run_status(StatusClient::Lnstatus, &lnsd, flags).await;
+        assert_eq!(
+            normalize_idle_text(&rn),
+            normalize_idle_text(&ln),
+            "multi-interface render parity for flags {flags:?} on lnsd\nrnstatus:\n{rn}\nlnstatus:\n{ln}"
+        );
+    }
+
+    // The -j top-level key set must match structurally as well (the JSON both
+    // clients read is the same daemon dict; key order/separators are the only
+    // allowed difference, per the module doc).
+    let rn_j: Value = serde_json::from_str(
+        run_status(StatusClient::Rnstatus, &lnsd, &["-j"])
+            .await
+            .trim(),
+    )
+    .expect("rnstatus -j JSON");
+    let ln_j: Value = serde_json::from_str(
+        run_status(StatusClient::Lnstatus, &lnsd, &["-j"])
+            .await
+            .trim(),
+    )
+    .expect("lnstatus -j JSON");
+    let top_keys = |v: &Value| -> BTreeSet<String> {
+        v.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        top_keys(&rn_j),
+        top_keys(&ln_j),
+        "multi-interface -j top-level key sets must match across clients"
+    );
+
+    drop(inj_a);
+    drop(inj_b);
+    let dir = lnsd.config_dir.clone();
+    drop(lnsd);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Field-by-field daemon stats parity (#67) on the frozen state, rnstatus
