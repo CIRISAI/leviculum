@@ -21,6 +21,29 @@ The URL selects a destination and a page path:
 
 `<dest_hash>` is 32 hex characters (the 16-byte truncated destination hash).
 
+## Discovering nodes
+
+Without a destination hash, `lnomad --discover` finds NomadNet page-hosting
+nodes by listening for their announces. Every NomadNet node announces the
+`nomadnetwork.node` destination, so the announces can be recognised and their
+destination hash and display name collected without knowing anything in advance:
+
+```
+lnomad --discover                 listen (default 30s) and list nodes found
+lnomad --discover --duration 60   listen for 60 seconds
+```
+
+On a terminal, each node is printed as it is first seen, then a list is shown:
+
+```
+[N] <name>  <dest_hash>  hops=H  last-seen Xs ago
+```
+
+Enter a number to open that node's `/page/index.mu` in the browser, or `q` to
+quit. With `--print` or non-tty stdout, the accumulated list is printed after the
+listen window and the command exits. The discovered list is also reachable from
+the browser with the `d` (`nodes`) command, and `o <N>` opens a listed node.
+
 ### Options
 
 - `--instance <name>`  shared-instance name (overrides the config file's)
@@ -29,6 +52,8 @@ The URL selects a destination and a page path:
 - `--width <n>`        render width (default: detected terminal width, else 80)
 - `--timeout <s>`      per-request timeout in seconds (default 30)
 - `--print`            fetch, render and print once, then exit
+- `--discover`         list NomadNet nodes seen from announces (no URL needed)
+- `--duration <s>`     `--discover` listen window in seconds (default 30)
 
 When stdout is not a terminal, `lnomad` prints once and exits even without
 `--print`, so piping and redirection never block on the prompt.
@@ -42,6 +67,8 @@ target`, and reads commands at the `>` prompt:
 - `b`         back to the previous page
 - `r`         reload the current page
 - `u <url>`   go to a new URL
+- `d` / `nodes`  list NomadNet nodes discovered from announces
+- `o <N>`     open discovered node number `N`
 - `h`         help
 - `q` / EOF   quit
 

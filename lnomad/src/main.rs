@@ -28,8 +28,8 @@ const FALLBACK_WIDTH: usize = 80;
 )]
 struct Args {
     /// Page URL: `<dest_hash>[:/page/x.mu[`f=v|...]]` (a bare hash opens the
-    /// default page).
-    url: String,
+    /// default page). Optional in `--discover` mode.
+    url: Option<String>,
 
     /// Shared-instance name to connect to (overrides the config file's).
     #[arg(long)]
@@ -54,6 +54,15 @@ struct Args {
     /// Fetch, render and print the page once, then exit (non-interactive).
     #[arg(long)]
     print: bool,
+
+    /// Discover NomadNet nodes from announces instead of fetching a page: listen
+    /// for `nomadnetwork.node` announces and list the nodes seen.
+    #[arg(long)]
+    discover: bool,
+
+    /// How long to listen in `--discover` mode, in seconds.
+    #[arg(long, default_value_t = 30)]
+    duration: u64,
 }
 
 /// Detect the terminal width in columns, falling back to [`FALLBACK_WIDTH`].
@@ -68,11 +77,22 @@ fn detect_width() -> usize {
 async fn main() -> ExitCode {
     let args = Args::parse();
 
-    let target = match parse_url(&args.url, None) {
-        Ok(target) => target,
-        Err(err) => {
-            eprintln!("lnomad: {err}: {}", args.url);
-            return ExitCode::from(2);
+    // In page mode the URL is required; in --discover mode it is ignored.
+    let target = if args.discover {
+        None
+    } else {
+        match args.url.as_deref() {
+            Some(url) => match parse_url(url, None) {
+                Ok(target) => Some(target),
+                Err(err) => {
+                    eprintln!("lnomad: {err}: {url}");
+                    return ExitCode::from(2);
+                }
+            },
+            None => {
+                eprintln!("lnomad: a page URL is required (or pass --discover)");
+                return ExitCode::from(2);
+            }
         }
     };
 
@@ -104,27 +124,51 @@ async fn main() -> ExitCode {
     // piped/redirected invocation never blocks on the REPL.
     let interactive =
         !args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let duration = Duration::from_secs(args.duration);
 
-    let code = if interactive {
-        let stdin = std::io::stdin();
-        let mut input = BufReader::new(stdin.lock());
+    let code = if args.discover {
         let mut out = std::io::stdout();
-        match browser::run(&mut input, &mut out, &mut session, target, &opts).await {
+        let result = if interactive {
+            let stdin = std::io::stdin();
+            let mut input = BufReader::new(stdin.lock());
+            browser::discover_interactive(&mut input, &mut out, &mut session, duration, &opts).await
+        } else {
+            browser::discover_print(&mut out, &mut session, duration).await
+        };
+        match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("lnomad: {err}");
                 ExitCode::FAILURE
+            }
+        }
+    } else if let Some(target) = target {
+        // Page mode: target was validated as present above.
+        if interactive {
+            let stdin = std::io::stdin();
+            let mut input = BufReader::new(stdin.lock());
+            let mut out = std::io::stdout();
+            match browser::run(&mut input, &mut out, &mut session, target, &opts).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("lnomad: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        } else {
+            let mut out = std::io::stdout();
+            match browser::print_once(&mut out, &mut session, &target, &opts).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("lnomad: {err}");
+                    ExitCode::FAILURE
+                }
             }
         }
     } else {
-        let mut out = std::io::stdout();
-        match browser::print_once(&mut out, &mut session, &target, &opts).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("lnomad: {err}");
-                ExitCode::FAILURE
-            }
-        }
+        // Unreachable: page mode always validates a URL into `Some` above.
+        eprintln!("lnomad: a page URL is required (or pass --discover)");
+        ExitCode::from(2)
     };
 
     // Best-effort teardown; the exit code already reflects the fetch outcome.

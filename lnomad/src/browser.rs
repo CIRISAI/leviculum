@@ -31,6 +31,10 @@ pub enum Command {
     Reload,
     /// Navigate to a new URL (`u <url>`).
     Go(String),
+    /// List the NomadNet nodes discovered from announces (`d` / `nodes`).
+    Nodes,
+    /// Open discovered node number `N` (`o N` / `open N`).
+    OpenNode(usize),
     /// Print the help text (`h`).
     Help,
     /// Quit the browser (`q` / EOF).
@@ -67,6 +71,11 @@ pub fn parse_command(input: &str) -> Command {
                 Command::Go(rest.to_string())
             }
         }
+        "d" | "nodes" => Command::Nodes,
+        "o" | "open" => match rest.parse::<usize>() {
+            Ok(n) => Command::OpenNode(n),
+            Err(_) => Command::Unknown(trimmed.to_string()),
+        },
         "h" | "help" | "?" => Command::Help,
         "q" | "quit" | "exit" => Command::Quit,
         _ => Command::Unknown(trimmed.to_string()),
@@ -256,6 +265,82 @@ pub async fn print_once<W: Write>(
         .map(|_| ())
 }
 
+/// Run node discovery for `duration`, then print the accumulated list once and
+/// return. Used for `--discover --print` and non-tty stdout, so a scripted or
+/// piped invocation never blocks on a prompt.
+pub async fn discover_print<W: Write>(
+    out: &mut W,
+    session: &mut Session,
+    duration: Duration,
+) -> std::io::Result<()> {
+    session.run_discovery(duration, |_| {}).await;
+    write_node_list(out, session)
+}
+
+/// Run node discovery interactively: print each newly seen node as it arrives,
+/// then let the reader open one by number (or `q` to quit). Opening a node hands
+/// off to the full [`run`] browser on that node's default page.
+pub async fn discover_interactive<R: BufRead, W: Write>(
+    input: &mut R,
+    out: &mut W,
+    session: &mut Session,
+    duration: Duration,
+    opts: &BrowserOptions,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "Discovering NomadNet nodes for {}s...",
+        duration.as_secs()
+    )?;
+    out.flush()?;
+
+    // Print newly discovered nodes as they arrive; re-announces of a known node
+    // are folded silently into the registry.
+    let mut announced: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
+    session
+        .run_discovery(duration, |node| {
+            if announced.insert(node.dest_hash) {
+                let _ = writeln!(
+                    out,
+                    "  [{}] {}  {}",
+                    announced.len(),
+                    node.display_name(),
+                    node.dest_hex()
+                );
+            }
+        })
+        .await;
+
+    writeln!(out)?;
+    write_node_list(out, session)?;
+
+    if session.discovered_nodes().is_empty() {
+        return Ok(());
+    }
+
+    loop {
+        write!(out, "\nopen node [N], or q to quit> ")?;
+        out.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            writeln!(out)?;
+            break;
+        }
+        match parse_command(&line) {
+            Command::Empty => {}
+            Command::Quit => break,
+            Command::Nodes => write_node_list(out, session)?,
+            Command::Help => writeln!(out, "{HELP}")?,
+            Command::Follow(n) | Command::OpenNode(n) => match node_target(session, n) {
+                Some(target) => return run(input, out, session, target, opts).await,
+                None => writeln!(out, "no discovered node [{n}]")?,
+            },
+            _ => writeln!(out, "enter a node number, or q to quit")?,
+        }
+    }
+    Ok(())
+}
+
 /// The help text shown for the `h` command.
 const HELP: &str = "\
 Commands:
@@ -263,6 +348,8 @@ Commands:
   b          back to the previous page
   r          reload the current page
   u <url>    go to a new URL
+  d / nodes  list NomadNet nodes discovered from announces
+  o <N>      open discovered node number N
   h          show this help
   q / EOF    quit";
 
@@ -354,9 +441,62 @@ pub async fn run<R: BufRead, W: Write>(
                 nav.visit(target);
                 links = show_current(out, session, &nav, opts, None).await;
             }
+            Command::Nodes => {
+                write_node_list(out, session)?;
+            }
+            Command::OpenNode(n) => {
+                let target = match node_target(session, n) {
+                    Some(target) => target,
+                    None => {
+                        writeln!(out, "no discovered node [{n}] (try `d` to list)")?;
+                        continue;
+                    }
+                };
+                nav.visit(target);
+                links = show_current(out, session, &nav, opts, None).await;
+            }
         }
     }
     Ok(())
+}
+
+/// Resolve discovered node index `n` to a fetch target for its default page.
+fn node_target(session: &Session, n: usize) -> Option<Target> {
+    let node = session.discovered_node(n)?;
+    parse_url(&node.dest_hex(), None).ok()
+}
+
+/// Write the discovered-nodes list (or a hint when none are known yet). The
+/// numbering matches the `o <N>` command's 1-based index.
+pub fn write_node_list<W: Write>(out: &mut W, session: &Session) -> std::io::Result<()> {
+    let nodes = session.discovered_nodes();
+    if nodes.is_empty() {
+        writeln!(
+            out,
+            "no NomadNet nodes discovered yet (announces arrive as nodes come online)"
+        )?;
+        return Ok(());
+    }
+    writeln!(out, "Discovered NomadNet nodes:")?;
+    let now = crate::discovery::now_unix_secs();
+    for (i, node) in nodes.iter().enumerate() {
+        writeln!(out, "  {}", format_node_line(i + 1, node, now))?;
+    }
+    Ok(())
+}
+
+/// Format one discovered-node list line: `[N] <name>  <dest_hash>  hops=H  last-seen Xs ago`.
+pub fn format_node_line(index: usize, node: &crate::discovery::DiscoveredNode, now: u64) -> String {
+    let hops = match node.hops {
+        Some(h) => h.to_string(),
+        None => "?".to_string(),
+    };
+    let age = now.saturating_sub(node.last_seen);
+    format!(
+        "[{index}] {}  {}  hops={hops}  last-seen {age}s ago",
+        node.display_name(),
+        node.dest_hex(),
+    )
 }
 
 /// Load and display the current page, returning its links. On a fetch error a
@@ -438,6 +578,50 @@ mod tests {
     #[test]
     fn go_without_argument_is_unknown() {
         assert_eq!(parse_command("u"), Command::Unknown("u".to_string()));
+    }
+
+    #[test]
+    fn parses_nodes_and_open_commands() {
+        assert_eq!(parse_command("d"), Command::Nodes);
+        assert_eq!(parse_command("nodes"), Command::Nodes);
+        assert_eq!(parse_command("o 2"), Command::OpenNode(2));
+        assert_eq!(parse_command("open 10"), Command::OpenNode(10));
+        // `o` needs a numeric argument; without one it is unknown.
+        assert_eq!(parse_command("o"), Command::Unknown("o".to_string()));
+        assert_eq!(parse_command("o x"), Command::Unknown("o x".to_string()));
+    }
+
+    #[test]
+    fn format_node_line_shows_index_name_hash_hops_and_age() {
+        let node = crate::discovery::DiscoveredNode {
+            dest_hash: [0xab; 16],
+            name: Some("Test Node".to_string()),
+            first_seen: 100,
+            last_seen: 140,
+            hops: Some(3),
+        };
+        let line = format_node_line(1, &node, 150);
+        assert_eq!(
+            line,
+            "[1] Test Node  abababababababababababababababab  hops=3  last-seen 10s ago"
+        );
+    }
+
+    #[test]
+    fn format_node_line_falls_back_when_name_and_hops_absent() {
+        let node = crate::discovery::DiscoveredNode {
+            dest_hash: [0x01; 16],
+            name: None,
+            first_seen: 100,
+            last_seen: 100,
+            hops: None,
+        };
+        let line = format_node_line(2, &node, 100);
+        // No name -> the dest hex is shown; unknown hops -> `?`.
+        assert_eq!(
+            line,
+            "[2] 01010101010101010101010101010101  01010101010101010101010101010101  hops=?  last-seen 0s ago"
+        );
     }
 
     #[test]

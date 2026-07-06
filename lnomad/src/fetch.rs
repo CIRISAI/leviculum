@@ -20,8 +20,9 @@ use std::time::Duration;
 
 use leviculum_std::config::Config;
 use leviculum_std::driver::ReticulumNodeBuilder;
-use leviculum_std::{DestinationHash, EventReceiver, NodeEvent, ReticulumNode};
+use leviculum_std::{DestinationHash, EventReceiver, NodeEvent, ReceivedAnnounce, ReticulumNode};
 
+use crate::discovery::{is_nomad_node_announce, now_unix_secs, DiscoveredNode, NomadNodeRegistry};
 use crate::url::Target;
 
 /// Path-discovery budget. A `PATH_REQUEST` has no retry of its own, so this is
@@ -84,6 +85,10 @@ pub struct Session {
     node: ReticulumNode,
     events: EventReceiver,
     current: Option<CurrentLink>,
+    /// NomadNet nodes learned from announces seen on this session's event
+    /// stream. Populated by the discovery loop and, opportunistically, by any
+    /// event wait during browsing, so the `nodes` command has a live list.
+    registry: NomadNodeRegistry,
 }
 
 impl Session {
@@ -118,6 +123,7 @@ impl Session {
             node,
             events,
             current: None,
+            registry: NomadNodeRegistry::new(),
         })
     }
 
@@ -166,6 +172,80 @@ impl Session {
 
         self.await_response(request_id, link_id, timeout + RESPONSE_SLACK)
             .await
+    }
+
+    /// Run the NomadNet node discovery loop for `duration`, folding every node
+    /// announce seen on the event stream into the shared registry. `on_node` is
+    /// called with the discovered node each time one is inserted or refreshed, so
+    /// a caller can print the list as it grows. Returns when the duration elapses
+    /// or the event stream closes.
+    pub async fn run_discovery<F>(&mut self, duration: Duration, mut on_node: F)
+    where
+        F: FnMut(&DiscoveredNode),
+    {
+        let deadline = tokio::time::Instant::now() + duration;
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return;
+            };
+            if remaining.is_zero() {
+                return;
+            }
+            match self.next_node_announce(remaining).await {
+                Some(dest) => {
+                    if let Some(node) = self.registry.get_by_hash(&dest) {
+                        on_node(node);
+                    }
+                }
+                // Stream closed or the discovery window elapsed: stop cleanly.
+                None => return,
+            }
+        }
+    }
+
+    /// Wait up to `timeout` for the next NomadNet node announce, fold it into the
+    /// registry, and return its destination hash. Non-node announces seen while
+    /// waiting are ignored by the filter and do not end the wait. Returns `None`
+    /// on timeout or a closed event stream.
+    pub async fn next_node_announce(&mut self, timeout: Duration) -> Option<[u8; 16]> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let event = match tokio::time::timeout_at(deadline, self.events.recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) | Err(_) => return None,
+            };
+            if let NodeEvent::AnnounceReceived { announce, .. } = &event {
+                if self.note_announce(announce) {
+                    return Some(*announce.destination_hash().as_bytes());
+                }
+            }
+        }
+    }
+
+    /// The discovered NomadNet nodes, in discovery order.
+    pub fn discovered_nodes(&self) -> Vec<&DiscoveredNode> {
+        self.registry.nodes()
+    }
+
+    /// The discovered node at 1-based index `n`, matching the shown numbering.
+    pub fn discovered_node(&self, n: usize) -> Option<&DiscoveredNode> {
+        self.registry.get(n)
+    }
+
+    /// Fold a single announce into the registry, returning `true` when it was a
+    /// NomadNet node announce (and so recorded). Hop count is read from the
+    /// node's path table at observation time.
+    fn note_announce(&mut self, announce: &ReceivedAnnounce) -> bool {
+        if !is_nomad_node_announce(announce) {
+            return false;
+        }
+        let hops = self
+            .node
+            .hops_to(announce.destination_hash())
+            .map(|h| h as u32);
+        let now = now_unix_secs();
+        self.registry.observe(announce, hops, now)
     }
 
     /// Establish (or reuse) an active link to `dest`, learning a path and the
@@ -248,6 +328,10 @@ impl Session {
                 NodeEvent::LinkClosed { link_id: id, .. } if id == link_id => {
                     return Err(FetchError::LinkFailed)
                 }
+                // Opportunistically learn node announces seen while waiting.
+                NodeEvent::AnnounceReceived { announce, .. } => {
+                    self.note_announce(&announce);
+                }
                 _ => {}
             }
         }
@@ -281,6 +365,10 @@ impl Session {
                 NodeEvent::LinkClosed { link_id: id, .. } if id == link_id => {
                     self.current = None;
                     return Err(FetchError::LinkFailed);
+                }
+                // Opportunistically learn node announces seen while waiting.
+                NodeEvent::AnnounceReceived { announce, .. } => {
+                    self.note_announce(&announce);
                 }
                 _ => {}
             }

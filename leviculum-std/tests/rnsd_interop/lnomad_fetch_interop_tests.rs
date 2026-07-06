@@ -32,7 +32,11 @@ use leviculum_std::driver::ReticulumNodeBuilder;
 use lnomad::fetch::{FetchError, Session};
 use lnomad::url::parse_url;
 
+use crate::common::parse_dest_hash;
 use crate::harness::{find_available_ports, DestinationInfo, TestDaemon};
+
+/// The node display name the Python page node announces (its announce `app_data`).
+const PAGE_NODE_NAME: &[u8] = b"lnomad-page-node";
 
 /// Stand up the Python NomadNet page node, dial it into the daemon's TCP server,
 /// register its page handlers, and announce it. Returns the node and its
@@ -152,6 +156,84 @@ async fn run_page_suite(session: &mut Session, page: &TestDaemon, dest_hex: &str
     );
 }
 
+/// Drive lnomad's NomadNet node discovery against a connected session and the
+/// Python page node. The page node announces its `nomadnetwork.node` destination
+/// while the discovery loop listens; the loop must surface the node with the
+/// right destination hash and decoded display name.
+///
+/// The Python node is re-announced across several rounds: its startup announce
+/// went out before the discovery client connected, so a fresh announce is what
+/// the running loop observes (and re-announcing tolerates a single dropped one).
+async fn run_discovery_suite(session: &mut Session, page: &TestDaemon, dest_hex: &str) {
+    let expected = *parse_dest_hash(dest_hex).as_bytes();
+
+    let mut found = false;
+    for _ in 0..10 {
+        page.announce_destination(dest_hex, PAGE_NODE_NAME)
+            .await
+            .expect("re-announce page node");
+        if let Some(dest) = session.next_node_announce(Duration::from_secs(3)).await {
+            if dest == expected {
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        found,
+        "lnomad discovery must observe the Python node's nomadnetwork.node announce"
+    );
+
+    let nodes = session.discovered_nodes();
+    let node = nodes
+        .iter()
+        .find(|n| n.dest_hash == expected)
+        .expect("discovered node must be in the registry");
+    assert_eq!(
+        node.dest_hex(),
+        dest_hex,
+        "discovered destination hash must match what Python announced"
+    );
+    assert_eq!(
+        node.name.as_deref(),
+        Some("lnomad-page-node"),
+        "discovered node name must decode from the announce app_data"
+    );
+}
+
+/// lnomad discovers a Python NomadNet node through a Rust `lnsd` shared instance.
+#[tokio::test]
+async fn lnomad_discovers_node_via_lnsd_shared_instance() {
+    let (ports, _alloc) = find_available_ports::<3>().await.expect("allocate ports");
+    let [daemon_tcp_port, page_rns_port, page_cmd_port] = ports;
+    let daemon_tcp: SocketAddr = format!("127.0.0.1:{daemon_tcp_port}").parse().unwrap();
+    let instance_name = format!("lnomad-disc-lnsd-{}", std::process::id());
+
+    let daemon_storage = tempfile::tempdir().expect("daemon storage");
+    let mut daemon = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance_name.clone())
+        .add_tcp_server(daemon_tcp)
+        .storage_path(daemon_storage.path().to_path_buf())
+        .build_sync()
+        .expect("build lnsd daemon");
+    daemon.start().await.expect("start lnsd daemon");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_tcp_port).await;
+
+    let session_storage = tempfile::tempdir().expect("session storage");
+    let mut session = Session::connect_to(&instance_name, session_storage.path().to_path_buf())
+        .await
+        .expect("connect lnomad session to lnsd");
+
+    run_discovery_suite(&mut session, &page, &dest_info.hash).await;
+
+    session.close().await.expect("close session");
+    daemon.stop().await.expect("stop lnsd daemon");
+}
+
 /// lnomad fetches Python-served pages through a Rust `lnsd` shared instance.
 #[tokio::test]
 async fn lnomad_fetches_pages_via_lnsd_shared_instance() {
@@ -213,6 +295,34 @@ async fn lnomad_fetches_pages_via_rnsd_shared_instance() {
         .expect("connect lnomad session to rnsd");
 
     run_page_suite(&mut session, &page, &dest_info.hash).await;
+
+    session.close().await.expect("close session");
+}
+
+/// lnomad discovers a Python NomadNet node through a Python `rnsd` shared
+/// instance: the same discovery driver, drop-in against the reference daemon.
+#[tokio::test]
+async fn lnomad_discovers_node_via_rnsd_shared_instance() {
+    let (ports, _alloc) = find_available_ports::<4>().await.expect("allocate ports");
+    let [daemon_rns_port, page_rns_port, daemon_cmd_port, page_cmd_port] = ports;
+    let instance_name = format!("lnomad-disc-rnsd-{}", std::process::id());
+
+    let _daemon = TestDaemon::start_with_shared_instance_ports(
+        daemon_rns_port,
+        daemon_cmd_port,
+        &instance_name,
+    )
+    .await
+    .expect("start rnsd shared instance");
+
+    let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_rns_port).await;
+
+    let session_storage = tempfile::tempdir().expect("session storage");
+    let mut session = Session::connect_to(&instance_name, session_storage.path().to_path_buf())
+        .await
+        .expect("connect lnomad session to rnsd");
+
+    run_discovery_suite(&mut session, &page, &dest_info.hash).await;
 
     session.close().await.expect("close session");
 }
