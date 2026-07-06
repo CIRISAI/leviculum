@@ -6,6 +6,11 @@ authors.workspace = true
 license.workspace = true
 description = "Standard library extensions for reticulum - networking, file I/O, async runtime"
 
+# `--cfg fuzzing` is set by cargo-fuzz for the detached `fuzz/` harness; declare
+# it so the unexpected-cfgs lint stays quiet in normal (non-fuzz) builds.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [features]
 default = ["compression"]
 # Enable compression support (uses no_std compatible compression from leviculum-core)

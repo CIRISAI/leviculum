@@ -804,4 +804,45 @@ mod tests {
         // Emission timestamps are stored in seconds (ms / 1000)
         assert_eq!(max_emission_from_blobs(&blobs), 3_000);
     }
+
+    /// Regression guard (Codeberg #108, fuzz `announce_from_packet`): the
+    /// field-slicer slices fixed-size fields out of the payload after the
+    /// `ANNOUNCE_MIN_SIZE` / `ANNOUNCE_RATCHETED_MIN_SIZE` gate. Feed every
+    /// payload length around both boundaries, for both ratchet framings, and
+    /// require it to reject (or accept) without panicking on an out-of-bounds
+    /// slice. The fuzzer found no crash here; this locks that in.
+    #[test]
+    fn from_packet_never_panics_around_size_boundaries() {
+        fn packet(len: usize, context_flag: bool) -> Packet {
+            Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Announce,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: [0u8; TRUNCATED_HASHBYTES],
+                context: PacketContext::None,
+                data: PacketData::Owned(vec![0u8; len]),
+            }
+        }
+
+        for context_flag in [false, true] {
+            let boundary = if context_flag {
+                ANNOUNCE_RATCHETED_MIN_SIZE
+            } else {
+                ANNOUNCE_MIN_SIZE
+            };
+            for len in 0..=(boundary + 2) {
+                let pkt = packet(len, context_flag);
+                // Must not panic; short payloads reject, exact/over accept.
+                let parsed = ReceivedAnnounce::from_packet(&pkt);
+                assert_eq!(parsed.is_ok(), len >= boundary);
+            }
+        }
+    }
 }

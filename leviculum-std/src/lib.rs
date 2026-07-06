@@ -24,6 +24,10 @@ pub mod file_identity_store;
 pub(crate) mod file_known_destinations_store;
 pub(crate) mod file_packet_hash_store;
 pub(crate) mod file_ratchet_store;
+/// Fuzzing-only entry points exposing crate-internal parsers to the detached
+/// cargo-fuzz harness. Compiled only under `--cfg fuzzing` (set by cargo-fuzz).
+#[cfg(fuzzing)]
+pub mod fuzz;
 pub(crate) mod ini_config;
 pub mod interfaces;
 pub(crate) mod known_destinations;

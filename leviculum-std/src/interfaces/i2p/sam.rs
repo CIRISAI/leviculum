@@ -560,4 +560,43 @@ mod tests {
     fn destination_from_short_private_key_errs() {
         assert!(Destination::from_private_base64("AAAA").is_err());
     }
+
+    /// Regression guard (Codeberg #108, fuzz `sam_parse`): the reply-line
+    /// parser and the base64/destination decoders it feeds run on bytes from
+    /// the SAM socket; a panic there takes the interface down. Exercise the
+    /// adversarial shapes the fuzzer explored (empty/partial lines, every
+    /// base64 group remainder, invalid symbols, an under-length destination)
+    /// and require graceful handling, never a panic. The fuzzer found no
+    /// crash here; this locks that in.
+    #[test]
+    fn sam_parse_path_never_panics_on_adversarial_input() {
+        // Reply-line parser: empty, verb-only, key-only, and `=`-heavy tokens.
+        for line in [
+            "",
+            " ",
+            "A",
+            "A B",
+            "A B C=",
+            "A B =v",
+            "A B ==",
+            "A B x=y=z",
+        ] {
+            let _ = Message::parse(line);
+        }
+
+        // base64 decoder: every group-remainder length (1..=4 symbols),
+        // all-invalid symbols, and stray padding.
+        for s in [
+            "", "A", "AB", "ABC", "ABCD", "ABCDE", "====", "!!!!", "-~-~", "A===",
+        ] {
+            let _ = i2p_b64decode(s);
+        }
+
+        // Destination decoders on short / malformed base64 (the private-key
+        // path reads a big-endian cert length after a 387-byte gate).
+        for s in ["", "AAAA", "-~-~-~-~"] {
+            let _ = Destination::from_public_base64(s);
+            let _ = Destination::from_private_base64(s);
+        }
+    }
 }

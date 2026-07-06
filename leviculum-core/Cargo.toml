@@ -6,6 +6,11 @@ authors.workspace = true
 license.workspace = true
 description = "Core library for reticulum - no_std compatible"
 
+# `--cfg fuzzing` is set by cargo-fuzz for the detached `fuzz/` harness; declare
+# it so the unexpected-cfgs lint stays quiet in normal (non-fuzz) builds.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [features]
 default = ["tracing"]
 # No std feature - leviculum-core is always no_std

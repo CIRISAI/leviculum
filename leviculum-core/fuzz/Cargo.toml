@@ -49,6 +49,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "announce_from_packet"
+path = "fuzz_targets/announce_from_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ifac_verify"
 path = "fuzz_targets/ifac_verify.rs"
 test = false

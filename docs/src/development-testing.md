@@ -28,8 +28,8 @@ system packages must be installed (all apt-installable on Debian):
   --ignored`). Enable the bridge with `sam.enabled = true` in
   `/etc/i2pd/i2pd.conf` and start the `i2pd` service.
 - **cargo-fuzz** + **nightly** (optional) — drive the wire-format parser fuzz
-  harness under `leviculum-core/fuzz` (see [Fuzzing the wire
-  parsers](#fuzzing-the-wire-parsers)). Not part of any tier; install with
+  harness under `leviculum-core/fuzz` and `leviculum-std/fuzz` (see [Fuzzing
+  the wire parsers](#fuzzing-the-wire-parsers)). Not part of any tier; install with
   `cargo install cargo-fuzz && rustup toolchain install nightly`.
 - **just**, **cargo**, **flock**, **notify-send** — build/CI plumbing.
 
@@ -187,10 +187,23 @@ separate cargo target dir. Safe to re-run after pulling.
 ## Fuzzing the wire parsers
 
 The functions that parse UNTRUSTED bytes off the wire (packet, resource
-advertisement, discovery announce, IFAC, HDLC/KISS deframers) have a
-coverage-guided fuzz harness under `leviculum-core/fuzz` (cargo-fuzz /
-libFuzzer). A parser that panics, overflows, hangs, or OOMs on malformed input
-is a remote DoS, so each target asserts graceful `Err`/`None`.
+advertisement, discovery announce app-data, announce field-slicer, IFAC,
+HDLC/KISS deframers, I2P SAM reply lines) have a coverage-guided fuzz harness
+(cargo-fuzz / libFuzzer). A parser that panics, overflows, hangs, or OOMs on
+malformed input is a remote DoS, so each target asserts graceful `Err`/`None`.
+
+There are two detached fuzz crates, one per library crate that owns a parser:
+
+- `leviculum-core/fuzz` — `packet_unpack`, `resource_advertisement_unpack`,
+  `discovery_announce`, `announce_from_packet`, `ifac_verify`, `hdlc_deframe`,
+  `kiss_deframe`.
+- `leviculum-std/fuzz` — `sam_parse` (the I2P SAM reply-line parser and the
+  base64/destination decoders it feeds).
+
+`announce_from_packet` (the `ReceivedAnnounce::from_packet` field-slicer) and
+`sam_parse` were added in Codeberg #108 alongside the #23 targets. Both reach
+crate-internal parsers through a `#[cfg(fuzzing)]`-gated `fuzz` module in each
+crate, so no fuzz-only surface leaks into the normal public API.
 
 This is NOT part of any tier (`just standard` never runs it). It needs nightly
 + cargo-fuzz and the glibc host target (the workspace defaults to musl, which
@@ -203,13 +216,18 @@ cargo +nightly fuzz run resource_advertisement_unpack \
     --target x86_64-unknown-linux-gnu \
     seeds/resource_advertisement_unpack -- -max_total_time=30 -max_len=8192
 cargo +nightly fuzz list          # all targets
+
+cd ../leviculum-std              # the SAM target lives in its own crate
+cargo +nightly fuzz run sam_parse \
+    --target x86_64-unknown-linux-gnu \
+    fuzz/seeds/sam_parse -- -max_total_time=30 -max_len=8192
 ```
 
 Any crash the fuzzer finds is fixed at the root AND pinned by a deterministic
 regression unit test in the normal suite, so it stays fixed without the fuzzer.
 Deep continuous fuzzing (hours per target) is a nightly/CI follow-up, not part
-of the 15-minute budget. See `leviculum-core/fuzz/README.md` for the target
-list and exposure ranking.
+of the 15-minute budget. See `leviculum-core/fuzz/README.md` and
+`leviculum-std/fuzz/README.md` for the target lists and exposure ranking.
 
 ## Golden rules
 
