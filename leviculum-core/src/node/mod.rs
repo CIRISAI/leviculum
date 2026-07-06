@@ -57,6 +57,8 @@ mod mvr_link_rekey_alias;
 mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_obs_endpoint;
+#[cfg(test)]
+mod mvr_response_resource;
 #[cfg(all(test, feature = "compression"))]
 mod mvr_send_segmentation;
 #[cfg(test)]

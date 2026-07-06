@@ -674,6 +674,13 @@ impl IncomingResource {
     pub(crate) fn request_id(&self) -> Option<&[u8]> {
         self.request_id.as_deref()
     }
+
+    /// Whether the advertisement flagged this resource as a request response
+    /// (`is_response`). A response resource that matches an outstanding request
+    /// is delivered as `ResponseReceived`, not a generic `ResourceCompleted`.
+    pub(crate) fn is_response(&self) -> bool {
+        self.flags.is_response
+    }
 }
 
 #[cfg(test)]

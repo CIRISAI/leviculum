@@ -262,6 +262,29 @@ class TestDaemon:
         # Start JSON-RPC command server
         self._start_cmd_server()
 
+    def _page_content(self):
+        """Deterministic content for the NomadNet-style page node.
+
+        Fixed and reproducible so a client can assert byte-identity. `small`
+        stays a few hundred bytes (well under the link MDU, so it comes back as
+        a single RESPONSE packet); `large` exceeds the maximum negotiable link
+        MDU so RNS always auto-upgrades the response to an is_response Resource.
+
+        The size floor matters: over TCP, RNS link-MTU discovery raises the link
+        MTU up to the interface HW_MTU (262144 B), so a "several KB" page still
+        fits ONE packet and never becomes a resource. `large` is sized above
+        that ceiling to force the resource path on any link. Cached on first use
+        so every handler and `get_page_content` return the exact same bytes.
+        """
+        if not hasattr(self, "_page_content_cache"):
+            small = b"`c`!Nomad small page`!\n\n" + bytes(i % 251 for i in range(200))
+            large = b"`c`!Nomad large page`!\n\n" + bytes(i % 251 for i in range(300000))
+            self._page_content_cache = {
+                "/page/small.mu": small,
+                "/page/large.mu": large,
+            }
+        return self._page_content_cache
+
     def _discovery_keys(self):
         """Discovery config keys appended to a discoverable TCPServer block.
 
@@ -623,6 +646,67 @@ class TestDaemon:
                 allow=RNS.Destination.ALLOW_ALL,
             )
             return {"result": "ok"}
+
+        elif method == "register_page_request_handler":
+            # Register a minimal NomadNet-style page node on a destination.
+            #
+            # NomadNet serves pages over RAW RNS request/response (not LXMF):
+            # `destination.register_request_handler("/page/<name>.mu", ...)`
+            # (nomadnet/Node.py). A response that fits one packet returns as a
+            # single RESPONSE packet; a response larger than the link MDU is
+            # auto-upgraded by RNS to a Resource carrying is_response=true and
+            # the request_id (RNS.Link.handle_request). This handler mirrors that
+            # for three fixed pages:
+            #   /page/small.mu -> a few hundred bytes  (single-packet path)
+            #   /page/large.mu -> several KB           (is_response Resource path)
+            #   /page/echo.mu  -> echoes the request data (query-field round trip)
+            dest_hash = params.get("dest_hash")
+            if dest_hash not in self.destinations:
+                return {"error": f"destination {dest_hash} not found"}
+            _identity, dest = self.destinations[dest_hash]
+
+            pages = self._page_content()
+
+            def small_page_handler(path, data, request_id, link_id, remote_identity, requested_at):
+                return pages["/page/small.mu"]
+
+            def large_page_handler(path, data, request_id, link_id, remote_identity, requested_at):
+                return pages["/page/large.mu"]
+
+            def echo_page_handler(path, data, request_id, link_id, remote_identity, requested_at):
+                # Return the request data verbatim so a client can assert its
+                # query fields round-tripped. `data` is already the unpacked
+                # request payload (bytes for a msgpack bin request value).
+                return data
+
+            dest.register_request_handler(
+                "/page/small.mu",
+                response_generator=small_page_handler,
+                allow=RNS.Destination.ALLOW_ALL,
+            )
+            dest.register_request_handler(
+                "/page/large.mu",
+                response_generator=large_page_handler,
+                allow=RNS.Destination.ALLOW_ALL,
+            )
+            dest.register_request_handler(
+                "/page/echo.mu",
+                response_generator=echo_page_handler,
+                allow=RNS.Destination.ALLOW_ALL,
+            )
+            return {"result": {
+                "small_len": len(pages["/page/small.mu"]),
+                "large_len": len(pages["/page/large.mu"]),
+            }}
+
+        elif method == "get_page_content":
+            # Return the exact bytes the page node serves for a given path, so a
+            # client can assert byte-identity against what it fetched.
+            path = params.get("path")
+            pages = self._page_content()
+            if path not in pages:
+                return {"error": f"no page content for {path}"}
+            return {"result": {"content": pages[path].hex()}}
 
         elif method == "get_destinations":
             dests = {}

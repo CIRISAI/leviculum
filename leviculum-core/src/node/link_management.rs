@@ -1832,6 +1832,29 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         });
     }
 
+    /// Parse a wrapped request response payload `[request_id, response_data]`
+    /// (msgpack fixarray(2)): the framing both `send_response` (single packet)
+    /// and `send_response_resource` (`> MDU` resource) produce. Returns the
+    /// 16-byte `request_id` and the raw response value. Used by the response-
+    /// resource completion path to mirror Python `response_resource_concluded`
+    /// unpacking `unpacked_response[0]` / `unpacked_response[1]`.
+    fn parse_wrapped_response(
+        plaintext: &[u8],
+    ) -> Option<([u8; crate::constants::TRUNCATED_HASHBYTES], Vec<u8>)> {
+        use crate::resource::msgpack::{
+            read_fixarray_len, read_msgpack_bin, read_msgpack_raw_value,
+        };
+        let mut pos = 0;
+        if read_fixarray_len(plaintext, &mut pos)? != 2 {
+            return None;
+        }
+        let request_id_bytes = read_msgpack_bin(plaintext, &mut pos)?;
+        let request_id: [u8; crate::constants::TRUNCATED_HASHBYTES] =
+            request_id_bytes.try_into().ok()?;
+        let response_data = read_msgpack_raw_value(plaintext, &mut pos)?;
+        Some((request_id, response_data.to_vec()))
+    }
+
     /// Handle a CacheRequest packet: re-send a cached resource proof if we have it.
     fn handle_cache_request(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -1981,56 +2004,74 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let link_mdu = link.mdu();
         let sdu = crate::resource::resource_sdu(link.negotiated_mtu());
 
-        match strategy {
-            ResourceStrategy::AcceptAll => {
-                // Auto-accept: create IncomingResource and send first REQ
-                match IncomingResource::from_advertisement(
-                    &adv,
-                    link_mdu,
-                    sdu,
-                    now_ms,
-                    self.max_incoming_resource_size,
-                ) {
-                    Ok((incoming, req_payload)) => {
-                        // Encrypt and send REQ
-                        let req_packet = link.build_data_packet_with_context(
-                            &req_payload,
-                            PacketContext::ResourceReq,
-                            &mut self.rng,
-                        );
-                        match req_packet {
-                            Ok(pkt) => {
-                                link.set_incoming_resource(incoming);
-                                link.record_outbound(now_secs);
-                                self.route_link_packet(&link_id, &pkt);
-                                self.events.push(NodeEvent::ResourceTransferStarted {
-                                    link_id,
-                                    resource_hash,
-                                    is_sender: false,
-                                });
-                            }
-                            Err(e) => {
-                                crate::tracing::debug!("Failed to build REQ packet: {e}");
-                            }
+        // A response resource (`is_response`) whose `request_id` matches an
+        // outstanding request is always accepted, regardless of resource
+        // strategy — Python `Link.py` accepts it in the
+        // `ResourceAdvertisement.is_response(packet)` branch BEFORE the
+        // `ACCEPT_*` checks. Without this an initiator with the default
+        // `AcceptNone` strategy would drop the response to its own request, so
+        // a `> MDU` request response (e.g. a NomadNet page) would never
+        // transfer. The generic strategy still governs every non-response
+        // resource.
+        let is_response_match = adv.flags.is_response
+            && adv
+                .request_id
+                .as_deref()
+                .and_then(|rid| <[u8; TRUNCATED_HASHBYTES]>::try_from(rid).ok())
+                .is_some_and(|rid| self.pending_requests.contains_key(&rid));
+
+        if is_response_match || matches!(strategy, ResourceStrategy::AcceptAll) {
+            // Auto-accept: create IncomingResource and send first REQ.
+            match IncomingResource::from_advertisement(
+                &adv,
+                link_mdu,
+                sdu,
+                now_ms,
+                self.max_incoming_resource_size,
+            ) {
+                Ok((incoming, req_payload)) => {
+                    let req_packet = link.build_data_packet_with_context(
+                        &req_payload,
+                        PacketContext::ResourceReq,
+                        &mut self.rng,
+                    );
+                    match req_packet {
+                        Ok(pkt) => {
+                            link.set_incoming_resource(incoming);
+                            link.record_outbound(now_secs);
+                            self.route_link_packet(&link_id, &pkt);
+                            self.events.push(NodeEvent::ResourceTransferStarted {
+                                link_id,
+                                resource_hash,
+                                is_sender: false,
+                            });
+                        }
+                        Err(e) => {
+                            crate::tracing::debug!("Failed to build REQ packet: {e}");
                         }
                     }
-                    Err(e) => {
-                        crate::tracing::debug!("Failed to create IncomingResource: {e}");
-                    }
+                }
+                Err(e) => {
+                    crate::tracing::debug!("Failed to create IncomingResource: {e}");
                 }
             }
-            ResourceStrategy::AcceptApp => {
-                // Store for application to accept/reject
-                link.set_pending_resource_adv(adv);
-                self.events.push(NodeEvent::ResourceAdvertised {
-                    link_id,
-                    resource_hash,
-                    transfer_size,
-                    data_size,
-                });
-            }
-            ResourceStrategy::AcceptNone => {
-                crate::tracing::trace!("Resource ADV rejected (strategy=AcceptNone)");
+        } else {
+            match strategy {
+                ResourceStrategy::AcceptApp => {
+                    // Store for application to accept/reject.
+                    link.set_pending_resource_adv(adv);
+                    self.events.push(NodeEvent::ResourceAdvertised {
+                        link_id,
+                        resource_hash,
+                        transfer_size,
+                        data_size,
+                    });
+                }
+                // AcceptNone (and the already-handled AcceptAll) reject a
+                // non-response resource.
+                _ => {
+                    crate::tracing::trace!("Resource ADV rejected (strategy=AcceptNone)");
+                }
             }
         }
 
@@ -2244,15 +2285,41 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         let seg_idx = incoming.segment_index();
                         let total_segs = incoming.total_segments();
 
-                        self.events.push(NodeEvent::ResourceCompleted {
-                            link_id,
-                            resource_hash,
-                            data,
-                            metadata,
-                            is_sender: false,
-                            segment_index: seg_idx,
-                            total_segments: total_segs,
-                        });
+                        // Python `response_resource_concluded` (Link.py): a
+                        // completed resource whose ADV flagged `is_response` and
+                        // whose wrapped `[request_id, response]` matches an
+                        // outstanding request is delivered to the request path as
+                        // `ResponseReceived` — the SAME shape as the single-packet
+                        // response — not the generic `ResourceCompleted`.
+                        // Responses up to RESOURCE_MAX_EFFICIENT_SIZE (~1 MiB) are
+                        // single-segment, which covers every request response; a
+                        // (never-in-practice) multi-segment response falls through
+                        // to the generic resource path.
+                        let response_delivery = if incoming.is_response() && total_segs == 1 {
+                            Self::parse_wrapped_response(&data)
+                                .filter(|(rid, _)| self.pending_requests.contains_key(rid))
+                        } else {
+                            None
+                        };
+
+                        if let Some((request_id, response_data)) = response_delivery {
+                            self.pending_requests.remove(&request_id);
+                            self.events.push(NodeEvent::ResponseReceived {
+                                link_id,
+                                request_id,
+                                response_data,
+                            });
+                        } else {
+                            self.events.push(NodeEvent::ResourceCompleted {
+                                link_id,
+                                resource_hash,
+                                data,
+                                metadata,
+                                is_sender: false,
+                                segment_index: seg_idx,
+                                total_segments: total_segs,
+                            });
+                        }
                     }
                     Err(e) => {
                         crate::tracing::debug!("Resource assembly failed: {e}");

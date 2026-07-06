@@ -2226,6 +2226,34 @@ impl TestDaemon {
         .await
     }
 
+    /// Register the NomadNet-style page node on a destination: `/page/small.mu`
+    /// (single-packet response), `/page/large.mu` (is_response Resource) and
+    /// `/page/echo.mu` (echoes the request data). Mirrors NomadNet's
+    /// `register_request_handler` page serving.
+    pub async fn register_page_request_handler(
+        &self,
+        dest_hash: &str,
+    ) -> Result<serde_json::Value, HarnessError> {
+        self.query(
+            "register_page_request_handler",
+            serde_json::json!({ "dest_hash": dest_hash }),
+        )
+        .await
+    }
+
+    /// Fetch the exact bytes the page node serves for a path, so a client can
+    /// assert byte-identity against what it fetched.
+    pub async fn get_page_content(&self, path: &str) -> Result<Vec<u8>, HarnessError> {
+        let result = self
+            .query("get_page_content", serde_json::json!({ "path": path }))
+            .await?;
+        let hex_str = result
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HarnessError::ParseError("Missing page content".to_string()))?;
+        hex::decode(hex_str).map_err(|e| HarnessError::ParseError(format!("bad page hex: {e}")))
+    }
+
     /// Send a resource over an established link.
     ///
     /// Returns the resource hash (hex string).
