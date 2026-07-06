@@ -57,7 +57,7 @@ use crate::link::LinkId;
 use crate::memory_storage::MemoryStorage;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
-use crate::traits::NoStorage;
+use crate::traits::{NoStorage, Storage};
 use crate::transport::{Action, InterfaceId, TickOutput};
 
 // ----------------------------------------------------------------------------
@@ -218,6 +218,13 @@ struct ScenarioOutcome {
     a_drop_delta: u64,
     /// Did `A` forward anything onward when the proof arrived?
     a_forwarded_proof: bool,
+    /// `hops` field on the LRPROOF that `A` actually forwarded toward the
+    /// initiator (unpacked off the wire). `None` if `A` forwarded nothing.
+    forwarded_proof_hops: Option<u8>,
+    /// The `remaining_hops` `A` froze into its link-table entry when it forwarded
+    /// the request. This is the `link_entry[IDX_LT_REM_HOPS]` value that Python
+    /// `Transport.py:2176` compares `packet.hops` against before forwarding.
+    frozen_remaining_hops: Option<u8>,
     /// Did the initiator establish the link?
     initiator_established: bool,
     /// Captured structured tracing for the whole run.
@@ -243,6 +250,8 @@ struct ScenarioOutcome {
 fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
     let mut a_drop_delta = 0;
     let mut a_forwarded_proof = false;
+    let mut forwarded_proof_hops = None;
+    let mut frozen_remaining_hops = None;
     let mut initiator_established = false;
 
     let ((), logs) = with_captured_logs(|| {
@@ -271,13 +280,22 @@ fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
         );
 
         // 1. Initiator connects -> broadcasts the link request.
-        let (_init_link, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (init_link, _routed, out) = initiator.connect(dest_hash, &signing_key);
         let request = one_packet(&out);
 
         // 2. A receives the request from its local client and forwards it.
         //    LINK_ENTRY_SET fires here: remaining_hops frozen to path.hops = 1.
         let out = relay_a.handle_packet(InterfaceId(a_local), &request);
         let a_forwarded = one_packet(&out);
+
+        // Read the value A froze into its link table. This is the exact
+        // `link_entry[IDX_LT_REM_HOPS]` that Python's Transport.py:2176 gates
+        // the LRPROOF forward on. It is 1 (A's optimistic stored path to R).
+        frozen_remaining_hops = relay_a
+            .transport()
+            .storage()
+            .get_link_entry(init_link.as_bytes())
+            .map(|e| e.remaining_hops);
 
         // 3. Live topology: R is not directly reachable; A's forward is picked
         //    up by relay G on the shared RF medium (the re-transmitter).
@@ -297,7 +315,15 @@ fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
         let dropped_before = relay_a.transport().stats().packets_dropped;
         let out = relay_a.handle_packet(InterfaceId(a_mesh), &g_proof);
         a_drop_delta = relay_a.transport().stats().packets_dropped - dropped_before;
-        a_forwarded_proof = !action_data(&out).is_empty();
+        let forwarded = action_data(&out);
+        a_forwarded_proof = !forwarded.is_empty();
+        // Unpack the actual proof A put back on the wire toward the initiator and
+        // read its hop count. This is the `packet.hops` a strict Python client
+        // (Transport.py:2176) compares against its frozen remaining_hops.
+        forwarded_proof_hops = forwarded
+            .first()
+            .and_then(|raw| crate::packet::Packet::unpack(raw).ok())
+            .map(|p| p.hops);
 
         // 7. Deliver whatever (if anything) A forwarded to the initiator.
         for pkt in action_data(&out) {
@@ -311,6 +337,8 @@ fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
     ScenarioOutcome {
         a_drop_delta,
         a_forwarded_proof,
+        forwarded_proof_hops,
+        frozen_remaining_hops,
         initiator_established,
         logs,
     }
@@ -369,6 +397,85 @@ fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
     assert!(
         o.logs.contains("packet_hops=2") && o.logs.contains("remaining_hops=1"),
         "proof must still arrive at hops=2 against the frozen remaining_hops=1.\n--- logs ---\n{}",
+        o.logs
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Codeberg #38: Python-incompat reproduction — the forwarded proof's hops does
+// NOT equal the downstream's frozen remaining_hops, the exact invariant Python
+// enforces before forwarding an LRPROOF (Transport.py:2176). A strict Python
+// client on the receiving side therefore DROPS this proof and times out, while
+// our lenient stack establishes.
+// ----------------------------------------------------------------------------
+
+/// Deterministic reproduction of the #38 wire condition that makes a Python
+/// client time out through our relay.
+///
+/// Python `RNS/Transport.py:2176` forwards an LRPROOF to the next / local-client
+/// interface ONLY when `packet.hops == link_entry[IDX_LT_REM_HOPS]` (STRICT
+/// equality, guarded by transport_enabled/for_local_client_link/from_local_client).
+/// A Python node in the relay position DROPS a proof whose arriving hop count is
+/// not exactly the remaining_hops it froze when it forwarded the request.
+///
+/// Our relay `transport.rs:3724-3745` deviates: on mismatch it logs
+/// `LRPROOF hop asymmetry, forwarding anyway (remaining_hops)` and forwards the
+/// ORIGINAL packet UNCHANGED — it does NOT rewrite `packet.hops` down to the
+/// frozen `remaining_hops` (STEP-0 Q1: `let mut forwarded = packet;
+/// forward_on_interface_from(...)` → `send_packet_on_interface` → `packet.pack`
+/// serialises the current, asymmetric hops; nothing overwrites it). So the proof
+/// leaves our relay carrying hops=2 while the frozen remaining_hops=1.
+///
+/// This test asserts the broken invariant EXISTS today: the forwarded proof's
+/// `hops` (2) does not equal the frozen `remaining_hops` (1). That inequality is
+/// precisely what a strict Python peer rejects.
+///
+/// Kept green-as-characterization: it documents the CURRENT (Python-incompatible)
+/// state. The fix will make our relay rewrite the forwarded proof's hops to the
+/// frozen remaining_hops (so `packet.hops == remaining_hops`, satisfying
+/// Transport.py:2176); when it lands, flip the `assert_ne!` to `assert_eq!` and
+/// update the expected forwarded hops to 1.
+#[test]
+fn lrproof_forwarded_proof_hops_mismatch_downstream_remaining_python_would_drop() {
+    let o = run_asymmetric_return_path_scenario();
+
+    let fwd_hops = o.forwarded_proof_hops.unwrap_or_else(|| {
+        panic!(
+            "A must forward a proof so we can inspect its hops.\n--- logs ---\n{}",
+            o.logs
+        )
+    });
+    let remaining = o.frozen_remaining_hops.unwrap_or_else(|| {
+        panic!(
+            "A must have frozen a remaining_hops in its link table.\n--- logs ---\n{}",
+            o.logs
+        )
+    });
+
+    // Exact values pin the scenario (optimistic 1-hop path, 2-hop live return).
+    assert_eq!(
+        remaining, 1,
+        "A must freeze remaining_hops=1 from its optimistic stored path.\n--- logs ---\n{}",
+        o.logs
+    );
+    assert_eq!(
+        fwd_hops, 2,
+        "the proof A forwards toward the initiator must carry the asymmetric hops=2.\n\
+         --- logs ---\n{}",
+        o.logs
+    );
+
+    // THE reproduction: our relay forwards a proof whose hops != the frozen
+    // remaining_hops. Python's Transport.py:2176 requires equality and would
+    // DROP this proof, timing out a Python client. When the fix rewrites the
+    // forwarded hops to `remaining`, this becomes assert_eq!(fwd_hops, remaining).
+    assert_ne!(
+        fwd_hops, remaining,
+        "CHARACTERIZATION of #38: our relay forwards the LRPROOF with hops={fwd_hops} \
+         != frozen remaining_hops={remaining}. A strict Python peer (Transport.py:2176 \
+         requires packet.hops == remaining_hops) drops this and times out; our lenient \
+         stack establishes. The fix will rewrite forwarded hops to remaining_hops, \
+         flipping this to assert_eq!.\n--- logs ---\n{}",
         o.logs
     );
 }

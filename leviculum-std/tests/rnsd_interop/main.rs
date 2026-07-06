@@ -55,6 +55,7 @@ mod link_manager_tests;
 mod link_tests;
 mod lnomad_fetch_interop_tests;
 mod loadtest_tcp_hub_tests;
+mod lrproof_hop_undercount_interop_tests;
 mod mtu_tests;
 mod multihop_tests;
 mod node_api_tests;
