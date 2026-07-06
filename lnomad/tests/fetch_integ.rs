@@ -24,10 +24,26 @@ use leviculum_std::{
     Destination, DestinationType, Direction, NodeEvent, ProofStrategy, ReticulumNode,
 };
 
+use lnomad::browser::{print_once, BrowserOptions};
 use lnomad::fetch::{FetchError, Session};
 use lnomad::url::parse_url;
 
 const SMALL_PAGE: &[u8] = b"`F222`Bce2>Welcome\n\nThis is a small NomadNet page.\n";
+
+/// A multi-kilobyte micron page: a heading, a link, and enough body to exceed a
+/// single link packet so the response comes back over the `is_response` Resource
+/// path. Rendered output and the collected link drive the print-mode assertions.
+fn large_page() -> Vec<u8> {
+    let mut page = String::new();
+    page.push_str(">Node Directory\n\n");
+    page.push_str("Browse the pages served by this node.\n\n");
+    page.push_str("`[Documentation`:/page/docs.mu]\n\n");
+    // Pad well past one packet's worth of payload with stable, greppable lines.
+    for i in 0..200 {
+        page.push_str(&format!("Entry {i:03} in the node directory listing.\n"));
+    }
+    page.into_bytes()
+}
 
 /// Grab a currently-free localhost TCP port by binding and immediately dropping.
 fn free_port() -> u16 {
@@ -79,6 +95,7 @@ impl PageResponder {
         let dest_hex = hex::encode(dest_hash.as_bytes());
         node.register_destination(dest);
         node.register_request_handler(dest_hash, "/page/small.mu", RequestPolicy::AllowAll);
+        node.register_request_handler(dest_hash, "/page/large.mu", RequestPolicy::AllowAll);
         node.register_request_handler(dest_hash, "/page/echo.mu", RequestPolicy::AllowAll);
         node.announce_destination(&dest_hash, Some(b"lnomad-page-node"))
             .await
@@ -106,6 +123,7 @@ async fn reply_loop(node: ReticulumNode, mut events: leviculum_std::EventReceive
         {
             let response = match path.as_str() {
                 "/page/small.mu" => msgpack_bin(SMALL_PAGE),
+                "/page/large.mu" => msgpack_bin(&large_page()),
                 // Echo the raw request value (a msgpack map of query fields).
                 "/page/echo.mu" => data,
                 _ => continue,
@@ -212,6 +230,52 @@ async fn echo_page_round_trips_query_fields() {
             ("var_count".to_string(), "3".to_string()),
         ],
         "echo must return the query fields as a var_ map"
+    );
+
+    session.close().await.expect("close session");
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+#[tokio::test]
+async fn print_mode_renders_page_and_link_list() {
+    let (mut daemon, responder, mut session, _daemon_storage, dest_hex) = setup().await;
+
+    // Drive the browser's print-once path exactly as `lnomad --print` does:
+    // fetch the large page over the Resource path, parse, render (no colour),
+    // and print, into an in-memory buffer we can assert on.
+    let target = parse_url(&format!("{dest_hex}:/page/large.mu"), None).expect("parse url");
+    let opts = BrowserOptions {
+        width: 80,
+        no_color: true,
+        timeout: Duration::from_secs(20),
+    };
+    let mut out: Vec<u8> = Vec::new();
+    print_once(&mut out, &mut session, &target, &opts)
+        .await
+        .expect("print large page");
+    let printed = String::from_utf8(out).expect("printed output is utf8");
+
+    // Rendered page content: the heading and body text survive rendering.
+    assert!(
+        printed.contains("Node Directory"),
+        "heading missing from output: {printed:?}"
+    );
+    assert!(
+        printed.contains("Browse the pages served by this node."),
+        "body text missing from output"
+    );
+    assert!(
+        printed.contains("Entry 199 in the node directory listing."),
+        "tail of the large page missing (Resource path truncated?)"
+    );
+    // The numbered link list is printed below the page.
+    assert!(printed.contains("Links:"), "link list header missing");
+    // The target keeps its same-destination `:` form, resolved against the
+    // current page when followed.
+    assert!(
+        printed.contains("[1] Documentation -> :/page/docs.mu"),
+        "link entry missing from output: {printed:?}"
     );
 
     session.close().await.expect("close session");

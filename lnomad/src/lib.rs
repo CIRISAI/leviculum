@@ -20,10 +20,16 @@
 //! [`fetch`] connects to a running `lnsd`/`rnsd` shared instance and retrieves a
 //! page's bytes over the RNS request/response path.
 
+//! Phase 4b adds the [`browser`] module: the REPL command grammar, the
+//! navigation state machine, and the fetch/parse/render/print loop that the
+//! `lnomad` binary drives.
+
+pub mod browser;
 pub mod fetch;
 pub mod render;
 pub mod url;
 
+pub use browser::{parse_command, resolve_link, BrowserOptions, Command, Nav};
 pub use fetch::{FetchError, Session};
 pub use render::{render_with_options, RenderedLink, RenderedPage};
 pub use url::{parse_url, Target, UrlError};
