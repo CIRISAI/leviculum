@@ -18,4 +18,4 @@
 
 pub mod render;
 
-pub use render::{render, render_with_options, RenderedLink, RenderedPage};
+pub use render::{render_with_options, RenderedLink, RenderedPage};
