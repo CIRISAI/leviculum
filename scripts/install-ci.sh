@@ -49,6 +49,16 @@ for cmd in i2pd; do
     fi
 done
 
+# Optional test dependency: nomadnet drives the on-demand lnomad acceptance
+# (scripts/lnomad_nomadnet_acceptance.sh). Not part of any tier, so warn rather
+# than fail when it is absent.
+for cmd in nomadnet; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[install-ci] Note: optional test dependency '$cmd' not found"
+        echo "[install-ci] Hint: pip install nomadnet (needed only for the lnomad acceptance)"
+    fi
+done
+
 # Optional test dependency: cargo-fuzz (+ nightly) drives the wire-format
 # parser fuzz harness under leviculum-core/fuzz (Codeberg #23). Not part of
 # `just standard` — the regression tests for any crash it finds live in the

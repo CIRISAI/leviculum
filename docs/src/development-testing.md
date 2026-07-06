@@ -21,6 +21,10 @@ system packages must be installed (all apt-installable on Debian):
   Python `rnsd`/`rnstatus` as the compatibility reference.
 - **socat** — bridges a virtual serial pty pair so the serial-family interfaces
   (KISS, AX.25, Pipe) can be interop-tested against a real Python peer.
+- **nomadnet** (optional) — the real NomadNet node used by the on-demand lnomad
+  acceptance (`scripts/lnomad_nomadnet_acceptance.sh`, see [The lnomad
+  acceptance](#the-lnomad-acceptance)). Not part of any tier; install with
+  `pip install nomadnet`.
 - **i2pd** (optional) — provides the SAM bridge on 127.0.0.1:7656 that the
   `I2PInterface` live tests use. The default suite covers `I2PInterface` with an
   in-process mock SAM bridge, so i2pd is not needed to go green; it only gates
@@ -183,6 +187,35 @@ just install-ci
 
 Idempotent. Installs git hooks, systemd user units, state dirs,
 separate cargo target dir. Safe to re-run after pulling.
+
+## The lnomad acceptance
+
+`lnomad` is the terminal NomadNet browser. Its end-to-end acceptance drives a
+**real** NomadNet node rather than a mock: NomadNet runs as the shared Reticulum
+instance and as a node server hosting a known `index.mu`; `lnomad --print`
+fetches and renders that page over the shared-instance path, and the script
+asserts the rendered output contains the known content.
+
+```sh
+reticulum-integ/scripts/lnomad_nomadnet_acceptance.sh
+```
+
+It prints `ACCEPT-PASS` / `LNOMAD-ACCEPT-COMPLETE` and exits 0 on success, or
+`ACCEPT-FAIL: <reason>` and non-zero otherwise. It creates an isolated RNS +
+NomadNet config under a temp dir and always cleans up (kills nomadnet, removes
+the temp dir) on exit.
+
+This is an **on-demand** acceptance — it is NOT wired into any tier, because it
+needs `nomadnet` (and its Python `RNS`) installed and takes ~30 s of real
+announce/link setup. Requirements and overrides:
+
+- **nomadnet** on PATH (or point `NOMADNET` at the executable).
+- **python3 + RNS** on PATH (or point `PY` at the interpreter).
+- The musl `lnomad` release binary; the script builds it (`cargo build --release
+  -p lnomad`) if it is missing. Override its location with `LNOMAD`, or the
+  cargo target dir with `CARGO_TARGET_DIR`.
+- Tune timing with `NN_SETTLE` (nomadnet startup, default 25 s) and
+  `LNOMAD_TIMEOUT` (fetch timeout, default 40 s).
 
 ## Fuzzing the wire parsers
 
