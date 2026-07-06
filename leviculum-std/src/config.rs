@@ -367,7 +367,9 @@ pub struct InterfaceConfig {
     pub devices: Option<String>,
     /// Comma-separated blacklist of NIC names
     pub ignored_devices: Option<String>,
-    /// Enable multicast loopback (for same-machine testing)
+    /// Enable multicast loopback (`IPV6_MULTICAST_LOOP`), the carrier self-echo
+    /// mechanism. Unset (`None`) inherits the default `true`, matching Python-RNS.
+    /// Set to `false` to opt out.
     pub multicast_loopback: Option<bool>,
 
     // Announce-rate limiting (Codeberg #92). Python: Reticulum.py:798-821.

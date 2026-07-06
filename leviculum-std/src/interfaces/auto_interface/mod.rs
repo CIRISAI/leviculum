@@ -66,7 +66,12 @@ pub struct AutoInterfaceConfig {
     pub allowed_devices: Option<String>,
     /// Comma-separated blacklist of NIC names
     pub ignored_devices: Option<String>,
-    /// Enable multicast loopback (for testing on same machine)
+    /// Enable multicast loopback (`IPV6_MULTICAST_LOOP`). This is the carrier
+    /// self-echo mechanism: the host receiving its own discovery multicast is
+    /// how AutoInterface detects a live carrier. Defaults to `true`, matching
+    /// Python-RNS (which never sets the sockopt and inherits the OS default ON
+    /// on Linux) and giving reliable self-echo even on bridges that stop
+    /// reflecting the group. Set to `false` to opt out.
     pub multicast_loopback: bool,
 }
 
@@ -79,7 +84,7 @@ impl Default for AutoInterfaceConfig {
             discovery_scope: "link".to_string(),
             allowed_devices: None,
             ignored_devices: None,
-            multicast_loopback: false,
+            multicast_loopback: true,
         }
     }
 }
@@ -476,7 +481,8 @@ pub(crate) fn bind_multicast_socket(
     // Set multicast interface
     socket.set_multicast_if_v6(nic.index)?;
 
-    // Enable/disable multicast loopback (needed for same-machine testing)
+    // Enable/disable multicast loopback: the carrier self-echo mechanism
+    // (default on, matching Python-RNS). Also required for same-machine tests.
     socket.set_multicast_loop_v6(enable_loopback)?;
 
     // Join multicast group on this NIC

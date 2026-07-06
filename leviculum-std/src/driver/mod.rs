@@ -1529,7 +1529,7 @@ impl ReticulumNode {
                                 .unwrap_or_else(|| "link".to_string()),
                             allowed_devices: config.devices.clone(),
                             ignored_devices: config.ignored_devices.clone(),
-                            multicast_loopback: config.multicast_loopback.unwrap_or(false),
+                            multicast_loopback: config.multicast_loopback.unwrap_or(true),
                         };
                         let peer_count_rx = spawn_auto_interface(
                             next_id.clone(),
