@@ -422,6 +422,11 @@ pub struct InterfaceConfig {
     pub airtime_limit_long: Option<f64>,
     /// Enable CSMA/CA on the T114 LoRa interface (requires CAD-capable firmware).
     pub csma_enabled: Option<bool>,
+    /// Regulatory duty-cycle policy for this LoRa interface (Codeberg #55).
+    /// `off`/`none`/`unlimited` (default) disables gating for unregulated
+    /// bands; `eu868`/`etsi-eu868` enforces the ETSI EN 300 220-2 sub-band
+    /// caps. Unset means unlimited.
+    pub duty_cycle: Option<String>,
 
     // RNodeMultiInterface only.
     /// Nested subinterface blocks (`[[[name]]]`) of an `RNodeMultiInterface`.
@@ -553,6 +558,7 @@ impl Default for InterfaceConfig {
             airtime_limit_short: None,
             airtime_limit_long: None,
             csma_enabled: None,
+            duty_cycle: None,
             subinterfaces: Vec::new(),
         }
     }
