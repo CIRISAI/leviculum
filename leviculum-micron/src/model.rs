@@ -7,17 +7,31 @@
 //! RGB), alignment and text attributes as plain flags.
 
 use crate::color::Color;
+use std::collections::BTreeMap;
 
 /// A fully parsed micron page.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// `Eq` is not derived: [`Block::Partial`] carries a floating-point refresh
+/// interval. `PartialEq` is enough for equality checks in tests.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MicronDocument {
     /// Top-level blocks in source order.
     pub blocks: Vec<Block>,
+    /// Named anchors mapped to the index of the [`Block`] they mark. Populated
+    /// from inline `` `:name `` declarations and heading slugs, mirroring the
+    /// canonical `markup_to_attrmaps` `anchors` dict (name -> row index) so
+    /// Phase 4 navigation can jump to a target.
+    pub anchors: BTreeMap<String, usize>,
+    /// Indices of the blocks that are section headings, in source order.
+    /// Mirrors the canonical `header_rows`.
+    pub header_rows: Vec<usize>,
 }
 
 /// A block-level element, produced one (or zero) per source line, except
 /// [`Block::LiteralBlock`] which groups the lines between two `` `= `` toggles.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Eq` is not derived because [`Block::Partial`] carries an `f64` refresh.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     /// A section heading. `depth` is the count of leading `>` (1, 2, 3, ...).
     Heading {
@@ -45,6 +59,38 @@ pub enum Block {
     LiteralBlock {
         /// The verbatim lines of the block.
         lines: Vec<Line>,
+    },
+    /// A table, delimited by an opening and closing `` `t `` toggle.
+    ///
+    /// v1 stub: the raw source rows buffered between the toggles are kept
+    /// verbatim (each a `|`-separated markdown-style row). The canonical
+    /// `render_table` column layout (`MarkdownToMicron.format_table_raw`) is a
+    /// rendering concern deferred to Phase 3.
+    Table {
+        /// Section depth in effect (for renderer indentation).
+        depth: u8,
+        /// Forced column alignment from `` `t<l|c|r> ``, or `None`.
+        align: Option<Align>,
+        /// Max table width from `` `t[align]<width> ``, or `None` for the default.
+        max_width: Option<usize>,
+        /// The raw buffered table rows, in source order.
+        rows: Vec<String>,
+    },
+    /// An embedded partial `` `{url`refresh`fields} ``.
+    ///
+    /// v1 stub: the descriptor is parsed into its components. The fetch,
+    /// content hashing and periodic refresh (canonical `parse_partial`) are
+    /// deferred to a later phase.
+    Partial {
+        /// Section depth in effect (for renderer indentation).
+        depth: u8,
+        /// The partial's source URL/path.
+        url: String,
+        /// Refresh interval in seconds; values `< 1` normalise to `None`, as in
+        /// the canonical parser.
+        refresh: Option<f64>,
+        /// `|`-separated field components carried by the partial.
+        fields: Vec<String>,
     },
     /// An empty source line.
     Blank,

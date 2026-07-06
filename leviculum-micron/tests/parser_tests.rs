@@ -214,6 +214,32 @@ fn invalid_colour_keeps_raw_without_rgb() {
     assert_eq!(c.rgb, None);
 }
 
+#[test]
+fn true_colour_six_hex_resolves() {
+    // A `FT<rrggbb> foreground selects a full 24-bit colour.
+    let spans = para_spans("`FT00ff80colour");
+    let coloured = spans.iter().find(|s| s.text == "colour").expect("span");
+    let fg = coloured.style.fg.as_ref().expect("fg colour");
+    assert_eq!(fg.raw, "00ff80");
+    assert_eq!(fg.rgb, Some((0x00, 0xff, 0x80)));
+}
+
+#[test]
+fn true_colour_background_resolves() {
+    let spans = para_spans("`BTff0000onred");
+    let s = spans.iter().find(|s| s.text == "onred").expect("span");
+    let bg = s.style.bg.as_ref().expect("bg colour");
+    assert_eq!(bg.rgb, Some((0xff, 0x00, 0x00)));
+    // The legacy three-nibble form still resolves alongside true colour.
+    let legacy = para_spans("`Ff00red");
+    let lspan = legacy
+        .iter()
+        .find(|s| s.text == "red")
+        .expect("legacy span");
+    let lfg = lspan.style.fg.as_ref().expect("legacy fg");
+    assert_eq!(lfg.rgb, Some((0xff, 0x00, 0x00)));
+}
+
 // --- Alignment -----------------------------------------------------------
 
 #[test]
@@ -222,8 +248,11 @@ fn alignment_center_right_default() {
     assert_eq!(para_spans("`rright")[0].style.align, Align::Right);
     // `a resets to the default (left).
     assert_eq!(para_spans("`r`aback")[0].style.align, Align::Left);
-    // toggling the same alignment off returns to default.
-    assert_eq!(para_spans("`c`ctwice")[0].style.align, Align::Left);
+    // The canonical parser no longer toggles an alignment off when the same
+    // command repeats: `c`c stays centered (older NomadNet reverted to default).
+    assert_eq!(para_spans("`c`ctwice")[0].style.align, Align::Center);
+    // The `` ` `` reset still returns alignment to the default.
+    assert_eq!(para_spans("`c`\u{0060}reset")[0].style.align, Align::Left);
 }
 
 // --- Links ---------------------------------------------------------------
@@ -272,6 +301,125 @@ fn anchor_declaration() {
     assert_eq!(spans[0].anchor.as_deref(), Some("section1"));
     assert!(spans[0].text.is_empty());
     assert!(spans.iter().any(|s| s.text == " following text"));
+}
+
+#[test]
+fn anchor_surfaces_at_document_level() {
+    // An inline anchor is bound to the index of the block it was declared on.
+    let doc = parse("first line\n`:target anchored line\nlast line");
+    assert_eq!(doc.anchors.get("target"), Some(&1));
+    // The span still carries the anchor for fine-grained navigation.
+    if let Block::Paragraph { line, .. } = &doc.blocks[1] {
+        assert!(line
+            .spans
+            .iter()
+            .any(|s| s.anchor.as_deref() == Some("target")));
+    } else {
+        panic!("expected paragraph at block 1");
+    }
+}
+
+#[test]
+fn heading_generates_slug_anchor() {
+    let doc = parse(">> Getting Started");
+    // The heading auto-slug is lowercased and hyphenated.
+    assert_eq!(doc.anchors.get("getting-started"), Some(&0));
+    // The heading row is recorded in header_rows.
+    assert_eq!(doc.header_rows, vec![0]);
+}
+
+#[test]
+fn heading_slug_strips_markup() {
+    // Colour/format commands are stripped before slugifying (canonical).
+    let doc = parse("> `!Bold`! `F00ftitle Here");
+    assert!(doc.anchors.contains_key("bold-title-here"));
+}
+
+#[test]
+fn anchor_first_declaration_wins() {
+    let doc = parse("`:dup one\n`:dup two");
+    // The first block index for a repeated name is kept.
+    assert_eq!(doc.anchors.get("dup"), Some(&0));
+}
+
+// --- Tables --------------------------------------------------------------
+
+#[test]
+fn table_toggle_buffers_rows() {
+    let doc = parse("`t\nName | Age\n--- | ---\nAda | 36\n`t");
+    let table = doc
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            Block::Table { rows, .. } => Some(rows),
+            _ => None,
+        })
+        .expect("table block");
+    assert_eq!(table.len(), 3);
+    assert_eq!(table[0], "Name | Age");
+    assert_eq!(table[2], "Ada | 36");
+}
+
+#[test]
+fn table_captures_align_and_width() {
+    let doc = parse("`tc80\nA | B\n- | -\n`t");
+    match doc.blocks.iter().find(|b| matches!(b, Block::Table { .. })) {
+        Some(Block::Table {
+            align, max_width, ..
+        }) => {
+            assert_eq!(*align, Some(Align::Center));
+            assert_eq!(*max_width, Some(80));
+        }
+        _ => panic!("expected table block"),
+    }
+}
+
+#[test]
+fn unterminated_table_is_flushed() {
+    // A table left open at end of input surfaces its rows rather than vanishing.
+    let doc = parse("`t\nA | B\n- | -");
+    assert!(doc.blocks.iter().any(|b| matches!(b, Block::Table { .. })));
+}
+
+// --- Partials ------------------------------------------------------------
+
+#[test]
+fn partial_parses_url_refresh_fields() {
+    let doc = parse("`{12ab:/page/x`5`a=1|b=2}");
+    match doc.blocks.first() {
+        Some(Block::Partial {
+            url,
+            refresh,
+            fields,
+            ..
+        }) => {
+            assert_eq!(url, "12ab:/page/x");
+            assert_eq!(*refresh, Some(5.0));
+            assert_eq!(fields, &vec!["a=1".to_string(), "b=2".to_string()]);
+        }
+        other => panic!("expected partial, got {other:?}"),
+    }
+}
+
+#[test]
+fn partial_refresh_below_one_is_none() {
+    let doc = parse("`{12ab:/x`0.5}");
+    match doc.blocks.first() {
+        Some(Block::Partial { refresh, .. }) => assert_eq!(*refresh, None),
+        other => panic!("expected partial, got {other:?}"),
+    }
+}
+
+// --- Heading-with-field sanitization ------------------------------------
+
+#[test]
+fn heading_with_field_is_demoted_to_paragraph() {
+    // A `>`-line that also contains a form field is not a heading.
+    let doc = parse(">`<32|name`>");
+    assert!(matches!(doc.blocks[0], Block::Paragraph { .. }));
+    if let Block::Paragraph { line, .. } = &doc.blocks[0] {
+        assert!(line.spans.iter().any(|s| s.field.is_some()));
+    }
 }
 
 // --- Form fields ---------------------------------------------------------

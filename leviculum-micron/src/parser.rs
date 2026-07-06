@@ -8,6 +8,7 @@
 
 use crate::color::Color;
 use crate::model::{Align, Block, Field, FieldKind, Line, Link, MicronDocument, Span, Style};
+use std::collections::BTreeMap;
 
 /// The persistent parser state, mirroring the reference `default_state`.
 ///
@@ -24,6 +25,21 @@ struct State {
     italic: bool,
     default_align: Align,
     align: Align,
+    /// Anchor names declared but not yet bound to a block, mirroring the
+    /// canonical `pending_anchors`. Drained onto the next block that a line
+    /// produces (`markup_to_attrmaps` binding).
+    pending_anchors: Vec<String>,
+    /// Whether the current line is a heading whose block index should be
+    /// recorded in `header_rows` (canonical `_header_pending`).
+    header_pending: bool,
+    /// Whether lines are being buffered into a table (canonical `table_mode`).
+    table_mode: bool,
+    /// Raw rows buffered since the opening `` `t `` toggle.
+    table_buffer: Vec<String>,
+    /// Forced column alignment captured at the opening `` `t `` toggle.
+    table_align: Option<Align>,
+    /// Max table width captured at the opening `` `t `` toggle.
+    table_max_width: Option<usize>,
 }
 
 impl Default for State {
@@ -38,6 +54,12 @@ impl Default for State {
             italic: false,
             default_align: Align::Left,
             align: Align::Left,
+            pending_anchors: Vec::new(),
+            header_pending: false,
+            table_mode: false,
+            table_buffer: Vec::new(),
+            table_align: None,
+            table_max_width: None,
         }
     }
 }
@@ -64,6 +86,8 @@ impl State {
 pub fn parse(input: &str) -> MicronDocument {
     let mut state = State::default();
     let mut blocks: Vec<Block> = Vec::new();
+    let mut anchors: BTreeMap<String, usize> = BTreeMap::new();
+    let mut header_rows: Vec<usize> = Vec::new();
     // Consecutive literal lines are grouped into a single LiteralBlock.
     let mut literal_lines: Vec<Line> = Vec::new();
 
@@ -74,9 +98,15 @@ pub fn parse(input: &str) -> MicronDocument {
             let was_literal = state.literal;
             state.literal = !state.literal;
             if was_literal && !state.literal && !literal_lines.is_empty() {
-                blocks.push(Block::LiteralBlock {
-                    lines: std::mem::take(&mut literal_lines),
-                });
+                bind_and_push(
+                    Block::LiteralBlock {
+                        lines: std::mem::take(&mut literal_lines),
+                    },
+                    &mut blocks,
+                    &mut anchors,
+                    &mut header_rows,
+                    &mut state,
+                );
             }
             continue;
         }
@@ -88,23 +118,86 @@ pub fn parse(input: &str) -> MicronDocument {
 
         // Empty lines never reach parse_line in the reference; they are blanks.
         if raw_line.is_empty() {
-            blocks.push(Block::Blank);
+            bind_and_push(
+                Block::Blank,
+                &mut blocks,
+                &mut anchors,
+                &mut header_rows,
+                &mut state,
+            );
             continue;
         }
 
         if let Some(block) = parse_line(raw_line, &mut state) {
-            blocks.push(block);
+            bind_and_push(
+                block,
+                &mut blocks,
+                &mut anchors,
+                &mut header_rows,
+                &mut state,
+            );
         }
     }
 
     // An unterminated literal block is flushed at end of input (lenient).
     if !literal_lines.is_empty() {
-        blocks.push(Block::LiteralBlock {
-            lines: literal_lines,
-        });
+        bind_and_push(
+            Block::LiteralBlock {
+                lines: literal_lines,
+            },
+            &mut blocks,
+            &mut anchors,
+            &mut header_rows,
+            &mut state,
+        );
     }
 
-    MicronDocument { blocks }
+    // An unterminated table is flushed at end of input (lenient); the canonical
+    // parser drops it, but we surface the buffered rows rather than lose them.
+    if state.table_mode && !state.table_buffer.is_empty() {
+        let block = Block::Table {
+            depth: state.depth,
+            align: state.table_align.take(),
+            max_width: state.table_max_width.take(),
+            rows: std::mem::take(&mut state.table_buffer),
+        };
+        bind_and_push(
+            block,
+            &mut blocks,
+            &mut anchors,
+            &mut header_rows,
+            &mut state,
+        );
+    }
+
+    MicronDocument {
+        blocks,
+        anchors,
+        header_rows,
+    }
+}
+
+/// Push `block`, binding any [`State::pending_anchors`] to its index and
+/// recording the index in `header_rows` when a heading is pending. Mirrors the
+/// canonical `markup_to_attrmaps` binding: an anchor maps to the index of the
+/// block produced by the line that declared it; the first binding for a name
+/// wins.
+fn bind_and_push(
+    block: Block,
+    blocks: &mut Vec<Block>,
+    anchors: &mut BTreeMap<String, usize>,
+    header_rows: &mut Vec<usize>,
+    state: &mut State,
+) {
+    let idx = blocks.len();
+    for name in state.pending_anchors.drain(..) {
+        anchors.entry(name).or_insert(idx);
+    }
+    if state.header_pending {
+        header_rows.push(idx);
+        state.header_pending = false;
+    }
+    blocks.push(block);
 }
 
 /// Build a single verbatim literal line (mirrors `make_output` literal branch,
@@ -123,7 +216,16 @@ fn make_literal_line(state: &State, raw_line: &str) -> Line {
 }
 
 /// Handle one non-empty, non-literal source line (mirrors `parse_line`).
-fn parse_line(line: &str, state: &mut State) -> Option<Block> {
+fn parse_line(raw: &str, state: &mut State) -> Option<Block> {
+    // Heading-with-field sanitization (canonical parse_line lines 233-236): a
+    // line that starts a heading (`>`) but also contains a `` `< `` form field
+    // is demoted to a normal line by stripping its leading `>` markers.
+    let line: &str = if raw.starts_with('>') && raw.contains("`<") {
+        raw.trim_start_matches('>')
+    } else {
+        raw
+    };
+
     let first = line.chars().next()?;
 
     // Escape: strip the leading `\` and emit the rest literally-armed.
@@ -142,6 +244,22 @@ fn parse_line(line: &str, state: &mut State) -> Option<Block> {
     // Comment: dropped entirely.
     if first == '#' {
         return None;
+    }
+
+    // Table toggle (canonical parse_line lines 247-270). Checked before the
+    // block constructs so that, while buffering, rows with any leading
+    // character are captured verbatim.
+    if let Some(rest) = line.strip_prefix("`t") {
+        return handle_table_toggle(rest, state);
+    }
+    if state.table_mode {
+        state.table_buffer.push(line.to_string());
+        return None;
+    }
+
+    // Partial (canonical parse_line lines 277-279).
+    if let Some(rest) = line.strip_prefix("`{") {
+        return parse_partial(rest, state.depth);
     }
 
     // Section-heading depth reset: reset depth then re-parse the remainder.
@@ -180,6 +298,16 @@ fn parse_line(line: &str, state: &mut State) -> Option<Block> {
         state.bold = saved.2;
         state.underline = saved.3;
         state.italic = saved.4;
+
+        // A heading contributes an auto-generated slug anchor and marks its row
+        // as a header (canonical parse_line lines 308-311). Set before the empty
+        // check so an anchor/header on a text-less heading still carries to the
+        // next produced block, exactly as the reference does.
+        let slug = slugify_micron(rest);
+        if !slug.is_empty() {
+            state.pending_anchors.push(slug);
+        }
+        state.header_pending = true;
 
         if spans.is_empty() {
             return None;
@@ -277,16 +405,19 @@ fn make_output(state: &mut State, line: &str, pre_escape: bool) -> Vec<Span> {
                         '_' => state.underline = !state.underline,
                         '!' => state.bold = !state.bold,
                         '*' => state.italic = !state.italic,
+                        // Foreground colour: `Fxxx` (12-bit) or `FT<rrggbb>`
+                        // (24-bit true colour). Canonical make_output 617-626.
                         'F' if n >= i + 4 => {
-                            let color: String = chars[i + 1..i + 4].iter().collect();
+                            let (color, adv) = read_color(&chars, i, n);
                             state.fg = Some(Color::parse(&color));
-                            skip = 3;
+                            skip = adv;
                         }
                         'f' => state.fg = None,
+                        // Background colour: `Bxxx` or `BT<rrggbb>`. 629-638.
                         'B' if n >= i + 4 => {
-                            let color: String = chars[i + 1..i + 4].iter().collect();
+                            let (color, adv) = read_color(&chars, i, n);
                             state.bg = Some(Color::parse(&color));
-                            skip = 3;
+                            skip = adv;
                         }
                         'b' => state.bg = None,
                         '`' => {
@@ -297,39 +428,33 @@ fn make_output(state: &mut State, line: &str, pre_escape: bool) -> Vec<Span> {
                             state.bg = None;
                             state.align = state.default_align;
                         }
-                        'c' => {
-                            state.align = if state.align != Align::Center {
-                                Align::Center
-                            } else {
-                                state.default_align
-                            };
-                        }
-                        'l' => {
-                            state.align = if state.align != Align::Left {
-                                Align::Left
-                            } else {
-                                state.default_align
-                            };
-                        }
-                        'r' => {
-                            state.align = if state.align != Align::Right {
-                                Align::Right
-                            } else {
-                                state.default_align
-                            };
-                        }
+                        // Alignment commands set the alignment; unlike older
+                        // NomadNet, the canonical parser (make_output 648-653)
+                        // no longer toggles back to the default when the command
+                        // repeats the current alignment. `` `a `` and the `` ` ``
+                        // reset return to the default.
+                        'c' => state.align = Align::Center,
+                        'l' => state.align = Align::Left,
+                        'r' => state.align = Align::Right,
                         'a' => state.align = state.default_align,
                         ':' => {
-                            // Anchor declaration `:name` (name until a non-name
-                            // char). Not present in this reference version
-                            // (which treats `:` as a no-op); implemented here
-                            // per the micron spec as a lenient superset.
+                            // Anchor declaration `:name` (name runs until a
+                            // non-name char). Canonical make_output 657-667
+                            // registers the name in `pending_anchors`, which
+                            // `markup_to_attrmaps` binds to this line's block.
+                            // We mirror that binding (see `bind_and_push`) and,
+                            // as a render-agnostic superset, also emit a
+                            // zero-width span carrying the anchor so a renderer
+                            // can mark the exact in-line position.
                             let mut j = i + 1;
                             while j < n && is_name_char(chars[j]) {
                                 j += 1;
                             }
                             let name: String = chars[i + 1..j].iter().collect();
                             skip = j - (i + 1);
+                            if !name.is_empty() {
+                                state.pending_anchors.push(name.clone());
+                            }
                             output.push(Span {
                                 anchor: Some(name),
                                 style: state.style(),
@@ -536,4 +661,173 @@ fn parse_link(state: &State, chars: &[char], open: usize) -> Option<(Option<Span
         }),
         endpos,
     ))
+}
+
+/// Read a colour argument following an `F`/`B` command char at index `i`.
+///
+/// Returns the raw colour string and the number of following characters to
+/// skip. The caller guarantees `n >= i + 4`. The `T<rrggbb>` true-colour form
+/// (six hex chars) takes precedence when a `T` follows and enough characters
+/// remain; otherwise the legacy three-character form is used. Mirrors the
+/// canonical make_output branches (617-626 / 629-638).
+fn read_color(chars: &[char], i: usize, n: usize) -> (String, usize) {
+    if chars[i + 1] == 'T' && n >= i + 8 {
+        (chars[i + 2..i + 8].iter().collect(), 7)
+    } else {
+        (chars[i + 1..i + 4].iter().collect(), 3)
+    }
+}
+
+/// Handle a `` `t `` table toggle. On the opening toggle the optional alignment
+/// (`l`/`c`/`r`) and max width are captured and buffering begins; on the
+/// closing toggle the buffered rows become a [`Block::Table`]. Mirrors the
+/// canonical parse_line table handling (248-270); fewer than two buffered rows
+/// yields nothing, as `render_table` requires a header and separator row.
+fn handle_table_toggle(rest: &str, state: &mut State) -> Option<Block> {
+    if state.table_mode {
+        state.table_mode = false;
+        let rows = std::mem::take(&mut state.table_buffer);
+        let align = state.table_align.take();
+        let max_width = state.table_max_width.take();
+        if rows.len() < 2 {
+            return None;
+        }
+        return Some(Block::Table {
+            depth: state.depth,
+            align,
+            max_width,
+            rows,
+        });
+    }
+
+    let align = match rest.chars().next() {
+        Some('l') => Some(Align::Left),
+        Some('c') => Some(Align::Center),
+        Some('r') => Some(Align::Right),
+        _ => None,
+    };
+    let width_str = if align.is_some() { &rest[1..] } else { rest };
+    let max_width = if width_str.is_empty() {
+        None
+    } else {
+        width_str.parse::<usize>().ok()
+    };
+
+    state.table_mode = true;
+    state.table_buffer = Vec::new();
+    state.table_align = align;
+    state.table_max_width = max_width;
+    None
+}
+
+/// Parse a `` `{url`refresh`fields} `` partial into a [`Block::Partial`].
+///
+/// `rest` is the text after the opening `` `{ ``; the descriptor ends at the
+/// first `}`. Mirrors the canonical `parse_partial` (149-195); the fetch,
+/// content hash and refresh scheduling are deferred to a later phase.
+fn parse_partial(rest: &str, depth: u8) -> Option<Block> {
+    let end = rest.find('}')?;
+    let data = &rest[..end];
+    let components: Vec<&str> = data.split('`').collect();
+    let (url, refresh, fields_raw): (&str, Option<f64>, &str) = match components.len() {
+        1 => (components[0], None, ""),
+        2 => (components[0], parse_refresh(components[1]), ""),
+        3 => (components[0], parse_refresh(components[1]), components[2]),
+        _ => ("", None, ""),
+    };
+    if url.is_empty() {
+        return None;
+    }
+    let fields = if fields_raw.is_empty() {
+        Vec::new()
+    } else {
+        fields_raw.split('|').map(|s| s.to_string()).collect()
+    };
+    Some(Block::Partial {
+        depth,
+        url: url.to_string(),
+        refresh,
+        fields,
+    })
+}
+
+/// Parse a partial refresh interval in seconds. Values below 1 normalise to
+/// `None`, matching the canonical `if partial_refresh < 1: partial_refresh = None`.
+fn parse_refresh(s: &str) -> Option<f64> {
+    match s.parse::<f64>() {
+        Ok(v) if v >= 1.0 => Some(v),
+        _ => None,
+    }
+}
+
+/// Slugify heading text into an anchor name (canonical `slugify_micron`,
+/// 79-88): strip micron control sequences, replace each run of non-alphanumeric
+/// ASCII with a single `-`, trim leading/trailing `-`, and lowercase.
+fn slugify_micron(text: &str) -> String {
+    let stripped = strip_micron(text);
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in stripped.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// Remove micron control sequences from `text`, mirroring the canonical
+/// `_MICRON_STRIP_RE` alternation (70-77): true-colour `` `[FB]T<6hex> ``,
+/// 12-bit `` `[FB]<3hex> ``, anchor `` `:name ``, and single-character commands.
+fn strip_micron(text: &str) -> String {
+    const CMDS: &str = "!*_=fbacrl`<>{";
+    let cs: Vec<char> = text.chars().collect();
+    let n = cs.len();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < n {
+        if cs[i] == '`' && i + 1 < n {
+            let c1 = cs[i + 1];
+            // `[FB]T<6hex>
+            if (c1 == 'F' || c1 == 'B')
+                && i + 8 < n
+                && cs[i + 2] == 'T'
+                && cs[i + 3..i + 9].iter().all(|c| c.is_ascii_hexdigit())
+            {
+                i += 9;
+                continue;
+            }
+            // `[FB]<3hex>
+            if (c1 == 'F' || c1 == 'B')
+                && i + 4 < n
+                && cs[i + 2..i + 5].iter().all(|c| c.is_ascii_hexdigit())
+            {
+                i += 5;
+                continue;
+            }
+            // `:name
+            if c1 == ':' {
+                let mut j = i + 2;
+                while j < n && is_name_char(cs[j]) {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // `<single command char>
+            if CMDS.contains(c1) {
+                i += 2;
+                continue;
+            }
+        }
+        out.push(cs[i]);
+        i += 1;
+    }
+    out
 }
