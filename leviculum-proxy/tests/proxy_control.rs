@@ -8,7 +8,7 @@ use tokio::time::Instant;
 
 use lora_proxy::control::run_control_socket;
 use lora_proxy::forward::forward_kiss_frames;
-use lora_proxy::rules::{Action, Direction, Filter, RuleEngine};
+use lora_proxy::rules::{Action, Direction, Filter, RuleEngine, RuleSpec};
 
 /// Helper: write a KISS frame to a stream
 async fn write_kiss_frame<W: AsyncWriteExt + Unpin>(w: &mut W, cmd: u8, payload: &[u8]) {
@@ -451,6 +451,99 @@ async fn test_drop_5_forward_10() {
     assert_eq!(eng.dropped, 5);
     assert_eq!(eng.forwarded, 5);
     println!("Stats: {}", eng.stats_json());
+}
+
+/// Test 11: probabilistic loss-rate rule via control socket, plus the
+/// mutual-exclusivity and range guards on the parse path.
+#[tokio::test]
+async fn test_control_socket_rate_mode() {
+    let engine = Arc::new(Mutex::new(RuleEngine::new()));
+    let sock_path =
+        std::env::temp_dir().join(format!("proxy-test-rate-{}.sock", std::process::id()));
+
+    let engine_clone = Arc::clone(&engine);
+    let sock = sock_path.clone();
+    tokio::spawn(async move {
+        let _ = run_control_socket(&sock, engine_clone).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A rate rule with an explicit seed is accepted and stored as rate mode.
+    let resp = control_cmd(
+        &sock_path,
+        "rule add drop direction=a_to_b filter=cmd:0x00 rate=0.25 seed=99",
+    )
+    .await;
+    assert!(resp.starts_with("OK "), "Got: {resp}");
+    {
+        let eng = engine.lock().await;
+        let rules = eng.list_rules();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rate, Some(0.25));
+        assert_eq!(rules[0].remaining, None);
+    }
+
+    // rate and count together are rejected (mutually exclusive).
+    let resp = control_cmd(&sock_path, "rule add drop rate=0.5 count=3").await;
+    assert!(resp.contains("mutually exclusive"), "Got: {resp}");
+
+    // Out-of-range rate is rejected.
+    let resp = control_cmd(&sock_path, "rule add drop rate=1.5").await;
+    assert!(resp.contains("out of range"), "Got: {resp}");
+
+    // Only the first (valid) rule should exist.
+    let eng = engine.lock().await;
+    assert_eq!(eng.list_rules().len(), 1);
+    drop(eng);
+
+    let _ = std::fs::remove_file(&sock_path);
+}
+
+/// Test 12: end-to-end reproducibility of rate mode through the forwarder.
+/// Two independent proxies with the same seeded rate rule, fed an identical
+/// frame sequence, drop the identical set of frames.
+#[tokio::test]
+async fn test_rate_mode_end_to_end_reproducible() {
+    async fn run_once() -> Vec<u8> {
+        let engine = Arc::new(Mutex::new(RuleEngine::new()));
+        let (a_proxy, mut a_test) = tokio::io::duplex(8192);
+        let (b_proxy, mut b_test) = tokio::io::duplex(8192);
+
+        let engine_clone = Arc::clone(&engine);
+        let _fwd = tokio::spawn(async move {
+            let _ = forward_kiss_frames(a_proxy, "a", b_proxy, "b", engine_clone).await;
+        });
+
+        engine.lock().await.add_rule_spec(RuleSpec {
+            action: Action::Drop,
+            rate: Some(0.5),
+            seed: 4242,
+            ..RuleSpec::default()
+        });
+        tokio::task::yield_now().await;
+
+        // Send 40 frames tagged 0..40 in the payload.
+        for i in 0..40u8 {
+            write_kiss_frame(&mut a_test, 0x00, &[i]).await;
+        }
+
+        // Collect whichever frames survive; the payload tag identifies them.
+        let received = read_kiss_frames(&mut b_test, 40, Duration::from_millis(500)).await;
+        received.into_iter().map(|(_, p)| p[0]).collect()
+    }
+
+    let run_a = run_once().await;
+    let run_b = run_once().await;
+    assert_eq!(
+        run_a, run_b,
+        "seeded rate mode must forward the same frames"
+    );
+    // Sanity: rate=0.5 dropped some but not all of the 40 frames.
+    assert!(
+        !run_a.is_empty() && run_a.len() < 40,
+        "got {} frames",
+        run_a.len()
+    );
 }
 
 /// Test 10: max_size via control socket

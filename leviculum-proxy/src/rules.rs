@@ -1,5 +1,42 @@
 use std::fmt;
 
+/// Default seed for a rule's probabilistic-loss PRNG when a scenario does not
+/// specify one. A fixed default keeps rate-mode runs reproducible out of the
+/// box: the same rule string always drops the same frames.
+pub const DEFAULT_LOSS_SEED: u64 = 0x5EED_0000_0000_0001;
+
+/// Deterministic seeded PRNG (SplitMix64) driving probabilistic loss.
+///
+/// Chosen over system randomness so a given `(seed, rate, frame sequence)` is
+/// bit-for-bit reproducible: rate-mode tests must never be flaky. The
+/// generator is self-contained (no external crate) to keep the proxy's
+/// dependency surface minimal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform `f64` in the half-open range `[0.0, 1.0)`, built from the top
+    /// 53 bits so every representable double is reachable and the value is
+    /// always strictly less than 1.0.
+    fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     AToB,
@@ -60,7 +97,53 @@ pub struct Rule {
     pub max_size: usize,
     /// Number of matching frames to skip before the rule activates.
     pub skip: u32,
+    /// Deterministic count mode: number of matching frames still to act on.
+    /// `None` means "act on every match forever". Mutually exclusive with
+    /// `rate`.
     pub remaining: Option<u32>,
+    /// Probabilistic loss mode: when `Some(p)`, each matching frame (after
+    /// `skip`) triggers the action with probability `p`, drawn from `rng`.
+    /// `None` selects the deterministic `remaining` count mode instead.
+    pub rate: Option<f64>,
+    /// Seeded PRNG backing probabilistic loss. Only consulted when `rate` is
+    /// `Some`; carried unconditionally so a `Rule` needs no extra allocation.
+    rng: SplitMix64,
+}
+
+/// Full specification for a fault-injection rule.
+///
+/// `count` (deterministic) and `rate` (probabilistic) are mutually exclusive:
+/// callers must set at most one. Construct via [`RuleSpec::default`] and set
+/// only the fields that differ from the defaults.
+pub struct RuleSpec {
+    pub direction: Direction,
+    pub action: Action,
+    pub filter: Filter,
+    pub min_size: usize,
+    pub max_size: usize,
+    pub skip: u32,
+    /// Deterministic drop-count. `None` = act on every match.
+    pub count: Option<u32>,
+    /// Probabilistic loss rate in `0.0..=1.0`. `None` = deterministic mode.
+    pub rate: Option<f64>,
+    /// Seed for the probabilistic PRNG; defaults to `DEFAULT_LOSS_SEED`.
+    pub seed: u64,
+}
+
+impl Default for RuleSpec {
+    fn default() -> Self {
+        Self {
+            direction: Direction::Both,
+            action: Action::Drop,
+            filter: Filter::All,
+            min_size: 0,
+            max_size: 0,
+            skip: 0,
+            count: None,
+            rate: None,
+            seed: DEFAULT_LOSS_SEED,
+        }
+    }
 }
 
 pub struct KissFrame {
@@ -102,6 +185,9 @@ impl RuleEngine {
         }
     }
 
+    /// Add a deterministic count-mode rule (probabilistic `rate` unset).
+    /// Thin wrapper over [`RuleEngine::add_rule_spec`] preserving the original
+    /// call shape used throughout the suite.
     #[allow(clippy::too_many_arguments)]
     pub fn add_rule(
         &mut self,
@@ -113,17 +199,34 @@ impl RuleEngine {
         skip: u32,
         count: Option<u32>,
     ) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.rules.push(Rule {
-            id,
+        self.add_rule_spec(RuleSpec {
             direction,
             action,
             filter,
             min_size,
             max_size,
             skip,
-            remaining: count,
+            count,
+            ..RuleSpec::default()
+        })
+    }
+
+    /// Add a rule from a full [`RuleSpec`], supporting both deterministic
+    /// count mode (`spec.count`) and probabilistic loss mode (`spec.rate`).
+    pub fn add_rule_spec(&mut self, spec: RuleSpec) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.rules.push(Rule {
+            id,
+            direction: spec.direction,
+            action: spec.action,
+            filter: spec.filter,
+            min_size: spec.min_size,
+            max_size: spec.max_size,
+            skip: spec.skip,
+            remaining: spec.count,
+            rate: spec.rate,
+            rng: SplitMix64::new(spec.seed),
         });
         id
     }
@@ -191,6 +294,18 @@ impl RuleEngine {
             rule.skip -= 1;
             self.forwarded += 1;
             return FrameDecision::Forward;
+        }
+
+        // Probabilistic loss mode: draw once per matching frame from the
+        // seeded PRNG. draw < rate acts, otherwise forwards. The draw always
+        // advances the PRNG so the dropped-frame set is a pure function of
+        // (seed, rate, frame sequence). rate == 0.0 never acts (draw is in
+        // [0,1)), rate == 1.0 always acts.
+        if let Some(rate) = rule.rate {
+            if rule.rng.next_f64() >= rate {
+                self.forwarded += 1;
+                return FrameDecision::Forward;
+            }
         }
 
         let decision = match rule.action {
@@ -525,6 +640,143 @@ mod tests {
 
         assert_eq!(engine.dropped, 1);
         assert_eq!(engine.forwarded, 2);
+    }
+
+    /// Collect the indices of frames the engine dropped over a fixed-length
+    /// sequence of identical matching frames.
+    fn dropped_indices(spec: RuleSpec, n: usize) -> Vec<usize> {
+        let mut engine = RuleEngine::new();
+        engine.add_rule_spec(spec);
+        let frame = KissFrame {
+            command: 0x00,
+            payload: vec![1],
+        };
+        (0..n)
+            .filter(|_| {
+                matches!(
+                    engine.evaluate(&frame, Direction::AToB),
+                    FrameDecision::Drop
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rate_mode_is_reproducible() {
+        // Same (seed, rate) over the same frame sequence => identical drops.
+        let spec = || RuleSpec {
+            action: Action::Drop,
+            rate: Some(0.4),
+            seed: 12345,
+            ..RuleSpec::default()
+        };
+        let run_a = dropped_indices(spec(), 1000);
+        let run_b = dropped_indices(spec(), 1000);
+        assert_eq!(
+            run_a, run_b,
+            "seeded rate mode must be bit-for-bit repeatable"
+        );
+        // Sanity: rate=0.4 must actually drop a non-trivial, non-total subset.
+        assert!(!run_a.is_empty());
+        assert!(run_a.len() < 1000);
+    }
+
+    #[test]
+    fn rate_mode_seed_changes_drop_set() {
+        // A different seed must yield a different dropped-frame set, proving
+        // the stream is seed-derived rather than fixed.
+        let with_seed = |seed| RuleSpec {
+            action: Action::Drop,
+            rate: Some(0.5),
+            seed,
+            ..RuleSpec::default()
+        };
+        assert_ne!(
+            dropped_indices(with_seed(1), 500),
+            dropped_indices(with_seed(2), 500)
+        );
+    }
+
+    #[test]
+    fn rate_mode_statistical_fraction() {
+        // Over a large N the drop fraction sits within a tight tolerance of
+        // the configured rate. Deterministic (seeded), so this is not flaky.
+        let n = 100_000;
+        let rate = 0.3;
+        let dropped = dropped_indices(
+            RuleSpec {
+                action: Action::Drop,
+                rate: Some(rate),
+                seed: 0xABCDEF,
+                ..RuleSpec::default()
+            },
+            n,
+        )
+        .len();
+        let fraction = dropped as f64 / n as f64;
+        assert!(
+            (fraction - rate).abs() < 0.01,
+            "drop fraction {fraction} deviates from rate {rate} beyond tolerance"
+        );
+    }
+
+    #[test]
+    fn rate_zero_drops_nothing_and_one_drops_all() {
+        assert_eq!(
+            dropped_indices(
+                RuleSpec {
+                    action: Action::Drop,
+                    rate: Some(0.0),
+                    ..RuleSpec::default()
+                },
+                500,
+            )
+            .len(),
+            0
+        );
+        assert_eq!(
+            dropped_indices(
+                RuleSpec {
+                    action: Action::Drop,
+                    rate: Some(1.0),
+                    ..RuleSpec::default()
+                },
+                500,
+            )
+            .len(),
+            500
+        );
+    }
+
+    #[test]
+    fn rate_mode_respects_skip() {
+        // The first `skip` matching frames are forwarded before any draw.
+        let dropped = dropped_indices(
+            RuleSpec {
+                action: Action::Drop,
+                rate: Some(1.0),
+                skip: 3,
+                ..RuleSpec::default()
+            },
+            10,
+        );
+        // rate=1.0 drops every post-skip frame => indices 3..10.
+        assert_eq!(dropped, vec![3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn count_mode_unchanged_via_spec() {
+        // Deterministic count mode still bounds and auto-removes exactly as
+        // before when routed through the spec path.
+        let dropped = dropped_indices(
+            RuleSpec {
+                action: Action::Drop,
+                count: Some(2),
+                ..RuleSpec::default()
+            },
+            10,
+        );
+        assert_eq!(dropped, vec![0, 1]);
     }
 
     #[test]

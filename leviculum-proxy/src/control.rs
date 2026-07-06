@@ -6,7 +6,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::rules::{Action, Direction, Filter, RuleEngine};
+use crate::rules::{Action, Direction, Filter, RuleEngine, RuleSpec, DEFAULT_LOSS_SEED};
 
 pub async fn run_control_socket(
     path: &Path,
@@ -131,6 +131,8 @@ async fn parse_rule_add(args: &[&str], engine: &Arc<Mutex<RuleEngine>>) -> Strin
     let mut max_size: usize = 0;
     let mut skip: u32 = 0;
     let mut count: Option<u32> = None;
+    let mut rate: Option<f64> = None;
+    let mut seed: u64 = DEFAULT_LOSS_SEED;
 
     for &arg in rest {
         if let Some(val) = arg.strip_prefix("direction=") {
@@ -173,14 +175,38 @@ async fn parse_rule_add(args: &[&str], engine: &Arc<Mutex<RuleEngine>>) -> Strin
                 Ok(n) => count = Some(n),
                 Err(_) => return format!("ERR invalid count: {val}"),
             }
+        } else if let Some(val) = arg.strip_prefix("rate=") {
+            match val.parse::<f64>() {
+                Ok(r) if (0.0..=1.0).contains(&r) => rate = Some(r),
+                Ok(r) => return format!("ERR rate out of range (0.0..=1.0): {r}"),
+                Err(_) => return format!("ERR invalid rate: {val}"),
+            }
+        } else if let Some(val) = arg.strip_prefix("seed=") {
+            match val.parse::<u64>() {
+                Ok(n) => seed = n,
+                Err(_) => return format!("ERR invalid seed: {val}"),
+            }
         } else {
             return format!("ERR unknown option: {arg}");
         }
     }
 
-    let id = engine
-        .lock()
-        .await
-        .add_rule(direction, action, filter, min_size, max_size, skip, count);
+    // Deterministic count mode and probabilistic rate mode are mutually
+    // exclusive: a single rule cannot be both bounded-by-count and stochastic.
+    if count.is_some() && rate.is_some() {
+        return "ERR count and rate are mutually exclusive".to_string();
+    }
+
+    let id = engine.lock().await.add_rule_spec(RuleSpec {
+        direction,
+        action,
+        filter,
+        min_size,
+        max_size,
+        skip,
+        count,
+        rate,
+        seed,
+    });
     format!("OK {id}")
 }
