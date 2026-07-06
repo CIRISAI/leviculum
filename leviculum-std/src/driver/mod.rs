@@ -320,6 +320,33 @@ impl EventReceiver {
     }
 }
 
+/// Resolve the `lt_alock` u16 (long-term airtime lock) sent to the RNode
+/// firmware from the configured `airtime_limit_long` percentage and the TX
+/// `frequency` (Hz).
+///
+/// An explicit `airtime_limit_long` always wins, including `0` (which the
+/// firmware reads as "unlimited"): `Some(p) -> p * 100`. When it is absent and
+/// the frequency falls in an EU 863-870 MHz sub-band, the ETSI duty-cycle cap
+/// becomes the default (lawful-by-default, Codeberg #55): the fraction from
+/// `etsi_eu868_duty_cycle` maps to `fraction * 10000`. Non-EU / out-of-band
+/// frequencies with no explicit limit stay off (`None`).
+fn resolve_lt_alock(airtime_limit_long: Option<f64>, frequency: u32) -> Option<u16> {
+    match airtime_limit_long {
+        Some(p) => Some((p * 100.0) as u16),
+        None => leviculum_core::rnode::etsi_eu868_duty_cycle(frequency as u64).map(|fraction| {
+            let alock = (fraction * 10000.0) as u16;
+            tracing::info!(
+                "RNode: no airtime_limit_long set; applying ETSI EU868 lawful default \
+                 for {} Hz -> {:.1}% duty cycle (lt_alock={})",
+                frequency,
+                fraction * 100.0,
+                alock,
+            );
+            alock
+        }),
+    }
+}
+
 /// Build an IfacConfig from interface configuration, if IFAC params are present.
 fn build_ifac_config(config: &InterfaceConfig) -> Option<leviculum_core::ifac::IfacConfig> {
     if config.networkname.is_none() && config.passphrase.is_none() {
@@ -1557,7 +1584,7 @@ impl ReticulumNode {
                         .map_err(|e| Error::Config(format!("RNodeInterface: {}", e)))?;
 
                         let st_alock = config.airtime_limit_short.map(|p| (p * 100.0) as u16);
-                        let lt_alock = config.airtime_limit_long.map(|p| (p * 100.0) as u16);
+                        let lt_alock = resolve_lt_alock(config.airtime_limit_long, frequency);
                         let flow_control = config.flow_control.unwrap_or(false);
                         let buffer_size = config
                             .buffer_size
@@ -1694,7 +1721,7 @@ impl ReticulumNode {
                                 sf,
                                 cr,
                                 st_alock: sub.airtime_limit_short.map(|p| (p * 100.0) as u16),
-                                lt_alock: sub.airtime_limit_long.map(|p| (p * 100.0) as u16),
+                                lt_alock: resolve_lt_alock(sub.airtime_limit_long, frequency),
                                 outgoing: sub.outgoing,
                             });
                         }
@@ -4063,6 +4090,30 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codeberg #55: the EU lawful-by-default derives `lt_alock` from the TX
+    /// frequency only when `airtime_limit_long` is absent; an explicit value
+    /// (including the harness's `0`) always wins, and non-EU frequencies stay
+    /// off.
+    #[test]
+    fn test_resolve_lt_alock_lawful_default() {
+        // 869.525 MHz (P) with no explicit limit -> ETSI 10% = lt_alock 1000.
+        assert_eq!(resolve_lt_alock(None, 869_525_000), Some(1000));
+        // 868.1 MHz (M) with no explicit limit -> 1% = lt_alock 100.
+        assert_eq!(resolve_lt_alock(None, 868_100_000), Some(100));
+
+        // Explicit value wins over the auto-default (any value, incl. the
+        // rig harness's explicit 0 = off in runner.rs).
+        assert_eq!(resolve_lt_alock(Some(5.0), 869_525_000), Some(500));
+        assert_eq!(resolve_lt_alock(Some(0.0), 869_525_000), Some(0));
+        // Explicit value is honoured even on a non-EU frequency.
+        assert_eq!(resolve_lt_alock(Some(2.0), 915_000_000), Some(200));
+
+        // US / out-of-band frequency with no explicit limit -> stays off.
+        assert_eq!(resolve_lt_alock(None, 915_000_000), None);
+        // Guard gap with no explicit limit -> stays off.
+        assert_eq!(resolve_lt_alock(None, 869_300_000), None);
+    }
 
     fn auto_iface(
         discovery_port: Option<u16>,

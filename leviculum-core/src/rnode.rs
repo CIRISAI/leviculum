@@ -925,6 +925,43 @@ pub fn alock_u16_to_fraction(at: u16) -> f32 {
     }
 }
 
+/// ETSI duty-cycle cap for an EU 863-870 MHz frequency, as a fraction of the
+/// long-term window, or `None` if the frequency is outside the band or in a
+/// guard gap.
+///
+/// The sub-bands follow EN 300 220-2 / ERC 70-03 for 863-870 MHz:
+///
+/// | Sub-band | Range (MHz)     | Duty cycle | Fraction |
+/// |----------|-----------------|------------|----------|
+/// | K        | 863.0 - 865.0   | 0.1%       | 0.001    |
+/// | L        | 865.0 - 868.0   | 1%         | 0.01     |
+/// | M        | 868.0 - 868.6   | 1%         | 0.01     |
+/// | N        | 868.7 - 869.2   | 0.1%       | 0.001    |
+/// | P        | 869.4 - 869.65  | 10%        | 0.10     |
+/// | Q        | 869.7 - 870.0   | 1%         | 0.01     |
+///
+/// Guard gaps (868.6-868.7, 869.2-869.4, 869.65-869.7 MHz) and frequencies
+/// outside 863-870 MHz return `None` (no regulatory auto cap applies). The
+/// returned fraction maps to the firmware `lt_alock` via `fraction * 10000`
+/// (see `alock_u16_to_fraction`).
+///
+/// This is a lawful-by-default helper: it lets a LoRa interface derive the
+/// long-term airtime limit from its own TX frequency when the operator has not
+/// set one. It is receiver-invisible (the cap only shapes local TX) and
+/// Python-Reticulum does not do it, so it is our Priority-1 enhancement rather
+/// than a wire/semantic requirement.
+pub fn etsi_eu868_duty_cycle(freq_hz: u64) -> Option<f64> {
+    match freq_hz {
+        863_000_000..=864_999_999 => Some(0.001), // K 863.0-865.0: 0.1%
+        865_000_000..=867_999_999 => Some(0.01),  // L 865.0-868.0: 1%
+        868_000_000..=868_599_999 => Some(0.01),  // M 868.0-868.6: 1%
+        868_700_000..=869_199_999 => Some(0.001), // N 868.7-869.2: 0.1%
+        869_400_000..=869_649_999 => Some(0.10),  // P 869.4-869.65: 10%
+        869_700_000..=869_999_999 => Some(0.01),  // Q 869.7-870.0: 1%
+        _ => None,                                // guard gaps + out-of-band
+    }
+}
+
 /// Total on-air time, in milliseconds, of the LoRa frame(s) carrying a
 /// Reticulum packet of `data_len` bytes.
 ///
@@ -1270,6 +1307,33 @@ mod tests {
     #[test]
     fn test_build_set_lt_alock() {
         assert_single_frame(&build_set_lt_alock(1000), CMD_LT_ALOCK, &[0x03, 0xE8]);
+    }
+
+    #[test]
+    fn test_etsi_eu868_duty_cycle() {
+        // P sub-band 869.4-869.65 MHz -> 10% (the 869.525 MHz calling channel).
+        assert_eq!(etsi_eu868_duty_cycle(869_525_000), Some(0.10));
+        // M sub-band 868.0-868.6 MHz -> 1%.
+        assert_eq!(etsi_eu868_duty_cycle(868_100_000), Some(0.01));
+        // K sub-band 863.0-865.0 MHz -> 0.1%.
+        assert_eq!(etsi_eu868_duty_cycle(864_000_000), Some(0.001));
+        // N sub-band 868.7-869.2 MHz -> 0.1%.
+        assert_eq!(etsi_eu868_duty_cycle(869_000_000), Some(0.001));
+        // L / Q sub-bands -> 1%.
+        assert_eq!(etsi_eu868_duty_cycle(867_000_000), Some(0.01));
+        assert_eq!(etsi_eu868_duty_cycle(869_800_000), Some(0.01));
+        // Guard gaps carry no auto cap.
+        assert_eq!(etsi_eu868_duty_cycle(868_650_000), None); // M/N gap
+        assert_eq!(etsi_eu868_duty_cycle(869_300_000), None); // N/P gap
+        assert_eq!(etsi_eu868_duty_cycle(869_680_000), None); // P/Q gap
+
+        // US 915 MHz and other out-of-band frequencies -> no auto cap.
+        assert_eq!(etsi_eu868_duty_cycle(915_000_000), None);
+        assert_eq!(etsi_eu868_duty_cycle(862_000_000), None);
+        assert_eq!(etsi_eu868_duty_cycle(870_500_000), None);
+        // The P cap maps to the exact firmware lt_alock (fraction * 10000).
+        let p = etsi_eu868_duty_cycle(869_525_000).unwrap();
+        assert_eq!((p * 10000.0) as u16, 1000);
     }
 
     #[test]
