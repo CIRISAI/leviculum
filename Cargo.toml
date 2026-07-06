@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "leviculum-core",
+    "leviculum-micron",
     "leviculum-std",
     "leviculum-ffi",
     "leviculum-cli",

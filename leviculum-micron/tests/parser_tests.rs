@@ -1,0 +1,425 @@
+//! Construct-by-construct unit tests for the micron parser.
+//!
+//! Each test asserts the resulting document model, not a rendering. Snippets
+//! are a mix of hand-crafted lines and lines drawn from `README.mu`.
+
+use leviculum_micron::{parse, Align, Block, Color, FieldKind, Line, Span};
+
+/// Return the spans of the single paragraph produced by `input`.
+fn para_spans(input: &str) -> Vec<Span> {
+    let doc = parse(input);
+    assert_eq!(
+        doc.blocks.len(),
+        1,
+        "expected exactly one block for {input:?}"
+    );
+    match &doc.blocks[0] {
+        Block::Paragraph { line, .. } => line.spans.clone(),
+        other => panic!("expected a paragraph, got {other:?}"),
+    }
+}
+
+// --- Plain text ----------------------------------------------------------
+
+#[test]
+fn plain_text_is_one_span() {
+    let spans = para_spans("just some plain text");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].text, "just some plain text");
+    assert_eq!(spans[0].style, Default::default());
+    assert!(spans[0].link.is_none());
+    assert!(spans[0].field.is_none());
+    assert!(spans[0].anchor.is_none());
+}
+
+// --- Headings + depth reset ---------------------------------------------
+
+#[test]
+fn headings_depth_1_2_3() {
+    for (src, depth) in [(">H1", 1u8), (">>H2", 2), (">>>H3", 3)] {
+        let doc = parse(src);
+        match &doc.blocks[0] {
+            Block::Heading { depth: d, line } => {
+                assert_eq!(*d, depth, "depth for {src:?}");
+                assert_eq!(line.spans[0].text, src.trim_start_matches('>'));
+            }
+            other => panic!("expected heading for {src:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn depth_persists_and_resets() {
+    let doc = parse(">>>Deep\ninside\n<\noutside");
+    // Heading depth 3, paragraph inheriting depth 3, then reset to 0.
+    assert!(matches!(doc.blocks[0], Block::Heading { depth: 3, .. }));
+    assert!(matches!(doc.blocks[1], Block::Paragraph { depth: 3, .. }));
+    // The lone `<` emits no block; the next line is depth 0.
+    assert!(matches!(doc.blocks[2], Block::Paragraph { depth: 0, .. }));
+    assert_eq!(doc.blocks.len(), 3);
+}
+
+#[test]
+fn bare_heading_marker_sets_depth_but_emits_nothing() {
+    let doc = parse(">>\ntext");
+    // `>>` alone sets depth 2 and produces no block; the text inherits it.
+    assert_eq!(doc.blocks.len(), 1);
+    assert!(matches!(doc.blocks[0], Block::Paragraph { depth: 2, .. }));
+}
+
+// --- Literal block -------------------------------------------------------
+
+#[test]
+fn literal_block_passes_backticks_through() {
+    let doc = parse("`=\ntext with `backticks` and `!markup`!\n`=");
+    assert_eq!(doc.blocks.len(), 1);
+    match &doc.blocks[0] {
+        Block::LiteralBlock { lines } => {
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].spans.len(), 1);
+            assert_eq!(
+                lines[0].spans[0].text,
+                "text with `backticks` and `!markup`!"
+            );
+        }
+        other => panic!("expected literal block, got {other:?}"),
+    }
+}
+
+#[test]
+fn literal_block_unescapes_toggle() {
+    let doc = parse("`=\n\\`=\n`=");
+    match &doc.blocks[0] {
+        Block::LiteralBlock { lines } => assert_eq!(lines[0].spans[0].text, "`="),
+        other => panic!("expected literal block, got {other:?}"),
+    }
+}
+
+#[test]
+fn unterminated_literal_block_is_flushed() {
+    // No closing `= — still yields a literal block (lenient).
+    let doc = parse("`=\nhanging literal");
+    assert!(matches!(
+        doc.blocks.last(),
+        Some(Block::LiteralBlock { .. })
+    ));
+}
+
+// --- Comment -------------------------------------------------------------
+
+#[test]
+fn comment_is_dropped() {
+    let doc = parse("before\n# a comment line\nafter");
+    assert_eq!(doc.blocks.len(), 2);
+    assert!(matches!(doc.blocks[0], Block::Paragraph { .. }));
+    assert!(matches!(doc.blocks[1], Block::Paragraph { .. }));
+}
+
+// --- Divider -------------------------------------------------------------
+
+#[test]
+fn divider_default_and_custom() {
+    match parse("-").blocks[0] {
+        Block::Divider { character, .. } => assert_eq!(character, '\u{2500}'),
+        ref other => panic!("expected divider, got {other:?}"),
+    }
+    match parse("-=").blocks[0] {
+        Block::Divider { character, .. } => assert_eq!(character, '='),
+        ref other => panic!("expected divider, got {other:?}"),
+    }
+    // A longer run of dashes is still a divider with the default glyph.
+    match parse("-----").blocks[0] {
+        Block::Divider { character, .. } => assert_eq!(character, '\u{2500}'),
+        ref other => panic!("expected divider, got {other:?}"),
+    }
+}
+
+// --- Text attribute toggles ---------------------------------------------
+
+#[test]
+fn bold_underline_italic_toggles() {
+    let spans = para_spans("`!bold`! `_under`_ `*italic`*");
+    // "bold" bold, then a plain " ", then "under" underlined, plain " ",
+    // then "italic" italic.
+    assert_eq!(spans[0].text, "bold");
+    assert!(spans[0].style.bold);
+    assert!(spans.iter().any(|s| s.text == "under" && s.style.underline));
+    assert!(spans.iter().any(|s| s.text == "italic" && s.style.italic));
+}
+
+#[test]
+fn nested_toggles_combine() {
+    let spans = para_spans("`!`_both`_`!");
+    assert_eq!(spans[0].text, "both");
+    assert!(spans[0].style.bold);
+    assert!(spans[0].style.underline);
+    assert!(!spans[0].style.italic);
+}
+
+#[test]
+fn backtick_resets_all_formatting() {
+    // bold+italic+fg, then `` resets, then plain text.
+    let spans = para_spans("`!`*`Ff00red``plain");
+    let red = spans.iter().find(|s| s.text == "red").expect("red span");
+    assert!(red.style.bold && red.style.italic);
+    assert_eq!(red.style.fg, Some(Color::parse("f00")));
+    let plain = spans
+        .iter()
+        .find(|s| s.text == "plain")
+        .expect("plain span");
+    assert!(!plain.style.bold && !plain.style.italic);
+    assert_eq!(plain.style.fg, None);
+}
+
+// --- Colour --------------------------------------------------------------
+
+#[test]
+fn foreground_colour_set_and_reset() {
+    let spans = para_spans("`Ff00red`fdefault");
+    let red = spans.iter().find(|s| s.text == "red").expect("red span");
+    assert_eq!(red.style.fg, Some(Color::parse("f00")));
+    assert_eq!(red.style.fg.as_ref().unwrap().rgb, Some((255, 0, 0)));
+    let def = spans
+        .iter()
+        .find(|s| s.text == "default")
+        .expect("default span");
+    assert_eq!(def.style.fg, None);
+}
+
+#[test]
+fn background_colour_set_and_reset() {
+    let spans = para_spans("`B00ftint`bplain");
+    let tint = spans.iter().find(|s| s.text == "tint").expect("tint span");
+    assert_eq!(tint.style.bg, Some(Color::parse("00f")));
+    assert_eq!(tint.style.bg.as_ref().unwrap().rgb, Some((0, 0, 255)));
+    let plain = spans
+        .iter()
+        .find(|s| s.text == "plain")
+        .expect("plain span");
+    assert_eq!(plain.style.bg, None);
+}
+
+#[test]
+fn grayscale_colour_resolves() {
+    let c = Color::parse("g50");
+    assert_eq!(c.rgb, Some((127, 127, 127)));
+    let black = Color::parse("g00");
+    assert_eq!(black.rgb, Some((0, 0, 0)));
+}
+
+#[test]
+fn invalid_colour_keeps_raw_without_rgb() {
+    let c = Color::parse("zzz");
+    assert_eq!(c.raw, "zzz");
+    assert_eq!(c.rgb, None);
+}
+
+// --- Alignment -----------------------------------------------------------
+
+#[test]
+fn alignment_center_right_default() {
+    assert_eq!(para_spans("`ccentered")[0].style.align, Align::Center);
+    assert_eq!(para_spans("`rright")[0].style.align, Align::Right);
+    // `a resets to the default (left).
+    assert_eq!(para_spans("`r`aback")[0].style.align, Align::Left);
+    // toggling the same alignment off returns to default.
+    assert_eq!(para_spans("`c`ctwice")[0].style.align, Align::Left);
+}
+
+// --- Links ---------------------------------------------------------------
+
+#[test]
+fn link_with_fields() {
+    let spans = para_spans("`[Label`dest:/page/x.mu`f1=v1|f2=v2]");
+    let link = spans[0].link.as_ref().expect("link");
+    assert_eq!(spans[0].text, "Label");
+    assert_eq!(link.label, "Label");
+    assert_eq!(link.target, "dest:/page/x.mu");
+    assert_eq!(link.fields, vec!["f1=v1".to_string(), "f2=v2".to_string()]);
+}
+
+#[test]
+fn link_without_fields() {
+    let spans = para_spans("`[Label`dest]");
+    let link = spans[0].link.as_ref().expect("link");
+    assert_eq!(link.label, "Label");
+    assert_eq!(link.target, "dest");
+    assert!(link.fields.is_empty());
+}
+
+#[test]
+fn link_without_label_uses_target() {
+    let spans = para_spans("`[https://example.org/]");
+    let link = spans[0].link.as_ref().expect("link");
+    assert_eq!(link.label, "https://example.org/");
+    assert_eq!(link.target, "https://example.org/");
+    assert_eq!(spans[0].text, "https://example.org/");
+}
+
+#[test]
+fn unterminated_link_degrades_to_text() {
+    // No closing `]`: the bracket is consumed, the rest is plain text.
+    let spans = para_spans("`[no closing bracket");
+    assert!(spans.iter().all(|s| s.link.is_none()));
+    assert!(spans.iter().any(|s| s.text.contains("no closing bracket")));
+}
+
+// --- Anchors -------------------------------------------------------------
+
+#[test]
+fn anchor_declaration() {
+    let spans = para_spans("`:section1 following text");
+    assert_eq!(spans[0].anchor.as_deref(), Some("section1"));
+    assert!(spans[0].text.is_empty());
+    assert!(spans.iter().any(|s| s.text == " following text"));
+}
+
+// --- Form fields ---------------------------------------------------------
+
+#[test]
+fn text_field_with_components() {
+    let spans = para_spans("`<32|username`initial value>");
+    let field = spans[0].field.as_ref().expect("field");
+    assert_eq!(field.name, "username");
+    assert_eq!(field.width, 32);
+    assert_eq!(field.kind, FieldKind::Text);
+    assert_eq!(field.value, "initial value");
+    assert!(!field.masked);
+}
+
+#[test]
+fn masked_field() {
+    let spans = para_spans("`<!8|pin`>");
+    let field = spans[0].field.as_ref().expect("field");
+    assert_eq!(field.name, "pin");
+    assert_eq!(field.width, 8);
+    assert!(field.masked);
+    assert_eq!(field.kind, FieldKind::Text);
+}
+
+#[test]
+fn plain_field_without_components() {
+    let spans = para_spans("`<simplename`seed>");
+    let field = spans[0].field.as_ref().expect("field");
+    assert_eq!(field.name, "simplename");
+    assert_eq!(field.width, 24); // default
+    assert_eq!(field.value, "seed");
+}
+
+#[test]
+fn checkbox_field() {
+    let spans = para_spans("`<?|agree`I agree>");
+    let field = spans[0].field.as_ref().expect("field");
+    assert_eq!(field.kind, FieldKind::Checkbox);
+    assert_eq!(field.name, "agree");
+    assert_eq!(field.label, "I agree");
+    assert_eq!(field.value, "I agree"); // no explicit value -> label
+}
+
+#[test]
+fn radio_field_with_value_and_prechecked() {
+    let spans = para_spans("`<^|choice|val1|*`Option One>");
+    let field = spans[0].field.as_ref().expect("field");
+    assert_eq!(field.kind, FieldKind::Radio);
+    assert_eq!(field.name, "choice");
+    assert_eq!(field.value, "val1");
+    assert_eq!(field.label, "Option One");
+    assert!(field.prechecked);
+}
+
+#[test]
+fn unterminated_field_degrades() {
+    // No `` ` `` inside: not a valid field, consumed as text (no panic).
+    let spans = para_spans("`<name with no backtick");
+    assert!(spans.iter().all(|s| s.field.is_none()));
+}
+
+// --- Escapes -------------------------------------------------------------
+
+#[test]
+fn escape_line_disables_comment() {
+    let spans = para_spans("\\# not a comment");
+    assert_eq!(spans[0].text, "# not a comment");
+}
+
+#[test]
+fn escaped_backtick_is_literal() {
+    let spans = para_spans("a \\`b\\` c");
+    let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(joined, "a `b` c");
+}
+
+// --- Graceful degradation -----------------------------------------------
+
+#[test]
+fn unterminated_colour_sequence_is_graceful() {
+    // `F with fewer than 3 following chars: the command is ignored.
+    let spans = para_spans("`F1");
+    assert!(spans.iter().all(|s| s.style.fg.is_none()));
+    assert!(spans.iter().any(|s| s.text == "1"));
+}
+
+#[test]
+fn state_persists_across_lines() {
+    // A colour set on one line carries to the next until reset.
+    let doc = parse("`Ff00first line\nsecond line");
+    let l1 = match &doc.blocks[0] {
+        Block::Paragraph { line, .. } => line,
+        other => panic!("{other:?}"),
+    };
+    let l2 = match &doc.blocks[1] {
+        Block::Paragraph { line, .. } => line,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(l1.spans[0].style.fg, Some(Color::parse("f00")));
+    assert_eq!(l2.spans[0].style.fg, Some(Color::parse("f00")));
+}
+
+#[test]
+fn blank_lines_become_blank_blocks() {
+    let doc = parse("a\n\nb");
+    assert!(matches!(doc.blocks[0], Block::Paragraph { .. }));
+    assert!(matches!(doc.blocks[1], Block::Blank));
+    assert!(matches!(doc.blocks[2], Block::Paragraph { .. }));
+}
+
+#[test]
+fn empty_input_is_one_blank() {
+    let doc = parse("");
+    assert_eq!(doc.blocks, vec![Block::Blank]);
+}
+
+// --- README.mu whole-document parse -------------------------------------
+
+#[test]
+fn parses_full_readme_without_panicking() {
+    let readme = include_str!("../../vendor/Reticulum/README.mu");
+    let doc = parse(readme);
+
+    // Plausible block count: the file is a few hundred lines.
+    assert!(
+        doc.blocks.len() > 150,
+        "unexpectedly few blocks: {}",
+        doc.blocks.len()
+    );
+
+    // Structural sanity: headings, links and literal blocks are all present.
+    assert!(doc
+        .blocks
+        .iter()
+        .any(|b| matches!(b, Block::Heading { depth: 2, .. })));
+    assert!(doc
+        .blocks
+        .iter()
+        .any(|b| matches!(b, Block::LiteralBlock { .. })));
+
+    let has_link = doc.blocks.iter().any(|b| match b {
+        Block::Paragraph { line, .. } | Block::Heading { line, .. } => line_has_link(line),
+        _ => false,
+    });
+    assert!(has_link, "expected at least one link in README.mu");
+}
+
+fn line_has_link(line: &Line) -> bool {
+    line.spans.iter().any(|s| s.link.is_some())
+}
