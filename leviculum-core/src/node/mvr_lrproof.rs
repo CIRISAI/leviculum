@@ -402,15 +402,14 @@ fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
 }
 
 // ----------------------------------------------------------------------------
-// Codeberg #38: Python-incompat reproduction — the forwarded proof's hops does
-// NOT equal the downstream's frozen remaining_hops, the exact invariant Python
-// enforces before forwarding an LRPROOF (Transport.py:2176). A strict Python
-// client on the receiving side therefore DROPS this proof and times out, while
-// our lenient stack establishes.
+// Codeberg #38: Python-compat FIX proof — the forwarded proof's hops now EQUALS
+// the downstream's frozen remaining_hops, the exact invariant Python enforces
+// before forwarding an LRPROOF (Transport.py:2176). A strict Python client on
+// the receiving side therefore ACCEPTS this proof and establishes the link.
 // ----------------------------------------------------------------------------
 
-/// Deterministic reproduction of the #38 wire condition that makes a Python
-/// client time out through our relay.
+/// Deterministic proof of the #38 fix: our relay rewrites the forwarded LRPROOF
+/// hop count so a strict Python client accepts it.
 ///
 /// Python `RNS/Transport.py:2176` forwards an LRPROOF to the next / local-client
 /// interface ONLY when `packet.hops == link_entry[IDX_LT_REM_HOPS]` (STRICT
@@ -418,25 +417,18 @@ fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
 /// A Python node in the relay position DROPS a proof whose arriving hop count is
 /// not exactly the remaining_hops it froze when it forwarded the request.
 ///
-/// Our relay `transport.rs:3724-3745` deviates: on mismatch it logs
-/// `LRPROOF hop asymmetry, forwarding anyway (remaining_hops)` and forwards the
-/// ORIGINAL packet UNCHANGED — it does NOT rewrite `packet.hops` down to the
-/// frozen `remaining_hops` (STEP-0 Q1: `let mut forwarded = packet;
-/// forward_on_interface_from(...)` → `send_packet_on_interface` → `packet.pack`
-/// serialises the current, asymmetric hops; nothing overwrites it). So the proof
-/// leaves our relay carrying hops=2 while the frozen remaining_hops=1.
+/// Our relay `transport.rs` still logs
+/// `LRPROOF hop asymmetry, forwarding anyway (remaining_hops)` on the mismatch,
+/// but now REWRITES the forwarded packet's `hops` down to the frozen
+/// `remaining_hops` before it goes on the wire (`forward_on_interface_from`
+/// does not re-increment). So the proof leaves our relay carrying hops=1,
+/// matching the frozen remaining_hops=1.
 ///
-/// This test asserts the broken invariant EXISTS today: the forwarded proof's
-/// `hops` (2) does not equal the frozen `remaining_hops` (1). That inequality is
-/// precisely what a strict Python peer rejects.
-///
-/// Kept green-as-characterization: it documents the CURRENT (Python-incompatible)
-/// state. The fix will make our relay rewrite the forwarded proof's hops to the
-/// frozen remaining_hops (so `packet.hops == remaining_hops`, satisfying
-/// Transport.py:2176); when it lands, flip the `assert_ne!` to `assert_eq!` and
-/// update the expected forwarded hops to 1.
+/// This test asserts the FIXED invariant holds: the forwarded proof's `hops` (1)
+/// equals the frozen `remaining_hops` (1). That equality is precisely what a
+/// strict Python peer requires to accept the proof and establish the link.
 #[test]
-fn lrproof_forwarded_proof_hops_mismatch_downstream_remaining_python_would_drop() {
+fn lrproof_forwarded_proof_hops_match_downstream_remaining_python_would_accept() {
     let o = run_asymmetric_return_path_scenario();
 
     let fwd_hops = o.forwarded_proof_hops.unwrap_or_else(|| {
@@ -459,23 +451,21 @@ fn lrproof_forwarded_proof_hops_mismatch_downstream_remaining_python_would_drop(
         o.logs
     );
     assert_eq!(
-        fwd_hops, 2,
-        "the proof A forwards toward the initiator must carry the asymmetric hops=2.\n\
-         --- logs ---\n{}",
+        fwd_hops, 1,
+        "the proof A forwards toward the initiator must be rewritten to hops=1 \
+         (the frozen remaining_hops), not the asymmetric hops=2.\n--- logs ---\n{}",
         o.logs
     );
 
-    // THE reproduction: our relay forwards a proof whose hops != the frozen
-    // remaining_hops. Python's Transport.py:2176 requires equality and would
-    // DROP this proof, timing out a Python client. When the fix rewrites the
-    // forwarded hops to `remaining`, this becomes assert_eq!(fwd_hops, remaining).
-    assert_ne!(
+    // THE fix: our relay forwards a proof whose hops == the frozen remaining_hops.
+    // Python's Transport.py:2176 requires this equality; it now holds, so a strict
+    // Python client accepts the proof and establishes instead of timing out.
+    assert_eq!(
         fwd_hops, remaining,
-        "CHARACTERIZATION of #38: our relay forwards the LRPROOF with hops={fwd_hops} \
-         != frozen remaining_hops={remaining}. A strict Python peer (Transport.py:2176 \
-         requires packet.hops == remaining_hops) drops this and times out; our lenient \
-         stack establishes. The fix will rewrite forwarded hops to remaining_hops, \
-         flipping this to assert_eq!.\n--- logs ---\n{}",
+        "FIX of #38: our relay rewrites the forwarded LRPROOF to hops={fwd_hops} \
+         == frozen remaining_hops={remaining}. A strict Python peer (Transport.py:2176 \
+         requires packet.hops == remaining_hops) now accepts this and establishes; \
+         both our stack and a Python peer establish.\n--- logs ---\n{}",
         o.logs
     );
 }

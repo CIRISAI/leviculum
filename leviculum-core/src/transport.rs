@@ -3721,6 +3721,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // below; loops stay bounded by the global max_hops drop. This is a
                 // deliberate deviation from Python's relay (Transport.py:2112),
                 // which drops on hop mismatch.
+                // On a hop mismatch we forward anyway, but REWRITE the forwarded
+                // proof's hop count to the value a strict Python peer expects
+                // (#38, Python Transport.py:2176 forwards only if
+                // packet.hops == remaining_hops). forward_on_interface_from does
+                // not re-increment, so the value set here is exactly what leaves
+                // on the wire: a local client 0 hops away reads remaining_hops; a
+                // client N hops away reads target+N == its own frozen count.
+                let mut rewrite_hops: Option<u8> = None;
                 let target_iface = if interface_index == link_entry.next_hop_interface_index {
                     // From destination side.
                     if packet.hops != link_entry.remaining_hops {
@@ -3730,6 +3738,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             remaining_hops = link_entry.remaining_hops,
                             "LRPROOF hop asymmetry, forwarding anyway (remaining_hops)"
                         );
+                        rewrite_hops = Some(link_entry.remaining_hops);
                     }
                     link_entry.received_interface_index
                 } else if interface_index == link_entry.received_interface_index {
@@ -3741,6 +3750,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             entry_hops = link_entry.hops,
                             "LRPROOF hop asymmetry, forwarding anyway (taken hops)"
                         );
+                        rewrite_hops = Some(link_entry.hops);
                     }
                     link_entry.next_hop_interface_index
                 } else {
@@ -3862,6 +3872,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     self.iface_name(target_iface)
                 );
                 let mut forwarded = packet;
+                // #38: on the mismatch branch, rewrite the on-wire hop count so a
+                // strict Python receiver (Transport.py:2176) accepts the proof.
+                if let Some(hops) = rewrite_hops {
+                    forwarded.hops = hops;
+                }
                 return self.forward_on_interface_from(
                     target_iface,
                     Some(interface_index),

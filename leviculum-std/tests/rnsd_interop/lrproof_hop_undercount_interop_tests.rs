@@ -1,5 +1,6 @@
-//! Codeberg #38: a Python client link times out through our relay on hop
-//! asymmetry, while a leviculum-std client on the identical topology establishes.
+//! Codeberg #38: the FIX proven end to end — a Python client and a leviculum-std
+//! client BOTH establish the link through our relay on the identical hop-asymmetry
+//! topology that previously timed the Python client out.
 //!
 //! ## Mechanism (reference-confirmed against vendored Python)
 //!
@@ -8,17 +9,18 @@
 //! `expected_hops == PATHFINDER_M`, i.e. the path was unknown at link creation).
 //! `expected_hops` is taken from the initiator's path table at `create_link`
 //! time. If that path is UNDERCOUNTED (optimistic, fewer hops than the live
-//! round trip), the proof returns with `packet.hops > expected_hops`, no pending
-//! link matches, `validate_proof` is never called, and `create_link` times out.
+//! round trip), the proof would return with `packet.hops > expected_hops`, no
+//! pending link would match, `validate_proof` would never be called, and
+//! `create_link` would time out.
 //!
-//! Our relay `transport.rs:3724` deviates from Python's strict relay
-//! (`Transport.py:2176`, which DROPS on hop mismatch): on mismatch it logs
-//! `LRPROOF hop asymmetry, forwarding anyway (remaining_hops)` and forwards the
-//! proof UNCHANGED — it does NOT rewrite `packet.hops` down to the frozen
-//! `remaining_hops` (#38 STEP-0 Q1). So the asymmetric proof reaches the client.
-//! Our own leviculum-std initiator accepts it (lenient, Priority 1: max
-//! delivery); a strict Python initiator rejects it and times out. Same relay,
-//! same page, only the client differs — exactly the field symptom.
+//! The #38 fix in our relay `transport.rs` REWRITES the forwarded LRPROOF's
+//! `packet.hops` down to the frozen `remaining_hops` on the mismatch branch
+//! (Python `Transport.py:2176` requires this equality). So the proof now reaches
+//! the initiator carrying the hop count it expects: the strict Python initiator
+//! matches its pending link and establishes, exactly as our own leviculum-std
+//! initiator always did. The relay still DETECTS and logs the asymmetry
+//! (`LRPROOF hop asymmetry, forwarding anyway (remaining_hops)`); it does not
+//! pretend the path is symmetric. Same relay, same page: both clients establish.
 //!
 //! ## Topology
 //!
@@ -216,10 +218,11 @@ async fn spawn_undercount_shim(relay2_addr: SocketAddr) -> (SocketAddr, Arc<Atom
 // The reproduction.
 // ----------------------------------------------------------------------------
 
-/// Full #38 reproduction: Python initiator times out, Rust initiator establishes,
-/// on the identical hop-undercount relay chain.
+/// Full #38 fix proof: Python initiator AND Rust initiator both establish the
+/// link on the identical hop-undercount relay chain that previously timed the
+/// Python client out.
 #[tokio::test]
-async fn lrproof_hop_undercount_python_client_times_out_rust_client_establishes() {
+async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
     let log_buf = captured_logs();
     log_buf.lock().unwrap().clear();
 
@@ -309,7 +312,7 @@ async fn lrproof_hop_undercount_python_client_times_out_rust_client_establishes(
     );
 
     // ========================================================================
-    // (A) PYTHON initiator: create_link must TIME OUT.
+    // (A) PYTHON initiator: create_link must now ESTABLISH (no timeout).
     // ========================================================================
     let initiator_py = TestDaemon::start().await.expect("start Python initiator A");
     initiator_py
@@ -338,9 +341,11 @@ async fn lrproof_hop_undercount_python_client_times_out_rust_client_establishes(
         .await;
     let logs = log_snapshot(&log_buf);
     assert!(
-        py_link.is_err(),
-        "REPRODUCTION (a): the Python initiator's create_link must TIME OUT on \
-         the hop asymmetry, but it returned {py_link:?}.\n--- relay logs ---\n{logs}"
+        py_link.is_ok(),
+        "FIX (a): the Python initiator's create_link must now ESTABLISH on the \
+         hop asymmetry (our relay rewrites the forwarded LRPROOF hops to the \
+         frozen remaining_hops, satisfying Transport.py:2176), but it returned \
+         {py_link:?}.\n--- relay logs ---\n{logs}"
     );
 
     // ========================================================================
@@ -353,8 +358,8 @@ async fn lrproof_hop_undercount_python_client_times_out_rust_client_establishes(
     );
 
     // ========================================================================
-    // (C) CONTROL: a leviculum-std initiator on the SAME running relays DOES
-    //     establish the link — the client-side divergence.
+    // (C) a leviculum-std initiator on the SAME running relays also establishes
+    //     the link — post-fix both clients establish (previously only this one).
     // ========================================================================
     let _initiator_rs_storage = temp_storage("lrproof_hop_undercount", "initiator_rs");
     let mut initiator_rs = ReticulumNodeBuilder::new()
@@ -389,10 +394,10 @@ async fn lrproof_hop_undercount_python_client_times_out_rust_client_establishes(
     let logs = log_snapshot(&log_buf);
     assert!(
         established,
-        "REPRODUCTION (c/CONTROL): the leviculum-std initiator must ESTABLISH the \
-         link on the identical hop-undercount chain where the Python initiator \
-         timed out. This is the #38 divergence: same relay, only the client \
-         differs.\n--- relay logs ---\n{logs}"
+        "FIX (c): the leviculum-std initiator must ESTABLISH the link on the \
+         identical hop-undercount chain. Post-fix both the Python initiator (a) \
+         and this leviculum-std initiator establish: same relay, both clients \
+         accept the rewritten proof.\n--- relay logs ---\n{logs}"
     );
 
     // Tidy up async nodes.
