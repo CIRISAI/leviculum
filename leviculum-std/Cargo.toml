@@ -61,3 +61,7 @@ tracing-subscriber.workspace = true
 hex = "0.4"
 regex = "1"
 tempfile = "3"
+# lnomad is the NomadNet browser backend; its shared-instance fetch path is
+# drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
+# (lnomad depends on leviculum-std at build time), which Cargo permits.
+lnomad = { path = "../lnomad" }

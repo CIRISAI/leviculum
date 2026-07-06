@@ -16,6 +16,14 @@
 //! assert_eq!(page.links.len(), 1);
 //! ```
 
-pub mod render;
+//! Phase 4a adds the network backend: [`url`] parses NomadNet page URLs and
+//! [`fetch`] connects to a running `lnsd`/`rnsd` shared instance and retrieves a
+//! page's bytes over the RNS request/response path.
 
+pub mod fetch;
+pub mod render;
+pub mod url;
+
+pub use fetch::{FetchError, Session};
 pub use render::{render_with_options, RenderedLink, RenderedPage};
+pub use url::{parse_url, Target, UrlError};

@@ -53,6 +53,7 @@ mod lifecycle_tests;
 mod link_keepalive_close_tests;
 mod link_manager_tests;
 mod link_tests;
+mod lnomad_fetch_interop_tests;
 mod loadtest_tcp_hub_tests;
 mod mtu_tests;
 mod multihop_tests;
