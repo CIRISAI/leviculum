@@ -97,6 +97,24 @@ const HINT_HINTS: &str = "type a hint label or link text   Esc: cancel";
 /// The home-row alphabet hint labels are drawn from (vimium-style).
 const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
 
+/// The muted "chrome" background the fixed top-bar and status bar are filled
+/// with, so they read as a distinct bar over the black content (dark slate).
+const CHROME_BG: Color = Color::Rgb(38, 40, 49);
+/// The light foreground the chrome bars carry over [`CHROME_BG`].
+const CHROME_FG: Color = Color::Rgb(205, 210, 220);
+
+/// The style the fixed top-bar and status bar are filled with, full width, so
+/// they stand out from the content. With colour, a muted slate background and a
+/// light foreground; under `no_color`, the REVERSE modifier so the bars still
+/// delineate without any colour. Shared by both bars for a consistent look.
+fn chrome_style(no_color: bool) -> Style {
+    if no_color {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(CHROME_FG).bg(CHROME_BG)
+    }
+}
+
 /// The content layout width for a terminal `cols` wide: full width minus the
 /// scrollbar column, never below 1 so wrapping stays well defined.
 fn content_width(cols: u16) -> usize {
@@ -364,6 +382,9 @@ pub struct Model {
     pub spinner: ThrobberState,
     /// Whether the keybinding help overlay is shown.
     pub show_help: bool,
+    /// Whether colour is suppressed (NO_COLOR / non-tty): the chrome bars fall
+    /// back to reverse video instead of a coloured background.
+    pub no_color: bool,
     /// Set once the user has asked to quit; the IO loop breaks on it.
     pub quit: bool,
 }
@@ -1172,9 +1193,14 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
     let text = to_ratatui_text(&model.page[start..end]);
     frame.render_widget(Paragraph::new(text), body);
 
-    let mut state = ScrollbarState::new(model.page.len())
-        .viewport_content_length(viewport)
-        .position(model.scroll);
+    // Map the scrollbar over the SCROLL POSITIONS, not the line count: content
+    // length is `max_scroll` so `position` spans the full `[0, max_scroll]` range
+    // across the track. This makes the thumb top hit the track top at `scroll==0`
+    // and the thumb bottom hit the track bottom at `scroll==max_scroll`. Setting
+    // `content_length` to `page.len()` with `viewport_content_length` instead left
+    // the thumb short of the bottom for pages only a little taller than the
+    // viewport (the position denominator over-counted by the viewport height).
+    let mut state = ScrollbarState::new(model.max_scroll(viewport).max(1)).position(model.scroll);
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None);
@@ -1187,6 +1213,9 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
+    // Fill the whole bar (both rows, full width) with the chrome style first; the
+    // title and controls render on top and inherit its background.
+    frame.render_widget(Block::default().style(chrome_style(model.no_color)), area);
     let title_row = Rect { height: 1, ..area };
     let title = RtLine::from(RtSpan::styled(
         model.title.clone(),
@@ -1290,6 +1319,9 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
+    // Fill the status bar full width with the chrome style; the spinner / status /
+    // hints render on top and inherit its background.
+    frame.render_widget(Block::default().style(chrome_style(model.no_color)), area);
     let dim = Style::default().add_modifier(Modifier::DIM);
     if let Some(pending) = &model.pending {
         let label = format!(" loading {}", pending.target.path);
@@ -1593,7 +1625,10 @@ pub async fn run_tui(session: Session, initial: Target, opts: BrowserOptions) ->
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut events = EventStream::new();
 
-    let mut model = Model::default();
+    let mut model = Model {
+        no_color: opts.no_color,
+        ..Model::default()
+    };
     let size = terminal.size()?;
     model.size = (size.width, size.height);
     model.relayout(content_width(size.width));
@@ -2288,6 +2323,109 @@ mod tests {
             }
         }
         assert!(scrollbar_cell, "scrollbar column should not be empty");
+    }
+
+    #[test]
+    fn scrollbar_thumb_reaches_top_and_bottom() {
+        // A page much taller than the viewport, so the thumb is a small handle
+        // that must travel the whole track as `scroll` runs `0..=max_scroll`.
+        let (w, h) = (40u16, 13u16);
+        let mut m = Model::from_document(&long_doc(), content_width(w), "Long", (w, h));
+        assert!(
+            m.page.len() > m.viewport() * 2,
+            "fixture must be much taller than the viewport"
+        );
+
+        let col = w - SCROLLBAR_COLS; // rightmost column carries the scrollbar
+        let content_top = TOPBAR_ROWS; // first content row (below the two-row top-bar)
+        let content_bottom = h - STATUS_ROWS - 1; // last content row (above the status bar)
+
+        // The rows in the scrollbar column occupied by the thumb glyph (block).
+        let thumb_rows = |buf: &ratatui::buffer::Buffer| -> Vec<u16> {
+            (content_top..=content_bottom)
+                .filter(|&y| buf[(col, y)].symbol() == "█")
+                .collect()
+        };
+
+        // scroll = 0: the thumb sits at the TOP of the track, not the bottom.
+        m.scroll = 0;
+        let buf = render(&m, w, h);
+        let top = thumb_rows(&buf);
+        assert!(!top.is_empty(), "thumb should be visible at scroll 0");
+        assert_eq!(
+            *top.first().unwrap(),
+            content_top,
+            "thumb top must hit the track top at scroll 0"
+        );
+        assert!(
+            *top.last().unwrap() < content_bottom,
+            "thumb must not fill to the bottom at scroll 0"
+        );
+
+        // scroll = max_scroll: the thumb BOTTOM reaches the bottom row of the track.
+        let vp = m.viewport();
+        m.scroll = m.max_scroll(vp);
+        assert!(m.scroll > 0, "max_scroll must be positive for a tall page");
+        let buf = render(&m, w, h);
+        let bottom = thumb_rows(&buf);
+        assert!(!bottom.is_empty(), "thumb should be visible at max scroll");
+        assert_eq!(
+            *bottom.last().unwrap(),
+            content_bottom,
+            "thumb bottom must reach the track bottom at max scroll"
+        );
+        assert!(
+            *bottom.first().unwrap() > content_top,
+            "thumb must have left the top at max scroll"
+        );
+
+        // A mid value puts the thumb strictly between the two extremes.
+        m.scroll = m.max_scroll(vp) / 2;
+        let buf = render(&m, w, h);
+        let mid = thumb_rows(&buf);
+        assert!(!mid.is_empty(), "thumb should be visible mid-scroll");
+        assert!(
+            *mid.first().unwrap() > content_top && *mid.last().unwrap() < content_bottom,
+            "mid-scroll thumb must sit between the track ends: {mid:?}"
+        );
+    }
+
+    #[test]
+    fn chrome_bars_carry_background_full_width() {
+        let m = loaded_model((80, 24));
+        assert!(!m.no_color, "colour is on by default");
+        let buffer = render(&m, 80, 24);
+        // The two top-bar rows (0, 1) and the status row (23) carry the chrome
+        // background across the full width, including the rightmost column.
+        for &y in &[0u16, 1, 23] {
+            for &x in &[0u16, 40, 79] {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    CHROME_BG,
+                    "cell ({x},{y}) is missing the chrome background"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_bars_use_reverse_under_no_color() {
+        let mut m = loaded_model((80, 24));
+        m.no_color = true;
+        let buffer = render(&m, 80, 24);
+        for &y in &[0u16, 1, 23] {
+            for &x in &[0u16, 40, 79] {
+                let cell = &buffer[(x, y)];
+                assert!(
+                    cell.modifier.contains(Modifier::REVERSED),
+                    "cell ({x},{y}) must be reversed under no_color"
+                );
+                assert_ne!(
+                    cell.bg, CHROME_BG,
+                    "no_color must not paint the colour background"
+                );
+            }
+        }
     }
 
     #[test]
