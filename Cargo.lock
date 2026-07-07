@@ -1192,7 +1192,9 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "thiserror 2.0.17",
+ "throbber-widgets-tui",
  "tokio",
+ "tui-input",
  "unicode-width",
 ]
 
@@ -2413,6 +2415,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "throbber-widgets-tui"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b0452e418faaa263a742d94e5c2f9f50c777a0ae5b3ec53ce754d917d568e36"
+dependencies = [
+ "ratatui",
+]
+
+[[package]]
 name = "time"
 version = "0.3.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2563,6 +2574,17 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tui-input"
+version = "0.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bd014a652e31cf25ea68d11b10a7b09549863449b19387505c9933f11eb05fa"
+dependencies = [
+ "ratatui",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
