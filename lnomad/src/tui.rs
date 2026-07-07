@@ -1748,9 +1748,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_content(model, frame, content);
     render_status(model, frame, status);
     // Overlays drawn on top of the laid-out page: the search-match highlights,
-    // the focus highlight, and the hint badges while hint mode is active.
+    // the focus highlight, the mouse-hover highlight, and the hint badges while
+    // hint mode is active.
     render_search_matches(model, frame);
     render_focus(model, frame);
+    render_hover(model, frame);
     if model.mode == Mode::Hint {
         render_hints(model, frame);
     }
@@ -1781,6 +1783,36 @@ fn render_focus(model: &Model, frame: &mut Frame) {
             }
             if let Some(cell) = buf.cell_mut((x, vl.row)) {
                 cell.set_style(highlight);
+            }
+        }
+    }
+}
+
+/// Highlight the link the mouse is hovering over, so the pointer's target is
+/// visible in the content as well as the status bar. Kept distinct from the Tab
+/// focus (reverse video): hover patches bold + underline onto the link's own
+/// colour, so the two can coexist on different links. A no-op when nothing is
+/// hovered or the hovered link is off-screen.
+fn render_hover(model: &Model, frame: &mut Frame) {
+    let Some(idx) = model.hover else {
+        return;
+    };
+    let area = frame.area();
+    let buf = frame.buffer_mut();
+    let hover = Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    for vl in visible_links(model) {
+        if vl.index != idx {
+            continue;
+        }
+        for x in vl.col_start..vl.col_end {
+            if x >= area.width || vl.row >= area.height {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((x, vl.row)) {
+                // Patch (not replace) so the link colour and any focus reverse
+                // underneath are preserved and the hover modifiers add on top.
+                let style = cell.style().patch(hover);
+                cell.set_style(style);
             }
         }
     }
@@ -3721,6 +3753,16 @@ mod tests {
         }
     }
 
+    /// A mouse-move event at `(col, row)`.
+    fn moved(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
     /// The laid-out link with 1-based `index`.
     fn link_of(m: &Model, index: usize) -> &RenderedLink {
         m.links.iter().find(|l| l.index == index).expect("link")
@@ -4047,6 +4089,51 @@ mod tests {
         let cell = &buffer[(vl.col_start, vl.row)];
         assert_eq!(cell.symbol(), "a", "hint badge not drawn over the link");
         assert_eq!(cell.bg, Color::Rgb(255, 215, 0), "badge background missing");
+    }
+
+    #[test]
+    fn mouse_move_over_link_sets_and_clears_hover() {
+        let mut m = loaded_model((80, 24));
+        let vl = visible_links(&m)
+            .into_iter()
+            .find(|v| v.index == 1)
+            .expect("alpha visible");
+        update(&mut m, AppEvent::Mouse(moved(vl.col_start, vl.row)));
+        assert_eq!(m.hover, Some(1), "moving over a link sets the hover");
+        // A move off any link clears it.
+        update(&mut m, AppEvent::Mouse(moved(vl.col_start, vl.row + 3)));
+        assert_eq!(m.hover, None, "moving off a link clears the hover");
+    }
+
+    #[test]
+    fn hovered_link_renders_highlighted_and_others_do_not() {
+        let mut m = loaded_model((80, 24));
+        let hovered = visible_links(&m)
+            .into_iter()
+            .find(|v| v.index == 1)
+            .expect("alpha visible");
+        let other = visible_links(&m)
+            .into_iter()
+            .find(|v| v.index == 2)
+            .expect("beta visible");
+        update(
+            &mut m,
+            AppEvent::Mouse(moved(hovered.col_start, hovered.row)),
+        );
+        let buffer = render(&m, 80, 24);
+        let cell = &buffer[(hovered.col_start, hovered.row)];
+        assert!(
+            cell.modifier.contains(Modifier::BOLD) && cell.modifier.contains(Modifier::UNDERLINED),
+            "hovered link not highlighted: {:?}",
+            cell.modifier
+        );
+        // The non-hovered link keeps its plain link styling (no hover bold).
+        let plain = &buffer[(other.col_start, other.row)];
+        assert!(
+            !plain.modifier.contains(Modifier::BOLD),
+            "non-hovered link wrongly bolded: {:?}",
+            plain.modifier
+        );
     }
 
     #[test]
