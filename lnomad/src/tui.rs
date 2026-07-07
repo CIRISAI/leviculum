@@ -54,7 +54,6 @@ use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::{Frame, Terminal};
-use throbber_widgets_tui::{Throbber, ThrobberState};
 use tokio::sync::{mpsc, Mutex};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -507,8 +506,10 @@ pub struct Model {
     /// A transient status/error message shown in the status bar, or `None` for
     /// the default hints.
     pub status: Option<String>,
-    /// The loading spinner's animation state.
-    pub spinner: ThrobberState,
+    /// The loading spinner's animation tick: advances once per redraw while a
+    /// fetch is in flight, driving both the circling glyph and the shimmering
+    /// rainbow hue. See [`spinner_span`].
+    pub spin: usize,
     /// Whether the keybinding help overlay is shown.
     pub show_help: bool,
     /// Whether colour is suppressed (NO_COLOR / non-tty): the chrome bars fall
@@ -770,7 +771,7 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
             vec![Effect::Quit]
         }
         AppEvent::Tick => {
-            model.spinner.calc_next();
+            model.spin = model.spin.wrapping_add(1);
             Vec::new()
         }
         AppEvent::PageLoaded { doc, title } => {
@@ -1977,6 +1978,37 @@ fn short_hex(dest: &[u8; 16]) -> String {
     s
 }
 
+/// The six braille glyphs of the loading spinner: a single dot circling once per
+/// full cycle. `spin % 6` picks the current frame.
+const SPIN_FRAMES: [&str; 6] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴"];
+
+/// A garish, fully saturated true-colour rainbow the spinner glows through. The
+/// colours are picked at full brightness so they pop on both the dark and light
+/// chrome bar.
+const RAINBOW: [(u8, u8, u8); 6] = [
+    (255, 0, 0),   // red
+    (255, 140, 0), // orange
+    (255, 240, 0), // yellow
+    (0, 230, 0),   // green
+    (0, 220, 255), // cyan
+    (255, 0, 200), // magenta
+];
+
+/// Render one frame of the loading spinner: the current braille glyph as a bold,
+/// full-brightness rainbow span. The glyph advances one step per `spin` (the dot
+/// circles), while the hue advances twice as fast (`spin * 2`) so the colour
+/// shimmers faster than the dot position.
+fn spinner_span(spin: usize) -> RtSpan<'static> {
+    let glyph = SPIN_FRAMES[spin % SPIN_FRAMES.len()];
+    let (r, g, b) = RAINBOW[(spin * 2) % RAINBOW.len()];
+    RtSpan::styled(
+        glyph,
+        Style::default()
+            .fg(Color::Rgb(r, g, b))
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 /// Draw the status bar: the loading spinner while a fetch is in flight, else a
 /// status/error message, else the context key-hints.
 fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
@@ -1997,8 +2029,8 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
     let dim = Style::default().add_modifier(Modifier::DIM);
     if let Some(pending) = &model.pending {
         let label = format!(" loading {}", pending.target.path);
-        let throbber = Throbber::default().label(label).style(dim);
-        frame.render_widget(Paragraph::new(throbber.to_line(&model.spinner)), area);
+        let line = RtLine::from(vec![spinner_span(model.spin), RtSpan::styled(label, dim)]);
+        frame.render_widget(Paragraph::new(line), area);
     } else if let Some(target) = focused_link_target(model) {
         // A focused (Tab) or hovered (mouse) link shows its target here, taking
         // the place of the key-hints until focus/hover clears.
@@ -3199,6 +3231,68 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let status = row_text(&buffer, 23, 80);
         assert!(status.contains("loading"), "loading missing: {status:?}");
+    }
+
+    #[test]
+    fn spinner_span_shimmers_and_cycles() {
+        // The glyph steps through the six braille frames as `spin` advances.
+        for spin in 0..12 {
+            assert_eq!(
+                &*spinner_span(spin).content,
+                SPIN_FRAMES[spin % SPIN_FRAMES.len()],
+                "glyph out of cycle at spin={spin}"
+            );
+        }
+        // Every frame is bold and a full-brightness rainbow true colour.
+        for spin in 0..RAINBOW.len() {
+            let style = spinner_span(spin).style;
+            assert!(
+                style.add_modifier.contains(Modifier::BOLD),
+                "spinner not bold at spin={spin}"
+            );
+            let (r, g, b) = RAINBOW[(spin * 2) % RAINBOW.len()];
+            assert_eq!(
+                style.fg,
+                Some(Color::Rgb(r, g, b)),
+                "wrong rainbow fg at spin={spin}"
+            );
+        }
+        // The hue shimmers: consecutive `spin` values glow in DIFFERENT rainbow
+        // colours (the hue rotates faster than the glyph position).
+        for spin in 0..RAINBOW.len() {
+            assert_ne!(
+                spinner_span(spin).style.fg,
+                spinner_span(spin + 1).style.fg,
+                "hue did not change between spin={spin} and spin={}",
+                spin + 1
+            );
+        }
+    }
+
+    #[test]
+    fn loading_status_bar_has_rainbow_bold_spinner_cell() {
+        let mut m = loaded_model((80, 24));
+        m.pending = Some(Pending {
+            target: tgt(9),
+            action: HistoryAction::Push,
+        });
+        m.spin = 3;
+        let buffer = render(&m, 80, 24);
+        let mut found = false;
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, 23)];
+            if cell.modifier.contains(Modifier::BOLD)
+                && RAINBOW
+                    .iter()
+                    .any(|&(r, g, b)| cell.fg == Color::Rgb(r, g, b))
+            {
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "no bold rainbow spinner cell in the loading status bar"
+        );
     }
 
     #[test]
