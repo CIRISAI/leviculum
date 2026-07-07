@@ -380,8 +380,18 @@ impl Renderer {
                     underline: true,
                     ..base
                 };
-                push_styled(&mut out, &label, link_style);
+                // Only the core label (and the appended `[N]` marker) carry the
+                // link style; surrounding whitespace stays in the base style so it
+                // is not underlined or coloured. rngit puts bullets/indent inside
+                // the link label, and the underlined leading whitespace looks bad.
+                let lead_len = label.len() - label.trim_start().len();
+                let (lead, rest) = label.split_at(lead_len);
+                let trail_len = rest.len() - rest.trim_end().len();
+                let (core, trail) = rest.split_at(rest.len() - trail_len);
+                push_styled(&mut out, lead, base);
+                push_styled(&mut out, core, link_style);
                 push_styled(&mut out, &format!("[{index}]"), link_style);
+                push_styled(&mut out, trail, base);
                 continue;
             }
             if let Some(field) = &span.field {
@@ -776,6 +786,76 @@ mod tests {
                 ("g".to_string(), "reticulum".to_string()),
                 ("ref".to_string(), String::new()),
             ]
+        );
+    }
+
+    fn link_span(label: &str) -> Span {
+        Span {
+            text: label.to_string(),
+            link: Some(Link {
+                label: label.to_string(),
+                target: "/page/index.mu".to_string(),
+                fields: vec![],
+            }),
+            ..Span::default()
+        }
+    }
+
+    #[test]
+    fn link_leading_whitespace_not_underlined() {
+        // rngit embeds the bullet + indent inside the link label; the leading
+        // whitespace must render plain, not underlined.
+        let d = doc(vec![Block::Paragraph {
+            depth: 0,
+            line: Line::new(vec![link_span("  \u{2022} mirrors")]),
+        }]);
+        let page = render(&d, 40);
+        // Two leading spaces precede the underlined LINK run; the core label and
+        // the `[1]` marker share the underline + LINK_FG run.
+        assert!(
+            page.text
+                .contains("  \x1b[0;4;38;2;0;175;255m\u{2022} mirrors[1]"),
+            "got: {:?}",
+            page.text
+        );
+        // The leading spaces appear before the first SGR sequence.
+        let first_sgr = page.text.find('\x1b').unwrap();
+        assert!(
+            page.text[..first_sgr].contains("  "),
+            "leading spaces should precede the first SGR; got: {:?}",
+            page.text
+        );
+    }
+
+    #[test]
+    fn link_trailing_whitespace_not_underlined() {
+        let d = doc(vec![Block::Paragraph {
+            depth: 0,
+            line: Line::new(vec![link_span("mirrors  ")]),
+        }]);
+        let page = render(&d, 40);
+        // Core label + marker underlined, then reset, then two plain spaces.
+        assert!(
+            page.text
+                .contains("\x1b[0;4;38;2;0;175;255mmirrors[1]\x1b[0m  "),
+            "got: {:?}",
+            page.text
+        );
+    }
+
+    #[test]
+    fn link_without_whitespace_fully_underlined() {
+        // Control: no surrounding whitespace => whole label stays underlined.
+        let d = doc(vec![Block::Paragraph {
+            depth: 0,
+            line: Line::new(vec![link_span("mirrors")]),
+        }]);
+        let page = render(&d, 40);
+        assert!(
+            page.text
+                .contains("\x1b[0;4;38;2;0;175;255mmirrors[1]\x1b[0m"),
+            "got: {:?}",
+            page.text
         );
     }
 
