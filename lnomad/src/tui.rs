@@ -14,16 +14,21 @@
 //!   crossterm's [`EventStream`] into the update/view loop, guarded so the
 //!   terminal is always restored (RAII [`TerminalGuard`] + a panic hook).
 //!
-//! Phase 1 keeps the interaction minimal: quit on `q`/`Ctrl-C`, store the size
-//! on resize, and draw the top of the page. Scrolling, mouse hit-testing and
-//! link navigation land in later phases; the loop is already structured with a
-//! `tokio::select!` so an async page fetch can join it without reshaping.
+//! Phase 2 adds vertical scrolling. The [`Model`] now owns the parsed
+//! [`MicronDocument`] and its current layout width, so a resize *re-wraps* the
+//! content to the new width (via [`Model::relayout`]) rather than merely
+//! clipping it. Scroll offset is a line index into the laid-out page, moved by
+//! a set of [`ScrollCmd`]s bound to both vi and emacs motions (plus the mouse
+//! wheel), and always clamped to the page. [`view`] renders only the visible
+//! slice and a ratatui `Scrollbar` on the right. Mouse hit-testing and link
+//! navigation still land in later phases; the loop keeps its `tokio::select!`
+//! so an async page fetch can join it without reshaping.
 
 use std::io::{self, Stdout};
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
-    MouseEvent,
+    MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -31,49 +36,78 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as RtLine, Span as RtSpan, Text};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{Frame, Terminal};
 
 use leviculum_micron::MicronDocument;
 
 use crate::render::{layout, RLine, RStyle, RenderedLink};
 
+/// The number of columns reserved on the right for the scrollbar.
+const SCROLLBAR_COLS: u16 = 1;
+/// How many lines one mouse-wheel notch scrolls.
+const WHEEL_STEP: usize = 3;
+
+/// The content layout width for a terminal `cols` wide: full width minus the
+/// scrollbar column, never below 1 so wrapping stays well defined.
+fn content_width(cols: u16) -> usize {
+    (cols.saturating_sub(SCROLLBAR_COLS) as usize).max(1)
+}
+
+/// A vertical scroll motion, resolved against the current viewport height in
+/// [`Model::apply_scroll`]. Bound to both vi and emacs keys plus the wheel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollCmd {
+    /// Up one line.
+    LineUp,
+    /// Down one line.
+    LineDown,
+    /// Up half a viewport.
+    HalfPageUp,
+    /// Down half a viewport.
+    HalfPageDown,
+    /// Up one full viewport.
+    PageUp,
+    /// Down one full viewport.
+    PageDown,
+    /// To the very top.
+    Top,
+    /// To the very bottom.
+    Bottom,
+}
+
 /// The complete UI state. Pure data: [`update`] is the only thing that mutates
 /// it, and it never performs IO.
+///
+/// The model owns the parsed `doc` and its current layout `width` so a resize
+/// can re-wrap: [`relayout`](Model::relayout) recomputes `page`/`links` from the
+/// stored document at a new width.
 #[derive(Clone, Debug, Default)]
 pub struct Model {
+    /// The parsed document, kept so a resize can re-wrap it to a new width.
+    pub doc: MicronDocument,
+    /// The width the page is currently laid out at.
+    pub width: usize,
     /// The page laid out into target-agnostic styled lines.
     pub page: Vec<RLine>,
     /// The page's links, with their laid-out positions for hit-testing.
     pub links: Vec<RenderedLink>,
-    /// The title shown in the frame's border.
+    /// The title (shown in the top-bar in a later phase; carried for now).
     pub title: String,
     /// The last known terminal size, as `(cols, rows)`.
     pub size: (u16, u16),
+    /// Index of the top visible line in `page`. Always clamped to the page.
+    pub scroll: usize,
     /// Set once the user has asked to quit; the IO loop breaks on it.
     pub quit: bool,
 }
 
 impl Model {
-    /// Build a model from already laid-out lines and links.
-    pub fn new(
-        page: Vec<RLine>,
-        links: Vec<RenderedLink>,
-        title: String,
-        size: (u16, u16),
-    ) -> Self {
-        Self {
-            page,
-            links,
-            title,
-            size,
-            quit: false,
-        }
-    }
-
-    /// Lay a parsed document out at `width` and build a model from it.
+    /// Lay a parsed document out at `width` and build a model from it, keeping
+    /// the document so a later resize can re-wrap it.
     pub fn from_document(
         doc: &MicronDocument,
         width: usize,
@@ -81,7 +115,71 @@ impl Model {
         size: (u16, u16),
     ) -> Self {
         let (page, links) = layout(doc, width);
-        Self::new(page, links, title.into(), size)
+        Self {
+            doc: doc.clone(),
+            width,
+            page,
+            links,
+            title: title.into(),
+            size,
+            scroll: 0,
+            quit: false,
+        }
+    }
+
+    /// Re-wrap the stored document to `width`, replacing `page`/`links`. The
+    /// caller is responsible for re-clamping `scroll` afterwards.
+    pub fn relayout(&mut self, width: usize) {
+        self.width = width;
+        let (page, links) = layout(&self.doc, width);
+        self.page = page;
+        self.links = links;
+    }
+
+    /// The number of page lines visible at once. Phase 2 has no chrome, so this
+    /// is the full terminal height.
+    pub fn viewport(&self) -> usize {
+        self.size.1 as usize
+    }
+
+    /// The largest valid `scroll` for a given viewport: the last position where
+    /// the final page line still sits at the bottom of the viewport.
+    pub fn max_scroll(&self, viewport: usize) -> usize {
+        self.page.len().saturating_sub(viewport)
+    }
+
+    /// Clamp `scroll` into `[0, max_scroll(viewport)]` (e.g. after a re-wrap).
+    pub fn clamp_scroll(&mut self, viewport: usize) {
+        self.scroll = self.scroll.min(self.max_scroll(viewport));
+    }
+
+    /// Apply a scroll command against `viewport`, clamped to the page. Never
+    /// under- or overflows, even when the page is shorter than the viewport.
+    pub fn apply_scroll(&mut self, cmd: ScrollCmd, viewport: usize) {
+        let max = self.max_scroll(viewport);
+        let vp = viewport.max(1);
+        let half = (vp / 2).max(1);
+        self.scroll = match cmd {
+            ScrollCmd::LineUp => self.scroll.saturating_sub(1),
+            ScrollCmd::LineDown => self.scroll.saturating_add(1),
+            ScrollCmd::HalfPageUp => self.scroll.saturating_sub(half),
+            ScrollCmd::HalfPageDown => self.scroll.saturating_add(half),
+            ScrollCmd::PageUp => self.scroll.saturating_sub(vp),
+            ScrollCmd::PageDown => self.scroll.saturating_add(vp),
+            ScrollCmd::Top => 0,
+            ScrollCmd::Bottom => max,
+        }
+        .min(max);
+    }
+
+    /// Scroll down by `n` lines (mouse wheel), clamped to the page.
+    pub fn scroll_lines_down(&mut self, n: usize, viewport: usize) {
+        self.scroll = self.scroll.saturating_add(n).min(self.max_scroll(viewport));
+    }
+
+    /// Scroll up by `n` lines (mouse wheel), clamped at the top.
+    pub fn scroll_lines_up(&mut self, n: usize) {
+        self.scroll = self.scroll.saturating_sub(n);
     }
 }
 
@@ -101,30 +199,116 @@ pub enum AppEvent {
 
 /// Fold an event into the model. Pure and IO-free.
 ///
-/// Phase 1 handles only: quit on `q` or `Ctrl-C`, and store the new size on a
-/// resize. Everything else is ignored for now.
+/// Handles quit (`q` / `Ctrl-C`), scroll motions (both vi and emacs idioms plus
+/// the mouse wheel), redraw (`Ctrl-L`), and resize (store the size, re-wrap the
+/// document to the new width, then re-clamp the scroll offset).
 pub fn update(model: &mut Model, event: AppEvent) {
     match event {
         AppEvent::Quit => model.quit = true,
         AppEvent::Key(key) => {
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-            if key.code == KeyCode::Char('q') || ctrl_c {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            if key.code == KeyCode::Char('q') || (ctrl && key.code == KeyCode::Char('c')) {
                 model.quit = true;
+                return;
+            }
+            // Ctrl-L: recompute the layout and redraw, keeping the offset (just
+            // re-clamped, in case the page got shorter).
+            if ctrl && key.code == KeyCode::Char('l') {
+                let (w, vp) = (model.width, model.viewport());
+                model.relayout(w);
+                model.clamp_scroll(vp);
+                return;
+            }
+            if let Some(cmd) = key_to_scroll(&key) {
+                let vp = model.viewport();
+                model.apply_scroll(cmd, vp);
             }
         }
-        AppEvent::Resize(cols, rows) => model.size = (cols, rows),
-        AppEvent::Mouse(_) => {}
+        AppEvent::Resize(cols, rows) => {
+            model.size = (cols, rows);
+            model.relayout(content_width(cols));
+            let vp = model.viewport();
+            model.clamp_scroll(vp);
+        }
+        AppEvent::Mouse(mouse) => {
+            let vp = model.viewport();
+            match mouse.kind {
+                MouseEventKind::ScrollDown => model.scroll_lines_down(WHEEL_STEP, vp),
+                MouseEventKind::ScrollUp => model.scroll_lines_up(WHEEL_STEP),
+                _ => {}
+            }
+        }
     }
 }
 
-/// Draw the model into the frame: a single full-screen bordered paragraph
-/// showing the page from the top (no scroll yet).
+/// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms.
+/// Returns `None` for keys that are not scroll motions.
+fn key_to_scroll(key: &KeyEvent) -> Option<ScrollCmd> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let plain = !ctrl && !alt;
+    match key.code {
+        // Line down: j, Ctrl-n, Down.
+        KeyCode::Char('j') if plain => Some(ScrollCmd::LineDown),
+        KeyCode::Char('n') if ctrl => Some(ScrollCmd::LineDown),
+        KeyCode::Down => Some(ScrollCmd::LineDown),
+        // Line up: k, Ctrl-p, Up.
+        KeyCode::Char('k') if plain => Some(ScrollCmd::LineUp),
+        KeyCode::Char('p') if ctrl => Some(ScrollCmd::LineUp),
+        KeyCode::Up => Some(ScrollCmd::LineUp),
+        // Page down: Ctrl-f, Ctrl-v, Space, PageDown.
+        KeyCode::Char('f') if ctrl => Some(ScrollCmd::PageDown),
+        KeyCode::Char('v') if ctrl => Some(ScrollCmd::PageDown),
+        KeyCode::Char(' ') if plain => Some(ScrollCmd::PageDown),
+        KeyCode::PageDown => Some(ScrollCmd::PageDown),
+        // Page up: Ctrl-b, Alt-v, PageUp.
+        KeyCode::Char('b') if ctrl => Some(ScrollCmd::PageUp),
+        KeyCode::Char('v') if alt => Some(ScrollCmd::PageUp),
+        KeyCode::PageUp => Some(ScrollCmd::PageUp),
+        // Half page: Ctrl-d / Ctrl-u.
+        KeyCode::Char('d') if ctrl => Some(ScrollCmd::HalfPageDown),
+        KeyCode::Char('u') if ctrl => Some(ScrollCmd::HalfPageUp),
+        // Top: g, Alt-< (Alt+Shift+,), Home.
+        KeyCode::Char('g') if plain => Some(ScrollCmd::Top),
+        KeyCode::Char('<') if alt => Some(ScrollCmd::Top),
+        KeyCode::Home => Some(ScrollCmd::Top),
+        // Bottom: G, Alt-> (Alt+Shift+.), End.
+        KeyCode::Char('G') if plain => Some(ScrollCmd::Bottom),
+        KeyCode::Char('>') if alt => Some(ScrollCmd::Bottom),
+        KeyCode::End => Some(ScrollCmd::Bottom),
+        _ => None,
+    }
+}
+
+/// Draw the model into the frame: the visible slice of the page in the content
+/// area, and a vertical `Scrollbar` in the reserved right-hand column.
+///
+/// Works at any size: when the page is shorter than the viewport the slice is
+/// simply the whole page and the scrollbar shows a full track (no panic).
 pub fn view(model: &Model, frame: &mut Frame) {
-    let text = to_ratatui_text(&model.page);
-    let block = Block::bordered().title(model.title.clone());
-    let paragraph = Paragraph::new(text).block(block);
-    frame.render_widget(paragraph, frame.area());
+    let area = frame.area();
+    let viewport = area.height as usize;
+
+    // Reserve the rightmost column for the scrollbar; render content to the rest.
+    let content = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(SCROLLBAR_COLS),
+        height: area.height,
+    };
+
+    let end = model.scroll.saturating_add(viewport).min(model.page.len());
+    let start = model.scroll.min(end);
+    let text = to_ratatui_text(&model.page[start..end]);
+    frame.render_widget(Paragraph::new(text), content);
+
+    let mut state = ScrollbarState::new(model.page.len())
+        .viewport_content_length(viewport)
+        .position(model.scroll);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None);
+    frame.render_stateful_widget(scrollbar, area, &mut state);
 }
 
 /// Map laid-out styled lines to a ratatui [`Text`], grouping runs of equal
@@ -271,6 +455,14 @@ pub async fn run_tui(mut model: Model) -> io::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut events = EventStream::new();
 
+    // Sync to the real terminal size and re-wrap before the first draw:
+    // crossterm does not emit an initial resize event.
+    let size = terminal.size()?;
+    model.size = (size.width, size.height);
+    model.relayout(content_width(size.width));
+    let vp = model.viewport();
+    model.clamp_scroll(vp);
+
     loop {
         terminal.draw(|frame| view(&model, frame))?;
         if model.quit {
@@ -403,6 +595,241 @@ mod tests {
             found_styled_link,
             "no underlined LINK_FG 'A' cell found:\n{flat}"
         );
+    }
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// The plain text of a laid-out line (its cells' characters).
+    fn line_text(line: &RLine) -> String {
+        line.cells.iter().map(|c| c.ch).collect()
+    }
+
+    /// The text of buffer row `y` across columns `0..width`.
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        let mut s = String::new();
+        for x in 0..width {
+            s.push_str(buffer[(x, y)].symbol());
+        }
+        s
+    }
+
+    /// A tall single-paragraph document that wraps into many lines.
+    fn long_doc() -> leviculum_micron::MicronDocument {
+        let words: Vec<String> = (0..300).map(|i| format!("word{i:03}")).collect();
+        parse(&words.join(" "))
+    }
+
+    /// A model over [`long_doc`], laid out to the content width for `size.0`.
+    fn tall_model(size: (u16, u16)) -> Model {
+        Model::from_document(&long_doc(), content_width(size.0), "Long", size)
+    }
+
+    #[test]
+    fn apply_scroll_math() {
+        let mut m = Model {
+            page: vec![RLine::default(); 100],
+            ..Model::default()
+        };
+        let vp = 10;
+        m.apply_scroll(ScrollCmd::LineDown, vp);
+        assert_eq!(m.scroll, 1, "LineDown increments");
+
+        m.scroll = 0;
+        m.apply_scroll(ScrollCmd::PageDown, vp);
+        assert_eq!(m.scroll, 10, "PageDown moves by viewport");
+
+        m.scroll = 0;
+        m.apply_scroll(ScrollCmd::HalfPageDown, vp);
+        assert_eq!(m.scroll, 5, "HalfPage moves by viewport/2");
+
+        m.scroll = 42;
+        m.apply_scroll(ScrollCmd::Top, vp);
+        assert_eq!(m.scroll, 0, "Top is 0");
+
+        m.apply_scroll(ScrollCmd::Bottom, vp);
+        assert_eq!(m.scroll, 90, "Bottom is max = len - viewport");
+
+        // Clamp at the bottom: neither Line nor Page goes past max.
+        m.apply_scroll(ScrollCmd::LineDown, vp);
+        assert_eq!(m.scroll, 90, "LineDown clamps at bottom");
+        m.apply_scroll(ScrollCmd::PageDown, vp);
+        assert_eq!(m.scroll, 90, "PageDown clamps at bottom");
+
+        // Clamp at the top.
+        m.scroll = 0;
+        m.apply_scroll(ScrollCmd::LineUp, vp);
+        assert_eq!(m.scroll, 0, "LineUp clamps at top");
+        m.apply_scroll(ScrollCmd::PageUp, vp);
+        assert_eq!(m.scroll, 0, "PageUp clamps at top");
+    }
+
+    #[test]
+    fn apply_scroll_no_overflow_when_page_shorter_than_viewport() {
+        let mut m = Model {
+            page: vec![RLine::default(); 3],
+            ..Model::default()
+        };
+        let vp = 10;
+        for cmd in [
+            ScrollCmd::LineDown,
+            ScrollCmd::PageDown,
+            ScrollCmd::HalfPageDown,
+            ScrollCmd::Bottom,
+        ] {
+            m.scroll = 0;
+            m.apply_scroll(cmd, vp);
+            assert_eq!(m.scroll, 0, "{cmd:?} must clamp to 0 for a short page");
+        }
+        // Empty page and zero viewport must not panic or overflow either.
+        let mut e = Model::default();
+        e.apply_scroll(ScrollCmd::PageDown, 0);
+        e.apply_scroll(ScrollCmd::Bottom, 0);
+        assert_eq!(e.scroll, 0);
+    }
+
+    #[test]
+    fn update_scroll_keys() {
+        let mut m = tall_model((40, 10)); // viewport 10
+        assert_eq!(m.scroll, 0);
+
+        update(
+            &mut m,
+            AppEvent::Key(key(KeyCode::Char('j'), KeyModifiers::NONE)),
+        );
+        assert_eq!(m.scroll, 1, "j scrolls down one line");
+
+        update(
+            &mut m,
+            AppEvent::Key(key(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(m.scroll, 11, "Ctrl-f pages down by the viewport");
+
+        update(
+            &mut m,
+            AppEvent::Key(key(KeyCode::Char('G'), KeyModifiers::NONE)),
+        );
+        let bottom = m.max_scroll(10);
+        assert!(bottom > 0);
+        assert_eq!(m.scroll, bottom, "G jumps to the bottom");
+
+        update(
+            &mut m,
+            AppEvent::Key(key(KeyCode::Char('v'), KeyModifiers::ALT)),
+        );
+        assert_eq!(m.scroll, bottom - 10, "Alt-v pages up by the viewport");
+
+        let before = m.scroll;
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(
+            m.scroll,
+            (before + WHEEL_STEP).min(bottom),
+            "wheel down scrolls by WHEEL_STEP"
+        );
+    }
+
+    #[test]
+    fn vi_and_emacs_map_same_command() {
+        let cases = [
+            (
+                key(KeyCode::Char('j'), KeyModifiers::NONE),
+                key(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            ),
+            (
+                key(KeyCode::Char('k'), KeyModifiers::NONE),
+                key(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            ),
+            (
+                key(KeyCode::Char('f'), KeyModifiers::CONTROL),
+                key(KeyCode::Char(' '), KeyModifiers::NONE),
+            ),
+            (
+                key(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                key(KeyCode::Char('v'), KeyModifiers::ALT),
+            ),
+            (
+                key(KeyCode::Char('g'), KeyModifiers::NONE),
+                key(KeyCode::Home, KeyModifiers::NONE),
+            ),
+            (
+                key(KeyCode::Char('G'), KeyModifiers::NONE),
+                key(KeyCode::End, KeyModifiers::NONE),
+            ),
+        ];
+        for (vi, emacs) in cases {
+            let cmd = key_to_scroll(&vi);
+            assert!(cmd.is_some(), "{vi:?} should map to a scroll command");
+            assert_eq!(cmd, key_to_scroll(&emacs), "{vi:?} vs {emacs:?}");
+        }
+    }
+
+    #[test]
+    fn resize_rewraps_and_clamps() {
+        let mut m = Model::from_document(&long_doc(), content_width(100), "Long", (100, 10));
+        // Jump to the bottom, then resize both ways.
+        update(
+            &mut m,
+            AppEvent::Key(key(KeyCode::Char('G'), KeyModifiers::NONE)),
+        );
+
+        update(&mut m, AppEvent::Resize(40, 10));
+        let narrow = m.page.len();
+        assert!(
+            m.scroll <= m.max_scroll(m.viewport()),
+            "scroll must stay clamped after shrinking"
+        );
+
+        update(&mut m, AppEvent::Resize(100, 10));
+        let wide = m.page.len();
+        assert!(
+            m.scroll <= m.max_scroll(m.viewport()),
+            "scroll must stay clamped after growing"
+        );
+        assert!(
+            narrow > wide,
+            "a narrower width must re-wrap into more lines: {narrow} vs {wide}"
+        );
+    }
+
+    #[test]
+    fn view_scrolls_slice_and_draws_scrollbar() {
+        let w = 40u16;
+        let mut m = Model::from_document(&long_doc(), content_width(w), "Long", (w, 10));
+        assert!(m.page.len() > 20, "fixture must exceed the viewport");
+
+        let backend = TestBackend::new(w, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        // Before scrolling: the top visible row is page line 0.
+        terminal.draw(|frame| view(&m, frame)).expect("draw");
+        let top0 = row_text(terminal.backend().buffer(), 0, w - SCROLLBAR_COLS);
+        assert_eq!(top0.trim_end(), line_text(&m.page[0]).trim_end());
+
+        // After PageDown (viewport 10): the top visible row is page line 10.
+        update(
+            &mut m,
+            AppEvent::Key(key(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(m.scroll, 10);
+        terminal.draw(|frame| view(&m, frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let top1 = row_text(buffer, 0, w - SCROLLBAR_COLS);
+        assert_eq!(top1.trim_end(), line_text(&m.page[10]).trim_end());
+
+        // A scrollbar occupies the reserved right-hand column.
+        let mut scrollbar_cell = false;
+        for y in 0..10 {
+            if buffer[(w - SCROLLBAR_COLS, y)].symbol() != " " {
+                scrollbar_cell = true;
+            }
+        }
+        assert!(scrollbar_cell, "scrollbar column should not be empty");
     }
 
     /// A mock terminal that records whether `restore` ran, via a shared flag.
