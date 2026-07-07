@@ -162,6 +162,39 @@ fn content_height(rows: u16) -> usize {
     rows.saturating_sub(CHROME_ROWS) as usize
 }
 
+/// Truncate `s` to at most `cols` display columns, unicode-width-aware, ending
+/// with a `…` when anything is cut. The returned string's display width never
+/// exceeds `cols`, so it fits an overlay of `cols` inner columns without
+/// spilling over the border. A zero budget yields an empty string.
+fn truncate_to_cols(s: &str, cols: usize) -> String {
+    if cols == 0 {
+        return String::new();
+    }
+    let total: usize = s
+        .chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+    if total <= cols {
+        return s.to_string();
+    }
+    // Reserve one column for the ellipsis, then take as many full characters as
+    // fit. A wide char that would straddle the budget is dropped whole, so the
+    // result never exceeds `cols`.
+    let budget = cols - 1;
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        out.push(c);
+        width += w;
+    }
+    out.push('…');
+    out
+}
+
 /// Split the frame into the three fixed regions: top-bar, content, status.
 fn regions(area: Rect) -> [Rect; 3] {
     let parts = Layout::vertical([
@@ -2185,13 +2218,27 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     let header = text_style.add_modifier(Modifier::BOLD);
     let selected = Style::default().add_modifier(Modifier::REVERSED);
 
+    // Fix the panel width up front so rows can be truncated to the inner display
+    // width (the two border columns removed). A long bookmark row that reached
+    // the border let the selected row's reversed bar spill past it; truncating
+    // to the inner width keeps every row strictly inside the border.
+    let width = 72u16.min(area.width);
+    let inner = width.saturating_sub(2) as usize;
+
     let mut lines: Vec<RtLine<'static>> = Vec::new();
     lines.push(RtLine::from(RtSpan::styled("Bookmarks", header)));
     if bm_count == 0 {
         lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
     } else {
         for (i, place) in entries.iter().enumerate().take(bm_count) {
-            lines.push(place_line(place, i, model.places_sel, text_style, selected));
+            lines.push(place_line(
+                place,
+                i,
+                model.places_sel,
+                text_style,
+                selected,
+                inner,
+            ));
         }
     }
     lines.push(RtLine::from(""));
@@ -2200,11 +2247,17 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
         lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
     } else {
         for (i, place) in entries.iter().enumerate().skip(bm_count) {
-            lines.push(place_line(place, i, model.places_sel, text_style, selected));
+            lines.push(place_line(
+                place,
+                i,
+                model.places_sel,
+                text_style,
+                selected,
+                inner,
+            ));
         }
     }
 
-    let width = 64u16.min(area.width);
     let height = (lines.len() as u16 + 2).min(area.height);
     let overlay = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -2228,9 +2281,11 @@ fn place_line(
     sel: usize,
     normal: Style,
     selected: Style,
+    inner: usize,
 ) -> RtLine<'static> {
     let style = if idx == sel { selected } else { normal };
-    RtLine::from(RtSpan::styled(place_label(place), style))
+    let label = truncate_to_cols(&place_label(place), inner);
+    RtLine::from(RtSpan::styled(label, style))
 }
 
 /// The one-line label for a place: a bookmark's title and URL, or a node's name,
@@ -4780,6 +4835,70 @@ mod tests {
         let ps = places(&m);
         assert_eq!(ps.len(), 1);
         assert!(matches!(ps[0], Place::Node { .. }));
+    }
+
+    #[test]
+    fn truncate_to_cols_is_width_aware() {
+        assert_eq!(truncate_to_cols("hello", 10), "hello");
+        assert_eq!(truncate_to_cols("hello", 5), "hello");
+        // Cut to a budget: the ellipsis takes the last column.
+        assert_eq!(truncate_to_cols("hello world", 5), "hell…");
+        assert_eq!(
+            UnicodeWidthStr::width(truncate_to_cols("hello world", 5).as_str()),
+            5
+        );
+        // A wide char that would straddle the budget is dropped whole, so the
+        // result never exceeds the requested width.
+        let cut = truncate_to_cols("🚀ab", 2);
+        assert!(
+            UnicodeWidthStr::width(cut.as_str()) <= 2,
+            "over budget: {cut:?}"
+        );
+        assert_eq!(truncate_to_cols("anything", 0), "");
+    }
+
+    #[test]
+    fn places_row_truncates_and_keeps_border_intact() {
+        let mut m = loaded_model((80, 24));
+        // A bookmark whose label (title + url + emoji) far exceeds the panel's
+        // inner width, so the selected row must be truncated with an ellipsis.
+        m.bookmarks.add(Bookmark {
+            url: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/page/a-very-long-page-path.mu".to_string(),
+            title: "🚀 an extremely long bookmark title that cannot fit inside the panel"
+                .to_string(),
+        });
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 0, "the long bookmark is the selected row");
+        let buffer = render(&m, 80, 24);
+
+        // Panel geometry: width 72 centred in an 80-column area → x=4, so the
+        // right border sits at column 75.
+        let width = 72u16;
+        let x = (80 - width) / 2;
+        let right_border = x + width - 1;
+
+        // The bookmark row is the one carrying the truncation ellipsis.
+        let mut row = None;
+        for y in 0..buffer.area.height {
+            if row_text(&buffer, y, 80).contains('…') {
+                row = Some(y);
+            }
+        }
+        let row = row.expect("a truncated bookmark row with an ellipsis");
+
+        // The right border cell is intact and no reversed selected-bar cell
+        // reaches or passes it (the overflow the truncation fixes).
+        assert_eq!(
+            buffer[(right_border, row)].symbol(),
+            "│",
+            "right border overwritten"
+        );
+        for col in right_border..buffer.area.width {
+            assert!(
+                !buffer[(col, row)].modifier.contains(Modifier::REVERSED),
+                "selected bar spilled to column {col} on row {row}"
+            );
+        }
     }
 
     #[test]
