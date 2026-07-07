@@ -77,8 +77,11 @@ status bar. Links carry no `[N]` marker and there is no link legend; a link is
 set apart by its underline and colour, and is reached by focus, hint or click:
 
 - `j` / `k`, arrows, `Ctrl-f` / `Ctrl-b`, `g` / `G`  scroll
-- `Tab` / `Shift-Tab`  move the focus cursor across links (auto-scrolls)
+- `Tab` / `Shift-Tab`  move the focus cursor across links AND form fields, in
+  document order (auto-scrolls)
 - `Enter`     follow the focused link
+- form fields, when focused: type to edit a text field, `Space` to toggle a
+  checkbox / radio, `Esc` to leave field editing; a click focuses a field too
 - `f`         hint mode: type the label shown over a link (or the link's text)
 - `/`         in-page search: type a query, `Enter` highlights every match and
   jumps to the first; `n` / `N` cycle to the next / previous match, `Esc` clears
@@ -96,6 +99,17 @@ The focused or hovered link's target is shown in the status bar. Same-destinatio
 links (`:/page/x.mu`) resolve against the page currently in view; a followed link
 carries its preset (`f=v`) fields as `var_*` request variables.
 
+### Form fields and submitting
+
+A page can carry input fields (`` `<name`> `` text, `` `<?|name`Label> ``
+checkbox, `` `<^|name`Label> `` radio). They render as input boxes, initialised
+from their prefill; `Tab` reaches them and, once focused, they edit in place. A
+link that references a field by name (e.g. `` `[Submit`:/page/s.mu`name] ``, or
+`*` for every field) is a submit: following it collects the current values of the
+referenced fields and sends them as NomadNet expects, each under a `field_<name>`
+request variable, alongside any `var_*` presets. This interoperates with a real
+NomadNet node, whose page handler reads the same `field_*` / `var_*` variables.
+
 A link whose target is an external URL (an `http`, `https` or `mailto` scheme)
 is not fetched in-mesh: it is handed to the platform default handler (`xdg-open`
 on Linux). Any other scheme (`file`, `javascript`, custom schemes) is refused
@@ -110,9 +124,6 @@ spinner during a fetch).
 
 ## v1 limits
 
-- Interactive form-field input (fields the reader must type) is a stub: a link
-  is followed with its preset fields only, and a note is printed when a link
-  carries form fields.
 - A `#anchor` in a target (a followed link or the initial URL) is resolved
   against the page's anchors and scrolled to on load; an unknown anchor falls
   back to the top of the page with a toast note.

@@ -154,12 +154,6 @@ fn preset_field_blob(link: &RenderedLink) -> String {
         .join("|")
 }
 
-/// Whether a link carries form-field placeholders that would need interactive
-/// input (a component with no value), which the v1 browser cannot fill.
-fn has_form_fields(link: &RenderedLink) -> bool {
-    link.fields.iter().any(|(_, v)| v.is_empty())
-}
-
 /// Resolve a followed link into a fetch [`Target`] and any `#anchor`.
 ///
 /// The link target is resolved against `current_dest` (for `:/page/x.mu`
@@ -498,12 +492,6 @@ pub async fn run<R: BufRead, W: Write>(
                         continue;
                     }
                 };
-                if has_form_fields(&link) {
-                    writeln!(
-                        out,
-                        "(link [{n}] has form fields; interactive input is a v1 stub, following with preset fields only)"
-                    )?;
-                }
                 nav.visit(target);
                 links = show_current(out, session, &nav, opts, anchor.as_deref()).await;
             }
@@ -804,12 +792,12 @@ mod tests {
         );
         let (t, _) = resolve_link(&l, None).unwrap();
         // The preset field is carried with the var_ prefix; the valueless
-        // placeholder is dropped (interactive input is a v1 stub).
+        // form-field reference is dropped here (the TUI collects its current
+        // value as a `field_` entry at submit time instead).
         assert_eq!(
             t.fields,
             vec![("var_g".to_string(), "reticulum".to_string())]
         );
-        assert!(has_form_fields(&l));
     }
 
     #[test]

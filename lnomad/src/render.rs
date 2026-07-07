@@ -81,6 +81,51 @@ pub struct RenderedLink {
     pub col_end: usize,
 }
 
+/// The current value of an input field, supplied by the TUI so a re-layout
+/// reflects what the reader has typed / toggled. The print / non-tty sink passes
+/// no overrides, so it always lays fields out from their parsed prefill (keeping
+/// the golden output stable). Indexed positionally by the field's 1-based
+/// [`RenderedField::index`] (i.e. `field_values[index - 1]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FieldValue {
+    /// The current text of a text field (ignored for checkbox/radio).
+    pub text: String,
+    /// The current checked state of a checkbox/radio (ignored for text).
+    pub checked: bool,
+}
+
+/// A form field collected while rendering, with its laid-out position (mirroring
+/// [`RenderedLink`]) so the TUI can hit-test, focus and edit it. The metadata is
+/// enough to (re)build the editable field store and to package a submit request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RenderedField {
+    /// 1-based index in source order, identifying the field for focus and
+    /// hit-testing (independent of the link index space).
+    pub index: usize,
+    /// The field name (the form key; submitted as `field_<name>`).
+    pub name: String,
+    /// The field kind (text, checkbox, radio).
+    pub kind: FieldKind,
+    /// The submit value: a text field's current text, or a checkbox/radio's
+    /// explicit value (the label when the field gave none).
+    pub value: String,
+    /// The checkbox/radio display label (empty for text fields).
+    pub label: String,
+    /// The field's declared display width (text fields; default 24).
+    pub width: usize,
+    /// Whether a text field masks its input.
+    pub masked: bool,
+    /// The current checked state of a checkbox/radio (its prefill when not yet
+    /// toggled).
+    pub checked: bool,
+    /// 0-based index of the laid-out [`RLine`] the field renders on.
+    pub line: usize,
+    /// 0-based DISPLAY column where the field widget starts on that line.
+    pub col_start: usize,
+    /// 0-based display column one past the last cell of the field widget.
+    pub col_end: usize,
+}
+
 /// Render a document to a [`RenderedPage`] at `width` columns, with 24-bit ANSI
 /// colour enabled and the dark theme (the `--print` / non-tty look).
 pub fn render(doc: &MicronDocument, width: usize) -> RenderedPage {
@@ -106,6 +151,10 @@ pub fn render_with_options(doc: &MicronDocument, width: usize, no_color: bool) -
     }
 }
 
+/// Empty field overrides: the print / non-tty sink lays every field out from its
+/// parsed prefill, so its golden output never depends on interactive edits.
+const NO_FIELD_VALUES: &[FieldValue] = &[];
+
 /// Lay a document out into target-agnostic styled lines: the shared core both
 /// the ANSI sink ([`render_with_options`]) and the ratatui sink build on.
 ///
@@ -116,7 +165,7 @@ pub fn render_with_options(doc: &MicronDocument, width: usize, no_color: bool) -
 /// is made here: colour is a property of the sink, not the layout. The `theme`
 /// selects the accent colours (heading bands, link colour) baked into the cells.
 pub fn layout(doc: &MicronDocument, width: usize, theme: Theme) -> (Vec<RLine>, Vec<RenderedLink>) {
-    let (lines, links, _block_lines) = layout_blocks(doc, width, theme);
+    let (lines, links, _block_lines, _fields) = layout_blocks(doc, width, theme, NO_FIELD_VALUES);
     (lines, links)
 }
 
@@ -130,10 +179,18 @@ pub fn layout_blocks(
     doc: &MicronDocument,
     width: usize,
     theme: Theme,
-) -> (Vec<RLine>, Vec<RenderedLink>, Vec<usize>) {
+    field_values: &[FieldValue],
+) -> (
+    Vec<RLine>,
+    Vec<RenderedLink>,
+    Vec<usize>,
+    Vec<RenderedField>,
+) {
     let mut renderer = Renderer {
         lines: Vec::new(),
         links: Vec::new(),
+        fields: Vec::new(),
+        field_values,
         width: width.max(MIN_WIDTH),
         theme,
     };
@@ -142,8 +199,8 @@ pub fn layout_blocks(
         block_lines.push(renderer.lines.len());
         renderer.render_block(block);
     }
-    renderer.record_link_positions();
-    (renderer.lines, renderer.links, block_lines)
+    renderer.record_positions();
+    (renderer.lines, renderer.links, block_lines, renderer.fields)
 }
 
 /// Serialise laid-out styled lines to the ANSI byte stream. Runs of equal style
@@ -255,6 +312,10 @@ pub struct StyledChar {
     /// Leading/trailing whitespace inside a link label is untagged so it stays
     /// unstyled and outside the hit-test range.
     pub link: Option<usize>,
+    /// The 1-based index of the form field this cell is part of, if any (the
+    /// whole rendered widget is tagged, including its brackets), for hit-testing
+    /// and the input-box overlay.
+    pub field: Option<usize>,
 }
 
 /// One laid-out output row: a sequence of styled cells, already wrapped,
@@ -265,14 +326,18 @@ pub struct RLine {
     pub cells: Vec<StyledChar>,
 }
 
-struct Renderer {
+struct Renderer<'a> {
     lines: Vec<RLine>,
     links: Vec<RenderedLink>,
+    fields: Vec<RenderedField>,
+    /// Current field values from the TUI (empty for the print sink), indexed by
+    /// a field's 1-based index minus one.
+    field_values: &'a [FieldValue],
     width: usize,
     theme: Theme,
 }
 
-impl Renderer {
+impl Renderer<'_> {
     fn render_block(&mut self, block: &Block) {
         match block {
             Block::Heading { depth, line } => self.render_heading(*depth, line),
@@ -300,28 +365,42 @@ impl Renderer {
         self.lines.push(RLine::default());
     }
 
-    /// After all blocks are laid out, walk the lines and record each link's
-    /// laid-out position: the line and column span of its tagged (clickable)
-    /// cells, taken from the first line the link appears on.
-    fn record_link_positions(&mut self) {
-        let mut seen: Vec<bool> = vec![false; self.links.len()];
+    /// After all blocks are laid out, walk the lines and record each link's and
+    /// field's laid-out position: the line and column span of its tagged cells,
+    /// taken from the first line the element appears on. Column indices are
+    /// DISPLAY columns (a wide char before the element advances two columns), so
+    /// the recorded span lines up with the cells the renderer paints.
+    fn record_positions(&mut self) {
+        let mut seen_links: Vec<bool> = vec![false; self.links.len()];
+        let mut seen_fields: Vec<bool> = vec![false; self.fields.len()];
         for (li, line) in self.lines.iter().enumerate() {
-            // Track the running DISPLAY column across the line so a link sitting
-            // after a wide char is recorded at the column the renderer paints it,
-            // not its character index.
             let mut col = 0usize;
             for cell in line.cells.iter() {
                 let w = UnicodeWidthChar::width(cell.ch).unwrap_or(0);
                 if let Some(idx) = cell.link {
                     if let Some(slot) = idx.checked_sub(1) {
                         if let Some(link) = self.links.get_mut(slot) {
-                            if !seen[slot] {
-                                seen[slot] = true;
+                            if !seen_links[slot] {
+                                seen_links[slot] = true;
                                 link.line = li;
                                 link.col_start = col;
                                 link.col_end = col + w;
                             } else if link.line == li {
                                 link.col_end = col + w;
+                            }
+                        }
+                    }
+                }
+                if let Some(idx) = cell.field {
+                    if let Some(slot) = idx.checked_sub(1) {
+                        if let Some(field) = self.fields.get_mut(slot) {
+                            if !seen_fields[slot] {
+                                seen_fields[slot] = true;
+                                field.line = li;
+                                field.col_start = col;
+                                field.col_end = col + w;
+                            } else if field.line == li {
+                                field.col_end = col + w;
                             }
                         }
                     }
@@ -538,7 +617,24 @@ impl Renderer {
                 continue;
             }
             if let Some(field) = &span.field {
-                push_styled(&mut out, &field_text(field), base);
+                let index = self.fields.len() + 1;
+                let over = self.field_values.get(index - 1);
+                let (display, value, checked) = field_display(field, over);
+                self.fields.push(RenderedField {
+                    index,
+                    name: field.name.clone(),
+                    kind: field.kind,
+                    value,
+                    label: field.label.clone(),
+                    width: field.width,
+                    masked: field.masked,
+                    checked,
+                    // Filled in by `record_positions` after layout.
+                    line: 0,
+                    col_start: 0,
+                    col_end: 0,
+                });
+                push_field(&mut out, &display, base, index);
                 continue;
             }
             // Anchor spans carry no visible text; a plain span carries its text.
@@ -568,8 +664,10 @@ impl Renderer {
                     underline: c.st.underline,
                     italic: c.st.italic,
                 },
-                // Keep the link tag so a link inside a heading stays hit-testable.
+                // Keep the link/field tags so an element inside a heading stays
+                // hit-testable.
                 link: c.link,
+                field: c.field,
             })
             .collect();
         (banded, align)
@@ -635,7 +733,12 @@ fn wrap(chars: Vec<StyledChar>, width: usize) -> Vec<Vec<StyledChar>> {
 
 /// Build one untagged styled cell.
 fn cell(ch: char, st: RStyle) -> StyledChar {
-    StyledChar { ch, st, link: None }
+    StyledChar {
+        ch,
+        st,
+        link: None,
+        field: None,
+    }
 }
 
 /// Append the characters of `text` with a single style, untagged.
@@ -653,6 +756,20 @@ fn push_link(out: &mut Vec<StyledChar>, text: &str, st: RStyle, link: usize) {
             ch,
             st,
             link: Some(link),
+            field: None,
+        });
+    }
+}
+
+/// Append `text` with a single style, tagging every cell with `field` (its
+/// 1-based index) so the laid-out widget can be hit-tested, focused and edited.
+fn push_field(out: &mut Vec<StyledChar>, text: &str, st: RStyle, field: usize) {
+    for ch in text.chars() {
+        out.push(StyledChar {
+            ch,
+            st,
+            link: None,
+            field: Some(field),
         });
     }
 }
@@ -707,22 +824,42 @@ fn split_field(component: &str) -> (String, String) {
     }
 }
 
-/// The visible text drawn for a form field.
-fn field_text(field: &Field) -> String {
+/// The visible widget text, submit value, and checked state of a form field,
+/// honouring any current-value override (the reader's typed text / toggled
+/// state); with no override it renders from the parsed prefill, which is what the
+/// print / non-tty sink always does. A masked text field shows its content as
+/// asterisks while its true text is still returned as the submit value.
+fn field_display(field: &Field, over: Option<&FieldValue>) -> (String, String, bool) {
     match field.kind {
-        FieldKind::Text => format!("[{}]", field.value),
+        FieldKind::Text => {
+            let text = over
+                .map(|o| o.text.clone())
+                .unwrap_or_else(|| field.value.clone());
+            let shown = if field.masked {
+                "*".repeat(text.chars().count())
+            } else {
+                text.clone()
+            };
+            (format!("[{shown}]"), text, false)
+        }
         FieldKind::Checkbox => {
-            format!(
-                "[{}] {}",
-                if field.prechecked { "x" } else { " " },
-                field.label
+            let checked = over.map(|o| o.checked).unwrap_or(field.prechecked);
+            (
+                format!("[{}] {}", if checked { "x" } else { " " }, field.label),
+                field.value.clone(),
+                checked,
             )
         }
         FieldKind::Radio => {
-            format!(
-                "({}) {}",
-                if field.prechecked { "*" } else { " " },
-                field.label
+            let checked = over.map(|o| o.checked).unwrap_or(field.prechecked);
+            (
+                format!(
+                    "({}) {}",
+                    if checked { "\u{2022}" } else { " " },
+                    field.label
+                ),
+                field.value.clone(),
+                checked,
             )
         }
     }

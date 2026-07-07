@@ -65,9 +65,10 @@ use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::browser::{self, BrowserOptions};
 use crate::discovery::{DiscoveredNode, NomadNodeRegistry};
 use crate::fetch::Session;
-use crate::render::{layout_blocks, RLine, RStyle, RenderedLink};
+use crate::render::{layout_blocks, FieldValue, RLine, RStyle, RenderedField, RenderedLink};
 use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
 use crate::url::{classify_link, parse_url, LinkKind, Target, DEFAULT_PATH};
+use leviculum_micron::FieldKind;
 
 /// The number of columns reserved on the right for the scrollbar.
 const SCROLLBAR_COLS: u16 = 1;
@@ -106,6 +107,8 @@ const ADDRESS_HINTS: &str = "Enter: go   Esc: cancel";
 const HINT_HINTS: &str = "type a hint label or link text   Esc: cancel";
 /// Search-mode status hints (shown when the query line has no room of its own).
 const SEARCH_HINTS: &str = "Enter: search   n/N: next/prev   Esc: cancel";
+/// Field-edit-mode status hints.
+const FIELD_HINTS: &str = "type to edit   Space: toggle   Tab: next field/link   Esc: done";
 
 /// The home-row alphabet hint labels are drawn from (vimium-style).
 const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
@@ -248,6 +251,58 @@ pub enum Mode {
     /// In-page search (`/`): a one-line query editor; committing highlights all
     /// matches and jumps to the first.
     Search,
+    /// A form field has focus and is being edited: typing edits a text field,
+    /// Space toggles a checkbox/radio, Tab/Shift-Tab move to the next/previous
+    /// interactive element, Esc returns to browsing.
+    Field,
+}
+
+/// A focusable interactive element on the page: a link or a form field, keyed by
+/// its 1-based index in its own kind's space. The Tab focus cycle walks links and
+/// fields together in document order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    /// The page link with this 1-based index.
+    Link(usize),
+    /// The form field with this 1-based index.
+    Field(usize),
+}
+
+/// A form field currently on screen, with its screen rectangle. Produced by
+/// [`visible_fields`] and consumed by hit-testing, focus and the input overlay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisibleField {
+    /// The field's 1-based [`RenderedField::index`].
+    pub index: usize,
+    /// The field name (form key).
+    pub name: String,
+    /// The field kind (text, checkbox, radio).
+    pub kind: FieldKind,
+    /// The screen row (absolute, below the top-bar) the field sits on.
+    pub row: u16,
+    /// The first screen column of the field widget.
+    pub col_start: u16,
+    /// One past the last screen column of the field widget.
+    pub col_end: u16,
+}
+
+/// The editable state of one form field: the source of truth for what the reader
+/// has typed or toggled. Persists across a re-layout (resize / theme toggle);
+/// rebuilt only when a new page loads.
+#[derive(Clone, Debug)]
+pub struct FieldEdit {
+    /// The field name (submitted as `field_<name>`).
+    pub name: String,
+    /// The field kind.
+    pub kind: FieldKind,
+    /// The text editor for a text field (unused for checkbox/radio).
+    pub input: Input,
+    /// The current checked state of a checkbox/radio (unused for text).
+    pub checked: bool,
+    /// The submit value of a checkbox/radio: its explicit value, or its label
+    /// when none was given (unused for text; a text field submits its editor
+    /// contents).
+    pub value: String,
 }
 
 /// One in-page search hit: a column span on a single laid-out page line. Column
@@ -568,7 +623,19 @@ pub struct Model {
     /// index) resolves to a page line. Recomputed on every relayout.
     pub block_lines: Vec<usize>,
     /// The link the focus cursor is on (Tab navigation), 1-based, or `None`.
+    /// Mutually exclusive with [`field_focus`](Model::field_focus): at most one
+    /// interactive element is focused at a time.
     pub focus: Option<usize>,
+    /// The form field's laid-out positions and metadata, refreshed on every
+    /// relayout from the parsed document and the current [`field_state`].
+    pub field_defs: Vec<RenderedField>,
+    /// The editable field store (typed text / toggled state), the source of
+    /// truth for rendering and submission. Indexed by a field's 1-based index
+    /// minus one; preserved across a relayout, rebuilt on a page load.
+    pub field_state: Vec<FieldEdit>,
+    /// The form field the focus cursor is on (Tab navigation / a click), 1-based,
+    /// or `None`. Set exactly when [`mode`](Model::mode) is [`Mode::Field`].
+    pub field_focus: Option<usize>,
     /// The link the mouse is hovering over, 1-based, or `None`.
     pub hover: Option<usize>,
     /// The characters typed so far in hint mode, narrowing the visible labels.
@@ -620,18 +687,52 @@ impl Model {
         size: (u16, u16),
     ) -> Self {
         let theme = Theme::default();
-        let (page, links, block_lines) = layout_blocks(doc, width, theme);
-        Self {
+        let (page, links, block_lines, field_defs) =
+            layout_blocks(doc, width, theme, &[] as &[FieldValue]);
+        let mut model = Self {
             doc: doc.clone(),
             width,
             page,
             links,
             block_lines,
+            field_defs,
             title: title.into(),
             size,
             theme,
             ..Self::default()
-        }
+        };
+        model.rebuild_field_state();
+        model
+    }
+
+    /// Rebuild the editable field store from the freshly laid-out field defs
+    /// (their parsed prefill). Called on construction and on every page load;
+    /// NOT on a resize/theme relayout, where the store must be preserved.
+    pub fn rebuild_field_state(&mut self) {
+        self.field_state = self
+            .field_defs
+            .iter()
+            .map(|f| FieldEdit {
+                name: f.name.clone(),
+                kind: f.kind,
+                input: Input::new(f.value.clone()),
+                checked: f.checked,
+                value: f.value.clone(),
+            })
+            .collect();
+    }
+
+    /// The current field values, for feeding a relayout so the laid-out widgets
+    /// reflect what the reader has typed / toggled. Positionally indexed by a
+    /// field's 1-based index minus one.
+    fn field_values(&self) -> Vec<FieldValue> {
+        self.field_state
+            .iter()
+            .map(|fe| FieldValue {
+                text: fe.input.value().to_string(),
+                checked: fe.checked,
+            })
+            .collect()
     }
 
     /// Re-wrap the stored document to `width` under the current theme, replacing
@@ -639,10 +740,13 @@ impl Model {
     /// afterwards. Also used to re-lay-out in place after a theme toggle.
     pub fn relayout(&mut self, width: usize) {
         self.width = width;
-        let (page, links, block_lines) = layout_blocks(&self.doc, width, self.theme);
+        let values = self.field_values();
+        let (page, links, block_lines, field_defs) =
+            layout_blocks(&self.doc, width, self.theme, &values);
         self.page = page;
         self.links = links;
         self.block_lines = block_lines;
+        self.field_defs = field_defs;
     }
 
     /// Toggle between the dark and light theme, re-laying the page out so the
@@ -764,6 +868,33 @@ pub fn visible_links(model: &Model) -> Vec<VisibleLink> {
             row,
             col_start: link.col_start as u16,
             col_end: link.col_end as u16,
+        });
+    }
+    out
+}
+
+/// The form fields currently on screen, each with its absolute screen rectangle,
+/// mirroring [`visible_links`]. A field on content line `field.line` is visible
+/// when `scroll <= field.line < scroll + viewport`; it then sits at screen row
+/// `TOPBAR_ROWS + (field.line - scroll)`, columns `[col_start, col_end)`. Off-
+/// viewport fields are excluded. Pure, so hit-testing, focus and the input
+/// overlay share one source of truth.
+pub fn visible_fields(model: &Model) -> Vec<VisibleField> {
+    let viewport = model.viewport();
+    let scroll = model.scroll;
+    let mut out = Vec::new();
+    for field in &model.field_defs {
+        if field.line < scroll || field.line >= scroll + viewport {
+            continue;
+        }
+        let row = TOPBAR_ROWS + (field.line - scroll) as u16;
+        out.push(VisibleField {
+            index: field.index,
+            name: field.name.clone(),
+            kind: field.kind,
+            row,
+            col_start: field.col_start as u16,
+            col_end: field.col_end as u16,
         });
     }
     out
@@ -938,13 +1069,19 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
     let pending = model.pending.take();
     let anchor = model.pending_anchor.take();
     model.doc = doc;
+    // A fresh document replaces the old fields: clear the store so the relayout
+    // lays them out from the new prefill, then rebuild the editable store from it.
+    model.field_state.clear();
     model.relayout(content_width(model.size.0));
+    model.rebuild_field_state();
     model.scroll = 0;
     model.title = title;
     model.dismiss_toast();
     // A fresh page invalidates any focus/hover cursor into the old link set, and
     // any search match highlights against the old page.
     model.focus = None;
+    model.field_focus = None;
+    model.mode = Mode::Browse;
     model.hover = None;
     model.matches.clear();
     model.current_match = None;
@@ -1020,7 +1157,100 @@ fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
         Mode::Address => update_address_key(model, key),
         Mode::Hint => update_hint_key(model, key),
         Mode::Search => update_search_key(model, key),
+        Mode::Field => update_field_key(model, key),
         Mode::Browse => update_browse_key(model, key, ctrl),
+    }
+}
+
+/// Fold a key while a form field has focus. Tab/Shift-Tab move to the next/
+/// previous interactive element; Esc leaves editing back to browse. A text field
+/// takes the usual editing keys (typing, Backspace/Delete, Left/Right, Home/End)
+/// and re-lays the page out so its widget reflects the new value; a checkbox/
+/// radio toggles on Space (a radio deselects its group siblings). Any other key
+/// is ignored, so field editing never leaks into browse hotkeys.
+fn update_field_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+    match key.code {
+        KeyCode::Tab => {
+            focus_next(model);
+            return Vec::new();
+        }
+        KeyCode::BackTab => {
+            focus_prev(model);
+            return Vec::new();
+        }
+        KeyCode::Esc => {
+            model.field_focus = None;
+            model.mode = Mode::Browse;
+            return Vec::new();
+        }
+        _ => {}
+    }
+
+    let Some(fi) = model.field_focus else {
+        model.mode = Mode::Browse;
+        return Vec::new();
+    };
+    let Some(fe) = model.field_state.get(fi - 1) else {
+        return Vec::new();
+    };
+
+    match fe.kind {
+        FieldKind::Text => {
+            if matches!(
+                key.code,
+                KeyCode::Char(_)
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Home
+                    | KeyCode::End
+            ) {
+                if let Some(fe) = model.field_state.get_mut(fi - 1) {
+                    fe.input.handle_event(&Event::Key(key));
+                }
+                // The widget text changed width: re-lay the page out so the box
+                // and every downstream position stay correct, keeping the scroll.
+                let (w, vp) = (model.width, model.viewport());
+                model.relayout(w);
+                model.clamp_scroll(vp);
+            }
+        }
+        FieldKind::Checkbox => {
+            if key.code == KeyCode::Char(' ') {
+                if let Some(fe) = model.field_state.get_mut(fi - 1) {
+                    fe.checked = !fe.checked;
+                }
+                let (w, vp) = (model.width, model.viewport());
+                model.relayout(w);
+                model.clamp_scroll(vp);
+            }
+        }
+        FieldKind::Radio => {
+            if key.code == KeyCode::Char(' ') {
+                select_radio(model, fi);
+                let (w, vp) = (model.width, model.viewport());
+                model.relayout(w);
+                model.clamp_scroll(vp);
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Select radio field `fi` (1-based), deselecting every other radio sharing its
+/// name (one selection per group), matching the reference radio-group behaviour.
+fn select_radio(model: &mut Model, fi: usize) {
+    let Some(name) = model.field_state.get(fi - 1).map(|fe| fe.name.clone()) else {
+        return;
+    };
+    for fe in model.field_state.iter_mut() {
+        if fe.kind == FieldKind::Radio && fe.name == name {
+            fe.checked = false;
+        }
+    }
+    if let Some(fe) = model.field_state.get_mut(fi - 1) {
+        fe.checked = true;
     }
 }
 
@@ -1668,7 +1898,13 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
             Vec::new()
         }
         LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
-            Ok((target, anchor)) => {
+            Ok((mut target, anchor)) => {
+                // A submit link (one that references form fields, or `*` for all)
+                // carries the CURRENT field values, packaged as NomadNet expects:
+                // `field_<name>` entries alongside the `var_<key>` presets that
+                // resolve_link already put on the target. Preset `var_` and
+                // collected `field_` keys never collide, so we just append.
+                target.fields.extend(collect_submit_fields(model, &link));
                 model.dismiss_toast();
                 model.pending = Some(Pending {
                     target: target.clone(),
@@ -1690,6 +1926,64 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
     }
 }
 
+/// Collect the current values of the form fields a link references, packaged as
+/// the NomadNet request map expects: each becomes a `field_<name>` entry.
+///
+/// Mirrors the reference `Browser.handle_link` (NomadNet `Browser.py`): a link's
+/// field components that carry no `=` are field-NAME references (a `*` component
+/// means "all fields"); their referenced fields' current widget values are added
+/// under a `field_` prefix. A text field is always included; a checkbox/radio is
+/// included only when checked (its submit value), and several checked checkboxes
+/// sharing a name are comma-joined. The `k=v` preset components are handled by
+/// [`browser::resolve_link`] as `var_<k>`, so they are ignored here.
+fn collect_submit_fields(model: &Model, link: &RenderedLink) -> Vec<(String, String)> {
+    let mut all = false;
+    let mut referenced: Vec<&str> = Vec::new();
+    for (k, v) in &link.fields {
+        if !v.is_empty() {
+            continue; // a `k=v` preset -> handled as var_ by resolve_link.
+        }
+        if k == "*" {
+            all = true;
+        } else {
+            referenced.push(k.as_str());
+        }
+    }
+    if !all && referenced.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    for fe in &model.field_state {
+        if !all && !referenced.iter().any(|n| *n == fe.name) {
+            continue;
+        }
+        let key = format!("field_{}", fe.name);
+        match fe.kind {
+            FieldKind::Text => out.push((key, fe.input.value().to_string())),
+            FieldKind::Checkbox => {
+                if fe.checked {
+                    if let Some(existing) = out.iter_mut().find(|(k, _)| *k == key) {
+                        existing.1 = format!("{},{}", existing.1, fe.value);
+                    } else {
+                        out.push((key, fe.value.clone()));
+                    }
+                }
+            }
+            FieldKind::Radio => {
+                if fe.checked {
+                    if let Some(existing) = out.iter_mut().find(|(k, _)| *k == key) {
+                        existing.1 = fe.value.clone();
+                    } else {
+                        out.push((key, fe.value.clone()));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Activate a hint target: follow the link, or drive the top-bar control.
 fn activate_hint_target(model: &mut Model, target: HintTarget) -> Vec<Effect> {
     match target {
@@ -1704,43 +1998,96 @@ fn activate_hint_target(model: &mut Model, target: HintTarget) -> Vec<Effect> {
     }
 }
 
-/// Move the focus cursor to the next link in reading order (wrapping), scrolling
-/// it into view. A no-op when the page has no links.
+/// The interactive elements (links and form fields) in document order: sorted by
+/// laid-out `(line, col_start)`, so the Tab cycle walks them exactly as they read
+/// down the page. The single source of truth for focus traversal.
+fn interactive_order(model: &Model) -> Vec<Focus> {
+    let mut items: Vec<(usize, usize, Focus)> = Vec::new();
+    for l in &model.links {
+        items.push((l.line, l.col_start, Focus::Link(l.index)));
+    }
+    for f in &model.field_defs {
+        items.push((f.line, f.col_start, Focus::Field(f.index)));
+    }
+    items.sort_by_key(|(line, col, _)| (*line, *col));
+    items.into_iter().map(|(_, _, focus)| focus).collect()
+}
+
+/// The currently focused interactive element, as a [`Focus`], or `None`.
+fn current_focus(model: &Model) -> Option<Focus> {
+    if let Some(i) = model.field_focus {
+        Some(Focus::Field(i))
+    } else {
+        model.focus.map(Focus::Link)
+    }
+}
+
+/// Move the focus cursor to the next interactive element (link or field) in
+/// reading order (wrapping), scrolling it into view. A no-op when the page has no
+/// interactive elements.
 fn focus_next(model: &mut Model) {
-    let n = model.links.len();
-    if n == 0 {
+    let order = interactive_order(model);
+    if order.is_empty() {
         return;
     }
-    let next = match model.focus {
-        None => 1,
-        Some(i) if i >= n => 1,
-        Some(i) => i + 1,
+    let next = match current_focus(model).and_then(|c| order.iter().position(|x| *x == c)) {
+        Some(i) => order[(i + 1) % order.len()],
+        None => order[0],
     };
-    set_focus(model, next);
+    apply_focus(model, next);
 }
 
-/// Move the focus cursor to the previous link in reading order (wrapping),
-/// scrolling it into view. A no-op when the page has no links.
+/// Move the focus cursor to the previous interactive element (wrapping),
+/// scrolling it into view. A no-op when the page has no interactive elements.
 fn focus_prev(model: &mut Model) {
-    let n = model.links.len();
-    if n == 0 {
+    let order = interactive_order(model);
+    if order.is_empty() {
         return;
     }
-    let prev = match model.focus {
-        None => n,
-        Some(i) if i <= 1 => n,
-        Some(i) => i - 1,
+    let last = order.len() - 1;
+    let prev = match current_focus(model).and_then(|c| order.iter().position(|x| *x == c)) {
+        Some(0) | None => order[last],
+        Some(i) => order[i - 1],
     };
-    set_focus(model, prev);
+    apply_focus(model, prev);
 }
 
-/// Set the focus to link `index` and auto-scroll so it is inside the viewport.
-fn set_focus(model: &mut Model, index: usize) {
-    model.focus = Some(index);
-    let Some(link) = model.links.iter().find(|l| l.index == index) else {
-        return;
-    };
-    let line = link.line;
+/// Focus an interactive element: set the link/field focus (they are mutually
+/// exclusive), switch mode (a field enters [`Mode::Field`] editing; a link
+/// returns to [`Mode::Browse`]), and auto-scroll it into view.
+fn apply_focus(model: &mut Model, focus: Focus) {
+    match focus {
+        Focus::Link(index) => {
+            model.focus = Some(index);
+            model.field_focus = None;
+            model.mode = Mode::Browse;
+            if let Some(line) = model
+                .links
+                .iter()
+                .find(|l| l.index == index)
+                .map(|l| l.line)
+            {
+                scroll_line_into_view(model, line);
+            }
+        }
+        Focus::Field(index) => {
+            model.field_focus = Some(index);
+            model.focus = None;
+            model.mode = Mode::Field;
+            if let Some(line) = model
+                .field_defs
+                .iter()
+                .find(|f| f.index == index)
+                .map(|f| f.line)
+            {
+                scroll_line_into_view(model, line);
+            }
+        }
+    }
+}
+
+/// Scroll the minimal amount so page `line` is inside the viewport.
+fn scroll_line_into_view(model: &mut Model, line: usize) {
     let vp = model.viewport();
     if line < model.scroll {
         model.scroll = line;
@@ -1756,6 +2103,13 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
     for vl in visible_links(model) {
         if row == vl.row && col >= vl.col_start && col < vl.col_end {
             return follow_link(model, vl.index);
+        }
+    }
+    // A click on a form field focuses it (entering field-edit mode).
+    for vf in visible_fields(model) {
+        if row == vf.row && col >= vf.col_start && col < vf.col_end {
+            apply_focus(model, Focus::Field(vf.index));
+            return Vec::new();
         }
     }
     let [topbar, _content, _status] = regions(model.frame_area());
@@ -1864,9 +2218,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_topbar(model, frame, topbar);
     render_content(model, frame, content);
     render_status(model, frame, status);
-    // Overlays drawn on top of the laid-out page: the search-match highlights,
-    // the focus highlight, the mouse-hover highlight, and the hint badges while
-    // hint mode is active.
+    // Overlays drawn on top of the laid-out page: the form-field input boxes, the
+    // search-match highlights, the focus highlight, the mouse-hover highlight, and
+    // the hint badges while hint mode is active.
+    render_fields(model, frame);
     render_search_matches(model, frame);
     render_focus(model, frame);
     render_hover(model, frame);
@@ -1881,6 +2236,56 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
     // The toast floats on top of everything so it is always visible.
     render_toast(model, frame, frame.area());
+}
+
+/// Draw the form-field input boxes over the laid-out page: every field's cells
+/// get an input style (a distinct chrome-slate box, or an underline box under
+/// `no_color`); the focused field is reversed on top so it stands out. A focused
+/// TEXT field also places the hardware cursor at its edit position.
+fn render_fields(model: &Model, frame: &mut Frame) {
+    let visible = visible_fields(model);
+    if visible.is_empty() {
+        return;
+    }
+    let area = frame.area();
+    let base = if model.no_color {
+        Style::default().add_modifier(Modifier::UNDERLINED)
+    } else {
+        Style::default()
+            .fg(rgb(model.theme.chrome_fg()))
+            .bg(rgb(model.theme.chrome_bg()))
+    };
+    let focused = base.add_modifier(Modifier::REVERSED);
+    // The hardware cursor position for a focused text field, resolved after the
+    // buffer paint so it lands on the correct cell.
+    let mut cursor: Option<(u16, u16)> = None;
+    {
+        let buf = frame.buffer_mut();
+        for vf in &visible {
+            let is_focused = model.field_focus == Some(vf.index);
+            let style = if is_focused { focused } else { base };
+            for x in vf.col_start..vf.col_end {
+                if x >= area.width || vf.row >= area.height {
+                    continue;
+                }
+                if let Some(c) = buf.cell_mut((x, vf.row)) {
+                    c.set_style(style);
+                }
+            }
+            if is_focused && vf.kind == FieldKind::Text {
+                if let Some(fe) = model.field_state.get(vf.index - 1) {
+                    // Past the opening `[`, offset by the editor cursor, clamped
+                    // inside the box (before the closing `]`).
+                    let cx = vf.col_start + 1 + fe.input.visual_cursor() as u16;
+                    let clamped = cx.min(vf.col_end.saturating_sub(1));
+                    cursor = Some((clamped, vf.row));
+                }
+            }
+        }
+    }
+    if let Some(pos) = cursor {
+        frame.set_cursor_position(pos);
+    }
 }
 
 /// Highlight the focused link's cells (reverse video) so Tab navigation is
@@ -2229,6 +2634,7 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
             Mode::Address => ADDRESS_HINTS,
             Mode::Hint => HINT_HINTS,
             Mode::Search => SEARCH_HINTS,
+            Mode::Field => FIELD_HINTS,
             Mode::Browse => BROWSE_HINTS,
         };
         // The key-hints are the most-read chrome text: render them in the bright
@@ -2295,8 +2701,11 @@ const HELP_LINES: &[&str] = &[
     "  Ctrl-f / Ctrl-b     page down / up",
     "  Ctrl-d / Ctrl-u     half page down / up",
     "  g / G  Home / End   top / bottom",
-    "  Tab / Shift-Tab     focus prev/next",
+    "  Tab / Shift-Tab     focus link / field",
     "  Enter               follow the link",
+    "  (field) type        edit a text field",
+    "  (field) Space       toggle a checkbox / radio",
+    "  (field) Esc         leave field editing",
     "  f                   hint a link",
     "  / n N               search / next / prev",
     "  click               follow link",
@@ -4329,18 +4738,29 @@ mod tests {
 
     #[test]
     fn tab_cycles_focus_and_wraps() {
+        // The sample page has two links then one text field, in document order.
         let mut m = loaded_model((80, 24));
         assert_eq!(m.focus, None);
+        assert_eq!(m.field_focus, None);
         press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(m.focus, Some(1));
         press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(m.focus, Some(2));
-        // Wrap back to the first link.
+        // The third element is the text field: link focus clears, field focus
+        // takes over, and the mode switches to field editing.
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.focus, None);
+        assert_eq!(m.field_focus, Some(1));
+        assert_eq!(m.mode, Mode::Field);
+        // Wrap back to the first link (and back to browse mode).
         press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(m.focus, Some(1));
-        // Shift-Tab goes backward, wrapping to the last.
+        assert_eq!(m.field_focus, None);
+        assert_eq!(m.mode, Mode::Browse);
+        // Shift-Tab goes backward from the first link, wrapping to the field.
         press(&mut m, KeyCode::BackTab, KeyModifiers::NONE);
-        assert_eq!(m.focus, Some(2));
+        assert_eq!(m.field_focus, Some(1));
+        assert_eq!(m.mode, Mode::Field);
     }
 
     #[test]
@@ -4600,6 +5020,7 @@ mod tests {
                     ch,
                     st: RStyle::default(),
                     link: None,
+                    field: None,
                 })
                 .collect(),
         }
@@ -5290,5 +5711,263 @@ mod tests {
         assert!(text.contains("Discovered nodes"), "missing header:\n{text}");
         assert!(text.contains("Home"), "missing bookmark:\n{text}");
         assert!(text.contains("Node-C"), "missing node:\n{text}");
+    }
+
+    // --- Phase 7: editable form fields + submit -------------------------
+
+    const HASH_HEX: &str = "0123456789abcdef0123456789abcdef";
+
+    /// A loaded model from a micron source with a current destination set, so
+    /// same-destination links and field submission resolve.
+    fn field_model(src: &str, size: (u16, u16)) -> Model {
+        let mut m = Model::from_document(&parse(src), content_width(size.0), "T", size);
+        m.history.visit(tgt(0xab));
+        m.current_dest = Some([0xab; 16]);
+        m
+    }
+
+    #[test]
+    fn field_store_inits_from_prefill() {
+        let src = "Name: `<name`bob>\nAgree: `<?|agree`Agree>";
+        let m = field_model(src, (80, 24));
+        assert_eq!(m.field_state.len(), 2);
+        assert_eq!(m.field_state[0].name, "name");
+        assert_eq!(m.field_state[0].kind, FieldKind::Text);
+        assert_eq!(m.field_state[0].input.value(), "bob");
+        assert_eq!(m.field_state[1].name, "agree");
+        assert_eq!(m.field_state[1].kind, FieldKind::Checkbox);
+        assert!(!m.field_state[1].checked, "checkbox starts unchecked");
+    }
+
+    #[test]
+    fn typing_edits_focused_text_field() {
+        let src = "Name: `<name`bo>";
+        let mut m = field_model(src, (80, 24));
+        // Tab focuses the only interactive element, the text field.
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.field_focus, Some(1));
+        assert_eq!(m.mode, Mode::Field);
+        // The editor starts with the cursor at the end of "bo"; typing appends.
+        type_str(&mut m, "b");
+        assert_eq!(m.field_state[0].input.value(), "bob");
+        // The re-layout reflects the new value in the laid-out widget.
+        let field_line: String = m.page[m.field_defs[0].line]
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect();
+        assert!(
+            field_line.contains("[bob]"),
+            "widget not updated: {field_line:?}"
+        );
+    }
+
+    #[test]
+    fn space_toggles_focused_checkbox() {
+        let src = "Agree: `<?|agree`Agree>";
+        let mut m = field_model(src, (80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.field_focus, Some(1));
+        assert!(!m.field_state[0].checked);
+        press(&mut m, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(m.field_state[0].checked, "Space should check the box");
+        press(&mut m, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(!m.field_state[0].checked, "Space should uncheck it again");
+    }
+
+    #[test]
+    fn space_selects_radio_and_deselects_group_siblings() {
+        // Two radios sharing the name "col": selecting one deselects the other.
+        let src = "`<^|col`Red>`<^|col`Blue>";
+        let mut m = field_model(src, (80, 24));
+        assert_eq!(m.field_state.len(), 2);
+        // Focus + select the first radio.
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(m.field_state[0].checked);
+        assert!(!m.field_state[1].checked);
+        // Move to the second and select it: the first must clear.
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(!m.field_state[0].checked, "sibling radio not cleared");
+        assert!(m.field_state[1].checked);
+    }
+
+    #[test]
+    fn esc_leaves_field_editing() {
+        let src = "Name: `<name`>";
+        let mut m = field_model(src, (80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Field);
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Browse);
+        assert_eq!(m.field_focus, None);
+    }
+
+    #[test]
+    fn visible_fields_positions_after_wide_char() {
+        // A width-2 emoji then a space, then the field: the widget starts at
+        // display column 3 (2 + 1), not character index 2.
+        let src = "\u{1f389} `<name`>";
+        let m = field_model(src, (80, 24));
+        let vf = visible_fields(&m);
+        assert_eq!(vf.len(), 1);
+        assert_eq!(vf[0].row, TOPBAR_ROWS);
+        assert_eq!(vf[0].col_start, 3, "field mispositioned after wide char");
+        // Empty text field renders as "[]" -> two columns wide.
+        assert_eq!(vf[0].col_end, 5);
+    }
+
+    #[test]
+    fn submit_link_carries_collected_field_values() {
+        // A page with a text field "name" (prefill "bob") and a submit link that
+        // references it plus a `k=v` preset.
+        let src = format!("`<name`bob>\n`[Go`{HASH_HEX}:/page/s.mu`name|a=1]");
+        let mut m = field_model(&src, (80, 24));
+        let effects = follow_link(&mut m, 1);
+        let target = match effects.as_slice() {
+            [Effect::Navigate(t)] => t.clone(),
+            other => panic!("expected a single Navigate, got {other:?}"),
+        };
+        assert_eq!(target.path, "/page/s.mu");
+        // The preset lands as var_a; the collected field value as field_name.
+        assert!(
+            target
+                .fields
+                .contains(&("var_a".to_string(), "1".to_string())),
+            "preset missing: {:?}",
+            target.fields
+        );
+        assert!(
+            target
+                .fields
+                .contains(&("field_name".to_string(), "bob".to_string())),
+            "collected field missing: {:?}",
+            target.fields
+        );
+    }
+
+    #[test]
+    fn submit_link_reflects_edited_value_and_ignores_unreferenced_fields() {
+        // Two text fields; the link references only "q". Editing "q" must flow
+        // through, and the unreferenced "other" field must not be submitted.
+        let src = format!("`<q`hi>`<other`x>\n`[Go`{HASH_HEX}:/page/s.mu`q]");
+        let mut m = field_model(&src, (80, 24));
+        // Focus the first field (q) and append "!".
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut m, "!");
+        assert_eq!(m.field_state[0].input.value(), "hi!");
+        let link = m.links.iter().find(|l| l.index == 1).cloned().unwrap();
+        let collected = collect_submit_fields(&m, &link);
+        assert_eq!(
+            collected,
+            vec![("field_q".to_string(), "hi!".to_string())],
+            "only the referenced, edited field should be collected"
+        );
+    }
+
+    #[test]
+    fn submit_link_star_collects_all_fields() {
+        let src = format!("`<a`1>`<b`2>\n`[Go`{HASH_HEX}:/page/s.mu`*]");
+        let m = field_model(&src, (80, 24));
+        let link = m.links.iter().find(|l| l.index == 1).cloned().unwrap();
+        let collected = collect_submit_fields(&m, &link);
+        assert_eq!(
+            collected,
+            vec![
+                ("field_a".to_string(), "1".to_string()),
+                ("field_b".to_string(), "2".to_string()),
+            ],
+            "`*` should collect every field"
+        );
+    }
+
+    #[test]
+    fn unchecked_checkbox_is_not_submitted() {
+        let src = format!("`<?|agree`Agree>\n`[Go`{HASH_HEX}:/page/s.mu`agree]");
+        let mut m = field_model(&src, (80, 24));
+        let link = m.links.iter().find(|l| l.index == 1).cloned().unwrap();
+        // Unchecked: nothing collected.
+        assert!(collect_submit_fields(&m, &link).is_empty());
+        // Check it (focus the checkbox, Space), then it submits its value.
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char(' '), KeyModifiers::NONE);
+        let collected = collect_submit_fields(&m, &link);
+        assert_eq!(
+            collected,
+            vec![("field_agree".to_string(), "Agree".to_string())],
+            "a checked box submits its value (the label when none given)"
+        );
+    }
+
+    #[test]
+    fn mouse_click_on_field_focuses_it() {
+        let src = "Name: `<name`>";
+        let mut m = field_model(src, (80, 24));
+        let vf = visible_fields(&m)[0].clone();
+        let effects = update(&mut m, AppEvent::Mouse(click(vf.col_start, vf.row)));
+        assert!(effects.is_empty(), "focusing a field yields no effect");
+        assert_eq!(m.field_focus, Some(1));
+        assert_eq!(m.mode, Mode::Field);
+    }
+
+    #[test]
+    fn field_state_survives_resize() {
+        let src = "Name: `<name`>";
+        let mut m = field_model(src, (80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut m, "kept");
+        assert_eq!(m.field_state[0].input.value(), "kept");
+        update(&mut m, AppEvent::Resize(60, 20));
+        assert_eq!(
+            m.field_state[0].input.value(),
+            "kept",
+            "a resize must not reset the field store"
+        );
+    }
+
+    // --- Phase 7: TestBackend rendering ---------------------------------
+
+    #[test]
+    fn input_field_renders_its_value_in_a_box() {
+        let src = "Name: `<name`bob>";
+        let m = field_model(src, (80, 24));
+        let buffer = render(&m, 80, 24);
+        assert!(flat(&buffer).contains("[bob]"), "field value not drawn");
+        // The field cells carry the input-box background (theme chrome bg).
+        let vf = visible_fields(&m)[0].clone();
+        let cell = &buffer[(vf.col_start, vf.row)];
+        assert_eq!(
+            cell.bg,
+            Color::Rgb(
+                Theme::Dark.chrome_bg().0,
+                Theme::Dark.chrome_bg().1,
+                Theme::Dark.chrome_bg().2
+            ),
+            "input field should render in an input-box style"
+        );
+    }
+
+    #[test]
+    fn focused_field_is_highlighted() {
+        let src = "Name: `<name`bob>";
+        let mut m = field_model(src, (80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        let vf = visible_fields(&m)[0].clone();
+        let buffer = render(&m, 80, 24);
+        let cell = &buffer[(vf.col_start, vf.row)];
+        assert!(
+            cell.modifier.contains(Modifier::REVERSED),
+            "a focused field should be highlighted"
+        );
+    }
+
+    #[test]
+    fn checkbox_renders_its_state() {
+        // Prechecked checkbox renders "[x]"; an unchecked one "[ ]".
+        let checked = field_model("`<?|a|Yes|*`On>", (80, 24));
+        assert!(flat(&render(&checked, 80, 24)).contains("[x] On"));
+        let unchecked = field_model("`<?|a`Off>", (80, 24));
+        assert!(flat(&render(&unchecked, 80, 24)).contains("[ ] Off"));
     }
 }
