@@ -24,6 +24,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use leviculum_core::constants::NAME_HASHBYTES;
 use leviculum_core::{Destination, ReceivedAnnounce};
 
+/// The maximum number of nodes the registry retains. Discovery runs for the
+/// whole session and a busy mesh announces far more nodes than a user can act
+/// on, so the registry is a bounded FIFO: once it is full, learning a new node
+/// evicts the oldest-inserted one. RAM only — never persisted.
+pub const NODE_CAPACITY: usize = 500;
+
 /// The app name a NomadNet node destination is registered under.
 pub const NOMADNET_APP_NAME: &str = "nomadnetwork";
 
@@ -115,6 +121,10 @@ impl DiscoveredNode {
 /// an existing one's `last_seen`/`hops` (and fills its `name` from the announce
 /// when it carries one). Insertion order is preserved for stable numbering by
 /// tracking a per-node sequence.
+///
+/// The registry is a bounded FIFO of [`NODE_CAPACITY`] nodes: a re-announce of a
+/// known node upserts in place and keeps its slot; a new node appends and, when
+/// that would exceed the capacity, evicts the oldest-inserted node first.
 #[derive(Debug, Default, Clone)]
 pub struct NomadNodeRegistry {
     nodes: BTreeMap<[u8; 16], DiscoveredNode>,
@@ -184,18 +194,13 @@ impl NomadNodeRegistry {
                 }
             }
             None => {
-                self.order.insert(dest_hash, self.next_seq);
-                self.next_seq += 1;
-                self.nodes.insert(
+                self.insert_new(DiscoveredNode {
                     dest_hash,
-                    DiscoveredNode {
-                        dest_hash,
-                        name,
-                        first_seen: now,
-                        last_seen: now,
-                        hops,
-                    },
-                );
+                    name,
+                    first_seen: now,
+                    last_seen: now,
+                    hops,
+                });
             }
         }
     }
@@ -218,10 +223,36 @@ impl NomadNodeRegistry {
                 }
             }
             None => {
-                self.order.insert(node.dest_hash, self.next_seq);
-                self.next_seq += 1;
-                self.nodes.insert(node.dest_hash, node.clone());
+                self.insert_new(node.clone());
             }
+        }
+    }
+
+    /// Append a brand-new node, evicting the oldest-inserted one first when the
+    /// registry is already at [`NODE_CAPACITY`]. The caller has already confirmed
+    /// `node.dest_hash` is unseen.
+    fn insert_new(&mut self, node: DiscoveredNode) {
+        if self.nodes.len() >= NODE_CAPACITY {
+            self.evict_oldest();
+        }
+        let dest_hash = node.dest_hash;
+        self.order.insert(dest_hash, self.next_seq);
+        self.next_seq += 1;
+        self.nodes.insert(dest_hash, node);
+    }
+
+    /// Evict the oldest-inserted node (the smallest first-seen sequence), keeping
+    /// the registry a FIFO bounded by [`NODE_CAPACITY`]. A no-op on an empty
+    /// registry.
+    fn evict_oldest(&mut self) {
+        let oldest = self
+            .order
+            .iter()
+            .min_by_key(|(_, &seq)| seq)
+            .map(|(dest, _)| *dest);
+        if let Some(dest) = oldest {
+            self.nodes.remove(&dest);
+            self.order.remove(&dest);
         }
     }
 
@@ -370,6 +401,81 @@ mod tests {
         assert_eq!(nodes[1].name.as_deref(), Some("Second"));
         assert_eq!(reg.get(1).unwrap().name.as_deref(), Some("First"));
         assert_eq!(reg.get(2).unwrap().name.as_deref(), Some("Second"));
+    }
+
+    /// Build a distinct 16-byte dest hash from an index, so a FIFO test can mint
+    /// more than 256 unique nodes (the low two bytes carry the whole range).
+    fn dest(i: u32) -> [u8; 16] {
+        let mut h = [0u8; 16];
+        h[0] = (i >> 8) as u8;
+        h[1] = (i & 0xff) as u8;
+        h
+    }
+
+    #[test]
+    fn registry_is_a_bounded_fifo_of_capacity() {
+        let mut reg = NomadNodeRegistry::new();
+        // Fill to exactly capacity with distinct nodes.
+        for i in 0..NODE_CAPACITY as u32 {
+            reg.upsert(dest(i), Some(format!("n{i}")), None, i as u64);
+        }
+        assert_eq!(reg.len(), NODE_CAPACITY);
+        assert!(
+            reg.get_by_hash(&dest(0)).is_some(),
+            "first present when full"
+        );
+
+        // Re-announcing an existing node upserts in place: no growth, no evict,
+        // and it keeps its slot in discovery order (still first).
+        reg.upsert(dest(0), Some("renamed".to_string()), Some(4), 999);
+        assert_eq!(reg.len(), NODE_CAPACITY, "upsert must not grow the buffer");
+        assert!(reg.get_by_hash(&dest(0)).is_some(), "upsert kept oldest");
+        assert_eq!(
+            reg.nodes()[0].dest_hash,
+            dest(0),
+            "order preserved by upsert"
+        );
+        assert_eq!(reg.nodes()[0].name.as_deref(), Some("renamed"));
+
+        // One more DISTINCT node exceeds capacity: the oldest (dest(0)) is
+        // evicted, the newcomer is present, and the count stays at capacity.
+        let newcomer = dest(NODE_CAPACITY as u32);
+        reg.upsert(newcomer, Some("new".to_string()), None, 1000);
+        assert_eq!(reg.len(), NODE_CAPACITY, "FIFO stays bounded");
+        assert!(reg.get_by_hash(&dest(0)).is_none(), "oldest evicted first");
+        assert!(reg.get_by_hash(&newcomer).is_some(), "newcomer retained");
+        // dest(1) is now the oldest surviving node, so it heads discovery order.
+        assert_eq!(
+            reg.nodes()[0].dest_hash,
+            dest(1),
+            "order preserved after evict"
+        );
+        assert_eq!(reg.nodes().last().unwrap().dest_hash, newcomer);
+    }
+
+    #[test]
+    fn upsert_node_also_evicts_oldest_when_full() {
+        let mut reg = NomadNodeRegistry::new();
+        for i in 0..NODE_CAPACITY as u32 {
+            reg.upsert_node(&DiscoveredNode {
+                dest_hash: dest(i),
+                name: Some(format!("n{i}")),
+                first_seen: i as u64,
+                last_seen: i as u64,
+                hops: None,
+            });
+        }
+        assert_eq!(reg.len(), NODE_CAPACITY);
+        reg.upsert_node(&DiscoveredNode {
+            dest_hash: dest(NODE_CAPACITY as u32),
+            name: Some("new".to_string()),
+            first_seen: 1000,
+            last_seen: 1000,
+            hops: None,
+        });
+        assert_eq!(reg.len(), NODE_CAPACITY);
+        assert!(reg.get_by_hash(&dest(0)).is_none(), "oldest evicted");
+        assert!(reg.get_by_hash(&dest(NODE_CAPACITY as u32)).is_some());
     }
 
     #[test]

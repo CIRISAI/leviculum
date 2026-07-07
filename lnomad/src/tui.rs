@@ -3242,6 +3242,48 @@ fn spawn_fetch(
     *inflight = Some(handle);
 }
 
+/// How long the background discovery drain parks on the shared session before
+/// yielding the lock. A fetch that wants the session waits at most this slice,
+/// while an idle mesh still has its announces drained continuously. Kept small
+/// relative to a page fetch so the hand-off is imperceptible.
+const DISCOVERY_LOCK_SLICE: Duration = Duration::from_millis(250);
+
+/// Spawn the continuous NomadNet node-discovery drain.
+///
+/// The single shared-instance event stream carries announces alongside fetch
+/// responses and has one consumer (whoever holds the session), so discovery
+/// cannot own a second stream. Instead this task drives the same session in
+/// short slices: it locks the session, parks for the next node announce, then
+/// releases so a queued navigation runs next (the session mutex is fair). Any
+/// node announce it drains — or that a concurrent fetch drains — is forwarded to
+/// the announce sink wired to the loop's `node_rx`, surfacing as an
+/// [`AppEvent::NodeDiscovered`]. So the registry keeps filling whether or not a
+/// fetch is in flight, and there is never a second reader racing the stream.
+///
+/// The returned handle is aborted at teardown (mirroring the in-flight fetch),
+/// dropping this task's session clone so the session can be unwrapped and closed.
+fn spawn_discovery(session: &Arc<Mutex<Session>>) -> tokio::task::JoinHandle<()> {
+    let session = session.clone();
+    tokio::spawn(async move {
+        loop {
+            let mut guard = session.lock().await;
+            // `recv_node_announce` forwards each node announce to the sink itself;
+            // it is cancel-safe, so capping the park at one slice drops the wait
+            // without losing a buffered event. `Ok(None)` means the stream closed
+            // (the session is stopping) — stop draining. Otherwise (an announce
+            // arrived, or the slice elapsed) release the lock and re-park.
+            let closed = matches!(
+                tokio::time::timeout(DISCOVERY_LOCK_SLICE, guard.recv_node_announce()).await,
+                Ok(None)
+            );
+            drop(guard);
+            if closed {
+                break;
+            }
+        }
+    })
+}
+
 /// Run the effects [`update`] returned: start navigations, cancel the in-flight
 /// fetch, or record a quit.
 fn run_effects(
@@ -3390,10 +3432,22 @@ pub async fn run_tui(
     model.size = (size.width, size.height);
     model.relayout(content_width(size.width));
 
+    // Wire continuous node discovery: the session forwards every node announce it
+    // sees (idle-drained by the background task below, or drained by a fetch) to
+    // this channel, which the select loop folds into the model registry. Set the
+    // sink before sharing the session so no announce is missed at startup.
+    let (node_tx, mut node_rx) = mpsc::unbounded_channel::<DiscoveredNode>();
+    let mut session = session;
+    session.set_announce_sink(node_tx);
+
     let session = Arc::new(Mutex::new(session));
     let (tx, mut rx) = mpsc::unbounded_channel::<FetchOutcome>();
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let mut generation: u64 = 0;
+
+    // Continuous background discovery: lives for the whole session, independent
+    // of fetches, feeding `node_rx` (see `spawn_discovery`).
+    let discovery = spawn_discovery(&session);
 
     // Kick off the initial navigation, honouring a `#anchor` on the initial URL
     // (the parser folds it into the path; split it back off so the fetched path
@@ -3461,18 +3515,24 @@ pub async fn run_tui(
                     }
                 }
             },
+            Some(node) = node_rx.recv() => {
+                update(&mut model, AppEvent::NodeDiscovered(node));
+            }
             _ = ticker.tick(), if animate => {
                 update(&mut model, AppEvent::Tick);
             }
         }
     };
 
-    // Tear down: abort and drain the in-flight task, then best-effort close the
-    // session once no task clone of it survives.
+    // Tear down: abort and drain the in-flight task and the background discovery
+    // task (releasing their session clones), then best-effort close the session
+    // once no task clone of it survives.
     if let Some(handle) = inflight.take() {
         handle.abort();
         let _ = handle.await;
     }
+    discovery.abort();
+    let _ = discovery.await;
     drop(tx);
     if let Ok(mutex) = Arc::try_unwrap(session) {
         let _ = mutex.into_inner().close().await;
@@ -6037,6 +6097,26 @@ mod tests {
     fn discovery_event_feeds_the_places_panel() {
         let mut m = loaded_model((80, 24));
         update(&mut m, AppEvent::NodeDiscovered(disc_node(0xcd, "Node-C")));
+        let ps = places(&m);
+        assert_eq!(ps.len(), 1);
+        assert!(matches!(ps[0], Place::Node { .. }));
+    }
+
+    #[test]
+    fn discovery_channel_node_reaches_the_model() {
+        // The background discovery task forwards each node onto a channel whose
+        // receiver is the loop's fourth select arm. Drive that channel directly
+        // (no real RNS): a node sent on it is received and folded into the model,
+        // and the places panel then lists it — exactly what the arm does.
+        let mut m = loaded_model((80, 24));
+        let (node_tx, mut node_rx) = mpsc::unbounded_channel::<DiscoveredNode>();
+        node_tx.send(disc_node(0xab, "Node-A")).expect("send node");
+        let node = node_rx.try_recv().expect("node delivered on channel");
+        update(&mut m, AppEvent::NodeDiscovered(node));
+        assert!(
+            m.node_registry.get_by_hash(&[0xab; 16]).is_some(),
+            "node folded into the model registry"
+        );
         let ps = places(&m);
         assert_eq!(ps.len(), 1);
         assert!(matches!(ps[0], Place::Node { .. }));

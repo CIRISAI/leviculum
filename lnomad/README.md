@@ -50,6 +50,12 @@ quit. With `--print` or non-tty stdout, the accumulated list is printed after th
 listen window and the command exits. The discovered list is also reachable from
 the browser with the `d` (`nodes`) command, and `o <N>` opens a listed node.
 
+In the browser, discovery runs continuously in the background from startup: node
+announces are folded into the places panel whether or not a page is loading, so
+the list keeps filling while you read, scroll, or have a panel open. The registry
+is a bounded FIFO of the 500 most recent nodes (re-announces update in place; once
+full, the oldest-seen node is evicted), and is held in RAM only.
+
 ### Options
 
 - `--instance <name>`  shared-instance name (overrides the config file's)
