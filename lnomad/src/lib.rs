@@ -29,6 +29,7 @@ pub mod cli;
 pub mod discovery;
 pub mod fetch;
 pub mod render;
+pub mod theme;
 pub mod tui;
 pub mod url;
 
@@ -42,6 +43,7 @@ pub use fetch::{FetchError, Session};
 pub use render::{
     layout, render_with_options, RLine, RStyle, RenderedLink, RenderedPage, StyledChar,
 };
+pub use theme::{resolve_theme, Bg, Theme, ThemeFlag};
 pub use tui::{
     run_tui, to_ratatui_text, update, view, AppEvent, Model, TerminalGuard, TerminalOps,
 };

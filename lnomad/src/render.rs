@@ -34,6 +34,8 @@
 
 use leviculum_micron::{Align, Block, Field, FieldKind, Line, MicronDocument, Style};
 
+use crate::theme::Theme;
+
 /// Per-depth section indent, matching the reference `SECTION_INDENT`.
 const SECTION_INDENT: usize = 2;
 /// Default table width cap, matching the reference `MAX_TABLE_WIDTH`.
@@ -41,10 +43,6 @@ const MAX_TABLE_WIDTH: usize = 100;
 /// Smallest width the renderer will lay out to; anything smaller is clamped up
 /// so wrapping and alignment stay well defined.
 const MIN_WIDTH: usize = 1;
-/// The foreground colour applied to link labels, so a link reads as distinct
-/// from body text regardless of the page's own colours. Links carry no visible
-/// `[N]` marker: they are set apart by this colour plus an underline only.
-const LINK_FG: (u8, u8, u8) = (0, 175, 255);
 
 /// The full rendered page: laid-out text plus the links found in it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -80,7 +78,7 @@ pub struct RenderedLink {
 }
 
 /// Render a document to a [`RenderedPage`] at `width` columns, with 24-bit ANSI
-/// colour enabled.
+/// colour enabled and the dark theme (the `--print` / non-tty look).
 pub fn render(doc: &MicronDocument, width: usize) -> RenderedPage {
     render_with_options(doc, width, false)
 }
@@ -95,7 +93,9 @@ pub fn render(doc: &MicronDocument, width: usize) -> RenderedPage {
 /// lines with [`layout`], then serialises them to the exact byte stream the
 /// `--print` / non-tty path emits.
 pub fn render_with_options(doc: &MicronDocument, width: usize, no_color: bool) -> RenderedPage {
-    let (lines, links) = layout(doc, width);
+    // The print / non-tty sink is always the dark theme, so its golden output is
+    // stable and independent of any terminal-background detection.
+    let (lines, links) = layout(doc, width, Theme::Dark);
     RenderedPage {
         text: emit_ansi(&lines, no_color),
         links,
@@ -109,12 +109,14 @@ pub fn render_with_options(doc: &MicronDocument, width: usize, no_color: bool) -
 /// indented; every character carries its resolved [`RStyle`]. The returned
 /// [`RenderedLink`]s carry both their navigation data and their laid-out
 /// `(line, col_start, col_end)` position for hit-testing. No `no_color` choice
-/// is made here: colour is a property of the sink, not the layout.
-pub fn layout(doc: &MicronDocument, width: usize) -> (Vec<RLine>, Vec<RenderedLink>) {
+/// is made here: colour is a property of the sink, not the layout. The `theme`
+/// selects the accent colours (heading bands, link colour) baked into the cells.
+pub fn layout(doc: &MicronDocument, width: usize, theme: Theme) -> (Vec<RLine>, Vec<RenderedLink>) {
     let mut renderer = Renderer {
         lines: Vec::new(),
         links: Vec::new(),
         width: width.max(MIN_WIDTH),
+        theme,
     };
     for block in &doc.blocks {
         renderer.render_block(block);
@@ -246,6 +248,7 @@ struct Renderer {
     lines: Vec<RLine>,
     links: Vec<RenderedLink>,
     width: usize,
+    theme: Theme,
 }
 
 impl Renderer {
@@ -322,7 +325,7 @@ impl Renderer {
     }
 
     fn render_heading(&mut self, depth: u8, line: &Line) {
-        let (fg, bg) = heading_theme(depth);
+        let (fg, bg) = self.theme.heading_band(depth);
         let (chars, align) = self.flatten_heading(line, fg, bg);
         let indent = Self::indent_for(depth as usize);
         let content_width = self.width.saturating_sub(indent).max(MIN_WIDTH);
@@ -488,7 +491,7 @@ impl Renderer {
                     col_end: 0,
                 });
                 let link_style = RStyle {
-                    fg: Some(LINK_FG),
+                    fg: Some(self.theme.link_fg()),
                     underline: true,
                     ..base
                 };
@@ -561,17 +564,6 @@ impl Renderer {
         }
         row.extend(content);
         self.push_line(row);
-    }
-}
-
-/// The dark-theme heading band colours (fg, bg) for a heading depth, mirroring
-/// `STYLES_DARK` (`MicronParser.py` lines 20-22). Depths beyond 3 reuse the
-/// depth-3 band.
-fn heading_theme(depth: u8) -> ((u8, u8, u8), (u8, u8, u8)) {
-    match depth {
-        1 => ((0x22, 0x22, 0x22), (0xbb, 0xbb, 0xbb)),
-        2 => ((0x11, 0x11, 0x11), (0x99, 0x99, 0x99)),
-        _ => ((0x00, 0x00, 0x00), (0x77, 0x77, 0x77)),
     }
 }
 
@@ -754,6 +746,37 @@ mod tests {
         // Strip SGR to count visible columns.
         let visible = strip_sgr(first_line);
         assert_eq!(visible.chars().count(), 20, "band should fill the width");
+    }
+
+    #[test]
+    fn light_theme_uses_light_band_and_link_colour() {
+        let d = doc(vec![
+            Block::Heading {
+                depth: 1,
+                line: Line::new(vec![plain_span("Title")]),
+            },
+            Block::Paragraph {
+                depth: 0,
+                line: Line::new(vec![link_span("Docs")]),
+            },
+        ]);
+        let (lines, _links) = layout(&d, 40, Theme::Light);
+        let text = emit_ansi(&lines, false);
+        // Light depth-1 band: fg #000000 (0), bg #777777 (119).
+        assert!(
+            text.contains("38;2;0;0;0") && text.contains("48;2;119;119;119"),
+            "light heading band missing: {text:?}"
+        );
+        // Light link colour: deep blue #005aaa => (0, 90, 170).
+        assert!(
+            text.contains("38;2;0;90;170"),
+            "light link colour missing: {text:?}"
+        );
+        // The dark cyan link colour must NOT appear under the light theme.
+        assert!(
+            !text.contains("38;2;0;175;255"),
+            "dark link colour leaked into light theme: {text:?}"
+        );
     }
 
     #[test]

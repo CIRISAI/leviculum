@@ -55,6 +55,10 @@ the browser with the `d` (`nodes`) command, and `o <N>` opens a listed node.
 - `--instance <name>`  shared-instance name (overrides the config file's)
 - `--config <dir>`     Reticulum config directory (default: the platform default)
 - `--no-color`         disable ANSI colour
+- `--theme <t>`        colour theme: `auto` (default), `light`, or `dark`. `auto`
+  detects the terminal background (OSC 11, with a `COLORFGBG` fallback) and picks
+  the matching theme, defaulting to dark when it cannot tell. Ignored with
+  `--print` or non-tty output.
 - `--width <n>`        render width (default: detected terminal width, else 80)
 - `--timeout <s>`      per-request timeout in seconds (default 30)
 - `--print`            fetch, render and print once, then exit
@@ -79,6 +83,7 @@ set apart by its underline and colour, and is reached by focus, hint or click:
 - click       follow a link, or activate a top-bar control
 - `:`         enter an address
 - `R`         reload the page
+- `t`         toggle the light / dark theme (correct a wrong auto-detection)
 - `M-←` / `M-→`  back / forward
 - `Esc` / `Ctrl-g`  cancel a load
 - `?`         toggle the help overlay

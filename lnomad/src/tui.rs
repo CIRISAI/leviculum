@@ -64,6 +64,7 @@ use leviculum_micron::MicronDocument;
 use crate::browser::{self, BrowserOptions};
 use crate::fetch::Session;
 use crate::render::{layout, RLine, RStyle, RenderedLink};
+use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
 use crate::url::{parse_url, Target};
 
 /// The number of columns reserved on the right for the scrollbar.
@@ -88,7 +89,8 @@ const FORWARD_LABEL: &str = "forward ›";
 const RELOAD_LABEL: &str = "⟳ reload";
 
 /// Browse-mode status hints.
-const BROWSE_HINTS: &str = "j/k scroll  Tab focus  f hint  : addr  R reload  ? help  q quit";
+const BROWSE_HINTS: &str =
+    "j/k scroll  Tab focus  f hint  : addr  R reload  t theme  ? help  q quit";
 /// Address-mode status hints.
 const ADDRESS_HINTS: &str = "Enter: go   Esc: cancel";
 /// Hint-mode status hints.
@@ -97,21 +99,23 @@ const HINT_HINTS: &str = "type a hint label or link text   Esc: cancel";
 /// The home-row alphabet hint labels are drawn from (vimium-style).
 const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
 
-/// The muted "chrome" background the fixed top-bar and status bar are filled
-/// with, so they read as a distinct bar over the black content (dark slate).
-const CHROME_BG: Color = Color::Rgb(38, 40, 49);
-/// The light foreground the chrome bars carry over [`CHROME_BG`].
-const CHROME_FG: Color = Color::Rgb(205, 210, 220);
+/// A ratatui [`Color`] from a theme RGB triple.
+fn rgb(c: (u8, u8, u8)) -> Color {
+    Color::Rgb(c.0, c.1, c.2)
+}
 
 /// The style the fixed top-bar and status bar are filled with, full width, so
-/// they stand out from the content. With colour, a muted slate background and a
-/// light foreground; under `no_color`, the REVERSE modifier so the bars still
-/// delineate without any colour. Shared by both bars for a consistent look.
-fn chrome_style(no_color: bool) -> Style {
+/// they stand out from the content. With colour, the theme's chrome background
+/// and foreground (a muted slate on dark, a light bar on light); under
+/// `no_color`, the REVERSE modifier so the bars still delineate without any
+/// colour. Shared by both bars for a consistent look.
+fn chrome_style(no_color: bool, theme: Theme) -> Style {
     if no_color {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
-        Style::default().fg(CHROME_FG).bg(CHROME_BG)
+        Style::default()
+            .fg(rgb(theme.chrome_fg()))
+            .bg(rgb(theme.chrome_bg()))
     }
 }
 
@@ -385,6 +389,9 @@ pub struct Model {
     /// Whether colour is suppressed (NO_COLOR / non-tty): the chrome bars fall
     /// back to reverse video instead of a coloured background.
     pub no_color: bool,
+    /// The active light/dark theme: the accents baked into `page` and the chrome
+    /// colours the view draws. Toggled at runtime with `t`.
+    pub theme: Theme,
     /// Set once the user has asked to quit; the IO loop breaks on it.
     pub quit: bool,
 }
@@ -398,7 +405,8 @@ impl Model {
         title: impl Into<String>,
         size: (u16, u16),
     ) -> Self {
-        let (page, links) = layout(doc, width);
+        let theme = Theme::default();
+        let (page, links) = layout(doc, width, theme);
         Self {
             doc: doc.clone(),
             width,
@@ -406,17 +414,28 @@ impl Model {
             links,
             title: title.into(),
             size,
+            theme,
             ..Self::default()
         }
     }
 
-    /// Re-wrap the stored document to `width`, replacing `page`/`links`. The
-    /// caller is responsible for re-clamping `scroll` afterwards.
+    /// Re-wrap the stored document to `width` under the current theme, replacing
+    /// `page`/`links`. The caller is responsible for re-clamping `scroll`
+    /// afterwards. Also used to re-lay-out in place after a theme toggle.
     pub fn relayout(&mut self, width: usize) {
         self.width = width;
-        let (page, links) = layout(&self.doc, width);
+        let (page, links) = layout(&self.doc, width, self.theme);
         self.page = page;
         self.links = links;
+    }
+
+    /// Toggle between the dark and light theme, re-laying the page out so the
+    /// new accents take effect and re-clamping the scroll offset.
+    pub fn toggle_theme(&mut self) {
+        self.theme = self.theme.toggle();
+        let (w, vp) = (self.width, self.viewport());
+        self.relayout(w);
+        self.clamp_scroll(vp);
     }
 
     /// The number of page lines visible at once: the terminal height minus the
@@ -810,6 +829,12 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
         return Vec::new();
     }
 
+    // Toggle the light/dark theme (`t`), correcting a wrong auto-detection.
+    if key.code == KeyCode::Char('t') && !ctrl && !alt {
+        model.toggle_theme();
+        return Vec::new();
+    }
+
     // Tab / Shift-Tab move the focus cursor across links; Enter follows it.
     if key.code == KeyCode::Tab {
         focus_next(model);
@@ -1155,8 +1180,8 @@ fn render_hints(model: &Model, frame: &mut Frame) {
     let area = frame.area();
     let input = model.hint_input.clone();
     let badge = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Rgb(255, 215, 0))
+        .fg(rgb(model.theme.hint_badge_fg()))
+        .bg(rgb(model.theme.hint_badge_bg()))
         .add_modifier(Modifier::BOLD);
     let buf = frame.buffer_mut();
     for hint in hints(model) {
@@ -1215,7 +1240,10 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     }
     // Fill the whole bar (both rows, full width) with the chrome style first; the
     // title and controls render on top and inherit its background.
-    frame.render_widget(Block::default().style(chrome_style(model.no_color)), area);
+    frame.render_widget(
+        Block::default().style(chrome_style(model.no_color, model.theme)),
+        area,
+    );
     let title_row = Rect { height: 1, ..area };
     let title = RtLine::from(RtSpan::styled(
         model.title.clone(),
@@ -1321,7 +1349,10 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
     }
     // Fill the status bar full width with the chrome style; the spinner / status /
     // hints render on top and inherit its background.
-    frame.render_widget(Block::default().style(chrome_style(model.no_color)), area);
+    frame.render_widget(
+        Block::default().style(chrome_style(model.no_color, model.theme)),
+        area,
+    );
     let dim = Style::default().add_modifier(Modifier::DIM);
     if let Some(pending) = &model.pending {
         let label = format!(" loading {}", pending.target.path);
@@ -1373,6 +1404,7 @@ const HELP_LINES: &[&str] = &[
     "  click               follow link",
     "  :                   enter an address",
     "  R                   reload the page",
+    "  t                   toggle light / dark theme",
     "  M-← / M-→           back / forward",
     "  Esc / Ctrl-g        cancel a load",
     "  ?                   toggle this help",
@@ -1612,6 +1644,58 @@ fn run_effects(
     }
 }
 
+/// How long to wait for the terminal's OSC 11 background reply before giving up
+/// and falling back to the dark theme. Kept short so a terminal that never
+/// answers does not stall startup.
+const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Query the terminal background for `--theme auto`, returning `None` (→ dark)
+/// when the flag is explicit, the query fails, or the terminal does not answer.
+///
+/// The `termbg` crate sends the OSC 11 query (falling back to `COLORFGBG`),
+/// parses the reply, and handles the timeout, tmux/screen wrapping and raw-mode
+/// save/restore itself. Its 16-bit-per-channel result is reduced to 8-bit; the
+/// foreground, when `COLORFGBG` provides one, is a luminance tiebreaker only.
+fn detect_background(flag: ThemeFlag) -> Option<Bg> {
+    if !matches!(flag, ThemeFlag::Auto) {
+        return None;
+    }
+    let bg = termbg::rgb(BG_QUERY_TIMEOUT).ok()?;
+    Some(Bg {
+        bg: rgb16_to_rgb8(bg),
+        fg: colorfgbg_foreground(),
+    })
+}
+
+/// Reduce a `termbg` 16-bit-per-channel colour to 8-bit by taking the high byte.
+fn rgb16_to_rgb8(c: termbg::Rgb) -> (u8, u8, u8) {
+    ((c.r >> 8) as u8, (c.g >> 8) as u8, (c.b >> 8) as u8)
+}
+
+/// The foreground colour implied by `COLORFGBG` (`"<fg>;<bg>"` of palette
+/// indices), as a coarse grey used only as a mid-tone tiebreaker. `None` when
+/// the variable is absent or unparsable.
+fn colorfgbg_foreground() -> Option<(u8, u8, u8)> {
+    let raw = std::env::var("COLORFGBG").ok()?;
+    let fg_index: u8 = raw.split(';').next()?.trim().parse().ok()?;
+    Some(ansi_index_grey(fg_index))
+}
+
+/// A grey whose luminance approximates a 16-colour palette index: the normal
+/// set (0..8) reads dark, the bright set (8..16) light. Only the relative
+/// luminance matters, so an exact palette is unnecessary.
+fn ansi_index_grey(index: u8) -> (u8, u8, u8) {
+    let v = match index {
+        0 => 0,
+        7 => 192,
+        8 => 96,
+        15 => 255,
+        i if i < 8 => 128,
+        _ => 224,
+    };
+    (v, v, v)
+}
+
 /// Run the interactive TUI, owning the [`Session`] and driving navigation.
 ///
 /// Does the initial fetch of `initial` and every subsequent navigation as a
@@ -1619,14 +1703,27 @@ fn run_effects(
 /// [`AppEvent::PageLoaded`] / [`AppEvent::LoadFailed`], so the UI stays live
 /// (spinner animates, keys and the address editor work) while a page loads. A
 /// cancel drops the in-flight task; a slow or failed fetch never blocks the UI.
-pub async fn run_tui(session: Session, initial: Target, opts: BrowserOptions) -> io::Result<()> {
+pub async fn run_tui(
+    session: Session,
+    initial: Target,
+    opts: BrowserOptions,
+    theme_flag: ThemeFlag,
+) -> io::Result<()> {
     install_panic_hook();
+
+    // Resolve the theme BEFORE entering the alt-screen/raw event loop: the OSC 11
+    // background query (via `termbg`) briefly toggles raw mode and reads a reply
+    // on stdin, and doing it now keeps that reply from leaking into key input.
+    // `termbg` restores the terminal state and drains stdin itself.
+    let theme = resolve_theme(detect_background(theme_flag), theme_flag);
+
     let mut guard = TerminalGuard::new(CrosstermTerminal::new())?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut events = EventStream::new();
 
     let mut model = Model {
         no_color: opts.no_color,
+        theme,
         ..Model::default()
     };
     let size = terminal.size()?;
@@ -2295,6 +2392,71 @@ mod tests {
     }
 
     #[test]
+    fn light_theme_view_uses_light_link_and_heading_band() {
+        let mut model = model_from_sample(content_width(80), (80, 24));
+        model.toggle_theme();
+        assert_eq!(model.theme, Theme::Light);
+        let buffer = render(&model, 80, 24);
+
+        // The link label 'A' now carries the light (deep-blue) link colour.
+        let light_link = Color::Rgb(0, 90, 170);
+        let mut found_light_link = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == "A"
+                    && cell.fg == light_link
+                    && cell.modifier.contains(Modifier::UNDERLINED)
+                {
+                    found_light_link = true;
+                }
+            }
+        }
+        assert!(found_light_link, "no light-blue underlined link cell found");
+
+        // The depth-1 "Sample Page" heading carries the light band bg #777777
+        // (the dark theme would band it #bbbbbb instead).
+        let light_band_bg = Color::Rgb(0x77, 0x77, 0x77);
+        let has_light_band = (0..buffer.area.height)
+            .any(|y| (0..buffer.area.width).any(|x| buffer[(x, y)].bg == light_band_bg));
+        assert!(has_light_band, "light heading band not found");
+        // The dark depth-1 band must not appear under the light theme.
+        let dark_band_bg = Color::Rgb(0xbb, 0xbb, 0xbb);
+        let has_dark_band = (0..buffer.area.height)
+            .any(|y| (0..buffer.area.width).any(|x| buffer[(x, y)].bg == dark_band_bg));
+        assert!(!has_dark_band, "dark heading band leaked into light theme");
+    }
+
+    #[test]
+    fn t_toggles_theme_and_view_reflects_it() {
+        let mut m = loaded_model((80, 24));
+        assert_eq!(m.theme, Theme::Dark);
+
+        // `t` flips the model to the light theme...
+        let effects = press(&mut m, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert!(effects.is_empty());
+        assert_eq!(m.theme, Theme::Light);
+        let light_bg = rgb(Theme::Light.chrome_bg());
+        let buffer = render(&m, 80, 24);
+        assert_eq!(
+            buffer[(0, 0)].bg,
+            light_bg,
+            "view must reflect the light chrome after toggling"
+        );
+
+        // ...and `t` again flips back to dark.
+        press(&mut m, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(m.theme, Theme::Dark);
+        let dark_bg = rgb(Theme::Dark.chrome_bg());
+        let buffer = render(&m, 80, 24);
+        assert_eq!(
+            buffer[(0, 0)].bg,
+            dark_bg,
+            "view must return to dark chrome"
+        );
+    }
+
+    #[test]
     fn view_scrolls_slice_below_topbar_and_draws_scrollbar() {
         let (w, h) = (40u16, 13u16);
         let mut m = Model::from_document(&long_doc(), content_width(w), "Long", (w, h));
@@ -2394,6 +2556,8 @@ mod tests {
     fn chrome_bars_carry_background_full_width() {
         let m = loaded_model((80, 24));
         assert!(!m.no_color, "colour is on by default");
+        assert_eq!(m.theme, Theme::Dark, "dark is the default theme");
+        let dark_bg = rgb(Theme::Dark.chrome_bg());
         let buffer = render(&m, 80, 24);
         // The two top-bar rows (0, 1) and the status row (23) carry the chrome
         // background across the full width, including the rightmost column.
@@ -2401,7 +2565,7 @@ mod tests {
             for &x in &[0u16, 40, 79] {
                 assert_eq!(
                     buffer[(x, y)].bg,
-                    CHROME_BG,
+                    dark_bg,
                     "cell ({x},{y}) is missing the chrome background"
                 );
             }
@@ -2409,21 +2573,44 @@ mod tests {
     }
 
     #[test]
-    fn chrome_bars_use_reverse_under_no_color() {
+    fn chrome_bars_carry_light_background_under_light_theme() {
         let mut m = loaded_model((80, 24));
-        m.no_color = true;
+        m.toggle_theme();
+        assert_eq!(m.theme, Theme::Light);
+        let light_bg = rgb(Theme::Light.chrome_bg());
         let buffer = render(&m, 80, 24);
         for &y in &[0u16, 1, 23] {
             for &x in &[0u16, 40, 79] {
-                let cell = &buffer[(x, y)];
-                assert!(
-                    cell.modifier.contains(Modifier::REVERSED),
-                    "cell ({x},{y}) must be reversed under no_color"
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    light_bg,
+                    "cell ({x},{y}) is missing the light chrome background"
                 );
-                assert_ne!(
-                    cell.bg, CHROME_BG,
-                    "no_color must not paint the colour background"
-                );
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_bars_use_reverse_under_no_color() {
+        let dark_bg = rgb(Theme::Dark.chrome_bg());
+        for theme in [Theme::Dark, Theme::Light] {
+            let mut m = loaded_model((80, 24));
+            m.no_color = true;
+            m.theme = theme;
+            m.relayout(m.width);
+            let buffer = render(&m, 80, 24);
+            for &y in &[0u16, 1, 23] {
+                for &x in &[0u16, 40, 79] {
+                    let cell = &buffer[(x, y)];
+                    assert!(
+                        cell.modifier.contains(Modifier::REVERSED),
+                        "cell ({x},{y}) must be reversed under no_color ({theme:?})"
+                    );
+                    assert_ne!(
+                        cell.bg, dark_bg,
+                        "no_color must not paint the colour background ({theme:?})"
+                    );
+                }
             }
         }
     }

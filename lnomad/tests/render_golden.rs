@@ -8,6 +8,7 @@
 
 use leviculum_micron::parse;
 use lnomad::render::{layout, render_with_options};
+use lnomad::theme::Theme;
 
 const SAMPLE: &str = include_str!("fixtures/sample.mu");
 const GOLDEN_COLOR: &str = include_str!("fixtures/golden_80_color.ansi");
@@ -36,8 +37,8 @@ fn print_output_is_byte_identical_to_golden_plain() {
 #[test]
 fn narrower_width_produces_more_lines() {
     let doc = parse(SAMPLE);
-    let (wide, _) = layout(&doc, 80);
-    let (narrow, _) = layout(&doc, 40);
+    let (wide, _) = layout(&doc, 80, Theme::Dark);
+    let (narrow, _) = layout(&doc, 40, Theme::Dark);
     // The plain paragraph rewraps: 40 columns needs strictly more rows than 80.
     assert!(
         narrow.len() > wide.len(),
@@ -55,7 +56,7 @@ fn line_text(line: &lnomad::render::RLine) -> String {
 #[test]
 fn bullet_link_records_its_laid_out_position() {
     let doc = parse(SAMPLE);
-    let (lines, links) = layout(&doc, 80);
+    let (lines, links) = layout(&doc, 80, Theme::Dark);
 
     // The plain "• Alpha" link is link 1; its label starts at column 0 (no
     // leading whitespace) and the clickable span covers just "• Alpha" (no
@@ -86,7 +87,7 @@ fn bullet_link_records_its_laid_out_position() {
 #[test]
 fn leading_whitespace_of_link_is_not_underlined() {
     let doc = parse(SAMPLE);
-    let (lines, links) = layout(&doc, 80);
+    let (lines, links) = layout(&doc, 80, Theme::Dark);
 
     // The "  • Beta" link's label carries two leading spaces; those must render
     // plain (not underlined, not tagged), and col_start must point past them.

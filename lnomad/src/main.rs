@@ -10,12 +10,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use leviculum_std::config::Config;
 use lnomad::browser::{self, BrowserOptions};
 use lnomad::cli::{resolve_args, Mode};
 use lnomad::fetch::Session;
+use lnomad::theme::ThemeFlag;
 use lnomad::tui::run_tui;
 use lnomad::url::parse_url;
 
@@ -46,6 +47,11 @@ struct Args {
     #[arg(long)]
     no_color: bool,
 
+    /// Colour theme for the interactive TUI: `auto` detects the terminal
+    /// background, `light`/`dark` force a theme. Ignored with `--print` / non-tty.
+    #[arg(long, value_enum, default_value_t = ThemeArg::Auto)]
+    theme: ThemeArg,
+
     /// Render width in columns (default: the detected terminal width, else 80).
     #[arg(long)]
     width: Option<usize>,
@@ -67,6 +73,27 @@ struct Args {
     /// the seconds as the bare positional: `lnomad --discover [seconds]`.
     #[arg(long)]
     duration: Option<u64>,
+}
+
+/// The `--theme` choice, a clap-facing mirror of [`ThemeFlag`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ThemeArg {
+    /// Detect the terminal background and pick the matching theme.
+    Auto,
+    /// Force the light theme.
+    Light,
+    /// Force the dark theme.
+    Dark,
+}
+
+impl From<ThemeArg> for ThemeFlag {
+    fn from(arg: ThemeArg) -> Self {
+        match arg {
+            ThemeArg::Auto => ThemeFlag::Auto,
+            ThemeArg::Light => ThemeFlag::Light,
+            ThemeArg::Dark => ThemeFlag::Dark,
+        }
+    }
 }
 
 /// Default listen duration in `--discover` mode, in seconds.
@@ -165,7 +192,7 @@ async fn main() -> ExitCode {
             // the address bar, history) itself, keeping the UI live while a page
             // loads. The session is moved in and closed there, so we return
             // directly rather than fall through to the shared teardown below.
-            return match run_tui(session, target, opts).await {
+            return match run_tui(session, target, opts, args.theme.into()).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("lnomad: {err}");
