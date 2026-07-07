@@ -1673,20 +1673,23 @@ fn close_places(model: &mut Model) {
     model.show_places = false;
 }
 
-/// Fold a key while the places panel is open: `j/k`/arrows move the selection,
-/// `Enter` opens it, `x` deletes the selected bookmark, `Esc`/`d` close.
+/// Fold a key while the places panel is open. The up/down motions are the SAME
+/// as the content scroll: [`key_to_scroll`] maps `j`/`k`/`Ctrl-n`/`Ctrl-p`/arrows
+/// (line), `Ctrl-f`/`Ctrl-b`/`Ctrl-d`/`Ctrl-u` (page/half-page, clamped to the
+/// ends), and `g`/`G`/Home/End (first/last), applied to the panel SELECTION
+/// instead of the page. `Enter` opens the selected place, `x` deletes the
+/// selected bookmark, `Esc`/`d` close the panel.
 fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+    // Movement shares the content keymap, so the panel and the page scroll the
+    // same way. This is checked first: `Ctrl-d` is a half-page motion here, not
+    // the `d` that closes the panel.
+    if let Some(cmd) = key_to_scroll(&key) {
+        apply_places_scroll(model, cmd);
+        return Vec::new();
+    }
     match key.code {
         KeyCode::Esc | KeyCode::Char('d') => {
             close_places(model);
-            Vec::new()
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            move_places_selection(model, 1);
-            Vec::new()
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            move_places_selection(model, -1);
             Vec::new()
         }
         KeyCode::Enter => {
@@ -1698,17 +1701,32 @@ fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     }
 }
 
-/// Move the places selection by `delta`, clamped to the current row count. A
-/// no-op when the panel is empty.
-fn move_places_selection(model: &mut Model, delta: isize) {
+/// Apply a [`ScrollCmd`] to the places-panel selection, reusing the content
+/// keymap so the panel and the page share one set of up/down motions. Line
+/// motions step one entry, page/half-page motions jump several (clamped to the
+/// list ends), and top/bottom select the first/last entry. A no-op when the
+/// panel is empty.
+fn apply_places_scroll(model: &mut Model, cmd: ScrollCmd) {
     let len = places(model).len();
     if len == 0 {
         model.places_sel = 0;
         return;
     }
-    let max = len - 1;
-    let next = model.places_sel as isize + delta;
-    model.places_sel = next.clamp(0, max as isize) as usize;
+    let max = (len - 1) as isize;
+    let vp = model.viewport().max(1) as isize;
+    let half = (vp / 2).max(1);
+    let sel = model.places_sel as isize;
+    let next = match cmd {
+        ScrollCmd::LineUp => sel - 1,
+        ScrollCmd::LineDown => sel + 1,
+        ScrollCmd::HalfPageUp => sel - half,
+        ScrollCmd::HalfPageDown => sel + half,
+        ScrollCmd::PageUp => sel - vp,
+        ScrollCmd::PageDown => sel + vp,
+        ScrollCmd::Top => 0,
+        ScrollCmd::Bottom => max,
+    };
+    model.places_sel = next.clamp(0, max) as usize;
 }
 
 /// Open the selected place: a bookmark's URL, or a discovered node's default
@@ -5946,6 +5964,59 @@ mod tests {
                 is_file: false,
             })]
         );
+    }
+
+    #[test]
+    fn places_panel_shares_the_content_scroll_keymap() {
+        let mut m = loaded_model((80, 24));
+        for i in 0..5u8 {
+            m.bookmarks.add(Bookmark {
+                url: format!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa{i:02}:/page/index.mu"),
+                title: format!("B{i}"),
+            });
+        }
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(m.show_places);
+        assert_eq!(m.places_sel, 0);
+
+        // Line down: j, Ctrl-n, Down all step one entry.
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 1);
+        press(&mut m, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(m.places_sel, 2);
+        press(&mut m, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 3);
+
+        // Line up: k, Ctrl-p, Up step back one entry.
+        press(&mut m, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 2);
+        press(&mut m, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(m.places_sel, 1);
+        press(&mut m, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 0);
+
+        // g / G / Home / End jump to the first / last entry.
+        let last = places(&m).len() - 1;
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, last);
+        press(&mut m, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 0);
+        press(&mut m, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(m.places_sel, last);
+        press(&mut m, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 0);
+
+        // Ctrl-d is a half-page motion here, not the `d` that closes the panel.
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(m.show_places, "Ctrl-d must not close the panel");
+        assert_eq!(
+            m.places_sel, last,
+            "half-page jump clamps to the last entry"
+        );
+
+        // Plain `d` still closes the panel.
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(!m.show_places);
     }
 
     #[test]

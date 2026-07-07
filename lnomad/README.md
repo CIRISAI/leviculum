@@ -106,6 +106,12 @@ transparent: `R` always refetches (bypassing it and refreshing the stored copy),
 and non-idempotent form submits are never cached. A shown page served from the
 cache carries a subtle `⚡ cached` marker at the right of the top-bar.
 
+The places panel (`d`) takes the same up/down motions as the page scroll applied
+to its selection: `j` / `k`, `Ctrl-n` / `Ctrl-p`, arrows step a row; `Ctrl-f` /
+`Ctrl-b` and `Ctrl-d` / `Ctrl-u` jump several; `g` / `G`, `Home` / `End` go to
+the first / last entry. `Enter` opens the selection, `x` deletes the selected
+bookmark, `Esc` / `d` close the panel.
+
 ### Form fields and submitting
 
 A page can carry input fields (`` `<name`> `` text, `` `<?|name`Label> ``
