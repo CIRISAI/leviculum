@@ -98,8 +98,14 @@ carries its preset (`f=v`) fields as `var_*` request variables.
 A link whose target is an external URL (an `http`, `https` or `mailto` scheme)
 is not fetched in-mesh: it is handed to the platform default handler (`xdg-open`
 on Linux). Any other scheme (`file`, `javascript`, custom schemes) is refused
-and reported in the status bar, since a page comes from an untrusted node and an
-arbitrary URI must never reach a system handler.
+and reported in a transient toast, since a page comes from an untrusted node and
+an arbitrary URI must never reach a system handler.
+
+Transient notes (a fetch error, a refused link, "copied", "bookmarked",
+"cancelled") appear as an auto-dismissing toast floated at the bottom-right of
+the content, not in the status bar. A toast clears after a few seconds or on the
+next key press; the status bar always keeps the key-hints (or the loading
+spinner during a fetch).
 
 ## v1 limits
 
@@ -108,5 +114,5 @@ arbitrary URI must never reach a system handler.
   carries form fields.
 - A `#anchor` in a target (a followed link or the initial URL) is resolved
   against the page's anchors and scrolled to on load; an unknown anchor falls
-  back to the top of the page with a status note.
+  back to the top of the page with a toast note.
 - `/file/` downloads are not supported.

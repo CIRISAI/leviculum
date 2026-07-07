@@ -82,8 +82,14 @@ const STATUS_ROWS: u16 = 1;
 const CHROME_ROWS: u16 = TOPBAR_ROWS + STATUS_ROWS;
 /// Columns of blank gap between top-bar controls.
 const CTRL_GAP: u16 = 2;
-/// Spinner animation cadence while a fetch is in flight, in milliseconds.
+/// Spinner animation cadence while a fetch is in flight, in milliseconds. Also
+/// the cadence at which an idle toast is aged towards its expiry.
 const SPINNER_TICK_MS: u64 = 120;
+/// How long a toast stays up before auto-dismissing, in milliseconds.
+const TOAST_LIFETIME_MS: u64 = 4000;
+/// Toast lifetime expressed in animation ticks (`TOAST_LIFETIME_MS` over the
+/// tick cadence), so expiry is a pure count of ticks.
+const TOAST_TICKS: u64 = TOAST_LIFETIME_MS / SPINNER_TICK_MS;
 
 /// The label for each of the three fixed top-bar controls.
 const BACK_LABEL: &str = "‹ back";
@@ -487,6 +493,34 @@ pub enum Effect {
     Quit,
 }
 
+/// Whether a transient toast carries an error or a neutral/success note. Drives
+/// the toast's accent colour and glyph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastKind {
+    /// A failure the reader should notice (a bad link, a failed fetch): drawn in
+    /// an attention colour with a `⚠` prefix.
+    Error,
+    /// A neutral confirmation (copied, bookmarked, cancelled): drawn in a calm
+    /// colour with a `✓` prefix.
+    Info,
+}
+
+/// A transient, auto-dismissing notification floated over the content. Replaces
+/// the old sticky status-bar messages, leaving the status bar for the key-hints
+/// (or the loading spinner during a fetch).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toast {
+    /// Whether this is an error or a neutral note.
+    pub kind: ToastKind,
+    /// The message text; carries the offending target for error toasts so it is
+    /// self-describing.
+    pub text: String,
+    /// The [`Model::now_tick`] value when the toast was shown, so its age (and
+    /// thus expiry) is a pure function of the monotonic tick counter and needs no
+    /// wall clock to unit-test.
+    pub shown_at: u64,
+}
+
 /// The complete UI state. Pure data: [`update`] is the only thing that mutates
 /// it, and it never performs IO.
 ///
@@ -539,9 +573,14 @@ pub struct Model {
     pub hover: Option<usize>,
     /// The characters typed so far in hint mode, narrowing the visible labels.
     pub hint_input: String,
-    /// A transient status/error message shown in the status bar, or `None` for
-    /// the default hints.
-    pub status: Option<String>,
+    /// The active transient toast (fetch error, "copied", "bookmarked", ...), or
+    /// `None`. Rendered as a floating overlay, not in the status bar; auto-expires
+    /// and is cleared on the next key event. See [`Model::set_toast`].
+    pub toast: Option<Toast>,
+    /// A monotonic tick counter, advanced once per animation [`AppEvent::Tick`].
+    /// The toast's age is measured against it, so expiry is testable by advancing
+    /// this counter without any real time passing.
+    pub now_tick: u64,
     /// The loading spinner's animation tick: advances once per redraw while a
     /// fetch is in flight, driving both the circling glyph and the shimmering
     /// rainbow hue. See [`spinner_span`].
@@ -624,6 +663,37 @@ impl Model {
     /// Whether a fetch is currently in flight.
     pub fn is_loading(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Show a transient toast, stamped with the current tick so it can expire.
+    /// Every transient message routes through here instead of the status bar.
+    pub fn set_toast(&mut self, kind: ToastKind, text: impl Into<String>) {
+        self.toast = Some(Toast {
+            kind,
+            text: text.into(),
+            shown_at: self.now_tick,
+        });
+    }
+
+    /// Dismiss any active toast (a navigation or key event clears it early).
+    pub fn dismiss_toast(&mut self) {
+        self.toast = None;
+    }
+
+    /// Advance the toast towards expiry: clear it once it has been up for at
+    /// least [`TOAST_TICKS`] ticks. Called on every animation tick.
+    fn expire_toast(&mut self) {
+        if let Some(toast) = &self.toast {
+            if self.now_tick.saturating_sub(toast.shown_at) >= TOAST_TICKS {
+                self.toast = None;
+            }
+        }
+    }
+
+    /// Whether the UI needs the periodic tick: a fetch spinner is animating, or a
+    /// toast is up and must age towards its auto-dismiss.
+    pub fn needs_tick(&self) -> bool {
+        self.is_loading() || self.toast.is_some()
     }
 
     /// The largest valid `scroll` for a given viewport: the last position where
@@ -808,6 +878,8 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::Tick => {
             model.spin = model.spin.wrapping_add(1);
+            model.now_tick = model.now_tick.wrapping_add(1);
+            model.expire_toast();
             Vec::new()
         }
         AppEvent::PageLoaded { doc, title } => {
@@ -816,7 +888,7 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::LoadFailed(msg) => {
             model.pending = None;
-            model.status = Some(msg);
+            model.set_toast(ToastKind::Error, msg);
             Vec::new()
         }
         AppEvent::NodeDiscovered(node) => {
@@ -864,7 +936,7 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
     model.relayout(content_width(model.size.0));
     model.scroll = 0;
     model.title = title;
-    model.status = None;
+    model.dismiss_toast();
     // A fresh page invalidates any focus/hover cursor into the old link set, and
     // any search match highlights against the old page.
     model.focus = None;
@@ -879,14 +951,14 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
         }
     }
     // A followed `#anchor` scrolls its block's first line to the top; an unknown
-    // anchor falls back to the top of the page with a status note.
+    // anchor falls back to the top of the page with a toast note.
     if let Some(name) = anchor {
         match anchor_line(model, &name) {
             Some(line) => {
                 let vp = model.viewport();
                 model.scroll = line.min(model.max_scroll(vp));
             }
-            None => model.status = Some(format!("anchor #{name} not found")),
+            None => model.set_toast(ToastKind::Error, format!("anchor #{name} not found")),
         }
     }
 }
@@ -912,6 +984,10 @@ fn split_path_anchor(mut target: Target) -> (Target, Option<String>) {
 /// Fold a key press, routed by mode. Returns any effects.
 fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // Any key dismisses the current toast; a handler below may raise a fresh one
+    // for this very key (e.g. `m` -> "bookmarked"), which then wins.
+    model.dismiss_toast();
 
     // Ctrl-C quits from any mode.
     if ctrl && key.code == KeyCode::Char('c') {
@@ -1017,7 +1093,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Esc => {
             model.mode = Mode::Browse;
             model.input.reset();
-            model.status = None;
+            model.dismiss_toast();
             Vec::new()
         }
         KeyCode::Enter => {
@@ -1026,7 +1102,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                 Ok(target) => {
                     model.mode = Mode::Browse;
                     model.input.reset();
-                    model.status = None;
+                    model.dismiss_toast();
                     model.pending = Some(Pending {
                         target: target.clone(),
                         action: HistoryAction::Push,
@@ -1035,7 +1111,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                     vec![Effect::Navigate(target)]
                 }
                 Err(err) => {
-                    model.status = Some(format!("bad URL: {err}"));
+                    model.set_toast(ToastKind::Error, format!("bad URL: {raw} ({err})"));
                     Vec::new()
                 }
             }
@@ -1060,7 +1136,7 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
     if model.is_loading() && (key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g')))
     {
         model.pending = None;
-        model.status = Some("cancelled".to_string());
+        model.set_toast(ToastKind::Info, "cancelled");
         return vec![Effect::Cancel];
     }
 
@@ -1170,14 +1246,14 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
 fn enter_address(model: &mut Model) {
     model.mode = Mode::Address;
     model.input.reset();
-    model.status = None;
+    model.dismiss_toast();
 }
 
 /// Enter hint mode with a cleared filter buffer.
 fn enter_hint(model: &mut Model) {
     model.mode = Mode::Hint;
     model.hint_input.clear();
-    model.status = None;
+    model.dismiss_toast();
 }
 
 /// Leave hint mode, discarding the filter buffer.
@@ -1193,7 +1269,7 @@ fn enter_search(model: &mut Model) {
     model.search_input.reset();
     model.matches.clear();
     model.current_match = None;
-    model.status = None;
+    model.dismiss_toast();
 }
 
 /// Leave search mode (Esc): back to Browse, clearing the query and all match
@@ -1203,20 +1279,20 @@ fn exit_search(model: &mut Model) {
     model.search_input.reset();
     model.matches.clear();
     model.current_match = None;
-    model.status = None;
+    model.dismiss_toast();
 }
 
 /// Commit a search query: recompute matches over the current page, mark the
 /// first as current and scroll it into view. An empty result clears the current
-/// match and notes it in the status bar.
+/// match and notes it in a toast.
 fn commit_search(model: &mut Model, query: &str) {
     model.matches = find_matches(&model.page, query);
     if model.matches.is_empty() {
         model.current_match = None;
-        model.status = Some(format!("no matches for \"{query}\""));
+        model.set_toast(ToastKind::Info, format!("no matches for \"{query}\""));
     } else {
         model.current_match = Some(0);
-        model.status = None;
+        model.dismiss_toast();
         scroll_to_current_match(model);
     }
 }
@@ -1318,7 +1394,7 @@ fn toggle_places(model: &mut Model) {
     model.show_places = !model.show_places;
     if model.show_places {
         model.places_sel = 0;
-        model.status = None;
+        model.dismiss_toast();
     }
 }
 
@@ -1367,7 +1443,7 @@ fn move_places_selection(model: &mut Model, delta: isize) {
 
 /// Open the selected place: a bookmark's URL, or a discovered node's default
 /// page. Closes the panel and starts a fresh navigation. A malformed bookmark
-/// URL surfaces a status message instead.
+/// URL surfaces an error toast instead.
 fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
     let Some(place) = places(model).into_iter().nth(idx) else {
         return Vec::new();
@@ -1376,7 +1452,7 @@ fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         Place::Bookmark { url, .. } => match parse_url(&url, model.current_dest) {
             Ok(target) => target,
             Err(err) => {
-                model.status = Some(format!("bad bookmark URL: {err}"));
+                model.set_toast(ToastKind::Error, format!("bad bookmark URL: {url} ({err})"));
                 return Vec::new();
             }
         },
@@ -1388,7 +1464,7 @@ fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         },
     };
     close_places(model);
-    model.status = None;
+    model.dismiss_toast();
     model.pending = Some(Pending {
         target: target.clone(),
         action: HistoryAction::Push,
@@ -1406,44 +1482,44 @@ fn delete_selected_place(model: &mut Model) -> Vec<Effect> {
     model.bookmarks.remove(&url);
     let len = places(model).len();
     model.places_sel = model.places_sel.min(len.saturating_sub(1));
-    model.status = Some(format!("removed bookmark {url}"));
+    model.set_toast(ToastKind::Info, format!("removed bookmark {url}"));
     vec![Effect::SaveBookmarks]
 }
 
 /// Toggle a bookmark for the current page: remove it when the page is already
 /// bookmarked, else add it under the current title. Persists on change. A no-op
-/// with a status note when nothing is loaded.
+/// with a toast note when nothing is loaded.
 fn toggle_bookmark_current(model: &mut Model) -> Vec<Effect> {
     let Some(url) = current_url(model) else {
-        model.status = Some("nothing to bookmark".to_string());
+        model.set_toast(ToastKind::Info, "nothing to bookmark");
         return Vec::new();
     };
     if model.bookmarks.contains(&url) {
         model.bookmarks.remove(&url);
-        model.status = Some(format!("removed bookmark {url}"));
+        model.set_toast(ToastKind::Info, format!("removed bookmark {url}"));
     } else {
         let title = model.title.trim().to_string();
         model.bookmarks.add(Bookmark {
             url: url.clone(),
             title,
         });
-        model.status = Some(format!("bookmarked {url}"));
+        model.set_toast(ToastKind::Info, format!("bookmarked {url}"));
     }
     vec![Effect::SaveBookmarks]
 }
 
 /// Yank the focused link's target URL, or (with nothing focused) the current
-/// page URL, to the clipboard. A no-op with a status note when there is nothing
+/// page URL, to the clipboard. A no-op with a toast note when there is nothing
 /// to copy.
 fn yank_url(model: &mut Model) -> Vec<Effect> {
     let url = match focused_link_url(model).or_else(|| current_url(model)) {
         Some(url) => url,
         None => {
-            model.status = Some("nothing to copy".to_string());
+            model.set_toast(ToastKind::Info, "nothing to copy");
             return Vec::new();
         }
     };
-    model.status = Some(format!("copied {url}"));
+    model.set_toast(ToastKind::Info, format!("copied {url}"));
     vec![Effect::Copy(url)]
 }
 
@@ -1533,7 +1609,7 @@ fn reload_current(model: &mut Model) -> Vec<Effect> {
         action: HistoryAction::Goto(idx),
     });
     model.pending_anchor = None;
-    model.status = None;
+    model.dismiss_toast();
     vec![Effect::Navigate(target)]
 }
 
@@ -1549,7 +1625,7 @@ fn go_back(model: &mut Model) -> Vec<Effect> {
         action: HistoryAction::Goto(idx),
     });
     model.pending_anchor = None;
-    model.status = None;
+    model.dismiss_toast();
     vec![Effect::Navigate(target)]
 }
 
@@ -1565,12 +1641,12 @@ fn go_forward(model: &mut Model) -> Vec<Effect> {
         action: HistoryAction::Goto(idx),
     });
     model.pending_anchor = None;
-    model.status = None;
+    model.dismiss_toast();
     vec![Effect::Navigate(target)]
 }
 
 /// Follow the link with 1-based `index`: resolve its target against the current
-/// destination and start a fresh navigation, or set an error status.
+/// destination and start a fresh navigation, or raise an error toast.
 fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
     let Some(link) = model.links.iter().find(|l| l.index == index).cloned() else {
         return Vec::new();
@@ -1579,16 +1655,16 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
     // is refused outright. Only an RNS target is fetched in-mesh.
     match classify_link(&link.target) {
         LinkKind::External(url) => {
-            model.status = None;
+            model.dismiss_toast();
             vec![Effect::OpenExternal(url)]
         }
         LinkKind::Unsafe(scheme) => {
-            model.status = Some(format!("won't open {scheme}: link"));
+            model.set_toast(ToastKind::Error, format!("won't open {scheme}: link"));
             Vec::new()
         }
         LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
             Ok((target, anchor)) => {
-                model.status = None;
+                model.dismiss_toast();
                 model.pending = Some(Pending {
                     target: target.clone(),
                     action: HistoryAction::Push,
@@ -1599,7 +1675,10 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
                 vec![Effect::Navigate(target)]
             }
             Err(err) => {
-                model.status = Some(format!("bad link: {err}"));
+                model.set_toast(
+                    ToastKind::Error,
+                    format!("bad link: {} ({err})", link.target),
+                );
                 Vec::new()
             }
         },
@@ -1795,6 +1874,8 @@ pub fn view(model: &Model, frame: &mut Frame) {
     if model.show_help {
         render_help(frame, frame.area());
     }
+    // The toast floats on top of everything so it is always visible.
+    render_toast(model, frame, frame.area());
 }
 
 /// Highlight the focused link's cells (reverse video) so Tab navigation is
@@ -2089,8 +2170,9 @@ fn spinner_span(spin: usize) -> RtSpan<'static> {
     )
 }
 
-/// Draw the status bar: the loading spinner while a fetch is in flight, else a
-/// status/error message, else the context key-hints.
+/// Draw the status bar: the loading spinner while a fetch is in flight, else the
+/// focused/hovered link's target, else the context key-hints. Transient messages
+/// no longer live here; they float as a [`render_toast`] overlay instead.
 fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
@@ -2115,9 +2197,6 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
         // A focused (Tab) or hovered (mouse) link shows its target here, taking
         // the place of the key-hints until focus/hover clears.
         frame.render_widget(Paragraph::new(RtSpan::styled(target, dim)), area);
-    } else if let Some(msg) = &model.status {
-        let err = Style::default().fg(Color::Rgb(255, 95, 95));
-        frame.render_widget(Paragraph::new(RtSpan::styled(msg.clone(), err)), area);
     } else {
         let hints = match model.mode {
             Mode::Address => ADDRESS_HINTS,
@@ -2315,6 +2394,51 @@ fn place_label(place: &Place) -> String {
             format!("  {label}  ·  {}  ·  {hop}", short_hex(dest_hash))
         }
     }
+}
+
+/// Draw the transient toast: a small bordered box floated at the bottom-right of
+/// the content (never over the status bar), coloured by kind. An error is an
+/// attention red with a `⚠`; an info note is a calm green with a `✓`. Under
+/// `no_color` both fall back to reverse video. A no-op when no toast is up.
+fn render_toast(model: &Model, frame: &mut Frame, area: Rect) {
+    let Some(toast) = &model.toast else {
+        return;
+    };
+    let [_topbar, content, _status] = regions(area);
+    // Too little room to float a bordered box: skip rather than draw garbage.
+    if content.width < 8 || content.height < 3 {
+        return;
+    }
+    let (glyph, accent) = match toast.kind {
+        ToastKind::Error => ('⚠', Color::Rgb(255, 95, 95)),
+        ToastKind::Info => ('✓', Color::Rgb(120, 220, 120)),
+    };
+    let style = if model.no_color {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(accent)
+    };
+    // A one-column margin from the content's right edge, room for both borders,
+    // and the message truncated to whatever inner width is left.
+    let margin = 1u16;
+    let max_inner = content.width.saturating_sub(2 + 2 * margin).max(1) as usize;
+    let body = truncate_to_cols(&format!("{glyph} {}", toast.text), max_inner);
+    let inner_w = UnicodeWidthStr::width(body.as_str()) as u16;
+    let box_w = inner_w + 2;
+    let box_h = 3u16;
+    // Bottom-right of the content, sitting just above the status bar.
+    let overlay = Rect {
+        x: content.right().saturating_sub(box_w + margin),
+        y: content.bottom().saturating_sub(box_h),
+        width: box_w,
+        height: box_h,
+    };
+    let block = Block::default().borders(Borders::ALL).style(style);
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(RtSpan::styled(body, style)).block(block),
+        overlay,
+    );
 }
 
 /// Draw the centered help overlay listing the keybindings.
@@ -2549,10 +2673,10 @@ fn run_effects(
             Effect::OpenExternal(url) => {
                 // Hand the URL to the platform default handler (`xdg-open` on
                 // Linux). `open::that` launches the handler and returns; a
-                // failure only updates the status, never takes the UI down.
+                // failure only raises a toast, never takes the UI down.
                 match open::that(&url) {
-                    Ok(_) => model.status = Some(format!("opened externally: {url}")),
-                    Err(_) => model.status = Some(format!("failed to open: {url}")),
+                    Ok(_) => model.set_toast(ToastKind::Info, format!("opened externally: {url}")),
+                    Err(_) => model.set_toast(ToastKind::Error, format!("failed to open: {url}")),
                 }
             }
             Effect::Cancel => {
@@ -2564,7 +2688,7 @@ fn run_effects(
             }
             Effect::Copy(text) => {
                 // Write the OSC 52 clipboard-set sequence straight to the
-                // terminal; the update side has already set the "copied" status.
+                // terminal; the update side has already raised the "copied" toast.
                 let _ =
                     crossterm::execute!(std::io::stdout(), crossterm::style::Print(osc52(&text)));
             }
@@ -2711,7 +2835,9 @@ pub async fn run_tui(
         if model.quit {
             break Ok(());
         }
-        let loading = model.is_loading();
+        // Tick while a fetch spinner animates or a toast is aging towards its
+        // auto-dismiss, so an idle toast still expires.
+        let animate = model.needs_tick();
         tokio::select! {
             maybe_event = events.next() => match step_event(maybe_event) {
                 EventStep::Apply(app) => {
@@ -2747,7 +2873,7 @@ pub async fn run_tui(
                     }
                 }
             },
-            _ = ticker.tick(), if loading => {
+            _ = ticker.tick(), if animate => {
                 update(&mut model, AppEvent::Tick);
             }
         }
@@ -3001,7 +3127,9 @@ mod tests {
         type_str(&mut m, "not-a-hash");
         let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
         assert!(effects.is_empty());
-        assert!(m.status.is_some());
+        let toast = m.toast.as_ref().expect("an error toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(toast.text.contains("not-a-hash"), "toast: {}", toast.text);
         // Still in address mode so the user can fix the input.
         assert_eq!(m.mode, Mode::Address);
     }
@@ -3034,7 +3162,9 @@ mod tests {
         let effects = press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(effects, vec![Effect::Cancel]);
         assert!(m.pending.is_none());
-        assert_eq!(m.status.as_deref(), Some("cancelled"));
+        let toast = m.toast.as_ref().expect("a cancel toast is raised");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(toast.text, "cancelled");
     }
 
     #[test]
@@ -3101,7 +3231,9 @@ mod tests {
         });
         let effects = update(&mut m, AppEvent::LoadFailed("no path".to_string()));
         assert!(effects.is_empty());
-        assert_eq!(m.status.as_deref(), Some("no path"));
+        let toast = m.toast.as_ref().expect("a failure toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert_eq!(toast.text, "no path");
         assert!(m.pending.is_none());
         // The page is unchanged: still the previously loaded document.
         assert_eq!(m.title, "Kept");
@@ -3407,12 +3539,109 @@ mod tests {
     }
 
     #[test]
-    fn error_state_renders_message() {
+    fn error_toast_renders_over_content_and_status_keeps_hints() {
         let mut m = loaded_model((80, 24));
-        m.status = Some("no path to destination".to_string());
+        m.set_toast(ToastKind::Error, "no path to destination");
+        let buffer = render(&m, 80, 24);
+
+        // The toast text and its warning glyph render somewhere in the content.
+        let all = flat(&buffer);
+        assert!(all.contains("no path"), "toast text missing:\n{all}");
+        assert!(all.contains('⚠'), "error glyph missing:\n{all}");
+
+        // The attention red is painted on the toast cells.
+        let mut found_error_style = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].fg == Color::Rgb(255, 95, 95) {
+                    found_error_style = true;
+                }
+            }
+        }
+        assert!(found_error_style, "error style not painted");
+
+        // The status bar (row 23) still shows the key-hints, not the message.
+        let status = row_text(&buffer, 23, 80);
+        assert!(status.contains("quit"), "hints missing: {status:?}");
+        assert!(
+            !status.contains("no path"),
+            "message leaked into status bar"
+        );
+    }
+
+    #[test]
+    fn set_toast_stores_kind_and_text() {
+        let mut m = Model::default();
+        m.set_toast(ToastKind::Info, "copied aa11:/page/x.mu");
+        let toast = m.toast.as_ref().expect("toast stored");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(toast.text, "copied aa11:/page/x.mu");
+        assert_eq!(toast.shown_at, m.now_tick);
+    }
+
+    #[test]
+    fn toast_expires_after_the_timeout() {
+        let mut m = Model::default();
+        m.set_toast(ToastKind::Info, "copied");
+        // Just short of the lifetime it is still up.
+        for _ in 0..TOAST_TICKS - 1 {
+            update(&mut m, AppEvent::Tick);
+        }
+        assert!(m.toast.is_some(), "toast dismissed too early");
+        // One more tick crosses the lifetime and clears it.
+        update(&mut m, AppEvent::Tick);
+        assert!(m.toast.is_none(), "toast should have expired");
+    }
+
+    #[test]
+    fn any_key_dismisses_the_toast() {
+        let mut m = model_from_sample(content_width(80), (80, 24));
+        m.set_toast(ToastKind::Info, "bookmarked");
+        // A plain scroll key is a navigation event: it clears the toast.
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(m.toast.is_none(), "a key event should dismiss the toast");
+    }
+
+    #[test]
+    fn needs_tick_tracks_loading_and_toast() {
+        let mut m = Model::default();
+        assert!(!m.needs_tick(), "idle model needs no tick");
+        m.set_toast(ToastKind::Info, "up");
+        assert!(m.needs_tick(), "an active toast must drive the tick");
+    }
+
+    #[test]
+    fn bad_link_follow_sets_error_toast_with_url_not_status_bar() {
+        // A same-destination link with no current destination fails to resolve.
+        let mut m = loaded_model((80, 24));
+        m.current_dest = None;
+        m.links = vec![RenderedLink {
+            index: 1,
+            label: "Broken".to_string(),
+            target: ":/page/broken.mu".to_string(),
+            ..RenderedLink::default()
+        }];
+        let effects = follow_link(&mut m, 1);
+        assert!(effects.is_empty(), "a broken link must not navigate");
+        let toast = m.toast.as_ref().expect("a bad-link toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast.text.contains(":/page/broken.mu"),
+            "toast must carry the offending url: {}",
+            toast.text
+        );
+
+        // The offending url shows in the toast overlay, never in the status bar.
         let buffer = render(&m, 80, 24);
         let status = row_text(&buffer, 23, 80);
-        assert!(status.contains("no path"), "error missing: {status:?}");
+        assert!(
+            !status.contains(":/page/broken.mu"),
+            "the url leaked into the status bar: {status:?}"
+        );
+        assert!(
+            status.contains("quit"),
+            "status bar lost its hints: {status:?}"
+        );
     }
 
     #[test]
@@ -4021,7 +4250,7 @@ mod tests {
     }
 
     #[test]
-    fn following_unsafe_scheme_link_refuses_with_status() {
+    fn following_unsafe_scheme_link_refuses_with_toast() {
         let mut m = Model {
             links: vec![RenderedLink {
                 index: 1,
@@ -4034,10 +4263,12 @@ mod tests {
         let effects = follow_link(&mut m, 1);
         assert!(effects.is_empty(), "an unsafe link must yield no effect");
         assert!(m.pending.is_none(), "an unsafe link must not navigate");
-        let status = m.status.expect("a refusal status is set");
+        let toast = m.toast.as_ref().expect("a refusal toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
         assert!(
-            status.contains("file"),
-            "status names the refused scheme: {status:?}"
+            toast.text.contains("file"),
+            "toast names the refused scheme: {}",
+            toast.text
         );
     }
 
@@ -4447,10 +4678,11 @@ mod tests {
             },
         );
         assert_eq!(m.scroll, 0, "unknown anchor falls back to the top");
+        let toast = m.toast.as_ref().expect("unknown anchor raises a toast");
         assert!(
-            m.status.as_deref().unwrap_or("").contains("not found"),
-            "unknown anchor should note it: {:?}",
-            m.status
+            toast.text.contains("not found"),
+            "unknown anchor should note it: {}",
+            toast.text
         );
     }
 
@@ -4575,10 +4807,11 @@ mod tests {
         press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
         assert!(m.matches.is_empty());
         assert_eq!(m.current_match, None);
+        let toast = m.toast.as_ref().expect("a fruitless search raises a toast");
         assert!(
-            m.status.as_deref().unwrap_or("").contains("no matches"),
-            "a fruitless search should say so: {:?}",
-            m.status
+            toast.text.contains("no matches"),
+            "a fruitless search should say so: {}",
+            toast.text
         );
     }
 
@@ -4767,7 +5000,9 @@ mod tests {
         let url = current_url(&m).expect("current url");
         let fx = press(&mut m, KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(fx, vec![Effect::Copy(url)]);
-        assert!(m.status.as_deref().unwrap_or_default().contains("copied"));
+        let toast = m.toast.as_ref().expect("a copy toast is raised");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert!(toast.text.contains("copied"), "toast: {}", toast.text);
     }
 
     #[test]
