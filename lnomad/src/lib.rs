@@ -49,4 +49,4 @@ pub use theme::{resolve_theme, Bg, Theme, ThemeFlag};
 pub use tui::{
     run_tui, to_ratatui_text, update, view, AppEvent, Model, TerminalGuard, TerminalOps,
 };
-pub use url::{parse_url, Target, UrlError};
+pub use url::{classify_link, parse_url, LinkKind, Target, UrlError};

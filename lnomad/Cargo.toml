@@ -28,6 +28,7 @@ unicode-width = "0.2.2"
 futures = "0.3.32"
 tui-input = "0.15"
 termbg = "0.6.2"
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"

@@ -102,6 +102,77 @@ pub fn parse_url(input: &str, current_dest: Option<[u8; 16]>) -> Result<Target, 
     })
 }
 
+/// How a followed link target should be handled.
+///
+/// A NomadNet page can carry three kinds of link: an in-mesh RNS destination we
+/// fetch ourselves, an external URL we hand to the system's default handler, and
+/// a URL whose scheme we refuse to open. The split is a security boundary: a
+/// page comes from an untrusted node, so only a whitelisted scheme is ever
+/// passed to a system handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkKind {
+    /// An RNS/NomadNet destination (`<hash>:/page/...`, `<hash>`, or the
+    /// same-destination `:/...` form). Followed by fetching it in-mesh.
+    Rns,
+    /// An external URL with a safe scheme (`http`/`https`/`mailto`), openable in
+    /// the user's default handler. Carries the original URL verbatim.
+    External(String),
+    /// A URL with a scheme we will not hand to a system handler (`file`,
+    /// `javascript`, any custom scheme). Carries the offending scheme, lowercased.
+    Unsafe(String),
+}
+
+/// Classify a link target so the browser knows whether to fetch it in-mesh, open
+/// it externally, or refuse it. A pure function over the target string.
+///
+/// RNS targets keep NomadNet's colon grammar (`<32-hex>:/page/...`, a bare
+/// 32-hex hash, or the same-destination `:/...`). An external URL is recognised
+/// by a URI scheme (`<alpha><alnum|+-.>* :`); only `http`, `https` and `mailto`
+/// are safe to open, and every other scheme is refused. A 32-hex destination
+/// prefix is always read as an RNS hash, never a scheme, so a hash that happens
+/// to start with a letter is not mistaken for an external URL.
+pub fn classify_link(target: &str) -> LinkKind {
+    // The same-destination form starts with the colon and never has a scheme.
+    if target.starts_with(':') {
+        return LinkKind::Rns;
+    }
+    match uri_scheme(target) {
+        Some(scheme) => {
+            // A full-length hex destination prefix is an RNS hash, not a scheme.
+            if scheme.len() == TRUNCATED_HASH_HEX_LEN
+                && scheme.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return LinkKind::Rns;
+            }
+            match scheme.to_ascii_lowercase().as_str() {
+                "http" | "https" | "mailto" => LinkKind::External(target.to_string()),
+                other => LinkKind::Unsafe(other.to_string()),
+            }
+        }
+        // No scheme and no leading colon: a bare hash or relative page path.
+        None => LinkKind::Rns,
+    }
+}
+
+/// The URI scheme of `s` (the run before the first `:`), if it is a well-formed
+/// scheme name: a leading ASCII letter followed by letters, digits, `+`, `-` or
+/// `.` (RFC 3986). Returns `None` when there is no colon or the prefix is not a
+/// valid scheme (e.g. it starts with a digit, as a numeric destination hash does).
+fn uri_scheme(s: &str) -> Option<&str> {
+    let idx = s.find(':')?;
+    let scheme = &s[..idx];
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    if chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+        Some(scheme)
+    } else {
+        None
+    }
+}
+
 /// An empty path falls back to the default page, matching the reference.
 fn normalize_path(path: &str) -> String {
     if path.is_empty() {
@@ -266,5 +337,68 @@ mod tests {
             parse_url(&format!("{HASH_HEX}:/page:/x.mu"), None),
             Err(UrlError::Malformed)
         );
+    }
+
+    #[test]
+    fn classify_https_and_http_are_external() {
+        assert_eq!(
+            classify_link("https://example.org/x"),
+            LinkKind::External("https://example.org/x".to_string())
+        );
+        assert_eq!(
+            classify_link("http://example.org"),
+            LinkKind::External("http://example.org".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_mailto_is_external() {
+        assert_eq!(
+            classify_link("mailto:a@b"),
+            LinkKind::External("mailto:a@b".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_scheme_case_is_insensitive() {
+        assert_eq!(
+            classify_link("HTTPS://example.org"),
+            LinkKind::External("HTTPS://example.org".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_file_scheme_is_unsafe() {
+        assert_eq!(
+            classify_link("file:///etc/passwd"),
+            LinkKind::Unsafe("file".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_javascript_scheme_is_unsafe() {
+        assert_eq!(
+            classify_link("javascript:alert(1)"),
+            LinkKind::Unsafe("javascript".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_rns_hash_path_and_same_dest_are_rns() {
+        assert_eq!(
+            classify_link(&format!("{HASH_HEX}:/page/x.mu")),
+            LinkKind::Rns
+        );
+        assert_eq!(classify_link(":/page/x.mu"), LinkKind::Rns);
+        assert_eq!(classify_link(HASH_HEX), LinkKind::Rns);
+    }
+
+    #[test]
+    fn classify_letter_leading_hash_is_rns_not_scheme() {
+        // A 32-hex destination that happens to start with a letter must not be
+        // read as a URI scheme.
+        let hash = "abcdef0123456789abcdef0123456789";
+        assert_eq!(hash.len(), TRUNCATED_HASH_HEX_LEN);
+        assert_eq!(classify_link(&format!("{hash}:/page/x.mu")), LinkKind::Rns);
     }
 }

@@ -67,7 +67,7 @@ use crate::discovery::{DiscoveredNode, NomadNodeRegistry};
 use crate::fetch::Session;
 use crate::render::{layout_blocks, RLine, RStyle, RenderedLink};
 use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
-use crate::url::{parse_url, Target, DEFAULT_PATH};
+use crate::url::{classify_link, parse_url, LinkKind, Target, DEFAULT_PATH};
 
 /// The number of columns reserved on the right for the scrollbar.
 const SCROLLBAR_COLS: u16 = 1;
@@ -440,6 +440,9 @@ pub struct Pending {
 pub enum Effect {
     /// Start (or restart) a fetch for this target.
     Navigate(Target),
+    /// Open this external URL in the user's default handler (the IO shell runs
+    /// `open::that`). Only whitelisted safe schemes ever reach this effect.
+    OpenExternal(String),
     /// Cancel the in-flight fetch and stay on the current page.
     Cancel,
     /// Copy this text to the system clipboard (the IO shell writes it as an
@@ -1539,22 +1542,34 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
     let Some(link) = model.links.iter().find(|l| l.index == index).cloned() else {
         return Vec::new();
     };
-    match browser::resolve_link(&link, model.current_dest) {
-        Ok((target, anchor)) => {
+    // An external URL is opened in the user's default handler; an unsafe scheme
+    // is refused outright. Only an RNS target is fetched in-mesh.
+    match classify_link(&link.target) {
+        LinkKind::External(url) => {
             model.status = None;
-            model.pending = Some(Pending {
-                target: target.clone(),
-                action: HistoryAction::Push,
-            });
-            // Remember any `#anchor` so the load handler scrolls to it once the
-            // page arrives (resolved against the freshly-laid-out lines).
-            model.pending_anchor = anchor;
-            vec![Effect::Navigate(target)]
+            vec![Effect::OpenExternal(url)]
         }
-        Err(err) => {
-            model.status = Some(format!("bad link: {err}"));
+        LinkKind::Unsafe(scheme) => {
+            model.status = Some(format!("won't open {scheme}: link"));
             Vec::new()
         }
+        LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
+            Ok((target, anchor)) => {
+                model.status = None;
+                model.pending = Some(Pending {
+                    target: target.clone(),
+                    action: HistoryAction::Push,
+                });
+                // Remember any `#anchor` so the load handler scrolls to it once
+                // the page arrives (resolved against the freshly-laid-out lines).
+                model.pending_anchor = anchor;
+                vec![Effect::Navigate(target)]
+            }
+            Err(err) => {
+                model.status = Some(format!("bad link: {err}"));
+                Vec::new()
+            }
+        },
     }
 }
 
@@ -2443,6 +2458,15 @@ fn run_effects(
         match effect {
             Effect::Navigate(target) => {
                 spawn_fetch(inflight, generation, session, tx, timeout, target);
+            }
+            Effect::OpenExternal(url) => {
+                // Hand the URL to the platform default handler (`xdg-open` on
+                // Linux). `open::that` launches the handler and returns; a
+                // failure only updates the status, never takes the UI down.
+                match open::that(&url) {
+                    Ok(_) => model.status = Some(format!("opened externally: {url}")),
+                    Err(_) => model.status = Some(format!("failed to open: {url}")),
+                }
             }
             Effect::Cancel => {
                 if let Some(handle) = inflight.take() {
@@ -3871,6 +3895,59 @@ mod tests {
         let mut m = loaded_model((80, 24));
         press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
         let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let expected = browser::resolve_link(link_of(&m, 1), m.current_dest)
+            .unwrap()
+            .0;
+        assert_eq!(effects, vec![Effect::Navigate(expected)]);
+    }
+
+    #[test]
+    fn following_external_https_link_opens_externally() {
+        let mut m = Model {
+            links: vec![RenderedLink {
+                index: 1,
+                label: "Site".to_string(),
+                target: "https://example.org/x".to_string(),
+                ..RenderedLink::default()
+            }],
+            ..Model::default()
+        };
+        let effects = follow_link(&mut m, 1);
+        assert_eq!(
+            effects,
+            vec![Effect::OpenExternal("https://example.org/x".to_string())]
+        );
+        assert!(
+            m.pending.is_none(),
+            "an external link must not start a fetch"
+        );
+    }
+
+    #[test]
+    fn following_unsafe_scheme_link_refuses_with_status() {
+        let mut m = Model {
+            links: vec![RenderedLink {
+                index: 1,
+                label: "Bad".to_string(),
+                target: "file:///etc/passwd".to_string(),
+                ..RenderedLink::default()
+            }],
+            ..Model::default()
+        };
+        let effects = follow_link(&mut m, 1);
+        assert!(effects.is_empty(), "an unsafe link must yield no effect");
+        assert!(m.pending.is_none(), "an unsafe link must not navigate");
+        let status = m.status.expect("a refusal status is set");
+        assert!(
+            status.contains("file"),
+            "status names the refused scheme: {status:?}"
+        );
+    }
+
+    #[test]
+    fn following_rns_link_still_navigates() {
+        let mut m = loaded_model((80, 24));
+        let effects = follow_link(&mut m, 1);
         let expected = browser::resolve_link(link_of(&m, 1), m.current_dest)
             .unwrap()
             .0;

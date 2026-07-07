@@ -95,6 +95,12 @@ The focused or hovered link's target is shown in the status bar. Same-destinatio
 links (`:/page/x.mu`) resolve against the page currently in view; a followed link
 carries its preset (`f=v`) fields as `var_*` request variables.
 
+A link whose target is an external URL (an `http`, `https` or `mailto` scheme)
+is not fetched in-mesh: it is handed to the platform default handler (`xdg-open`
+on Linux). Any other scheme (`file`, `javascript`, custom schemes) is refused
+and reported in the status bar, since a page comes from an untrusted node and an
+arbitrary URI must never reach a system handler.
+
 ## v1 limits
 
 - Interactive form-field input (fields the reader must type) is a stub: a link
