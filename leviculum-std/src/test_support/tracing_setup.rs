@@ -53,6 +53,16 @@ pub fn init_tracing_with_event_log() {
         // anyone who wants verbose fmt output.
         let fmt_layer = fmt::layer().with_test_writer().with_filter(env_filter);
         let event_layer = crate::event_log::layer();
-        Registry::default().with(fmt_layer).with(event_layer).init();
+        // Plain-WARN capture for tests that assert on an ordinary
+        // `tracing::warn!` message (Codeberg #38's LRPROOF asymmetry
+        // line).  Filtered to `leviculum_core` WARN so the per-handle
+        // buffers stay small; inert until a test registers a handle.
+        let warn_capture_layer = crate::test_support::warn_capture::layer()
+            .with_filter(EnvFilter::new("leviculum_core=warn"));
+        Registry::default()
+            .with(fmt_layer)
+            .with(event_layer)
+            .with(warn_capture_layer)
+            .init();
     });
 }

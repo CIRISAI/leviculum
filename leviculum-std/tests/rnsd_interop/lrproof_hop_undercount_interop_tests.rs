@@ -50,7 +50,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,6 +59,7 @@ use tokio::net::{TcpListener, TcpStream};
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::DestinationHash;
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
+use leviculum_std::test_support::warn_capture::register_warn_capture;
 
 use crate::common::{
     temp_storage, wait_for_link_established, wait_for_path_on_node, wait_for_path_reannounce,
@@ -67,56 +68,16 @@ use crate::common::{
 use crate::harness::{pick_free_tcp_port, TestDaemon};
 
 // ----------------------------------------------------------------------------
-// Process-global WARN capture (so relay-1's asymmetry warning is observable).
-// ----------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-static LOG_BUF: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
-
-/// Install a global WARN-level tracing subscriber writing into a shared buffer,
-/// exactly once per process. Returns the buffer. Because this test is meant to
-/// be run by name (effectively in isolation), the global default is ours.
-fn captured_logs() -> Arc<Mutex<Vec<u8>>> {
-    LOG_BUF
-        .get_or_init(|| {
-            let buf = Arc::new(Mutex::new(Vec::new()));
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(CaptureWriter(buf.clone()))
-                .with_max_level(tracing::Level::WARN)
-                .with_ansi(false)
-                .with_target(true)
-                .finish();
-            // Ignore the error if some other subscriber is already global: the
-            // divergence assertions (a)+(c) still stand; only assertion (b)
-            // depends on this capture.
-            let _ = tracing::subscriber::set_global_default(subscriber);
-            buf
-        })
-        .clone()
-}
-
-fn log_snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
-    String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
-}
+// WARN capture for relay-1's asymmetry line.
+//
+// This observes the relay's plain `tracing::warn!` "LRPROOF hop asymmetry,
+// forwarding anyway" message. It hooks the harness's ONE global subscriber via
+// `register_warn_capture` (an active-handles capture layer) rather than a
+// private `set_global_default`. The private-subscriber approach was a race: any
+// test that calls `common::init_tracing()` installs the global subscriber first
+// under the parallel full suite, so the private one never took effect and the
+// buffer stayed empty — assertion (b) then failed under load while passing in
+// isolation. The global-subscriber hook captures regardless of test ordering.
 
 // ----------------------------------------------------------------------------
 // The undercount TCP shim.
@@ -350,8 +311,7 @@ async fn setup_undercount_chain() -> UndercountChain {
 /// Python client out.
 #[tokio::test]
 async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
-    let log_buf = captured_logs();
-    log_buf.lock().unwrap().clear();
+    let warn_capture = register_warn_capture();
 
     let UndercountChain {
         responder,
@@ -391,10 +351,13 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
         "Python initiator A must learn a path to B before create_link"
     );
 
+    // create_link establishes in ~100ms even under full-suite CPU contention
+    // (measured); 30s is generous headroom for slower CI, matching the heaviest
+    // sibling relay test (test_diamond_relay_and_failure_recovery).
     let py_link = initiator_py
-        .create_link(&dest_b_hash_str, &dest_b_public_key, 15)
+        .create_link(&dest_b_hash_str, &dest_b_public_key, 30)
         .await;
-    let logs = log_snapshot(&log_buf);
+    let logs = warn_capture.snapshot();
     assert!(
         py_link.is_ok(),
         "FIX (a): the Python initiator's create_link must now ESTABLISH on the \
@@ -446,7 +409,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
         .expect("Rust initiator connect");
     let established =
         wait_for_link_established(&mut events_rs, handle.link_id(), Duration::from_secs(20)).await;
-    let logs = log_snapshot(&log_buf);
+    let logs = warn_capture.snapshot();
     assert!(
         established,
         "FIX (c): the leviculum-std initiator must ESTABLISH the link on the \
@@ -477,8 +440,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
 /// middle drop would need a different topology.
 #[tokio::test]
 async fn lrproof_hop_undercount_data_transfer_both_ways() {
-    let log_buf = captured_logs();
-    log_buf.lock().unwrap().clear();
+    let warn_capture = register_warn_capture();
 
     let UndercountChain {
         responder,
@@ -512,8 +474,9 @@ async fn lrproof_hop_undercount_data_transfer_both_ways() {
         "Python initiator A must learn a path to B before create_link"
     );
 
+    // 30s: generous headroom (establishes in ~100ms even under full-suite load).
     let link_hash = initiator_py
-        .create_link(&dest_b_hash_str, &dest_b_public_key, 15)
+        .create_link(&dest_b_hash_str, &dest_b_public_key, 30)
         .await
         .expect("Python A create_link must establish over the asymmetric chain");
 
@@ -543,7 +506,7 @@ async fn lrproof_hop_undercount_data_transfer_both_ways() {
             break;
         }
     }
-    let logs = log_snapshot(&log_buf);
+    let logs = warn_capture.snapshot();
     assert!(
         b_got,
         "A->B: responder B must receive the payload sent over the asymmetric \
@@ -567,7 +530,7 @@ async fn lrproof_hop_undercount_data_transfer_both_ways() {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let logs = log_snapshot(&log_buf);
+    let logs = warn_capture.snapshot();
     assert!(
         a_got_echo,
         "B->A: Python initiator A must receive B's echo over the asymmetric \

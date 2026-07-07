@@ -8,3 +8,4 @@
 
 pub mod event_log;
 pub mod tracing_setup;
+pub mod warn_capture;
