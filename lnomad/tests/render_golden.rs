@@ -7,6 +7,7 @@
 //! (`layout` -> `RLine` + positioned `RenderedLink`) directly.
 
 use leviculum_micron::parse;
+use lnomad::color::ColorDepth;
 use lnomad::render::{layout, render_with_options};
 use lnomad::theme::Theme;
 
@@ -17,7 +18,8 @@ const GOLDEN_PLAIN: &str = include_str!("fixtures/golden_80_plain.txt");
 #[test]
 fn print_output_is_byte_identical_to_golden_color() {
     let doc = parse(SAMPLE);
-    let page = render_with_options(&doc, 80, false);
+    // Pinned to true colour so the frozen golden stays 24-bit `38;2;r;g;b`.
+    let page = render_with_options(&doc, 80, false, ColorDepth::Truecolor);
     assert_eq!(
         page.text, GOLDEN_COLOR,
         "--print (colour) output drifted from the frozen golden"
@@ -27,7 +29,7 @@ fn print_output_is_byte_identical_to_golden_color() {
 #[test]
 fn print_output_is_byte_identical_to_golden_plain() {
     let doc = parse(SAMPLE);
-    let page = render_with_options(&doc, 80, true);
+    let page = render_with_options(&doc, 80, true, ColorDepth::Truecolor);
     assert_eq!(
         page.text, GOLDEN_PLAIN,
         "--print (no_color) output drifted from the frozen golden"

@@ -35,6 +35,7 @@
 use leviculum_micron::{Align, Block, Field, FieldKind, Line, MicronDocument, Style};
 use unicode_width::UnicodeWidthChar;
 
+use crate::color::{rgb_to_ansi256, ColorDepth};
 use crate::theme::Theme;
 
 /// Per-depth section indent, matching the reference `SECTION_INDENT`.
@@ -129,7 +130,7 @@ pub struct RenderedField {
 /// Render a document to a [`RenderedPage`] at `width` columns, with 24-bit ANSI
 /// colour enabled and the dark theme (the `--print` / non-tty look).
 pub fn render(doc: &MicronDocument, width: usize) -> RenderedPage {
-    render_with_options(doc, width, false)
+    render_with_options(doc, width, false, ColorDepth::Truecolor)
 }
 
 /// Render a document, optionally stripping all SGR sequences.
@@ -140,13 +141,20 @@ pub fn render(doc: &MicronDocument, width: usize) -> RenderedPage {
 ///
 /// This is the ANSI sink: it lays the document out into target-agnostic styled
 /// lines with [`layout`], then serialises them to the exact byte stream the
-/// `--print` / non-tty path emits.
-pub fn render_with_options(doc: &MicronDocument, width: usize, no_color: bool) -> RenderedPage {
+/// `--print` / non-tty path emits. `depth` selects 24-bit (`38;2;r;g;b`) or the
+/// downgraded xterm-256 (`38;5;idx`) SGR encoding; it is ignored under
+/// `no_color`, which emits no SGR at all.
+pub fn render_with_options(
+    doc: &MicronDocument,
+    width: usize,
+    no_color: bool,
+    depth: ColorDepth,
+) -> RenderedPage {
     // The print / non-tty sink is always the dark theme, so its golden output is
     // stable and independent of any terminal-background detection.
     let (lines, links) = layout(doc, width, Theme::Dark);
     RenderedPage {
-        text: emit_ansi(&lines, no_color),
+        text: emit_ansi(&lines, no_color, depth),
         links,
     }
 }
@@ -207,16 +215,16 @@ pub fn layout_blocks(
 /// are grouped into a single self-contained SGR sequence, matching the layout's
 /// original line-at-a-time emission byte-for-byte. With `no_color`, no escape
 /// sequences are emitted at all.
-fn emit_ansi(lines: &[RLine], no_color: bool) -> String {
+fn emit_ansi(lines: &[RLine], no_color: bool, depth: ColorDepth) -> String {
     let mut out = String::new();
     for line in lines {
-        emit_ansi_line(&line.cells, no_color, &mut out);
+        emit_ansi_line(&line.cells, no_color, depth, &mut out);
     }
     out
 }
 
 /// Emit one styled line (plus its trailing newline) into `out`.
-fn emit_ansi_line(cells: &[StyledChar], no_color: bool, out: &mut String) {
+fn emit_ansi_line(cells: &[StyledChar], no_color: bool, depth: ColorDepth, out: &mut String) {
     let mut active = false;
     let mut i = 0;
     while i < cells.len() {
@@ -228,7 +236,7 @@ fn emit_ansi_line(cells: &[StyledChar], no_color: bool, out: &mut String) {
             j += 1;
         }
         if !no_color && !st.is_plain() {
-            out.push_str(&st.sgr());
+            out.push_str(&st.sgr(depth));
             out.push_str(&text);
             active = true;
         } else {
@@ -267,8 +275,11 @@ impl RStyle {
         self.fg.is_none() && self.bg.is_none() && !self.bold && !self.underline && !self.italic
     }
 
-    /// The self-contained SGR prefix for this style (starts by resetting).
-    fn sgr(&self) -> String {
+    /// The self-contained SGR prefix for this style (starts by resetting). Under
+    /// [`ColorDepth::Truecolor`] colours emit as 24-bit `38;2;r;g;b` / `48;2;...`;
+    /// under [`ColorDepth::Ansi256`] they are downgraded to the nearest palette
+    /// index as `38;5;idx` / `48;5;idx`.
+    fn sgr(&self, depth: ColorDepth) -> String {
         let mut s = String::from("\x1b[0");
         if self.bold {
             s.push_str(";1");
@@ -280,10 +291,16 @@ impl RStyle {
             s.push_str(";4");
         }
         if let Some((r, g, b)) = self.fg {
-            s.push_str(&format!(";38;2;{r};{g};{b}"));
+            match depth {
+                ColorDepth::Truecolor => s.push_str(&format!(";38;2;{r};{g};{b}")),
+                ColorDepth::Ansi256 => s.push_str(&format!(";38;5;{}", rgb_to_ansi256(r, g, b))),
+            }
         }
         if let Some((r, g, b)) = self.bg {
-            s.push_str(&format!(";48;2;{r};{g};{b}"));
+            match depth {
+                ColorDepth::Truecolor => s.push_str(&format!(";48;2;{r};{g};{b}")),
+                ColorDepth::Ansi256 => s.push_str(&format!(";48;5;{}", rgb_to_ansi256(r, g, b))),
+            }
         }
         s.push('m');
         s
@@ -924,7 +941,7 @@ mod tests {
             },
         ]);
         let (lines, _links) = layout(&d, 40, Theme::Light);
-        let text = emit_ansi(&lines, false);
+        let text = emit_ansi(&lines, false, ColorDepth::Truecolor);
         // Light depth-1 band: fg #000000 (0), bg #777777 (119).
         assert!(
             text.contains("38;2;0;0;0") && text.contains("48;2;119;119;119"),
@@ -974,6 +991,28 @@ mod tests {
         // f00 -> #ff0000, 00f -> #0000ff (nibble doubling).
         assert!(page.text.contains("38;2;255;0;0"));
         assert!(page.text.contains("48;2;0;0;255"));
+    }
+
+    #[test]
+    fn ansi256_depth_downgrades_to_indexed_codes() {
+        let style = Style {
+            fg: Some(Color::parse("f00")),
+            bg: Some(Color::parse("00f")),
+            ..Style::default()
+        };
+        let d = doc(vec![Block::Paragraph {
+            depth: 0,
+            line: Line::new(vec![styled_span("hi", style)]),
+        }]);
+        let page = render_with_options(&d, 40, false, ColorDepth::Ansi256);
+        // Pure red -> palette 196, pure blue -> palette 21; no 24-bit sequence.
+        assert!(page.text.contains("38;5;196"), "got: {:?}", page.text);
+        assert!(page.text.contains("48;5;21"), "got: {:?}", page.text);
+        assert!(
+            !page.text.contains("38;2;"),
+            "24-bit leaked: {:?}",
+            page.text
+        );
     }
 
     #[test]
@@ -1173,7 +1212,7 @@ mod tests {
             depth: 0,
             line: Line::new(vec![styled_span("bold red", style)]),
         }]);
-        let page = render_with_options(&d, 40, true);
+        let page = render_with_options(&d, 40, true, ColorDepth::Truecolor);
         assert!(!page.text.contains('\x1b'), "SGR leaked: {:?}", page.text);
         assert!(page.text.contains("bold red"));
     }
@@ -1194,7 +1233,7 @@ mod tests {
             depth: 0,
             line: Line::new(vec![span]),
         }]);
-        let page = render_with_options(&d, 40, true);
+        let page = render_with_options(&d, 40, true, ColorDepth::Truecolor);
         assert!(!page.text.contains('\x1b'));
         // Plain output: the label appears bare, with no `[N]` marker.
         assert!(page.text.contains("Label"));
@@ -1256,7 +1295,7 @@ mod tests {
             assert!(!link.target.is_empty());
         }
         // no_color rendering must also survive the whole document.
-        let plain = render_with_options(&d, 80, true);
+        let plain = render_with_options(&d, 80, true, ColorDepth::Truecolor);
         assert!(!plain.text.contains('\x1b'));
     }
 

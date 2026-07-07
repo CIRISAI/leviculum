@@ -15,6 +15,7 @@ use clap::{Parser, ValueEnum};
 use leviculum_std::config::Config;
 use lnomad::browser::{self, BrowserOptions};
 use lnomad::cli::{resolve_args, Mode};
+use lnomad::color::{resolve_depth, ColorFlag};
 use lnomad::fetch::Session;
 use lnomad::theme::ThemeFlag;
 use lnomad::tui::run_tui;
@@ -51,6 +52,12 @@ struct Args {
     /// background, `light`/`dark` force a theme. Ignored with `--print` / non-tty.
     #[arg(long, value_enum, default_value_t = ThemeArg::Auto)]
     theme: ThemeArg,
+
+    /// Terminal colour depth: `auto` picks true colour when `COLORTERM` is
+    /// `truecolor`/`24bit` and otherwise downgrades to the xterm-256 palette;
+    /// `truecolor`/`256` force the depth. `--no-color` still overrides this.
+    #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+    color: ColorArg,
 
     /// Render width in columns (default: the detected terminal width, else 80).
     #[arg(long)]
@@ -92,6 +99,28 @@ impl From<ThemeArg> for ThemeFlag {
             ThemeArg::Auto => ThemeFlag::Auto,
             ThemeArg::Light => ThemeFlag::Light,
             ThemeArg::Dark => ThemeFlag::Dark,
+        }
+    }
+}
+
+/// The `--color` choice, a clap-facing mirror of [`ColorFlag`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ColorArg {
+    /// Detect the depth from `COLORTERM`.
+    Auto,
+    /// Force 24-bit true colour.
+    Truecolor,
+    /// Force the xterm-256 palette.
+    #[value(name = "256")]
+    Ansi256,
+}
+
+impl From<ColorArg> for ColorFlag {
+    fn from(arg: ColorArg) -> Self {
+        match arg {
+            ColorArg::Auto => ColorFlag::Auto,
+            ColorArg::Truecolor => ColorFlag::Truecolor,
+            ColorArg::Ansi256 => ColorFlag::Ansi256,
         }
     }
 }
@@ -138,9 +167,17 @@ async fn main() -> ExitCode {
         },
     };
 
+    // Resolve the colour depth once: the `--color` flag over the `COLORTERM`
+    // heuristic. Threaded into both the print sink and the interactive TUI.
+    let depth = resolve_depth(
+        args.color.into(),
+        std::env::var("COLORTERM").ok().as_deref(),
+    );
+
     let opts = BrowserOptions {
         width: args.width.unwrap_or_else(detect_width).max(1),
         no_color: args.no_color || !std::io::stdout().is_terminal(),
+        depth,
         timeout: Duration::from_secs(args.timeout),
     };
 

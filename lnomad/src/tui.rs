@@ -63,6 +63,7 @@ use leviculum_micron::MicronDocument;
 
 use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::browser::{self, BrowserOptions};
+use crate::color::{rgb_to_ansi256, ColorDepth};
 use crate::discovery::{DiscoveredNode, NomadNodeRegistry};
 use crate::fetch::Session;
 use crate::page_cache::{CacheEntry, PageCache};
@@ -662,6 +663,12 @@ pub struct Model {
     /// Whether colour is suppressed (NO_COLOR / non-tty): the chrome bars fall
     /// back to reverse video instead of a coloured background.
     pub no_color: bool,
+    /// The terminal colour depth. Under [`ColorDepth::Ansi256`] the rendered
+    /// buffer's 24-bit RGB colours are downgraded to the nearest xterm-256 index
+    /// in a single post-pass at the end of [`view`]; [`ColorDepth::Truecolor`]
+    /// leaves them as authored. Subordinate to [`no_color`](Model::no_color),
+    /// which suppresses the downgrade along with all colour.
+    pub depth: ColorDepth,
     /// The active light/dark theme: the accents baked into `page` and the chrome
     /// colours the view draws. Toggled at runtime with `t`.
     pub theme: Theme,
@@ -2370,6 +2377,41 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
     // The toast floats on top of everything so it is always visible.
     render_toast(model, frame, frame.area());
+    // Colour-depth post-pass: on a terminal without true colour, downgrade every
+    // 24-bit RGB colour in the finished buffer to its nearest xterm-256 index in
+    // one sweep. A single chokepoint over the rendered buffer keeps every colour
+    // site (content, chrome, spinner, toast, highlights) media-agnostic.
+    downgrade_buffer(model, frame);
+}
+
+/// Downgrade the rendered buffer's 24-bit colours to the xterm-256 palette when
+/// the resolved [`ColorDepth`] is [`ColorDepth::Ansi256`]. A no-op under
+/// [`ColorDepth::Truecolor`] and under `no_color` (where `NO_COLOR` already wins
+/// and the buffer carries the reverse-video chrome instead of colour), so both
+/// leave the buffer byte-identical to before this feature.
+fn downgrade_buffer(model: &Model, frame: &mut Frame) {
+    if model.no_color || model.depth == ColorDepth::Truecolor {
+        return;
+    }
+    let area = frame.area();
+    let buf = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.fg = downgrade_color(cell.fg);
+                cell.bg = downgrade_color(cell.bg);
+            }
+        }
+    }
+}
+
+/// Map a single 24-bit [`Color::Rgb`] to its nearest xterm-256 [`Color::Indexed`];
+/// every other colour (already-indexed, named, reset) passes through unchanged.
+fn downgrade_color(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Indexed(rgb_to_ansi256(r, g, b)),
+        other => other,
+    }
 }
 
 /// Draw the form-field input boxes over the laid-out page: every field's cells
@@ -3423,6 +3465,7 @@ pub async fn run_tui(
 
     let mut model = Model {
         no_color: opts.no_color,
+        depth: opts.depth,
         theme,
         bookmarks,
         bookmarks_path,
@@ -4634,6 +4677,65 @@ mod tests {
             found_styled_link,
             "no underlined LINK_FG 'A' cell found:\n{text}"
         );
+    }
+
+    /// Find the fg colour of the underlined link-label 'A' cell in a rendered
+    /// buffer, if any.
+    fn link_label_fg(buffer: &ratatui::buffer::Buffer) -> Option<Color> {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == "A" && cell.modifier.contains(Modifier::UNDERLINED) {
+                    return Some(cell.fg);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn ansi256_depth_downgrades_link_colour_to_indexed() {
+        let mut model = model_from_sample(content_width(80), (80, 24));
+        model.depth = ColorDepth::Ansi256;
+        let buffer = render(&model, 80, 24);
+        // The link label keeps its colour, but as the nearest palette index, not
+        // a 24-bit Rgb triple.
+        let expect = Color::Indexed(rgb_to_ansi256(0, 175, 255));
+        assert_eq!(
+            link_label_fg(&buffer),
+            Some(expect),
+            "Ansi256 render should downgrade the link fg to an indexed colour"
+        );
+    }
+
+    #[test]
+    fn truecolor_depth_keeps_link_colour_as_rgb() {
+        let mut model = model_from_sample(content_width(80), (80, 24));
+        model.depth = ColorDepth::Truecolor;
+        let buffer = render(&model, 80, 24);
+        assert_eq!(
+            link_label_fg(&buffer),
+            Some(Color::Rgb(0, 175, 255)),
+            "Truecolor render should keep the link fg as a 24-bit Rgb triple"
+        );
+    }
+
+    #[test]
+    fn no_color_suppresses_the_ansi256_downgrade() {
+        // NO_COLOR still wins: even with an Ansi256 depth, the downgrade post-pass
+        // is skipped so the reverse-video chrome path is untouched.
+        let mut model = model_from_sample(content_width(80), (80, 24));
+        model.no_color = true;
+        model.depth = ColorDepth::Ansi256;
+        let buffer = render(&model, 80, 24);
+        // No cell carries an Indexed colour (the downgrade never ran).
+        let has_indexed = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                matches!(cell.fg, Color::Indexed(_)) || matches!(cell.bg, Color::Indexed(_))
+            })
+        });
+        assert!(!has_indexed, "no_color must suppress the Ansi256 downgrade");
     }
 
     #[test]

@@ -65,6 +65,11 @@ full, the oldest-seen node is evicted), and is held in RAM only.
   detects the terminal background (OSC 11, with a `COLORFGBG` fallback) and picks
   the matching theme, defaulting to dark when it cannot tell. Ignored with
   `--print` or non-tty output.
+- `--color <d>`        colour depth: `auto` (default), `truecolor`, or `256`.
+  `auto` emits 24-bit true colour when `COLORTERM` is `truecolor`/`24bit` and
+  otherwise downgrades every colour to the nearest xterm-256 palette index, so
+  terminals without true-colour support still render sensibly. `--no-color`
+  overrides this and drops to monochrome.
 - `--width <n>`        render width (default: detected terminal width, else 80)
 - `--timeout <s>`      per-request timeout in seconds (default 30)
 - `--print`            fetch, render and print once, then exit

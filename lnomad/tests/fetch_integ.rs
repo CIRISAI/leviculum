@@ -248,6 +248,7 @@ async fn print_mode_renders_page_and_link_list() {
     let opts = BrowserOptions {
         width: 80,
         no_color: true,
+        depth: lnomad::color::ColorDepth::Truecolor,
         timeout: Duration::from_secs(20),
     };
     let mut out: Vec<u8> = Vec::new();

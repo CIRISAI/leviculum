@@ -27,6 +27,7 @@
 pub mod bookmarks;
 pub mod browser;
 pub mod cli;
+pub mod color;
 pub mod discovery;
 pub mod fetch;
 pub mod page_cache;
@@ -38,6 +39,7 @@ pub mod url;
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use browser::{parse_command, resolve_link, BrowserOptions, Command, Nav};
 pub use cli::{resolve_args, Mode};
+pub use color::{resolve_depth, rgb_to_ansi256, ColorDepth, ColorFlag};
 pub use discovery::{
     is_nomad_node_announce, name_hash_is_nomad_node, nomad_node_name_hash, DiscoveredNode,
     NomadNodeRegistry,

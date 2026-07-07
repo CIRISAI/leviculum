@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use leviculum_micron::MicronDocument;
 
+use crate::color::ColorDepth;
 use crate::fetch::{FetchError, Session};
 use crate::render::{render_with_options, RenderedLink, RenderedPage};
 use crate::url::{parse_url, Target, UrlError};
@@ -181,6 +182,9 @@ pub struct BrowserOptions {
     pub width: usize,
     /// Strip ANSI colour from the rendered output.
     pub no_color: bool,
+    /// The terminal colour depth: 24-bit true colour, or the downgraded
+    /// xterm-256 palette for terminals without true-colour support.
+    pub depth: ColorDepth,
     /// Per-request fetch timeout.
     pub timeout: Duration,
 }
@@ -322,7 +326,7 @@ async fn load_and_show<W: Write>(
     anchor: Option<&str>,
 ) -> Result<RenderedPage, FetchError> {
     let doc = fetch_document(session, target, opts.timeout).await?;
-    let page = render_with_options(&doc, opts.width, opts.no_color);
+    let page = render_with_options(&doc, opts.width, opts.no_color, opts.depth);
     let _ = write_page(out, &page);
     if let Some(a) = anchor {
         write_anchor_note(out, &doc, a);
@@ -829,6 +833,7 @@ mod tests {
         BrowserOptions {
             width,
             no_color,
+            depth: ColorDepth::Truecolor,
             timeout: Duration::from_secs(1),
         }
     }
