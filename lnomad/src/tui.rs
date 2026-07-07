@@ -65,6 +65,7 @@ use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::browser::{self, BrowserOptions};
 use crate::discovery::{DiscoveredNode, NomadNodeRegistry};
 use crate::fetch::Session;
+use crate::page_cache::{CacheEntry, PageCache};
 use crate::render::{layout_blocks, FieldValue, RLine, RStyle, RenderedField, RenderedLink};
 use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
 use crate::url::{classify_link, parse_url, LinkKind, Target, DEFAULT_PATH};
@@ -96,6 +97,10 @@ const TOAST_TICKS: u64 = TOAST_LIFETIME_MS / SPINNER_TICK_MS;
 const BACK_LABEL: &str = "‹ back";
 const FORWARD_LABEL: &str = "forward ›";
 const RELOAD_LABEL: &str = "⟳ reload";
+
+/// The subtle right-aligned top-bar marker shown when the current page was
+/// served from the in-RAM page cache rather than a fresh fetch.
+const CACHED_LABEL: &str = "⚡ cached ";
 
 /// Browse-mode status hints. A curated subset that fits an 80-column status bar;
 /// the full keybinding list lives in the `?` help overlay.
@@ -673,6 +678,14 @@ pub struct Model {
     pub show_places: bool,
     /// The selected row in the places panel, an index into [`places`].
     pub places_sel: usize,
+    /// The in-RAM LRU cache of recently viewed pages, keyed by fetch target. A
+    /// revisit (including back/forward) renders instantly from here; a reload
+    /// bypasses it and form submits are never stored. See [`PageCache`].
+    pub page_cache: PageCache,
+    /// Whether the page currently shown was served from [`page_cache`] rather
+    /// than a fresh fetch. Drives the subtle "cached" top-bar marker; cleared on
+    /// the next fresh load.
+    pub cached_view: bool,
     /// Set once the user has asked to quit; the IO loop breaks on it.
     pub quit: bool,
 }
@@ -828,6 +841,16 @@ impl Model {
             ScrollCmd::Bottom => max,
         }
         .min(max);
+    }
+
+    /// Stash the current page's scroll offset into its cache entry (when the
+    /// page is cached), so a later revisit restores where the reader was. A
+    /// no-op when the current target is not cached (e.g. a form-submit result,
+    /// or the very first page still loading).
+    pub fn stash_scroll(&mut self) {
+        if let Some(target) = self.history.current().cloned() {
+            self.page_cache.set_scroll(&target, self.scroll);
+        }
     }
 
     /// Scroll down by `n` lines (mouse wheel), clamped to the page.
@@ -1068,6 +1091,8 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
 fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
     let pending = model.pending.take();
     let anchor = model.pending_anchor.take();
+    // A fresh fetch, not a cache hit: clear the "cached" marker.
+    model.cached_view = false;
     model.doc = doc;
     // A fresh document replaces the old fields: clear the store so the relayout
     // lays them out from the new prefill, then rebuild the editable store from it.
@@ -1085,13 +1110,14 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
     model.hover = None;
     model.matches.clear();
     model.current_match = None;
-    if let Some(pending) = pending {
+    let loaded_target = pending.map(|pending| {
         model.current_dest = Some(pending.target.dest_hash);
         match pending.action {
-            HistoryAction::Push => model.history.visit(pending.target),
+            HistoryAction::Push => model.history.visit(pending.target.clone()),
             HistoryAction::Goto(idx) => model.history.goto(idx),
         }
-    }
+        pending.target
+    });
     // A followed `#anchor` scrolls its block's first line to the top; an unknown
     // anchor falls back to the top of the page with a toast note.
     if let Some(name) = anchor {
@@ -1101,6 +1127,21 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
                 model.scroll = line.min(model.max_scroll(vp));
             }
             None => model.set_toast(ToastKind::Error, format!("anchor #{name} not found")),
+        }
+    }
+    // Cache the freshly loaded page (overwriting any prior entry for this target,
+    // as a reload does) so a later revisit renders instantly. A non-idempotent
+    // form submit is never cached.
+    if let Some(target) = loaded_target {
+        if !is_form_submit(&target) {
+            model.page_cache.insert(
+                target,
+                CacheEntry {
+                    doc: model.doc.clone(),
+                    title: model.title.clone(),
+                    scroll: model.scroll,
+                },
+            );
         }
     }
 }
@@ -1337,13 +1378,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                 Ok(target) => {
                     model.mode = Mode::Browse;
                     model.input.reset();
-                    model.dismiss_toast();
-                    model.pending = Some(Pending {
-                        target: target.clone(),
-                        action: HistoryAction::Push,
-                    });
-                    model.pending_anchor = None;
-                    vec![Effect::Navigate(target)]
+                    begin_navigation(model, target, HistoryAction::Push, None)
                 }
                 Err(err) => {
                     model.set_toast(ToastKind::Error, format!("bad URL: {raw} ({err})"));
@@ -1699,13 +1734,7 @@ fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         },
     };
     close_places(model);
-    model.dismiss_toast();
-    model.pending = Some(Pending {
-        target: target.clone(),
-        action: HistoryAction::Push,
-    });
-    model.pending_anchor = None;
-    vec![Effect::Navigate(target)]
+    begin_navigation(model, target, HistoryAction::Push, None)
 }
 
 /// Delete the selected bookmark and persist, keeping the selection in range. A
@@ -1833,6 +1862,110 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Whether `target` is a non-idempotent form submit: it carries at least one
+/// `field_<name>` value collected from an on-page form. Such requests are never
+/// served from (or stored in) the page cache. Preset-only (`var_`) targets are
+/// idempotent and cacheable.
+fn is_form_submit(target: &Target) -> bool {
+    target.fields.iter().any(|(k, _)| k.starts_with("field_"))
+}
+
+/// Start a navigation to `target`, recording it in history per `action` and
+/// scrolling to `anchor` (if any) once shown.
+///
+/// A cache hit for an idempotent target renders instantly from
+/// [`Model::page_cache`] with its stored scroll restored and emits NO fetch and
+/// NO spinner. A miss, or a non-idempotent form submit (never cached), sets the
+/// pending fetch and emits [`Effect::Navigate`]. The single entry point every
+/// navigation (address bar, link, bookmark, back/forward) routes through so the
+/// cache is checked uniformly; a reload deliberately bypasses it.
+fn begin_navigation(
+    model: &mut Model,
+    target: Target,
+    action: HistoryAction,
+    anchor: Option<String>,
+) -> Vec<Effect> {
+    // Remember where the reader was on the page being left, so a later revisit
+    // of it restores the scroll position.
+    model.stash_scroll();
+    model.dismiss_toast();
+
+    if !is_form_submit(&target) {
+        if let Some(entry) = model.page_cache.get(&target).cloned() {
+            return load_from_cache(model, target, action, anchor, entry);
+        }
+    }
+
+    model.pending = Some(Pending {
+        target: target.clone(),
+        action,
+    });
+    model.pending_anchor = anchor;
+    vec![Effect::Navigate(target)]
+}
+
+/// Show `target` from its cached parsed document: relayout at the current width/
+/// theme, restore the stored scroll (or scroll to `anchor`), fold the navigation
+/// into history exactly as a fresh load would, and flag the view as cached.
+///
+/// Emits no fetch. When a fetch was in flight it emits [`Effect::Cancel`] so a
+/// late result cannot clobber the page we just restored.
+fn load_from_cache(
+    model: &mut Model,
+    target: Target,
+    action: HistoryAction,
+    anchor: Option<String>,
+    entry: CacheEntry,
+) -> Vec<Effect> {
+    let was_loading = model.is_loading();
+    model.pending = None;
+    model.pending_anchor = None;
+
+    model.doc = entry.doc;
+    model.title = entry.title;
+    // The cached document brings its own fields: rebuild the editable store from
+    // the freshly laid-out prefill, exactly as a fresh load does.
+    model.field_state.clear();
+    model.relayout(content_width(model.size.0));
+    model.rebuild_field_state();
+
+    // A different page invalidates any focus/hover cursor and search matches
+    // held against the old one.
+    model.focus = None;
+    model.field_focus = None;
+    model.mode = Mode::Browse;
+    model.hover = None;
+    model.matches.clear();
+    model.current_match = None;
+
+    model.current_dest = Some(target.dest_hash);
+    match action {
+        HistoryAction::Push => model.history.visit(target),
+        HistoryAction::Goto(idx) => model.history.goto(idx),
+    }
+
+    // Restore the reader's last scroll, or scroll to a followed `#anchor`.
+    let vp = model.viewport();
+    match anchor {
+        Some(name) => match anchor_line(model, &name) {
+            Some(line) => model.scroll = line.min(model.max_scroll(vp)),
+            None => {
+                model.scroll = 0;
+                model.set_toast(ToastKind::Error, format!("anchor #{name} not found"));
+            }
+        },
+        None => model.scroll = entry.scroll.min(model.max_scroll(vp)),
+    }
+
+    model.cached_view = true;
+
+    if was_loading {
+        vec![Effect::Cancel]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Reload the page under the history cursor without changing history.
 fn reload_current(model: &mut Model) -> Vec<Effect> {
     let Some(target) = model.history.current().cloned() else {
@@ -1855,13 +1988,7 @@ fn go_back(model: &mut Model) -> Vec<Effect> {
     }
     let idx = model.history.idx - 1;
     let target = model.history.stack[idx].clone();
-    model.pending = Some(Pending {
-        target: target.clone(),
-        action: HistoryAction::Goto(idx),
-    });
-    model.pending_anchor = None;
-    model.dismiss_toast();
-    vec![Effect::Navigate(target)]
+    begin_navigation(model, target, HistoryAction::Goto(idx), None)
 }
 
 /// Navigate forward one history entry (re-fetching it), if possible.
@@ -1871,13 +1998,7 @@ fn go_forward(model: &mut Model) -> Vec<Effect> {
     }
     let idx = model.history.idx + 1;
     let target = model.history.stack[idx].clone();
-    model.pending = Some(Pending {
-        target: target.clone(),
-        action: HistoryAction::Goto(idx),
-    });
-    model.pending_anchor = None;
-    model.dismiss_toast();
-    vec![Effect::Navigate(target)]
+    begin_navigation(model, target, HistoryAction::Goto(idx), None)
 }
 
 /// Follow the link with 1-based `index`: resolve its target against the current
@@ -1905,15 +2026,10 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
                 // resolve_link already put on the target. Preset `var_` and
                 // collected `field_` keys never collide, so we just append.
                 target.fields.extend(collect_submit_fields(model, &link));
-                model.dismiss_toast();
-                model.pending = Some(Pending {
-                    target: target.clone(),
-                    action: HistoryAction::Push,
-                });
-                // Remember any `#anchor` so the load handler scrolls to it once
-                // the page arrives (resolved against the freshly-laid-out lines).
-                model.pending_anchor = anchor;
-                vec![Effect::Navigate(target)]
+                // A submit target is routed through the same entry point but is
+                // never served from cache (see [`is_form_submit`]); any `#anchor`
+                // is resolved against the shown page.
+                begin_navigation(model, target, HistoryAction::Push, anchor)
             }
             Err(err) => {
                 model.set_toast(
@@ -2457,6 +2573,23 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     ));
     frame.render_widget(Paragraph::new(title), title_row);
 
+    // A subtle, right-aligned marker when the shown page came from the in-RAM
+    // cache rather than a fresh fetch. Drawn in the muted chrome fg (never DIM,
+    // and reverse-video-safe under NO_COLOR), so it reads as unobtrusive chrome.
+    if model.cached_view {
+        let w = UnicodeWidthStr::width(CACHED_LABEL) as u16;
+        if title_row.width > w {
+            let marker = Rect {
+                x: title_row.x + title_row.width - w,
+                y: title_row.y,
+                width: w,
+                height: 1,
+            };
+            let style = chrome_muted_style(model.no_color, model.theme);
+            frame.render_widget(Paragraph::new(RtSpan::styled(CACHED_LABEL, style)), marker);
+        }
+    }
+
     if area.height < TOPBAR_ROWS {
         return;
     }
@@ -2713,7 +2846,7 @@ const HELP_LINES: &[&str] = &[
     "  d                   places panel",
     "  m                   bookmark this page",
     "  y                   copy link / page URL",
-    "  R                   reload the page",
+    "  R                   reload the page (always refetches)",
     "  t                   toggle light / dark theme",
     "  M-← / M-→           back / forward",
     "  mouse back / fwd     back / forward",
@@ -3747,6 +3880,212 @@ mod tests {
         assert_eq!(
             m.pending.as_ref().map(|p| p.action.clone()),
             Some(HistoryAction::Goto(0))
+        );
+    }
+
+    // --- page cache ------------------------------------------------------
+
+    #[test]
+    fn is_form_submit_flags_field_targets_only() {
+        let submit = Target {
+            dest_hash: [3; 16],
+            path: "/page/s.mu".to_string(),
+            fields: vec![("field_name".to_string(), "value".to_string())],
+            is_file: false,
+        };
+        assert!(is_form_submit(&submit));
+        // A `var_` preset is idempotent and cacheable.
+        let preset = Target {
+            dest_hash: [3; 16],
+            path: "/page/s.mu".to_string(),
+            fields: vec![("var_a".to_string(), "1".to_string())],
+            is_file: false,
+        };
+        assert!(!is_form_submit(&preset));
+        assert!(!is_form_submit(&tgt(1)));
+    }
+
+    #[test]
+    fn page_loaded_inserts_into_the_cache() {
+        let mut m = tall_model((80, 24));
+        m.pending = Some(Pending {
+            target: tgt(1),
+            action: HistoryAction::Push,
+        });
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: long_doc(),
+                title: "A".to_string(),
+            },
+        );
+        assert!(m.page_cache.contains(&tgt(1)), "fresh load is cached");
+        assert!(!m.cached_view, "a fresh load is not a cached view");
+    }
+
+    #[test]
+    fn fresh_navigation_to_cached_target_loads_from_cache_without_fetch() {
+        let mut m = tall_model((80, 24));
+        m.history.visit(tgt(1));
+        m.current_dest = Some([1; 16]);
+        m.page_cache.insert(
+            tgt(2),
+            CacheEntry {
+                doc: long_doc(),
+                title: "Two".to_string(),
+                scroll: 9,
+            },
+        );
+        let fx = begin_navigation(&mut m, tgt(2), HistoryAction::Push, None);
+        assert!(fx.is_empty(), "a cache hit emits no fetch: {fx:?}");
+        assert!(m.pending.is_none(), "no fetch is pending");
+        assert_eq!(m.title, "Two");
+        assert_eq!(m.scroll, 9, "the stored scroll is restored");
+        assert!(m.cached_view, "the cached marker is set");
+        // History is folded immediately (no async round-trip).
+        assert_eq!(m.history.stack, vec![tgt(1), tgt(2)]);
+        assert_eq!(m.history.idx, 1);
+    }
+
+    #[test]
+    fn back_and_forward_hit_the_cache_and_restore_scroll() {
+        // A tall, narrow viewport makes the sample document long enough that a
+        // scroll offset of 12 is well within range (not clamped on restore).
+        let mut m = tall_model((40, 13));
+        // Load A through the fetch path so it caches.
+        m.pending = Some(Pending {
+            target: tgt(1),
+            action: HistoryAction::Push,
+        });
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: long_doc(),
+                title: "A".to_string(),
+            },
+        );
+        m.scroll = 12;
+
+        // Navigate to B (a fresh fetch): leaving A stashes its scroll.
+        let fx = begin_navigation(&mut m, tgt(2), HistoryAction::Push, None);
+        assert_eq!(fx, vec![Effect::Navigate(tgt(2))]);
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: long_doc(),
+                title: "B".to_string(),
+            },
+        );
+        m.scroll = 3;
+
+        // Back to A: instant from cache, scroll 12 restored, no fetch.
+        let fx = press(&mut m, KeyCode::Left, KeyModifiers::ALT);
+        assert!(fx.is_empty(), "back hit the cache: {fx:?}");
+        assert!(m.pending.is_none());
+        assert_eq!(m.history.idx, 0, "history moved immediately");
+        assert_eq!(m.title, "A");
+        assert_eq!(m.scroll, 12, "A's stashed scroll restored");
+        assert!(m.cached_view);
+
+        // Forward to B: instant, scroll 3 restored (stashed on leaving B).
+        let fx = press(&mut m, KeyCode::Right, KeyModifiers::ALT);
+        assert!(fx.is_empty(), "forward hit the cache: {fx:?}");
+        assert_eq!(m.history.idx, 1);
+        assert_eq!(m.title, "B");
+        assert_eq!(m.scroll, 3);
+        assert!(m.cached_view);
+    }
+
+    #[test]
+    fn reload_bypasses_cache_and_overwrites_the_entry() {
+        let mut m = tall_model((80, 24));
+        m.history.visit(tgt(1));
+        m.current_dest = Some([1; 16]);
+        m.page_cache.insert(
+            tgt(1),
+            CacheEntry {
+                doc: parse("old body"),
+                title: "Old".to_string(),
+                scroll: 3,
+            },
+        );
+        // R refetches even though the page is cached.
+        let fx = press(&mut m, KeyCode::Char('R'), KeyModifiers::NONE);
+        assert_eq!(fx, vec![Effect::Navigate(tgt(1))]);
+        assert_eq!(
+            m.pending.as_ref().map(|p| p.action.clone()),
+            Some(HistoryAction::Goto(0))
+        );
+        // On load the entry is overwritten with the fresh page.
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse("new body"),
+                title: "New".to_string(),
+            },
+        );
+        assert!(!m.cached_view, "a fresh load clears the cached marker");
+        let hit = m.page_cache.get(&tgt(1)).expect("still cached");
+        assert_eq!(hit.title, "New", "the entry was overwritten");
+    }
+
+    #[test]
+    fn form_submit_is_never_cached_and_always_fetches() {
+        let mut m = tall_model((80, 24));
+        let submit = Target {
+            dest_hash: [3; 16],
+            path: "/page/s.mu".to_string(),
+            fields: vec![("field_name".to_string(), "value".to_string())],
+            is_file: false,
+        };
+        let fx = begin_navigation(&mut m, submit.clone(), HistoryAction::Push, None);
+        assert_eq!(fx, vec![Effect::Navigate(submit.clone())], "always fetches");
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse("submitted"),
+                title: "S".to_string(),
+            },
+        );
+        assert!(
+            !m.page_cache.contains(&submit),
+            "a form submit result must not be cached"
+        );
+    }
+
+    #[test]
+    fn cache_hit_while_loading_cancels_the_inflight_fetch() {
+        let mut m = tall_model((80, 24));
+        m.history.visit(tgt(1));
+        m.current_dest = Some([1; 16]);
+        m.page_cache.insert(
+            tgt(2),
+            CacheEntry {
+                doc: long_doc(),
+                title: "Two".to_string(),
+                scroll: 0,
+            },
+        );
+        m.pending = Some(Pending {
+            target: tgt(9),
+            action: HistoryAction::Push,
+        });
+        let fx = begin_navigation(&mut m, tgt(2), HistoryAction::Push, None);
+        assert_eq!(fx, vec![Effect::Cancel], "a stale fetch is cancelled");
+        assert!(m.pending.is_none());
+        assert_eq!(m.title, "Two");
+    }
+
+    #[test]
+    fn cached_marker_shown_only_when_view_is_cached() {
+        let mut m = loaded_model((80, 24));
+        let fresh = flat(&render(&m, 80, 24));
+        assert!(!fresh.contains("cached"), "no marker on a fresh page");
+        m.cached_view = true;
+        let cached = flat(&render(&m, 80, 24));
+        assert!(
+            cached.contains("cached"),
+            "marker shown when cached:\n{cached}"
         );
     }
 

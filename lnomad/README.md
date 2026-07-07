@@ -87,7 +87,7 @@ set apart by its underline and colour, and is reached by focus, hint or click:
   jumps to the first; `n` / `N` cycle to the next / previous match, `Esc` clears
 - click       follow a link, or activate a top-bar control
 - `:`         enter an address
-- `R`         reload the page
+- `R`         reload the page (always refetches, bypassing the cache)
 - `t`         toggle the light / dark theme (correct a wrong auto-detection)
 - `M-←` / `M-→`  back / forward
 - mouse back / forward side buttons  back / forward
@@ -98,6 +98,13 @@ set apart by its underline and colour, and is reached by focus, hint or click:
 The focused or hovered link's target is shown in the status bar. Same-destination
 links (`:/page/x.mu`) resolve against the page currently in view; a followed link
 carries its preset (`f=v`) fields as `var_*` request variables.
+
+Recently viewed pages are held in an in-RAM cache (the last 50 distinct pages),
+so revisiting one, including stepping back and forward through history, renders
+instantly from memory with your last scroll position restored. The cache is
+transparent: `R` always refetches (bypassing it and refreshing the stored copy),
+and non-idempotent form submits are never cached. A shown page served from the
+cache carries a subtle `⚡ cached` marker at the right of the top-bar.
 
 ### Form fields and submitting
 

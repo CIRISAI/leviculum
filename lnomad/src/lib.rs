@@ -29,6 +29,7 @@ pub mod browser;
 pub mod cli;
 pub mod discovery;
 pub mod fetch;
+pub mod page_cache;
 pub mod render;
 pub mod theme;
 pub mod tui;
@@ -42,6 +43,7 @@ pub use discovery::{
     NomadNodeRegistry,
 };
 pub use fetch::{FetchError, Session};
+pub use page_cache::{CacheEntry, PageCache};
 pub use render::{
     layout, render_with_options, RLine, RStyle, RenderedLink, RenderedPage, StyledChar,
 };
