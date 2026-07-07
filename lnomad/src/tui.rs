@@ -2185,7 +2185,15 @@ fn place_label(place: &Place) -> String {
 
 /// Draw the centered help overlay listing the keybindings.
 fn render_help(frame: &mut Frame, area: Rect) {
-    let width = 44u16.min(area.width);
+    // Size the overlay to the widest help line plus its two borders, so no line
+    // wraps in a normal-width terminal. `Wrap` below stays as a safety net for
+    // terminals too narrow to hold the widest line.
+    let inner = HELP_LINES
+        .iter()
+        .map(|l| UnicodeWidthStr::width(*l))
+        .max()
+        .unwrap_or(0) as u16;
+    let width = (inner + 2).min(area.width);
     let height = (HELP_LINES.len() as u16 + 2).min(area.height);
     let overlay = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -3538,6 +3546,39 @@ mod tests {
         // Esc dismisses it.
         press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!m.show_help);
+    }
+
+    #[test]
+    fn help_overlay_widens_to_the_longest_line() {
+        let mut m = loaded_model((100, 30));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let buffer = render(&m, 100, 30);
+        let text = flat(&buffer);
+        // The widest description renders contiguously on one row: at the old fixed
+        // width of 44 it wrapped ("toggle light / dark" | "theme").
+        assert!(
+            text.lines()
+                .any(|row| row.contains("toggle light / dark theme")),
+            "widest help line wrapped:\n{text}"
+        );
+        // The overlay is at least the widest line plus its two borders wide.
+        let inner = HELP_LINES
+            .iter()
+            .map(|l| UnicodeWidthStr::width(*l))
+            .max()
+            .unwrap();
+        let border = text
+            .lines()
+            .find(|row| row.contains('┌'))
+            .expect("top border row");
+        let chars: Vec<char> = border.chars().collect();
+        let start = chars.iter().position(|&c| c == '┌').unwrap();
+        let end = chars.iter().position(|&c| c == '┐').unwrap();
+        let width = end - start + 1;
+        assert!(
+            width >= inner + 2,
+            "overlay width {width} < longest line {inner} + 2",
+        );
     }
 
     #[test]
