@@ -41,8 +41,9 @@ const MAX_TABLE_WIDTH: usize = 100;
 /// Smallest width the renderer will lay out to; anything smaller is clamped up
 /// so wrapping and alignment stay well defined.
 const MIN_WIDTH: usize = 1;
-/// The foreground colour applied to link labels and their `[N]` markers, so a
-/// link reads as distinct from body text regardless of the page's own colours.
+/// The foreground colour applied to link labels, so a link reads as distinct
+/// from body text regardless of the page's own colours. Links carry no visible
+/// `[N]` marker: they are set apart by this colour plus an underline only.
 const LINK_FG: (u8, u8, u8) = (0, 175, 255);
 
 /// The full rendered page: laid-out text plus the links found in it.
@@ -58,7 +59,8 @@ pub struct RenderedPage {
 /// laid-out position) future mouse hit-testing in the TUI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderedLink {
-    /// 1-based index matching the visible `[N]` marker in the text.
+    /// 1-based index in source order. Internal only now (no visible `[N]`
+    /// marker): it identifies the link for focus, hint labelling and hit-testing.
     pub index: usize,
     /// The link's display label.
     pub label: String,
@@ -72,8 +74,8 @@ pub struct RenderedLink {
     pub line: usize,
     /// 0-based column where the clickable label starts on that line.
     pub col_start: usize,
-    /// 0-based column one past the last clickable cell (the `[N]` marker is part
-    /// of the clickable span). `col_start..col_end` is the hit-test range.
+    /// 0-based column one past the last clickable cell. `col_start..col_end` is
+    /// the hit-test range (the visible label core, with no `[N]` marker).
     pub col_end: usize,
 }
 
@@ -85,8 +87,9 @@ pub fn render(doc: &MicronDocument, width: usize) -> RenderedPage {
 
 /// Render a document, optionally stripping all SGR sequences.
 ///
-/// With `no_color` set, the output carries no escape sequences at all (the
-/// `[N]` link markers, indentation, wrapping and alignment are preserved).
+/// With `no_color` set, the output carries no escape sequences at all
+/// (indentation, wrapping and alignment are preserved; links, no longer marked
+/// by a `[N]`, become indistinguishable from body text in plain output).
 ///
 /// This is the ANSI sink: it lays the document out into target-agnostic styled
 /// lines with [`layout`], then serialises them to the exact byte stream the
@@ -461,8 +464,8 @@ impl Renderer {
         }
     }
 
-    /// Flatten a line's spans into styled characters, recording links and their
-    /// visible `[N]` markers. Returns the characters and the line's alignment.
+    /// Flatten a line's spans into styled characters, recording each link's
+    /// clickable span. Returns the characters and the line's alignment.
     fn flatten_line(&mut self, line: &Line) -> (Vec<StyledChar>, Align) {
         let mut out: Vec<StyledChar> = Vec::new();
         for span in &line.spans {
@@ -498,10 +501,10 @@ impl Renderer {
                 let trail_len = rest.len() - rest.trim_end().len();
                 let (core, trail) = rest.split_at(rest.len() - trail_len);
                 push_styled(&mut out, lead, base);
-                // The core label and the `[N]` marker are the clickable span:
-                // style them and tag them with the link index for hit-testing.
+                // The core label is the clickable span: style it and tag it with
+                // the link index for hit-testing. No visible `[N]` marker is
+                // appended; the underline + LINK_FG alone mark it as a link.
                 push_link(&mut out, core, link_style, index);
-                push_link(&mut out, &format!("[{index}]"), link_style, index);
                 push_styled(&mut out, trail, base);
                 continue;
             }
@@ -852,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn link_gets_marker_and_entry() {
+    fn link_records_entry_without_visible_marker() {
         let link = Link {
             label: "Docs".to_string(),
             target: "/page/docs.mu".to_string(),
@@ -869,7 +872,8 @@ mod tests {
         }]);
         let page = render(&d, 40);
         assert!(page.text.contains("Docs"));
-        assert!(page.text.contains("[1]"), "visible marker missing");
+        // No visible `[N]` marker: links are set apart by style only.
+        assert!(!page.text.contains("[1]"), "unexpected visible marker");
         assert_eq!(page.links.len(), 1);
         let l = &page.links[0];
         assert_eq!(l.index, 1);
@@ -905,11 +909,11 @@ mod tests {
             line: Line::new(vec![link_span("  \u{2022} mirrors")]),
         }]);
         let page = render(&d, 40);
-        // Two leading spaces precede the underlined LINK run; the core label and
-        // the `[1]` marker share the underline + LINK_FG run.
+        // Two leading spaces precede the underlined LINK run; the core label
+        // carries the underline + LINK_FG run, with no `[N]` marker appended.
         assert!(
             page.text
-                .contains("  \x1b[0;4;38;2;0;175;255m\u{2022} mirrors[1]"),
+                .contains("  \x1b[0;4;38;2;0;175;255m\u{2022} mirrors\x1b[0m"),
             "got: {:?}",
             page.text
         );
@@ -929,10 +933,10 @@ mod tests {
             line: Line::new(vec![link_span("mirrors  ")]),
         }]);
         let page = render(&d, 40);
-        // Core label + marker underlined, then reset, then two plain spaces.
+        // Core label underlined, then reset, then two plain spaces.
         assert!(
             page.text
-                .contains("\x1b[0;4;38;2;0;175;255mmirrors[1]\x1b[0m  "),
+                .contains("\x1b[0;4;38;2;0;175;255mmirrors\x1b[0m  "),
             "got: {:?}",
             page.text
         );
@@ -947,8 +951,7 @@ mod tests {
         }]);
         let page = render(&d, 40);
         assert!(
-            page.text
-                .contains("\x1b[0;4;38;2;0;175;255mmirrors[1]\x1b[0m"),
+            page.text.contains("\x1b[0;4;38;2;0;175;255mmirrors\x1b[0m"),
             "got: {:?}",
             page.text
         );
@@ -990,14 +993,14 @@ mod tests {
     }
 
     #[test]
-    fn no_color_keeps_link_marker() {
+    fn no_color_link_has_no_marker() {
         let link = Link {
-            label: "L".to_string(),
+            label: "Label".to_string(),
             target: "/x".to_string(),
             fields: vec![],
         };
         let span = Span {
-            text: "L".to_string(),
+            text: "Label".to_string(),
             link: Some(link),
             ..Span::default()
         };
@@ -1007,7 +1010,9 @@ mod tests {
         }]);
         let page = render_with_options(&d, 40, true);
         assert!(!page.text.contains('\x1b'));
-        assert!(page.text.contains("L[1]"));
+        // Plain output: the label appears bare, with no `[N]` marker.
+        assert!(page.text.contains("Label"));
+        assert!(!page.text.contains("[1]"));
     }
 
     #[test]

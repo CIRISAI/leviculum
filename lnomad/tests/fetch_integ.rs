@@ -269,13 +269,24 @@ async fn print_mode_renders_page_and_link_list() {
         printed.contains("Entry 199 in the node directory listing."),
         "tail of the large page missing (Resource path truncated?)"
     );
-    // The numbered link list is printed below the page.
-    assert!(printed.contains("Links:"), "link list header missing");
-    // The target keeps its same-destination `:` form, resolved against the
-    // current page when followed.
+    // Links render inline (set apart by underline + colour), with no `[N]`
+    // marker and no trailing `Links:` legend: the label appears in the page body
+    // but the numbered-legend forms do not.
     assert!(
-        printed.contains("[1] Documentation -> :/page/docs.mu"),
-        "link entry missing from output: {printed:?}"
+        printed.contains("Documentation"),
+        "inline link label missing from output: {printed:?}"
+    );
+    assert!(
+        !printed.contains("Links:"),
+        "legend header leaked into output: {printed:?}"
+    );
+    assert!(
+        !printed.contains("[1] Documentation"),
+        "numbered link marker leaked into output: {printed:?}"
+    );
+    assert!(
+        !printed.contains("-> :/page/docs.mu"),
+        "legend entry leaked into output: {printed:?}"
     );
 
     session.close().await.expect("close session");

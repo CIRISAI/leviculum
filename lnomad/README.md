@@ -65,30 +65,34 @@ the browser with the `d` (`nodes`) command, and `o <N>` opens a listed node.
 When stdout is not a terminal, `lnomad` prints once and exits even without
 `--print`, so piping and redirection never block on the prompt.
 
-## Interactive commands
+## Interactive keys
 
-On a terminal, `lnomad` renders the page, lists its links as `[N] label ->
-target`, and reads commands at the `>` prompt:
+On a terminal, `lnomad` opens a full-screen browser: a top-bar (page title,
+back / forward / reload controls, address slot), the scrollable page, and a
+status bar. Links carry no `[N]` marker and there is no link legend; a link is
+set apart by its underline and colour, and is reached by focus, hint or click:
 
-- `N`         follow link number `N`
-- `b`         back to the previous page
-- `r`         reload the current page
-- `u <url>`   go to a new URL
-- `d` / `nodes`  list NomadNet nodes discovered from announces
-- `o <N>`     open discovered node number `N`
-- `l`         toggle the link legend
-- `h`         help
-- `q` / EOF   quit
+- `j` / `k`, arrows, `Ctrl-f` / `Ctrl-b`, `g` / `G`  scroll
+- `Tab` / `Shift-Tab`  move the focus cursor across links (auto-scrolls)
+- `Enter`     follow the focused link
+- `f`         hint mode: type the label shown over a link (or the link's text)
+- click       follow a link, or activate a top-bar control
+- `:`         enter an address
+- `R`         reload the page
+- `M-←` / `M-→`  back / forward
+- `Esc` / `Ctrl-g`  cancel a load
+- `?`         toggle the help overlay
+- `q` / `Ctrl-c`  quit
 
-Same-destination links (`:/page/x.mu`) resolve against the page currently in
-view. A followed link carries its preset (`f=v`) fields as `var_*` request
-variables.
+The focused or hovered link's target is shown in the status bar. Same-destination
+links (`:/page/x.mu`) resolve against the page currently in view; a followed link
+carries its preset (`f=v`) fields as `var_*` request variables.
 
 ## v1 limits
 
 - Interactive form-field input (fields the reader must type) is a stub: a link
   is followed with its preset fields only, and a note is printed when a link
   carries form fields.
-- A `#anchor` in a target is resolved against the page's anchors and its
-  position is annotated; a scrolling TUI is out of scope for v1.
+- A `#anchor` in a target is resolved against the page's anchors, but the
+  browser does not yet scroll to the anchor position on load.
 - `/file/` downloads are not supported.

@@ -4,8 +4,8 @@ This is a plain paragraph that should wrap when the render width is narrow
 enough to force a hard break across several lines of output.
 
 Links:
-[0;4;38;2;0;175;255m• Alpha[1][0m
-  [0;4;38;2;0;175;255m• Beta[2][0m
+[0;4;38;2;0;175;255m• Alpha[0m
+  [0;4;38;2;0;175;255m• Beta[0m
 
 ────────────────────────────────────────────────────────────────────────────────
 

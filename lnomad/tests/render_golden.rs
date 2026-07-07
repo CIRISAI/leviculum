@@ -58,20 +58,21 @@ fn bullet_link_records_its_laid_out_position() {
     let (lines, links) = layout(&doc, 80);
 
     // The plain "• Alpha" link is link 1; its label starts at column 0 (no
-    // leading whitespace) and the clickable span covers "• Alpha[1]".
+    // leading whitespace) and the clickable span covers just "• Alpha" (no
+    // visible `[N]` marker is appended).
     let alpha = links
         .iter()
         .find(|l| l.target == ":/page/alpha.mu")
         .expect("alpha link");
     let alpha_line = &lines[alpha.line];
     assert!(
-        line_text(alpha_line).starts_with("• Alpha[1]"),
+        line_text(alpha_line).starts_with("• Alpha"),
         "alpha not at line start: {:?}",
         line_text(alpha_line)
     );
     assert_eq!(alpha.col_start, 0, "alpha label should start at column 0");
-    // "• Alpha" = 7 chars + "[1]" = 3 -> exclusive end 10.
-    assert_eq!(alpha.col_end, 10, "alpha clickable span end");
+    // "• Alpha" = 7 chars -> exclusive end 7.
+    assert_eq!(alpha.col_end, 7, "alpha clickable span end");
     // Every cell in the recorded span is underline-styled (the clickable core).
     for ci in alpha.col_start..alpha.col_end {
         assert!(

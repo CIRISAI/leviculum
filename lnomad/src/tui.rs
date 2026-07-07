@@ -25,6 +25,12 @@
 //!
 //! Phase 3 adds the top-bar, the history stack, async navigation with a loading
 //! spinner and `Esc`/`Ctrl-g` cancel, and a `tui-input` address editor.
+//!
+//! Phase 4 adds the navigation layer over the rendered page: [`visible_links`]
+//! maps each on-screen link to a screen rectangle, reused by Tab focus (with
+//! auto-scroll), `f` hint mode (vimium-style labels over links and controls),
+//! left-click hit-testing, and mouse-hover. The focused or hovered link's target
+//! shows in the status bar. Links no longer carry a visible `[N]` marker.
 
 use std::io::{self, Stdout};
 use std::sync::Arc;
@@ -32,7 +38,7 @@ use std::time::Duration;
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -82,9 +88,14 @@ const FORWARD_LABEL: &str = "forward ›";
 const RELOAD_LABEL: &str = "⟳ reload";
 
 /// Browse-mode status hints.
-const BROWSE_HINTS: &str = "j/k scroll  : address  R reload  M-←/→ back/fwd  ? help  q quit";
+const BROWSE_HINTS: &str = "j/k scroll  Tab focus  f hint  : addr  R reload  ? help  q quit";
 /// Address-mode status hints.
 const ADDRESS_HINTS: &str = "Enter: go   Esc: cancel";
+/// Hint-mode status hints.
+const HINT_HINTS: &str = "type a hint label or link text   Esc: cancel";
+
+/// The home-row alphabet hint labels are drawn from (vimium-style).
+const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
 
 /// The content layout width for a terminal `cols` wide: full width minus the
 /// scrollbar column, never below 1 so wrapping stays well defined.
@@ -139,6 +150,9 @@ pub enum Mode {
     Browse,
     /// The top-bar address editor has focus.
     Address,
+    /// Hint mode (`f`): each visible link and top-bar control wears a label the
+    /// reader types to jump to it.
+    Hint,
 }
 
 /// One of the clickable top-bar controls, recorded with its rect so a later
@@ -162,6 +176,42 @@ pub struct ControlRect {
     pub control: Control,
     /// Where it sits on screen.
     pub rect: Rect,
+}
+
+/// A link that is currently on screen, with its screen rectangle. Produced by
+/// [`visible_links`] and consumed by hit-testing, hint labelling and focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibleLink {
+    /// The link's 1-based [`RenderedLink::index`](crate::render::RenderedLink).
+    pub index: usize,
+    /// The screen row (absolute, below the top-bar) the link sits on.
+    pub row: u16,
+    /// The first screen column of the clickable span.
+    pub col_start: u16,
+    /// One past the last screen column of the clickable span.
+    pub col_end: u16,
+}
+
+/// What a hint label jumps to: a page link or a top-bar control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintTarget {
+    /// The page link with this 1-based index.
+    Link(usize),
+    /// A top-bar control.
+    Control(Control),
+}
+
+/// A hint badge: its typed label, what it activates, and where it renders.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hint {
+    /// The label the reader types to activate this hint.
+    pub label: String,
+    /// What activating the hint does.
+    pub target: HintTarget,
+    /// The screen row the badge renders on.
+    pub row: u16,
+    /// The first screen column the badge renders at.
+    pub col: u16,
 }
 
 /// The browsing history: a linear stack of visited targets and a cursor into it.
@@ -297,10 +347,16 @@ pub struct Model {
     pub current_dest: Option<[u8; 16]>,
     /// A navigation in flight, or `None` when idle. `Some` means "loading".
     pub pending: Option<Pending>,
-    /// The current interaction mode (browse or address entry).
+    /// The current interaction mode (browse, address entry, or hint).
     pub mode: Mode,
     /// The address-bar editor.
     pub input: Input,
+    /// The link the focus cursor is on (Tab navigation), 1-based, or `None`.
+    pub focus: Option<usize>,
+    /// The link the mouse is hovering over, 1-based, or `None`.
+    pub hover: Option<usize>,
+    /// The characters typed so far in hint mode, narrowing the visible labels.
+    pub hint_input: String,
     /// A transient status/error message shown in the status bar, or `None` for
     /// the default hints.
     pub status: Option<String>,
@@ -392,6 +448,99 @@ impl Model {
     pub fn scroll_lines_up(&mut self, n: usize) {
         self.scroll = self.scroll.saturating_sub(n);
     }
+
+    /// The frame rectangle implied by the model's last known size, so the pure
+    /// layout helpers ([`visible_links`], [`hints`]) can run without a live frame.
+    fn frame_area(&self) -> Rect {
+        Rect::new(0, 0, self.size.0, self.size.1)
+    }
+}
+
+/// The links currently on screen, each with its absolute screen rectangle.
+///
+/// A link on content line `link.line` is visible when
+/// `scroll <= link.line < scroll + viewport`; it then sits at screen row
+/// `TOPBAR_ROWS + (link.line - scroll)`, columns `[col_start, col_end)` (the
+/// content body starts at column 0). Off-viewport links are excluded. Pure, so
+/// hit-testing, hints and focus all share one source of truth.
+pub fn visible_links(model: &Model) -> Vec<VisibleLink> {
+    let viewport = model.viewport();
+    let scroll = model.scroll;
+    let mut out = Vec::new();
+    for link in &model.links {
+        if link.line < scroll || link.line >= scroll + viewport {
+            continue;
+        }
+        let row = TOPBAR_ROWS + (link.line - scroll) as u16;
+        out.push(VisibleLink {
+            index: link.index,
+            row,
+            col_start: link.col_start as u16,
+            col_end: link.col_end as u16,
+        });
+    }
+    out
+}
+
+/// Generate `n` unique hint labels from the home-row alphabet: single characters
+/// while they suffice, two-character combinations once there are more targets
+/// than the alphabet holds.
+pub fn hint_labels(n: usize) -> Vec<String> {
+    if n <= HINT_ALPHABET.len() {
+        return HINT_ALPHABET
+            .iter()
+            .take(n)
+            .map(|c| c.to_string())
+            .collect();
+    }
+    let mut out = Vec::with_capacity(n);
+    'outer: for &a in &HINT_ALPHABET {
+        for &b in &HINT_ALPHABET {
+            out.push(format!("{a}{b}"));
+            if out.len() == n {
+                break 'outer;
+            }
+        }
+    }
+    out
+}
+
+/// The hint badges for the current frame: one per visible link (in reading
+/// order) then one per top-bar control, each wearing a unique label.
+pub fn hints(model: &Model) -> Vec<Hint> {
+    let [topbar, _content, _status] = regions(model.frame_area());
+    let mut slots: Vec<(HintTarget, u16, u16)> = Vec::new();
+    for vl in visible_links(model) {
+        slots.push((HintTarget::Link(vl.index), vl.row, vl.col_start));
+    }
+    for cr in top_bar_controls(topbar) {
+        slots.push((HintTarget::Control(cr.control), cr.rect.y, cr.rect.x));
+    }
+    hint_labels(slots.len())
+        .into_iter()
+        .zip(slots)
+        .map(|(label, (target, row, col))| Hint {
+            label,
+            target,
+            row,
+            col,
+        })
+        .collect()
+}
+
+/// Whether `hint` matches the typed `input`: its label starts with the prefix,
+/// or (for a link) its visible text contains the input as a case-insensitive
+/// substring. `input` is assumed already lowercased.
+fn hint_matches(model: &Model, hint: &Hint, input: &str) -> bool {
+    if hint.label.starts_with(input) {
+        return true;
+    }
+    if let HintTarget::Link(idx) = hint.target {
+        if let Some(link) = model.links.iter().find(|l| l.index == idx) {
+            return link.label.to_lowercase().contains(input);
+        }
+    }
+    false
 }
 
 /// A UI input event, decoupled from crossterm so [`update`] is trivially
@@ -400,7 +549,8 @@ impl Model {
 pub enum AppEvent {
     /// A key was pressed.
     Key(KeyEvent),
-    /// A mouse event occurred (wheel scrolling; clicks land in a later phase).
+    /// A mouse event occurred (wheel scrolling, left-click to follow a link or
+    /// activate a top-bar control, and move-to-hover).
     Mouse(MouseEvent),
     /// The terminal was resized to `(cols, rows)`.
     Resize(u16, u16),
@@ -450,11 +600,23 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         AppEvent::Mouse(mouse) => {
             let vp = model.viewport();
             match mouse.kind {
-                MouseEventKind::ScrollDown => model.scroll_lines_down(WHEEL_STEP, vp),
-                MouseEventKind::ScrollUp => model.scroll_lines_up(WHEEL_STEP),
-                _ => {}
+                MouseEventKind::ScrollDown => {
+                    model.scroll_lines_down(WHEEL_STEP, vp);
+                    Vec::new()
+                }
+                MouseEventKind::ScrollUp => {
+                    model.scroll_lines_up(WHEEL_STEP);
+                    Vec::new()
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    handle_click(model, mouse.column, mouse.row)
+                }
+                MouseEventKind::Moved => {
+                    update_hover(model, mouse.column, mouse.row);
+                    Vec::new()
+                }
+                _ => Vec::new(),
             }
-            Vec::new()
         }
         AppEvent::Key(key) => update_key(model, key),
     }
@@ -469,6 +631,9 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
     model.scroll = 0;
     model.title = title;
     model.status = None;
+    // A fresh page invalidates any focus/hover cursor into the old link set.
+    model.focus = None;
+    model.hover = None;
     if let Some(pending) = pending {
         model.current_dest = Some(pending.target.dest_hash);
         match pending.action {
@@ -501,7 +666,54 @@ fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
 
     match model.mode {
         Mode::Address => update_address_key(model, key),
+        Mode::Hint => update_hint_key(model, key),
         Mode::Browse => update_browse_key(model, key, ctrl),
+    }
+}
+
+/// Fold a key while hint mode is active. A character narrows the visible labels
+/// (by label prefix or link-text substring); a unique match follows the link or
+/// activates the control. `Esc` exits; a non-matching key is ignored.
+fn update_hint_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+    match key.code {
+        KeyCode::Esc => {
+            exit_hint(model);
+            Vec::new()
+        }
+        KeyCode::Backspace => {
+            model.hint_input.pop();
+            Vec::new()
+        }
+        KeyCode::Char(c) => {
+            let mut candidate = model.hint_input.clone();
+            candidate.push(c.to_ascii_lowercase());
+            let all = hints(model);
+            // An exact label match activates immediately (handles single-char
+            // labels, where the label is also its own prefix).
+            if let Some(hint) = all.iter().find(|h| h.label == candidate) {
+                let target = hint.target;
+                exit_hint(model);
+                return activate_hint_target(model, target);
+            }
+            let matches: Vec<&Hint> = all
+                .iter()
+                .filter(|h| hint_matches(model, h, &candidate))
+                .collect();
+            match matches.as_slice() {
+                // A key that matches nothing is ignored (not accepted).
+                [] => Vec::new(),
+                [only] => {
+                    let target = only.target;
+                    exit_hint(model);
+                    activate_hint_target(model, target)
+                }
+                _ => {
+                    model.hint_input = candidate;
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -567,10 +779,30 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
 
     // Enter address mode.
     if key.code == KeyCode::Char(':') {
-        model.mode = Mode::Address;
-        model.input.reset();
-        model.status = None;
+        enter_address(model);
         return Vec::new();
+    }
+
+    // Enter hint mode (`f`).
+    if key.code == KeyCode::Char('f') && !ctrl && !alt {
+        enter_hint(model);
+        return Vec::new();
+    }
+
+    // Tab / Shift-Tab move the focus cursor across links; Enter follows it.
+    if key.code == KeyCode::Tab {
+        focus_next(model);
+        return Vec::new();
+    }
+    if key.code == KeyCode::BackTab {
+        focus_prev(model);
+        return Vec::new();
+    }
+    if key.code == KeyCode::Enter {
+        return match model.focus {
+            Some(idx) => follow_link(model, idx),
+            None => Vec::new(),
+        };
     }
 
     // Toggle the help overlay.
@@ -581,39 +813,16 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
 
     // Reload the current page (no history change).
     if key.code == KeyCode::Char('R') {
-        if let Some(target) = model.history.current().cloned() {
-            let idx = model.history.idx;
-            model.pending = Some(Pending {
-                target: target.clone(),
-                action: HistoryAction::Goto(idx),
-            });
-            model.status = None;
-            return vec![Effect::Navigate(target)];
-        }
-        return Vec::new();
+        return reload_current(model);
     }
 
     // Back / forward (Alt-Left / Alt-Right): peek the target and re-fetch it,
     // moving the cursor only once it loads.
-    if alt && key.code == KeyCode::Left && model.history.can_back() {
-        let idx = model.history.idx - 1;
-        let target = model.history.stack[idx].clone();
-        model.pending = Some(Pending {
-            target: target.clone(),
-            action: HistoryAction::Goto(idx),
-        });
-        model.status = None;
-        return vec![Effect::Navigate(target)];
+    if alt && key.code == KeyCode::Left {
+        return go_back(model);
     }
-    if alt && key.code == KeyCode::Right && model.history.can_forward() {
-        let idx = model.history.idx + 1;
-        let target = model.history.stack[idx].clone();
-        model.pending = Some(Pending {
-            target: target.clone(),
-            action: HistoryAction::Goto(idx),
-        });
-        model.status = None;
-        return vec![Effect::Navigate(target)];
+    if alt && key.code == KeyCode::Right {
+        return go_forward(model);
     }
 
     if let Some(cmd) = key_to_scroll(&key) {
@@ -621,6 +830,183 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
         model.apply_scroll(cmd, vp);
     }
     Vec::new()
+}
+
+/// Enter address-entry mode with a cleared editor.
+fn enter_address(model: &mut Model) {
+    model.mode = Mode::Address;
+    model.input.reset();
+    model.status = None;
+}
+
+/// Enter hint mode with a cleared filter buffer.
+fn enter_hint(model: &mut Model) {
+    model.mode = Mode::Hint;
+    model.hint_input.clear();
+    model.status = None;
+}
+
+/// Leave hint mode, discarding the filter buffer.
+fn exit_hint(model: &mut Model) {
+    model.mode = Mode::Browse;
+    model.hint_input.clear();
+}
+
+/// Reload the page under the history cursor without changing history.
+fn reload_current(model: &mut Model) -> Vec<Effect> {
+    let Some(target) = model.history.current().cloned() else {
+        return Vec::new();
+    };
+    let idx = model.history.idx;
+    model.pending = Some(Pending {
+        target: target.clone(),
+        action: HistoryAction::Goto(idx),
+    });
+    model.status = None;
+    vec![Effect::Navigate(target)]
+}
+
+/// Navigate back one history entry (re-fetching it), if possible.
+fn go_back(model: &mut Model) -> Vec<Effect> {
+    if !model.history.can_back() {
+        return Vec::new();
+    }
+    let idx = model.history.idx - 1;
+    let target = model.history.stack[idx].clone();
+    model.pending = Some(Pending {
+        target: target.clone(),
+        action: HistoryAction::Goto(idx),
+    });
+    model.status = None;
+    vec![Effect::Navigate(target)]
+}
+
+/// Navigate forward one history entry (re-fetching it), if possible.
+fn go_forward(model: &mut Model) -> Vec<Effect> {
+    if !model.history.can_forward() {
+        return Vec::new();
+    }
+    let idx = model.history.idx + 1;
+    let target = model.history.stack[idx].clone();
+    model.pending = Some(Pending {
+        target: target.clone(),
+        action: HistoryAction::Goto(idx),
+    });
+    model.status = None;
+    vec![Effect::Navigate(target)]
+}
+
+/// Follow the link with 1-based `index`: resolve its target against the current
+/// destination and start a fresh navigation, or set an error status.
+fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
+    let Some(link) = model.links.iter().find(|l| l.index == index).cloned() else {
+        return Vec::new();
+    };
+    match browser::resolve_link(&link, model.current_dest) {
+        Ok((target, _anchor)) => {
+            model.status = None;
+            model.pending = Some(Pending {
+                target: target.clone(),
+                action: HistoryAction::Push,
+            });
+            vec![Effect::Navigate(target)]
+        }
+        Err(err) => {
+            model.status = Some(format!("bad link: {err}"));
+            Vec::new()
+        }
+    }
+}
+
+/// Activate a hint target: follow the link, or drive the top-bar control.
+fn activate_hint_target(model: &mut Model, target: HintTarget) -> Vec<Effect> {
+    match target {
+        HintTarget::Link(idx) => follow_link(model, idx),
+        HintTarget::Control(Control::Back) => go_back(model),
+        HintTarget::Control(Control::Forward) => go_forward(model),
+        HintTarget::Control(Control::Reload) => reload_current(model),
+        HintTarget::Control(Control::Address) => {
+            enter_address(model);
+            Vec::new()
+        }
+    }
+}
+
+/// Move the focus cursor to the next link in reading order (wrapping), scrolling
+/// it into view. A no-op when the page has no links.
+fn focus_next(model: &mut Model) {
+    let n = model.links.len();
+    if n == 0 {
+        return;
+    }
+    let next = match model.focus {
+        None => 1,
+        Some(i) if i >= n => 1,
+        Some(i) => i + 1,
+    };
+    set_focus(model, next);
+}
+
+/// Move the focus cursor to the previous link in reading order (wrapping),
+/// scrolling it into view. A no-op when the page has no links.
+fn focus_prev(model: &mut Model) {
+    let n = model.links.len();
+    if n == 0 {
+        return;
+    }
+    let prev = match model.focus {
+        None => n,
+        Some(i) if i <= 1 => n,
+        Some(i) => i - 1,
+    };
+    set_focus(model, prev);
+}
+
+/// Set the focus to link `index` and auto-scroll so it is inside the viewport.
+fn set_focus(model: &mut Model, index: usize) {
+    model.focus = Some(index);
+    let Some(link) = model.links.iter().find(|l| l.index == index) else {
+        return;
+    };
+    let line = link.line;
+    let vp = model.viewport();
+    if line < model.scroll {
+        model.scroll = line;
+    } else if vp > 0 && line >= model.scroll + vp {
+        model.scroll = line + 1 - vp;
+    }
+    model.clamp_scroll(vp);
+}
+
+/// Hit-test a mouse click at `(col, row)`: follow the link under it, else
+/// activate the top-bar control under it, else do nothing.
+fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
+    for vl in visible_links(model) {
+        if row == vl.row && col >= vl.col_start && col < vl.col_end {
+            return follow_link(model, vl.index);
+        }
+    }
+    let [topbar, _content, _status] = regions(model.frame_area());
+    for cr in top_bar_controls(topbar) {
+        if rect_contains(cr.rect, col, row) {
+            return activate_hint_target(model, HintTarget::Control(cr.control));
+        }
+    }
+    Vec::new()
+}
+
+/// Set the hovered link to whichever visible link is under `(col, row)`, or
+/// `None` when the cursor is over no link.
+fn update_hover(model: &mut Model, col: u16, row: u16) {
+    model.hover = visible_links(model)
+        .into_iter()
+        .find(|vl| row == vl.row && col >= vl.col_start && col < vl.col_end)
+        .map(|vl| vl.index);
+}
+
+/// Whether `rect` contains the point `(x, y)`.
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom()
 }
 
 /// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms.
@@ -706,8 +1092,66 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_topbar(model, frame, topbar);
     render_content(model, frame, content);
     render_status(model, frame, status);
+    // Overlays drawn on top of the laid-out page: the focus highlight, and the
+    // hint badges while hint mode is active.
+    render_focus(model, frame);
+    if model.mode == Mode::Hint {
+        render_hints(model, frame);
+    }
     if model.show_help {
         render_help(frame, frame.area());
+    }
+}
+
+/// Highlight the focused link's cells (reverse video) so Tab navigation is
+/// visible. A no-op when nothing is focused or the focus is off-screen.
+fn render_focus(model: &Model, frame: &mut Frame) {
+    let Some(idx) = model.focus else {
+        return;
+    };
+    let area = frame.area();
+    let buf = frame.buffer_mut();
+    let highlight = Style::default().add_modifier(Modifier::REVERSED);
+    for vl in visible_links(model) {
+        if vl.index != idx {
+            continue;
+        }
+        for x in vl.col_start..vl.col_end {
+            if x >= area.width || vl.row >= area.height {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((x, vl.row)) {
+                cell.set_style(highlight);
+            }
+        }
+    }
+}
+
+/// Draw the hint badges: each matching hint's label over the first cells of its
+/// link or control, on a distinct background. Only hints still matching the
+/// typed prefix are shown, so typing narrows the field.
+fn render_hints(model: &Model, frame: &mut Frame) {
+    let area = frame.area();
+    let input = model.hint_input.clone();
+    let badge = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(255, 215, 0))
+        .add_modifier(Modifier::BOLD);
+    let buf = frame.buffer_mut();
+    for hint in hints(model) {
+        if !hint.label.starts_with(&input) {
+            continue;
+        }
+        for (i, ch) in hint.label.chars().enumerate() {
+            let x = hint.col + i as u16;
+            if x >= area.width || hint.row >= area.height {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((x, hint.row)) {
+                cell.set_char(ch);
+                cell.set_style(badge);
+            }
+        }
     }
 }
 
@@ -851,15 +1295,35 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
         let label = format!(" loading {}", pending.target.path);
         let throbber = Throbber::default().label(label).style(dim);
         frame.render_widget(Paragraph::new(throbber.to_line(&model.spinner)), area);
+    } else if let Some(target) = focused_link_target(model) {
+        // A focused (Tab) or hovered (mouse) link shows its target here, taking
+        // the place of the key-hints until focus/hover clears.
+        frame.render_widget(Paragraph::new(RtSpan::styled(target, dim)), area);
     } else if let Some(msg) = &model.status {
         let err = Style::default().fg(Color::Rgb(255, 95, 95));
         frame.render_widget(Paragraph::new(RtSpan::styled(msg.clone(), err)), area);
     } else {
         let hints = match model.mode {
             Mode::Address => ADDRESS_HINTS,
+            Mode::Hint => HINT_HINTS,
             Mode::Browse => BROWSE_HINTS,
         };
         frame.render_widget(Paragraph::new(RtSpan::styled(hints, dim)), area);
+    }
+}
+
+/// The status-bar text for the focused-or-hovered link's target, if any: the
+/// current node's short hash and the link's path (`node · :/page/x.mu`).
+fn focused_link_target(model: &Model) -> Option<String> {
+    let idx = model.focus.or(model.hover)?;
+    let link = model.links.iter().find(|l| l.index == idx)?;
+    // A same-destination link's target begins with ':'; prefix the current node
+    // so the reader sees which node it resolves against.
+    match model.current_dest {
+        Some(dest) if link.target.starts_with(':') => {
+            Some(format!("{} · {}", short_hex(&dest), link.target))
+        }
+        _ => Some(link.target.clone()),
     }
 }
 
@@ -871,6 +1335,10 @@ const HELP_LINES: &[&str] = &[
     "  Ctrl-f / Ctrl-b     page down / up",
     "  Ctrl-d / Ctrl-u     half page down / up",
     "  g / G  Home / End   top / bottom",
+    "  Tab / Shift-Tab     focus prev/next",
+    "  Enter               follow the link",
+    "  f                   hint a link",
+    "  click               follow link",
     "  :                   enter an address",
     "  R                   reload the page",
     "  M-← / M-→           back / forward",
@@ -1844,6 +2312,321 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let text = flat(&buffer);
         assert!(text.contains("abc"), "editor content missing:\n{text}");
+    }
+
+    // --- phase 4: visible_links, hints, focus, mouse --------------------
+
+    /// A left-button mouse-down event at `(col, row)`.
+    fn click(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// The laid-out link with 1-based `index`.
+    fn link_of(m: &Model, index: usize) -> &RenderedLink {
+        m.links.iter().find(|l| l.index == index).expect("link")
+    }
+
+    #[test]
+    fn visible_links_map_content_lines_to_screen_rects() {
+        let m = model_from_sample(content_width(80), (80, 24));
+        let vls = visible_links(&m);
+        assert_eq!(vls.len(), 2, "sample has two links");
+        for vl in &vls {
+            let link = link_of(&m, vl.index);
+            // row = top-bar rows + (content line - scroll); scroll is 0 here.
+            assert_eq!(vl.row, TOPBAR_ROWS + link.line as u16);
+            assert_eq!(vl.col_start, link.col_start as u16);
+            assert_eq!(vl.col_end, link.col_end as u16);
+        }
+    }
+
+    #[test]
+    fn visible_links_exclude_off_viewport() {
+        let mut m = model_from_sample(content_width(80), (80, 24));
+        // Scroll past both links (they sit near the top of the page).
+        m.scroll = link_of(&m, 2).line + 1;
+        assert!(
+            visible_links(&m).is_empty(),
+            "links above the scroll must be excluded"
+        );
+    }
+
+    #[test]
+    fn visible_links_partial_scroll_keeps_only_lower_link() {
+        let mut m = model_from_sample(content_width(80), (80, 24));
+        let beta_line = link_of(&m, 2).line;
+        m.scroll = beta_line;
+        let vls = visible_links(&m);
+        assert_eq!(vls.len(), 1, "only the lower link stays visible");
+        assert_eq!(vls[0].index, 2);
+        // The now-topmost visible link sits at the content top row.
+        assert_eq!(vls[0].row, TOPBAR_ROWS);
+    }
+
+    #[test]
+    fn hint_labels_are_single_char_when_few() {
+        let labels = hint_labels(3);
+        assert_eq!(labels, vec!["a", "s", "d"]);
+        // All nine of the alphabet fit as single characters.
+        assert!(hint_labels(9).iter().all(|l| l.len() == 1));
+        let nine = hint_labels(9);
+        assert_eq!(nine.len(), 9);
+        assert_eq!(
+            nine.iter().collect::<std::collections::HashSet<_>>().len(),
+            9
+        );
+    }
+
+    #[test]
+    fn hint_labels_are_two_char_when_many() {
+        let labels = hint_labels(10);
+        assert_eq!(labels.len(), 10);
+        assert!(
+            labels.iter().all(|l| l.chars().count() == 2),
+            "got: {labels:?}"
+        );
+        assert_eq!(labels[0], "aa");
+        // Unique across the whole set.
+        let uniq: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(uniq.len(), 10);
+    }
+
+    #[test]
+    fn hints_cover_visible_links_then_controls_with_unique_labels() {
+        let m = loaded_model((80, 24));
+        let hs = hints(&m);
+        // Two links + four top-bar controls.
+        assert_eq!(hs.len(), 6);
+        assert!(matches!(hs[0].target, HintTarget::Link(1)));
+        assert!(matches!(hs[1].target, HintTarget::Link(2)));
+        assert!(matches!(hs[2].target, HintTarget::Control(Control::Back)));
+        assert!(matches!(
+            hs[5].target,
+            HintTarget::Control(Control::Address)
+        ));
+        let labels: std::collections::HashSet<_> = hs.iter().map(|h| &h.label).collect();
+        assert_eq!(labels.len(), 6, "labels must be unique");
+    }
+
+    #[test]
+    fn f_enters_hint_mode() {
+        let mut m = loaded_model((80, 24));
+        let effects = press(&mut m, KeyCode::Char('f'), KeyModifiers::NONE);
+        assert!(effects.is_empty());
+        assert_eq!(m.mode, Mode::Hint);
+    }
+
+    #[test]
+    fn typing_a_unique_label_follows_that_link() {
+        let mut m = loaded_model((80, 24));
+        press(&mut m, KeyCode::Char('f'), KeyModifiers::NONE);
+        // The first link's label is 'a'.
+        let effects = press(&mut m, KeyCode::Char('a'), KeyModifiers::NONE);
+        let expected = browser::resolve_link(link_of(&m, 1), m.current_dest)
+            .unwrap()
+            .0;
+        assert_eq!(effects, vec![Effect::Navigate(expected.clone())]);
+        assert_eq!(m.mode, Mode::Browse, "hint mode exits after a match");
+        assert_eq!(m.pending.as_ref().map(|p| &p.target), Some(&expected));
+    }
+
+    #[test]
+    fn typing_link_text_follows_that_link() {
+        let mut m = loaded_model((80, 24));
+        press(&mut m, KeyCode::Char('f'), KeyModifiers::NONE);
+        // 'b' matches no label but uniquely matches the "• Beta" link text.
+        let effects = press(&mut m, KeyCode::Char('b'), KeyModifiers::NONE);
+        let expected = browser::resolve_link(link_of(&m, 2), m.current_dest)
+            .unwrap()
+            .0;
+        assert_eq!(effects, vec![Effect::Navigate(expected)]);
+        assert_eq!(m.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn non_matching_hint_key_is_ignored() {
+        let mut m = loaded_model((80, 24));
+        press(&mut m, KeyCode::Char('f'), KeyModifiers::NONE);
+        // 'z' is neither a label prefix nor in any link's text.
+        let effects = press(&mut m, KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(effects.is_empty());
+        assert_eq!(m.mode, Mode::Hint, "still hinting");
+        assert!(m.hint_input.is_empty(), "invalid key not accepted");
+    }
+
+    #[test]
+    fn esc_exits_hint_mode() {
+        let mut m = loaded_model((80, 24));
+        press(&mut m, KeyCode::Char('f'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn tab_cycles_focus_and_wraps() {
+        let mut m = loaded_model((80, 24));
+        assert_eq!(m.focus, None);
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.focus, Some(1));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.focus, Some(2));
+        // Wrap back to the first link.
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.focus, Some(1));
+        // Shift-Tab goes backward, wrapping to the last.
+        press(&mut m, KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(m.focus, Some(2));
+    }
+
+    #[test]
+    fn tab_sets_status_target() {
+        let m = loaded_model((80, 24));
+        let mut m2 = m.clone();
+        press(&mut m2, KeyCode::Tab, KeyModifiers::NONE);
+        let target = focused_link_target(&m2).expect("focused target");
+        assert!(
+            target.contains(&link_of(&m, 1).target),
+            "status target missing the link path: {target:?}"
+        );
+    }
+
+    #[test]
+    fn enter_follows_focused_link() {
+        let mut m = loaded_model((80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let expected = browser::resolve_link(link_of(&m, 1), m.current_dest)
+            .unwrap()
+            .0;
+        assert_eq!(effects, vec![Effect::Navigate(expected)]);
+    }
+
+    #[test]
+    fn focus_auto_scrolls_to_off_screen_link() {
+        // A link on content line 50 with a 21-row viewport must scroll into view.
+        let mut m = Model {
+            page: vec![RLine::default(); 60],
+            links: vec![RenderedLink {
+                index: 1,
+                label: "Deep".to_string(),
+                target: ":/page/deep.mu".to_string(),
+                line: 50,
+                col_start: 0,
+                col_end: 4,
+                ..RenderedLink::default()
+            }],
+            size: (80, 24),
+            ..Model::default()
+        };
+        assert_eq!(m.viewport(), 21);
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.focus, Some(1));
+        // scroll = line + 1 - viewport = 50 + 1 - 21 = 30.
+        assert_eq!(m.scroll, 30);
+    }
+
+    #[test]
+    fn mouse_click_on_link_navigates() {
+        let mut m = loaded_model((80, 24));
+        let vl = visible_links(&m)
+            .into_iter()
+            .find(|v| v.index == 1)
+            .expect("alpha visible");
+        let effects = update(&mut m, AppEvent::Mouse(click(vl.col_start, vl.row)));
+        let expected = browser::resolve_link(link_of(&m, 1), m.current_dest)
+            .unwrap()
+            .0;
+        assert_eq!(effects, vec![Effect::Navigate(expected)]);
+    }
+
+    #[test]
+    fn mouse_click_off_a_link_does_nothing() {
+        let mut m = loaded_model((80, 24));
+        // Row well below any link, in the content body.
+        let effects = update(&mut m, AppEvent::Mouse(click(0, 20)));
+        assert!(effects.is_empty());
+        assert!(m.pending.is_none());
+    }
+
+    #[test]
+    fn mouse_click_on_reload_control_reloads() {
+        let mut m = loaded_model((80, 24));
+        let cr = top_bar_controls(regions(m.frame_area())[0])
+            .into_iter()
+            .find(|c| c.control == Control::Reload)
+            .expect("reload control");
+        let effects = update(&mut m, AppEvent::Mouse(click(cr.rect.x, cr.rect.y)));
+        // Reload re-navigates the current history entry.
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], Effect::Navigate(_)));
+        assert_eq!(
+            m.pending.as_ref().map(|p| p.action.clone()),
+            Some(HistoryAction::Goto(0))
+        );
+    }
+
+    #[test]
+    fn rendered_buffer_has_no_marker_or_legend() {
+        // A link-bearing page with no "Links:" content of its own.
+        let m = Model::from_document(
+            &parse("Intro paragraph\n\n`[Alpha`:/page/alpha.mu]"),
+            content_width(80),
+            "T",
+            (80, 24),
+        );
+        let buffer = render(&m, 80, 24);
+        let text = flat(&buffer);
+        assert!(text.contains("Alpha"), "link label missing:\n{text}");
+        assert!(!text.contains("[1]"), "visible [N] marker leaked:\n{text}");
+        assert!(!text.contains("Links:"), "legend leaked:\n{text}");
+    }
+
+    #[test]
+    fn hint_badges_render_over_links() {
+        let mut m = loaded_model((80, 24));
+        let vl = visible_links(&m)
+            .into_iter()
+            .find(|v| v.index == 1)
+            .expect("alpha visible");
+        press(&mut m, KeyCode::Char('f'), KeyModifiers::NONE);
+        let buffer = render(&m, 80, 24);
+        // The first link wears the 'a' badge over its first cell.
+        let cell = &buffer[(vl.col_start, vl.row)];
+        assert_eq!(cell.symbol(), "a", "hint badge not drawn over the link");
+        assert_eq!(cell.bg, Color::Rgb(255, 215, 0), "badge background missing");
+    }
+
+    #[test]
+    fn focused_link_renders_highlighted() {
+        let mut m = loaded_model((80, 24));
+        let vl = visible_links(&m)
+            .into_iter()
+            .find(|v| v.index == 1)
+            .expect("alpha visible");
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        let buffer = render(&m, 80, 24);
+        let cell = &buffer[(vl.col_start, vl.row)];
+        assert!(
+            cell.modifier.contains(Modifier::REVERSED),
+            "focused link not highlighted"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_focused_link_target() {
+        let mut m = loaded_model((80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        let buffer = render(&m, 80, 24);
+        let status = row_text(&buffer, 23, 80);
+        assert!(
+            status.contains(&link_of(&m, 1).target),
+            "status bar missing the focused target: {status:?}"
+        );
     }
 
     // --- terminal guard (retained from phase 2) --------------------------
