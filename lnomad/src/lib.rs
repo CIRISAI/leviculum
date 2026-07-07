@@ -29,6 +29,7 @@ pub mod cli;
 pub mod discovery;
 pub mod fetch;
 pub mod render;
+pub mod tui;
 pub mod url;
 
 pub use browser::{parse_command, resolve_link, BrowserOptions, Command, Nav};
@@ -38,5 +39,10 @@ pub use discovery::{
     NomadNodeRegistry,
 };
 pub use fetch::{FetchError, Session};
-pub use render::{render_with_options, RenderedLink, RenderedPage};
+pub use render::{
+    layout, render_with_options, RLine, RStyle, RenderedLink, RenderedPage, StyledChar,
+};
+pub use tui::{
+    run_tui, to_ratatui_text, update, view, AppEvent, Model, TerminalGuard, TerminalOps,
+};
 pub use url::{parse_url, Target, UrlError};

@@ -54,7 +54,8 @@ pub struct RenderedPage {
     pub links: Vec<RenderedLink>,
 }
 
-/// A single link collected while rendering, ready for Phase 4 navigation.
+/// A single link collected while rendering, ready for navigation and (via its
+/// laid-out position) future mouse hit-testing in the TUI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderedLink {
     /// 1-based index matching the visible `[N]` marker in the text.
@@ -66,6 +67,14 @@ pub struct RenderedLink {
     /// The link's `|`-separated field components, split into `(key, value)`
     /// pairs (a component without `=` yields an empty value).
     pub fields: Vec<(String, String)>,
+    /// 0-based index of the laid-out [`RLine`] the link's visible label starts
+    /// on (the clickable core, after any leading whitespace).
+    pub line: usize,
+    /// 0-based column where the clickable label starts on that line.
+    pub col_start: usize,
+    /// 0-based column one past the last clickable cell (the `[N]` marker is part
+    /// of the clickable span). `col_start..col_end` is the hit-test range.
+    pub col_end: usize,
 }
 
 /// Render a document to a [`RenderedPage`] at `width` columns, with 24-bit ANSI
@@ -78,31 +87,96 @@ pub fn render(doc: &MicronDocument, width: usize) -> RenderedPage {
 ///
 /// With `no_color` set, the output carries no escape sequences at all (the
 /// `[N]` link markers, indentation, wrapping and alignment are preserved).
+///
+/// This is the ANSI sink: it lays the document out into target-agnostic styled
+/// lines with [`layout`], then serialises them to the exact byte stream the
+/// `--print` / non-tty path emits.
 pub fn render_with_options(doc: &MicronDocument, width: usize, no_color: bool) -> RenderedPage {
+    let (lines, links) = layout(doc, width);
+    RenderedPage {
+        text: emit_ansi(&lines, no_color),
+        links,
+    }
+}
+
+/// Lay a document out into target-agnostic styled lines: the shared core both
+/// the ANSI sink ([`render_with_options`]) and the ratatui sink build on.
+///
+/// Each [`RLine`] is one output row, already width-wrapped, aligned and
+/// indented; every character carries its resolved [`RStyle`]. The returned
+/// [`RenderedLink`]s carry both their navigation data and their laid-out
+/// `(line, col_start, col_end)` position for hit-testing. No `no_color` choice
+/// is made here: colour is a property of the sink, not the layout.
+pub fn layout(doc: &MicronDocument, width: usize) -> (Vec<RLine>, Vec<RenderedLink>) {
     let mut renderer = Renderer {
-        out: String::new(),
+        lines: Vec::new(),
         links: Vec::new(),
         width: width.max(MIN_WIDTH),
-        no_color,
     };
     for block in &doc.blocks {
         renderer.render_block(block);
     }
-    RenderedPage {
-        text: renderer.out,
-        links: renderer.links,
+    renderer.record_link_positions();
+    (renderer.lines, renderer.links)
+}
+
+/// Serialise laid-out styled lines to the ANSI byte stream. Runs of equal style
+/// are grouped into a single self-contained SGR sequence, matching the layout's
+/// original line-at-a-time emission byte-for-byte. With `no_color`, no escape
+/// sequences are emitted at all.
+fn emit_ansi(lines: &[RLine], no_color: bool) -> String {
+    let mut out = String::new();
+    for line in lines {
+        emit_ansi_line(&line.cells, no_color, &mut out);
     }
+    out
+}
+
+/// Emit one styled line (plus its trailing newline) into `out`.
+fn emit_ansi_line(cells: &[StyledChar], no_color: bool, out: &mut String) {
+    let mut active = false;
+    let mut i = 0;
+    while i < cells.len() {
+        let st = cells[i].st;
+        let mut j = i;
+        let mut text = String::new();
+        while j < cells.len() && cells[j].st == st {
+            text.push(cells[j].ch);
+            j += 1;
+        }
+        if !no_color && !st.is_plain() {
+            out.push_str(&st.sgr());
+            out.push_str(&text);
+            active = true;
+        } else {
+            if active {
+                out.push_str("\x1b[0m");
+                active = false;
+            }
+            out.push_str(&text);
+        }
+        i = j;
+    }
+    if active {
+        out.push_str("\x1b[0m");
+    }
+    out.push('\n');
 }
 
 /// A resolved terminal style: colours already reduced to RGB, attributes as
 /// flags. `None` colours mean "use the terminal default" (no SGR emitted).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct RStyle {
-    fg: Option<(u8, u8, u8)>,
-    bg: Option<(u8, u8, u8)>,
-    bold: bool,
-    underline: bool,
-    italic: bool,
+pub struct RStyle {
+    /// Foreground colour, or `None` for the terminal default.
+    pub fg: Option<(u8, u8, u8)>,
+    /// Background colour, or `None` for the terminal default.
+    pub bg: Option<(u8, u8, u8)>,
+    /// Bold attribute.
+    pub bold: bool,
+    /// Underline attribute.
+    pub underline: bool,
+    /// Italic attribute.
+    pub italic: bool,
 }
 
 impl RStyle {
@@ -146,16 +220,29 @@ fn resolve_style(style: &Style) -> RStyle {
 
 /// One styled character, the unit the layout engine works in.
 #[derive(Clone, Copy, Debug)]
-struct StyledChar {
-    ch: char,
-    st: RStyle,
+pub struct StyledChar {
+    /// The visible character.
+    pub ch: char,
+    /// Its resolved style.
+    pub st: RStyle,
+    /// The 1-based index of the link this cell is a clickable part of, if any.
+    /// Leading/trailing whitespace inside a link label is untagged so it stays
+    /// unstyled and outside the hit-test range.
+    pub link: Option<usize>,
+}
+
+/// One laid-out output row: a sequence of styled cells, already wrapped,
+/// aligned and indented. The target-agnostic unit both sinks consume.
+#[derive(Clone, Debug, Default)]
+pub struct RLine {
+    /// The row's cells, left to right.
+    pub cells: Vec<StyledChar>,
 }
 
 struct Renderer {
-    out: String,
+    lines: Vec<RLine>,
     links: Vec<RenderedLink>,
     width: usize,
-    no_color: bool,
 }
 
 impl Renderer {
@@ -172,7 +259,43 @@ impl Renderer {
                 rows,
             } => self.render_table(*depth as usize, *align, *max_width, rows),
             Block::Partial { depth, .. } => self.render_partial(*depth as usize),
-            Block::Blank => self.out.push('\n'),
+            Block::Blank => self.push_blank(),
+        }
+    }
+
+    /// Store a finished row of styled cells as one output line.
+    fn push_line(&mut self, cells: Vec<StyledChar>) {
+        self.lines.push(RLine { cells });
+    }
+
+    /// Store an empty output line (a blank row).
+    fn push_blank(&mut self) {
+        self.lines.push(RLine::default());
+    }
+
+    /// After all blocks are laid out, walk the lines and record each link's
+    /// laid-out position: the line and column span of its tagged (clickable)
+    /// cells, taken from the first line the link appears on.
+    fn record_link_positions(&mut self) {
+        let mut seen: Vec<bool> = vec![false; self.links.len()];
+        for (li, line) in self.lines.iter().enumerate() {
+            for (ci, cell) in line.cells.iter().enumerate() {
+                let Some(idx) = cell.link else { continue };
+                let Some(slot) = idx.checked_sub(1) else {
+                    continue;
+                };
+                let Some(link) = self.links.get_mut(slot) else {
+                    continue;
+                };
+                if !seen[slot] {
+                    seen[slot] = true;
+                    link.line = li;
+                    link.col_start = ci;
+                    link.col_end = ci + 1;
+                } else if link.line == li {
+                    link.col_end = ci + 1;
+                }
+            }
         }
     }
 
@@ -185,7 +308,7 @@ impl Renderer {
     fn render_paragraph(&mut self, depth: usize, line: &Line) {
         let (chars, align) = self.flatten_line(line);
         if chars.is_empty() {
-            self.out.push('\n');
+            self.push_blank();
             return;
         }
         let indent = Self::indent_for(depth);
@@ -214,17 +337,17 @@ impl Renderer {
             let lead = leading_pad(align, content_width, content.len());
             let mut row: Vec<StyledChar> = Vec::new();
             for _ in 0..indent {
-                row.push(StyledChar { ch: ' ', st: band });
+                row.push(cell(' ', band));
             }
             for _ in 0..lead {
-                row.push(StyledChar { ch: ' ', st: band });
+                row.push(cell(' ', band));
             }
             row.extend(content);
             // Pad the whole row so the theme band spans the full page width.
             while row.len() < self.width {
-                row.push(StyledChar { ch: ' ', st: band });
+                row.push(cell(' ', band));
             }
-            self.emit_line(&row);
+            self.push_line(row);
         }
     }
 
@@ -233,18 +356,12 @@ impl Renderer {
         let rule_len = self.width.saturating_sub(side * 2);
         let mut row: Vec<StyledChar> = Vec::new();
         for _ in 0..side {
-            row.push(StyledChar {
-                ch: ' ',
-                st: RStyle::default(),
-            });
+            row.push(cell(' ', RStyle::default()));
         }
         for _ in 0..rule_len {
-            row.push(StyledChar {
-                ch: character,
-                st: RStyle::default(),
-            });
+            row.push(cell(character, RStyle::default()));
         }
-        self.emit_line(&row);
+        self.push_line(row);
     }
 
     fn render_literal(&mut self, lines: &[Line]) {
@@ -252,7 +369,7 @@ impl Renderer {
             let (chars, _align) = self.flatten_line(line);
             // Verbatim: no wrapping, no indent, no alignment. Backticks and any
             // other markup characters are already stored literally by the parser.
-            self.emit_line(&chars);
+            self.push_line(chars);
         }
     }
 
@@ -260,17 +377,11 @@ impl Renderer {
         let indent = Self::indent_for(depth);
         let mut row: Vec<StyledChar> = Vec::new();
         for _ in 0..indent {
-            row.push(StyledChar {
-                ch: ' ',
-                st: RStyle::default(),
-            });
+            row.push(cell(' ', RStyle::default()));
         }
         // Match the reference placeholder glyph for an unresolved partial.
-        row.push(StyledChar {
-            ch: '\u{29d6}',
-            st: RStyle::default(),
-        });
-        self.emit_line(&row);
+        row.push(cell('\u{29d6}', RStyle::default()));
+        self.push_line(row);
     }
 
     fn render_table(
@@ -325,10 +436,7 @@ impl Renderer {
         for row in &parsed {
             let mut cells: Vec<StyledChar> = Vec::new();
             for _ in 0..indent {
-                cells.push(StyledChar {
-                    ch: ' ',
-                    st: RStyle::default(),
-                });
+                cells.push(cell(' ', RStyle::default()));
             }
             if is_separator_row(row) {
                 for (c, w) in colw.iter().enumerate() {
@@ -336,10 +444,7 @@ impl Renderer {
                         push_plain(&mut cells, "\u{2500}\u{253c}\u{2500}");
                     }
                     for _ in 0..*w {
-                        cells.push(StyledChar {
-                            ch: '\u{2500}',
-                            st: RStyle::default(),
-                        });
+                        cells.push(cell('\u{2500}', RStyle::default()));
                     }
                 }
             } else {
@@ -352,7 +457,7 @@ impl Renderer {
                     push_plain(&mut cells, &fit(cell, *w, cell_align));
                 }
             }
-            self.emit_line(&cells);
+            self.push_line(cells);
         }
     }
 
@@ -374,6 +479,10 @@ impl Renderer {
                     label: link.label.clone(),
                     target: link.target.clone(),
                     fields: link.fields.iter().map(|f| split_field(f)).collect(),
+                    // Filled in by `record_link_positions` after layout.
+                    line: 0,
+                    col_start: 0,
+                    col_end: 0,
                 });
                 let link_style = RStyle {
                     fg: Some(LINK_FG),
@@ -389,8 +498,10 @@ impl Renderer {
                 let trail_len = rest.len() - rest.trim_end().len();
                 let (core, trail) = rest.split_at(rest.len() - trail_len);
                 push_styled(&mut out, lead, base);
-                push_styled(&mut out, core, link_style);
-                push_styled(&mut out, &format!("[{index}]"), link_style);
+                // The core label and the `[N]` marker are the clickable span:
+                // style them and tag them with the link index for hit-testing.
+                push_link(&mut out, core, link_style, index);
+                push_link(&mut out, &format!("[{index}]"), link_style, index);
                 push_styled(&mut out, trail, base);
                 continue;
             }
@@ -416,15 +527,17 @@ impl Renderer {
         let (chars, align) = self.flatten_line(line);
         let banded = chars
             .into_iter()
-            .map(|sc| StyledChar {
-                ch: sc.ch,
+            .map(|c| StyledChar {
+                ch: c.ch,
                 st: RStyle {
                     fg: Some(fg),
                     bg: Some(bg),
-                    bold: sc.st.bold,
-                    underline: sc.st.underline,
-                    italic: sc.st.italic,
+                    bold: c.st.bold,
+                    underline: c.st.underline,
+                    italic: c.st.italic,
                 },
+                // Keep the link tag so a link inside a heading stays hit-testable.
+                link: c.link,
             })
             .collect();
         (banded, align)
@@ -441,45 +554,10 @@ impl Renderer {
         let lead = leading_pad(align, content_width, content.len());
         let mut row: Vec<StyledChar> = Vec::new();
         for _ in 0..(indent + lead) {
-            row.push(StyledChar {
-                ch: ' ',
-                st: RStyle::default(),
-            });
+            row.push(cell(' ', RStyle::default()));
         }
         row.extend(content);
-        self.emit_line(&row);
-    }
-
-    /// Write a fully laid-out line of styled characters, grouping runs of equal
-    /// style into one SGR sequence each, then a trailing newline.
-    fn emit_line(&mut self, chars: &[StyledChar]) {
-        let mut active = false;
-        let mut i = 0;
-        while i < chars.len() {
-            let st = chars[i].st;
-            let mut j = i;
-            let mut text = String::new();
-            while j < chars.len() && chars[j].st == st {
-                text.push(chars[j].ch);
-                j += 1;
-            }
-            if !self.no_color && !st.is_plain() {
-                self.out.push_str(&st.sgr());
-                self.out.push_str(&text);
-                active = true;
-            } else {
-                if active {
-                    self.out.push_str("\x1b[0m");
-                    active = false;
-                }
-                self.out.push_str(&text);
-            }
-            i = j;
-        }
-        if active {
-            self.out.push_str("\x1b[0m");
-        }
-        self.out.push('\n');
+        self.push_line(row);
     }
 }
 
@@ -534,10 +612,27 @@ fn wrap(chars: Vec<StyledChar>, width: usize) -> Vec<Vec<StyledChar>> {
     lines
 }
 
-/// Append the characters of `text` with a single style.
+/// Build one untagged styled cell.
+fn cell(ch: char, st: RStyle) -> StyledChar {
+    StyledChar { ch, st, link: None }
+}
+
+/// Append the characters of `text` with a single style, untagged.
 fn push_styled(out: &mut Vec<StyledChar>, text: &str, st: RStyle) {
     for ch in text.chars() {
-        out.push(StyledChar { ch, st });
+        out.push(cell(ch, st));
+    }
+}
+
+/// Append `text` with a single style, tagging every cell with `link` (its
+/// 1-based index) so the laid-out span can be hit-tested.
+fn push_link(out: &mut Vec<StyledChar>, text: &str, st: RStyle, link: usize) {
+    for ch in text.chars() {
+        out.push(StyledChar {
+            ch,
+            st,
+            link: Some(link),
+        });
     }
 }
 

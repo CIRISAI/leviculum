@@ -196,7 +196,10 @@ pub struct BrowserOptions {
 
 /// Fetch a page, parse it, and return the parsed document. The raw bytes are
 /// decoded as UTF-8 lossily so a page with stray bytes still renders.
-async fn fetch_document(
+///
+/// Public so the TUI shell (`main`) can fetch a page once and lay it out into a
+/// [`crate::tui::Model`], sharing the exact fetch/parse path the print sink uses.
+pub async fn fetch_document(
     session: &mut Session,
     target: &Target,
     timeout: Duration,
@@ -204,6 +207,16 @@ async fn fetch_document(
     let bytes = session.fetch(target, timeout).await?;
     let source = String::from_utf8_lossy(&bytes);
     Ok(leviculum_micron::parse(&source))
+}
+
+/// A short, glanceable page title for the TUI frame: the node's discovered
+/// display name when known, else the short dest hex, then the page path.
+pub fn page_title(name: Option<&str>, dest_hash: &[u8; 16], path: &str) -> String {
+    let label = match name {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => short_dest_hex(dest_hash),
+    };
+    format!(" {label} · :{path} ")
 }
 
 /// The faint (dim) SGR introducer and the reset, used for the orientation
@@ -654,6 +667,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            ..RenderedLink::default()
         }
     }
 
@@ -881,6 +895,7 @@ mod tests {
                     label: format!("L{i}"),
                     target: format!("/page/{i}.mu"),
                     fields: Vec::new(),
+                    ..RenderedLink::default()
                 })
                 .collect(),
         }

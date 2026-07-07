@@ -16,10 +16,15 @@ use leviculum_std::config::Config;
 use lnomad::browser::{self, BrowserOptions};
 use lnomad::cli::{resolve_args, Mode};
 use lnomad::fetch::Session;
+use lnomad::tui::{run_tui, Model};
 use lnomad::url::parse_url;
 
 /// Fallback render width when no terminal size can be detected.
 const FALLBACK_WIDTH: usize = 80;
+/// Initial model height, in rows, before the first resize event reports the
+/// real terminal height. Only the stored `Model::size` uses it; drawing uses
+/// the live frame area.
+const FALLBACK_HEIGHT: u16 = 24;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -159,11 +164,25 @@ async fn main() -> ExitCode {
     } else if let Some(target) = target {
         // Page mode: target was validated as present above.
         if interactive {
-            let stdin = std::io::stdin();
-            let mut input = BufReader::new(stdin.lock());
-            let mut out = std::io::stdout();
-            match browser::run(&mut input, &mut out, &mut session, target, &opts).await {
-                Ok(()) => ExitCode::SUCCESS,
+            // Phase 1 TUI: fetch the page once, then show its top under the
+            // ratatui shell (q / Ctrl-C to quit). Scrolling and link navigation
+            // arrive in later phases; the old `browser::run` REPL stays in the
+            // library for now.
+            match browser::fetch_document(&mut session, &target, opts.timeout).await {
+                Ok(doc) => {
+                    let name = session.node_name(&target.dest_hash);
+                    let title =
+                        browser::page_title(name.as_deref(), &target.dest_hash, &target.path);
+                    let size = (opts.width as u16, FALLBACK_HEIGHT);
+                    let model = Model::from_document(&doc, opts.width, title, size);
+                    match run_tui(model).await {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(err) => {
+                            eprintln!("lnomad: {err}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
                 Err(err) => {
                     eprintln!("lnomad: {err}");
                     ExitCode::FAILURE
