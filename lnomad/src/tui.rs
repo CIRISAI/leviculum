@@ -2143,25 +2143,47 @@ fn short_hex(dest: &[u8; 16]) -> String {
 /// full cycle. `spin % 6` picks the current frame.
 const SPIN_FRAMES: [&str; 6] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴"];
 
-/// A garish, fully saturated true-colour rainbow the spinner glows through. The
-/// colours are picked at full brightness so they pop on both the dark and light
-/// chrome bar.
-const RAINBOW: [(u8, u8, u8); 6] = [
-    (255, 0, 0),   // red
-    (255, 140, 0), // orange
-    (255, 240, 0), // yellow
-    (0, 230, 0),   // green
-    (0, 220, 255), // cyan
-    (255, 0, 200), // magenta
-];
+/// Degrees of hue the spinner colour advances per animation tick. The colour
+/// glides continuously through the HSV wheel rather than snapping between a few
+/// fixed rainbow stops. At the [`SPINNER_TICK_MS`] (120 ms) redraw cadence a full
+/// 360 degree rainbow takes `360 / HUE_STEP` ticks = 40 ticks = 4.8 s, and each
+/// tick shifts the hue by only 9 degrees, so the change reads as a smooth glide
+/// with no flicker.
+const HUE_STEP: f32 = 9.0;
+
+/// Convert an HSV colour to 8-bit RGB. Pure function. `h_deg` is the hue in
+/// degrees (wrapped into `[0, 360)`), `s` and `v` are the saturation and value in
+/// `[0, 1]`. Uses the standard sextant formulation; the spinner calls it with
+/// `s = v = 1.0` for maximally vivid, full-brightness colours.
+fn hsv_to_rgb(h_deg: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = h_deg.rem_euclid(360.0);
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let c = v * s;
+    let sextant = h / 60.0;
+    let x = c * (1.0 - (sextant.rem_euclid(2.0) - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = match sextant as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let to_u8 = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to_u8(r1), to_u8(g1), to_u8(b1))
+}
 
 /// Render one frame of the loading spinner: the current braille glyph as a bold,
-/// full-brightness rainbow span. The glyph advances one step per `spin` (the dot
-/// circles), while the hue advances twice as fast (`spin * 2`) so the colour
-/// shimmers faster than the dot position.
+/// full-brightness span whose colour rotates slowly and continuously through the
+/// HSV hue wheel. The glyph advances one step per `spin` (the dot circles) while
+/// the hue advances a small [`HUE_STEP`] per tick, so the colour glides smoothly
+/// and much more slowly than the dot position.
 fn spinner_span(spin: usize) -> RtSpan<'static> {
     let glyph = SPIN_FRAMES[spin % SPIN_FRAMES.len()];
-    let (r, g, b) = RAINBOW[(spin * 2) % RAINBOW.len()];
+    let hue = (spin as f32 * HUE_STEP).rem_euclid(360.0);
+    let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
     RtSpan::styled(
         glyph,
         Style::default()
@@ -3477,7 +3499,40 @@ mod tests {
     }
 
     #[test]
-    fn spinner_span_shimmers_and_cycles() {
+    fn hsv_to_rgb_known_conversions() {
+        // The primary and secondary hues at full saturation and value.
+        assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0), (255, 0, 0), "h=0 -> red");
+        assert_eq!(hsv_to_rgb(60.0, 1.0, 1.0), (255, 255, 0), "h=60 -> yellow");
+        assert_eq!(hsv_to_rgb(120.0, 1.0, 1.0), (0, 255, 0), "h=120 -> green");
+        assert_eq!(hsv_to_rgb(180.0, 1.0, 1.0), (0, 255, 255), "h=180 -> cyan");
+        assert_eq!(hsv_to_rgb(240.0, 1.0, 1.0), (0, 0, 255), "h=240 -> blue");
+        assert_eq!(
+            hsv_to_rgb(300.0, 1.0, 1.0),
+            (255, 0, 255),
+            "h=300 -> magenta"
+        );
+        // Hue wraps: 360 == 0, and negatives fold back into range.
+        assert_eq!(
+            hsv_to_rgb(360.0, 1.0, 1.0),
+            (255, 0, 0),
+            "h=360 wraps to red"
+        );
+        assert_eq!(
+            hsv_to_rgb(-60.0, 1.0, 1.0),
+            (255, 0, 255),
+            "h=-60 -> magenta"
+        );
+        // s=1, v=1 always yields a fully saturated, full-brightness colour: one
+        // channel at 255 and at least one at 0.
+        for deg in (0..360).step_by(7) {
+            let (r, g, b) = hsv_to_rgb(deg as f32, 1.0, 1.0);
+            assert_eq!(r.max(g).max(b), 255, "not full brightness at h={deg}");
+            assert_eq!(r.min(g).min(b), 0, "not fully saturated at h={deg}");
+        }
+    }
+
+    #[test]
+    fn spinner_span_glides_smoothly_through_the_spectrum() {
         // The glyph steps through the six braille frames as `spin` advances.
         for spin in 0..12 {
             assert_eq!(
@@ -3486,30 +3541,50 @@ mod tests {
                 "glyph out of cycle at spin={spin}"
             );
         }
-        // Every frame is bold and a full-brightness rainbow true colour.
-        for spin in 0..RAINBOW.len() {
+        // Every frame is bold and carries the HSV colour for its hue.
+        let cycle = (360.0 / HUE_STEP).ceil() as usize;
+        for spin in 0..cycle {
             let style = spinner_span(spin).style;
             assert!(
                 style.add_modifier.contains(Modifier::BOLD),
                 "spinner not bold at spin={spin}"
             );
-            let (r, g, b) = RAINBOW[(spin * 2) % RAINBOW.len()];
+            let hue = (spin as f32 * HUE_STEP).rem_euclid(360.0);
+            let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
             assert_eq!(
                 style.fg,
                 Some(Color::Rgb(r, g, b)),
-                "wrong rainbow fg at spin={spin}"
+                "wrong hsv fg at spin={spin}"
             );
         }
-        // The hue shimmers: consecutive `spin` values glow in DIFFERENT rainbow
-        // colours (the hue rotates faster than the glyph position).
-        for spin in 0..RAINBOW.len() {
-            assert_ne!(
-                spinner_span(spin).style.fg,
-                spinner_span(spin + 1).style.fg,
-                "hue did not change between spin={spin} and spin={}",
-                spin + 1
-            );
+        // The colour glides smoothly: consecutive ticks shift the hue by only the
+        // small HUE_STEP, so each RGB channel moves by a bounded amount (no hard
+        // jumps). A single HUE_STEP spans at most one 60-degree sextant, over which
+        // a channel changes by at most 255.
+        let max_delta = (HUE_STEP / 60.0 * 255.0).ceil() as i32 + 1;
+        for spin in 0..cycle {
+            let a = spinner_span(spin).style.fg;
+            let b = spinner_span(spin + 1).style.fg;
+            let (Some(Color::Rgb(ar, ag, ab)), Some(Color::Rgb(br, bg, bb))) = (a, b) else {
+                panic!("spinner fg not an Rgb colour at spin={spin}");
+            };
+            assert_ne!(a, b, "hue did not change between spin={spin} and next");
+            for (x, y, ch) in [(ar, br, "r"), (ag, bg, "g"), (ab, bb, "b")] {
+                let d = (x as i32 - y as i32).abs();
+                assert!(
+                    d <= max_delta,
+                    "channel {ch} jumped by {d} (> {max_delta}) at spin={spin}"
+                );
+            }
         }
+        // A full cycle spans the whole spectrum: the hue reaches both ends.
+        let hues: Vec<f32> = (0..cycle)
+            .map(|s| (s as f32 * HUE_STEP).rem_euclid(360.0))
+            .collect();
+        let min = hues.iter().cloned().fold(f32::MAX, f32::min);
+        let max = hues.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(min < 30.0, "cycle does not start near hue 0 (min={min})");
+        assert!(max > 330.0, "cycle does not reach the far end (max={max})");
     }
 
     #[test]
@@ -3520,15 +3595,13 @@ mod tests {
             action: HistoryAction::Push,
         });
         m.spin = 3;
+        let hue = (m.spin as f32 * HUE_STEP).rem_euclid(360.0);
+        let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
         let buffer = render(&m, 80, 24);
         let mut found = false;
         for x in 0..buffer.area.width {
             let cell = &buffer[(x, 23)];
-            if cell.modifier.contains(Modifier::BOLD)
-                && RAINBOW
-                    .iter()
-                    .any(|&(r, g, b)| cell.fg == Color::Rgb(r, g, b))
-            {
+            if cell.modifier.contains(Modifier::BOLD) && cell.fg == Color::Rgb(r, g, b) {
                 found = true;
             }
         }
