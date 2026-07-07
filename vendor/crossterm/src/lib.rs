@@ -1,4 +1,8 @@
 #![deny(unused_imports, unused_must_use)]
+// Vendored, minimally-patched crate (leviculum #115): cap upstream style lints
+// so they do not surface in our build, matching Cargo's `--cap-lints allow` for
+// registry deps. The two explicit denies above stay in force (more specific).
+#![allow(warnings)]
 
 //! # Cross-platform Terminal Manipulation Library
 //!
