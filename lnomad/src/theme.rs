@@ -176,6 +176,26 @@ impl Theme {
             Theme::Light => (0, 90, 170),
         }
     }
+
+    /// The background tint painted over every in-page search match (the current
+    /// match gets a stronger, reversed highlight on top of this). A muted amber
+    /// on dark, a pale amber on light, so a match reads as marked without the
+    /// full contrast reserved for the current one.
+    pub fn search_match_bg(self) -> (u8, u8, u8) {
+        match self {
+            Theme::Dark => (120, 100, 0),
+            Theme::Light => (255, 235, 130),
+        }
+    }
+
+    /// The foreground drawn over [`search_match_bg`](Theme::search_match_bg): a
+    /// readable pairing for the non-current search-match tint.
+    pub fn search_match_fg(self) -> (u8, u8, u8) {
+        match self {
+            Theme::Dark => (255, 255, 255),
+            Theme::Light => (0, 0, 0),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -63,7 +63,7 @@ use leviculum_micron::MicronDocument;
 
 use crate::browser::{self, BrowserOptions};
 use crate::fetch::Session;
-use crate::render::{layout, RLine, RStyle, RenderedLink};
+use crate::render::{layout_blocks, RLine, RStyle, RenderedLink};
 use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
 use crate::url::{parse_url, Target};
 
@@ -90,11 +90,13 @@ const RELOAD_LABEL: &str = "⟳ reload";
 
 /// Browse-mode status hints.
 const BROWSE_HINTS: &str =
-    "j/k scroll  Tab focus  f hint  : addr  R reload  t theme  ? help  q quit";
+    "j/k scroll  f hint  / search  : addr  R reload  t theme  ? help  q quit";
 /// Address-mode status hints.
 const ADDRESS_HINTS: &str = "Enter: go   Esc: cancel";
 /// Hint-mode status hints.
 const HINT_HINTS: &str = "type a hint label or link text   Esc: cancel";
+/// Search-mode status hints (shown when the query line has no room of its own).
+const SEARCH_HINTS: &str = "Enter: search   n/N: next/prev   Esc: cancel";
 
 /// The home-row alphabet hint labels are drawn from (vimium-style).
 const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
@@ -201,6 +203,67 @@ pub enum Mode {
     /// Hint mode (`f`): each visible link and top-bar control wears a label the
     /// reader types to jump to it.
     Hint,
+    /// In-page search (`/`): a one-line query editor; committing highlights all
+    /// matches and jumps to the first.
+    Search,
+}
+
+/// One in-page search hit: a column span on a single laid-out page line. Column
+/// indices are 0-based and address [`RLine`] cells directly (one cell = one
+/// column), so they map straight onto screen columns in the content body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Match {
+    /// 0-based index of the laid-out [`RLine`] the match sits on.
+    pub line_idx: usize,
+    /// 0-based first matched column on that line.
+    pub col_start: usize,
+    /// 0-based column one past the last matched column (`col_start..col_end`).
+    pub col_end: usize,
+}
+
+/// Every case-insensitive substring match of `query` over the rendered page
+/// text (the [`RLine`] cells, i.e. exactly what the reader sees, post-wrap).
+///
+/// Matching is per line and non-overlapping: after a hit the scan resumes at
+/// its end, so adjacent hits (`aa` in `aaaa` -> two matches) are found but
+/// overlapping ones (`aa` starting one column apart) are not. An empty query
+/// yields no matches. Comparison is case-insensitive per character while keeping
+/// a strict one-cell-per-column mapping, so the returned rects line up with the
+/// laid-out cells regardless of case.
+pub fn find_matches(page: &[RLine], query: &str) -> Vec<Match> {
+    let needle: Vec<char> = query.chars().collect();
+    let n = needle.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (line_idx, line) in page.iter().enumerate() {
+        let hay: Vec<char> = line.cells.iter().map(|c| c.ch).collect();
+        if hay.len() < n {
+            continue;
+        }
+        let mut i = 0;
+        while i + n <= hay.len() {
+            if (0..n).all(|k| chars_eq_ci(hay[i + k], needle[k])) {
+                out.push(Match {
+                    line_idx,
+                    col_start: i,
+                    col_end: i + n,
+                });
+                i += n;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Case-insensitive equality of two characters, without changing the column
+/// count (each side stays one character), so match columns keep aligning to
+/// laid-out cells.
+fn chars_eq_ci(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
 }
 
 /// One of the clickable top-bar controls, recorded with its rect so a later
@@ -395,10 +458,24 @@ pub struct Model {
     pub current_dest: Option<[u8; 16]>,
     /// A navigation in flight, or `None` when idle. `Some` means "loading".
     pub pending: Option<Pending>,
-    /// The current interaction mode (browse, address entry, or hint).
+    /// The `#anchor` the in-flight navigation should scroll to once its page
+    /// loads, or `None`. Kept beside `pending` so the anchor survives the async
+    /// round-trip and is resolved against the freshly-loaded page's lines.
+    pub pending_anchor: Option<String>,
+    /// The current interaction mode (browse, address entry, hint, or search).
     pub mode: Mode,
     /// The address-bar editor.
     pub input: Input,
+    /// The in-page search query editor (`/`).
+    pub search_input: Input,
+    /// The current query's matches over the laid-out page, highlighted while set.
+    pub matches: Vec<Match>,
+    /// Index into `matches` of the current match (the one scrolled to and drawn
+    /// with the stronger highlight), or `None` when there is no current match.
+    pub current_match: Option<usize>,
+    /// Block index -> first laid-out line, so a `#anchor` (stored as a block
+    /// index) resolves to a page line. Recomputed on every relayout.
+    pub block_lines: Vec<usize>,
     /// The link the focus cursor is on (Tab navigation), 1-based, or `None`.
     pub focus: Option<usize>,
     /// The link the mouse is hovering over, 1-based, or `None`.
@@ -432,12 +509,13 @@ impl Model {
         size: (u16, u16),
     ) -> Self {
         let theme = Theme::default();
-        let (page, links) = layout(doc, width, theme);
+        let (page, links, block_lines) = layout_blocks(doc, width, theme);
         Self {
             doc: doc.clone(),
             width,
             page,
             links,
+            block_lines,
             title: title.into(),
             size,
             theme,
@@ -450,9 +528,10 @@ impl Model {
     /// afterwards. Also used to re-lay-out in place after a theme toggle.
     pub fn relayout(&mut self, width: usize) {
         self.width = width;
-        let (page, links) = layout(&self.doc, width, self.theme);
+        let (page, links, block_lines) = layout_blocks(&self.doc, width, self.theme);
         self.page = page;
         self.links = links;
+        self.block_lines = block_lines;
     }
 
     /// Toggle between the dark and light theme, re-laying the page out so the
@@ -546,6 +625,15 @@ pub fn visible_links(model: &Model) -> Vec<VisibleLink> {
         });
     }
     out
+}
+
+/// Resolve an anchor name to the page line to scroll to: the first laid-out
+/// [`RLine`] of the block the anchor marks. The parser records anchors as block
+/// indices (`doc.anchors`); [`Model::block_lines`] maps a block index to its
+/// first line. `None` when the anchor is unknown or its block laid out no line.
+pub fn anchor_line(model: &Model, anchor: &str) -> Option<usize> {
+    let block = *model.doc.anchors.get(anchor)?;
+    model.block_lines.get(block).copied()
 }
 
 /// Generate `n` unique hint labels from the home-row alphabet: single characters
@@ -692,20 +780,53 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
 /// the title, and record the navigation in history per its pending action.
 fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
     let pending = model.pending.take();
+    let anchor = model.pending_anchor.take();
     model.doc = doc;
     model.relayout(content_width(model.size.0));
     model.scroll = 0;
     model.title = title;
     model.status = None;
-    // A fresh page invalidates any focus/hover cursor into the old link set.
+    // A fresh page invalidates any focus/hover cursor into the old link set, and
+    // any search match highlights against the old page.
     model.focus = None;
     model.hover = None;
+    model.matches.clear();
+    model.current_match = None;
     if let Some(pending) = pending {
         model.current_dest = Some(pending.target.dest_hash);
         match pending.action {
             HistoryAction::Push => model.history.visit(pending.target),
             HistoryAction::Goto(idx) => model.history.goto(idx),
         }
+    }
+    // A followed `#anchor` scrolls its block's first line to the top; an unknown
+    // anchor falls back to the top of the page with a status note.
+    if let Some(name) = anchor {
+        match anchor_line(model, &name) {
+            Some(line) => {
+                let vp = model.viewport();
+                model.scroll = line.min(model.max_scroll(vp));
+            }
+            None => model.status = Some(format!("anchor #{name} not found")),
+        }
+    }
+}
+
+/// Split a trailing `#anchor` off a target's path, returning the anchor-free
+/// target and the anchor name (when non-empty). The initial URL keeps its
+/// `#anchor` inside `path` after [`parse_url`](crate::url::parse_url); stripping
+/// it here keeps the fetched path clean and lets the load handler scroll to it.
+fn split_path_anchor(mut target: Target) -> (Target, Option<String>) {
+    let split = target
+        .path
+        .split_once('#')
+        .map(|(base, anchor)| (base.to_string(), anchor.to_string()));
+    match split {
+        Some((base, anchor)) if !anchor.is_empty() => {
+            target.path = base;
+            (target, Some(anchor))
+        }
+        _ => (target, None),
     }
 }
 
@@ -733,7 +854,30 @@ fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     match model.mode {
         Mode::Address => update_address_key(model, key),
         Mode::Hint => update_hint_key(model, key),
+        Mode::Search => update_search_key(model, key),
         Mode::Browse => update_browse_key(model, key, ctrl),
+    }
+}
+
+/// Fold a key while the in-page search editor has focus. `Enter` commits the
+/// query (compute matches, jump to the first); `Esc` cancels and clears all
+/// highlights; any other key edits the query.
+fn update_search_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+    match key.code {
+        KeyCode::Esc => {
+            exit_search(model);
+            Vec::new()
+        }
+        KeyCode::Enter => {
+            let query = model.search_input.value().to_string();
+            model.mode = Mode::Browse;
+            commit_search(model, &query);
+            Vec::new()
+        }
+        _ => {
+            model.search_input.handle_event(&Event::Key(key));
+            Vec::new()
+        }
     }
 }
 
@@ -803,6 +947,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                         target: target.clone(),
                         action: HistoryAction::Push,
                     });
+                    model.pending_anchor = None;
                     vec![Effect::Navigate(target)]
                 }
                 Err(err) => {
@@ -852,6 +997,23 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
     // Enter hint mode (`f`).
     if key.code == KeyCode::Char('f') && !ctrl && !alt {
         enter_hint(model);
+        return Vec::new();
+    }
+
+    // Enter in-page search mode (`/`).
+    if key.code == KeyCode::Char('/') && !ctrl && !alt {
+        enter_search(model);
+        return Vec::new();
+    }
+
+    // Cycle the current search match: `n` next, `N` previous (both wrap), each
+    // scrolling the current match into view. A no-op with no active matches.
+    if key.code == KeyCode::Char('n') && !ctrl && !alt {
+        next_match(model);
+        return Vec::new();
+    }
+    if key.code == KeyCode::Char('N') && !ctrl && !alt {
+        prev_match(model);
         return Vec::new();
     }
 
@@ -924,6 +1086,84 @@ fn exit_hint(model: &mut Model) {
     model.hint_input.clear();
 }
 
+/// Enter in-page search mode with a cleared query editor, dropping any prior
+/// match highlights so the reader starts from a clean slate.
+fn enter_search(model: &mut Model) {
+    model.mode = Mode::Search;
+    model.search_input.reset();
+    model.matches.clear();
+    model.current_match = None;
+    model.status = None;
+}
+
+/// Leave search mode (Esc): back to Browse, clearing the query and all match
+/// highlights plus the current-match marker.
+fn exit_search(model: &mut Model) {
+    model.mode = Mode::Browse;
+    model.search_input.reset();
+    model.matches.clear();
+    model.current_match = None;
+    model.status = None;
+}
+
+/// Commit a search query: recompute matches over the current page, mark the
+/// first as current and scroll it into view. An empty result clears the current
+/// match and notes it in the status bar.
+fn commit_search(model: &mut Model, query: &str) {
+    model.matches = find_matches(&model.page, query);
+    if model.matches.is_empty() {
+        model.current_match = None;
+        model.status = Some(format!("no matches for \"{query}\""));
+    } else {
+        model.current_match = Some(0);
+        model.status = None;
+        scroll_to_current_match(model);
+    }
+}
+
+/// Advance the current match to the next one (wrapping) and scroll it into view.
+/// A no-op when there are no matches.
+fn next_match(model: &mut Model) {
+    let n = model.matches.len();
+    if n == 0 {
+        return;
+    }
+    let cur = model.current_match.unwrap_or(0);
+    model.current_match = Some((cur + 1) % n);
+    scroll_to_current_match(model);
+}
+
+/// Move the current match to the previous one (wrapping) and scroll it into
+/// view. A no-op when there are no matches.
+fn prev_match(model: &mut Model) {
+    let n = model.matches.len();
+    if n == 0 {
+        return;
+    }
+    let cur = model.current_match.unwrap_or(0);
+    model.current_match = Some((cur + n - 1) % n);
+    scroll_to_current_match(model);
+}
+
+/// Scroll so the current match's line is inside the viewport (minimal motion,
+/// like Tab focus), clamped to the page. A no-op when there is no current match.
+fn scroll_to_current_match(model: &mut Model) {
+    let Some(ci) = model.current_match else {
+        return;
+    };
+    let Some(m) = model.matches.get(ci) else {
+        return;
+    };
+    let line = m.line_idx;
+    let vp = model.viewport();
+    if line < model.scroll {
+        model.scroll = line;
+    } else if vp > 0 && line >= model.scroll + vp {
+        model.scroll = line + 1 - vp;
+    }
+    model.clamp_scroll(vp);
+}
+
 /// Reload the page under the history cursor without changing history.
 fn reload_current(model: &mut Model) -> Vec<Effect> {
     let Some(target) = model.history.current().cloned() else {
@@ -934,6 +1174,7 @@ fn reload_current(model: &mut Model) -> Vec<Effect> {
         target: target.clone(),
         action: HistoryAction::Goto(idx),
     });
+    model.pending_anchor = None;
     model.status = None;
     vec![Effect::Navigate(target)]
 }
@@ -949,6 +1190,7 @@ fn go_back(model: &mut Model) -> Vec<Effect> {
         target: target.clone(),
         action: HistoryAction::Goto(idx),
     });
+    model.pending_anchor = None;
     model.status = None;
     vec![Effect::Navigate(target)]
 }
@@ -964,6 +1206,7 @@ fn go_forward(model: &mut Model) -> Vec<Effect> {
         target: target.clone(),
         action: HistoryAction::Goto(idx),
     });
+    model.pending_anchor = None;
     model.status = None;
     vec![Effect::Navigate(target)]
 }
@@ -975,12 +1218,15 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
         return Vec::new();
     };
     match browser::resolve_link(&link, model.current_dest) {
-        Ok((target, _anchor)) => {
+        Ok((target, anchor)) => {
             model.status = None;
             model.pending = Some(Pending {
                 target: target.clone(),
                 action: HistoryAction::Push,
             });
+            // Remember any `#anchor` so the load handler scrolls to it once the
+            // page arrives (resolved against the freshly-laid-out lines).
+            model.pending_anchor = anchor;
             vec![Effect::Navigate(target)]
         }
         Err(err) => {
@@ -1164,8 +1410,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_topbar(model, frame, topbar);
     render_content(model, frame, content);
     render_status(model, frame, status);
-    // Overlays drawn on top of the laid-out page: the focus highlight, and the
-    // hint badges while hint mode is active.
+    // Overlays drawn on top of the laid-out page: the search-match highlights,
+    // the focus highlight, and the hint badges while hint mode is active.
+    render_search_matches(model, frame);
     render_focus(model, frame);
     if model.mode == Mode::Hint {
         render_hints(model, frame);
@@ -1194,6 +1441,43 @@ fn render_focus(model: &Model, frame: &mut Frame) {
             }
             if let Some(cell) = buf.cell_mut((x, vl.row)) {
                 cell.set_style(highlight);
+            }
+        }
+    }
+}
+
+/// Highlight the on-screen search matches: every match wears a theme-aware
+/// background tint, and the current match a stronger reversed highlight on top.
+/// Off-viewport matches are skipped. A no-op when there are no matches.
+fn render_search_matches(model: &Model, frame: &mut Frame) {
+    if model.matches.is_empty() {
+        return;
+    }
+    let area = frame.area();
+    let viewport = model.viewport();
+    let scroll = model.scroll;
+    let match_style = Style::default()
+        .fg(rgb(model.theme.search_match_fg()))
+        .bg(rgb(model.theme.search_match_bg()));
+    let current_style = Style::default().add_modifier(Modifier::REVERSED);
+    let buf = frame.buffer_mut();
+    for (i, m) in model.matches.iter().enumerate() {
+        if m.line_idx < scroll || m.line_idx >= scroll + viewport {
+            continue;
+        }
+        let row = TOPBAR_ROWS + (m.line_idx - scroll) as u16;
+        let style = if model.current_match == Some(i) {
+            current_style
+        } else {
+            match_style
+        };
+        for col in m.col_start..m.col_end {
+            let x = col as u16;
+            if x >= area.width || row >= area.height {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                cell.set_style(style);
             }
         }
     }
@@ -1381,6 +1665,11 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
         Block::default().style(chrome_style(model.no_color, model.theme)),
         area,
     );
+    // In search mode the status bar becomes the `/<query>` editor.
+    if model.mode == Mode::Search {
+        render_search_bar(model, frame, area);
+        return;
+    }
     let dim = Style::default().add_modifier(Modifier::DIM);
     if let Some(pending) = &model.pending {
         let label = format!(" loading {}", pending.target.path);
@@ -1397,6 +1686,7 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
         let hints = match model.mode {
             Mode::Address => ADDRESS_HINTS,
             Mode::Hint => HINT_HINTS,
+            Mode::Search => SEARCH_HINTS,
             Mode::Browse => BROWSE_HINTS,
         };
         // The key-hints are the most-read chrome text: render them in the bright
@@ -1404,6 +1694,40 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
         let hint_style = chrome_text_style(model.no_color, model.theme);
         frame.render_widget(Paragraph::new(RtSpan::styled(hints, hint_style)), area);
     }
+}
+
+/// Draw the in-page search editor into the status bar: a `/` prompt, then the
+/// live query with its cursor, styled to read on the chrome bar.
+fn render_search_bar(model: &Model, frame: &mut Frame, area: Rect) {
+    if area.width == 0 {
+        return;
+    }
+    let text_style = chrome_text_style(model.no_color, model.theme);
+    frame.render_widget(
+        Paragraph::new(RtSpan::styled("/", text_style)),
+        Rect { width: 1, ..area },
+    );
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(1),
+        height: 1,
+    };
+    if inner.width == 0 {
+        return;
+    }
+    let w = inner.width as usize;
+    let scroll = model.search_input.visual_scroll(w.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(RtSpan::styled(
+            model.search_input.value().to_string(),
+            text_style,
+        ))
+        .scroll((0, scroll as u16)),
+        inner,
+    );
+    let cx = inner.x + (model.search_input.visual_cursor().saturating_sub(scroll)) as u16;
+    frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
 }
 
 /// The status-bar text for the focused-or-hovered link's target, if any: the
@@ -1432,6 +1756,7 @@ const HELP_LINES: &[&str] = &[
     "  Tab / Shift-Tab     focus prev/next",
     "  Enter               follow the link",
     "  f                   hint a link",
+    "  / n N               search / next / prev",
     "  click               follow link",
     "  :                   enter an address",
     "  R                   reload the page",
@@ -1766,11 +2091,15 @@ pub async fn run_tui(
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let mut generation: u64 = 0;
 
-    // Kick off the initial navigation.
+    // Kick off the initial navigation, honouring a `#anchor` on the initial URL
+    // (the parser folds it into the path; split it back off so the fetched path
+    // is clean and the load handler can scroll to it).
+    let (initial, initial_anchor) = split_path_anchor(initial);
     model.pending = Some(Pending {
         target: initial.clone(),
         action: HistoryAction::Push,
     });
+    model.pending_anchor = initial_anchor;
     spawn_fetch(
         &mut inflight,
         &mut generation,
@@ -3083,6 +3412,387 @@ mod tests {
             status.contains(&link_of(&m, 1).target),
             "status bar missing the focused target: {status:?}"
         );
+    }
+
+    // --- phase 5: in-page search + #anchor scroll-to --------------------
+
+    /// One laid-out line from plain text, every cell in the default style.
+    fn rline(text: &str) -> RLine {
+        RLine {
+            cells: text
+                .chars()
+                .map(|ch| crate::render::StyledChar {
+                    ch,
+                    st: RStyle::default(),
+                    link: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn find_matches_multiple_across_lines_and_case_insensitive() {
+        let page = vec![rline("Foo bar foo"), rline("nothing here"), rline("FOObar")];
+        let ms = find_matches(&page, "foo");
+        assert_eq!(
+            ms,
+            vec![
+                Match {
+                    line_idx: 0,
+                    col_start: 0,
+                    col_end: 3
+                },
+                Match {
+                    line_idx: 0,
+                    col_start: 8,
+                    col_end: 11
+                },
+                Match {
+                    line_idx: 2,
+                    col_start: 0,
+                    col_end: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn find_matches_empty_query_and_no_match_are_empty() {
+        let page = vec![rline("abcdef")];
+        assert!(
+            find_matches(&page, "").is_empty(),
+            "empty query -> no matches"
+        );
+        assert!(
+            find_matches(&page, "xyz").is_empty(),
+            "no hit -> no matches"
+        );
+        // A query longer than the line never matches.
+        assert!(find_matches(&page, "abcdefg").is_empty());
+    }
+
+    #[test]
+    fn find_matches_adjacent_hits_are_non_overlapping() {
+        // "aa" over "aaaa" yields two adjacent, non-overlapping matches (not the
+        // three an overlapping scan would report).
+        let ms = find_matches(&[rline("aaaa")], "aa");
+        assert_eq!(
+            ms,
+            vec![
+                Match {
+                    line_idx: 0,
+                    col_start: 0,
+                    col_end: 2
+                },
+                Match {
+                    line_idx: 0,
+                    col_start: 2,
+                    col_end: 4
+                },
+            ]
+        );
+    }
+
+    /// A controlled document with a known anchor deep in a tall page: 30 intro
+    /// paragraphs, then `` `:deep `` before a heading, then 30 trailing ones, so
+    /// the anchor sits well below the first viewport and above the page bottom.
+    fn long_anchor_doc() -> leviculum_micron::MicronDocument {
+        let mut s = String::new();
+        for i in 0..30 {
+            s.push_str(&format!("intro{i}\n\n"));
+        }
+        s.push_str("`:deep\n>Deep Heading\n\n");
+        for i in 0..30 {
+            s.push_str(&format!("tail{i}\n\n"));
+        }
+        parse(&s)
+    }
+
+    #[test]
+    fn anchor_line_resolves_known_and_rejects_unknown() {
+        // `:target binds to its own (blank) block; the heading slug binds to the
+        // heading block. Both resolve to a page line; an unknown anchor does not.
+        let m = Model::from_document(
+            &parse("Intro para\n`:target\n>Marked Section\nbody text"),
+            content_width(80),
+            "T",
+            (80, 24),
+        );
+        let target_line = anchor_line(&m, "target").expect("known anchor resolves");
+        let heading_line = anchor_line(&m, "marked-section").expect("heading slug resolves");
+        assert!(
+            line_text(&m.page[heading_line]).contains("Marked Section"),
+            "heading anchor must land on the heading line: {:?}",
+            line_text(&m.page[heading_line])
+        );
+        assert!(
+            target_line < heading_line,
+            "the anchor precedes the heading"
+        );
+        assert_eq!(anchor_line(&m, "nope"), None);
+    }
+
+    #[test]
+    fn navigation_with_anchor_scrolls_to_anchor_line() {
+        let mut m = model_from_sample(content_width(80), (80, 10));
+        m.pending = Some(Pending {
+            target: tgt(7),
+            action: HistoryAction::Push,
+        });
+        m.pending_anchor = Some("deep".to_string());
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: long_anchor_doc(),
+                title: "Deep".to_string(),
+            },
+        );
+        let vp = m.viewport();
+        let line = anchor_line(&m, "deep").expect("anchor resolves on the loaded page");
+        assert!(
+            line > vp,
+            "anchor must sit below the first viewport to test a jump"
+        );
+        assert_eq!(m.scroll, line.min(m.max_scroll(vp)));
+        assert!(m.scroll > 0, "scroll must have moved to the anchor");
+        assert!(m.pending_anchor.is_none(), "anchor consumed on load");
+    }
+
+    #[test]
+    fn navigation_with_unknown_anchor_stays_top_and_notes() {
+        let mut m = model_from_sample(content_width(80), (80, 10));
+        m.pending = Some(Pending {
+            target: tgt(7),
+            action: HistoryAction::Push,
+        });
+        m.pending_anchor = Some("missing".to_string());
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: long_anchor_doc(),
+                title: "Deep".to_string(),
+            },
+        );
+        assert_eq!(m.scroll, 0, "unknown anchor falls back to the top");
+        assert!(
+            m.status.as_deref().unwrap_or("").contains("not found"),
+            "unknown anchor should note it: {:?}",
+            m.status
+        );
+    }
+
+    #[test]
+    fn split_path_anchor_strips_the_fragment() {
+        let (base, anchor) = split_path_anchor(Target {
+            dest_hash: [1; 16],
+            path: "/page/x.mu#sec".to_string(),
+            fields: Vec::new(),
+            is_file: false,
+        });
+        assert_eq!(base.path, "/page/x.mu");
+        assert_eq!(anchor.as_deref(), Some("sec"));
+        // No fragment -> no anchor, path untouched.
+        let (base2, anchor2) = split_path_anchor(Target {
+            dest_hash: [1; 16],
+            path: "/page/y.mu".to_string(),
+            fields: Vec::new(),
+            is_file: false,
+        });
+        assert_eq!(base2.path, "/page/y.mu");
+        assert!(anchor2.is_none());
+    }
+
+    /// A tall page whose only "needle" sits below the first viewport, so a search
+    /// commit must scroll to reveal it.
+    fn deep_match_model(size: (u16, u16)) -> Model {
+        let mut s = String::new();
+        for i in 0..40 {
+            s.push_str(&format!("filler{i}\n\n"));
+        }
+        s.push_str("needle deep here\n");
+        Model::from_document(&parse(&s), content_width(size.0), "S", size)
+    }
+
+    /// A short page with three "needle" occurrences on distinct lines, all inside
+    /// a full-height viewport, for cycling tests.
+    fn triple_match_model() -> Model {
+        let s = "needle one\n\nfiller\n\nneedle two\n\nneedle three";
+        Model::from_document(&parse(s), content_width(80), "S", (80, 24))
+    }
+
+    #[test]
+    fn slash_enters_search_and_enter_commits_matches_and_scrolls() {
+        let mut m = deep_match_model((80, 10));
+        let eff = press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(eff.is_empty());
+        assert_eq!(m.mode, Mode::Search);
+        type_str(&mut m, "needle");
+        let eff = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(eff.is_empty());
+        assert_eq!(m.mode, Mode::Browse, "Enter commits and leaves search");
+        assert!(!m.matches.is_empty(), "commit populates matches");
+        assert_eq!(m.current_match, Some(0));
+        // The (single, deep) match is scrolled into the viewport.
+        let first = m.matches[0];
+        let vp = m.viewport();
+        assert!(
+            first.line_idx >= vp,
+            "match must start below the first viewport"
+        );
+        assert!(
+            first.line_idx >= m.scroll && first.line_idx < m.scroll + vp,
+            "current match must be visible after commit"
+        );
+    }
+
+    #[test]
+    fn n_and_shift_n_cycle_matches_and_wrap() {
+        let mut m = triple_match_model();
+        press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_str(&mut m, "needle");
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(m.matches.len(), 3, "three needle lines");
+        assert_eq!(m.current_match, Some(0));
+        press(&mut m, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(m.current_match, Some(1));
+        press(&mut m, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(m.current_match, Some(2));
+        // n wraps past the end back to the first.
+        press(&mut m, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(m.current_match, Some(0));
+        // N wraps before the start to the last.
+        press(&mut m, KeyCode::Char('N'), KeyModifiers::NONE);
+        assert_eq!(m.current_match, Some(2));
+    }
+
+    #[test]
+    fn n_with_no_matches_is_a_noop() {
+        let mut m = triple_match_model();
+        assert!(m.matches.is_empty());
+        press(&mut m, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(m.current_match, None);
+        assert_eq!(m.scroll, 0);
+    }
+
+    #[test]
+    fn reentering_search_and_esc_clears_highlights() {
+        let mut m = triple_match_model();
+        press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_str(&mut m, "needle");
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!m.matches.is_empty(), "committed matches exist");
+        // Re-entering search drops the prior highlights immediately.
+        press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(
+            m.matches.is_empty(),
+            "entering search clears old highlights"
+        );
+        // Esc returns to browse with nothing highlighted.
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Browse);
+        assert!(m.matches.is_empty());
+        assert!(m.current_match.is_none());
+    }
+
+    #[test]
+    fn commit_with_no_match_notes_it() {
+        let mut m = triple_match_model();
+        press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_str(&mut m, "zzz");
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(m.matches.is_empty());
+        assert_eq!(m.current_match, None);
+        assert!(
+            m.status.as_deref().unwrap_or("").contains("no matches"),
+            "a fruitless search should say so: {:?}",
+            m.status
+        );
+    }
+
+    #[test]
+    fn search_highlights_matches_and_current_is_stronger() {
+        let mut m = triple_match_model();
+        press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_str(&mut m, "needle");
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let buffer = render(&m, 80, 24);
+        // The current (first) match is drawn reversed.
+        let cur = m.matches[0];
+        let cur_row = TOPBAR_ROWS + cur.line_idx as u16;
+        let cur_cell = &buffer[(cur.col_start as u16, cur_row)];
+        assert!(
+            cur_cell.modifier.contains(Modifier::REVERSED),
+            "current match must use the stronger reversed highlight"
+        );
+        // A non-current match carries the theme's match tint, not the reverse.
+        let other = m.matches[1];
+        let other_row = TOPBAR_ROWS + other.line_idx as u16;
+        let other_cell = &buffer[(other.col_start as u16, other_row)];
+        assert_eq!(
+            other_cell.bg,
+            rgb(Theme::Dark.search_match_bg()),
+            "non-current match must carry the tint background"
+        );
+        assert!(
+            !other_cell.modifier.contains(Modifier::REVERSED),
+            "non-current match must not use the stronger highlight"
+        );
+    }
+
+    #[test]
+    fn search_commit_scrolls_current_match_into_the_rendered_viewport() {
+        let mut m = deep_match_model((80, 10));
+        press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_str(&mut m, "needle");
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let mline = m.matches[0].line_idx;
+        let vp = m.viewport();
+        assert!(
+            mline >= m.scroll && mline < m.scroll + vp,
+            "match in viewport"
+        );
+        let buffer = render(&m, 80, 10);
+        let row = TOPBAR_ROWS + (mline - m.scroll) as u16;
+        let cell = &buffer[(m.matches[0].col_start as u16, row)];
+        assert!(
+            cell.modifier.contains(Modifier::REVERSED),
+            "the current match must render (reversed) inside the viewport"
+        );
+    }
+
+    #[test]
+    fn anchor_jump_renders_the_anchor_line_at_the_content_top() {
+        let mut m = model_from_sample(content_width(80), (80, 10));
+        m.pending = Some(Pending {
+            target: tgt(7),
+            action: HistoryAction::Push,
+        });
+        m.pending_anchor = Some("deep".to_string());
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: long_anchor_doc(),
+                title: "Deep".to_string(),
+            },
+        );
+        let buffer = render(&m, 80, 10);
+        let top = row_text(&buffer, TOPBAR_ROWS, 80 - SCROLLBAR_COLS);
+        assert_eq!(
+            top.trim_end(),
+            line_text(&m.page[m.scroll]).trim_end(),
+            "the anchor's line must sit at the top of the content viewport"
+        );
+    }
+
+    #[test]
+    fn search_bar_renders_query_line() {
+        let mut m = triple_match_model();
+        press(&mut m, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_str(&mut m, "abc");
+        let buffer = render(&m, 80, 24);
+        let status = row_text(&buffer, 23, 80);
+        assert!(status.contains('/'), "search prompt missing: {status:?}");
+        assert!(status.contains("abc"), "query text missing: {status:?}");
     }
 
     // --- terminal guard (retained from phase 2) --------------------------

@@ -112,17 +112,34 @@ pub fn render_with_options(doc: &MicronDocument, width: usize, no_color: bool) -
 /// is made here: colour is a property of the sink, not the layout. The `theme`
 /// selects the accent colours (heading bands, link colour) baked into the cells.
 pub fn layout(doc: &MicronDocument, width: usize, theme: Theme) -> (Vec<RLine>, Vec<RenderedLink>) {
+    let (lines, links, _block_lines) = layout_blocks(doc, width, theme);
+    (lines, links)
+}
+
+/// Lay a document out like [`layout`], additionally returning the block->line
+/// mapping: `block_lines[i]` is the 0-based index of the first [`RLine`] the
+/// `i`-th [`Block`] laid out into. This lets `#anchor` navigation, which stores
+/// anchors as block indices, resolve an anchor to a page line. A block that
+/// emits no line (an empty table) records the line index the next block starts
+/// at, so the mapping is still monotonic and in range.
+pub fn layout_blocks(
+    doc: &MicronDocument,
+    width: usize,
+    theme: Theme,
+) -> (Vec<RLine>, Vec<RenderedLink>, Vec<usize>) {
     let mut renderer = Renderer {
         lines: Vec::new(),
         links: Vec::new(),
         width: width.max(MIN_WIDTH),
         theme,
     };
+    let mut block_lines = Vec::with_capacity(doc.blocks.len());
     for block in &doc.blocks {
+        block_lines.push(renderer.lines.len());
         renderer.render_block(block);
     }
     renderer.record_link_positions();
-    (renderer.lines, renderer.links)
+    (renderer.lines, renderer.links, block_lines)
 }
 
 /// Serialise laid-out styled lines to the ANSI byte stream. Runs of equal style

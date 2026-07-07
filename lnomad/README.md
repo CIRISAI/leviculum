@@ -80,6 +80,8 @@ set apart by its underline and colour, and is reached by focus, hint or click:
 - `Tab` / `Shift-Tab`  move the focus cursor across links (auto-scrolls)
 - `Enter`     follow the focused link
 - `f`         hint mode: type the label shown over a link (or the link's text)
+- `/`         in-page search: type a query, `Enter` highlights every match and
+  jumps to the first; `n` / `N` cycle to the next / previous match, `Esc` clears
 - click       follow a link, or activate a top-bar control
 - `:`         enter an address
 - `R`         reload the page
@@ -98,6 +100,7 @@ carries its preset (`f=v`) fields as `var_*` request variables.
 - Interactive form-field input (fields the reader must type) is a stub: a link
   is followed with its preset fields only, and a note is printed when a link
   carries form fields.
-- A `#anchor` in a target is resolved against the page's anchors, but the
-  browser does not yet scroll to the anchor position on load.
+- A `#anchor` in a target (a followed link or the initial URL) is resolved
+  against the page's anchors and scrolled to on load; an unknown anchor falls
+  back to the top of the page with a status note.
 - `/file/` downloads are not supported.
