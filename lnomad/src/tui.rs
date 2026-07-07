@@ -2134,11 +2134,13 @@ pub async fn run_tui(
                         opts.timeout,
                     );
                 }
-                // A recognised-but-inert or unparseable event (e.g. a mouse
-                // side button, which crossterm reports as a parse error): keep
-                // looping. It must never tear down the UI.
+                // A recognised-but-inert event (focus/paste, which map to
+                // nothing): keep looping.
                 EventStep::Ignore => {}
-                EventStep::End => break Ok(()),
+                // A closed stream (Ok) or a genuine IO error (Err) both leave
+                // the loop; the error propagates so a dead terminal cannot
+                // busy-loop.
+                EventStep::End(result) => break result,
             },
             Some(outcome) = rx.recv() => {
                 if outcome.generation == generation {
@@ -2190,26 +2192,32 @@ fn map_event(event: Event) -> Option<AppEvent> {
 enum EventStep {
     /// Apply this app-event to the model (a mapped, actionable event).
     Apply(AppEvent),
-    /// A recognised-but-inert event (or an unparseable one): do nothing and keep
-    /// looping. The UI must survive events crossterm cannot map — notably the
-    /// mouse side buttons (8/9), which crossterm reports as a parse error.
+    /// A recognised-but-inert event that maps to nothing: do nothing and keep
+    /// looping. Crossterm discards unparseable byte sequences internally (its
+    /// `parse_event` contract clears the buffer on error), so those never reach
+    /// us as a `Some(Err)` — the only event we ignore is a mapped-to-`None` one
+    /// (focus gained/lost, paste).
     Ignore,
-    /// The stream ended: leave the loop.
-    End,
+    /// Leave the loop with this result: `Ok(())` on a clean close (the stream
+    /// ended), `Err` on a genuine IO error from the event stream (a stdin/poll
+    /// failure). Ignoring the latter would busy-loop on a dead terminal.
+    End(io::Result<()>),
 }
 
 /// Classify one `EventStream` item without touching the model, so the loop's
-/// error-tolerance is unit-testable. An `Err` (unparseable/unsupported
-/// sequence) is [`Ignore`](EventStep::Ignore), NOT a reason to quit: it must
-/// never tear down the UI. `None` (stream closed) is the only exit.
+/// exit behaviour is unit-testable. A `Some(Err)` is a real IO error (stdin or
+/// poll failure) — crossterm never surfaces unparseable sequences as errors, it
+/// discards them internally — so it is an exit, NOT ignore-and-continue:
+/// ignoring it risks a busy-loop on a dead terminal. `None` (stream closed) is a
+/// clean exit.
 fn step_event(item: Option<Result<Event, io::Error>>) -> EventStep {
     match item {
         Some(Ok(event)) => match map_event(event) {
             Some(app) => EventStep::Apply(app),
             None => EventStep::Ignore,
         },
-        Some(Err(_)) => EventStep::Ignore,
-        None => EventStep::End,
+        Some(Err(err)) => EventStep::End(Err(err)),
+        None => EventStep::End(Ok(())),
     }
 }
 
@@ -3060,13 +3068,15 @@ mod tests {
     }
 
     #[test]
-    fn step_event_ignores_unparseable_and_exits_only_on_close() {
-        // An Err from the event stream (e.g. a mouse side button crossterm cannot
-        // parse) is ignored, never fatal: the UI must survive it.
-        let err = io::Error::new(io::ErrorKind::InvalidData, "unparseable sequence");
-        assert!(matches!(step_event(Some(Err(err))), EventStep::Ignore));
-        // A closed stream (None) is the only exit.
-        assert!(matches!(step_event(None), EventStep::End));
+    fn step_event_exits_on_stream_error_and_close() {
+        // A Some(Err) from the event stream is a genuine IO error (stdin/poll
+        // failure); crossterm discards unparseable sequences internally and
+        // never surfaces them as errors. So it EXITS the loop, carrying the
+        // error, rather than being ignored (which would busy-loop a dead tty).
+        let err = io::Error::other("poll failure");
+        assert!(matches!(step_event(Some(Err(err))), EventStep::End(Err(_))));
+        // A closed stream (None) is a clean exit.
+        assert!(matches!(step_event(None), EventStep::End(Ok(()))));
         // A real key still maps to an applied app-event.
         let ev = Event::Key(key(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(matches!(
