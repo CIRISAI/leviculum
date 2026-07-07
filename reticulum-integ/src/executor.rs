@@ -1505,8 +1505,8 @@ fn execute_wait_for_path(
                 });
             }
             ("success", false) => {
-                last_stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                last_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                last_stderr = sanitize_rnpath_output(&String::from_utf8_lossy(&output.stderr));
+                last_stdout = sanitize_rnpath_output(&String::from_utf8_lossy(&output.stdout));
                 last_status = output.status.to_string();
                 if attempt < attempts {
                     println!("  path not found on attempt {attempt}/{attempts}, retrying...");
@@ -1544,6 +1544,71 @@ fn execute_wait_for_path(
             "rnpath exited {last_status} after {attempts} attempts: {last_stdout} {last_stderr}"
         ),
     })
+}
+
+/// Strip Python `rnpath`'s animated progress spinner and terminal control
+/// noise from its captured (non-TTY) output.
+///
+/// `rnpath` emits a braille spinner (`⢄⢂⢁⡁⡈⡐⡠`, code points U+2800..=U+28FF)
+/// interleaved with backspaces (0x08) and carriage-return line rewrites even
+/// when its stdout is a pipe — it does not gate the animation on
+/// `sys.stdout.isatty()` and offers no no-spinner flag (see
+/// `vendor/Reticulum/RNS/Utilities/rnpath.py` ~line 453). Captured verbatim
+/// this is kilobytes of control-char soup that pollutes the detail string and
+/// makes the CI_HW result parser mislabel a clean `wait_for_path` failure as an
+/// unparseable harness error.
+///
+/// This reduces the capture to the final meaningful text on each line. A
+/// carriage return rewrites the line from column 0, so only the text after the
+/// last `\r` survives (the final overwrite, e.g. `Path found ...` /
+/// `Path not found`); backspaces, braille glyphs, ANSI escapes and other C0
+/// control bytes are dropped. Pure and unit-testable.
+fn sanitize_rnpath_output(raw: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in raw.split('\n') {
+        // Keep only the segment after the last carriage return: that is what a
+        // terminal would show after all the in-place rewrites finished.
+        let final_segment = line.rsplit('\r').next().unwrap_or(line);
+        let cleaned = strip_control_noise(final_segment);
+        let trimmed = cleaned.trim();
+        if !trimmed.is_empty() {
+            lines.push(trimmed.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+/// Drop backspaces, braille spinner glyphs, ANSI CSI escapes and other C0
+/// control characters (keeping tabs) from a single already-CR-collapsed
+/// segment. Helper for [`sanitize_rnpath_output`].
+fn strip_control_noise(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut chars = segment.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ANSI escape: skip a CSI sequence up to and including its final
+            // letter; for any other escape just drop the introducer.
+            '\u{1b}' => {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&nc) = chars.peek() {
+                        chars.next();
+                        if nc.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Backspace (0x08) — the spinner's `\b\b` cursor rewind.
+            '\u{8}' => {}
+            // Braille progress glyphs U+2800..=U+28FF.
+            c if ('\u{2800}'..='\u{28ff}').contains(&c) => {}
+            // Any remaining C0 control byte except tab.
+            c if (c as u32) < 0x20 && c != '\t' => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Scan a daemon's docker log for evidence that it has learned a path to
@@ -1640,9 +1705,13 @@ fn dump_no_path_forensics(
         rnpath_output.status
     ));
     buf.push_str("--- rnpath stdout ---\n");
-    buf.push_str(&String::from_utf8_lossy(&rnpath_output.stdout));
+    buf.push_str(&sanitize_rnpath_output(&String::from_utf8_lossy(
+        &rnpath_output.stdout,
+    )));
     buf.push_str("\n--- rnpath stderr ---\n");
-    buf.push_str(&String::from_utf8_lossy(&rnpath_output.stderr));
+    buf.push_str(&sanitize_rnpath_output(&String::from_utf8_lossy(
+        &rnpath_output.stderr,
+    )));
     buf.push('\n');
 
     // Focused extract: HOW did the requesting node learn this hash, and on
@@ -2338,7 +2407,7 @@ fn execute_transfer_direction(
             action: "file_transfer".into(),
             detail: format!(
                 "announce from {recv_node} did not reach {send_node} (rnpath failed): {}",
-                String::from_utf8_lossy(&path_output.stderr)
+                sanitize_rnpath_output(&String::from_utf8_lossy(&path_output.stderr))
             ),
         });
     }
@@ -2826,6 +2895,74 @@ fn parse_hops_from_output(output: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn sanitize_rnpath_strips_spinner_path_not_found() {
+        // Faithful reproduction of `rnpath <hash> -w N` output captured off a
+        // pipe when the path never resolves: the "requested" prime line, then
+        // many spinner frames (`\b\b` + braille glyph + space), then the
+        // clear-line rewrite followed by "Path not found". See
+        // vendor/Reticulum/RNS/Utilities/rnpath.py lines 449-476.
+        let hash = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let syms = ['⢄', '⢂', '⢁', '⡁', '⡈', '⡐', '⡠'];
+        let mut raw = format!("Path to <{hash}> requested   ");
+        for i in 0..40 {
+            raw.push_str("\u{8}\u{8}");
+            raw.push(syms[i % syms.len()]);
+            raw.push(' ');
+        }
+        raw.push_str("\r                                                       \rPath not found\n");
+
+        let clean = sanitize_rnpath_output(&raw);
+        assert_eq!(clean, "Path not found");
+        assert!(!clean.contains('\u{8}'), "backspaces must be gone");
+        assert!(
+            !clean
+                .chars()
+                .any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)),
+            "braille spinner glyphs must be gone"
+        );
+        // The pathological capture is kilobytes; the sanitized form is tiny.
+        assert!(
+            clean.len() < 32,
+            "sanitized output must be short: {clean:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_rnpath_strips_spinner_path_found() {
+        let hash = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let hop = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let syms = ['⢄', '⢂', '⢁', '⡁', '⡈', '⡐', '⡠'];
+        let mut raw = format!("Path to <{hash}> requested   ");
+        for i in 0..12 {
+            raw.push_str("\u{8}\u{8}");
+            raw.push(syms[i % syms.len()]);
+            raw.push(' ');
+        }
+        raw.push_str(&format!(
+            "\rPath found, destination <{hash}> is 1 hop away via <{hop}> on TCPInterface\n"
+        ));
+
+        let clean = sanitize_rnpath_output(&raw);
+        assert_eq!(
+            clean,
+            format!("Path found, destination <{hash}> is 1 hop away via <{hop}> on TCPInterface")
+        );
+        assert!(!clean.contains('\u{8}'));
+        assert!(!clean
+            .chars()
+            .any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)));
+    }
+
+    #[test]
+    fn sanitize_rnpath_passthrough_and_empty() {
+        // Plain text with no control noise is preserved verbatim.
+        assert_eq!(sanitize_rnpath_output("Path not found"), "Path not found");
+        // Empty / whitespace-only capture collapses to empty.
+        assert_eq!(sanitize_rnpath_output(""), "");
+        assert_eq!(sanitize_rnpath_output("   \r   \r  \n"), "");
+    }
 
     #[test]
     fn delivery_parse_link_summary_line() {
