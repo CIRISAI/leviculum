@@ -916,6 +916,11 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
                 MouseEventKind::Down(MouseButton::Left) => {
                     handle_click(model, mouse.column, mouse.row)
                 }
+                // Mouse side buttons: Back (button 8) and Forward (button 9)
+                // drive the same history navigation as Alt-Left / Alt-Right,
+                // and are a no-op when there is no history in that direction.
+                MouseEventKind::Down(MouseButton::Back) => go_back(model),
+                MouseEventKind::Down(MouseButton::Forward) => go_forward(model),
                 MouseEventKind::Moved => {
                     update_hover(model, mouse.column, mouse.row);
                     Vec::new()
@@ -2302,6 +2307,7 @@ const HELP_LINES: &[&str] = &[
     "  R                   reload the page",
     "  t                   toggle light / dark theme",
     "  M-← / M-→           back / forward",
+    "  mouse back / fwd     back / forward",
     "  Esc / Ctrl-g        cancel a load",
     "  ?                   toggle this help",
     "  q / Ctrl-c          quit",
@@ -3172,6 +3178,66 @@ mod tests {
             m.pending.as_ref().map(|p| p.action.clone()),
             Some(HistoryAction::Goto(0))
         );
+    }
+
+    #[test]
+    fn mouse_back_button_on_history_yields_navigate_prev() {
+        let mut m = model_from_sample(content_width(80), (80, 24));
+        let (a, b) = (tgt(1), tgt(2));
+        m.history.visit(a.clone());
+        m.history.visit(b.clone());
+        m.current_dest = Some(b.dest_hash);
+
+        let effects = update(
+            &mut m,
+            AppEvent::Mouse(mouse(MouseEventKind::Down(MouseButton::Back))),
+        );
+        assert_eq!(effects, vec![Effect::Navigate(a.clone())]);
+        // The cursor only moves once the page loads (same path as Alt-Left).
+        assert_eq!(m.history.idx, 1);
+        assert_eq!(
+            m.pending.as_ref().map(|p| p.action.clone()),
+            Some(HistoryAction::Goto(0))
+        );
+    }
+
+    #[test]
+    fn mouse_forward_button_on_history_yields_navigate_next() {
+        let mut m = model_from_sample(content_width(80), (80, 24));
+        let (a, b) = (tgt(1), tgt(2));
+        m.history.visit(a.clone());
+        m.history.visit(b);
+        // Step back so a forward step exists.
+        m.history.goto(0);
+        m.current_dest = Some(a.dest_hash);
+
+        let effects = update(
+            &mut m,
+            AppEvent::Mouse(mouse(MouseEventKind::Down(MouseButton::Forward))),
+        );
+        assert_eq!(effects, vec![Effect::Navigate(tgt(2))]);
+        assert_eq!(m.history.idx, 0);
+        assert_eq!(
+            m.pending.as_ref().map(|p| p.action.clone()),
+            Some(HistoryAction::Goto(1))
+        );
+    }
+
+    #[test]
+    fn mouse_side_buttons_are_noop_without_history() {
+        let mut m = model_from_sample(content_width(80), (80, 24));
+        // No prior navigation: nothing behind or ahead.
+        let back = update(
+            &mut m,
+            AppEvent::Mouse(mouse(MouseEventKind::Down(MouseButton::Back))),
+        );
+        let forward = update(
+            &mut m,
+            AppEvent::Mouse(mouse(MouseEventKind::Down(MouseButton::Forward))),
+        );
+        assert!(back.is_empty());
+        assert!(forward.is_empty());
+        assert!(m.pending.is_none());
     }
 
     #[test]

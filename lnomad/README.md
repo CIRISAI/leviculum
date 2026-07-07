@@ -87,6 +87,7 @@ set apart by its underline and colour, and is reached by focus, hint or click:
 - `R`         reload the page
 - `t`         toggle the light / dark theme (correct a wrong auto-detection)
 - `M-←` / `M-→`  back / forward
+- mouse back / forward side buttons  back / forward
 - `Esc` / `Ctrl-g`  cancel a load
 - `?`         toggle the help overlay
 - `q` / `Ctrl-c`  quit
