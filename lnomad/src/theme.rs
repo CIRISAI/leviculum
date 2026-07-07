@@ -148,6 +148,19 @@ impl Theme {
         }
     }
 
+    /// A muted-but-readable chrome foreground for the UNAVAILABLE top-bar
+    /// controls (a disabled back/forward arrow). It sits between
+    /// [`chrome_fg`](Theme::chrome_fg) and the chrome background: distinct enough
+    /// to read as "disabled", but with roughly 3:1 contrast on
+    /// [`chrome_bg`](Theme::chrome_bg) so it stays legible. Not `Modifier::DIM`,
+    /// which halves the foreground and drops below readable on the chrome bar.
+    pub fn chrome_muted_fg(self) -> (u8, u8, u8) {
+        match self {
+            Theme::Dark => (140, 150, 165),
+            Theme::Light => (95, 100, 112),
+        }
+    }
+
     /// The hint-badge foreground (the typed label glyphs).
     pub fn hint_badge_fg(self) -> (u8, u8, u8) {
         match self {

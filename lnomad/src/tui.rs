@@ -119,6 +119,32 @@ fn chrome_style(no_color: bool, theme: Theme) -> Style {
     }
 }
 
+/// The foreground for the bright chrome text drawn over the bars: the status-bar
+/// key-hints and the AVAILABLE top-bar controls. Uses the theme's bright chrome
+/// foreground (~4.5:1 on the chrome background) instead of `Modifier::DIM`,
+/// which halved the foreground and read as too low contrast. Under `no_color`
+/// it returns the plain style so the reverse-video chrome fill shows through.
+fn chrome_text_style(no_color: bool, theme: Theme) -> Style {
+    if no_color {
+        Style::default()
+    } else {
+        Style::default().fg(rgb(theme.chrome_fg()))
+    }
+}
+
+/// The foreground for UNAVAILABLE top-bar controls: the theme's muted chrome
+/// foreground, a distinct-but-readable grey (~3:1 on the chrome background) that
+/// reads as "disabled" without the illegibility of `Modifier::DIM`. Under
+/// `no_color` it returns the plain style so the reverse-video fill shows
+/// through (no DIM under reverse).
+fn chrome_muted_style(no_color: bool, theme: Theme) -> Style {
+    if no_color {
+        Style::default()
+    } else {
+        Style::default().fg(rgb(theme.chrome_muted_fg()))
+    }
+}
+
 /// The content layout width for a terminal `cols` wide: full width minus the
 /// scrollbar column, never below 1 so wrapping stays well defined.
 fn content_width(cols: u16) -> usize {
@@ -1254,23 +1280,25 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     if area.height < TOPBAR_ROWS {
         return;
     }
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    let normal = Style::default();
+    // Available controls read in the bright chrome fg; unavailable ones in the
+    // muted (readable) chrome fg, never `Modifier::DIM`.
+    let available = chrome_text_style(model.no_color, model.theme);
+    let unavailable = chrome_muted_style(model.no_color, model.theme);
     for cr in top_bar_controls(area) {
         match cr.control {
             Control::Back => {
                 let style = if model.history.can_back() {
-                    normal
+                    available
                 } else {
-                    dim
+                    unavailable
                 };
                 frame.render_widget(Paragraph::new(RtSpan::styled(BACK_LABEL, style)), cr.rect);
             }
             Control::Forward => {
                 let style = if model.history.can_forward() {
-                    normal
+                    available
                 } else {
-                    dim
+                    unavailable
                 };
                 frame.render_widget(
                     Paragraph::new(RtSpan::styled(FORWARD_LABEL, style)),
@@ -1279,9 +1307,9 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
             }
             Control::Reload => {
                 let style = if model.history.current().is_some() {
-                    normal
+                    available
                 } else {
-                    dim
+                    unavailable
                 };
                 frame.render_widget(Paragraph::new(RtSpan::styled(RELOAD_LABEL, style)), cr.rect);
             }
@@ -1371,7 +1399,10 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
             Mode::Hint => HINT_HINTS,
             Mode::Browse => BROWSE_HINTS,
         };
-        frame.render_widget(Paragraph::new(RtSpan::styled(hints, dim)), area);
+        // The key-hints are the most-read chrome text: render them in the bright
+        // chrome fg (no DIM) so they stay legible on the chrome bar.
+        let hint_style = chrome_text_style(model.no_color, model.theme);
+        frame.render_widget(Paragraph::new(RtSpan::styled(hints, hint_style)), area);
     }
 }
 
@@ -1761,23 +1792,24 @@ pub async fn run_tui(
         }
         let loading = model.is_loading();
         tokio::select! {
-            maybe_event = events.next() => match maybe_event {
-                Some(Ok(event)) => {
-                    if let Some(app) = map_event(event) {
-                        let effects = update(&mut model, app);
-                        run_effects(
-                            effects,
-                            &mut model,
-                            &mut inflight,
-                            &mut generation,
-                            &session,
-                            &tx,
-                            opts.timeout,
-                        );
-                    }
+            maybe_event = events.next() => match step_event(maybe_event) {
+                EventStep::Apply(app) => {
+                    let effects = update(&mut model, app);
+                    run_effects(
+                        effects,
+                        &mut model,
+                        &mut inflight,
+                        &mut generation,
+                        &session,
+                        &tx,
+                        opts.timeout,
+                    );
                 }
-                Some(Err(err)) => break Err(err),
-                None => break Ok(()),
+                // A recognised-but-inert or unparseable event (e.g. a mouse
+                // side button, which crossterm reports as a parse error): keep
+                // looping. It must never tear down the UI.
+                EventStep::Ignore => {}
+                EventStep::End => break Ok(()),
             },
             Some(outcome) = rx.recv() => {
                 if outcome.generation == generation {
@@ -1821,6 +1853,34 @@ fn map_event(event: Event) -> Option<AppEvent> {
         Event::Mouse(mouse) => Some(AppEvent::Mouse(mouse)),
         Event::Resize(cols, rows) => Some(AppEvent::Resize(cols, rows)),
         _ => None,
+    }
+}
+
+/// What the event loop should do with one item pulled from the terminal
+/// [`EventStream`].
+enum EventStep {
+    /// Apply this app-event to the model (a mapped, actionable event).
+    Apply(AppEvent),
+    /// A recognised-but-inert event (or an unparseable one): do nothing and keep
+    /// looping. The UI must survive events crossterm cannot map — notably the
+    /// mouse side buttons (8/9), which crossterm reports as a parse error.
+    Ignore,
+    /// The stream ended: leave the loop.
+    End,
+}
+
+/// Classify one `EventStream` item without touching the model, so the loop's
+/// error-tolerance is unit-testable. An `Err` (unparseable/unsupported
+/// sequence) is [`Ignore`](EventStep::Ignore), NOT a reason to quit: it must
+/// never tear down the UI. `None` (stream closed) is the only exit.
+fn step_event(item: Option<Result<Event, io::Error>>) -> EventStep {
+    match item {
+        Some(Ok(event)) => match map_event(event) {
+            Some(app) => EventStep::Apply(app),
+            None => EventStep::Ignore,
+        },
+        Some(Err(_)) => EventStep::Ignore,
+        None => EventStep::End,
     }
 }
 
@@ -2613,6 +2673,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn status_hints_use_bright_chrome_fg_not_dim() {
+        // The status-bar key-hints render in the theme's bright chrome fg with no
+        // DIM modifier, under both themes. loaded_model has no focus/hover/status
+        // pending, so the hints branch is what draws row 23.
+        for theme in [Theme::Dark, Theme::Light] {
+            let mut m = loaded_model((80, 24));
+            if theme == Theme::Light {
+                m.toggle_theme();
+            }
+            assert_eq!(m.theme, theme);
+            let buffer = render(&m, 80, 24);
+            // (0,23) is the first hint glyph ('j' of "j/k scroll ...").
+            let cell = &buffer[(0u16, 23u16)];
+            assert_eq!(
+                cell.fg,
+                rgb(theme.chrome_fg()),
+                "status hint must use the bright chrome fg ({theme:?})"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::DIM),
+                "status hint must not be DIM ({theme:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_control_uses_muted_fg_not_dim() {
+        // loaded_model has a single history entry, so back/forward are both
+        // unavailable: they must render in the readable muted chrome fg, not DIM.
+        for theme in [Theme::Dark, Theme::Light] {
+            let mut m = loaded_model((80, 24));
+            if theme == Theme::Light {
+                m.toggle_theme();
+            }
+            assert!(
+                !m.history.can_back(),
+                "back must be unavailable in this model"
+            );
+            let buffer = render(&m, 80, 24);
+            // (0,1) is the first glyph of the back control on the top-bar's
+            // second row.
+            let cell = &buffer[(0u16, 1u16)];
+            assert_eq!(
+                cell.fg,
+                rgb(theme.chrome_muted_fg()),
+                "unavailable control must use the muted chrome fg ({theme:?})"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::DIM),
+                "unavailable control must not be DIM ({theme:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn step_event_ignores_unparseable_and_exits_only_on_close() {
+        // An Err from the event stream (e.g. a mouse side button crossterm cannot
+        // parse) is ignored, never fatal: the UI must survive it.
+        let err = io::Error::new(io::ErrorKind::InvalidData, "unparseable sequence");
+        assert!(matches!(step_event(Some(Err(err))), EventStep::Ignore));
+        // A closed stream (None) is the only exit.
+        assert!(matches!(step_event(None), EventStep::End));
+        // A real key still maps to an applied app-event.
+        let ev = Event::Key(key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(
+            step_event(Some(Ok(ev))),
+            EventStep::Apply(AppEvent::Key(_))
+        ));
     }
 
     #[test]
