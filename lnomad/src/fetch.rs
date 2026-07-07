@@ -233,6 +233,15 @@ impl Session {
         self.registry.get(n)
     }
 
+    /// The friendly display name the announce registry knows for `dest_hash`, if
+    /// any. Used by the browser's status bar to name the current node; falls back
+    /// to the short dest hex at the call site when this is `None`.
+    pub fn node_name(&self, dest_hash: &[u8; 16]) -> Option<String> {
+        self.registry
+            .get_by_hash(dest_hash)
+            .and_then(|node| node.name.clone())
+    }
+
     /// Fold a single announce into the registry, returning `true` when it was a
     /// NomadNet node announce (and so recorded). Hop count is read from the
     /// node's path table at observation time.

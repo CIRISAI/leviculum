@@ -76,6 +76,7 @@ target`, and reads commands at the `>` prompt:
 - `u <url>`   go to a new URL
 - `d` / `nodes`  list NomadNet nodes discovered from announces
 - `o <N>`     open discovered node number `N`
+- `l`         toggle the link legend
 - `h`         help
 - `q` / EOF   quit
 

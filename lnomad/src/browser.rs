@@ -35,6 +35,8 @@ pub enum Command {
     Nodes,
     /// Open discovered node number `N` (`o N` / `open N`).
     OpenNode(usize),
+    /// Toggle the link legend on/off and re-render (`l`).
+    ToggleLegend,
     /// Print the help text (`h`).
     Help,
     /// Quit the browser (`q` / EOF).
@@ -72,6 +74,7 @@ pub fn parse_command(input: &str) -> Command {
             }
         }
         "d" | "nodes" => Command::Nodes,
+        "l" | "links" => Command::ToggleLegend,
         "o" | "open" => match rest.parse::<usize>() {
             Ok(n) => Command::OpenNode(n),
             Err(_) => Command::Unknown(trimmed.to_string()),
@@ -203,16 +206,112 @@ async fn fetch_document(
     Ok(leviculum_micron::parse(&source))
 }
 
-/// Write a rendered page followed by its numbered link index to `out`.
-fn write_page<W: Write>(out: &mut W, page: &RenderedPage) -> std::io::Result<()> {
+/// The faint (dim) SGR introducer and the reset, used for the orientation
+/// chrome (status bar, dimmed link targets, prompt hint). Reticulum's own
+/// renderer has no dim helper, so the raw sequences live here, always gated on
+/// [`BrowserOptions::no_color`].
+const FAINT: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
+
+/// A short, glanceable form of a destination hash: the first 8 hex characters
+/// (4 bytes) followed by an ellipsis, e.g. `a8d24177…`.
+fn short_dest_hex(dest_hash: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(9);
+    for byte in &dest_hash[..4] {
+        s.push_str(&format!("{byte:02x}"));
+    }
+    s.push('…');
+    s
+}
+
+/// Write the one-line orientation "address bar" printed at the top of every
+/// rendered page: the current node identity (its discovered display name when
+/// known, else the short dest hex) and the page path, e.g.
+/// `  Node Name · :/page/index.mu`. The line is dimmed when colour is on and
+/// truncated to `opts.width`.
+fn write_status_bar<W: Write>(
+    out: &mut W,
+    name: Option<&str>,
+    dest_hash: &[u8; 16],
+    path: &str,
+    opts: &BrowserOptions,
+) -> std::io::Result<()> {
+    let label = match name {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => short_dest_hex(dest_hash),
+    };
+    let mut content = format!("  {label} · :{path}");
+    if content.chars().count() > opts.width {
+        content = content.chars().take(opts.width).collect();
+    }
+    if opts.no_color {
+        writeln!(out, "{content}")
+    } else {
+        writeln!(out, "{FAINT}{content}{RESET}")
+    }
+}
+
+/// Write a rendered page followed by its numbered link legend to `out`.
+///
+/// The `-> target` portion of each legend entry is dimmed (when colour is on)
+/// so the target path recedes behind the `[N] label`. When `show_legend` is
+/// false the whole `Links:` block is omitted; the inline `[N]` markers in the
+/// page text are unaffected, so the numbers still work.
+fn write_page<W: Write>(
+    out: &mut W,
+    page: &RenderedPage,
+    no_color: bool,
+    show_legend: bool,
+) -> std::io::Result<()> {
     out.write_all(page.text.as_bytes())?;
-    if !page.links.is_empty() {
+    if show_legend && !page.links.is_empty() {
         writeln!(out, "\nLinks:")?;
         for link in &page.links {
-            writeln!(out, "  [{}] {} -> {}", link.index, link.label, link.target)?;
+            if no_color {
+                writeln!(out, "  [{}] {} -> {}", link.index, link.label, link.target)?;
+            } else {
+                writeln!(
+                    out,
+                    "  [{}] {} {FAINT}-> {}{RESET}",
+                    link.index, link.label, link.target
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+/// Write the faint one-line key-hint printed above the `> ` prompt, adapted to
+/// context: the `[1-N] open` hint appears only when the page has links, and
+/// `b back` only when there is somewhere to go back to. The prompt itself
+/// follows on the next line (no trailing newline).
+fn write_prompt_hint<W: Write>(
+    out: &mut W,
+    link_count: usize,
+    has_back: bool,
+    no_color: bool,
+) -> std::io::Result<()> {
+    let mut parts: Vec<String> = Vec::new();
+    if link_count >= 1 {
+        parts.push(format!("[1-{link_count}] open"));
+    }
+    if has_back {
+        parts.push("b back".to_string());
+    }
+    parts.push("r reload".to_string());
+    parts.push("u url".to_string());
+    parts.push("d nodes".to_string());
+    parts.push("l links".to_string());
+    parts.push("h help".to_string());
+    parts.push("q quit".to_string());
+    let hint = parts.join(" · ");
+    writeln!(out)?;
+    if no_color {
+        writeln!(out, "{hint}")?;
+    } else {
+        writeln!(out, "{FAINT}{hint}{RESET}")?;
+    }
+    write!(out, "> ")
 }
 
 /// Note where a `#anchor` resolves in the document. A full scroll TUI is out of
@@ -239,10 +338,11 @@ async fn load_and_show<W: Write>(
     target: &Target,
     opts: &BrowserOptions,
     anchor: Option<&str>,
+    show_legend: bool,
 ) -> Result<RenderedPage, FetchError> {
     let doc = fetch_document(session, target, opts.timeout).await?;
     let page = render_with_options(&doc, opts.width, opts.no_color);
-    let _ = write_page(out, &page);
+    let _ = write_page(out, &page, opts.no_color, show_legend);
     if let Some(a) = anchor {
         write_anchor_note(out, &doc, a);
     }
@@ -260,7 +360,7 @@ pub async fn print_once<W: Write>(
     target: &Target,
     opts: &BrowserOptions,
 ) -> Result<(), FetchError> {
-    load_and_show(out, session, target, opts, None)
+    load_and_show(out, session, target, opts, None, true)
         .await
         .map(|_| ())
 }
@@ -350,6 +450,7 @@ Commands:
   u <url>    go to a new URL
   d / nodes  list NomadNet nodes discovered from announces
   o <N>      open discovered node number N
+  l          toggle the link legend
   h          show this help
   q / EOF    quit";
 
@@ -379,11 +480,13 @@ pub async fn run<R: BufRead, W: Write>(
 ) -> std::io::Result<()> {
     let mut nav = Nav::new();
     nav.visit(initial);
+    // The link legend is shown by default; `l` toggles it.
+    let mut show_legend = true;
     // Safe: visit() just set the current target.
-    let mut links = show_current(out, session, &nav, opts, None).await;
+    let mut links = show_current(out, session, &nav, opts, None, show_legend).await;
 
     loop {
-        write!(out, "\n> ")?;
+        write_prompt_hint(out, links.len(), nav.history_len() > 0, opts.no_color)?;
         out.flush()?;
 
         let mut line = String::new();
@@ -396,6 +499,10 @@ pub async fn run<R: BufRead, W: Write>(
             Command::Empty => {}
             Command::Quit => break,
             Command::Help => writeln!(out, "{HELP}")?,
+            Command::ToggleLegend => {
+                show_legend = !show_legend;
+                links = show_current(out, session, &nav, opts, None, show_legend).await;
+            }
             Command::Unknown(raw) => {
                 writeln!(out, "unknown command: {raw:?} (h for help)")?;
             }
@@ -418,17 +525,18 @@ pub async fn run<R: BufRead, W: Write>(
                     )?;
                 }
                 nav.visit(target);
-                links = show_current(out, session, &nav, opts, anchor.as_deref()).await;
+                links =
+                    show_current(out, session, &nav, opts, anchor.as_deref(), show_legend).await;
             }
             Command::Back => {
                 if nav.back().is_none() {
                     writeln!(out, "no previous page")?;
                     continue;
                 }
-                links = show_current(out, session, &nav, opts, None).await;
+                links = show_current(out, session, &nav, opts, None, show_legend).await;
             }
             Command::Reload => {
-                links = show_current(out, session, &nav, opts, None).await;
+                links = show_current(out, session, &nav, opts, None, show_legend).await;
             }
             Command::Go(url) => {
                 let target = match parse_url(&url, nav.current_dest()) {
@@ -439,7 +547,7 @@ pub async fn run<R: BufRead, W: Write>(
                     }
                 };
                 nav.visit(target);
-                links = show_current(out, session, &nav, opts, None).await;
+                links = show_current(out, session, &nav, opts, None, show_legend).await;
             }
             Command::Nodes => {
                 write_node_list(out, session)?;
@@ -453,7 +561,7 @@ pub async fn run<R: BufRead, W: Write>(
                     }
                 };
                 nav.visit(target);
-                links = show_current(out, session, &nav, opts, None).await;
+                links = show_current(out, session, &nav, opts, None, show_legend).await;
             }
         }
     }
@@ -508,11 +616,16 @@ async fn show_current<W: Write>(
     nav: &Nav,
     opts: &BrowserOptions,
     anchor: Option<&str>,
+    show_legend: bool,
 ) -> Vec<RenderedLink> {
     let Some(target) = nav.current() else {
         return Vec::new();
     };
-    match load_and_show(out, session, target, opts, anchor).await {
+    // Orientation "address bar" at the top of the page: the friendly node name
+    // when the announce registry knows one, else the short dest hex.
+    let name = session.node_name(&target.dest_hash);
+    let _ = write_status_bar(out, name.as_deref(), &target.dest_hash, &target.path, opts);
+    match load_and_show(out, session, target, opts, anchor, show_legend).await {
         Ok(page) => page.links,
         Err(err) => {
             let _ = writeln!(out, "error: {}", error_message(&err));
@@ -578,6 +691,12 @@ mod tests {
     #[test]
     fn go_without_argument_is_unknown() {
         assert_eq!(parse_command("u"), Command::Unknown("u".to_string()));
+    }
+
+    #[test]
+    fn parses_toggle_legend_command() {
+        assert_eq!(parse_command("l"), Command::ToggleLegend);
+        assert_eq!(parse_command("links"), Command::ToggleLegend);
     }
 
     #[test]
@@ -741,5 +860,155 @@ mod tests {
     fn resolve_relative_without_current_is_malformed() {
         let l = link(":/page/x.mu", vec![]);
         assert!(resolve_link(&l, None).is_err());
+    }
+
+    // --- visual chrome: legend dimming, status bar, prompt hint ---
+
+    fn opts(width: usize, no_color: bool) -> BrowserOptions {
+        BrowserOptions {
+            width,
+            no_color,
+            timeout: Duration::from_secs(1),
+        }
+    }
+
+    fn page_with_links(n: usize) -> RenderedPage {
+        RenderedPage {
+            text: "body [1] text\n".to_string(),
+            links: (1..=n)
+                .map(|i| RenderedLink {
+                    index: i,
+                    label: format!("L{i}"),
+                    target: format!("/page/{i}.mu"),
+                    fields: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn render_to_string<F>(f: F) -> String
+    where
+        F: FnOnce(&mut Vec<u8>) -> std::io::Result<()>,
+    {
+        let mut buf = Vec::new();
+        f(&mut buf).expect("write");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    #[test]
+    fn legend_target_is_dimmed_with_colour() {
+        let page = page_with_links(1);
+        let out = render_to_string(|w| write_page(w, &page, false, true));
+        // The `-> target` portion is wrapped in the faint SGR and reset.
+        assert!(
+            out.contains("[1] L1 \x1b[2m-> /page/1.mu\x1b[0m"),
+            "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn legend_target_is_plain_under_no_color() {
+        let page = page_with_links(1);
+        let out = render_to_string(|w| write_page(w, &page, true, true));
+        assert!(!out.contains('\x1b'), "SGR leaked: {out:?}");
+        assert!(out.contains("[1] L1 -> /page/1.mu"), "got: {out:?}");
+    }
+
+    #[test]
+    fn legend_block_absent_when_hidden_but_inline_markers_remain() {
+        let page = page_with_links(2);
+        let out = render_to_string(|w| write_page(w, &page, false, false));
+        assert!(
+            !out.contains("Links:"),
+            "legend block should be hidden: {out:?}"
+        );
+        assert!(
+            !out.contains("-> /page/1.mu"),
+            "legend entry leaked: {out:?}"
+        );
+        // The inline `[N]` marker in the page text is unaffected.
+        assert!(out.contains("body [1] text"), "page text altered: {out:?}");
+    }
+
+    #[test]
+    fn status_bar_shows_short_hex_and_path_truncated() {
+        let out = render_to_string(|w| {
+            write_status_bar(w, None, &HASH_BYTES, "/page/index.mu", &opts(80, false))
+        });
+        // Short dest hex: first 8 hex chars + ellipsis.
+        assert!(out.contains("01234567…"), "got: {out:?}");
+        assert!(out.contains(":/page/index.mu"), "got: {out:?}");
+        assert!(
+            out.starts_with('\x1b'),
+            "status bar should be dimmed: {out:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_prefers_node_name_and_is_plain_under_no_color() {
+        let out = render_to_string(|w| {
+            write_status_bar(w, Some("Alpha"), &HASH_BYTES, "/page/x.mu", &opts(80, true))
+        });
+        assert!(!out.contains('\x1b'), "SGR leaked: {out:?}");
+        assert!(out.contains("Alpha"), "node name missing: {out:?}");
+        assert!(
+            !out.contains("01234567"),
+            "hex shown despite a name: {out:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_truncates_to_width() {
+        let out = render_to_string(|w| {
+            write_status_bar(
+                w,
+                Some("A very long node name here"),
+                &HASH_BYTES,
+                "/page/x.mu",
+                &opts(10, true),
+            )
+        });
+        // Plain output: the single line (minus newline) is at most `width` chars.
+        let line = out.trim_end_matches('\n');
+        assert_eq!(line.chars().count(), 10, "not truncated to width: {line:?}");
+    }
+
+    #[test]
+    fn prompt_hint_includes_link_range_when_links_present() {
+        let out = render_to_string(|w| write_prompt_hint(w, 3, false, true));
+        assert!(out.contains("[1-3] open"), "got: {out:?}");
+        assert!(out.contains("l links"), "got: {out:?}");
+        assert!(out.ends_with("> "), "prompt missing: {out:?}");
+    }
+
+    #[test]
+    fn prompt_hint_omits_link_range_when_no_links() {
+        let out = render_to_string(|w| write_prompt_hint(w, 0, false, true));
+        assert!(
+            !out.contains("open"),
+            "link hint shown with no links: {out:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_hint_shows_back_only_with_history() {
+        let with_back = render_to_string(|w| write_prompt_hint(w, 1, true, true));
+        assert!(with_back.contains("b back"), "got: {with_back:?}");
+        let no_back = render_to_string(|w| write_prompt_hint(w, 1, false, true));
+        assert!(
+            !no_back.contains("b back"),
+            "back shown with empty history: {no_back:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_hint_is_dimmed_with_colour_plain_without() {
+        let coloured = render_to_string(|w| write_prompt_hint(w, 1, false, false));
+        assert!(
+            coloured.contains("\x1b[2m"),
+            "hint not dimmed: {coloured:?}"
+        );
+        let plain = render_to_string(|w| write_prompt_hint(w, 1, false, true));
+        assert!(!plain.contains('\x1b'), "SGR leaked: {plain:?}");
     }
 }
