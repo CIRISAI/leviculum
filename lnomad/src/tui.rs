@@ -32,7 +32,8 @@
 //! left-click hit-testing, and mouse-hover. The focused or hovered link's target
 //! shows in the status bar. Links no longer carry a visible `[N]` marker.
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,11 +62,13 @@ use unicode_width::UnicodeWidthStr;
 
 use leviculum_micron::MicronDocument;
 
+use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::browser::{self, BrowserOptions};
+use crate::discovery::{DiscoveredNode, NomadNodeRegistry};
 use crate::fetch::Session;
 use crate::render::{layout_blocks, RLine, RStyle, RenderedLink};
 use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
-use crate::url::{parse_url, Target};
+use crate::url::{parse_url, Target, DEFAULT_PATH};
 
 /// The number of columns reserved on the right for the scrollbar.
 const SCROLLBAR_COLS: u16 = 1;
@@ -90,7 +93,7 @@ const RELOAD_LABEL: &str = "⟳ reload";
 
 /// Browse-mode status hints.
 const BROWSE_HINTS: &str =
-    "j/k scroll  f hint  / search  : addr  R reload  t theme  ? help  q quit";
+    "j/k scroll  f hint  / search  d places  m bookmark  y copy  : addr  R reload  t theme  ? help  q quit";
 /// Address-mode status hints.
 const ADDRESS_HINTS: &str = "Enter: go   Esc: cancel";
 /// Hint-mode status hints.
@@ -426,6 +429,11 @@ pub enum Effect {
     Navigate(Target),
     /// Cancel the in-flight fetch and stay on the current page.
     Cancel,
+    /// Copy this text to the system clipboard (the IO shell writes it as an
+    /// OSC 52 sequence to the terminal).
+    Copy(String),
+    /// Persist the model's bookmarks to disk (the IO shell writes the TOML).
+    SaveBookmarks,
     /// Quit the UI.
     Quit,
 }
@@ -495,6 +503,19 @@ pub struct Model {
     /// The active light/dark theme: the accents baked into `page` and the chrome
     /// colours the view draws. Toggled at runtime with `t`.
     pub theme: Theme,
+    /// NomadNet nodes discovered from announces seen on the session's event
+    /// stream, folded in from [`AppEvent::NodeDiscovered`]. Listed in the places
+    /// panel's "Discovered nodes" section.
+    pub node_registry: NomadNodeRegistry,
+    /// The persisted bookmarks, loaded at startup and saved on change.
+    pub bookmarks: Bookmarks,
+    /// Where the bookmarks are persisted, or `None` when no config dir is
+    /// resolvable (the browser then runs without persistence).
+    pub bookmarks_path: Option<PathBuf>,
+    /// Whether the places panel (bookmarks + discovered nodes) overlay is shown.
+    pub show_places: bool,
+    /// The selected row in the places panel, an index into [`places`].
+    pub places_sel: usize,
     /// Set once the user has asked to quit; the IO loop breaks on it.
     pub quit: bool,
 }
@@ -719,6 +740,9 @@ pub enum AppEvent {
     },
     /// A navigation failed with a human-readable message.
     LoadFailed(String),
+    /// A NomadNet node announce was seen on the session's event stream; fold it
+    /// into the model's discovered-node registry.
+    NodeDiscovered(DiscoveredNode),
     /// The spinner animation tick, delivered while a fetch is in flight.
     Tick,
 }
@@ -742,6 +766,10 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         AppEvent::LoadFailed(msg) => {
             model.pending = None;
             model.status = Some(msg);
+            Vec::new()
+        }
+        AppEvent::NodeDiscovered(node) => {
+            model.node_registry.upsert_node(&node);
             Vec::new()
         }
         AppEvent::Resize(cols, rows) => {
@@ -849,6 +877,11 @@ fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
             model.show_help = false;
         }
         return Vec::new();
+    }
+
+    // The places panel is modal like the help overlay: it owns keys until closed.
+    if model.show_places {
+        return update_places_key(model, key);
     }
 
     match model.mode {
@@ -1023,6 +1056,22 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
         return Vec::new();
     }
 
+    // Toggle the places panel (`d`): bookmarks + discovered nodes.
+    if key.code == KeyCode::Char('d') && !ctrl && !alt {
+        toggle_places(model);
+        return Vec::new();
+    }
+
+    // Bookmark (or un-bookmark) the current page (`m`).
+    if key.code == KeyCode::Char('m') && !ctrl && !alt {
+        return toggle_bookmark_current(model);
+    }
+
+    // Yank the current page (or focused link) URL to the clipboard (`y`).
+    if key.code == KeyCode::Char('y') && !ctrl && !alt {
+        return yank_url(model);
+    }
+
     // Tab / Shift-Tab move the focus cursor across links; Enter follows it.
     if key.code == KeyCode::Tab {
         focus_next(model);
@@ -1162,6 +1211,265 @@ fn scroll_to_current_match(model: &mut Model) {
         model.scroll = line + 1 - vp;
     }
     model.clamp_scroll(vp);
+}
+
+/// One row in the places panel: a saved bookmark or a discovered node. Built by
+/// [`places`] as a flat, ordered list (bookmarks first, then discovered nodes)
+/// that [`Model::places_sel`] indexes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// A saved bookmark: the URL to reopen and its captured title.
+    Bookmark {
+        /// The full page URL to reopen.
+        url: String,
+        /// The page title captured when it was bookmarked.
+        title: String,
+    },
+    /// A discovered NomadNet node: its default page is opened on activation.
+    Node {
+        /// The node's destination hash.
+        dest_hash: [u8; 16],
+        /// The node's display name, if its announce carried one.
+        name: Option<String>,
+        /// The hop count from the most recent announce, if known.
+        hops: Option<u32>,
+        /// Unix seconds of the most recent announce.
+        last_seen: u64,
+    },
+}
+
+/// The flat, ordered list of places: every bookmark (in insertion order), then
+/// every discovered node (in discovery order). The single source of truth for
+/// both the panel's rendering and its selection/activation, so a row index means
+/// the same thing to each.
+pub fn places(model: &Model) -> Vec<Place> {
+    let mut out = Vec::new();
+    for b in model.bookmarks.list() {
+        out.push(Place::Bookmark {
+            url: b.url.clone(),
+            title: b.title.clone(),
+        });
+    }
+    for n in model.node_registry.nodes() {
+        out.push(Place::Node {
+            dest_hash: n.dest_hash,
+            name: n.name.clone(),
+            hops: n.hops,
+            last_seen: n.last_seen,
+        });
+    }
+    out
+}
+
+/// Toggle the places panel. Opening it resets the selection to the first row and
+/// clears any transient status.
+fn toggle_places(model: &mut Model) {
+    model.show_places = !model.show_places;
+    if model.show_places {
+        model.places_sel = 0;
+        model.status = None;
+    }
+}
+
+/// Close the places panel.
+fn close_places(model: &mut Model) {
+    model.show_places = false;
+}
+
+/// Fold a key while the places panel is open: `j/k`/arrows move the selection,
+/// `Enter` opens it, `x` deletes the selected bookmark, `Esc`/`d` close.
+fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('d') => {
+            close_places(model);
+            Vec::new()
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            move_places_selection(model, 1);
+            Vec::new()
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            move_places_selection(model, -1);
+            Vec::new()
+        }
+        KeyCode::Enter => {
+            let idx = model.places_sel;
+            activate_place(model, idx)
+        }
+        KeyCode::Char('x') => delete_selected_place(model),
+        _ => Vec::new(),
+    }
+}
+
+/// Move the places selection by `delta`, clamped to the current row count. A
+/// no-op when the panel is empty.
+fn move_places_selection(model: &mut Model, delta: isize) {
+    let len = places(model).len();
+    if len == 0 {
+        model.places_sel = 0;
+        return;
+    }
+    let max = len - 1;
+    let next = model.places_sel as isize + delta;
+    model.places_sel = next.clamp(0, max as isize) as usize;
+}
+
+/// Open the selected place: a bookmark's URL, or a discovered node's default
+/// page. Closes the panel and starts a fresh navigation. A malformed bookmark
+/// URL surfaces a status message instead.
+fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
+    let Some(place) = places(model).into_iter().nth(idx) else {
+        return Vec::new();
+    };
+    let target = match place {
+        Place::Bookmark { url, .. } => match parse_url(&url, model.current_dest) {
+            Ok(target) => target,
+            Err(err) => {
+                model.status = Some(format!("bad bookmark URL: {err}"));
+                return Vec::new();
+            }
+        },
+        Place::Node { dest_hash, .. } => Target {
+            dest_hash,
+            path: DEFAULT_PATH.to_string(),
+            fields: Vec::new(),
+            is_file: false,
+        },
+    };
+    close_places(model);
+    model.status = None;
+    model.pending = Some(Pending {
+        target: target.clone(),
+        action: HistoryAction::Push,
+    });
+    model.pending_anchor = None;
+    vec![Effect::Navigate(target)]
+}
+
+/// Delete the selected bookmark and persist, keeping the selection in range. A
+/// no-op (no save) when the selected row is a discovered node, not a bookmark.
+fn delete_selected_place(model: &mut Model) -> Vec<Effect> {
+    let Some(Place::Bookmark { url, .. }) = places(model).into_iter().nth(model.places_sel) else {
+        return Vec::new();
+    };
+    model.bookmarks.remove(&url);
+    let len = places(model).len();
+    model.places_sel = model.places_sel.min(len.saturating_sub(1));
+    model.status = Some(format!("removed bookmark {url}"));
+    vec![Effect::SaveBookmarks]
+}
+
+/// Toggle a bookmark for the current page: remove it when the page is already
+/// bookmarked, else add it under the current title. Persists on change. A no-op
+/// with a status note when nothing is loaded.
+fn toggle_bookmark_current(model: &mut Model) -> Vec<Effect> {
+    let Some(url) = current_url(model) else {
+        model.status = Some("nothing to bookmark".to_string());
+        return Vec::new();
+    };
+    if model.bookmarks.contains(&url) {
+        model.bookmarks.remove(&url);
+        model.status = Some(format!("removed bookmark {url}"));
+    } else {
+        let title = model.title.trim().to_string();
+        model.bookmarks.add(Bookmark {
+            url: url.clone(),
+            title,
+        });
+        model.status = Some(format!("bookmarked {url}"));
+    }
+    vec![Effect::SaveBookmarks]
+}
+
+/// Yank the focused link's target URL, or (with nothing focused) the current
+/// page URL, to the clipboard. A no-op with a status note when there is nothing
+/// to copy.
+fn yank_url(model: &mut Model) -> Vec<Effect> {
+    let url = match focused_link_url(model).or_else(|| current_url(model)) {
+        Some(url) => url,
+        None => {
+            model.status = Some("nothing to copy".to_string());
+            return Vec::new();
+        }
+    };
+    model.status = Some(format!("copied {url}"));
+    vec![Effect::Copy(url)]
+}
+
+/// The full URL of the focused link's resolved target, or `None` when no link is
+/// focused (or it fails to resolve).
+fn focused_link_url(model: &Model) -> Option<String> {
+    let idx = model.focus?;
+    let link = model.links.iter().find(|l| l.index == idx)?;
+    let (target, _anchor) = browser::resolve_link(link, model.current_dest).ok()?;
+    Some(target_url(&target))
+}
+
+/// The full URL of the current page (`<dest_hex>:<path>`), or `None` when no
+/// page is loaded.
+fn current_url(model: &Model) -> Option<String> {
+    model.history.current().map(target_url)
+}
+
+/// A full, reopenable URL for a target: `<dest_hex>:<path>`, with any query
+/// fields reattached as the backtick blob [`parse_url`] understands (the stored
+/// `var_` key prefix stripped back off).
+fn target_url(target: &Target) -> String {
+    let base = format!("{}:{}", full_hex(&target.dest_hash), target.path);
+    if target.fields.is_empty() {
+        return base;
+    }
+    let blob = target
+        .fields
+        .iter()
+        .map(|(k, v)| format!("{}={}", k.strip_prefix("var_").unwrap_or(k), v))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("{base}`{blob}")
+}
+
+/// The full 32-character lowercase hex of a destination hash.
+fn full_hex(dest: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(dest.len() * 2);
+    for byte in dest {
+        s.push_str(&format!("{byte:02x}"));
+    }
+    s
+}
+
+/// Encode `text` as an OSC 52 clipboard-set sequence: `ESC ] 52 ; c ;
+/// <base64(text)> ST` (ST = `ESC \`). The IO shell writes this straight to the
+/// terminal, which copies the payload to the system clipboard. Pure, so the
+/// encoding is unit-testable without a terminal.
+pub fn osc52(text: &str) -> String {
+    format!("\x1b]52;c;{}\x1b\\", base64_encode(text.as_bytes()))
+}
+
+/// Standard base64 (RFC 4648, with `=` padding) of `bytes`. Small and local so
+/// the OSC 52 helper needs no extra dependency.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(n >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 0x3f] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Reload the page under the history cursor without changing history.
@@ -1416,6 +1724,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_focus(model, frame);
     if model.mode == Mode::Hint {
         render_hints(model, frame);
+    }
+    if model.show_places {
+        render_places(model, frame, frame.area());
     }
     if model.show_help {
         render_help(frame, frame.area());
@@ -1766,6 +2077,95 @@ const HELP_LINES: &[&str] = &[
     "  ?                   toggle this help",
     "  q / Ctrl-c          quit",
 ];
+
+/// Draw the centered places panel: a chrome-styled overlay with a "Bookmarks"
+/// section and a "Discovered nodes" section, the selected row reverse-video
+/// highlighted. Both the fill and the border use the theme's chrome colours, so
+/// the panel tracks the light/dark theme.
+fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
+    let entries = places(model);
+    let bm_count = model.bookmarks.len();
+    let text_style = chrome_text_style(model.no_color, model.theme);
+    let muted = chrome_muted_style(model.no_color, model.theme);
+    let header = text_style.add_modifier(Modifier::BOLD);
+    let selected = Style::default().add_modifier(Modifier::REVERSED);
+
+    let mut lines: Vec<RtLine<'static>> = Vec::new();
+    lines.push(RtLine::from(RtSpan::styled("Bookmarks", header)));
+    if bm_count == 0 {
+        lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
+    } else {
+        for (i, place) in entries.iter().enumerate().take(bm_count) {
+            lines.push(place_line(place, i, model.places_sel, text_style, selected));
+        }
+    }
+    lines.push(RtLine::from(""));
+    lines.push(RtLine::from(RtSpan::styled("Discovered nodes", header)));
+    if entries.len() == bm_count {
+        lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
+    } else {
+        for (i, place) in entries.iter().enumerate().skip(bm_count) {
+            lines.push(place_line(place, i, model.places_sel, text_style, selected));
+        }
+    }
+
+    let width = 64u16.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let overlay = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" places ")
+        .style(chrome_style(model.no_color, model.theme));
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), overlay);
+}
+
+/// One places-panel row: its label, reverse-video highlighted when it is the
+/// selected row.
+fn place_line(
+    place: &Place,
+    idx: usize,
+    sel: usize,
+    normal: Style,
+    selected: Style,
+) -> RtLine<'static> {
+    let style = if idx == sel { selected } else { normal };
+    RtLine::from(RtSpan::styled(place_label(place), style))
+}
+
+/// The one-line label for a place: a bookmark's title and URL, or a node's name,
+/// short hash and hop count.
+fn place_label(place: &Place) -> String {
+    match place {
+        Place::Bookmark { url, title } => {
+            if title.is_empty() {
+                format!("  {url}")
+            } else {
+                format!("  {title}  ·  {url}")
+            }
+        }
+        Place::Node {
+            dest_hash,
+            name,
+            hops,
+            ..
+        } => {
+            let label = name
+                .clone()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| short_hex(dest_hash));
+            let hop = hops
+                .map(|h| format!("{h} hops"))
+                .unwrap_or_else(|| "? hops".to_string());
+            format!("  {label}  ·  {}  ·  {hop}", short_hex(dest_hash))
+        }
+    }
+}
 
 /// Draw the centered help overlay listing the keybindings.
 fn render_help(frame: &mut Frame, area: Rect) {

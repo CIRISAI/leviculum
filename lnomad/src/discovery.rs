@@ -115,7 +115,7 @@ impl DiscoveredNode {
 /// an existing one's `last_seen`/`hops` (and fills its `name` from the announce
 /// when it carries one). Insertion order is preserved for stable numbering by
 /// tracking a per-node sequence.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct NomadNodeRegistry {
     nodes: BTreeMap<[u8; 16], DiscoveredNode>,
     /// First-seen sequence per node, so the list keeps a stable discovery order
@@ -196,6 +196,31 @@ impl NomadNodeRegistry {
                         hops,
                     },
                 );
+            }
+        }
+    }
+
+    /// Fold a whole [`DiscoveredNode`] in, preserving its own `first_seen`.
+    ///
+    /// Unlike [`upsert`](Self::upsert), which stamps `first_seen` at observation
+    /// time, this merges a node learned elsewhere (e.g. forwarded from a
+    /// [`Session`](crate::fetch::Session)'s own registry over a channel): an
+    /// existing entry has its `last_seen`/`hops` refreshed and its name filled
+    /// when the incoming one carries a name; a new dest is inserted verbatim,
+    /// keeping the carried timestamps.
+    pub fn upsert_node(&mut self, node: &DiscoveredNode) {
+        match self.nodes.get_mut(&node.dest_hash) {
+            Some(existing) => {
+                existing.last_seen = node.last_seen;
+                existing.hops = node.hops;
+                if node.name.is_some() {
+                    existing.name = node.name.clone();
+                }
+            }
+            None => {
+                self.order.insert(node.dest_hash, self.next_seq);
+                self.next_seq += 1;
+                self.nodes.insert(node.dest_hash, node.clone());
             }
         }
     }

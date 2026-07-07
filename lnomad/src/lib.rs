@@ -24,6 +24,7 @@
 //! navigation state machine, and the fetch/parse/render/print loop that the
 //! `lnomad` binary drives.
 
+pub mod bookmarks;
 pub mod browser;
 pub mod cli;
 pub mod discovery;
@@ -33,6 +34,7 @@ pub mod theme;
 pub mod tui;
 pub mod url;
 
+pub use bookmarks::{Bookmark, Bookmarks};
 pub use browser::{parse_command, resolve_link, BrowserOptions, Command, Nav};
 pub use cli::{resolve_args, Mode};
 pub use discovery::{

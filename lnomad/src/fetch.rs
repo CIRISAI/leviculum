@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
+
 use leviculum_std::config::Config;
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::{DestinationHash, EventReceiver, NodeEvent, ReceivedAnnounce, ReticulumNode};
@@ -89,6 +91,10 @@ pub struct Session {
     /// stream. Populated by the discovery loop and, opportunistically, by any
     /// event wait during browsing, so the `nodes` command has a live list.
     registry: NomadNodeRegistry,
+    /// An optional sink every newly-recorded node announce is forwarded to, so a
+    /// caller draining the event stream elsewhere (the TUI's select loop) can
+    /// fold discoveries into its own registry without owning the stream.
+    announce_sink: Option<mpsc::UnboundedSender<DiscoveredNode>>,
 }
 
 impl Session {
@@ -124,7 +130,34 @@ impl Session {
             events,
             current: None,
             registry: NomadNodeRegistry::new(),
+            announce_sink: None,
         })
+    }
+
+    /// Forward every newly-recorded node announce to `sink` in addition to the
+    /// session's own registry, so the TUI (which drains the event stream from
+    /// its select loop) folds discoveries into a model-held registry.
+    pub fn set_announce_sink(&mut self, sink: mpsc::UnboundedSender<DiscoveredNode>) {
+        self.announce_sink = Some(sink);
+    }
+
+    /// Await the next NomadNet node announce on the event stream, folding every
+    /// announce into the registry (and forwarding it to the announce sink), and
+    /// return its destination hash. Non-node events seen while waiting are
+    /// consumed and ignored. Returns `None` only when the event stream closes.
+    ///
+    /// Unlike [`next_node_announce`](Self::next_node_announce) this has no
+    /// timeout: the caller drives it from a `select!` that cancels it on the next
+    /// key press, so it can park on a quiet stream without a periodic wakeup.
+    pub async fn recv_node_announce(&mut self) -> Option<[u8; 16]> {
+        loop {
+            let event = self.events.recv().await?;
+            if let NodeEvent::AnnounceReceived { announce, .. } = &event {
+                if self.note_announce(announce) {
+                    return Some(*announce.destination_hash().as_bytes());
+                }
+            }
+        }
     }
 
     /// Fetch a page and return its raw bytes (the `.mu` markup the handler
@@ -254,7 +287,17 @@ impl Session {
             .hops_to(announce.destination_hash())
             .map(|h| h as u32);
         let now = now_unix_secs();
-        self.registry.observe(announce, hops, now)
+        let recorded = self.registry.observe(announce, hops, now);
+        if recorded {
+            if let Some(sink) = &self.announce_sink {
+                let dest = *announce.destination_hash().as_bytes();
+                if let Some(node) = self.registry.get_by_hash(&dest) {
+                    // Unbounded send never blocks; a closed receiver just drops.
+                    let _ = sink.send(node.clone());
+                }
+            }
+        }
+        recorded
     }
 
     /// Establish (or reuse) an active link to `dest`, learning a path and the
