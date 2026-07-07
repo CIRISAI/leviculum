@@ -29,7 +29,14 @@ default-members = [
 # leviculum-nrf requires cross-compilation (thumbv7em-none-eabihf) and
 # cannot build with --workspace on the host.
 # Build with: cargo build -p leviculum-nrf --target thumbv7em-none-eabihf
-exclude = ["leviculum-nrf"]
+exclude = ["leviculum-nrf", "vendor/crossterm"]
+
+# Vendored, minimally-patched crossterm 0.29.0. The patch exposes mouse side
+# buttons (X buttons 8/9) as MouseButton::Back / MouseButton::Forward, which
+# upstream crossterm swallows in parse_cb. Both lnomad and ratatui-crossterm
+# resolve to crossterm 0.29.0, so this replaces it everywhere.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
 version = "0.7.1"
