@@ -32,7 +32,7 @@
 //! left-click hit-testing, and mouse-hover. The focused or hovered link's target
 //! shows in the status bar. Links no longer carry a visible `[N]` marker.
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,9 +91,10 @@ const BACK_LABEL: &str = "‹ back";
 const FORWARD_LABEL: &str = "forward ›";
 const RELOAD_LABEL: &str = "⟳ reload";
 
-/// Browse-mode status hints.
+/// Browse-mode status hints. A curated subset that fits an 80-column status bar;
+/// the full keybinding list lives in the `?` help overlay.
 const BROWSE_HINTS: &str =
-    "j/k scroll  f hint  / search  d places  m bookmark  y copy  : addr  R reload  t theme  ? help  q quit";
+    "j/k scroll  f hint  / search  d places  m mark  y copy  : addr  ? help  q quit";
 /// Address-mode status hints.
 const ADDRESS_HINTS: &str = "Enter: go   Esc: cancel";
 /// Hint-mode status hints.
@@ -1448,8 +1449,7 @@ pub fn osc52(text: &str) -> String {
 /// Standard base64 (RFC 4648, with `=` padding) of `bytes`. Small and local so
 /// the OSC 52 helper needs no extra dependency.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -2070,6 +2070,9 @@ const HELP_LINES: &[&str] = &[
     "  / n N               search / next / prev",
     "  click               follow link",
     "  :                   enter an address",
+    "  d                   places panel",
+    "  m                   bookmark this page",
+    "  y                   copy link / page URL",
     "  R                   reload the page",
     "  t                   toggle light / dark theme",
     "  M-← / M-→           back / forward",
@@ -2395,6 +2398,19 @@ fn run_effects(
                 // Invalidate any late result from the cancelled task.
                 *generation = generation.wrapping_add(1);
             }
+            Effect::Copy(text) => {
+                // Write the OSC 52 clipboard-set sequence straight to the
+                // terminal; the update side has already set the "copied" status.
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::style::Print(osc52(&text)));
+            }
+            Effect::SaveBookmarks => {
+                // Persist the bookmarks, ignoring IO errors: a failed write must
+                // not take down the browser (no config dir → nothing to do).
+                if let Some(path) = &model.bookmarks_path {
+                    let _ = model.bookmarks.save(path);
+                }
+            }
             Effect::Quit => model.quit = true,
         }
     }
@@ -2477,9 +2493,21 @@ pub async fn run_tui(
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut events = EventStream::new();
 
+    // Load persisted bookmarks (best-effort): resolve the store path and read it,
+    // tolerating a missing or corrupt file. `None` when no config dir is
+    // resolvable, in which case bookmarks stay in-memory only and
+    // `Effect::SaveBookmarks` becomes a no-op.
+    let bookmarks_path = crate::bookmarks::default_path();
+    let bookmarks = bookmarks_path
+        .as_deref()
+        .map(Bookmarks::load)
+        .unwrap_or_default();
+
     let mut model = Model {
         no_color: opts.no_color,
         theme,
+        bookmarks,
+        bookmarks_path,
         ..Model::default()
     };
     let size = terminal.size()?;
@@ -4253,5 +4281,141 @@ mod tests {
         restored.set(false);
         guard.restore_now().expect("restore idempotent");
         assert!(!restored.get(), "restore ran twice");
+    }
+
+    // --- phase 6: bookmarks, copy, places panel -------------------------
+
+    fn disc_node(hash: u8, name: &str) -> DiscoveredNode {
+        DiscoveredNode {
+            dest_hash: [hash; 16],
+            name: Some(name.to_string()),
+            first_seen: 0,
+            last_seen: 0,
+            hops: Some(1),
+        }
+    }
+
+    #[test]
+    fn osc52_wraps_base64_payload() {
+        // ESC ] 52 ; c ; base64("hi") ST, with ST = ESC backslash.
+        assert_eq!(osc52("hi"), "\x1b]52;c;aGk=\x1b\\");
+    }
+
+    #[test]
+    fn status_bar_hints_fit_eighty_columns() {
+        // The curated browse hints must fit an 80-column bar so "quit" stays
+        // visible (see status_bar_renders_hints).
+        assert!(
+            UnicodeWidthStr::width(BROWSE_HINTS) <= 80,
+            "browse hints overflow 80 cols: {}",
+            UnicodeWidthStr::width(BROWSE_HINTS)
+        );
+    }
+
+    #[test]
+    fn bookmark_toggle_adds_then_removes_and_persists() {
+        let mut m = loaded_model((80, 24));
+        let url = current_url(&m).expect("current url");
+        // First `m` bookmarks the page and asks the shell to persist.
+        let fx = press(&mut m, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(m.bookmarks.contains(&url));
+        assert_eq!(fx, vec![Effect::SaveBookmarks]);
+        // Second `m` un-bookmarks it, again persisting.
+        let fx = press(&mut m, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(!m.bookmarks.contains(&url));
+        assert_eq!(fx, vec![Effect::SaveBookmarks]);
+    }
+
+    #[test]
+    fn yank_copies_current_page_url() {
+        let mut m = loaded_model((80, 24));
+        let url = current_url(&m).expect("current url");
+        let fx = press(&mut m, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(fx, vec![Effect::Copy(url)]);
+        assert!(m.status.as_deref().unwrap_or_default().contains("copied"));
+    }
+
+    #[test]
+    fn places_lists_bookmarks_then_discovered_nodes() {
+        let mut m = loaded_model((80, 24));
+        m.bookmarks.add(Bookmark {
+            url: "aa11:/page/index.mu".to_string(),
+            title: "Home".to_string(),
+        });
+        m.node_registry.upsert_node(&disc_node(0xcd, "Node-C"));
+        let ps = places(&m);
+        assert_eq!(ps.len(), 2, "one bookmark then one node");
+        assert!(matches!(ps[0], Place::Bookmark { .. }));
+        assert!(matches!(ps[1], Place::Node { .. }));
+    }
+
+    #[test]
+    fn places_panel_opens_navigates_and_activates() {
+        let mut m = loaded_model((80, 24));
+        m.bookmarks.add(Bookmark {
+            url: "aa11:/page/index.mu".to_string(),
+            title: "Home".to_string(),
+        });
+        m.node_registry.upsert_node(&disc_node(0xcd, "Node-C"));
+
+        // `d` opens the panel; it then owns keys.
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(m.show_places);
+        assert_eq!(m.places_sel, 0);
+
+        // `j` moves onto the discovered node; Enter opens its default page.
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 1);
+        let fx = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!m.show_places, "activating closes the panel");
+        assert_eq!(
+            fx,
+            vec![Effect::Navigate(Target {
+                dest_hash: [0xcd; 16],
+                path: DEFAULT_PATH.to_string(),
+                fields: Vec::new(),
+                is_file: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn places_panel_deletes_selected_bookmark_and_persists() {
+        let mut m = loaded_model((80, 24));
+        m.bookmarks.add(Bookmark {
+            url: "aa11:/page/index.mu".to_string(),
+            title: "Home".to_string(),
+        });
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        // `x` removes the selected bookmark and asks to persist.
+        let fx = press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(m.bookmarks.is_empty());
+        assert_eq!(fx, vec![Effect::SaveBookmarks]);
+    }
+
+    #[test]
+    fn discovery_event_feeds_the_places_panel() {
+        let mut m = loaded_model((80, 24));
+        update(&mut m, AppEvent::NodeDiscovered(disc_node(0xcd, "Node-C")));
+        let ps = places(&m);
+        assert_eq!(ps.len(), 1);
+        assert!(matches!(ps[0], Place::Node { .. }));
+    }
+
+    #[test]
+    fn places_panel_renders_both_sections() {
+        let mut m = loaded_model((80, 24));
+        m.bookmarks.add(Bookmark {
+            url: "aa11:/page/index.mu".to_string(),
+            title: "Home".to_string(),
+        });
+        m.node_registry.upsert_node(&disc_node(0xcd, "Node-C"));
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let buffer = render(&m, 80, 24);
+        let text = flat(&buffer);
+        assert!(text.contains("Bookmarks"), "missing header:\n{text}");
+        assert!(text.contains("Discovered nodes"), "missing header:\n{text}");
+        assert!(text.contains("Home"), "missing bookmark:\n{text}");
+        assert!(text.contains("Node-C"), "missing node:\n{text}");
     }
 }
