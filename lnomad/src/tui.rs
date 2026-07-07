@@ -58,7 +58,7 @@ use throbber_widgets_tui::{Throbber, ThrobberState};
 use tokio::sync::{mpsc, Mutex};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use leviculum_micron::MicronDocument;
 
@@ -213,15 +213,18 @@ pub enum Mode {
 }
 
 /// One in-page search hit: a column span on a single laid-out page line. Column
-/// indices are 0-based and address [`RLine`] cells directly (one cell = one
-/// column), so they map straight onto screen columns in the content body.
+/// indices are 0-based DISPLAY columns (the screen column the renderer draws the
+/// cell at), not character indices: a wide char (emoji, CJK) advances two
+/// columns, so `col_start`/`col_end` line up with the cells ratatui actually
+/// paints in the content body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Match {
     /// 0-based index of the laid-out [`RLine`] the match sits on.
     pub line_idx: usize,
-    /// 0-based first matched column on that line.
+    /// 0-based first matched display column on that line.
     pub col_start: usize,
-    /// 0-based column one past the last matched column (`col_start..col_end`).
+    /// 0-based display column one past the last matched column
+    /// (`col_start..col_end`).
     pub col_end: usize,
 }
 
@@ -246,13 +249,23 @@ pub fn find_matches(page: &[RLine], query: &str) -> Vec<Match> {
         if hay.len() < n {
             continue;
         }
+        // `col_at[i]` is the DISPLAY column where char `i` starts; `col_at[len]`
+        // is the column one past the line. Matching stays char-based, but the
+        // emitted spans are display columns so they align with the renderer.
+        let mut col_at = Vec::with_capacity(hay.len() + 1);
+        let mut col = 0usize;
+        for ch in &hay {
+            col_at.push(col);
+            col += UnicodeWidthChar::width(*ch).unwrap_or(0);
+        }
+        col_at.push(col);
         let mut i = 0;
         while i + n <= hay.len() {
             if (0..n).all(|k| chars_eq_ci(hay[i + k], needle[k])) {
                 out.push(Match {
                     line_idx,
-                    col_start: i,
-                    col_end: i + n,
+                    col_start: col_at[i],
+                    col_end: col_at[i + n],
                 });
                 i += n;
             } else {
@@ -3928,6 +3941,74 @@ mod tests {
                     col_end: 4
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn find_matches_positions_are_display_columns_after_wide_chars() {
+        // Two width-2 emojis (4 display columns) precede "term", which starts at
+        // char index 2 but display column 4; col_end is 4 + width("term") = 8.
+        let ms = find_matches(&[rline("😀😀term")], "term");
+        assert_eq!(
+            ms,
+            vec![Match {
+                line_idx: 0,
+                col_start: 4,
+                col_end: 8,
+            }]
+        );
+    }
+
+    #[test]
+    fn search_highlight_lands_on_the_term_after_wide_chars() {
+        // "😀😀 " is 5 display columns; the term occupies the next six.
+        let mut m = Model::from_document(&parse("😀😀 needle"), content_width(80), "S", (80, 24));
+        commit_search(&mut m, "needle");
+        let mch = m.matches.first().copied().expect("one match");
+        assert_eq!((mch.col_start, mch.col_end), (5, 11));
+
+        let buffer = render(&m, 80, 24);
+        let row = TOPBAR_ROWS + (mch.line_idx - m.scroll) as u16;
+        // The highlighted cells spell the term, not a wide-char-shifted slice.
+        let mut got = String::new();
+        for x in mch.col_start as u16..mch.col_end as u16 {
+            got.push_str(buffer[(x, row)].symbol());
+        }
+        assert_eq!(got, "needle");
+        assert!(
+            buffer[(mch.col_start as u16, row)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the current match should be highlighted",
+        );
+    }
+
+    #[test]
+    fn link_after_wide_chars_hit_tests_at_its_display_column() {
+        let doc = "😀😀 `[Alpha`:/page/alpha.mu]";
+        let mut m = Model::from_document(&parse(doc), content_width(80), "S", (80, 24));
+        // A current destination so the relative link resolves on activation.
+        m.current_dest = Some([0x11; 16]);
+        let vl = visible_links(&m)
+            .into_iter()
+            .find(|v| v.index == 1)
+            .expect("alpha visible");
+        // The label starts at display column 5 (after 😀😀 + space), not the char
+        // index 3 the old cell-index positioning reported.
+        assert_eq!(vl.col_start, 5);
+
+        // A click on the label's display column follows it ...
+        let effects = update(&mut m, AppEvent::Mouse(click(vl.col_start, vl.row)));
+        assert!(matches!(effects.as_slice(), [Effect::Navigate(_)]));
+
+        // ... while the old char-index column (3) sits inside the second emoji and
+        // hits nothing.
+        let mut m2 = Model::from_document(&parse(doc), content_width(80), "S", (80, 24));
+        m2.current_dest = Some([0x11; 16]);
+        let effects = update(&mut m2, AppEvent::Mouse(click(3, vl.row)));
+        assert!(
+            effects.is_empty(),
+            "char-index column must not hit the link"
         );
     }
 

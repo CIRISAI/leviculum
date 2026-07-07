@@ -33,6 +33,7 @@
 //!   `MAX_TABLE_WIDTH = 100` (lines 37, 197-218).
 
 use leviculum_micron::{Align, Block, Field, FieldKind, Line, MicronDocument, Style};
+use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 
@@ -70,10 +71,13 @@ pub struct RenderedLink {
     /// 0-based index of the laid-out [`RLine`] the link's visible label starts
     /// on (the clickable core, after any leading whitespace).
     pub line: usize,
-    /// 0-based column where the clickable label starts on that line.
+    /// 0-based DISPLAY column where the clickable label starts on that line (a
+    /// wide char before it advances two columns), matching the screen columns the
+    /// renderer paints so hit-testing and hints land on the label.
     pub col_start: usize,
-    /// 0-based column one past the last clickable cell. `col_start..col_end` is
-    /// the hit-test range (the visible label core, with no `[N]` marker).
+    /// 0-based display column one past the last clickable cell.
+    /// `col_start..col_end` is the hit-test range (the visible label core, with
+    /// no `[N]` marker).
     pub col_end: usize,
 }
 
@@ -302,22 +306,27 @@ impl Renderer {
     fn record_link_positions(&mut self) {
         let mut seen: Vec<bool> = vec![false; self.links.len()];
         for (li, line) in self.lines.iter().enumerate() {
-            for (ci, cell) in line.cells.iter().enumerate() {
-                let Some(idx) = cell.link else { continue };
-                let Some(slot) = idx.checked_sub(1) else {
-                    continue;
-                };
-                let Some(link) = self.links.get_mut(slot) else {
-                    continue;
-                };
-                if !seen[slot] {
-                    seen[slot] = true;
-                    link.line = li;
-                    link.col_start = ci;
-                    link.col_end = ci + 1;
-                } else if link.line == li {
-                    link.col_end = ci + 1;
+            // Track the running DISPLAY column across the line so a link sitting
+            // after a wide char is recorded at the column the renderer paints it,
+            // not its character index.
+            let mut col = 0usize;
+            for cell in line.cells.iter() {
+                let w = UnicodeWidthChar::width(cell.ch).unwrap_or(0);
+                if let Some(idx) = cell.link {
+                    if let Some(slot) = idx.checked_sub(1) {
+                        if let Some(link) = self.links.get_mut(slot) {
+                            if !seen[slot] {
+                                seen[slot] = true;
+                                link.line = li;
+                                link.col_start = col;
+                                link.col_end = col + w;
+                            } else if link.line == li {
+                                link.col_end = col + w;
+                            }
+                        }
+                    }
                 }
+                col += w;
             }
         }
     }
