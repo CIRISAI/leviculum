@@ -10018,6 +10018,72 @@ mod tests {
             );
         }
 
+        // Codeberg #38: clean_link_table healing sub-case for a link initiated by
+        // a LOCAL CLIENT (taken hops == 0). Python Transport.py:715-717 requests a
+        // fresh path for the ORIGINAL destination when an unvalidated local-client
+        // link expires, even while a (non-direct) path is still known. We
+        // implement the no-path, destination-direct and initiator-direct sub-cases
+        // but MISS this one, so every field event (hops=0) that expires
+        // unvalidated never triggers rediscovery.
+        //
+        // RED before the commit-3 fix: with hops == 0, a known NON-direct path and
+        // no throttle, none of the three existing sub-cases fire and no path
+        // request is issued.
+        #[test]
+        fn clean_link_table_local_client_link_requests_path() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let link_id = [0xAA; TRUNCATED_HASHBYTES];
+            let dest = [0xBB; TRUNCATED_HASHBYTES];
+            let now = transport.clock.now_ms();
+
+            // A KNOWN path to the destination that is NOT direct (hops == 2), so
+            // the destination-direct sub-case (is_direct → hops == 1) cannot fire.
+            transport.storage_mut().set_path(
+                dest,
+                PathEntry {
+                    hops: 2,
+                    expires_ms: now + 1_000_000,
+                    interface_index: 1,
+                    random_blobs: Vec::new(),
+                    next_hop: Some([0xEE; TRUNCATED_HASHBYTES]),
+                },
+            );
+
+            // A link initiated by a LOCAL CLIENT: taken hops == 0. Unvalidated,
+            // already past its proof deadline so clean_link_table expires it.
+            transport.storage_mut().set_link_entry(
+                link_id,
+                LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: 1,
+                    remaining_hops: 2,
+                    received_interface_index: 0,
+                    hops: 0,
+                    validated: false,
+                    proof_timeout_ms: now,
+                    destination_hash: dest,
+                    peer_signing_key: None,
+                },
+            );
+
+            // Not throttled: no prior path request recorded for `dest`.
+            assert!(transport.storage().get_path_request_time(&dest).is_none());
+
+            transport.clean_link_table(now + 1);
+
+            // request_path records the request time for the ORIGINAL destination
+            // (Transport.py:715-717 keys on IDX_LT_DSTHASH); its presence is the
+            // observable that a path request was issued.
+            assert!(
+                transport.storage().get_path_request_time(&dest).is_some(),
+                "local-client link (hops == 0) with a known non-direct path must \
+                 request a fresh path on unvalidated expiry (Transport.py:715-717)"
+            );
+        }
+
         #[test]
         fn test_link_entry_signing_key_from_announce_cache() {
             // When a link request is forwarded, the LinkEntry should get the
