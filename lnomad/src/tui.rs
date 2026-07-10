@@ -706,6 +706,10 @@ pub struct Model {
     /// selection); the view is scrolled the minimum needed to keep the selected
     /// row visible. Reset to 0 when the panel opens.
     pub places_scroll: usize,
+    /// The places-panel entry the mouse is hovering over, an index into
+    /// [`places`], or `None`. Highlights that row so it reads as clickable; kept
+    /// distinct from the selection ([`places_sel`]) so the two highlights differ.
+    pub places_hover: Option<usize>,
     /// The help overlay's VIEW offset: the first help line shown when the help
     /// is taller than the terminal. Reset to 0 when the help opens.
     pub help_scroll: usize,
@@ -1728,6 +1732,7 @@ fn toggle_places(model: &mut Model) {
     if model.show_places {
         model.places_sel = 0;
         model.places_scroll = 0;
+        model.places_hover = None;
         model.dismiss_toast();
     }
 }
@@ -1735,6 +1740,7 @@ fn toggle_places(model: &mut Model) {
 /// Close the places panel.
 fn close_places(model: &mut Model) {
     model.show_places = false;
+    model.places_hover = None;
 }
 
 /// Fold a key while the places panel is open. The up/down motions are the SAME
@@ -1817,6 +1823,49 @@ fn places_viewport(model: &Model, total: usize) -> usize {
     let rows = model.size.1 as usize;
     let height = (total + 2).min(rows);
     height.saturating_sub(2)
+}
+
+/// The places overlay's screen rectangle: the same centred box `render_places`
+/// draws, sized from the panel's line count and capped to the terminal. Shared by
+/// the renderer and the click / hover hit-test so the two never disagree on where
+/// the panel and its rows sit.
+fn places_overlay_rect(model: &Model, area: Rect) -> Rect {
+    let total = places_layout(model).total;
+    let width = 72u16.min(area.width);
+    let height = (total as u16 + 2).min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// The places-panel entry under screen point `(col, row)`, honouring the panel's
+/// scroll offset, or `None` when the point is not on an entry row — the border, a
+/// section title, the blank spacer, a `(none)` placeholder, the scrollbar, or
+/// anywhere outside the panel. The screen row maps to a panel line through the
+/// clamped scroll offset, and that line maps back to an entry through the same
+/// `entry_line` table the scroll math tracks, so a click can never land on the
+/// wrong row.
+fn place_at(model: &Model, col: u16, row: u16) -> Option<usize> {
+    let overlay = places_overlay_rect(model, model.frame_area());
+    let inner_top = overlay.y + 1;
+    // Strictly inside the border: the top/bottom border rows and the left/right
+    // border columns (the right one carries the scrollbar) are not entry rows.
+    if row < inner_top
+        || row + 1 >= overlay.bottom()
+        || col <= overlay.x
+        || col + 1 >= overlay.right()
+    {
+        return None;
+    }
+    let layout = places_layout(model);
+    let vp = places_viewport(model, layout.total);
+    let max = layout.total.saturating_sub(vp);
+    let offset = model.places_scroll.min(max);
+    let line = offset + (row - inner_top) as usize;
+    layout.entry_line.iter().position(|&l| l == line)
 }
 
 /// Scroll the places view the MINIMUM needed to keep the selected entry's row
@@ -2371,6 +2420,21 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
         model.show_help = false;
         return Vec::new();
     }
+    // The places panel is modal too: a single left click on an entry selects and
+    // activates it (the same language as links and footer buttons); a click
+    // elsewhere inside the panel does nothing; a click outside closes it. Every
+    // case is swallowed here, so a click can never fall through to a link,
+    // control or footer button underneath.
+    if model.show_places {
+        if let Some(idx) = place_at(model, col, row) {
+            model.places_sel = idx;
+            return activate_place(model, idx);
+        }
+        if !rect_contains(places_overlay_rect(model, model.frame_area()), col, row) {
+            close_places(model);
+        }
+        return Vec::new();
+    }
     for vl in visible_links(model) {
         if row == vl.row && col >= vl.col_start && col < vl.col_end {
             return follow_link(model, vl.index);
@@ -2403,6 +2467,15 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
 /// Set the hovered link to whichever visible link is under `(col, row)`, or
 /// `None` when the cursor is over no link.
 fn update_hover(model: &mut Model, col: u16, row: u16) {
+    // The places panel owns the pointer while it is open: a move over an entry
+    // highlights that row, a move off any entry clears it. The link and footer
+    // hovers stay cleared beneath the modal panel.
+    if model.show_places {
+        model.places_hover = place_at(model, col, row);
+        model.hover = None;
+        model.footer_hover = None;
+        return;
+    }
     // A move over a footer button highlights it; a footer hover and a content
     // link hover are mutually exclusive.
     if footer_shows_buttons(model) {
@@ -3898,8 +3971,8 @@ fn help_groups() -> Vec<HelpGroup> {
                     desc: "copy link / page address",
                 },
                 HelpEntry {
-                    keys: "d",
-                    desc: "places panel",
+                    keys: "d / click a place",
+                    desc: "places panel — click an entry to open it",
                 },
                 HelpEntry {
                     keys: "/ n N",
@@ -3984,12 +4057,13 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     let header = text_style.add_modifier(Modifier::BOLD);
     let selected = Style::default().add_modifier(Modifier::REVERSED);
 
-    // Fix the panel width up front so rows can be truncated to the inner display
-    // width (the two border columns removed). A long bookmark row that reached
-    // the border let the selected row's reversed bar spill past it; truncating
-    // to the inner width keeps every row strictly inside the border.
-    let width = 72u16.min(area.width);
-    let inner = width.saturating_sub(2) as usize;
+    // The centred overlay box, shared with the click / hover hit-test so both
+    // agree on where the panel sits. Its width fixes the inner display width (the
+    // two border columns removed) rows are truncated to: a long bookmark row that
+    // reached the border let the selected row's reversed bar spill past it;
+    // truncating to the inner width keeps every row strictly inside the border.
+    let overlay = places_overlay_rect(model, area);
+    let inner = overlay.width.saturating_sub(2) as usize;
 
     let mut lines: Vec<RtLine<'static>> = Vec::new();
     lines.push(RtLine::from(RtSpan::styled("Bookmarks", header)));
@@ -4001,6 +4075,7 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
                 place,
                 i,
                 model.places_sel,
+                model.places_hover,
                 text_style,
                 selected,
                 inner,
@@ -4017,6 +4092,7 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
                 place,
                 i,
                 model.places_sel,
+                model.places_hover,
                 text_style,
                 selected,
                 inner,
@@ -4026,14 +4102,8 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
 
     // The lines built above interleave the two section titles, an "(none)"
     // placeholder or the entry rows, and one blank spacer — exactly the order
-    // `places_layout` models, so the entry -> line mapping there stays exact.
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let overlay = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
+    // `places_layout` models, so the entry -> line mapping there (and the overlay
+    // height derived from it) stays exact.
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" places ")
@@ -4045,7 +4115,7 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     // selected row visible on the update side) and paint a scrollbar on the right
     // border. Same shared treatment as the help overlay.
     let total = lines.len();
-    let inner_h = height.saturating_sub(2) as usize;
+    let inner_h = overlay.height.saturating_sub(2) as usize;
     let max = total.saturating_sub(inner_h);
     let offset = model.places_scroll.min(max);
     let visible: Vec<RtLine> = lines.into_iter().skip(offset).take(inner_h).collect();
@@ -4065,11 +4135,21 @@ fn place_line(
     place: &Place,
     idx: usize,
     sel: usize,
+    hover: Option<usize>,
     normal: Style,
     selected: Style,
     inner: usize,
 ) -> RtLine<'static> {
-    let style = if idx == sel { selected } else { normal };
+    // Selection wins over hover, and the two styles differ (reverse video vs the
+    // bold + underline the links and footer buttons use on hover), so a hovered
+    // row stays distinguishable from the selected row even when they coincide.
+    let style = if idx == sel {
+        selected
+    } else if hover == Some(idx) {
+        normal.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        normal
+    };
     let label = truncate_to_cols(&place_label(place), inner);
     RtLine::from(RtSpan::styled(label, style))
 }
@@ -8224,6 +8304,188 @@ mod tests {
         assert!(selected_visible(&m), "the view follows the wheel");
         update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
         assert_eq!(m.places_sel, 0, "the wheel moves the selection back up");
+    }
+
+    /// The screen row the `idx`-th places entry is drawn on, through the same
+    /// overlay geometry and clamped scroll offset the renderer and hit-test use.
+    fn place_row(m: &Model, idx: usize) -> u16 {
+        let overlay = places_overlay_rect(m, m.frame_area());
+        let layout = places_layout(m);
+        let vp = places_viewport(m, layout.total);
+        let max = layout.total.saturating_sub(vp);
+        let offset = m.places_scroll.min(max);
+        overlay.y + 1 + (layout.entry_line[idx] - offset) as u16
+    }
+
+    /// A column safely inside the panel's inner region.
+    fn place_col(m: &Model) -> u16 {
+        places_overlay_rect(m, m.frame_area()).x + 2
+    }
+
+    /// A model with one bookmark then one discovered node, panel open. The
+    /// bookmark carries a full 32-hex destination hash so activating it parses to
+    /// a real navigation target.
+    fn places_model() -> Model {
+        let mut m = loaded_model((80, 24));
+        m.bookmarks.add(Bookmark {
+            url: format!("{}:/page/index.mu", "bb".repeat(16)),
+            title: "Home".to_string(),
+        });
+        m.node_registry.upsert_node(&disc_node(0xcd, "Node-C"));
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(m.show_places);
+        m
+    }
+
+    #[test]
+    fn places_click_on_a_bookmark_row_activates_it() {
+        let mut m = places_model();
+        // A single left click on the bookmark row does exactly what Enter on that
+        // selection does, and selects it first.
+        let mut via_key = m.clone();
+        let expected = press(&mut via_key, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!expected.is_empty(), "a bookmark row navigates");
+
+        let (col, row) = (place_col(&m), place_row(&m, 0));
+        let fx = update(&mut m, AppEvent::Mouse(click(col, row)));
+        assert_eq!(m.places_sel, 0, "the click selects the bookmark row");
+        assert_eq!(fx, expected, "the click activates exactly like Enter");
+        assert!(!m.show_places, "activating closes the panel");
+    }
+
+    #[test]
+    fn places_click_on_a_discovered_node_row_activates_it() {
+        let mut m = places_model();
+        let node_idx = 1;
+        let mut via_key = m.clone();
+        via_key.places_sel = node_idx;
+        let expected = press(&mut via_key, KeyCode::Enter, KeyModifiers::NONE);
+
+        let (col, row) = (place_col(&m), place_row(&m, node_idx));
+        let fx = update(&mut m, AppEvent::Mouse(click(col, row)));
+        assert_eq!(m.places_sel, node_idx, "the click selects the node row");
+        assert_eq!(
+            fx,
+            vec![Effect::Navigate(Target {
+                dest_hash: [0xcd; 16],
+                path: DEFAULT_PATH.to_string(),
+                fields: Vec::new(),
+                is_file: false,
+            })],
+            "the click opens the node's default page"
+        );
+        assert_eq!(fx, expected, "the click activates exactly like Enter");
+        assert!(!m.show_places, "activating closes the panel");
+    }
+
+    #[test]
+    fn places_click_honours_the_scroll_offset() {
+        // A tall list in a short terminal, scrolled to the bottom so the first
+        // visible row is well down the list. A click on that top row must select
+        // the entry actually drawn there, not the entry the row would hold at
+        // scroll 0.
+        let mut m = with_nodes((80, 8), 20);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert!(m.places_scroll > 0, "the list must be scrolled");
+
+        let layout = places_layout(&m);
+        let vp = places_viewport(&m, layout.total);
+        let offset = m.places_scroll.min(layout.total.saturating_sub(vp));
+        let top_idx = layout
+            .entry_line
+            .iter()
+            .position(|&l| l == offset)
+            .expect("an entry sits on the first visible line");
+        assert!(top_idx > 0, "the scrolled-in entry is not the first entry");
+
+        let Place::Node { dest_hash, .. } = places(&m)[top_idx].clone() else {
+            panic!("the scrolled-in entry is a discovered node");
+        };
+        let overlay = places_overlay_rect(&m, m.frame_area());
+        let fx = update(&mut m, AppEvent::Mouse(click(overlay.x + 2, overlay.y + 1)));
+        assert_eq!(
+            m.places_sel, top_idx,
+            "the hit-test maps the top screen row through the scroll offset"
+        );
+        assert_eq!(
+            fx,
+            vec![Effect::Navigate(Target {
+                dest_hash,
+                path: DEFAULT_PATH.to_string(),
+                fields: Vec::new(),
+                is_file: false,
+            })],
+            "it activates the entry actually drawn on that row"
+        );
+    }
+
+    #[test]
+    fn places_click_on_a_title_or_blank_does_nothing() {
+        let mut m = places_model();
+        let overlay = places_overlay_rect(&m, m.frame_area());
+        let sel_before = m.places_sel;
+        // Row 0 inside the panel is the "Bookmarks" section title, never an entry.
+        let fx = update(&mut m, AppEvent::Mouse(click(overlay.x + 2, overlay.y + 1)));
+        assert!(fx.is_empty(), "a click on a section title does nothing");
+        assert!(m.show_places, "the panel stays open");
+        assert_eq!(m.places_sel, sel_before, "the selection is unchanged");
+        assert!(place_at(&m, overlay.x + 2, overlay.y + 1).is_none());
+
+        // The blank spacer line between the two sections is likewise inert.
+        let blank = places_layout(&m).entry_line[0] + 1; // line after the sole bookmark
+        let fx = update(
+            &mut m,
+            AppEvent::Mouse(click(overlay.x + 2, overlay.y + 1 + blank as u16)),
+        );
+        assert!(fx.is_empty(), "a click on a blank line does nothing");
+        assert!(m.show_places);
+    }
+
+    #[test]
+    fn places_click_outside_the_panel_closes_it() {
+        let mut m = places_model();
+        let overlay = places_overlay_rect(&m, m.frame_area());
+        // A point above and left of the panel is outside it (and would otherwise
+        // reach the top bar underneath).
+        assert!(overlay.y > 0, "there is room above the panel");
+        let fx = update(&mut m, AppEvent::Mouse(click(0, 0)));
+        assert!(fx.is_empty(), "closing the panel follows no link");
+        assert!(!m.show_places, "a click outside closes the panel");
+    }
+
+    #[test]
+    fn places_hover_highlights_an_entry_and_clears_off_it() {
+        let mut m = places_model();
+        let (col, node_row) = (place_col(&m), place_row(&m, 1));
+        update(&mut m, AppEvent::Mouse(moved(col, node_row)));
+        assert_eq!(m.places_hover, Some(1), "moving over an entry hovers it");
+
+        // The hovered (non-selected) row is bold + underlined, distinct from the
+        // selected row's reverse video.
+        let buffer = render(&m, 80, 24);
+        let hovered = &buffer[(col, node_row)];
+        assert!(
+            hovered.modifier.contains(Modifier::UNDERLINED)
+                && hovered.modifier.contains(Modifier::BOLD),
+            "the hovered row is bold + underlined: {:?}",
+            hovered.modifier
+        );
+        assert!(
+            !hovered.modifier.contains(Modifier::REVERSED),
+            "the hover highlight is distinct from the selection's reverse video"
+        );
+        let sel_row = place_row(&m, 0);
+        let selected = &buffer[(col, sel_row)];
+        assert!(
+            selected.modifier.contains(Modifier::REVERSED),
+            "the selected row keeps its reverse-video highlight"
+        );
+
+        // Moving onto the section title (not an entry) clears the hover.
+        let overlay = places_overlay_rect(&m, m.frame_area());
+        update(&mut m, AppEvent::Mouse(moved(overlay.x + 2, overlay.y + 1)));
+        assert_eq!(m.places_hover, None, "moving off an entry clears the hover");
     }
 
     #[test]
