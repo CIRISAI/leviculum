@@ -113,9 +113,11 @@ by focus, hint or click:
 - `?`         toggle the help overlay
 - `q` / `Ctrl-c`  quit
 
-The focused or hovered link's target is shown in the footer. Same-destination
-links (`:/page/x.mu`) resolve against the page currently in view; a followed link
-carries its preset (`f=v`) fields as `var_*` request variables.
+The focused or hovered link's target appears in a small floating field at the
+bottom-left of the content, just above the footer, so it never covers the
+clickable button-hints. Same-destination links (`:/page/x.mu`) resolve against
+the page currently in view; a followed link carries its preset (`f=v`) fields as
+`var_*` request variables.
 
 Recently viewed pages are held in an in-RAM cache (the last 50 distinct pages),
 so revisiting one, including stepping back and forward through history, renders
@@ -147,11 +149,13 @@ on Linux). Any other scheme (`file`, `javascript`, custom schemes) is refused
 and reported in a transient toast, since a page comes from an untrusted node and
 an arbitrary URI must never reach a system handler.
 
-Transient notes (a fetch error, a refused link, "copied", "bookmarked",
-"cancelled") appear as an auto-dismissing toast floated at the bottom-right of
-the content, not in the footer. A toast clears after a few seconds or on the
-next key press; the footer always keeps its button-hints (or the loading
-spinner during a fetch).
+The two bottom surfaces split cleanly. The bottom-left floating field carries the
+current pointer/page state (a focused/hovered link's target, or the loading
+spinner and path during a fetch) and stays as long as it applies. Transient notes
+(a fetch error, a refused link, "copied", "bookmarked", "cancelled") appear as an
+auto-dismissing toast floated at the bottom-right of the content; a toast clears
+after a few seconds or on the next key press. Neither covers the footer, which
+always keeps its clickable button-hints.
 
 ## v1 limits
 

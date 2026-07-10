@@ -2525,6 +2525,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let [topbar, content, status] = regions(frame.area());
     render_topbar(model, frame, topbar);
     render_content(model, frame, content);
+    // The bottom-left status chip floats over the content, above the footer row,
+    // so the footer's clickable buttons below it are never covered.
+    render_status_chip(model, frame, frame.area());
     render_status(model, frame, status);
     // Overlays drawn on top of the laid-out page: the form-field input boxes, the
     // search-match highlights, the focus highlight, the mouse-hover highlight, and
@@ -3248,10 +3251,12 @@ fn footer_strong_before(items: &[FooterItem], kept: &[usize], pos: usize) -> boo
     prev.is_nav() && !cur.is_nav()
 }
 
-/// Whether the footer currently shows its button strip (rather than the search
-/// query editor, the loading spinner, or a focused/hovered link's target).
+/// Whether the footer currently shows its button strip. It now always does,
+/// except in search mode where the status bar becomes the `/<query>` editor: the
+/// loading spinner and a focused/hovered link's target float in the bottom-left
+/// [`render_status_chip`] over the content instead of covering the buttons.
 fn footer_shows_buttons(model: &Model) -> bool {
-    model.mode != Mode::Search && model.pending.is_none() && focused_link_target(model).is_none()
+    model.mode != Mode::Search
 }
 
 /// Run a footer button's action, mirroring the key it stands for.
@@ -3287,16 +3292,17 @@ fn run_footer_action(model: &mut Model, action: FooterAction) -> Vec<Effect> {
     }
 }
 
-/// Draw the status bar: the loading spinner while a fetch is in flight, else the
-/// focused/hovered link's target, else the unified footer button strip. In
-/// search mode it is the live `/<query>` editor. Transient messages float as a
-/// [`render_toast`] overlay instead.
+/// Draw the status bar: always the unified footer button strip, so the reader's
+/// clickable controls are never covered. In search mode it is the live `/<query>`
+/// editor instead. The loading spinner and a focused/hovered link's target float
+/// in the bottom-left [`render_status_chip`] over the content; transient messages
+/// float as a [`render_toast`] overlay.
 fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
-    // Fill the status bar full width with the chrome style; the spinner / status /
-    // hints render on top and inherit its background.
+    // Fill the status bar full width with the chrome style; the buttons render on
+    // top and inherit its background.
     frame.render_widget(
         Block::default().style(chrome_style(model.no_color, model.theme)),
         area,
@@ -3306,18 +3312,89 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
         render_search_bar(model, frame, area);
         return;
     }
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    if let Some(pending) = &model.pending {
-        let label = format!(" loading {}", pending.target.path);
-        let line = RtLine::from(vec![spinner_span(model.spin), RtSpan::styled(label, dim)]);
-        frame.render_widget(Paragraph::new(line), area);
-    } else if let Some(target) = focused_link_target(model) {
-        // A focused (Tab) or hovered (mouse) link shows its target here, taking
-        // the place of the footer buttons until focus/hover clears.
-        frame.render_widget(Paragraph::new(RtSpan::styled(target, dim)), area);
-    } else {
-        render_footer_strip(model, frame, area);
+    render_footer_strip(model, frame, area);
+}
+
+/// Draw the bottom-left floating status chip: a one-line field on the content's
+/// last row showing the CURRENT pointer/page state, floating over the page just
+/// above the footer so the footer's clickable buttons are never covered. In
+/// priority order it shows, while a fetch is in flight, the spinner and the
+/// loading path; else, when a link is focused (Tab) or hovered (mouse), that
+/// link's target (`→ <address>`); else nothing at all. Transient events use
+/// [`render_toast`] (bottom-right) instead.
+fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
+    let [_topbar, content, _status] = regions(area);
+    if content.width == 0 || content.height == 0 {
+        return;
     }
+    // One column of padding each side; the body is truncated to whatever inner
+    // width is left so the field never overflows the content width.
+    let pad = 1u16;
+    let inner_budget = content.width.saturating_sub(2 * pad) as usize;
+    if inner_budget == 0 {
+        return;
+    }
+    let text_style = chrome_muted_style(model.no_color, model.theme);
+    // Priority: a fetch in flight wins over a focused/hovered link; idle draws
+    // nothing at all and leaves the content row untouched.
+    let (spans, inner_w): (Vec<RtSpan<'static>>, u16) = if let Some(pending) = &model.pending {
+        let label = truncate_to_cols(
+            &format!(" loading {}", pending.target.path),
+            inner_budget.saturating_sub(1),
+        );
+        let w = 1 + UnicodeWidthStr::width(label.as_str()) as u16;
+        (
+            vec![spinner_span(model.spin), RtSpan::styled(label, text_style)],
+            w,
+        )
+    } else if let Some(target) = focused_link_target(model) {
+        let body = truncate_to_cols(&format!("→ {target}"), inner_budget);
+        let w = UnicodeWidthStr::width(body.as_str()) as u16;
+        (vec![RtSpan::styled(body, text_style)], w)
+    } else {
+        return;
+    };
+    let field_w = (inner_w + 2 * pad).min(content.width);
+    let field_y = content.bottom().saturating_sub(1);
+    let chip_bg = chrome_style(model.no_color, model.theme);
+    // A thin top edge one row above the field sets the card off from the page and
+    // from the footer beneath it, without a full border box. Theme-aware; under
+    // `no_color` the reverse-video chrome fill plus an underline reads as an edge.
+    if content.height >= 2 {
+        let edge = Rect {
+            x: content.x,
+            y: field_y.saturating_sub(1),
+            width: field_w,
+            height: 1,
+        };
+        let edge_style = if model.no_color {
+            chip_bg.add_modifier(Modifier::UNDERLINED)
+        } else {
+            chip_bg.patch(Style::default().fg(rgb(model.theme.chrome_muted_fg())))
+        };
+        frame.render_widget(Clear, edge);
+        frame.render_widget(
+            Paragraph::new(RtSpan::styled("▔".repeat(field_w as usize), edge_style)),
+            edge,
+        );
+    }
+    // The one-line field itself: chrome background, one-column left padding, the
+    // spinner / target painted on top (same Clear-then-paint technique as the toast).
+    let field = Rect {
+        x: content.x,
+        y: field_y,
+        width: field_w,
+        height: 1,
+    };
+    frame.render_widget(Clear, field);
+    frame.render_widget(Block::default().style(chip_bg), field);
+    let inner = Rect {
+        x: field.x.saturating_add(pad),
+        y: field.y,
+        width: field.width.saturating_sub(2 * pad),
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(RtLine::from(spans)), inner);
 }
 
 /// Draw the footer button strip: each button's key in the bright chrome fg and
@@ -5007,8 +5084,10 @@ mod tests {
             action: HistoryAction::Push,
         });
         let buffer = render(&m, 80, 24);
-        let status = row_text(&buffer, 23, 80);
-        assert!(status.contains("loading"), "loading missing: {status:?}");
+        // The loading state now floats in the bottom-left chip on the content's
+        // last row (row 22), not the footer row.
+        let chip = row_text(&buffer, 22, 80);
+        assert!(chip.contains("loading"), "loading missing: {chip:?}");
     }
 
     #[test]
@@ -5111,17 +5190,15 @@ mod tests {
         let hue = (m.spin as f32 * HUE_STEP).rem_euclid(360.0);
         let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
         let buffer = render(&m, 80, 24);
+        // The spinner now lives in the bottom-left chip on the content's last row.
         let mut found = false;
         for x in 0..buffer.area.width {
-            let cell = &buffer[(x, 23)];
+            let cell = &buffer[(x, 22)];
             if cell.modifier.contains(Modifier::BOLD) && cell.fg == Color::Rgb(r, g, b) {
                 found = true;
             }
         }
-        assert!(
-            found,
-            "no bold rainbow spinner cell in the loading status bar"
-        );
+        assert!(found, "no bold rainbow spinner cell in the loading chip");
     }
 
     #[test]
@@ -6146,15 +6223,132 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_shows_focused_link_target() {
+    fn focused_link_shows_chip_and_keeps_footer_buttons() {
         let mut m = loaded_model((80, 24));
         press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
         let buffer = render(&m, 80, 24);
+        // The chip renders the focused link's address on the content's last row
+        // (row 22), above the footer (row 23).
+        let chip = row_text(&buffer, 22, 80);
+        assert!(
+            chip.contains(&link_of(&m, 1).target),
+            "chip missing the focused target on the content's last row: {chip:?}"
+        );
+        assert!(
+            chip.contains('→'),
+            "chip missing its arrow marker: {chip:?}"
+        );
+        // The regression this batch prevents: the footer still draws its buttons.
         let status = row_text(&buffer, 23, 80);
         assert!(
-            status.contains(&link_of(&m, 1).target),
-            "status bar missing the focused target: {status:?}"
+            status.contains("back") && status.contains("quit"),
+            "footer buttons covered by the focused link: {status:?}"
         );
+    }
+
+    #[test]
+    fn hovered_link_shows_chip_and_keeps_footer_buttons() {
+        let mut m = loaded_model((80, 24));
+        let vl = visible_links(&m)[0];
+        update_hover(&mut m, vl.col_start, vl.row);
+        let buffer = render(&m, 80, 24);
+        let chip = row_text(&buffer, 22, 80);
+        assert!(
+            chip.contains(&link_of(&m, vl.index).target),
+            "chip missing the hovered target: {chip:?}"
+        );
+        let status = row_text(&buffer, 23, 80);
+        assert!(
+            status.contains("back") && status.contains("quit"),
+            "footer buttons covered by the hovered link: {status:?}"
+        );
+    }
+
+    #[test]
+    fn loading_chip_shows_spinner_and_path_and_keeps_footer_buttons() {
+        let mut m = loaded_model((80, 24));
+        m.pending = Some(Pending {
+            target: tgt(7),
+            action: HistoryAction::Push,
+        });
+        let buffer = render(&m, 80, 24);
+        let chip = row_text(&buffer, 22, 80);
+        assert!(
+            chip.contains("loading") && chip.contains("/page/7.mu"),
+            "loading chip missing spinner label / path: {chip:?}"
+        );
+        let spins: Vec<&str> = SPIN_FRAMES.to_vec();
+        assert!(
+            spins.iter().any(|g| chip.contains(g)),
+            "loading chip missing the spinner glyph: {chip:?}"
+        );
+        let status = row_text(&buffer, 23, 80);
+        assert!(
+            status.contains("back") && status.contains("quit"),
+            "footer buttons covered while loading: {status:?}"
+        );
+    }
+
+    #[test]
+    fn idle_draws_no_chip_and_leaves_the_content_row_untouched() {
+        let m = loaded_model((80, 24));
+        // No loading, no focus, no hover.
+        assert!(m.pending.is_none() && m.focus.is_none() && m.hover.is_none());
+        let buffer = render(&m, 80, 24);
+        let chip = row_text(&buffer, 22, 80);
+        assert!(!chip.contains('→'), "idle chip drew an arrow: {chip:?}");
+        assert!(
+            !chip.contains("loading"),
+            "idle chip drew a loading label: {chip:?}"
+        );
+    }
+
+    #[test]
+    fn loading_wins_over_a_hovered_link() {
+        let mut m = loaded_model((80, 24));
+        let vl = visible_links(&m)[0];
+        update_hover(&mut m, vl.col_start, vl.row);
+        m.pending = Some(Pending {
+            target: tgt(7),
+            action: HistoryAction::Push,
+        });
+        let buffer = render(&m, 80, 24);
+        let chip = row_text(&buffer, 22, 80);
+        assert!(
+            chip.contains("loading") && chip.contains("/page/7.mu"),
+            "loading did not win over the hovered link: {chip:?}"
+        );
+        assert!(
+            !chip.contains('→'),
+            "the hovered link's arrow leaked while loading: {chip:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_address_is_truncated_and_the_chip_never_exceeds_content_width() {
+        // A narrow terminal forces truncation of a focused link's long target.
+        let cols = 20u16;
+        let mut m = loaded_model((cols, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        let target = focused_link_target(&m).expect("focused target");
+        assert!(
+            UnicodeWidthStr::width(target.as_str()) + 2 > cols as usize,
+            "test needs a target wider than the terminal"
+        );
+        let buffer = render(&m, cols, 24);
+        let chip = row_text(&buffer, 22, cols);
+        // The whole row fits the terminal, so the field never spilled over.
+        assert_eq!(chip.chars().count(), cols as usize);
+        // The arrow and the node prefix survive; the truncated tail is gone.
+        assert!(
+            chip.contains('→'),
+            "chip missing its arrow marker: {chip:?}"
+        );
+        assert!(
+            !chip.contains("alpha.mu"),
+            "long address was not truncated: {chip:?}"
+        );
+        assert!(chip.contains('…'), "no ellipsis after truncation: {chip:?}");
     }
 
     // --- phase 5: in-page search + #anchor scroll-to --------------------
