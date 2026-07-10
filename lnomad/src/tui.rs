@@ -47,7 +47,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as RtLine, Span as RtSpan, Text};
 use ratatui::widgets::{
@@ -1087,12 +1087,23 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         AppEvent::Mouse(mouse) => {
             let vp = model.viewport();
             match mouse.kind {
+                // The wheel scrolls whichever window owns the screen: an open
+                // overlay takes it over the page underneath.
                 MouseEventKind::ScrollDown => {
-                    model.scroll_lines_down(WHEEL_STEP, vp);
+                    if model.show_help {
+                        let (_, max) = help_scroll_geometry(model);
+                        model.help_scroll = model.help_scroll.saturating_add(WHEEL_STEP).min(max);
+                    } else {
+                        model.scroll_lines_down(WHEEL_STEP, vp);
+                    }
                     Vec::new()
                 }
                 MouseEventKind::ScrollUp => {
-                    model.scroll_lines_up(WHEEL_STEP);
+                    if model.show_help {
+                        model.help_scroll = model.help_scroll.saturating_sub(WHEEL_STEP);
+                    } else {
+                        model.scroll_lines_up(WHEEL_STEP);
+                    }
                     Vec::new()
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -1206,13 +1217,18 @@ fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
         return vec![Effect::Quit];
     }
 
-    // The help overlay swallows keys until dismissed.
+    // The help overlay swallows keys until dismissed. While it is open every
+    // scroll key from `SCROLL_KEYS` moves the OVERLAY's view (via the shared
+    // `scrolled` rule), not the page underneath.
     if model.show_help {
         if matches!(
             key.code,
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
         ) {
             model.show_help = false;
+        } else if let Some(cmd) = key_to_scroll(&key) {
+            let (viewport, max) = help_scroll_geometry(model);
+            model.help_scroll = scrolled(model.help_scroll, cmd, viewport, max);
         }
         return Vec::new();
     }
@@ -4099,12 +4115,44 @@ fn render_help(model: &Model, frame: &mut Frame, area: Rect) {
         .title(" help — Esc, ? or click to close ")
         .style(chrome_style(model.no_color, model.theme));
     frame.render_widget(Clear, overlay);
+
+    // The block's inner height is the viewport; the help lines are the content.
+    // When the terminal is too short to hold them all, draw the slice starting at
+    // `help_scroll` (clamped) and paint a scrollbar on the right border. The
+    // shared `scrolled` rule keeps the offset in range, so slicing is always
+    // sound.
+    let total = lines.len();
+    let inner_h = height.saturating_sub(2) as usize;
+    let max = total.saturating_sub(inner_h);
+    let offset = model.help_scroll.min(max);
+    let visible: Vec<RtLine> = lines.into_iter().skip(offset).take(inner_h).collect();
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
+        Paragraph::new(Text::from(visible))
             .block(block)
             .wrap(Wrap { trim: false }),
         overlay,
     );
+    if max > 0 {
+        let mut state = ScrollbarState::new(max).position(offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        frame.render_stateful_widget(scrollbar, overlay.inner(Margin::new(0, 1)), &mut state);
+    }
+}
+
+/// The help overlay's scroll geometry for the current terminal size: the number
+/// of help lines that fit at once (the viewport) and the largest valid
+/// [`Model::help_scroll`] (`max`). Shared by the key/wheel handler (to clamp the
+/// offset via [`scrolled`]) and the renderer (to slice the visible lines), so
+/// the two can never disagree on the bounds. Mirrors `render_help`'s sizing: the
+/// overlay is at most the full terminal height, two rows go to the border.
+fn help_scroll_geometry(model: &Model) -> (usize, usize) {
+    let total = help_lines().len();
+    let rows = model.size.1 as usize;
+    let height = (total + 2).min(rows);
+    let viewport = height.saturating_sub(2);
+    (viewport, total.saturating_sub(viewport))
 }
 
 /// Map laid-out styled lines to a ratatui [`Text`], grouping runs of equal
@@ -7499,6 +7547,127 @@ mod tests {
             .filter(|l| l.contains("back / forward"))
             .count();
         assert_eq!(count, 1, "back / forward must appear once:\n{text}");
+    }
+
+    /// The overlay scrollbar's thumb (`█`) appears in a column strictly left of
+    /// the content's own scrollbar (the rightmost column), so this detects the
+    /// overlay's scrollbar without picking up the always-present content one.
+    fn overlay_scrollbar_shown(buffer: &ratatui::buffer::Buffer) -> bool {
+        let w = buffer.area.width;
+        for y in 0..buffer.area.height {
+            for x in 0..w.saturating_sub(1) {
+                if buffer[(x, y)].symbol() == "█" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn help_overlay_scrolls_when_taller_than_the_terminal() {
+        // A terminal too short to show the whole help.
+        let rows = 8u16;
+        let mut m = loaded_model((80, rows));
+        let total = help_lines().len();
+        assert!(
+            total + 2 > rows as usize,
+            "the help must overflow an {rows}-row terminal for this test"
+        );
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, 0, "the help opens at the top");
+        let page_before = m.scroll;
+        let (viewport, max) = help_scroll_geometry(&m);
+        assert!(max > 0, "there must be room to scroll");
+
+        // Down motions: j, Ctrl-n, PageDown, Ctrl-f.
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, 1, "j scrolls down one");
+        press(&mut m, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(m.help_scroll, 2, "Ctrl-n scrolls down one");
+        let before = m.help_scroll;
+        press(&mut m, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(
+            m.help_scroll,
+            (before + viewport).min(max),
+            "PageDown moves by a viewport"
+        );
+        m.help_scroll = 0;
+        press(&mut m, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert_eq!(m.help_scroll, viewport.min(max), "Ctrl-f pages down");
+
+        // G / End reach the last line; g / Home return to the top.
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, max, "G reaches the bottom");
+        press(&mut m, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, 0, "g returns to the top");
+        press(&mut m, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, max, "End also reaches the bottom");
+        press(&mut m, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, 0, "Home returns to the top");
+
+        // The wheel scrolls the overlay, both ways, clamped.
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(
+            m.help_scroll,
+            WHEEL_STEP.min(max),
+            "wheel down scrolls the help"
+        );
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
+        assert_eq!(m.help_scroll, 0, "wheel up scrolls back to the top");
+
+        // The offset clamps at both ends.
+        press(&mut m, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, 0, "clamps at the top");
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(m.help_scroll, max, "clamps at the bottom");
+
+        // Scrolling the help never moves the page underneath.
+        assert_eq!(m.scroll, page_before, "the page offset is untouched");
+    }
+
+    #[test]
+    fn help_scroll_reveals_the_last_line_and_draws_a_scrollbar() {
+        // Wide but short: the overlay is narrower than the terminal, so its
+        // right-border scrollbar sits strictly left of the content scrollbar.
+        let (w, rows) = (120u16, 8u16);
+        let mut m = loaded_model((w, rows));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        // The last help entry's keys are unique to the help body.
+        let marker = "q / Ctrl-c";
+        let top = flat(&render(&m, w, rows));
+        assert!(
+            !top.contains(marker),
+            "the last line must be hidden at the top:\n{top}"
+        );
+        assert!(
+            overlay_scrollbar_shown(&render(&m, w, rows)),
+            "the scrollbar must render while the help overflows"
+        );
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        let bottom = flat(&render(&m, w, rows));
+        assert!(
+            bottom.contains(marker),
+            "G must reveal the last help line:\n{bottom}"
+        );
+    }
+
+    #[test]
+    fn help_that_fits_shows_no_scrollbar_and_ignores_scroll_keys() {
+        let mut m = loaded_model((120, 40));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let (_, max) = help_scroll_geometry(&m);
+        assert_eq!(max, 0, "the help fits, so there is nothing to scroll");
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(
+            m.help_scroll, 0,
+            "scroll keys are pinned when the help fits"
+        );
+        assert!(
+            !overlay_scrollbar_shown(&render(&m, 120, 40)),
+            "no scrollbar when the help fits the terminal"
+        );
     }
 
     #[test]
