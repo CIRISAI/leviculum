@@ -151,10 +151,13 @@ The strict check of step 9 is not a bare guard. It is the SENSOR of a healing lo
    and marks the path unresponsive (`Transport.py:2721`) when transport is enabled.
 4. The path is relearned. The next attempt agrees, and the link establishes.
 
-**A stack that suppresses the drop also suppresses the healing.** That is the single most important
-sentence on this page. A relay that rewrites a mismatching hop count so the proof is accepted makes
-the link succeed once and guarantees that the wrong path is never corrected. The mismatch then
-recurs for the lifetime of the path entry.
+**A stack that suppresses the drop also suppresses the LINK-FAILURE healing path.** A relay that
+rewrites a mismatching hop count so the proof is accepted makes the link succeed once and blocks
+`clean_link_table` from ever re-requesting the path for that entry. It does NOT guarantee the entry
+is never corrected at all: a fresh equal-or-shorter announce still replaces it via rule 6,
+independent of the link-failure loop. So recurrence is a FIELD property (observed: a five-minute
+heartbeat on hamster, 2026-07-10) — evidence that no corrective announce arrived, not a guarantee
+the code makes it inevitable.
 
 ## Where leviculum diverges
 
@@ -164,16 +167,16 @@ Recorded 2026-07-10 against `vendor/Reticulum` as vendored.
 |------|-----------|-----------|---------|
 | Receipt increment | `:1457` | `transport.rs:1588` | matches |
 | IPC exception, instance side | `:1482` | `transport.rs:1592` | matches |
-| IPC exception, client side | `:1484` | absent | **defect**, a client of a shared instance counts one hop too many for everything it learns |
+| IPC exception, client side | `:1484` | `transport.rs:1592` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
 | Announce rebroadcast | `:2009` | `transport.rs:6235` | matches |
 | Path table store | `:1868`, `:2014` | `transport.rs:3140` | matches |
-| Path acceptance | `:1765`, `:2371` | `transport.rs:2610`, `:3056` | matches |
+| Path acceptance | `:1765`, `:2371` | `transport.rs:3082` (`should_update`) | matches |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
-| Strict proof check | `:1656` disjunction | `transport.rs:3746` per direction; mismatch rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default), reference-exact behind the flag, see below |
-| Healing, no path | `:710` | `transport.rs:6542` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:717` | absent | **defect** |
-| Healing, destination direct | `:726` | `transport.rs:6550` | matches |
-| Healing, initiator direct (`taken_hops == 1`) | `:748` | `transport.rs:6558` | matches |
+| LRPROOF relay check | `:2174-2206` (single `== remaining_hops`, drop else; the `:1656` disjunction is gated OUT for LRPROOF at `:1646`) | `transport.rs:3746`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
+| Healing, no path | `:710` | `transport.rs:6688` | matches |
+| Healing, local client link (`taken_hops == 0`) | `:717` | `transport.rs:6692` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, destination direct | `:726` | `transport.rs:6699` | matches |
+| Healing, initiator direct (`taken_hops == 1`) | `:748` | `transport.rs:6711` | matches |
 
 ### The deliberate deviation, and its cost
 
@@ -191,8 +194,10 @@ It also costs three things:
 3. It overwrites a measurement with an assertion. Downstream consumers of `hops` receive what this
    relay believes rather than what the packet did.
 
-The rewrite must stay until the cause is fixed and the warning is shown to fall silent. Removing it
-today breaks NomadNet within five minutes. That is a measurement, not a guess.
+The rewrite must stay until the cause is fixed and the warning is shown to fall silent. What is
+MEASURED is that the warning recurs every ~300 s with the rewrite ON. That removing it would break
+NomadNet is an INFERENCE (drop -> strict client rejects the proof -> link fails), not yet a
+measurement: no flag-off live run has been done. Do not deploy the flag off without one.
 
 ### The strict behaviour now exists behind a flag
 
@@ -201,19 +206,29 @@ The reference-exact strict check is implemented behind `TransportConfig.lrproof_
 in the field. Set to `false`, the forward site DROPS a proof whose hop count matches neither frozen
 operand rather than rewriting it:
 
-* the `next_hop` direction (destination -> initiator) drops unless `packet.hops == remaining_hops`,
-  mapping to `Transport.py:2176` (LRPROOF / local-client-link) and `Transport.py:1664` (transit
-  link) — both reference arms check `remaining_hops` on this direction;
-* the `received` direction (initiator -> destination) drops unless `packet.hops == taken_hops`,
-  mapping to `Transport.py:1668` (the transit-link arm of the `:1656` disjunction).
+* the `next_hop` direction (destination -> initiator) drops unless `packet.hops == remaining_hops`.
+  For a proof this maps to `Transport.py:2176` — the SINGLE `== IDX_LT_REM_HOPS` check whose only
+  else (`:2206`) drops. This is the arm the field case takes.
 
-The drop is the healing sensor of "The control loop that makes strictness safe" above, and the mvr
-proves the loop closes: `leviculum-core/src/node/mvr_hop_asymmetry.rs` runs the honest asymmetry with
-the flag off and shows convergence — the first proof is dropped and the link stays unvalidated, the
-timed-out local-client link makes `clean_link_table` request a fresh path for the original
-destination, the short arm is relearned (A's path to R drops from 3 to 2 hops), and a second link
-attempt agrees (`packet_hops == remaining_hops`, no warning) and establishes. Fail once, heal,
-succeed.
+MAPPING CAVEAT (found by adversarial review 2026-07-10): the `:1656` disjunction does NOT apply to
+LRPROOF at all — its transit block is gated at `Transport.py:1646` with `packet.context !=
+RNS.Packet.LRPROOF`. So for proofs the reference has exactly ONE relay path (`:2174-2206`, single
+check, drop else) and NO initiator-side LRPROOF forwarding. Our `received`-direction arm therefore
+has no LRPROOF counterpart in the reference; it is practically moot (proofs flow
+destination -> initiator), but it is a leviculum choice, not reference parity. Earlier drafts of
+this page and a code comment mis-cited the `:1656`/`:1664`/`:1668` arms for proofs — corrected.
+
+The drop is the healing SENSOR. Whether the loop actually CLOSES is NOT yet established. The mvr
+(`mvr_hop_asymmetry.rs`, flag off) shows the sensor fires — the proof is dropped, the link stays
+unvalidated, and `clean_link_table` issues a path request — but its convergence step is CIRCULAR and
+must not be read as proof of healing: the path request is discarded (`handle_timeout()` result
+dropped, no node answers it), and the short arm is relearned only because the test HAND-FEEDS a
+fresh announce. That same injected announce would heal the rewrite-ON world identically (rule 6),
+so the mvr does not isolate the flag as the cause of convergence. In the field, a path RESPONSE
+inherits the responder's STORED count (rule 7, "staleness propagates"), so a re-request can relearn
+the SAME stale count and loop "fail, request, fail". Convergence is guaranteed only for one-level
+divergence answered by the correct next hop. This is the open risk the interop A/B and a live
+flag-off run must settle before the default can change.
 
 The flag stays `false`-capable but `true`-default until an interop A/B and a live NomadNet-retry
 check confirm the strict drop heals on the air as it does in the mvr; only then can `false` become
