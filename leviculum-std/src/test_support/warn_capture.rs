@@ -3,8 +3,8 @@
 //! The structured event-log layer ([`crate::event_log`]) captures only
 //! records that carry an `event = "..."` field.  A few interop tests
 //! need to observe an ordinary `tracing::warn!` MESSAGE as a reliable
-//! assertion — e.g. the relay's `LRPROOF hop asymmetry, forwarding
-//! anyway` line (Codeberg #38), which is a plain warn emitted from
+//! assertion — e.g. the relay's `LRPROOF hop asymmetry: rewriting
+//! forwarded hops to the frozen count` line (Codeberg #38), which is a plain warn emitted from
 //! `leviculum_core::transport`, not a catalogued event.
 //!
 //! Capturing that with a private `set_global_default` subscriber inside

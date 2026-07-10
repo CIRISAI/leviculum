@@ -19,8 +19,8 @@
 //! the initiator carrying the hop count it expects: the strict Python initiator
 //! matches its pending link and establishes, exactly as our own leviculum-std
 //! initiator always did. The relay still DETECTS and logs the asymmetry
-//! (`LRPROOF hop asymmetry, forwarding anyway (remaining_hops)`); it does not
-//! pretend the path is symmetric. Same relay, same page: both clients establish.
+//! (`LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)`);
+//! it does not pretend the path is symmetric. Same relay, same page: both clients establish.
 //!
 //! ## Topology
 //!
@@ -70,8 +70,8 @@ use crate::harness::{pick_free_tcp_port, TestDaemon};
 // ----------------------------------------------------------------------------
 // WARN capture for relay-1's asymmetry line.
 //
-// This observes the relay's plain `tracing::warn!` "LRPROOF hop asymmetry,
-// forwarding anyway" message. It hooks the harness's ONE global subscriber via
+// This observes the relay's plain `tracing::warn!` "LRPROOF hop asymmetry:
+// rewriting forwarded hops to the frozen count" message. It hooks the harness's ONE global subscriber via
 // `register_warn_capture` (an active-handles capture layer) rather than a
 // private `set_global_default`. The private-subscriber approach was a race: any
 // test that calls `common::init_tracing()` installs the global subscriber first
@@ -370,9 +370,9 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
     // (B) our relay logged the asymmetry-forward.
     // ========================================================================
     assert!(
-        logs.contains("LRPROOF hop asymmetry, forwarding anyway"),
+        logs.contains("LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count"),
         "REPRODUCTION (b): relay-1 must log the LRPROOF hop asymmetry \
-         (forwarding anyway).\n--- relay logs ---\n{logs}"
+         (rewriting forwarded hops to the frozen count).\n--- relay logs ---\n{logs}"
     );
 
     // ========================================================================

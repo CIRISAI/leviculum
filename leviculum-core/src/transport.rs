@@ -3736,7 +3736,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
                             remaining_hops = link_entry.remaining_hops,
-                            "LRPROOF hop asymmetry, forwarding anyway (remaining_hops)"
+                            rewritten_to = link_entry.remaining_hops,
+                            "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)"
                         );
                         rewrite_hops = Some(link_entry.remaining_hops);
                     }
@@ -3748,7 +3749,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
                             entry_hops = link_entry.hops,
-                            "LRPROOF hop asymmetry, forwarding anyway (taken hops)"
+                            rewritten_to = link_entry.hops,
+                            "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (taken hops)"
                         );
                         rewrite_hops = Some(link_entry.hops);
                     }
@@ -4119,6 +4121,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // mismatch, forward anyway. Interface gate stays; loops stay
                     // bounded by the global max_hops drop. Deviation from Python
                     // (Transport.py:1594).
+                    // Deliberate asymmetry vs the LRPROOF path: LRPROOF rewrites
+                    // the forwarded hop count to the frozen count, link data does
+                    // NOT (no rewrite_hops here), so "forwarding anyway" is
+                    // accurate. Do not "fix" this to match the LRPROOF wording.
                     let target_iface = if interface_index == link_entry.next_hop_interface_index {
                         // From destination side.
                         if packet.hops != link_entry.remaining_hops {

@@ -384,8 +384,9 @@ fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
         o.logs
     );
     assert!(
-        o.logs
-            .contains("LRPROOF hop asymmetry, forwarding anyway (remaining_hops)"),
+        o.logs.contains(
+            "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)"
+        ),
         "the asymmetry must be logged as a forward, not a drop.\n--- logs ---\n{}",
         o.logs
     );
@@ -417,9 +418,9 @@ fn lrproof_hop_mismatch_relay_forwards_despite_asymmetry() {
 /// A Python node in the relay position DROPS a proof whose arriving hop count is
 /// not exactly the remaining_hops it froze when it forwarded the request.
 ///
-/// Our relay `transport.rs` still logs
-/// `LRPROOF hop asymmetry, forwarding anyway (remaining_hops)` on the mismatch,
-/// but now REWRITES the forwarded packet's `hops` down to the frozen
+/// Our relay `transport.rs` logs
+/// `LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)`
+/// on the mismatch, and REWRITES the forwarded packet's `hops` down to the frozen
 /// `remaining_hops` before it goes on the wire (`forward_on_interface_from`
 /// does not re-increment). So the proof leaves our relay carrying hops=1,
 /// matching the frozen remaining_hops=1.
