@@ -51,6 +51,7 @@
 - [jl / jldiff tools](jl-jldiff.md)
 - [Storage trait analysis](storage-trait-analysis.md)
 - [Broadcast Python-RNS parity](architecture-broadcast-python-parity.md)
+- [Hop counting](architecture-hop-counting.md)
 - [Testing quick reference](development-testing.md)
 - [CI pipeline](development-ci.md)
 
