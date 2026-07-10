@@ -113,7 +113,9 @@ by focus, hint or click:
 - mouse back / forward side buttons  back / forward
 - `Esc` / `Ctrl-g`  cancel a load
 - `?`         toggle the help overlay (grouped keybindings; `Esc`, `?` or a
-  click anywhere closes it)
+  click anywhere closes it). When an overlay (help or places) is taller than the
+  terminal the same scroll keys and the wheel scroll the focused window, with a
+  scrollbar on its border
 - `q` / `Ctrl-c`  quit
 
 The focused or hovered link's target appears in a small floating field at the
@@ -132,8 +134,10 @@ cache carries a subtle `⚡` bolt in the top-bar status cluster.
 The places panel (`d`) takes the same up/down motions as the page scroll applied
 to its selection: `j` / `k`, `Ctrl-n` / `Ctrl-p`, arrows step a row; `Ctrl-f` /
 `Ctrl-b` and `Ctrl-d` / `Ctrl-u` jump several; `g` / `G`, `Home` / `End` go to
-the first / last entry. `Enter` opens the selection, `x` deletes the selected
-bookmark, `Esc` / `d` close the panel.
+the first / last entry. When the list is taller than the terminal the view
+follows the selection (and the wheel moves the selection), with a scrollbar on
+the border. `Enter` opens the selection, `x` deletes the selected bookmark,
+`Esc` / `d` close the panel.
 
 ### Form fields and submitting
 

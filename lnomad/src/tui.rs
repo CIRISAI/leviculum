@@ -1093,6 +1093,15 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
                     if model.show_help {
                         let (_, max) = help_scroll_geometry(model);
                         model.help_scroll = model.help_scroll.saturating_add(WHEEL_STEP).min(max);
+                    } else if model.show_places {
+                        // The wheel moves the SELECTION (the view follows), so
+                        // there is exactly one piece of state to keep in range.
+                        let len = places(model).len();
+                        if len > 0 {
+                            model.places_sel =
+                                model.places_sel.saturating_add(WHEEL_STEP).min(len - 1);
+                            clamp_places_scroll(model);
+                        }
                     } else {
                         model.scroll_lines_down(WHEEL_STEP, vp);
                     }
@@ -1101,6 +1110,9 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
                 MouseEventKind::ScrollUp => {
                     if model.show_help {
                         model.help_scroll = model.help_scroll.saturating_sub(WHEEL_STEP);
+                    } else if model.show_places {
+                        model.places_sel = model.places_sel.saturating_sub(WHEEL_STEP);
+                        clamp_places_scroll(model);
                     } else {
                         model.scroll_lines_up(WHEEL_STEP);
                     }
@@ -1753,32 +1765,96 @@ fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     }
 }
 
-/// Apply a [`ScrollCmd`] to the places-panel selection, reusing the content
-/// keymap so the panel and the page share one set of up/down motions. Line
-/// motions step one entry, page/half-page motions jump several (clamped to the
-/// list ends), and top/bottom select the first/last entry. A no-op when the
-/// panel is empty.
+/// The places panel's line layout: the rendered LINE each entry sits on (indexed
+/// by its flat [`places`] index) and the total number of panel lines. The panel
+/// interleaves section titles and a blank spacer with the entry rows, so an
+/// entry's selection index is not its line index; this is the single mapping the
+/// renderer's sizing and the scroll math both read, so the selected row's on-
+/// screen position is always exact. Mirrors the line order `render_places` draws.
+struct PlacesLayout {
+    /// `entry_line[i]` is the rendered line of the i-th entry in [`places`].
+    entry_line: Vec<usize>,
+    /// Total rendered panel lines: titles, the spacer, placeholders and rows.
+    total: usize,
+}
+
+/// Compute the [`PlacesLayout`] for the current model, walking the same line
+/// order [`render_places`] builds so the two never disagree.
+fn places_layout(model: &Model) -> PlacesLayout {
+    let count = places(model).len();
+    let bm_count = model.bookmarks.len();
+    let mut entry_line = vec![0usize; count];
+    let mut line = 0usize;
+    line += 1; // "Bookmarks" title
+    if bm_count == 0 {
+        line += 1; // "  (none)"
+    } else {
+        for slot in entry_line.iter_mut().take(bm_count) {
+            *slot = line;
+            line += 1;
+        }
+    }
+    line += 1; // blank spacer
+    line += 1; // "Discovered nodes" title
+    if count == bm_count {
+        line += 1; // "  (none)"
+    } else {
+        for slot in entry_line.iter_mut().skip(bm_count) {
+            *slot = line;
+            line += 1;
+        }
+    }
+    PlacesLayout {
+        entry_line,
+        total: line,
+    }
+}
+
+/// The places overlay's inner viewport in rows for a panel of `total` lines: the
+/// overlay is at most the full terminal height, two rows go to the border.
+/// Mirrors `render_places`'s sizing so the scroll math and the draw agree.
+fn places_viewport(model: &Model, total: usize) -> usize {
+    let rows = model.size.1 as usize;
+    let height = (total + 2).min(rows);
+    height.saturating_sub(2)
+}
+
+/// Scroll the places view the MINIMUM needed to keep the selected entry's row
+/// inside the viewport, then clamp it to the list. The single piece of view
+/// state, so the selected row can never end up off-screen (mirrors the content's
+/// keep-line-visible logic).
+fn clamp_places_scroll(model: &mut Model) {
+    let layout = places_layout(model);
+    let vp = places_viewport(model, layout.total);
+    let max = layout.total.saturating_sub(vp);
+    let sel_line = layout
+        .entry_line
+        .get(model.places_sel)
+        .copied()
+        .unwrap_or(0);
+    if sel_line < model.places_scroll {
+        model.places_scroll = sel_line;
+    } else if vp > 0 && sel_line >= model.places_scroll + vp {
+        model.places_scroll = sel_line + 1 - vp;
+    }
+    model.places_scroll = model.places_scroll.min(max);
+}
+
+/// Apply a [`ScrollCmd`] to the places-panel selection through the shared
+/// [`scrolled`] rule, so the panel and the page move by the same semantics. Line
+/// motions step one entry; page/half-page motions move by the number of entries
+/// that fit in the overlay's inner height; top/bottom select the first/last
+/// entry. The view then follows via [`clamp_places_scroll`]. A no-op when empty.
 fn apply_places_scroll(model: &mut Model, cmd: ScrollCmd) {
     let len = places(model).len();
     if len == 0 {
         model.places_sel = 0;
+        model.places_scroll = 0;
         return;
     }
-    let max = (len - 1) as isize;
-    let vp = model.viewport().max(1) as isize;
-    let half = (vp / 2).max(1);
-    let sel = model.places_sel as isize;
-    let next = match cmd {
-        ScrollCmd::LineUp => sel - 1,
-        ScrollCmd::LineDown => sel + 1,
-        ScrollCmd::HalfPageUp => sel - half,
-        ScrollCmd::HalfPageDown => sel + half,
-        ScrollCmd::PageUp => sel - vp,
-        ScrollCmd::PageDown => sel + vp,
-        ScrollCmd::Top => 0,
-        ScrollCmd::Bottom => max,
-    };
-    model.places_sel = next.clamp(0, max) as usize;
+    let vp = places_viewport(model, places_layout(model).total);
+    model.places_sel = scrolled(model.places_sel, cmd, vp, len - 1);
+    clamp_places_scroll(model);
 }
 
 /// Open the selected place: a bookmark's URL, or a discovered node's default
@@ -1819,6 +1895,7 @@ fn delete_selected_place(model: &mut Model) -> Vec<Effect> {
     model.bookmarks.remove(&url);
     let len = places(model).len();
     model.places_sel = model.places_sel.min(len.saturating_sub(1));
+    clamp_places_scroll(model);
     model.set_toast(ToastKind::Info, format!("removed bookmark {url}"));
     vec![Effect::SaveBookmarks]
 }
@@ -3947,6 +4024,9 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
         }
     }
 
+    // The lines built above interleave the two section titles, an "(none)"
+    // placeholder or the entry rows, and one blank spacer — exactly the order
+    // `places_layout` models, so the entry -> line mapping there stays exact.
     let height = (lines.len() as u16 + 2).min(area.height);
     let overlay = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -3959,7 +4039,24 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
         .title(" places ")
         .style(chrome_style(model.no_color, model.theme));
     frame.render_widget(Clear, overlay);
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), overlay);
+
+    // The block's inner height is the viewport; when the list is taller than the
+    // terminal, draw the slice starting at `places_scroll` (clamped to keep the
+    // selected row visible on the update side) and paint a scrollbar on the right
+    // border. Same shared treatment as the help overlay.
+    let total = lines.len();
+    let inner_h = height.saturating_sub(2) as usize;
+    let max = total.saturating_sub(inner_h);
+    let offset = model.places_scroll.min(max);
+    let visible: Vec<RtLine> = lines.into_iter().skip(offset).take(inner_h).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)).block(block), overlay);
+    if max > 0 {
+        let mut state = ScrollbarState::new(max).position(offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        frame.render_stateful_widget(scrollbar, overlay.inner(Margin::new(0, 1)), &mut state);
+    }
 }
 
 /// One places-panel row: its label, reverse-video highlighted when it is the
@@ -7564,6 +7661,15 @@ mod tests {
         false
     }
 
+    /// Whether the places panel's selected entry currently sits inside the
+    /// overlay's viewport — the invariant the view-follow logic must keep.
+    fn selected_visible(m: &Model) -> bool {
+        let layout = places_layout(m);
+        let vp = places_viewport(m, layout.total);
+        let sel_line = layout.entry_line[m.places_sel];
+        sel_line >= m.places_scroll && sel_line < m.places_scroll + vp
+    }
+
     #[test]
     fn help_overlay_scrolls_when_taller_than_the_terminal() {
         // A terminal too short to show the whole help.
@@ -8008,6 +8114,150 @@ mod tests {
         // Plain `d` still closes the panel.
         press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
         assert!(!m.show_places);
+    }
+
+    /// Fill a model with `n` discovered nodes so the panel overflows a short
+    /// terminal.
+    fn with_nodes(size: (u16, u16), n: u8) -> Model {
+        let mut m = loaded_model(size);
+        for i in 0..n {
+            update(
+                &mut m,
+                AppEvent::NodeDiscovered(disc_node(0x40 + i, &format!("Node-{i}"))),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn places_panel_scrolls_to_follow_the_selection() {
+        let mut m = with_nodes((80, 8), 20);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(m.show_places);
+        assert_eq!(m.places_sel, 0);
+        assert_eq!(m.places_scroll, 0, "the panel opens at the top");
+
+        let layout = places_layout(&m);
+        let vp = places_viewport(&m, layout.total);
+        assert!(layout.total > vp, "the list must overflow this terminal");
+
+        // Stepping down one entry at a time keeps the selected row visible, and
+        // once the selection reaches the viewport bottom the view scrolls by one
+        // (all entries are nodes here, so a step is exactly one line).
+        let len = places(&m).len();
+        let mut prev = m.places_scroll;
+        let mut ever_scrolled = false;
+        for _ in 0..len - 1 {
+            press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+            assert!(selected_visible(&m), "the selected row must stay visible");
+            if m.places_scroll != prev {
+                assert_eq!(m.places_scroll, prev + 1, "the view scrolls by one line");
+                ever_scrolled = true;
+            }
+            prev = m.places_scroll;
+        }
+        assert!(
+            ever_scrolled,
+            "stepping past the bottom must scroll the view"
+        );
+
+        // G selects the last node AND shows it; g returns to the top.
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, len - 1, "G selects the last node");
+        assert!(selected_visible(&m), "the last node's row is visible");
+        press(&mut m, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 0, "g selects the first entry");
+        // Minimum-needed scrolling: the first entry is brought into view without
+        // scrolling any further than required to reveal it.
+        assert!(selected_visible(&m), "the first entry is visible after g");
+    }
+
+    #[test]
+    fn places_selection_stays_visible_across_the_section_boundary() {
+        let mut m = with_nodes((80, 8), 10);
+        for i in 0..4u8 {
+            m.bookmarks.add(Bookmark {
+                url: format!("aa{i:02}:/page/index.mu"),
+                title: format!("B{i}"),
+            });
+        }
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let len = places(&m).len();
+        // Walk the whole list; the selected row is visible at every step, even
+        // as it crosses the blank spacer and the "Discovered nodes" title.
+        for _ in 0..len + 2 {
+            press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+            assert!(
+                selected_visible(&m),
+                "selection off-screen at sel={}",
+                m.places_sel
+            );
+        }
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert!(selected_visible(&m), "G keeps the last row visible");
+    }
+
+    #[test]
+    fn places_page_motion_moves_by_the_visible_entry_count() {
+        let mut m = with_nodes((80, 8), 20);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let vp = places_viewport(&m, places_layout(&m).total);
+        let max = places(&m).len() - 1;
+        press(&mut m, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(
+            m.places_sel,
+            vp.min(max),
+            "PageDown moves the selection by the viewport entry count, not a constant"
+        );
+        assert!(selected_visible(&m));
+    }
+
+    #[test]
+    fn places_wheel_moves_the_selection_and_the_view_follows() {
+        let mut m = with_nodes((80, 8), 20);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(
+            m.places_sel, WHEEL_STEP,
+            "the wheel moves the selection by WHEEL_STEP"
+        );
+        assert!(selected_visible(&m), "the view follows the wheel");
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
+        assert_eq!(m.places_sel, 0, "the wheel moves the selection back up");
+    }
+
+    #[test]
+    fn places_scrollbar_shows_only_when_the_list_overflows() {
+        // Wide + short: the panel overflows, so the scrollbar renders.
+        let mut over = with_nodes((120, 8), 20);
+        press(&mut over, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(
+            overlay_scrollbar_shown(&render(&over, 120, 8)),
+            "a scrollbar renders while the list overflows"
+        );
+        // Tall: the whole list fits, so there is no scrollbar.
+        let mut fits = with_nodes((120, 40), 3);
+        press(&mut fits, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(
+            !overlay_scrollbar_shown(&render(&fits, 120, 40)),
+            "no scrollbar when the list fits the terminal"
+        );
+    }
+
+    #[test]
+    fn overlays_never_draw_outside_their_rect_on_a_tiny_terminal() {
+        // A 4x3 terminal is far smaller than either overlay's natural size;
+        // rendering must clamp to the rect and never panic.
+        let mut m = with_nodes((4, 3), 10);
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let _ = render(&m, 4, 3);
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        let _ = render(&m, 4, 3);
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let _ = render(&m, 4, 3);
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        let _ = render(&m, 4, 3);
     }
 
     #[test]
