@@ -97,6 +97,7 @@ impl PageResponder {
         node.register_request_handler(dest_hash, "/page/small.mu", RequestPolicy::AllowAll);
         node.register_request_handler(dest_hash, "/page/large.mu", RequestPolicy::AllowAll);
         node.register_request_handler(dest_hash, "/page/echo.mu", RequestPolicy::AllowAll);
+        node.register_request_handler(dest_hash, "/page/whoami.mu", RequestPolicy::AllowAll);
         node.announce_destination(&dest_hash, Some(b"lnomad-page-node"))
             .await
             .expect("responder announce");
@@ -126,6 +127,18 @@ async fn reply_loop(node: ReticulumNode, mut events: leviculum_std::EventReceive
                 "/page/large.mu" => msgpack_bin(&large_page()),
                 // Echo the raw request value (a msgpack map of query fields).
                 "/page/echo.mu" => data,
+                // The remote identity the responder observed on this link at
+                // request-handling time (i.e. AFTER any identify the client
+                // sent before requesting): its fingerprint, or empty for an
+                // anonymous link. This is how a forum/guestbook page would
+                // read `remote_identity`.
+                "/page/whoami.mu" => {
+                    let fingerprint = node
+                        .get_remote_identity(&link_id)
+                        .map(|identity| identity.hash().to_vec())
+                        .unwrap_or_default();
+                    msgpack_bin(&fingerprint)
+                }
                 _ => continue,
             };
             let _ = node.send_response(&link_id, &request_id, &response).await;
@@ -133,11 +146,14 @@ async fn reply_loop(node: ReticulumNode, mut events: leviculum_std::EventReceive
     }
 }
 
-/// Stand up the daemon + responder and connect an lnomad session to it.
+/// Stand up the daemon + responder and connect an lnomad session to it. The
+/// session gets a throwaway app config dir (identity + identify store), so
+/// tests never touch the user's real `~/.config/lnomad`.
 async fn setup() -> (
     ReticulumNode,
     PageResponder,
     Session,
+    tempfile::TempDir,
     tempfile::TempDir,
     String,
 ) {
@@ -169,17 +185,35 @@ async fn setup() -> (
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let session_storage = tempfile::tempdir().expect("session storage");
-    let session = Session::connect_to(&instance_name, session_storage.path().to_path_buf())
-        .await
-        .expect("lnomad session connect");
+    let app_dir = tempfile::tempdir().expect("session app dir");
+    let session = Session::connect_to_with_app_dir(
+        &instance_name,
+        session_storage.path().to_path_buf(),
+        Some(app_dir.path().to_path_buf()),
+    )
+    .await
+    .expect("lnomad session connect");
 
     let dest_hex = responder.dest_hex.clone();
-    (daemon, responder, session, daemon_storage, dest_hex)
+    (
+        daemon,
+        responder,
+        session,
+        daemon_storage,
+        app_dir,
+        dest_hex,
+    )
+}
+
+/// The responder's destination hash as raw bytes, for `set_identify`.
+fn dest_bytes(dest_hex: &str) -> [u8; 16] {
+    let bytes = hex::decode(dest_hex).expect("dest hex decodes");
+    bytes.try_into().expect("dest hash is 16 bytes")
 }
 
 #[tokio::test]
 async fn fetch_small_page_over_shared_instance() {
-    let (mut daemon, responder, mut session, _daemon_storage, dest_hex) = setup().await;
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
 
     let target = parse_url(&format!("{dest_hex}:/page/small.mu"), None).expect("parse url");
     let page = session
@@ -195,7 +229,7 @@ async fn fetch_small_page_over_shared_instance() {
 
 #[tokio::test]
 async fn echo_page_round_trips_query_fields() {
-    let (mut daemon, responder, mut session, _daemon_storage, dest_hex) = setup().await;
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
 
     // Fields become a `var_*` msgpack map; the echo handler returns it verbatim.
     let target = parse_url(
@@ -239,7 +273,7 @@ async fn echo_page_round_trips_query_fields() {
 
 #[tokio::test]
 async fn print_mode_renders_page_and_link_list() {
-    let (mut daemon, responder, mut session, _daemon_storage, dest_hex) = setup().await;
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
 
     // Drive the browser's print-once path exactly as `lnomad --print` does:
     // fetch the large page over the Resource path, parse, render (no colour),
@@ -296,8 +330,74 @@ async fn print_mode_renders_page_and_link_list() {
 }
 
 #[tokio::test]
+async fn identified_fetch_reveals_fingerprint_to_server() {
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
+    let dest = dest_bytes(&dest_hex);
+    let target = parse_url(&format!("{dest_hex}:/page/whoami.mu"), None).expect("parse url");
+
+    // Opt in: the fetch identifies on the fresh link before the request, so
+    // the responder's handler sees lnomad's identity as `remote_identity`.
+    session.set_identify(&dest, true).expect("persist identify");
+    assert!(session.is_identifying(&dest));
+    let observed = session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch whoami identified");
+    assert_eq!(
+        observed,
+        session.fingerprint().to_vec(),
+        "responder must observe exactly lnomad's fingerprint"
+    );
+
+    // Turn identify off. The reused link is identified and cannot be
+    // un-identified, so the session must drop it and the next fetch must build
+    // a brand new anonymous link: the responder sees no remote identity. Were
+    // the old link reused, it would still return the fingerprint.
+    session
+        .set_identify(&dest, false)
+        .expect("persist identify");
+    assert!(!session.is_identifying(&dest));
+    let observed = session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch whoami after identify off");
+    assert!(
+        observed.is_empty(),
+        "after identify off the fresh link must be anonymous, responder saw {}",
+        hex::encode(&observed)
+    );
+
+    session.close().await.expect("close session");
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+#[tokio::test]
+async fn anonymous_fetch_reveals_nothing() {
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
+
+    // Control arm: no identify decision for this dest, so the fetch stays
+    // anonymous and the responder observes no remote identity.
+    assert!(!session.is_identifying(&dest_bytes(&dest_hex)));
+    let target = parse_url(&format!("{dest_hex}:/page/whoami.mu"), None).expect("parse url");
+    let observed = session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch whoami anonymously");
+    assert!(
+        observed.is_empty(),
+        "anonymous fetch must reveal no identity, responder saw {}",
+        hex::encode(&observed)
+    );
+
+    session.close().await.expect("close session");
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+#[tokio::test]
 async fn unregistered_path_times_out_cleanly() {
-    let (mut daemon, responder, mut session, _daemon_storage, dest_hex) = setup().await;
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
 
     let target =
         parse_url(&format!("{dest_hex}:/page/does-not-exist.mu"), None).expect("parse url");

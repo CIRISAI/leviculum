@@ -22,9 +22,12 @@ use tokio::sync::mpsc;
 
 use leviculum_std::config::Config;
 use leviculum_std::driver::ReticulumNodeBuilder;
-use leviculum_std::{DestinationHash, EventReceiver, NodeEvent, ReceivedAnnounce, ReticulumNode};
+use leviculum_std::{
+    DestinationHash, EventReceiver, Identity, NodeEvent, ReceivedAnnounce, ReticulumNode,
+};
 
 use crate::discovery::{is_nomad_node_announce, now_unix_secs, DiscoveredNode, NomadNodeRegistry};
+use crate::identify::IdentifyStore;
 use crate::url::Target;
 
 /// Path-discovery budget. A `PATH_REQUEST` has no retry of its own, so this is
@@ -87,6 +90,12 @@ pub struct Session {
     node: ReticulumNode,
     events: EventReceiver,
     current: Option<CurrentLink>,
+    /// lnomad's own persistent identity, revealed to a destination on fetch
+    /// when the identify store opts that destination in. Distinct from the
+    /// shared instance's transport identity.
+    identity: Identity,
+    /// The per-node identify decisions (see [`crate::identify`]).
+    identify: IdentifyStore,
     /// NomadNet nodes learned from announces seen on this session's event
     /// stream. Populated by the discovery loop and, opportunistically, by any
     /// event wait during browsing, so the `nodes` command has a live list.
@@ -108,11 +117,38 @@ impl Session {
     }
 
     /// Connect to an explicitly named shared instance with an explicit storage
-    /// path. Used directly by tests that stand up a private instance.
+    /// path, keeping the default lnomad app config dir for the browser's own
+    /// identity and identify store.
     pub async fn connect_to(
         instance_name: &str,
         storage_path: PathBuf,
     ) -> Result<Self, FetchError> {
+        Self::connect_to_with_app_dir(
+            instance_name,
+            storage_path,
+            crate::identity::app_config_dir(),
+        )
+        .await
+    }
+
+    /// Connect like [`connect_to`](Self::connect_to) with an explicit lnomad
+    /// app config dir, where the browser's own identity (`identity`) and the
+    /// identify store (`identify.toml`) live. `None` runs ephemerally: a fresh
+    /// identity and an empty in-memory identify set, nothing persisted. Used by
+    /// tests that stand up a private instance.
+    pub async fn connect_to_with_app_dir(
+        instance_name: &str,
+        storage_path: PathBuf,
+        app_dir: Option<PathBuf>,
+    ) -> Result<Self, FetchError> {
+        let (identity, identify) = match app_dir {
+            Some(dir) => {
+                let identity = crate::identity::load_or_create(&dir.join("identity"))
+                    .map_err(|e| FetchError::Connect(format!("could not store identity: {e}")))?;
+                (identity, IdentifyStore::load(&dir.join("identify.toml")))
+            }
+            None => (leviculum_std::generate_identity(), IdentifyStore::new()),
+        };
         let mut node = ReticulumNodeBuilder::new()
             .enable_transport(false)
             .connect_to_shared_instance(instance_name)
@@ -129,9 +165,46 @@ impl Session {
             node,
             events,
             current: None,
+            identity,
+            identify,
             registry: NomadNodeRegistry::new(),
             announce_sink: None,
         })
+    }
+
+    /// The fingerprint of lnomad's own identity: the hash the responder sees
+    /// as `remote_identity` when this session identifies to it.
+    pub fn fingerprint(&self) -> [u8; 16] {
+        *self.identity.hash()
+    }
+
+    /// The fingerprint as lowercase hex, for display.
+    pub fn fingerprint_hex(&self) -> String {
+        crate::identity::fingerprint_hex(&self.fingerprint())
+    }
+
+    /// Whether this session identifies to `dest` when fetching from it.
+    pub fn is_identifying(&self, dest: &[u8; 16]) -> bool {
+        self.identify.contains(dest)
+    }
+
+    /// Turn identifying to `dest` on or off, persisting the decision.
+    ///
+    /// Identify is one-way: an established link cannot be un-identified, and a
+    /// reused anonymous link cannot retroactively cover an earlier request. So
+    /// when the decision for the currently reused destination changes, the
+    /// reused link is dropped and the next fetch builds a fresh one under the
+    /// new decision.
+    pub fn set_identify(&mut self, dest: &[u8; 16], on: bool) -> std::io::Result<()> {
+        if !self.identify.set(dest, on) {
+            return Ok(());
+        }
+        if let Some(current) = &self.current {
+            if current.dest_hash == *dest {
+                self.current = None;
+            }
+        }
+        self.identify.save()
     }
 
     /// Forward every newly-recorded node announce to `sink` in addition to the
@@ -350,6 +423,15 @@ impl Session {
         let link_id = *handle.link_id();
 
         self.wait_for_link_established(link_id, timeout).await?;
+
+        // Identify on the fresh link before any request goes out, so the
+        // responder has `remote_identity` when it generates the page.
+        if self.identify.contains(dest) {
+            self.node
+                .identify_link(&link_id, &self.identity)
+                .await
+                .map_err(|e| FetchError::Node(e.to_string()))?;
+        }
 
         self.current = Some(CurrentLink {
             dest_hash: *dest,

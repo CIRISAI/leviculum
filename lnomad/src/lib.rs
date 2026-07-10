@@ -30,6 +30,8 @@ pub mod cli;
 pub mod color;
 pub mod discovery;
 pub mod fetch;
+pub mod identify;
+pub mod identity;
 pub mod page_cache;
 pub mod render;
 pub mod theme;
@@ -45,6 +47,7 @@ pub use discovery::{
     NomadNodeRegistry,
 };
 pub use fetch::{FetchError, Session};
+pub use identify::IdentifyStore;
 pub use page_cache::{CacheEntry, PageCache};
 pub use render::{
     layout, render_with_options, RLine, RStyle, RenderedLink, RenderedPage, StyledChar,
