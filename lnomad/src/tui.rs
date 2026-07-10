@@ -105,18 +105,8 @@ const STAR_OFF: &str = "☆";
 /// served from the in-RAM page cache rather than a fresh fetch.
 const CACHED_GLYPH: &str = "⚡";
 
-/// Browse-mode status hints. A curated subset that fits an 80-column status bar;
-/// the full keybinding list lives in the `?` help overlay.
-const BROWSE_HINTS: &str =
-    "j/k scroll  f hint  / search  d places  m mark  y copy  : addr  ? help  q quit";
-/// Address-mode status hints.
-const ADDRESS_HINTS: &str = "Enter: go   Esc: cancel";
-/// Hint-mode status hints.
-const HINT_HINTS: &str = "type a hint label or link text   Esc: cancel";
-/// Search-mode status hints (shown when the query line has no room of its own).
-const SEARCH_HINTS: &str = "Enter: search   n/N: next/prev   Esc: cancel";
-/// Field-edit-mode status hints.
-const FIELD_HINTS: &str = "type to edit   Space: toggle   Tab: next field/link   Esc: done";
+/// The instructional sentence shown in the footer while hint mode is active.
+const HINT_SENTENCE: &str = "type a hint label or link text";
 
 /// The home-row alphabet hint labels are drawn from (vimium-style).
 const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
@@ -643,6 +633,10 @@ pub struct Model {
     pub field_focus: Option<usize>,
     /// The link the mouse is hovering over, 1-based, or `None`.
     pub hover: Option<usize>,
+    /// The footer button the mouse is hovering over, as an index into the current
+    /// mode's footer item list, or `None`. Highlights that button so it reads as
+    /// clickable. Mutually exclusive with a content-link [`hover`](Model::hover).
+    pub footer_hover: Option<usize>,
     /// The characters typed so far in hint mode, narrowing the visible labels.
     pub hint_input: String,
     /// The active transient toast (fetch error, "copied", "bookmarked", ...), or
@@ -2262,10 +2256,18 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
             return Vec::new();
         }
     }
-    let [topbar, _content, _status] = regions(model.frame_area());
+    let [topbar, _content, footer] = regions(model.frame_area());
     for cr in top_bar_controls(model, topbar) {
         if rect_contains(cr.rect, col, row) {
             return activate_hint_target(model, HintTarget::Control(cr.control));
+        }
+    }
+    // A click on a footer button runs its action (same as pressing its key).
+    if footer_shows_buttons(model) {
+        for slot in footer_layout(model, footer) {
+            if slot.item.action != FooterAction::None && rect_contains(slot.rect, col, row) {
+                return run_footer_action(model, slot.item.action);
+            }
         }
     }
     Vec::new()
@@ -2274,6 +2276,20 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
 /// Set the hovered link to whichever visible link is under `(col, row)`, or
 /// `None` when the cursor is over no link.
 fn update_hover(model: &mut Model, col: u16, row: u16) {
+    // A move over a footer button highlights it; a footer hover and a content
+    // link hover are mutually exclusive.
+    if footer_shows_buttons(model) {
+        let [_topbar, _content, footer] = regions(model.frame_area());
+        if let Some(slot) = footer_layout(model, footer)
+            .into_iter()
+            .find(|s| s.item.action != FooterAction::None && rect_contains(s.rect, col, row))
+        {
+            model.footer_hover = Some(slot.index);
+            model.hover = None;
+            return;
+        }
+    }
+    model.footer_hover = None;
     model.hover = visible_links(model)
         .into_iter()
         .find(|vl| row == vl.row && col >= vl.col_start && col < vl.col_end)
@@ -2959,9 +2975,322 @@ fn spinner_span(spin: usize) -> RtSpan<'static> {
     )
 }
 
+// --- the footer: a unified strip of clickable button / keybinding hints -----
+
+/// What a footer button activates when pressed or clicked. Mode-specific keys
+/// (`Esc`, `Tab`, `Space`, `Enter`, `n`, `N`) route back through the key handler
+/// so the click behaves exactly like the key press it mirrors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FooterAction {
+    Back,
+    Forward,
+    Reload,
+    Hint,
+    Search,
+    Places,
+    Mark,
+    Copy,
+    Help,
+    Quit,
+    /// Synthesize a plain key press (the mode-action buttons).
+    Key(KeyCode),
+    /// A non-interactive sentence (hint mode's instruction).
+    None,
+}
+
+/// One footer button: a key you can press and a label, which are the same thing
+/// you can also click. The key cell renders bright + bold, the label muted.
+#[derive(Clone, Copy, Debug)]
+struct FooterItem {
+    /// The pressable key or glyph (bright + bold), e.g. `‹`, `f`, `Esc`.
+    key: &'static str,
+    /// The muted descriptive label, e.g. `back`, `hint` (empty for a sentence).
+    label: &'static str,
+    /// Whether the key renders before the label. The forward arrow trails its
+    /// word (`forward ›`); everything else leads (`‹ back`, `f hint`).
+    key_first: bool,
+    /// What a press or click runs.
+    action: FooterAction,
+    /// Truncation priority: `None` never drops; `Some(rank)` drops when the row
+    /// is too narrow, lowest rank first.
+    drop_rank: Option<u8>,
+    /// Whether the control is currently usable; an unavailable nav item reads
+    /// muted rather than active.
+    available: bool,
+}
+
+impl FooterItem {
+    /// A never-dropped, always-available mode-action button.
+    const fn action(key: &'static str, label: &'static str, act: FooterAction) -> Self {
+        FooterItem {
+            key,
+            label,
+            key_first: true,
+            action: act,
+            drop_rank: None,
+            available: true,
+        }
+    }
+
+    /// The same, but droppable at rank `r` when the row is too narrow.
+    const fn droppable(key: &'static str, label: &'static str, act: FooterAction, r: u8) -> Self {
+        FooterItem {
+            drop_rank: Some(r),
+            ..FooterItem::action(key, label, act)
+        }
+    }
+
+    /// This item's rendered width, with labels (`false`) or collapsed to the key
+    /// glyph only (`true`).
+    fn width(&self, collapsed: bool) -> u16 {
+        let kw = UnicodeWidthStr::width(self.key) as u16;
+        if collapsed || self.label.is_empty() {
+            return kw.max(UnicodeWidthStr::width(self.label) as u16);
+        }
+        let lw = UnicodeWidthStr::width(self.label) as u16;
+        // key + one space + label (the key may be empty for a sentence).
+        if kw == 0 {
+            lw
+        } else {
+            kw + 1 + lw
+        }
+    }
+
+    /// Whether this item is part of the navigation trio (rendered before the
+    /// stronger divider).
+    fn is_nav(&self) -> bool {
+        matches!(
+            self.action,
+            FooterAction::Back | FooterAction::Forward | FooterAction::Reload
+        )
+    }
+}
+
+/// The footer's navigation trio, always first: back, forward, reload. Their
+/// availability tracks the history so an impossible motion reads muted.
+fn footer_nav(model: &Model) -> [FooterItem; 3] {
+    [
+        FooterItem {
+            available: model.history.can_back(),
+            ..FooterItem::action("‹", "back", FooterAction::Back)
+        },
+        FooterItem {
+            key: "›",
+            label: "forward",
+            key_first: false,
+            action: FooterAction::Forward,
+            drop_rank: None,
+            available: model.history.can_forward(),
+        },
+        FooterItem {
+            available: model.history.current().is_some(),
+            ..FooterItem::action("⟳", "reload", FooterAction::Reload)
+        },
+    ]
+}
+
+/// The footer button list for the current mode: the nav trio, then the
+/// mode-dependent action set. The first non-nav item carries the stronger
+/// divider before it.
+fn footer_items(model: &Model) -> Vec<FooterItem> {
+    let mut items: Vec<FooterItem> = footer_nav(model).to_vec();
+    match model.mode {
+        Mode::Browse => items.extend_from_slice(&[
+            FooterItem::droppable("f", "hint", FooterAction::Hint, 5),
+            FooterItem::droppable("/", "search", FooterAction::Search, 4),
+            FooterItem::droppable("d", "places", FooterAction::Places, 3),
+            FooterItem::droppable("m", "mark", FooterAction::Mark, 2),
+            FooterItem::droppable("y", "copy", FooterAction::Copy, 1),
+            FooterItem::action("?", "help", FooterAction::Help),
+            FooterItem::action("q", "quit", FooterAction::Quit),
+        ]),
+        Mode::Field => items.extend_from_slice(&[
+            FooterItem::action("Esc", "done", FooterAction::Key(KeyCode::Esc)),
+            FooterItem::droppable("Tab", "next field", FooterAction::Key(KeyCode::Tab), 1),
+            FooterItem::droppable("Space", "toggle", FooterAction::Key(KeyCode::Char(' ')), 2),
+            FooterItem::action("?", "help", FooterAction::Help),
+        ]),
+        Mode::Search => items.extend_from_slice(&[
+            FooterItem::action("Enter", "go", FooterAction::Key(KeyCode::Enter)),
+            FooterItem::droppable("n", "next", FooterAction::Key(KeyCode::Char('n')), 2),
+            FooterItem::droppable("N", "prev", FooterAction::Key(KeyCode::Char('N')), 3),
+            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
+            FooterItem::droppable("?", "help", FooterAction::Help, 1),
+        ]),
+        Mode::Address => items.extend_from_slice(&[
+            FooterItem::action("Enter", "go", FooterAction::Key(KeyCode::Enter)),
+            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
+            FooterItem::droppable("?", "help", FooterAction::Help, 1),
+        ]),
+        Mode::Hint => items.extend_from_slice(&[
+            FooterItem {
+                key: "",
+                label: HINT_SENTENCE,
+                key_first: true,
+                action: FooterAction::None,
+                drop_rank: None,
+                available: true,
+            },
+            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
+        ]),
+    }
+    items
+}
+
+/// The width of the divider drawn before the item at `kept`-position `pos`: a
+/// ` │ ` between items (a single space in collapsed mode, except at the stronger
+/// nav/mode boundary). Position 0 has no leading divider.
+fn footer_divider_width(pos: usize, is_strong: bool, collapsed: bool) -> u16 {
+    if pos == 0 {
+        0
+    } else if !collapsed || is_strong {
+        3 // " │ "
+    } else {
+        1 // a single space between collapsed glyphs
+    }
+}
+
+/// A laid-out footer button: the original item, whether its label is shown, and
+/// its screen rect. Drives rendering, click hit-testing and hover highlight.
+#[derive(Clone, Copy, Debug)]
+struct FooterSlot {
+    item: FooterItem,
+    /// Index into [`footer_items`] for the current mode (stable per mode), so a
+    /// hover can be remembered across the move-then-render round trip.
+    index: usize,
+    /// Whether the divider before this slot is the stronger nav/mode one.
+    strong_divider: bool,
+    /// The width of the divider gap before this slot (0 for the first slot).
+    div_before: u16,
+    collapsed: bool,
+    rect: Rect,
+}
+
+/// Lay the footer buttons out across `area`, dropping and then collapsing by
+/// priority so the row never overflows. Returns the kept slots (in order) with
+/// their screen rects.
+fn footer_layout(model: &Model, area: Rect) -> Vec<FooterSlot> {
+    let items = footer_items(model);
+
+    // Total width of a kept subset, laid with the given collapse.
+    let total_width = |kept: &[usize], collapsed: bool| -> u16 {
+        let mut w = 0u16;
+        for (pos, &i) in kept.iter().enumerate() {
+            let strong = footer_strong_before(&items, kept, pos);
+            w = w.saturating_add(footer_divider_width(pos, strong, collapsed));
+            w = w.saturating_add(items[i].width(collapsed));
+        }
+        w
+    };
+
+    // Drop droppable items (lowest rank first) until the subset fits.
+    let shrink = |collapsed: bool| -> Vec<usize> {
+        let mut kept: Vec<usize> = (0..items.len()).collect();
+        while total_width(&kept, collapsed) > area.width {
+            let victim = kept
+                .iter()
+                .copied()
+                .filter(|&i| items[i].drop_rank.is_some())
+                .min_by_key(|&i| items[i].drop_rank.unwrap_or(u8::MAX));
+            match victim {
+                Some(v) => kept.retain(|&i| i != v),
+                None => break,
+            }
+        }
+        kept
+    };
+
+    // Prefer full labels; only when even the non-droppable core overflows do we
+    // collapse to keys (re-adding items, since keys keep more of them).
+    let (kept, collapsed) = {
+        let labelled = shrink(false);
+        if total_width(&labelled, false) <= area.width {
+            (labelled, false)
+        } else {
+            (shrink(true), true)
+        }
+    };
+
+    // Assign rects left to right.
+    let mut out = Vec::with_capacity(kept.len());
+    let mut x = area.x;
+    for (pos, &i) in kept.iter().enumerate() {
+        let strong = footer_strong_before(&items, &kept, pos);
+        let dw = footer_divider_width(pos, strong, collapsed);
+        x = x.saturating_add(dw);
+        let w = items[i].width(collapsed);
+        out.push(FooterSlot {
+            item: items[i],
+            index: i,
+            strong_divider: strong,
+            div_before: dw,
+            collapsed,
+            rect: Rect {
+                x,
+                y: area.y,
+                width: w,
+                height: 1,
+            },
+        });
+        x = x.saturating_add(w);
+    }
+    out
+}
+
+/// Whether the divider before the kept item at `pos` is the stronger nav/mode
+/// boundary: true for the first non-nav item that follows a nav item.
+fn footer_strong_before(items: &[FooterItem], kept: &[usize], pos: usize) -> bool {
+    if pos == 0 {
+        return false;
+    }
+    let cur = &items[kept[pos]];
+    let prev = &items[kept[pos - 1]];
+    prev.is_nav() && !cur.is_nav()
+}
+
+/// Whether the footer currently shows its button strip (rather than the search
+/// query editor, the loading spinner, or a focused/hovered link's target).
+fn footer_shows_buttons(model: &Model) -> bool {
+    model.mode != Mode::Search && model.pending.is_none() && focused_link_target(model).is_none()
+}
+
+/// Run a footer button's action, mirroring the key it stands for.
+fn run_footer_action(model: &mut Model, action: FooterAction) -> Vec<Effect> {
+    match action {
+        FooterAction::Back => go_back(model),
+        FooterAction::Forward => go_forward(model),
+        FooterAction::Reload => reload_current(model),
+        FooterAction::Hint => {
+            enter_hint(model);
+            Vec::new()
+        }
+        FooterAction::Search => {
+            enter_search(model);
+            Vec::new()
+        }
+        FooterAction::Places => {
+            toggle_places(model);
+            Vec::new()
+        }
+        FooterAction::Mark => toggle_bookmark_current(model),
+        FooterAction::Copy => yank_url(model),
+        FooterAction::Help => {
+            model.show_help = !model.show_help;
+            Vec::new()
+        }
+        FooterAction::Quit => {
+            model.quit = true;
+            vec![Effect::Quit]
+        }
+        FooterAction::Key(code) => update_key(model, KeyEvent::new(code, KeyModifiers::NONE)),
+        FooterAction::None => Vec::new(),
+    }
+}
+
 /// Draw the status bar: the loading spinner while a fetch is in flight, else the
-/// focused/hovered link's target, else the context key-hints. Transient messages
-/// no longer live here; they float as a [`render_toast`] overlay instead.
+/// focused/hovered link's target, else the unified footer button strip. In
+/// search mode it is the live `/<query>` editor. Transient messages float as a
+/// [`render_toast`] overlay instead.
 fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
@@ -2984,20 +3313,96 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(line), area);
     } else if let Some(target) = focused_link_target(model) {
         // A focused (Tab) or hovered (mouse) link shows its target here, taking
-        // the place of the key-hints until focus/hover clears.
+        // the place of the footer buttons until focus/hover clears.
         frame.render_widget(Paragraph::new(RtSpan::styled(target, dim)), area);
     } else {
-        let hints = match model.mode {
-            Mode::Address => ADDRESS_HINTS,
-            Mode::Hint => HINT_HINTS,
-            Mode::Search => SEARCH_HINTS,
-            Mode::Field => FIELD_HINTS,
-            Mode::Browse => BROWSE_HINTS,
+        render_footer_strip(model, frame, area);
+    }
+}
+
+/// Draw the footer button strip: each button's key in the bright chrome fg and
+/// bold, its label in the muted chrome fg, a `│` divider between buttons (a
+/// brighter one at the nav/mode boundary), and a bold + underline highlight over
+/// the hovered button so it reads as clickable.
+fn render_footer_strip(model: &Model, frame: &mut Frame, area: Rect) {
+    let key_style = chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::BOLD);
+    let label_style = chrome_muted_style(model.no_color, model.theme);
+    let dim_div = chrome_muted_style(model.no_color, model.theme);
+    let strong_div = chrome_text_style(model.no_color, model.theme);
+
+    let slots = footer_layout(model, area);
+    for slot in &slots {
+        // The divider before this button (none before the first).
+        let dw = slot.div_before;
+        if dw > 0 {
+            let (glyph, style) = if slot.strong_divider {
+                ("│", strong_div)
+            } else {
+                ("│", dim_div)
+            };
+            // Centre the │ in its 1-or-3-column gap.
+            let gx = slot.rect.x.saturating_sub(dw).saturating_add(dw / 2);
+            frame.render_widget(
+                Paragraph::new(RtSpan::styled(glyph, style)),
+                Rect {
+                    x: gx,
+                    y: area.y,
+                    width: 1,
+                    height: 1,
+                },
+            );
+        }
+
+        // The button itself: key bright + bold, label muted; an unavailable nav
+        // button reads wholly muted.
+        let (kstyle, lstyle) = if slot.item.available {
+            (key_style, label_style)
+        } else {
+            (label_style, label_style)
         };
-        // The key-hints are the most-read chrome text: render them in the bright
-        // chrome fg (no DIM) so they stay legible on the chrome bar.
-        let hint_style = chrome_text_style(model.no_color, model.theme);
-        frame.render_widget(Paragraph::new(RtSpan::styled(hints, hint_style)), area);
+        let mut spans: Vec<RtSpan<'static>> = Vec::new();
+        let key = slot.item.key;
+        let label = slot.item.label;
+        let show_label = !slot.collapsed && !label.is_empty();
+        if slot.item.key_first {
+            if !key.is_empty() {
+                spans.push(RtSpan::styled(key, kstyle));
+            }
+            if show_label {
+                if !key.is_empty() {
+                    spans.push(RtSpan::styled(" ", lstyle));
+                }
+                spans.push(RtSpan::styled(label, lstyle));
+            }
+        } else {
+            if show_label {
+                spans.push(RtSpan::styled(label, lstyle));
+                spans.push(RtSpan::styled(" ", lstyle));
+            }
+            if !key.is_empty() {
+                spans.push(RtSpan::styled(key, kstyle));
+            }
+        }
+        frame.render_widget(Paragraph::new(RtLine::from(spans)), slot.rect);
+    }
+
+    // Highlight the hovered button, reusing the link-hover look (bold + underline
+    // patched over the button's own styling), so it reads as a button.
+    if let Some(idx) = model.footer_hover {
+        if let Some(slot) = slots.iter().find(|s| s.index == idx) {
+            let area_all = frame.area();
+            let buf = frame.buffer_mut();
+            let hover = Modifier::BOLD | Modifier::UNDERLINED;
+            for x in slot.rect.x..slot.rect.right() {
+                if x >= area_all.width || slot.rect.y >= area_all.height {
+                    continue;
+                }
+                if let Some(cell) = buf.cell_mut((x, slot.rect.y)) {
+                    let style = cell.style().patch(Style::default().add_modifier(hover));
+                    cell.set_style(style);
+                }
+            }
+        }
     }
 }
 
@@ -3065,7 +3470,7 @@ const HELP_LINES: &[&str] = &[
     "  (field) Esc         leave field editing",
     "  f                   hint a link",
     "  / n N               search / next / prev",
-    "  click               follow link",
+    "  click               follow link / press a footer button",
     "  :                   enter an address",
     "  d                   places panel",
     "  m                   bookmark this page",
@@ -5135,29 +5540,51 @@ mod tests {
         }
     }
 
+    /// The laid-out footer slot whose button carries `action`.
+    fn footer_slot(m: &Model, action: FooterAction) -> FooterSlot {
+        let footer = regions(m.frame_area())[2];
+        footer_layout(m, footer)
+            .into_iter()
+            .find(|s| s.item.action == action)
+            .expect("footer slot")
+    }
+
     #[test]
-    fn status_hints_use_bright_chrome_fg_not_dim() {
-        // The status-bar key-hints render in the theme's bright chrome fg with no
-        // DIM modifier, under both themes. loaded_model has no focus/hover/status
-        // pending, so the hints branch is what draws row 23.
+    fn footer_key_is_bright_bold_and_label_is_muted() {
+        // The grouping is carried by contrast, not spacing: the key cell renders
+        // in the bright chrome fg and BOLD (never DIM); the label cell in the
+        // muted chrome fg; and the two clearly differ. Checked under both themes.
         for theme in [Theme::Dark, Theme::Light] {
             let mut m = loaded_model((80, 24));
             if theme == Theme::Light {
                 m.toggle_theme();
             }
             assert_eq!(m.theme, theme);
+            // The `q quit` button: its key is available, so it is the active case.
+            let slot = footer_slot(&m, FooterAction::Quit);
             let buffer = render(&m, 80, 24);
-            // (0,23) is the first hint glyph ('j' of "j/k scroll ...").
-            let cell = &buffer[(0u16, 23u16)];
+            let key = &buffer[(slot.rect.x, 23u16)];
             assert_eq!(
-                cell.fg,
+                key.fg,
                 rgb(theme.chrome_fg()),
-                "status hint must use the bright chrome fg ({theme:?})"
+                "footer key must use the bright chrome fg ({theme:?})"
             );
             assert!(
-                !cell.modifier.contains(Modifier::DIM),
-                "status hint must not be DIM ({theme:?})"
+                key.modifier.contains(Modifier::BOLD),
+                "footer key must be BOLD ({theme:?})"
             );
+            assert!(
+                !key.modifier.contains(Modifier::DIM),
+                "footer key must not be DIM ({theme:?})"
+            );
+            // The label ("quit") starts two columns past the key ("q" + a space).
+            let label = &buffer[(slot.rect.x + 2, 23u16)];
+            assert_eq!(
+                label.fg,
+                rgb(theme.chrome_muted_fg()),
+                "footer label must use the muted chrome fg ({theme:?})"
+            );
+            assert_ne!(key.fg, label.fg, "key and label must differ ({theme:?})");
         }
     }
 
@@ -6250,15 +6677,165 @@ mod tests {
         assert_eq!(osc52("hi"), "\x1b]52;c;aGk=\x1b\\");
     }
 
+    /// The set of footer actions a browse footer keeps at width `w`.
+    fn browse_actions(w: u16) -> Vec<FooterAction> {
+        let m = loaded_model((80, 24));
+        footer_layout(&m, Rect::new(0, 23, w, 1))
+            .into_iter()
+            .map(|s| s.item.action)
+            .collect()
+    }
+
     #[test]
-    fn status_bar_hints_fit_eighty_columns() {
-        // The curated browse hints must fit an 80-column bar so "quit" stays
-        // visible (see status_bar_renders_hints).
+    fn footer_shows_every_button_at_a_wide_width() {
+        // Given enough room, the whole browse footer renders with labels and no
+        // collapse: nav trio + 7 browse actions = 10 buttons, in order.
+        let m = loaded_model((80, 24));
+        let slots = footer_layout(&m, Rect::new(0, 23, 120, 1));
+        assert_eq!(slots.len(), 10, "all browse buttons should fit wide");
+        assert!(slots.iter().all(|s| !s.collapsed), "no collapse when wide");
+        assert!(matches!(slots[0].item.action, FooterAction::Back));
+        assert!(matches!(slots[1].item.action, FooterAction::Forward));
+        assert!(matches!(slots[2].item.action, FooterAction::Reload));
+        // The stronger divider sits before the first non-nav button.
+        assert!(slots[3].strong_divider, "nav/mode boundary divider missing");
+        assert!(!slots[1].strong_divider, "nav items share the dim divider");
+        let right = slots.last().map(|s| s.rect.right()).unwrap_or(0);
+        assert!(right <= 120, "footer overflows: {right}");
+    }
+
+    #[test]
+    fn footer_nav_trio_is_first_and_click_navigates_back() {
+        let mut m = loaded_model((80, 24));
+        // Give history a back step so back is available and does something.
+        m.history.visit(tgt(0xcd));
+        m.current_dest = Some([0xcd; 16]);
+        assert!(m.history.can_back());
+        let slot = footer_slot(&m, FooterAction::Back);
+        let effects = update(&mut m, AppEvent::Mouse(click(slot.rect.x, slot.rect.y)));
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], Effect::Navigate(_)));
+    }
+
+    #[test]
+    fn footer_unavailable_nav_reads_muted_not_dim() {
+        // loaded_model has a single history entry: back is unavailable and must
+        // render in the readable muted chrome fg, never DIM.
+        for theme in [Theme::Dark, Theme::Light] {
+            let mut m = loaded_model((80, 24));
+            if theme == Theme::Light {
+                m.toggle_theme();
+            }
+            assert!(!m.history.can_back(), "back must be unavailable here");
+            let slot = footer_slot(&m, FooterAction::Back);
+            let buffer = render(&m, 80, 24);
+            let cell = &buffer[(slot.rect.x, 23u16)];
+            assert_eq!(
+                cell.fg,
+                rgb(theme.chrome_muted_fg()),
+                "unavailable nav must use the muted chrome fg ({theme:?})"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::DIM),
+                "unavailable nav must not be DIM ({theme:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_click_on_places_opens_the_panel() {
+        let mut m = loaded_model((80, 24));
+        assert!(!m.show_places);
+        let slot = footer_slot(&m, FooterAction::Places);
+        let effects = update(&mut m, AppEvent::Mouse(click(slot.rect.x, slot.rect.y)));
+        assert!(effects.is_empty());
+        assert!(m.show_places, "clicking `d places` opens the places panel");
+    }
+
+    #[test]
+    fn footer_priority_truncation_drops_copy_first() {
+        // At a width too tight for every label, `y copy` drops first while the nav
+        // trio, `? help` and `q quit` always remain, and labels stay (no collapse).
+        let acts = browse_actions(90);
         assert!(
-            UnicodeWidthStr::width(BROWSE_HINTS) <= 80,
-            "browse hints overflow 80 cols: {}",
-            UnicodeWidthStr::width(BROWSE_HINTS)
+            !acts.contains(&FooterAction::Copy),
+            "y copy should drop first: {acts:?}"
         );
+        for keep in [
+            FooterAction::Back,
+            FooterAction::Forward,
+            FooterAction::Reload,
+            FooterAction::Help,
+            FooterAction::Quit,
+        ] {
+            assert!(acts.contains(&keep), "{keep:?} must survive: {acts:?}");
+        }
+        let m = loaded_model((80, 24));
+        assert!(
+            footer_layout(&m, Rect::new(0, 23, 90, 1))
+                .iter()
+                .all(|s| !s.collapsed),
+            "labels should stay at a merely-narrow width"
+        );
+    }
+
+    #[test]
+    fn footer_collapses_labels_to_keys_when_very_narrow() {
+        let m = loaded_model((30, 24));
+        let slots = footer_layout(&m, Rect::new(0, 23, 30, 1));
+        assert!(
+            slots.iter().all(|s| s.collapsed),
+            "a very narrow footer must collapse to keys"
+        );
+        // Rendered: the key glyphs survive, the words do not.
+        let buffer = render(&m, 30, 24);
+        let row = row_text(&buffer, 23, 30);
+        assert!(row.contains('‹'), "back glyph missing: {row:?}");
+        assert!(row.contains('q'), "quit key missing: {row:?}");
+        assert!(!row.contains("quit"), "labels should be gone: {row:?}");
+        assert!(!row.contains("back"), "labels should be gone: {row:?}");
+    }
+
+    #[test]
+    fn footer_field_mode_shows_field_actions() {
+        let mut m = loaded_model((80, 24));
+        // Tab past the two links onto the sample page's text field.
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Field);
+        // At a comfortable width the full field-mode set is shown.
+        let labels: Vec<&str> = footer_layout(&m, Rect::new(0, 23, 100, 1))
+            .into_iter()
+            .map(|s| s.item.label)
+            .collect();
+        assert!(labels.contains(&"done"), "Esc done missing: {labels:?}");
+        assert!(
+            labels.contains(&"next field"),
+            "Tab next field missing: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"toggle"),
+            "Space toggle missing: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn footer_hover_highlights_then_clears() {
+        let mut m = loaded_model((80, 24));
+        let slot = footer_slot(&m, FooterAction::Quit);
+        update(&mut m, AppEvent::Mouse(moved(slot.rect.x, slot.rect.y)));
+        assert_eq!(m.footer_hover, Some(slot.index), "move sets footer hover");
+        let buffer = render(&m, 80, 24);
+        let cell = &buffer[(slot.rect.x, 23u16)];
+        assert!(
+            cell.modifier.contains(Modifier::UNDERLINED),
+            "hovered footer button not highlighted: {:?}",
+            cell.modifier
+        );
+        // A move off the footer clears it.
+        update(&mut m, AppEvent::Mouse(moved(slot.rect.x, 10)));
+        assert_eq!(m.footer_hover, None, "moving off clears footer hover");
     }
 
     #[test]

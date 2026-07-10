@@ -85,8 +85,14 @@ When stdout is not a terminal, `lnomad` prints once and exits even without
 On a terminal, `lnomad` opens a full-screen browser: a one-row top-bar (the page
 title, a `·`, and the address, with a right-aligned status cluster: a bookmark
 star, a cache bolt, and the hop count to the node), the scrollable page, and a
-status bar. Links carry no `[N]` marker and there is no link legend; a link is
-set apart by its underline and colour, and is reached by focus, hint or click:
+footer. The footer is a strip of clickable button-hints where a keybinding and a
+button are the same thing: the navigation trio (`‹ back`, `forward ›`,
+`⟳ reload`) first, then the current mode's actions. Each button's key reads
+bright and bold, its label muted; press the key or click the button. On a narrow
+terminal the footer drops the lowest-priority buttons and, if still too tight,
+collapses the rest to their key glyphs. Links carry no `[N]` marker and there is
+no link legend; a link is set apart by its underline and colour, and is reached
+by focus, hint or click:
 
 - `j` / `k`, arrows, `Ctrl-f` / `Ctrl-b`, `g` / `G`  scroll
 - `Tab` / `Shift-Tab`  move the focus cursor across links AND form fields, in
@@ -97,7 +103,7 @@ set apart by its underline and colour, and is reached by focus, hint or click:
 - `f`         hint mode: type the label shown over a link (or the link's text)
 - `/`         in-page search: type a query, `Enter` highlights every match and
   jumps to the first; `n` / `N` cycle to the next / previous match, `Esc` clears
-- click       follow a link, or activate a top-bar control
+- click       follow a link, activate a top-bar control, or press a footer button
 - `:`         enter an address
 - `R`         reload the page (always refetches, bypassing the cache)
 - `t`         toggle the light / dark theme (correct a wrong auto-detection)
@@ -107,7 +113,7 @@ set apart by its underline and colour, and is reached by focus, hint or click:
 - `?`         toggle the help overlay
 - `q` / `Ctrl-c`  quit
 
-The focused or hovered link's target is shown in the status bar. Same-destination
+The focused or hovered link's target is shown in the footer. Same-destination
 links (`:/page/x.mu`) resolve against the page currently in view; a followed link
 carries its preset (`f=v`) fields as `var_*` request variables.
 
@@ -143,8 +149,8 @@ an arbitrary URI must never reach a system handler.
 
 Transient notes (a fetch error, a refused link, "copied", "bookmarked",
 "cancelled") appear as an auto-dismissing toast floated at the bottom-right of
-the content, not in the status bar. A toast clears after a few seconds or on the
-next key press; the status bar always keeps the key-hints (or the loading
+the content, not in the footer. A toast clears after a few seconds or on the
+next key press; the footer always keeps its button-hints (or the loading
 spinner during a fetch).
 
 ## v1 limits
