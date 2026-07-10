@@ -105,6 +105,11 @@ const STAR_OFF: &str = "☆";
 /// served from the in-RAM page cache rather than a fresh fetch.
 const CACHED_GLYPH: &str = "⚡";
 
+/// The status-cluster glyph shown (with the fingerprint prefix) while the
+/// session identifies to the current page's node. An ordinary wide emoji (no
+/// VS16), so `UnicodeWidthStr` scores it 2 columns like the terminal draws it.
+const IDENTIFY_GLYPH: &str = "\u{1F511}";
+
 /// The instructional sentence shown in the footer while hint mode is active.
 const HINT_SENTENCE: &str = "type a hint label or link text";
 
@@ -577,6 +582,17 @@ pub enum Effect {
     Copy(String),
     /// Persist the model's bookmarks to disk (the IO shell writes the TOML).
     SaveBookmarks,
+    /// Turn identifying to `dest` on or off (the IO shell calls
+    /// [`Session::set_identify`], which persists the decision and drops the
+    /// reused link). Always emitted BEFORE the accompanying reload's
+    /// [`Navigate`](Effect::Navigate), so the fresh link is built under the new
+    /// decision.
+    SetIdentify {
+        /// The destination the decision applies to.
+        dest: [u8; 16],
+        /// `true` to identify, `false` to go anonymous.
+        on: bool,
+    },
     /// Quit the UI.
     Quit,
 }
@@ -736,6 +752,24 @@ pub struct Model {
     /// than a fresh fetch. Drives the subtle "cached" top-bar marker; cleared on
     /// the next fresh load.
     pub cached_view: bool,
+    /// lnomad's own identity fingerprint as lowercase hex. Stable for the whole
+    /// session, so the IO shell sets it ONCE at model construction from
+    /// [`Session::fingerprint_hex`]. Empty by default (unit tests set it
+    /// directly), in which case the top-bar identity marker stays hidden.
+    pub fingerprint: String,
+    /// Whether the session identifies to [`current_dest`](Model::current_dest).
+    /// The `i` toggle flips it optimistically so the UI updates immediately;
+    /// the IO shell's refresh after each fresh load is authoritative, and a
+    /// cache-served navigation restores it from [`identify_known`]
+    /// (Model::identify_known). Drives the top-bar marker and the footer label.
+    pub identifying: bool,
+    /// The destinations the model has learned the session identifies to: every
+    /// toggle and every fresh load's authoritative answer is folded in via
+    /// [`note_identify`](Model::note_identify). A cache-served navigation (which
+    /// asks the session nothing) reads [`identifying`](Model::identifying) from
+    /// here; the page cache only holds pages fetched this run, so the answer was
+    /// always learned first.
+    pub identify_known: std::collections::BTreeSet<[u8; 16]>,
     /// Set once the user has asked to quit; the IO loop breaks on it.
     pub quit: bool,
 }
@@ -854,6 +888,21 @@ impl Model {
     /// Dismiss any active toast (a navigation or key event clears it early).
     pub fn dismiss_toast(&mut self) {
         self.toast = None;
+    }
+
+    /// Record whether the session identifies to `dest`: fold it into
+    /// [`identify_known`](Model::identify_known) and, when `dest` is the current
+    /// page's node, refresh the display flag. Called by the `i` toggle and by
+    /// the IO shell with each fresh load's authoritative answer.
+    pub fn note_identify(&mut self, dest: [u8; 16], on: bool) {
+        if on {
+            self.identify_known.insert(dest);
+        } else {
+            self.identify_known.remove(&dest);
+        }
+        if self.current_dest == Some(dest) {
+            self.identifying = on;
+        }
     }
 
     /// Advance the toast towards expiry: clear it once it has been up for at
@@ -1183,6 +1232,12 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
         }
         pending.target
     });
+    // The loaded page's node may differ from the previous one: refresh the
+    // identify display flag from what the model has learned so far. The IO
+    // shell follows up with the session's authoritative answer for this load.
+    if let Some(dest) = model.current_dest {
+        model.identifying = model.identify_known.contains(&dest);
+    }
     // A followed `#anchor` scrolls its block's first line to the top; an unknown
     // anchor falls back to the top of the page with a toast note.
     if let Some(name) = anchor {
@@ -1546,6 +1601,12 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
     // Yank the current page (or focused link) URL to the clipboard (`y`).
     if key.code == KeyCode::Char('y') && !ctrl && !alt {
         return yank_url(model);
+    }
+
+    // Toggle identifying to the current page's node (`i`), reloading it so the
+    // decision takes effect on a fresh link.
+    if key.code == KeyCode::Char('i') && !ctrl && !alt {
+        return toggle_identify(model);
     }
 
     // Tab / Shift-Tab move the focus cursor across links; Enter follows it.
@@ -2172,6 +2233,9 @@ fn load_from_cache(
     model.current_match = None;
 
     model.current_dest = Some(target.dest_hash);
+    // A cache hit asks the session nothing, so the identify display flag comes
+    // from what the model learned when this run fetched (or toggled) the node.
+    model.identifying = model.identify_known.contains(&target.dest_hash);
     match action {
         HistoryAction::Push => model.history.visit(target),
         HistoryAction::Goto(idx) => model.history.goto(idx),
@@ -2212,6 +2276,36 @@ fn reload_current(model: &mut Model) -> Vec<Effect> {
     model.pending_anchor = None;
     model.dismiss_toast();
     vec![Effect::Navigate(target)]
+}
+
+/// Toggle identifying to the current page's node: flip the model's flag
+/// optimistically (the shell's post-reload refresh is authoritative), ask the
+/// shell to persist the decision, and reload the page — identify binds to the
+/// link, so the new decision only takes effect on a fresh one. The single
+/// source of truth for both the `i` key and the footer's identify button.
+fn toggle_identify(model: &mut Model) -> Vec<Effect> {
+    let Some(dest) = model.current_dest else {
+        return Vec::new();
+    };
+    let on = !model.identifying;
+    model.note_identify(dest, on);
+    let mut effects = vec![Effect::SetIdentify { dest, on }];
+    effects.extend(reload_current(model));
+    // After reload_current, whose toast dismissal must not clear this one.
+    let dest8: String = crate::identity::fingerprint_hex(&dest)
+        .chars()
+        .take(8)
+        .collect();
+    if on {
+        let fp8: String = model.fingerprint.chars().take(8).collect();
+        model.set_toast(
+            ToastKind::Info,
+            format!("Identifying to {dest8} as {fp8}  (i to stop)"),
+        );
+    } else {
+        model.set_toast(ToastKind::Info, format!("Now anonymous to {dest8}"));
+    }
+    effects
 }
 
 /// Navigate back one history entry (re-fetching it), if possible.
@@ -2747,6 +2841,10 @@ struct TopBar {
     /// The bookmark star: its glyph (★ / ☆) and rect, absent when no page is
     /// loaded. A click toggles the bookmark.
     star: Option<(&'static str, Rect)>,
+    /// The identity marker (key glyph + fingerprint prefix) and its column,
+    /// present only while identifying to the current node. Anonymous — the
+    /// default — shows nothing: the visible state is the one with consequences.
+    identity: Option<(String, u16)>,
     /// The cache-bolt glyph's column, present only for a cached view.
     cached_x: Option<u16>,
     /// The hop-count text (`N hops` / `unknown`) and its column.
@@ -2762,6 +2860,17 @@ fn star_glyph(model: &Model) -> Option<&'static str> {
     } else {
         STAR_OFF
     })
+}
+
+/// The identity-marker cluster text: the key glyph plus the first 8 hex chars
+/// of the session's own fingerprint, or `None` when not identifying to the
+/// current node (or the fingerprint is unset, as in a bare test model).
+fn identity_text(model: &Model) -> Option<String> {
+    if !model.identifying || model.fingerprint.is_empty() {
+        return None;
+    }
+    let fp8: String = model.fingerprint.chars().take(8).collect();
+    Some(format!("{IDENTIFY_GLYPH} {fp8}"))
 }
 
 /// The hop-count cluster text for the current destination: `N hops` when the
@@ -2781,27 +2890,44 @@ fn topbar_layout(model: &Model, area: Rect) -> TopBar {
     let y = area.y;
     let right = area.right();
 
-    // Right-aligned status cluster: star, then cache bolt, then hop count, each
-    // present only when it applies, separated by a single column.
+    // Right-aligned status cluster: star, identity marker, cache bolt, hop
+    // count, each present only when it applies, separated by a single column.
     let star = star_glyph(model);
-    let cached = model.cached_view;
-    let hops = hops_text(model);
+    let identity = identity_text(model);
+    let mut cached = model.cached_view;
+    let mut hops = hops_text(model);
     let seg_w = |g: &str| UnicodeWidthStr::width(g) as u16;
-    let mut cluster_w = 0u16;
-    let mut segs = 0u16;
-    if let Some(g) = star {
-        cluster_w += seg_w(g);
-        segs += 1;
+    let cluster_width = |cached: bool, hops: &Option<String>| -> u16 {
+        let mut w = 0u16;
+        let mut segs = 0u16;
+        if let Some(g) = star {
+            w += seg_w(g);
+            segs += 1;
+        }
+        if let Some(t) = &identity {
+            w += seg_w(t);
+            segs += 1;
+        }
+        if cached {
+            w += seg_w(CACHED_GLYPH);
+            segs += 1;
+        }
+        if let Some(h) = hops {
+            w += seg_w(h);
+            segs += 1;
+        }
+        w + segs.saturating_sub(1) // one blank column between segments
+    };
+    // When even the bare cluster cannot fit the bar, drop the least important
+    // segments: the hop count first, then the cache bolt. The star and the
+    // identity marker — the security-relevant state — always survive.
+    if cluster_width(cached, &hops) > area.width && hops.is_some() {
+        hops = None;
     }
-    if cached {
-        cluster_w += seg_w(CACHED_GLYPH);
-        segs += 1;
+    if cluster_width(cached, &hops) > area.width {
+        cached = false;
     }
-    if let Some(h) = &hops {
-        cluster_w += seg_w(h);
-        segs += 1;
-    }
-    cluster_w += segs.saturating_sub(1); // one blank column between segments
+    let cluster_w = cluster_width(cached, &hops);
     let cluster_x = right.saturating_sub(cluster_w).max(area.x);
 
     // Place each cluster segment left to right from cluster_x.
@@ -2816,6 +2942,11 @@ fn topbar_layout(model: &Model, area: Rect) -> TopBar {
         };
         cx = cx.saturating_add(w).saturating_add(1);
         (g, rect)
+    });
+    let identity = identity.map(|t| {
+        let x = cx;
+        cx = cx.saturating_add(seg_w(&t)).saturating_add(1);
+        (t, x)
     });
     let cached_x = if cached {
         let x = cx;
@@ -2881,6 +3012,7 @@ fn topbar_layout(model: &Model, area: Rect) -> TopBar {
         address,
         address_rect,
         star,
+        identity,
         cached_x,
         hops,
     }
@@ -3235,6 +3367,19 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     if let Some((glyph, rect)) = tb.star {
         frame.render_widget(Paragraph::new(RtSpan::styled(glyph, bright)), rect);
     }
+    // The identity marker reads in the bright chrome fg: it is security-relevant
+    // state, at least as prominent as the star, never muted.
+    if let Some((text, x)) = &tb.identity {
+        frame.render_widget(
+            Paragraph::new(RtSpan::styled(text.clone(), bright)),
+            Rect {
+                x: *x,
+                y: area.y,
+                width: UnicodeWidthStr::width(text.as_str()) as u16,
+                height: 1,
+            },
+        );
+    }
     if let Some(x) = tb.cached_x {
         frame.render_widget(
             Paragraph::new(RtSpan::styled(CACHED_GLYPH, muted)),
@@ -3373,6 +3518,8 @@ enum FooterAction {
     Back,
     Forward,
     Reload,
+    /// Toggle identifying to the current page's node (same as the `i` key).
+    Identify,
     Hint,
     Search,
     Places,
@@ -3481,15 +3628,29 @@ fn footer_nav(model: &Model) -> [FooterItem; 3] {
 fn footer_items(model: &Model) -> Vec<FooterItem> {
     let mut items: Vec<FooterItem> = footer_nav(model).to_vec();
     match model.mode {
-        Mode::Browse => items.extend_from_slice(&[
-            FooterItem::droppable("f", "hint", FooterAction::Hint, 5),
-            FooterItem::droppable("/", "search", FooterAction::Search, 4),
-            FooterItem::droppable("d", "places", FooterAction::Places, 3),
-            FooterItem::droppable("m", "mark", FooterAction::Mark, 2),
-            FooterItem::droppable("y", "copy", FooterAction::Copy, 1),
-            FooterItem::action("?", "help", FooterAction::Help),
-            FooterItem::action("q", "quit", FooterAction::Quit),
-        ]),
+        Mode::Browse => {
+            // The identify toggle, only when there is a page to identify to. A
+            // state action, so under truncation it outlives the hint/search/
+            // places/mark/copy conveniences (highest drop rank, right below the
+            // never-dropped reload).
+            if model.current_dest.is_some() {
+                let label = if model.identifying {
+                    "anonymous"
+                } else {
+                    "identify"
+                };
+                items.push(FooterItem::droppable("i", label, FooterAction::Identify, 6));
+            }
+            items.extend_from_slice(&[
+                FooterItem::droppable("f", "hint", FooterAction::Hint, 5),
+                FooterItem::droppable("/", "search", FooterAction::Search, 4),
+                FooterItem::droppable("d", "places", FooterAction::Places, 3),
+                FooterItem::droppable("m", "mark", FooterAction::Mark, 2),
+                FooterItem::droppable("y", "copy", FooterAction::Copy, 1),
+                FooterItem::action("?", "help", FooterAction::Help),
+                FooterItem::action("q", "quit", FooterAction::Quit),
+            ]);
+        }
         Mode::Field => items.extend_from_slice(&[
             FooterItem::action("Esc", "done", FooterAction::Key(KeyCode::Esc)),
             FooterItem::droppable("Tab", "next field", FooterAction::Key(KeyCode::Tab), 1),
@@ -3648,6 +3809,7 @@ fn run_footer_action(model: &mut Model, action: FooterAction) -> Vec<Effect> {
         FooterAction::Back => go_back(model),
         FooterAction::Forward => go_forward(model),
         FooterAction::Reload => reload_current(model),
+        FooterAction::Identify => toggle_identify(model),
         FooterAction::Hint => {
             enter_hint(model);
             Vec::new()
@@ -4010,6 +4172,14 @@ fn help_groups() -> Vec<HelpGroup> {
                 HelpEntry {
                     keys: "d / click a place",
                     desc: "places panel — click an entry to open it",
+                },
+                HelpEntry {
+                    keys: "i",
+                    desc: "identify / go anonymous to this node",
+                },
+                HelpEntry {
+                    keys: "",
+                    desc: "default anonymous; identifying lets this node attribute your posts",
                 },
                 HelpEntry {
                     keys: "/ n N",
@@ -4508,9 +4678,17 @@ struct FetchOutcome {
     result: LoadResult,
 }
 
-/// A fetch's outcome: a parsed page and its title, or an error message.
+/// A fetch's outcome: a parsed page and its title, or an error message. A
+/// success also carries the session's authoritative identify answer for the
+/// fetched destination (read under the same lock as the fetch), so the loop can
+/// refresh the model's display flag after every fresh load.
 enum LoadResult {
-    Ok { doc: MicronDocument, title: String },
+    Ok {
+        doc: MicronDocument,
+        title: String,
+        dest: [u8; 16],
+        identifying: bool,
+    },
     Err(String),
 }
 
@@ -4538,7 +4716,12 @@ fn spawn_fetch(
             Ok(doc) => {
                 let name = guard.node_name(&target.dest_hash);
                 let title = browser::page_title(name.as_deref(), &target.dest_hash, &target.path);
-                LoadResult::Ok { doc, title }
+                LoadResult::Ok {
+                    doc,
+                    title,
+                    dest: target.dest_hash,
+                    identifying: guard.is_identifying(&target.dest_hash),
+                }
             }
             Err(err) => LoadResult::Err(err.to_string()),
         };
@@ -4593,8 +4776,8 @@ fn spawn_discovery(session: &Arc<Mutex<Session>>) -> tokio::task::JoinHandle<()>
 }
 
 /// Run the effects [`update`] returned: start navigations, cancel the in-flight
-/// fetch, or record a quit.
-fn run_effects(
+/// fetch, persist an identify decision, or record a quit.
+async fn run_effects(
     effects: Vec<Effect>,
     model: &mut Model,
     inflight: &mut Option<tokio::task::JoinHandle<()>>,
@@ -4607,6 +4790,23 @@ fn run_effects(
         match effect {
             Effect::Navigate(target) => {
                 spawn_fetch(inflight, generation, session, tx, timeout, target);
+            }
+            Effect::SetIdentify { dest, on } => {
+                // The decision must be stored (and the reused link dropped)
+                // BEFORE the accompanying reload's fetch builds its fresh link.
+                // An in-flight fetch may hold the session lock for seconds, but
+                // it is superseded by that reload anyway — abort it now so the
+                // lock frees within one discovery slice.
+                if let Some(handle) = inflight.take() {
+                    handle.abort();
+                }
+                *generation = generation.wrapping_add(1);
+                if let Err(err) = session.lock().await.set_identify(&dest, on) {
+                    model.set_toast(
+                        ToastKind::Error,
+                        format!("could not save identify decision: {err}"),
+                    );
+                }
             }
             Effect::OpenExternal(url) => {
                 // Hand the URL to the platform default handler (`xdg-open` on
@@ -4735,6 +4935,8 @@ pub async fn run_tui(
         theme,
         bookmarks,
         bookmarks_path,
+        // The session's own fingerprint is stable for its whole life: set once.
+        fingerprint: session.fingerprint_hex(),
         ..Model::default()
     };
     let size = terminal.size()?;
@@ -4801,7 +5003,8 @@ pub async fn run_tui(
                         &session,
                         &tx,
                         opts.timeout,
-                    );
+                    )
+                    .await;
                 }
                 // A recognised-but-inert event (focus/paste, which map to
                 // nothing): keep looping.
@@ -4815,8 +5018,13 @@ pub async fn run_tui(
                 if outcome.generation == generation {
                     inflight = None;
                     match outcome.result {
-                        LoadResult::Ok { doc, title } => {
+                        LoadResult::Ok { doc, title, dest, identifying } => {
                             update(&mut model, AppEvent::PageLoaded { doc, title });
+                            // The session's answer for this load is
+                            // authoritative: it corrects the optimistic toggle
+                            // and covers a first visit to a node persisted in
+                            // identify.toml by an earlier run.
+                            model.note_identify(dest, identifying);
                         }
                         LoadResult::Err(msg) => {
                             update(&mut model, AppEvent::LoadFailed(msg));
@@ -7625,14 +7833,15 @@ mod tests {
     #[test]
     fn footer_shows_every_button_at_a_wide_width() {
         // Given enough room, the whole browse footer renders with labels and no
-        // collapse: nav trio + 7 browse actions = 10 buttons, in order.
-        let m = loaded_model((80, 24));
+        // collapse: nav trio + 8 browse actions = 11 buttons, in order.
+        let m = loaded_model((120, 24));
         let slots = footer_layout(&m, Rect::new(0, 23, 120, 1));
-        assert_eq!(slots.len(), 10, "all browse buttons should fit wide");
+        assert_eq!(slots.len(), 11, "all browse buttons should fit wide");
         assert!(slots.iter().all(|s| !s.collapsed), "no collapse when wide");
         assert!(matches!(slots[0].item.action, FooterAction::Back));
         assert!(matches!(slots[1].item.action, FooterAction::Forward));
         assert!(matches!(slots[2].item.action, FooterAction::Reload));
+        assert!(matches!(slots[3].item.action, FooterAction::Identify));
         // The stronger divider sits before the first non-nav button.
         assert!(slots[3].strong_divider, "nav/mode boundary divider missing");
         assert!(!slots[1].strong_divider, "nav items share the dim divider");
@@ -8134,6 +8343,200 @@ mod tests {
         let toast = m.toast.as_ref().expect("a copy toast is raised");
         assert_eq!(toast.kind, ToastKind::Info);
         assert!(toast.text.contains("copied"), "toast: {}", toast.text);
+    }
+
+    // --- identify: the `i` toggle, top-bar marker, footer button, help ----
+
+    /// A loaded model with a fingerprint set, as the IO shell would build it.
+    fn identify_model(size: (u16, u16)) -> Model {
+        let mut m = loaded_model(size);
+        m.fingerprint = "aabbccddeeff00112233445566778899".to_string();
+        m
+    }
+
+    #[test]
+    fn i_toggles_identify_emits_setidentify_and_reload() {
+        let mut m = identify_model((80, 24));
+        assert!(!m.identifying, "anonymous by default");
+
+        let fx = press(&mut m, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(
+            fx.first(),
+            Some(&Effect::SetIdentify {
+                dest: [0xab; 16],
+                on: true
+            }),
+            "the decision is persisted before the reload: {fx:?}"
+        );
+        assert!(
+            matches!(fx.get(1), Some(Effect::Navigate(t)) if t.dest_hash == [0xab; 16]),
+            "the toggle reloads the current page: {fx:?}"
+        );
+        assert!(m.identifying, "the flag flips optimistically");
+        let toast = m.toast.as_ref().expect("a toggle toast is raised");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert!(
+            toast.text.contains("Identifying") && toast.text.contains("aabbccdd"),
+            "toast names the fingerprint: {}",
+            toast.text
+        );
+
+        let fx = press(&mut m, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(
+            fx.first(),
+            Some(&Effect::SetIdentify {
+                dest: [0xab; 16],
+                on: false
+            }),
+            "the second toggle turns it off: {fx:?}"
+        );
+        assert!(
+            matches!(fx.get(1), Some(Effect::Navigate(_))),
+            "the second toggle reloads too: {fx:?}"
+        );
+        assert!(!m.identifying, "back to anonymous");
+        let toast = m.toast.as_ref().expect("a toggle toast is raised");
+        assert!(
+            toast.text.contains("anonymous"),
+            "toast notes anonymity: {}",
+            toast.text
+        );
+    }
+
+    #[test]
+    fn i_without_current_dest_is_noop() {
+        let mut m = model_from_sample(80, (80, 24));
+        assert!(m.current_dest.is_none());
+        let fx = press(&mut m, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(fx.is_empty(), "no page, no effects: {fx:?}");
+        assert!(!m.identifying);
+    }
+
+    #[test]
+    fn topbar_shows_key_marker_only_when_identifying() {
+        let mut m = identify_model((80, 24));
+        let anon = row_text(&render(&m, 80, 24), 0, 80);
+        assert!(
+            !anon.contains(IDENTIFY_GLYPH),
+            "anonymous shows no marker: {anon:?}"
+        );
+        m.identifying = true;
+        let ident = row_text(&render(&m, 80, 24), 0, 80);
+        assert!(
+            ident.contains(IDENTIFY_GLYPH),
+            "key marker missing: {ident:?}"
+        );
+        assert!(
+            ident.contains("aabbccdd"),
+            "fingerprint prefix missing: {ident:?}"
+        );
+        assert!(
+            !ident.contains("eeff0011"),
+            "only the first 8 hex chars show: {ident:?}"
+        );
+    }
+
+    #[test]
+    fn topbar_identity_marker_survives_hops_and_bolt_dropping() {
+        // At a width too narrow for the whole cluster the hop count drops
+        // first, then the cache bolt; the identity marker (and the star)
+        // survive. current_dest is set, so hops would read "unknown".
+        let mut m = identify_model((14, 24));
+        m.identifying = true;
+        m.cached_view = true;
+        let top = row_text(&render(&m, 14, 24), 0, 14);
+        assert!(
+            top.contains(IDENTIFY_GLYPH) && top.contains("aabbccdd"),
+            "identity must survive truncation: {top:?}"
+        );
+        assert!(!top.contains("unknown"), "hops drop first: {top:?}");
+        assert!(!top.contains(CACHED_GLYPH), "the bolt drops next: {top:?}");
+    }
+
+    #[test]
+    fn footer_identify_label_flips() {
+        let mut m = loaded_model((80, 24));
+        let label_of = |m: &Model| {
+            footer_items(m)
+                .into_iter()
+                .find(|i| i.action == FooterAction::Identify)
+                .map(|i| i.label)
+        };
+        assert_eq!(label_of(&m), Some("identify"), "anonymous state");
+        m.identifying = true;
+        assert_eq!(label_of(&m), Some("anonymous"), "identifying state");
+        m.current_dest = None;
+        assert_eq!(label_of(&m), None, "no page, no identify button");
+    }
+
+    #[test]
+    fn click_footer_identify_toggles() {
+        let mut m = identify_model((80, 24));
+        let slot = footer_slot(&m, FooterAction::Identify);
+        let fx = update(&mut m, AppEvent::Mouse(click(slot.rect.x, slot.rect.y)));
+        assert_eq!(
+            fx.first(),
+            Some(&Effect::SetIdentify {
+                dest: [0xab; 16],
+                on: true
+            }),
+            "the click persists like the key: {fx:?}"
+        );
+        assert!(
+            matches!(fx.get(1), Some(Effect::Navigate(_))),
+            "the click reloads like the key: {fx:?}"
+        );
+        assert!(m.identifying, "the click flips the flag like the key");
+    }
+
+    #[test]
+    fn help_lists_identify_binding() {
+        let mut m = loaded_model((120, 40));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let text = flat(&render(&m, 120, 40));
+        assert!(
+            text.contains("identify / go anonymous to this node"),
+            "help missing the i binding:\n{text}"
+        );
+        assert!(
+            text.contains("default anonymous"),
+            "help missing the anonymity-model line:\n{text}"
+        );
+    }
+
+    #[test]
+    fn cached_revisit_restores_identify_state_per_node() {
+        let mut m = tall_model((80, 24));
+        // Fresh-load node 1 and learn (as the IO shell does after a load) that
+        // the session identifies to it.
+        begin_navigation(&mut m, tgt(1), HistoryAction::Push, None);
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse("one"),
+                title: "One".to_string(),
+            },
+        );
+        m.note_identify([1; 16], true);
+        assert!(m.identifying);
+        // Fresh-load node 2, anonymous.
+        begin_navigation(&mut m, tgt(2), HistoryAction::Push, None);
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse("two"),
+                title: "Two".to_string(),
+            },
+        );
+        m.note_identify([2; 16], false);
+        assert!(!m.identifying, "node 2 is anonymous");
+        // Back to node 1 is a cache hit: no fetch, yet the flag is restored.
+        let fx = go_back(&mut m);
+        assert!(fx.is_empty(), "cache hit fetches nothing: {fx:?}");
+        assert!(m.identifying, "cached revisit restores the per-node state");
+        // Forward to node 2, also cached: anonymous again.
+        go_forward(&mut m);
+        assert!(!m.identifying, "cached forward restores anonymity");
     }
 
     #[test]
