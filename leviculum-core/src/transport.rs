@@ -3729,13 +3729,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // on the wire: a local client 0 hops away reads remaining_hops; a
                 // client N hops away reads target+N == its own frozen count.
                 let mut rewrite_hops: Option<u8> = None;
+                // Observability (#38): log BOTH frozen counts and WHICH interface
+                // branch we took on every asymmetry. We pick the direction from
+                // the receiving interface, then check packet.hops against the one
+                // frozen value that direction implies. Python
+                // (Transport.py:1656) instead forwards when packet.hops matches
+                // EITHER frozen count and derives the direction from the match
+                // (Transport.py:1664/1668). So a packet whose hops equal the OTHER
+                // frozen count is valid for Python but an "asymmetry" for us — and
+                // for LRPROOF we then rewrite it. Logging hops + remaining_hops +
+                // dir on both branches makes the journal decisive: packet_hops ==
+                // hops while dir = "next_hop" would prove an asymmetry Python would
+                // never see.
                 let target_iface = if interface_index == link_entry.next_hop_interface_index {
                     // From destination side.
                     if packet.hops != link_entry.remaining_hops {
                         crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
+                            hops = link_entry.hops,
                             remaining_hops = link_entry.remaining_hops,
+                            dir = "next_hop",
                             rewritten_to = link_entry.remaining_hops,
                             "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)"
                         );
@@ -3748,7 +3762,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
-                            entry_hops = link_entry.hops,
+                            hops = link_entry.hops,
+                            remaining_hops = link_entry.remaining_hops,
+                            dir = "received",
                             rewritten_to = link_entry.hops,
                             "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (taken hops)"
                         );
@@ -4131,7 +4147,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             crate::tracing::trace!(
                                 dest = %HexShort(&dest_hash),
                                 packet_hops = packet.hops,
+                                hops = link_entry.hops,
                                 remaining_hops = link_entry.remaining_hops,
+                                dir = "next_hop",
                                 "Link data hop asymmetry, forwarding anyway (remaining_hops)"
                             );
                         }
@@ -4142,7 +4160,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             crate::tracing::trace!(
                                 dest = %HexShort(&dest_hash),
                                 packet_hops = packet.hops,
-                                entry_hops = link_entry.hops,
+                                hops = link_entry.hops,
+                                remaining_hops = link_entry.remaining_hops,
+                                dir = "received",
                                 "Link data hop asymmetry, forwarding anyway (taken hops)"
                             );
                         }
