@@ -3744,6 +3744,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let target_iface = if interface_index == link_entry.next_hop_interface_index {
                     // From destination side.
                     if packet.hops != link_entry.remaining_hops {
+                        // Observability (#38): show the CURRENT path entry the
+                        // frozen remaining_hops disagreed with.
+                        //   path_hops_now != remaining_hops -> the path CHANGED
+                        //     after the link entry froze its copy: stale.
+                        //   path_hops_now == remaining_hops but != packet_hops
+                        //     -> the path table never described the route the
+                        //     proof travelled.
+                        let now_ms = self.clock.now_ms();
+                        let (path_hops_now, path_age_ms, path_next_hop, path_iface) =
+                            self.path_entry_log_fields(&dest_hash, now_ms);
                         crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
@@ -3751,6 +3761,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             remaining_hops = link_entry.remaining_hops,
                             dir = "next_hop",
                             rewritten_to = link_entry.remaining_hops,
+                            path_hops_now = %path_hops_now,
+                            path_age_ms = %path_age_ms,
+                            path_next_hop = %path_next_hop,
+                            path_iface = %path_iface,
                             "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)"
                         );
                         rewrite_hops = Some(link_entry.remaining_hops);
@@ -3759,6 +3773,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } else if interface_index == link_entry.received_interface_index {
                     // From initiator side.
                     if packet.hops != link_entry.hops {
+                        // Observability (#38): same current-path snapshot as the
+                        // next_hop branch (see interpretation above).
+                        let now_ms = self.clock.now_ms();
+                        let (path_hops_now, path_age_ms, path_next_hop, path_iface) =
+                            self.path_entry_log_fields(&dest_hash, now_ms);
                         crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),
                             packet_hops = packet.hops,
@@ -3766,6 +3785,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             remaining_hops = link_entry.remaining_hops,
                             dir = "received",
                             rewritten_to = link_entry.hops,
+                            path_hops_now = %path_hops_now,
+                            path_age_ms = %path_age_ms,
+                            path_next_hop = %path_next_hop,
+                            path_iface = %path_iface,
                             "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (taken hops)"
                         );
                         rewrite_hops = Some(link_entry.hops);
@@ -4842,6 +4865,44 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             InterfaceMode::AccessPoint => crate::constants::AP_PATH_TIME_SECS * 1000,
             InterfaceMode::Roaming => crate::constants::ROAMING_PATH_TIME_SECS * 1000,
             _ => self.config.path_expiry_secs * 1000,
+        }
+    }
+
+    /// Observability (#38): render the CURRENT path-table entry for `dest` as
+    /// four log fields — `(path_hops_now, path_age_ms, path_next_hop,
+    /// path_iface)` — for the LRPROOF hop-asymmetry warns. Every field is
+    /// `"none"` when no live path entry exists. Read-only; carries no
+    /// forwarding effect. `PathEntry` stores `expires_ms` rather than a
+    /// creation timestamp, so the age is reconstructed from the same
+    /// per-interface expiry the entry was inserted with.
+    fn path_entry_log_fields(
+        &self,
+        dest: &[u8; TRUNCATED_HASHBYTES],
+        now_ms: u64,
+    ) -> (String, String, String, String) {
+        match self.storage.get_path(dest) {
+            Some(path) => {
+                (
+                    alloc::format!("{}", path.hops),
+                    alloc::format!(
+                        "{}",
+                        now_ms.saturating_sub(path.expires_ms.saturating_sub(
+                            self.path_expiry_ms_for_interface(path.interface_index)
+                        ))
+                    ),
+                    match path.next_hop {
+                        Some(nh) => alloc::format!("{}", HexShort(&nh)),
+                        None => String::from("none"),
+                    },
+                    alloc::format!("{}", self.iface_name(path.interface_index)),
+                )
+            }
+            None => (
+                String::from("none"),
+                String::from("none"),
+                String::from("none"),
+                String::from("none"),
+            ),
         }
     }
 
