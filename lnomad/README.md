@@ -105,7 +105,7 @@ by focus, hint or click:
   jumps to the first; `n` / `N` cycle to the next / previous match, `Esc` clears
 - click       follow a link, activate a top-bar control, or press a footer button
 - `:`         enter an address
-- `R`         reload the page (always refetches, bypassing the cache)
+- `R` / `Ctrl-R` / `F5`  reload the page (always refetches, bypassing the cache)
 - `t`         toggle the light / dark theme (correct a wrong auto-detection)
 - `M-←` / `M-→`  back / forward
 - mouse back / forward side buttons  back / forward

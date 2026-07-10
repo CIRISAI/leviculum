@@ -1500,8 +1500,14 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
         return Vec::new();
     }
 
-    // Reload the current page (no history change).
-    if key.code == KeyCode::Char('R') {
+    // Reload the current page (no history change). Bound to `R`, `Ctrl-R` and
+    // `F5` to match browser muscle memory; bare lowercase `r` stays free, as a
+    // mesh reload is expensive and single letters are reserved for cheap local
+    // actions.
+    if key.code == KeyCode::Char('R')
+        || (ctrl && key.code == KeyCode::Char('r'))
+        || key.code == KeyCode::F(5)
+    {
         return reload_current(model);
     }
 
@@ -4653,6 +4659,38 @@ mod tests {
             m.pending.as_ref().map(|p| p.action.clone()),
             Some(HistoryAction::Goto(0))
         );
+    }
+
+    #[test]
+    fn reload_bound_to_r_ctrl_r_and_f5_but_not_bare_r() {
+        // R, Ctrl-R and F5 each reload the current page (browser muscle memory);
+        // bare lowercase r is deliberately left free, as a mesh reload is
+        // expensive and single letters are reserved for cheap local actions.
+        for (code, mods) in [
+            (KeyCode::Char('R'), KeyModifiers::NONE),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL),
+            (KeyCode::F(5), KeyModifiers::NONE),
+        ] {
+            let mut m = model_from_sample(content_width(80), (80, 24));
+            m.history.visit(tgt(3));
+            let effects = press(&mut m, code, mods);
+            assert_eq!(
+                effects,
+                vec![Effect::Navigate(tgt(3))],
+                "{code:?} + {mods:?} should reload"
+            );
+            assert_eq!(
+                m.pending.as_ref().map(|p| p.action.clone()),
+                Some(HistoryAction::Goto(0)),
+                "{code:?} + {mods:?} reload must not change history"
+            );
+        }
+        // Bare lowercase r does nothing: no navigation, no pending load.
+        let mut m = model_from_sample(content_width(80), (80, 24));
+        m.history.visit(tgt(3));
+        let effects = press(&mut m, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(effects.is_empty(), "bare r must be unbound: {effects:?}");
+        assert!(m.pending.is_none(), "bare r must not start a load");
     }
 
     // --- page cache ------------------------------------------------------
