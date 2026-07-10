@@ -238,7 +238,18 @@ fn emit_ansi_line(cells: &[StyledChar], no_color: bool, depth: ColorDepth, out: 
         let mut j = i;
         let mut text = String::new();
         while j < cells.len() && cells[j].st == st {
-            text.push(cells[j].ch);
+            // A text sink has no background with which to draw an input bar, so
+            // a field's padding is emitted as underscores: a reader (or a
+            // script) can still see that a field is there and how wide it is.
+            // Blank spaces would render it invisible. The TUI paints the very
+            // same cells as a filled bar instead.
+            let ch = cells[j].ch;
+            let printed = if cells[j].field.is_some() && ch == ' ' {
+                '_'
+            } else {
+                ch
+            };
+            text.push(printed);
             j += 1;
         }
         if !no_color && !st.is_plain() {
@@ -906,6 +917,22 @@ fn field_display(field: &Field, over: Option<&FieldValue>) -> (String, String, b
 mod tests {
     use super::*;
     use leviculum_micron::{parse, Color, Line, Link, Span, Style};
+
+    #[test]
+    fn print_sink_marks_a_field_box_with_underscores() {
+        // An 8-wide field prefilled "bo": the print sink cannot paint an input
+        // bar, so its padding must show as underscores. Blank spaces would make
+        // the field invisible in a plain dump.
+        let doc = parse("Name: `<8|n`bo>");
+        for no_color in [true, false] {
+            let page = render_with_options(&doc, 80, no_color, ColorDepth::Truecolor);
+            assert!(
+                page.text.contains("bo______"),
+                "field box not marked (no_color={no_color}): {:?}",
+                page.text
+            );
+        }
+    }
 
     fn plain_span(text: &str) -> Span {
         Span {
