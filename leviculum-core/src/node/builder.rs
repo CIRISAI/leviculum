@@ -127,6 +127,15 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Set LRPROOF hop-asymmetry handling (#38). `true` (default) rewrites a
+    /// mismatching forwarded proof to the frozen count; `false` selects the
+    /// reference-exact strict check that DROPS on mismatch, arming the healing
+    /// loop. See [`TransportConfig::lrproof_rewrite_on_asymmetry`].
+    pub fn lrproof_rewrite_on_asymmetry(mut self, rewrite: bool) -> Self {
+        self.transport_config.lrproof_rewrite_on_asymmetry = rewrite;
+        self
+    }
+
     /// Enable probe responder (rnstransport.probe destination with PROVE_ALL).
     ///
     /// When enabled, the node creates a probe destination from its transport

@@ -413,6 +413,27 @@ pub struct TransportConfig {
     /// scales with it. `None` keeps the default RTT-driven behaviour. Local
     /// timing only; does not change wire format or semantics.
     pub link_keepalive_secs: Option<u64>,
+    /// LRPROOF hop-asymmetry handling (#38). Governs what this relay does when a
+    /// returning link-request proof carries a hop count that does not match the
+    /// value frozen into its link table.
+    ///
+    /// * `true` (default, today's field behaviour): forward the proof anyway and
+    ///   REWRITE its on-wire hop count to the frozen value, so a strict
+    ///   Python-RNS peer (`Transport.py:2176`) accepts it. Buys interop today at
+    ///   the cost of suppressing the healing loop (see
+    ///   `docs/src/architecture-hop-counting.md`).
+    /// * `false`: the reference-exact strict check. A proof whose hops match
+    ///   neither frozen operand is DROPPED, never rewritten
+    ///   (`Transport.py:1656` disjunction for the transit direction,
+    ///   `Transport.py:2176` single `== remaining_hops` check for the
+    ///   local-client-link direction). The drop is the SENSOR of the healing
+    ///   loop: the link never validates, expires, and `clean_link_table`
+    ///   requests a fresh path.
+    ///
+    /// Every production construction keeps the default, so flipping this is a
+    /// deliberate opt-in gated by an interop A/B and a live check, never a
+    /// silent field change.
+    pub lrproof_rewrite_on_asymmetry: bool,
 }
 
 impl Default for TransportConfig {
@@ -425,6 +446,9 @@ impl Default for TransportConfig {
             max_queued_announces: MAX_QUEUED_ANNOUNCES_PER_INTERFACE,
             max_random_blobs: MAX_RANDOM_BLOBS,
             link_keepalive_secs: None,
+            // Default preserves today's field behaviour exactly (rewrite, not
+            // drop); the strict reference check is opt-in only (#38).
+            lrproof_rewrite_on_asymmetry: true,
         }
     }
 }
@@ -3744,7 +3768,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // hops while dir = "next_hop" would prove an asymmetry Python would
                 // never see.
                 let target_iface = if interface_index == link_entry.next_hop_interface_index {
-                    // From destination side.
+                    // From destination side. The proof travelled destination ->
+                    // this relay -> initiator; the operand that direction expects
+                    // is `remaining_hops`. This maps to:
+                    //   * Python `Transport.py:1664` (transit/data link path,
+                    //     interfaces differ, `receiving_interface == IDX_LT_NH_IF`
+                    //     -> check `== IDX_LT_REM_HOPS`, forward to IDX_LT_RCVD_IF);
+                    //   * Python `Transport.py:2176` (LRPROOF / local-client-link
+                    //     path -> single check `== IDX_LT_REM_HOPS`, then
+                    //     `:2177` `receiving_interface == IDX_LT_NH_IF`, forward to
+                    //     IDX_LT_RCVD_IF).
+                    // Both reference arms use the SAME operand on this direction,
+                    // so one rule covers transit and local-client links here.
                     if packet.hops != link_entry.remaining_hops {
                         // Observability (#38): show the CURRENT path entry the
                         // frozen remaining_hops disagreed with.
@@ -3762,25 +3797,57 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // only at IDX_LT_DSTHASH (storage_types.rs:76).
                         let (path_hops_now, path_age_ms, path_next_hop, path_iface) =
                             self.path_entry_log_fields(&link_entry.destination_hash, now_ms);
-                        crate::tracing::warn!(
-                            link_id = %HexShort(&dest_hash),
-                            dest = %HexShort(&link_entry.destination_hash),
-                            packet_hops = packet.hops,
-                            hops = link_entry.hops,
-                            remaining_hops = link_entry.remaining_hops,
-                            dir = "next_hop",
-                            rewritten_to = link_entry.remaining_hops,
-                            path_hops_now = %path_hops_now,
-                            path_age_ms = %path_age_ms,
-                            path_next_hop = %path_next_hop,
-                            path_iface = %path_iface,
-                            "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)"
-                        );
-                        rewrite_hops = Some(link_entry.remaining_hops);
+                        if self.config.lrproof_rewrite_on_asymmetry {
+                            crate::tracing::warn!(
+                                link_id = %HexShort(&dest_hash),
+                                dest = %HexShort(&link_entry.destination_hash),
+                                packet_hops = packet.hops,
+                                hops = link_entry.hops,
+                                remaining_hops = link_entry.remaining_hops,
+                                dir = "next_hop",
+                                rewritten_to = link_entry.remaining_hops,
+                                path_hops_now = %path_hops_now,
+                                path_age_ms = %path_age_ms,
+                                path_next_hop = %path_next_hop,
+                                path_iface = %path_iface,
+                                "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (remaining_hops)"
+                            );
+                            rewrite_hops = Some(link_entry.remaining_hops);
+                        } else {
+                            // Strict reference behaviour (#38): the operand did
+                            // not match `remaining_hops`, so Python
+                            // `Transport.py:2176`/`:1664` never sets
+                            // `outbound_interface` and the proof is DROPPED. The
+                            // drop is the healing sensor: the link never
+                            // validates, expires, and `clean_link_table` requests
+                            // a fresh path for the original destination.
+                            crate::tracing::warn!(
+                                link_id = %HexShort(&dest_hash),
+                                dest = %HexShort(&link_entry.destination_hash),
+                                packet_hops = packet.hops,
+                                hops = link_entry.hops,
+                                remaining_hops = link_entry.remaining_hops,
+                                dir = "next_hop",
+                                path_hops_now = %path_hops_now,
+                                path_age_ms = %path_age_ms,
+                                path_next_hop = %path_next_hop,
+                                path_iface = %path_iface,
+                                "LRPROOF hop asymmetry: dropping proof, hops match neither frozen count (remaining_hops)"
+                            );
+                            self.stats.record_drop(DropReason::LrproofInvalid);
+                            return Ok(());
+                        }
                     }
                     link_entry.received_interface_index
                 } else if interface_index == link_entry.received_interface_index {
-                    // From initiator side.
+                    // From initiator side. The operand this direction expects is
+                    // the taken `hops`. This maps to Python `Transport.py:1668`
+                    // (transit/data link path, interfaces differ,
+                    // `receiving_interface == IDX_LT_RCVD_IF` -> check
+                    // `== IDX_LT_HOPS`, forward to IDX_LT_NH_IF). The LRPROOF
+                    // handler (`Transport.py:2176`) has no initiator-side arm
+                    // (proofs flow destination -> initiator only), so for LRPROOF
+                    // this branch is the transit-link rule of `:1656`.
                     if packet.hops != link_entry.hops {
                         // Observability (#38): same current-path snapshot as the
                         // next_hop branch (see interpretation above).
@@ -3790,21 +3857,43 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // link id (see the next_hop branch comment).
                         let (path_hops_now, path_age_ms, path_next_hop, path_iface) =
                             self.path_entry_log_fields(&link_entry.destination_hash, now_ms);
-                        crate::tracing::warn!(
-                            link_id = %HexShort(&dest_hash),
-                            dest = %HexShort(&link_entry.destination_hash),
-                            packet_hops = packet.hops,
-                            hops = link_entry.hops,
-                            remaining_hops = link_entry.remaining_hops,
-                            dir = "received",
-                            rewritten_to = link_entry.hops,
-                            path_hops_now = %path_hops_now,
-                            path_age_ms = %path_age_ms,
-                            path_next_hop = %path_next_hop,
-                            path_iface = %path_iface,
-                            "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (taken hops)"
-                        );
-                        rewrite_hops = Some(link_entry.hops);
+                        if self.config.lrproof_rewrite_on_asymmetry {
+                            crate::tracing::warn!(
+                                link_id = %HexShort(&dest_hash),
+                                dest = %HexShort(&link_entry.destination_hash),
+                                packet_hops = packet.hops,
+                                hops = link_entry.hops,
+                                remaining_hops = link_entry.remaining_hops,
+                                dir = "received",
+                                rewritten_to = link_entry.hops,
+                                path_hops_now = %path_hops_now,
+                                path_age_ms = %path_age_ms,
+                                path_next_hop = %path_next_hop,
+                                path_iface = %path_iface,
+                                "LRPROOF hop asymmetry: rewriting forwarded hops to the frozen count (taken hops)"
+                            );
+                            rewrite_hops = Some(link_entry.hops);
+                        } else {
+                            // Strict reference behaviour (#38): `packet.hops`
+                            // matched neither frozen operand for this direction,
+                            // so Python `Transport.py:1668` leaves
+                            // `outbound_interface` unset and the proof is DROPPED.
+                            crate::tracing::warn!(
+                                link_id = %HexShort(&dest_hash),
+                                dest = %HexShort(&link_entry.destination_hash),
+                                packet_hops = packet.hops,
+                                hops = link_entry.hops,
+                                remaining_hops = link_entry.remaining_hops,
+                                dir = "received",
+                                path_hops_now = %path_hops_now,
+                                path_age_ms = %path_age_ms,
+                                path_next_hop = %path_next_hop,
+                                path_iface = %path_iface,
+                                "LRPROOF hop asymmetry: dropping proof, hops match neither frozen count (taken hops)"
+                            );
+                            self.stats.record_drop(DropReason::LrproofInvalid);
+                            return Ok(());
+                        }
                     }
                     link_entry.next_hop_interface_index
                 } else {
