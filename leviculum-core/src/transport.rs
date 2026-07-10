@@ -1074,6 +1074,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Removal path: removed in handle_interface_down via set_local_client(id, false).
     local_client_interfaces: BTreeSet<usize>,
 
+    /// The interface (if any) over which this node reaches a shared instance it
+    /// is a CLIENT of. Mirrors Python's `interface_to_shared_instance` predicate
+    /// (`Transport.py`): a client-side local interface carries the marker
+    /// `is_connected_to_shared_instance`. A packet arriving from that instance
+    /// crossed only the IPC hop, so its hop count must not be incremented.
+    /// `None` on a plain node or on the shared instance itself.
+    shared_instance_interface: Option<usize>,
+
     /// Per-interface incoming announce timestamps for frequency computation (Python ia_freq_deque).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
     interface_incoming_announce_times: BTreeMap<usize, VecDeque<u64>>,
@@ -1226,6 +1234,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_ingress_control: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
+            shared_instance_interface: None,
             interface_incoming_announce_times: BTreeMap::new(),
             interface_outgoing_announce_times: BTreeMap::new(),
             interface_incoming_pr_times: BTreeMap::new(),
@@ -1583,15 +1592,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         let mut packet = Packet::unpack(&raw)?;
 
-        // Increment hops on receipt, matching Python Transport.py:1319.
-        // After this: hops=1 means direct neighbor, hops=0 means local client.
-        packet.hops = packet.hops.saturating_add(1);
-
-        // Local shared-instance clients get the pre-increment value (net zero),
-        // matching Python Transport.py:1345,1348.
-        if self.is_local_client(interface_index) {
-            packet.hops = packet.hops.saturating_sub(1);
-        }
+        // Adjust the on-wire hop count for the interface this packet arrived on.
+        packet.hops = self.incoming_hop_count(interface_index, packet.hops);
 
         crate::tracing::trace!(
             "incoming packet ptype={:?} dest=<{}> iface={} hops={}",
@@ -5056,6 +5058,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Check if any local IPC clients are connected.
     fn has_local_clients(&self) -> bool {
         !self.local_client_interfaces.is_empty()
+    }
+
+    /// Compute the effective hop count for a packet arriving on `interface_index`,
+    /// given its on-wire `wire_hops`.
+    ///
+    /// Increment hops on receipt, matching Python Transport.py:1319.
+    /// After this: hops=1 means direct neighbor, hops=0 means local client.
+    ///
+    /// Local shared-instance clients get the pre-increment value (net zero),
+    /// matching Python Transport.py:1345,1348.
+    fn incoming_hop_count(&self, interface_index: usize, wire_hops: u8) -> u8 {
+        let mut hops = wire_hops.saturating_add(1);
+        if self.is_local_client(interface_index) {
+            hops = hops.saturating_sub(1);
+        }
+        hops
     }
 
     /// Test-only: flip `config.enable_transport` on a constructed
@@ -16392,6 +16410,81 @@ mod tests {
             transport.set_interface_name(LOCAL_CLIENT_IFACE, "Local[rns/default]/0".into());
             transport.set_local_client(LOCAL_CLIENT_IFACE, true);
             transport
+        }
+
+        /// A transport with NO local clients (it is itself a CLIENT of some
+        /// shared instance, reached over `UPLINK_IFACE`).
+        const UPLINK_IFACE: usize = 5;
+
+        fn make_transport_client_of_instance() -> Transport<MockClock, MemoryStorage> {
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = Identity::generate(&mut OsRng);
+            let config = TransportConfig {
+                enable_transport: false,
+                ..TransportConfig::default()
+            };
+            let mut transport =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            transport.set_interface_name(UPLINK_IFACE, "LocalClient[default]".into());
+            transport.set_interface_name(NETWORK_IFACE, "tcp_client/127.0.0.1".into());
+            // Mark the uplink to the shared instance. (Field set directly; the
+            // public setter lands with the fix in commit 2.)
+            transport.shared_instance_interface = Some(UPLINK_IFACE);
+            transport
+        }
+
+        /// A node that is a CLIENT of a shared instance must NOT count the IPC
+        /// hop: a packet arriving from its instance over the uplink is net zero,
+        /// mirroring Python's `elif Transport.interface_to_shared_instance(...)`
+        /// branch. Today we lack that branch, so the packet becomes +1. (#38)
+        #[test]
+        fn test_client_of_shared_instance_does_not_count_ipc_hop() {
+            let transport = make_transport_client_of_instance();
+
+            // Packet from the instance over the uplink: on-wire hops 0 -> net 0.
+            assert_eq!(
+                transport.incoming_hop_count(UPLINK_IFACE, 0),
+                0,
+                "packet from the shared instance must not count the IPC hop"
+            );
+            // A 3-hop packet relayed to us by the instance stays 3, not 4.
+            assert_eq!(
+                transport.incoming_hop_count(UPLINK_IFACE, 3),
+                3,
+                "hop count from the instance must be unchanged"
+            );
+            // A packet on any OTHER interface still gets the normal +1.
+            assert_eq!(
+                transport.incoming_hop_count(NETWORK_IFACE, 0),
+                1,
+                "non-uplink interfaces must still increment hops"
+            );
+        }
+
+        /// Pin the mutual exclusion of Python's `if len(local_client_interfaces)
+        /// > 0: ... elif interface_to_shared_instance(...)`: on a node that HAS
+        /// local clients (it IS the shared instance), the `elif` can never run,
+        /// so an interface that also carries the uplink marker must NOT be
+        /// decremented. (#38)
+        #[test]
+        fn test_shared_instance_marker_ignored_when_node_has_local_clients() {
+            let mut transport = make_transport_with_local_client();
+            // The node is the instance, yet an unrelated interface also carries
+            // the uplink marker. The outer branch is taken, so the elif is dead.
+            transport.shared_instance_interface = Some(NETWORK_IFACE);
+
+            // Packet from a local client: net zero (outer branch).
+            assert_eq!(
+                transport.incoming_hop_count(LOCAL_CLIENT_IFACE, 0),
+                0,
+                "packet from a local client is net zero"
+            );
+            // Packet on the uplink-marked interface: elif cannot run -> +1.
+            assert_eq!(
+                transport.incoming_hop_count(NETWORK_IFACE, 0),
+                1,
+                "elif must not run when the outer local-client branch was taken"
+            );
         }
 
         /// Build a valid announce packet as raw bytes. Returns (raw_bytes, dest_hash).
