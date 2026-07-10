@@ -235,6 +235,29 @@ pub enum ScrollCmd {
     Bottom,
 }
 
+/// The single scroll rule shared by every scrollable window — the content body
+/// and both overlays (help, places), and any future overlay. Resolve `cmd`
+/// against the current offset `cur`, given the `viewport` height in rows and
+/// `max` (the largest valid offset, i.e. `content.saturating_sub(viewport)`),
+/// clamped into `0..=max`. A half page is `viewport / 2`. Keeping one pure
+/// function means all windows scroll with identical semantics; a new overlay
+/// gets correct scrolling by calling this with its own viewport and max.
+pub fn scrolled(cur: usize, cmd: ScrollCmd, viewport: usize, max: usize) -> usize {
+    let vp = viewport.max(1);
+    let half = (vp / 2).max(1);
+    let next = match cmd {
+        ScrollCmd::LineUp => cur.saturating_sub(1),
+        ScrollCmd::LineDown => cur.saturating_add(1),
+        ScrollCmd::HalfPageUp => cur.saturating_sub(half),
+        ScrollCmd::HalfPageDown => cur.saturating_add(half),
+        ScrollCmd::PageUp => cur.saturating_sub(vp),
+        ScrollCmd::PageDown => cur.saturating_add(vp),
+        ScrollCmd::Top => 0,
+        ScrollCmd::Bottom => max,
+    };
+    next.min(max)
+}
+
 /// The interactive UI mode: normal browsing or entering an address.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -678,6 +701,14 @@ pub struct Model {
     pub show_places: bool,
     /// The selected row in the places panel, an index into [`places`].
     pub places_sel: usize,
+    /// The places overlay's VIEW offset: the first entry-line shown when the
+    /// panel is taller than the terminal. Distinct from [`places_sel`] (the
+    /// selection); the view is scrolled the minimum needed to keep the selected
+    /// row visible. Reset to 0 when the panel opens.
+    pub places_scroll: usize,
+    /// The help overlay's VIEW offset: the first help line shown when the help
+    /// is taller than the terminal. Reset to 0 when the help opens.
+    pub help_scroll: usize,
     /// The in-RAM LRU cache of recently viewed pages, keyed by fetch target. A
     /// revisit (including back/forward) renders instantly from here; a reload
     /// bypasses it and form submits are never stored. See [`PageCache`].
@@ -837,19 +868,7 @@ impl Model {
     /// under- or overflows, even when the page is shorter than the viewport.
     pub fn apply_scroll(&mut self, cmd: ScrollCmd, viewport: usize) {
         let max = self.max_scroll(viewport);
-        let vp = viewport.max(1);
-        let half = (vp / 2).max(1);
-        self.scroll = match cmd {
-            ScrollCmd::LineUp => self.scroll.saturating_sub(1),
-            ScrollCmd::LineDown => self.scroll.saturating_add(1),
-            ScrollCmd::HalfPageUp => self.scroll.saturating_sub(half),
-            ScrollCmd::HalfPageDown => self.scroll.saturating_add(half),
-            ScrollCmd::PageUp => self.scroll.saturating_sub(vp),
-            ScrollCmd::PageDown => self.scroll.saturating_add(vp),
-            ScrollCmd::Top => 0,
-            ScrollCmd::Bottom => max,
-        }
-        .min(max);
+        self.scroll = scrolled(self.scroll, cmd, viewport, max);
     }
 
     /// Stash the current page's scroll offset into its cache entry (when the
@@ -1497,6 +1516,7 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
     // Toggle the help overlay.
     if key.code == KeyCode::Char('?') {
         model.show_help = true;
+        model.help_scroll = 0;
         return Vec::new();
     }
 
@@ -1679,6 +1699,7 @@ fn toggle_places(model: &mut Model) {
     model.show_places = !model.show_places;
     if model.show_places {
         model.places_sel = 0;
+        model.places_scroll = 0;
         model.dismiss_toast();
     }
 }
@@ -3440,6 +3461,9 @@ fn run_footer_action(model: &mut Model, action: FooterAction) -> Vec<Effect> {
         FooterAction::Copy => yank_url(model),
         FooterAction::Help => {
             model.show_help = !model.show_help;
+            if model.show_help {
+                model.help_scroll = 0;
+            }
             Vec::new()
         }
         FooterAction::Quit => {
@@ -5228,6 +5252,37 @@ mod tests {
     }
 
     // --- scrolling (retained from phase 2) -------------------------------
+
+    #[test]
+    fn scrolled_is_the_one_scroll_rule() {
+        let vp = 10;
+        let max = 90;
+        // Line motions step one, clamped at both ends.
+        assert_eq!(scrolled(5, ScrollCmd::LineDown, vp, max), 6);
+        assert_eq!(scrolled(5, ScrollCmd::LineUp, vp, max), 4);
+        assert_eq!(scrolled(0, ScrollCmd::LineUp, vp, max), 0, "clamps at 0");
+        assert_eq!(
+            scrolled(max, ScrollCmd::LineDown, vp, max),
+            max,
+            "clamps at max"
+        );
+        // Full page uses the viewport, half page uses viewport/2.
+        assert_eq!(scrolled(0, ScrollCmd::PageDown, vp, max), 10);
+        assert_eq!(scrolled(20, ScrollCmd::PageUp, vp, max), 10);
+        assert_eq!(scrolled(0, ScrollCmd::HalfPageDown, vp, max), 5);
+        assert_eq!(scrolled(20, ScrollCmd::HalfPageUp, vp, max), 15);
+        // Page motions still clamp to the ends.
+        assert_eq!(scrolled(85, ScrollCmd::PageDown, vp, max), max);
+        assert_eq!(scrolled(3, ScrollCmd::PageUp, vp, max), 0);
+        // Top and Bottom jump straight to the extremes.
+        assert_eq!(scrolled(42, ScrollCmd::Top, vp, max), 0);
+        assert_eq!(scrolled(0, ScrollCmd::Bottom, vp, max), max);
+        // A zero viewport never divides by zero and still advances by one.
+        assert_eq!(scrolled(0, ScrollCmd::HalfPageDown, 0, max), 1);
+        // A max of 0 (content fits) pins every motion at 0.
+        assert_eq!(scrolled(0, ScrollCmd::PageDown, vp, 0), 0);
+        assert_eq!(scrolled(0, ScrollCmd::Bottom, vp, 0), 0);
+    }
 
     #[test]
     fn apply_scroll_math() {
