@@ -12,9 +12,9 @@
 //!   [`Effect::Navigate`]; a cancel yields [`Effect::Cancel`]. A completed fetch
 //!   arrives back as [`AppEvent::PageLoaded`] / [`AppEvent::LoadFailed`], also
 //!   folded by `update`.
-//! - [`view`] draws the model into a ratatui [`Frame`]: a two-row top-bar (page
-//!   title + back/forward/reload/address controls), the scrollable content, and
-//!   a one-row status bar. A test renders it into a
+//! - [`view`] draws the model into a ratatui [`Frame`]: a one-row top-bar (page
+//!   title, address, and a right-aligned status cluster), the scrollable
+//!   content, and a one-row status bar. A test renders it into a
 //!   [`ratatui::backend::TestBackend`] and asserts on the resulting buffer.
 //! - [`run_tui`] is the only part that touches a real terminal and the network.
 //!   It owns the [`Session`], runs the initial fetch and every subsequent
@@ -76,14 +76,16 @@ use leviculum_micron::FieldKind;
 const SCROLLBAR_COLS: u16 = 1;
 /// How many lines one mouse-wheel notch scrolls.
 const WHEEL_STEP: usize = 3;
-/// Rows in the fixed top-bar (title row + controls row).
-const TOPBAR_ROWS: u16 = 2;
+/// Rows in the fixed top-bar. A single identity row: the page title, the
+/// address, and a right-aligned status cluster.
+const TOPBAR_ROWS: u16 = 1;
 /// Rows in the fixed status bar.
 const STATUS_ROWS: u16 = 1;
 /// Total chrome rows: top-bar plus status bar. The content viewport is the
 /// terminal height minus this.
 const CHROME_ROWS: u16 = TOPBAR_ROWS + STATUS_ROWS;
-/// Columns of blank gap between top-bar controls.
+/// Columns of blank gap between the top-bar's left identity (title / address)
+/// and its right-aligned status cluster.
 const CTRL_GAP: u16 = 2;
 /// Spinner animation cadence while a fetch is in flight, in milliseconds. Also
 /// the cadence at which an idle toast is aged towards its expiry.
@@ -94,14 +96,14 @@ const TOAST_LIFETIME_MS: u64 = 4000;
 /// tick cadence), so expiry is a pure count of ticks.
 const TOAST_TICKS: u64 = TOAST_LIFETIME_MS / SPINNER_TICK_MS;
 
-/// The label for each of the three fixed top-bar controls.
-const BACK_LABEL: &str = "‹ back";
-const FORWARD_LABEL: &str = "forward ›";
-const RELOAD_LABEL: &str = "⟳ reload";
+/// The status-cluster glyph shown when the current page is bookmarked, and when
+/// it is not. The star is a click target that toggles the bookmark.
+const STAR_ON: &str = "★";
+const STAR_OFF: &str = "☆";
 
-/// The subtle right-aligned top-bar marker shown when the current page was
+/// The subtle right-aligned status-cluster glyph shown when the current page was
 /// served from the in-RAM page cache rather than a fresh fetch.
-const CACHED_LABEL: &str = "⚡ cached ";
+const CACHED_GLYPH: &str = "⚡";
 
 /// Browse-mode status hints. A curated subset that fits an 80-column status bar;
 /// the full keybinding list lives in the `?` help overlay.
@@ -382,18 +384,15 @@ fn chars_eq_ci(a: char, b: char) -> bool {
     a == b || a.to_lowercase().eq(b.to_lowercase())
 }
 
-/// One of the clickable top-bar controls, recorded with its rect so a later
-/// phase can hit-test mouse clicks against it.
+/// One of the clickable top-bar controls, recorded with its rect so mouse
+/// clicks and hint labels can be hit-tested against it. The navigation trio
+/// (back / forward / reload) lives in the footer, not here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
-    /// Go back in history.
-    Back,
-    /// Go forward in history.
-    Forward,
-    /// Reload the current page.
-    Reload,
-    /// The address / breadcrumb slot.
+    /// The address slot: a click opens the address editor.
     Address,
+    /// The bookmark star: a click toggles the current page's bookmark.
+    Bookmark,
 }
 
 /// A top-bar control's screen rectangle, for mouse hit-testing in a later phase.
@@ -979,7 +978,7 @@ pub fn hints(model: &Model) -> Vec<Hint> {
     for vl in visible_links(model) {
         slots.push((HintTarget::Link(vl.index), vl.row, vl.col_start));
     }
-    for cr in top_bar_controls(topbar) {
+    for cr in top_bar_controls(model, topbar) {
         slots.push((HintTarget::Control(cr.control), cr.rect.y, cr.rect.x));
     }
     hint_labels(slots.len())
@@ -1397,7 +1396,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                     begin_navigation(model, target, HistoryAction::Push, None)
                 }
                 Err(err) => {
-                    model.set_toast(ToastKind::Error, format!("bad URL: {raw} ({err})"));
+                    model.set_toast(ToastKind::Error, format!("bad address: {raw} ({err})"));
                     Vec::new()
                 }
             }
@@ -1756,7 +1755,10 @@ fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         Place::Bookmark { url, .. } => match parse_url(&url, model.current_dest) {
             Ok(target) => target,
             Err(err) => {
-                model.set_toast(ToastKind::Error, format!("bad bookmark URL: {url} ({err})"));
+                model.set_toast(
+                    ToastKind::Error,
+                    format!("bad bookmark address: {url} ({err})"),
+                );
                 return Vec::new();
             }
         },
@@ -2138,13 +2140,11 @@ fn collect_submit_fields(model: &Model, link: &RenderedLink) -> Vec<(String, Str
 fn activate_hint_target(model: &mut Model, target: HintTarget) -> Vec<Effect> {
     match target {
         HintTarget::Link(idx) => follow_link(model, idx),
-        HintTarget::Control(Control::Back) => go_back(model),
-        HintTarget::Control(Control::Forward) => go_forward(model),
-        HintTarget::Control(Control::Reload) => reload_current(model),
         HintTarget::Control(Control::Address) => {
             enter_address(model);
             Vec::new()
         }
+        HintTarget::Control(Control::Bookmark) => toggle_bookmark_current(model),
     }
 }
 
@@ -2263,7 +2263,7 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
         }
     }
     let [topbar, _content, _status] = regions(model.frame_area());
-    for cr in top_bar_controls(topbar) {
+    for cr in top_bar_controls(model, topbar) {
         if rect_contains(cr.rect, col, row) {
             return activate_hint_target(model, HintTarget::Control(cr.control));
         }
@@ -2324,40 +2324,182 @@ fn key_to_scroll(key: &KeyEvent) -> Option<ScrollCmd> {
     }
 }
 
-/// The geometry of the three fixed top-bar controls plus the address slot, laid
-/// out left to right on the controls row (the top-bar's second row). Exposed so
-/// a later phase can hit-test mouse clicks against the returned rectangles.
-pub fn top_bar_controls(topbar: Rect) -> Vec<ControlRect> {
-    let y = topbar.y.saturating_add(1);
-    let mut x = topbar.x;
-    let mut out = Vec::new();
-    for (control, label) in [
-        (Control::Back, BACK_LABEL),
-        (Control::Forward, FORWARD_LABEL),
-        (Control::Reload, RELOAD_LABEL),
-    ] {
-        let w = UnicodeWidthStr::width(label) as u16;
-        out.push(ControlRect {
-            control,
-            rect: Rect {
-                x,
-                y,
-                width: w.min(topbar.right().saturating_sub(x)),
-                height: 1,
-            },
-        });
-        x = x.saturating_add(w).saturating_add(CTRL_GAP);
-    }
-    let addr_w = topbar.right().saturating_sub(x);
-    out.push(ControlRect {
-        control: Control::Address,
-        rect: Rect {
-            x,
-            y,
-            width: addr_w,
-            height: 1,
+/// The ` · ` separator drawn between the title and the address on the top bar.
+const TOPBAR_SEP: &str = " · ";
+
+/// The resolved geometry of the one-row top bar: the title and address (each
+/// already ellipsized to fit) and the right-aligned status cluster (bookmark
+/// star, cache bolt, hop count). The renderer and the click / hint hit-testing
+/// both derive from this one function, so they can never disagree on where a
+/// span sits.
+struct TopBar {
+    /// The title text (label only), ellipsized to fit; empty when none.
+    title: String,
+    /// The column the title starts at.
+    title_x: u16,
+    /// The `·` separator's column, present only when both title and address show.
+    sep_x: Option<u16>,
+    /// The address text, ellipsized to fit; empty when it did not fit at all.
+    address: String,
+    /// The address slot's rect; a click here opens the address editor.
+    address_rect: Rect,
+    /// The bookmark star: its glyph (★ / ☆) and rect, absent when no page is
+    /// loaded. A click toggles the bookmark.
+    star: Option<(&'static str, Rect)>,
+    /// The cache-bolt glyph's column, present only for a cached view.
+    cached_x: Option<u16>,
+    /// The hop-count text (`N hops` / `unknown`) and its column.
+    hops: Option<(String, u16)>,
+}
+
+/// The bookmark-star glyph for the current page: filled when bookmarked, hollow
+/// when not, or `None` when no page is loaded (nothing to bookmark).
+fn star_glyph(model: &Model) -> Option<&'static str> {
+    let url = current_url(model)?;
+    Some(if model.bookmarks.contains(&url) {
+        STAR_ON
+    } else {
+        STAR_OFF
+    })
+}
+
+/// The hop-count cluster text for the current destination: `N hops` when the
+/// destination is a known announced node with a hop count, `unknown` when it is
+/// not in the registry, or `None` when no page is loaded.
+fn hops_text(model: &Model) -> Option<String> {
+    let dest = model.current_dest?;
+    Some(
+        match model.node_registry.get_by_hash(&dest).and_then(|n| n.hops) {
+            Some(h) => format!("{h} hops"),
+            None => "unknown".to_string(),
         },
+    )
+}
+
+fn topbar_layout(model: &Model, area: Rect) -> TopBar {
+    let y = area.y;
+    let right = area.right();
+
+    // Right-aligned status cluster: star, then cache bolt, then hop count, each
+    // present only when it applies, separated by a single column.
+    let star = star_glyph(model);
+    let cached = model.cached_view;
+    let hops = hops_text(model);
+    let seg_w = |g: &str| UnicodeWidthStr::width(g) as u16;
+    let mut cluster_w = 0u16;
+    let mut segs = 0u16;
+    if let Some(g) = star {
+        cluster_w += seg_w(g);
+        segs += 1;
+    }
+    if cached {
+        cluster_w += seg_w(CACHED_GLYPH);
+        segs += 1;
+    }
+    if let Some(h) = &hops {
+        cluster_w += seg_w(h);
+        segs += 1;
+    }
+    cluster_w += segs.saturating_sub(1); // one blank column between segments
+    let cluster_x = right.saturating_sub(cluster_w).max(area.x);
+
+    // Place each cluster segment left to right from cluster_x.
+    let mut cx = cluster_x;
+    let star = star.map(|g| {
+        let w = seg_w(g);
+        let rect = Rect {
+            x: cx,
+            y,
+            width: w,
+            height: 1,
+        };
+        cx = cx.saturating_add(w).saturating_add(1);
+        (g, rect)
     });
+    let cached_x = if cached {
+        let x = cx;
+        cx = cx.saturating_add(seg_w(CACHED_GLYPH)).saturating_add(1);
+        Some(x)
+    } else {
+        None
+    };
+    let hops = hops.map(|h| {
+        let x = cx;
+        (h, x)
+    });
+
+    // Left identity: title, separator, address. The cluster keeps its width; the
+    // title comes next; the address ellipsizes; and, only when even the title
+    // plus separator will not fit, the title ellipsizes too.
+    let left_end = if cluster_w > 0 {
+        cluster_x.saturating_sub(CTRL_GAP)
+    } else {
+        right
+    };
+    let left_w = left_end.saturating_sub(area.x);
+    let title_full = model.title.trim().to_string();
+    let addr_full = breadcrumb(model);
+    let sep_w = UnicodeWidthStr::width(TOPBAR_SEP) as u16;
+    let tw = UnicodeWidthStr::width(title_full.as_str()) as u16;
+
+    // Decide the title and how much width the address slot gets. The cluster
+    // already has its width; the title comes next; the address slot takes the
+    // rest and ellipsizes; and only when even the title plus separator plus one
+    // address column will not fit does the title ellipsize and the address drop.
+    let (title, has_sep, addr_avail) = if title_full.is_empty() {
+        (String::new(), false, left_w)
+    } else if tw + sep_w + 1 > left_w {
+        (truncate_to_cols(&title_full, left_w as usize), false, 0)
+    } else {
+        (title_full, true, left_w - tw - sep_w)
+    };
+
+    let title_x = area.x;
+    let title_w = UnicodeWidthStr::width(title.as_str()) as u16;
+    let (sep_x, addr_x) = if has_sep {
+        (Some(area.x + title_w), area.x + title_w + sep_w)
+    } else if title.is_empty() {
+        (None, area.x)
+    } else {
+        (None, area.x + title_w)
+    };
+    // The address text ellipsizes to the slot; the slot itself is the full
+    // remaining width so a click anywhere in it, and the live editor, both land.
+    let address = truncate_to_cols(&addr_full, addr_avail as usize);
+    let address_rect = Rect {
+        x: addr_x,
+        y,
+        width: addr_avail,
+        height: 1,
+    };
+
+    TopBar {
+        title,
+        title_x,
+        sep_x,
+        address,
+        address_rect,
+        star,
+        cached_x,
+        hops,
+    }
+}
+
+/// The clickable top-bar controls (the address slot and, when a page is loaded,
+/// the bookmark star), derived from [`topbar_layout`] so clicks and hint labels
+/// hit-test against exactly what the renderer draws.
+fn top_bar_controls(model: &Model, area: Rect) -> Vec<ControlRect> {
+    let tb = topbar_layout(model, area);
+    let mut out = vec![ControlRect {
+        control: Control::Address,
+        rect: tb.address_rect,
+    }];
+    if let Some((_, rect)) = tb.star {
+        out.push(ControlRect {
+            control: Control::Bookmark,
+            rect,
+        });
+    }
     out
 }
 
@@ -2627,112 +2769,121 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(scrollbar, area, &mut state);
 }
 
-/// Draw the two-row top-bar: title, then the back/forward/reload controls and
-/// the address slot (breadcrumb, or the live editor in address mode).
+/// Draw the one-row top bar: the page title, a `·`, and the address on the left,
+/// then the right-aligned status cluster (bookmark star, cache bolt, hop count).
+/// In address mode the address slot becomes the live editor.
 fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
-    // Fill the whole bar (both rows, full width) with the chrome style first; the
-    // title and controls render on top and inherit its background.
+    // Fill the bar full width with the chrome style first; the title, address and
+    // cluster render on top and inherit its background.
     frame.render_widget(
         Block::default().style(chrome_style(model.no_color, model.theme)),
         area,
     );
-    let title_row = Rect { height: 1, ..area };
-    let title = RtLine::from(RtSpan::styled(
-        model.title.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ));
-    frame.render_widget(Paragraph::new(title), title_row);
+    let tb = topbar_layout(model, area);
 
-    // A subtle, right-aligned marker when the shown page came from the in-RAM
-    // cache rather than a fresh fetch. Drawn in the muted chrome fg (never DIM,
-    // and reverse-video-safe under NO_COLOR), so it reads as unobtrusive chrome.
-    if model.cached_view {
-        let w = UnicodeWidthStr::width(CACHED_LABEL) as u16;
-        if title_row.width > w {
-            let marker = Rect {
-                x: title_row.x + title_row.width - w,
-                y: title_row.y,
-                width: w,
+    // Title in bold bright chrome fg.
+    if !tb.title.is_empty() {
+        let style = chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::BOLD);
+        frame.render_widget(
+            Paragraph::new(RtSpan::styled(tb.title.clone(), style)),
+            Rect {
+                x: tb.title_x,
+                y: area.y,
+                width: UnicodeWidthStr::width(tb.title.as_str()) as u16,
                 height: 1,
-            };
-            let style = chrome_muted_style(model.no_color, model.theme);
-            frame.render_widget(Paragraph::new(RtSpan::styled(CACHED_LABEL, style)), marker);
-        }
+            },
+        );
+    }
+    // The `·` separator in the muted chrome fg.
+    if let Some(sx) = tb.sep_x {
+        let style = chrome_muted_style(model.no_color, model.theme);
+        frame.render_widget(
+            Paragraph::new(RtSpan::styled(TOPBAR_SEP, style)),
+            Rect {
+                x: sx,
+                y: area.y,
+                width: UnicodeWidthStr::width(TOPBAR_SEP) as u16,
+                height: 1,
+            },
+        );
     }
 
-    if area.height < TOPBAR_ROWS {
-        return;
+    // The address slot: the live editor in address mode, else the address text
+    // with an input-field look (underlined) so it reads as editable.
+    if model.mode == Mode::Address {
+        render_address_editor(model, frame, tb.address_rect);
+    } else if !tb.address.is_empty() {
+        let style =
+            chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::UNDERLINED);
+        frame.render_widget(
+            Paragraph::new(RtSpan::styled(tb.address.clone(), style)),
+            tb.address_rect,
+        );
     }
-    // Available controls read in the bright chrome fg; unavailable ones in the
-    // muted (readable) chrome fg, never `Modifier::DIM`.
-    let available = chrome_text_style(model.no_color, model.theme);
-    let unavailable = chrome_muted_style(model.no_color, model.theme);
-    for cr in top_bar_controls(area) {
-        match cr.control {
-            Control::Back => {
-                let style = if model.history.can_back() {
-                    available
-                } else {
-                    unavailable
-                };
-                frame.render_widget(Paragraph::new(RtSpan::styled(BACK_LABEL, style)), cr.rect);
-            }
-            Control::Forward => {
-                let style = if model.history.can_forward() {
-                    available
-                } else {
-                    unavailable
-                };
-                frame.render_widget(
-                    Paragraph::new(RtSpan::styled(FORWARD_LABEL, style)),
-                    cr.rect,
-                );
-            }
-            Control::Reload => {
-                let style = if model.history.current().is_some() {
-                    available
-                } else {
-                    unavailable
-                };
-                frame.render_widget(Paragraph::new(RtSpan::styled(RELOAD_LABEL, style)), cr.rect);
-            }
-            Control::Address => render_address_slot(model, frame, cr.rect),
-        }
+
+    // Right-aligned status cluster. The star reads in the bright chrome fg (it is
+    // a click target); the bolt and hop count in the muted chrome fg.
+    let bright = chrome_text_style(model.no_color, model.theme);
+    let muted = chrome_muted_style(model.no_color, model.theme);
+    if let Some((glyph, rect)) = tb.star {
+        frame.render_widget(Paragraph::new(RtSpan::styled(glyph, bright)), rect);
+    }
+    if let Some(x) = tb.cached_x {
+        frame.render_widget(
+            Paragraph::new(RtSpan::styled(CACHED_GLYPH, muted)),
+            Rect {
+                x,
+                y: area.y,
+                width: UnicodeWidthStr::width(CACHED_GLYPH) as u16,
+                height: 1,
+            },
+        );
+    }
+    if let Some((text, x)) = &tb.hops {
+        frame.render_widget(
+            Paragraph::new(RtSpan::styled(text.clone(), muted)),
+            Rect {
+                x: *x,
+                y: area.y,
+                width: UnicodeWidthStr::width(text.as_str()) as u16,
+                height: 1,
+            },
+        );
     }
 }
 
-/// Draw the address slot: the live editor (with a `:` prompt and cursor) in
-/// address mode, otherwise a dimmed breadcrumb of the current URL.
-fn render_address_slot(model: &Model, frame: &mut Frame, area: Rect) {
+/// Draw the live address editor over the address slot: a `:` prompt, then the
+/// tui-input value with its cursor.
+fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
     if area.width == 0 {
         return;
     }
-    if model.mode == Mode::Address {
-        frame.render_widget(Paragraph::new(RtSpan::raw(":")), Rect { width: 1, ..area });
-        let inner = Rect {
-            x: area.x.saturating_add(1),
-            y: area.y,
-            width: area.width.saturating_sub(1),
-            height: 1,
-        };
-        if inner.width == 0 {
-            return;
-        }
-        let w = inner.width as usize;
-        let scroll = model.input.visual_scroll(w.saturating_sub(1));
-        frame.render_widget(
-            Paragraph::new(model.input.value().to_string()).scroll((0, scroll as u16)),
-            inner,
-        );
-        let cx = inner.x + (model.input.visual_cursor().saturating_sub(scroll)) as u16;
-        frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
-    } else {
-        let dim = Style::default().add_modifier(Modifier::DIM);
-        frame.render_widget(Paragraph::new(RtSpan::styled(breadcrumb(model), dim)), area);
+    let style = chrome_text_style(model.no_color, model.theme);
+    frame.render_widget(
+        Paragraph::new(RtSpan::styled(":", style)),
+        Rect { width: 1, ..area },
+    );
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(1),
+        height: 1,
+    };
+    if inner.width == 0 {
+        return;
     }
+    let w = inner.width as usize;
+    let scroll = model.input.visual_scroll(w.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(RtSpan::styled(model.input.value().to_string(), style))
+            .scroll((0, scroll as u16)),
+        inner,
+    );
+    let cx = inner.x + (model.input.visual_cursor().saturating_sub(scroll)) as u16;
+    frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
 }
 
 /// The address-slot breadcrumb for the current page, or a hint when nothing is
@@ -2918,7 +3069,7 @@ const HELP_LINES: &[&str] = &[
     "  :                   enter an address",
     "  d                   places panel",
     "  m                   bookmark this page",
-    "  y                   copy link / page URL",
+    "  y                   copy link / page address",
     "  R                   reload the page (always refetches)",
     "  t                   toggle light / dark theme",
     "  M-← / M-→           back / forward",
@@ -3744,13 +3895,18 @@ mod tests {
     }
 
     #[test]
-    fn content_region_is_total_minus_three() {
-        assert_eq!(content_height(24), 21);
+    fn content_region_is_total_minus_chrome() {
+        assert_eq!(content_height(24), 22);
         let [topbar, content, status] = regions(Rect::new(0, 0, 80, 24));
         assert_eq!(topbar.height, TOPBAR_ROWS);
+        assert_eq!(
+            topbar.y, 0,
+            "content begins on the row after the one-row top bar"
+        );
+        assert_eq!(content.y, TOPBAR_ROWS);
         assert_eq!(status.height, STATUS_ROWS);
-        assert_eq!(content.height, 24 - 3);
-        assert_eq!(model_from_sample(80, (80, 24)).viewport(), 21);
+        assert_eq!(content.height, 24 - CHROME_ROWS);
+        assert_eq!(model_from_sample(80, (80, 24)).viewport(), 22);
     }
 
     // --- History ---------------------------------------------------------
@@ -4067,14 +4223,14 @@ mod tests {
             CacheEntry {
                 doc: long_doc(),
                 title: "Two".to_string(),
-                scroll: 9,
+                scroll: 7,
             },
         );
         let fx = begin_navigation(&mut m, tgt(2), HistoryAction::Push, None);
         assert!(fx.is_empty(), "a cache hit emits no fetch: {fx:?}");
         assert!(m.pending.is_none(), "no fetch is pending");
         assert_eq!(m.title, "Two");
-        assert_eq!(m.scroll, 9, "the stored scroll is restored");
+        assert_eq!(m.scroll, 7, "the stored scroll is restored");
         assert!(m.cached_view, "the cached marker is set");
         // History is folded immediately (no async round-trip).
         assert_eq!(m.history.stack, vec![tgt(1), tgt(2)]);
@@ -4214,12 +4370,12 @@ mod tests {
     fn cached_marker_shown_only_when_view_is_cached() {
         let mut m = loaded_model((80, 24));
         let fresh = flat(&render(&m, 80, 24));
-        assert!(!fresh.contains("cached"), "no marker on a fresh page");
+        assert!(!fresh.contains(CACHED_GLYPH), "no bolt on a fresh page");
         m.cached_view = true;
         let cached = flat(&render(&m, 80, 24));
         assert!(
-            cached.contains("cached"),
-            "marker shown when cached:\n{cached}"
+            cached.contains(CACHED_GLYPH),
+            "cache bolt shown when cached:\n{cached}"
         );
     }
 
@@ -4296,9 +4452,9 @@ mod tests {
 
     #[test]
     fn update_scroll_keys() {
-        let mut m = tall_model((40, 13)); // viewport 13 - 3 = 10
+        let mut m = tall_model((40, 13)); // viewport 13 - 2 = 11
         let vp = m.viewport();
-        assert_eq!(vp, 10);
+        assert_eq!(vp, 11);
         assert_eq!(m.scroll, 0);
 
         press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
@@ -4396,12 +4552,8 @@ mod tests {
 
     /// A loaded model with a seeded history entry, ready to render.
     fn loaded_model(size: (u16, u16)) -> Model {
-        let mut m = Model::from_document(
-            &parse(SAMPLE),
-            content_width(size.0),
-            " Test Node · :/page/index.mu ",
-            size,
-        );
+        let mut m =
+            Model::from_document(&parse(SAMPLE), content_width(size.0), " Test Node ", size);
         m.history.visit(tgt(0xab));
         m.current_dest = Some([0xab; 16]);
         m
@@ -4415,15 +4567,23 @@ mod tests {
     }
 
     #[test]
-    fn topbar_renders_title_and_controls() {
+    fn topbar_is_one_row_title_address_and_cluster() {
         let m = loaded_model((80, 24));
         let buffer = render(&m, 80, 24);
-        let text = flat(&buffer);
-        assert!(text.contains("Test Node"), "title missing:\n{text}");
-        assert!(text.contains(":/page/index.mu"), "path missing:\n{text}");
-        assert!(text.contains("back"), "back control missing:\n{text}");
-        assert!(text.contains("forward"), "forward control missing:\n{text}");
-        assert!(text.contains("reload"), "reload control missing:\n{text}");
+        // Everything lives on the single identity row (row 0).
+        let top = row_text(&buffer, 0, 80);
+        assert!(top.contains("Test Node"), "title missing: {top:?}");
+        // The address, carrying the path exactly once (never in the title too).
+        assert!(top.contains(":/page/171.mu"), "address missing: {top:?}");
+        assert_eq!(
+            top.matches(":/page/171.mu").count(),
+            1,
+            "path must appear exactly once: {top:?}"
+        );
+        // Exactly one · separator between title and address.
+        assert_eq!(top.matches('·').count(), 1, "want one separator: {top:?}");
+        // The status cluster shows a hollow star (this page is not bookmarked).
+        assert!(top.contains(STAR_OFF), "bookmark star missing: {top:?}");
     }
 
     #[test]
@@ -4919,9 +5079,9 @@ mod tests {
         assert_eq!(m.theme, Theme::Dark, "dark is the default theme");
         let dark_bg = rgb(Theme::Dark.chrome_bg());
         let buffer = render(&m, 80, 24);
-        // The two top-bar rows (0, 1) and the status row (23) carry the chrome
+        // The one-row top bar (0) and the status row (23) carry the chrome
         // background across the full width, including the rightmost column.
-        for &y in &[0u16, 1, 23] {
+        for &y in &[0u16, 23] {
             for &x in &[0u16, 40, 79] {
                 assert_eq!(
                     buffer[(x, y)].bg,
@@ -4939,7 +5099,7 @@ mod tests {
         assert_eq!(m.theme, Theme::Light);
         let light_bg = rgb(Theme::Light.chrome_bg());
         let buffer = render(&m, 80, 24);
-        for &y in &[0u16, 1, 23] {
+        for &y in &[0u16, 23] {
             for &x in &[0u16, 40, 79] {
                 assert_eq!(
                     buffer[(x, y)].bg,
@@ -4959,7 +5119,7 @@ mod tests {
             m.theme = theme;
             m.relayout(m.width);
             let buffer = render(&m, 80, 24);
-            for &y in &[0u16, 1, 23] {
+            for &y in &[0u16, 23] {
                 for &x in &[0u16, 40, 79] {
                     let cell = &buffer[(x, y)];
                     assert!(
@@ -4997,35 +5157,6 @@ mod tests {
             assert!(
                 !cell.modifier.contains(Modifier::DIM),
                 "status hint must not be DIM ({theme:?})"
-            );
-        }
-    }
-
-    #[test]
-    fn unavailable_control_uses_muted_fg_not_dim() {
-        // loaded_model has a single history entry, so back/forward are both
-        // unavailable: they must render in the readable muted chrome fg, not DIM.
-        for theme in [Theme::Dark, Theme::Light] {
-            let mut m = loaded_model((80, 24));
-            if theme == Theme::Light {
-                m.toggle_theme();
-            }
-            assert!(
-                !m.history.can_back(),
-                "back must be unavailable in this model"
-            );
-            let buffer = render(&m, 80, 24);
-            // (0,1) is the first glyph of the back control on the top-bar's
-            // second row.
-            let cell = &buffer[(0u16, 1u16)];
-            assert_eq!(
-                cell.fg,
-                rgb(theme.chrome_muted_fg()),
-                "unavailable control must use the muted chrome fg ({theme:?})"
-            );
-            assert!(
-                !cell.modifier.contains(Modifier::DIM),
-                "unavailable control must not be DIM ({theme:?})"
             );
         }
     }
@@ -5201,17 +5332,20 @@ mod tests {
     fn hints_cover_visible_links_then_controls_with_unique_labels() {
         let m = loaded_model((80, 24));
         let hs = hints(&m);
-        // Two links + four top-bar controls.
-        assert_eq!(hs.len(), 6);
+        // Two links + two top-bar controls (the address slot and the star).
+        assert_eq!(hs.len(), 4);
         assert!(matches!(hs[0].target, HintTarget::Link(1)));
         assert!(matches!(hs[1].target, HintTarget::Link(2)));
-        assert!(matches!(hs[2].target, HintTarget::Control(Control::Back)));
         assert!(matches!(
-            hs[5].target,
+            hs[2].target,
             HintTarget::Control(Control::Address)
         ));
+        assert!(matches!(
+            hs[3].target,
+            HintTarget::Control(Control::Bookmark)
+        ));
         let labels: std::collections::HashSet<_> = hs.iter().map(|h| &h.label).collect();
-        assert_eq!(labels.len(), 6, "labels must be unique");
+        assert_eq!(labels.len(), 4, "labels must be unique");
     }
 
     #[test]
@@ -5390,11 +5524,11 @@ mod tests {
             size: (80, 24),
             ..Model::default()
         };
-        assert_eq!(m.viewport(), 21);
+        assert_eq!(m.viewport(), 22);
         press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(m.focus, Some(1));
-        // scroll = line + 1 - viewport = 50 + 1 - 21 = 30.
-        assert_eq!(m.scroll, 30);
+        // scroll = line + 1 - viewport = 50 + 1 - 22 = 29.
+        assert_eq!(m.scroll, 29);
     }
 
     #[test]
@@ -5421,19 +5555,74 @@ mod tests {
     }
 
     #[test]
-    fn mouse_click_on_reload_control_reloads() {
+    fn mouse_click_on_address_enters_address_mode() {
         let mut m = loaded_model((80, 24));
-        let cr = top_bar_controls(regions(m.frame_area())[0])
+        let cr = top_bar_controls(&m, regions(m.frame_area())[0])
             .into_iter()
-            .find(|c| c.control == Control::Reload)
-            .expect("reload control");
+            .find(|c| c.control == Control::Address)
+            .expect("address control");
         let effects = update(&mut m, AppEvent::Mouse(click(cr.rect.x, cr.rect.y)));
-        // Reload re-navigates the current history entry.
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(effects[0], Effect::Navigate(_)));
-        assert_eq!(
-            m.pending.as_ref().map(|p| p.action.clone()),
-            Some(HistoryAction::Goto(0))
+        assert!(effects.is_empty());
+        assert_eq!(m.mode, Mode::Address);
+    }
+
+    #[test]
+    fn mouse_click_on_star_toggles_bookmark() {
+        let mut m = loaded_model((80, 24));
+        let url = current_url(&m).expect("a page is loaded");
+        assert!(!m.bookmarks.contains(&url), "not bookmarked to start");
+        let cr = top_bar_controls(&m, regions(m.frame_area())[0])
+            .into_iter()
+            .find(|c| c.control == Control::Bookmark)
+            .expect("bookmark star");
+        let effects = update(&mut m, AppEvent::Mouse(click(cr.rect.x, cr.rect.y)));
+        assert_eq!(effects, vec![Effect::SaveBookmarks]);
+        assert!(m.bookmarks.contains(&url), "star click added the bookmark");
+        // A second click removes it again.
+        let cr = top_bar_controls(&m, regions(m.frame_area())[0])
+            .into_iter()
+            .find(|c| c.control == Control::Bookmark)
+            .expect("bookmark star");
+        update(&mut m, AppEvent::Mouse(click(cr.rect.x, cr.rect.y)));
+        assert!(
+            !m.bookmarks.contains(&url),
+            "star click removed the bookmark"
+        );
+    }
+
+    #[test]
+    fn star_glyph_reflects_bookmark_state() {
+        let mut m = loaded_model((80, 24));
+        assert_eq!(star_glyph(&m), Some(STAR_OFF));
+        toggle_bookmark_current(&mut m);
+        assert_eq!(star_glyph(&m), Some(STAR_ON));
+    }
+
+    #[test]
+    fn hops_cluster_reads_registry_or_unknown() {
+        let mut m = loaded_model((80, 24));
+        // Nothing announced for this dest yet: unknown.
+        assert_eq!(hops_text(&m).as_deref(), Some("unknown"));
+        // Once the dest is a known announced node with a hop count, N hops.
+        let mut node = disc_node(0xab, "Node-AB");
+        node.hops = Some(3);
+        m.node_registry.upsert_node(&node);
+        assert_eq!(hops_text(&m).as_deref(), Some("3 hops"));
+        let top = row_text(&render(&m, 80, 24), 0, 80);
+        assert!(top.contains("3 hops"), "hop count not rendered: {top:?}");
+    }
+
+    #[test]
+    fn narrow_topbar_ellipsizes_address_without_overflow() {
+        let m = loaded_model((30, 24));
+        let buffer = render(&m, 30, 24);
+        let top = row_text(&buffer, 0, 30);
+        // The row is at most the terminal width, never more.
+        assert!(UnicodeWidthStr::width(top.trim_end()) <= 30);
+        // The address had to ellipsize at this width.
+        assert!(
+            top.contains('…'),
+            "narrow address should ellipsize: {top:?}"
         );
     }
 

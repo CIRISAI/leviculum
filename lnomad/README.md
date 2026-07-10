@@ -8,10 +8,10 @@ links interactively.
 ## Usage
 
 ```
-lnomad <url> [options]
+lnomad <address> [options]
 ```
 
-The URL selects a destination and a page path:
+The address selects a destination and a page path:
 
 ```
 <dest_hash>                     open the destination's /page/index.mu
@@ -35,7 +35,7 @@ lnomad --discover --duration 60   listen for 60 seconds (explicit flag)
 ```
 
 In `--discover` mode the positional argument is the listen duration in seconds,
-not a page URL: `lnomad --discover 5` and `lnomad --discover --duration 5` are
+not a page address: `lnomad --discover 5` and `lnomad --discover --duration 5` are
 equivalent. A non-numeric positional is rejected, and giving both a positional
 and a `--duration` that disagree is an error.
 
@@ -73,7 +73,7 @@ full, the oldest-seen node is evicted), and is held in RAM only.
 - `--width <n>`        render width (default: detected terminal width, else 80)
 - `--timeout <s>`      per-request timeout in seconds (default 30)
 - `--print`            fetch, render and print once, then exit
-- `--discover`         list NomadNet nodes seen from announces (no URL needed)
+- `--discover`         list NomadNet nodes seen from announces (no address needed)
 - `--duration <s>`     `--discover` listen window in seconds (default 30); may
   also be given as the bare positional, e.g. `lnomad --discover <s>`
 
@@ -82,8 +82,9 @@ When stdout is not a terminal, `lnomad` prints once and exits even without
 
 ## Interactive keys
 
-On a terminal, `lnomad` opens a full-screen browser: a top-bar (page title,
-back / forward / reload controls, address slot), the scrollable page, and a
+On a terminal, `lnomad` opens a full-screen browser: a one-row top-bar (the page
+title, a `·`, and the address, with a right-aligned status cluster: a bookmark
+star, a cache bolt, and the hop count to the node), the scrollable page, and a
 status bar. Links carry no `[N]` marker and there is no link legend; a link is
 set apart by its underline and colour, and is reached by focus, hint or click:
 
@@ -115,7 +116,7 @@ so revisiting one, including stepping back and forward through history, renders
 instantly from memory with your last scroll position restored. The cache is
 transparent: `R` always refetches (bypassing it and refreshing the stored copy),
 and non-idempotent form submits are never cached. A shown page served from the
-cache carries a subtle `⚡ cached` marker at the right of the top-bar.
+cache carries a subtle `⚡` bolt in the top-bar status cluster.
 
 The places panel (`d`) takes the same up/down motions as the page scroll applied
 to its selection: `j` / `k`, `Ctrl-n` / `Ctrl-p`, arrows step a row; `Ctrl-f` /
@@ -148,7 +149,7 @@ spinner during a fetch).
 
 ## v1 limits
 
-- A `#anchor` in a target (a followed link or the initial URL) is resolved
+- A `#anchor` in a target (a followed link or the initial address) is resolved
   against the page's anchors and scrolled to on load; an unknown anchor falls
   back to the top of the page with a toast note.
 - `/file/` downloads are not supported.

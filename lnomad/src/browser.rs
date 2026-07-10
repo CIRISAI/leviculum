@@ -205,13 +205,13 @@ pub async fn fetch_document(
 }
 
 /// A short, glanceable page title for the TUI frame: the node's discovered
-/// display name when known, else the short dest hex, then the page path.
-pub fn page_title(name: Option<&str>, dest_hash: &[u8; 16], path: &str) -> String {
-    let label = match name {
+/// display name when known, else the short dest hex. The page path is not part
+/// of the title; it appears once, in the address shown beside it.
+pub fn page_title(name: Option<&str>, dest_hash: &[u8; 16], _path: &str) -> String {
+    match name {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => short_dest_hex(dest_hash),
-    };
-    format!(" {label} · :{path} ")
+    }
 }
 
 /// The faint (dim) SGR introducer and the reset, used for the orientation
