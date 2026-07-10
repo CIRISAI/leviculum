@@ -2450,9 +2450,10 @@ fn render_fields(model: &Model, frame: &mut Frame) {
             }
             if is_focused && vf.kind == FieldKind::Text {
                 if let Some(fe) = model.field_state.get(vf.index - 1) {
-                    // Past the opening `[`, offset by the editor cursor, clamped
-                    // inside the box (before the closing `]`).
-                    let cx = vf.col_start + 1 + fe.input.visual_cursor() as u16;
+                    // The box carries no bracket chrome any more: the cursor sits
+                    // directly at the editor offset inside it, clamped to the
+                    // box's last cell.
+                    let cx = vf.col_start + fe.input.visual_cursor() as u16;
                     let clamped = cx.min(vf.col_end.saturating_sub(1));
                     cursor = Some((clamped, vf.row));
                 }
@@ -6349,9 +6350,13 @@ mod tests {
             .map(|c| c.ch)
             .collect();
         assert!(
-            field_line.contains("[bob]"),
+            field_line.contains("bob"),
             "widget not updated: {field_line:?}"
         );
+        // The widget keeps its declared width while editing; typing fills it in
+        // place rather than growing the box.
+        let vf = visible_fields(&m)[0].clone();
+        assert_eq!((vf.col_end - vf.col_start) as usize, 24);
     }
 
     #[test]
@@ -6406,8 +6411,29 @@ mod tests {
         assert_eq!(vf.len(), 1);
         assert_eq!(vf[0].row, TOPBAR_ROWS);
         assert_eq!(vf[0].col_start, 3, "field mispositioned after wide char");
-        // Empty text field renders as "[]" -> two columns wide.
-        assert_eq!(vf[0].col_end, 5);
+        // An empty text field still spans its declared micron width (default 24),
+        // like NomadNet's full-width input bar — not the width of its content.
+        assert_eq!(vf[0].col_end, 3 + 24);
+    }
+
+    #[test]
+    fn text_field_box_spans_declared_width_not_content() {
+        // Default width (24) with a prefill, an explicit width, and an empty
+        // field: the widget is always exactly `width` columns wide.
+        for (src, width) in [
+            ("`<name`Guest>", 24usize),
+            ("`<12|nick`Guest>", 12),
+            ("`<40|msg`>", 40),
+        ] {
+            let m = field_model(src, (120, 24));
+            let vf = visible_fields(&m);
+            assert_eq!(vf.len(), 1, "one field in {src:?}");
+            assert_eq!(
+                (vf[0].col_end - vf[0].col_start) as usize,
+                width,
+                "field box in {src:?} must span its declared width {width}"
+            );
+        }
     }
 
     #[test]
@@ -6525,19 +6551,25 @@ mod tests {
         let src = "Name: `<name`bob>";
         let m = field_model(src, (80, 24));
         let buffer = render(&m, 80, 24);
-        assert!(flat(&buffer).contains("[bob]"), "field value not drawn");
-        // The field cells carry the input-box background (theme chrome bg).
+        assert!(flat(&buffer).contains("bob"), "field value not drawn");
         let vf = visible_fields(&m)[0].clone();
-        let cell = &buffer[(vf.col_start, vf.row)];
-        assert_eq!(
-            cell.bg,
-            Color::Rgb(
-                Theme::Dark.chrome_bg().0,
-                Theme::Dark.chrome_bg().1,
-                Theme::Dark.chrome_bg().2
-            ),
-            "input field should render in an input-box style"
+        // The box spans the field's DECLARED width (default 24), not "bob" (3).
+        assert_eq!((vf.col_end - vf.col_start) as usize, 24);
+        // Every cell of the box — including the padding past the text — carries
+        // the input-box background, so the field's full extent is visible, the
+        // way NomadNet draws an input bar.
+        let want = Color::Rgb(
+            Theme::Dark.chrome_bg().0,
+            Theme::Dark.chrome_bg().1,
+            Theme::Dark.chrome_bg().2,
         );
+        for x in vf.col_start..vf.col_end {
+            assert_eq!(
+                buffer[(x, vf.row)].bg,
+                want,
+                "input box not filled at column {x}"
+            );
+        }
     }
 
     #[test]

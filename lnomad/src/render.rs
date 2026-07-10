@@ -857,7 +857,12 @@ fn field_display(field: &Field, over: Option<&FieldValue>) -> (String, String, b
             } else {
                 text.clone()
             };
-            (format!("[{shown}]"), text, false)
+            // The widget spans the field's DECLARED micron width, not the width
+            // of whatever is currently typed: NomadNet draws an empty field as a
+            // full-width input bar. `fit` pads with spaces (or truncates) to
+            // exactly that many columns. A zero width would leave no cell to
+            // focus or click, so keep at least one.
+            (fit(&shown, field.width.max(1), Align::Left), text, false)
         }
         FieldKind::Checkbox => {
             let checked = over.map(|o| o.checked).unwrap_or(field.prechecked);
