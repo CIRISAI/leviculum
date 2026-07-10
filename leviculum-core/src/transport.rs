@@ -6598,7 +6598,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
             if !self.storage.has_path(&dest_hash) {
                 // Sub-case 1: Path missing, unconditionally try to rediscover
-                // (no throttle check). Python Transport.py:644.
+                // (no throttle check). Python Transport.py:708-710.
+                should_request_path = true;
+            } else if !path_request_throttled && entry.hops == 0 {
+                // Sub-case 2: link initiated by a LOCAL CLIENT (lr_taken_hops == 0).
+                // Rediscover the path, but do NOT mark it unresponsive: Python
+                // Transport.py:715-717 sets path_request_conditions only — no
+                // mark_path_unresponsive, no blocked_if. Order matters (elif
+                // chain): this must sit before the is_direct and hops == 1 cases.
                 should_request_path = true;
             } else if !path_request_throttled
                 && self
@@ -6606,15 +6613,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .get_path(&dest_hash)
                     .is_some_and(|p| p.is_direct())
             {
-                // Sub-case 2: Destination directly connected, may have roamed.
-                // is_direct() checks hops == 1, matching Python Transport.py:660-676.
+                // Sub-case 3: Destination directly connected, may have roamed.
+                // is_direct() checks hops == 1, matching Python Transport.py:724.
                 should_request_path = true;
                 if self.config.enable_transport {
                     self.mark_path_unresponsive(&dest_hash);
                 }
             } else if !path_request_throttled && entry.hops == 1 {
-                // Sub-case 3: Initiator directly connected (1 hop with receipt increment).
-                // Matches Python lr_taken_hops == 1. Python Transport.py:682-689.
+                // Sub-case 4: Initiator directly connected (1 hop with receipt increment).
+                // Matches Python lr_taken_hops == 1. Python Transport.py:746-753.
                 should_request_path = true;
                 if self.config.enable_transport {
                     self.mark_path_unresponsive(&dest_hash);
@@ -10081,6 +10088,55 @@ mod tests {
                 transport.storage().get_path_request_time(&dest).is_some(),
                 "local-client link (hops == 0) with a known non-direct path must \
                  request a fresh path on unvalidated expiry (Transport.py:715-717)"
+            );
+        }
+
+        // Guard for the commit-3 sub-case: it must fire ONLY for hops == 0, not
+        // for an arbitrary multi-hop initiator. A link with hops == 2 and a known
+        // non-direct path matches none of the four Python sub-cases
+        // (Transport.py:705-760) and must NOT request a path.
+        #[test]
+        fn clean_link_table_multihop_link_does_not_request_path() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let link_id = [0xAA; TRUNCATED_HASHBYTES];
+            let dest = [0xBB; TRUNCATED_HASHBYTES];
+            let now = transport.clock.now_ms();
+
+            transport.storage_mut().set_path(
+                dest,
+                PathEntry {
+                    hops: 2,
+                    expires_ms: now + 1_000_000,
+                    interface_index: 1,
+                    random_blobs: Vec::new(),
+                    next_hop: Some([0xEE; TRUNCATED_HASHBYTES]),
+                },
+            );
+
+            transport.storage_mut().set_link_entry(
+                link_id,
+                LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: 1,
+                    remaining_hops: 2,
+                    received_interface_index: 0,
+                    hops: 2,
+                    validated: false,
+                    proof_timeout_ms: now,
+                    destination_hash: dest,
+                    peer_signing_key: None,
+                },
+            );
+
+            transport.clean_link_table(now + 1);
+
+            assert!(
+                transport.storage().get_path_request_time(&dest).is_none(),
+                "multi-hop link (hops == 2) with a known non-direct path must NOT \
+                 request a path (no sub-case matches, Transport.py:705-760)"
             );
         }
 
