@@ -51,6 +51,8 @@ mod link_management;
 mod mvr_diamond_return_path;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_establishment_loss;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_hop_asymmetry;
 #[cfg(test)]
 mod mvr_link_rekey_alias;
 #[cfg(all(test, feature = "tracing"))]
