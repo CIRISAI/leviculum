@@ -5039,6 +5039,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// Mark (or clear) the interface over which this node reaches a shared
+    /// instance it is a CLIENT of. Mirrors Python's
+    /// `interface_to_shared_instance` marker (`is_connected_to_shared_instance`).
+    ///
+    /// Set by the driver on the client side of the local IPC interface (the
+    /// `connect_to_shared_instance` path). A packet arriving on this interface
+    /// only crossed the IPC hop, so `incoming_hop_count` leaves it unchanged.
+    pub fn set_shared_instance_interface(&mut self, id: Option<usize>) {
+        self.shared_instance_interface = id;
+    }
+
     /// Return destination hashes that were announced by any local client.
     /// Used by Block C (reconnect re-announce) and Block D (interface recovery).
     pub(crate) fn local_client_known_dest_hashes(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
@@ -5063,14 +5074,31 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Compute the effective hop count for a packet arriving on `interface_index`,
     /// given its on-wire `wire_hops`.
     ///
-    /// Increment hops on receipt, matching Python Transport.py:1319.
+    /// Increment hops on receipt, matching Python Transport.py:1457.
     /// After this: hops=1 means direct neighbor, hops=0 means local client.
     ///
-    /// Local shared-instance clients get the pre-increment value (net zero),
-    /// matching Python Transport.py:1345,1348.
+    /// Then undo that increment for a packet that only crossed the local IPC
+    /// hop, mirroring Python Transport.py:1481-1484 exactly, including the
+    /// mutual exclusion:
+    ///
+    /// ```python
+    /// if len(Transport.local_client_interfaces) > 0:
+    ///     if   Transport.is_local_client_interface(interface):    packet.hops -= 1  # :1482
+    /// elif     Transport.interface_to_shared_instance(interface): packet.hops -= 1  # :1484
+    /// ```
+    ///
+    /// The two decrements are mutually exclusive: a node that HAS local clients
+    /// (it IS the shared instance) only undoes the hop for packets FROM a local
+    /// client; a node with NO local clients (it is a CLIENT of some instance)
+    /// undoes the hop for packets arriving over its uplink to that instance. The
+    /// `elif` can never run once the outer branch was taken.
     fn incoming_hop_count(&self, interface_index: usize, wire_hops: u8) -> u8 {
         let mut hops = wire_hops.saturating_add(1);
-        if self.is_local_client(interface_index) {
+        if self.has_local_clients() {
+            if self.is_local_client(interface_index) {
+                hops = hops.saturating_sub(1);
+            }
+        } else if self.shared_instance_interface == Some(interface_index) {
             hops = hops.saturating_sub(1);
         }
         hops
@@ -16427,9 +16455,8 @@ mod tests {
                 Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
             transport.set_interface_name(UPLINK_IFACE, "LocalClient[default]".into());
             transport.set_interface_name(NETWORK_IFACE, "tcp_client/127.0.0.1".into());
-            // Mark the uplink to the shared instance. (Field set directly; the
-            // public setter lands with the fix in commit 2.)
-            transport.shared_instance_interface = Some(UPLINK_IFACE);
+            // Mark the uplink to the shared instance.
+            transport.set_shared_instance_interface(Some(UPLINK_IFACE));
             transport
         }
 
@@ -16471,7 +16498,7 @@ mod tests {
             let mut transport = make_transport_with_local_client();
             // The node is the instance, yet an unrelated interface also carries
             // the uplink marker. The outer branch is taken, so the elif is dead.
-            transport.shared_instance_interface = Some(NETWORK_IFACE);
+            transport.set_shared_instance_interface(Some(NETWORK_IFACE));
 
             // Packet from a local client: net zero (outer branch).
             assert_eq!(

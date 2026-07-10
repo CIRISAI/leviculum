@@ -2084,6 +2084,14 @@ impl ReticulumNode {
                 crate::interfaces::local::LOCAL_DEFAULT_BUFFER_SIZE,
             )?;
             tracing::info!("Connected to shared instance '{}'", instance_name);
+            // Mark this as the uplink to the shared instance so packets arriving
+            // from the instance do not count the local IPC hop (Python's
+            // interface_to_shared_instance branch, Transport.py:1484). Without
+            // this the client's whole path table would read one hop too many.
+            {
+                let mut core = self.inner.lock().unwrap();
+                core.set_interface_shared_instance(Some(id.0));
+            }
             registry.register(handle);
         }
 

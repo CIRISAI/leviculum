@@ -1419,6 +1419,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.set_local_client(id, is_local);
     }
 
+    /// Mark (or clear) the interface over which this node reaches a shared
+    /// instance it is a CLIENT of. The driver calls this on the client side of
+    /// the local IPC interface (`connect_to_shared_instance`) so packets from
+    /// the instance do not count the IPC hop.
+    pub fn set_interface_shared_instance(&mut self, id: Option<usize>) {
+        self.transport.set_shared_instance_interface(id);
+    }
+
     /// Record the wall-clock ms at which the given interface will next
     /// accept an MTU-sized packet. Called by the driver after every
     /// dispatch tick. See `Transport::set_interface_next_slot_ms` for
