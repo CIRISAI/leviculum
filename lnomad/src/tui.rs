@@ -1098,14 +1098,10 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
                         let (_, max) = help_scroll_geometry(model);
                         model.help_scroll = model.help_scroll.saturating_add(WHEEL_STEP).min(max);
                     } else if model.show_places {
-                        // The wheel moves the SELECTION (the view follows), so
-                        // there is exactly one piece of state to keep in range.
-                        let len = places(model).len();
-                        if len > 0 {
-                            model.places_sel =
-                                model.places_sel.saturating_add(WHEEL_STEP).min(len - 1);
-                            clamp_places_scroll(model);
-                        }
+                        // The wheel is a VIEW control, not a cursor: it moves the
+                        // scroll offset and leaves the selection alone, so no
+                        // entry is ever skipped past.
+                        wheel_places_view(model, ScrollCmd::LineDown);
                     } else {
                         model.scroll_lines_down(WHEEL_STEP, vp);
                     }
@@ -1115,8 +1111,7 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
                     if model.show_help {
                         model.help_scroll = model.help_scroll.saturating_sub(WHEEL_STEP);
                     } else if model.show_places {
-                        model.places_sel = model.places_sel.saturating_sub(WHEEL_STEP);
-                        clamp_places_scroll(model);
+                        wheel_places_view(model, ScrollCmd::LineUp);
                     } else {
                         model.scroll_lines_up(WHEEL_STEP);
                     }
@@ -1887,6 +1882,21 @@ fn clamp_places_scroll(model: &mut Model) {
         model.places_scroll = sel_line + 1 - vp;
     }
     model.places_scroll = model.places_scroll.min(max);
+}
+
+/// Scroll the places VIEW (not the selection) by `WHEEL_STEP` lines in `cmd`'s
+/// direction, clamped to `0..=max` through the shared [`scrolled`] rule. This is
+/// the mouse wheel: unlike the keys it never touches [`Model::places_sel`], so a
+/// notch cannot jump over entries and leave them unreachable. A later key motion
+/// moves the selection by one and `clamp_places_scroll` snaps the view back to
+/// it — the familiar file-manager behaviour.
+fn wheel_places_view(model: &mut Model, cmd: ScrollCmd) {
+    let layout = places_layout(model);
+    let vp = places_viewport(model, layout.total);
+    let max = layout.total.saturating_sub(vp);
+    for _ in 0..WHEEL_STEP {
+        model.places_scroll = scrolled(model.places_scroll, cmd, vp, max);
+    }
 }
 
 /// Apply a [`ScrollCmd`] to the places-panel selection through the shared
@@ -8293,17 +8303,109 @@ mod tests {
     }
 
     #[test]
-    fn places_wheel_moves_the_selection_and_the_view_follows() {
+    fn places_wheel_scrolls_the_view_and_never_moves_the_selection() {
         let mut m = with_nodes((80, 8), 20);
         press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let layout = places_layout(&m);
+        let vp = places_viewport(&m, layout.total);
+        let max = layout.total.saturating_sub(vp);
+        assert!(max > WHEEL_STEP, "the list must overflow enough to wheel");
+
+        // A notch down moves the VIEW by WHEEL_STEP lines and leaves the
+        // selection where it was.
         update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
-        assert_eq!(
-            m.places_sel, WHEEL_STEP,
-            "the wheel moves the selection by WHEEL_STEP"
-        );
-        assert!(selected_visible(&m), "the view follows the wheel");
+        assert_eq!(m.places_scroll, WHEEL_STEP, "wheel down scrolls the view");
+        assert_eq!(m.places_sel, 0, "wheel down leaves the selection alone");
+
+        // A notch up scrolls the view back and again leaves the selection alone.
         update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
-        assert_eq!(m.places_sel, 0, "the wheel moves the selection back up");
+        assert_eq!(m.places_scroll, 0, "wheel up scrolls the view back");
+        assert_eq!(m.places_sel, 0, "wheel up leaves the selection alone");
+    }
+
+    #[test]
+    fn places_wheel_clamps_at_both_ends() {
+        let mut m = with_nodes((80, 8), 20);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let layout = places_layout(&m);
+        let vp = places_viewport(&m, layout.total);
+        let max = layout.total.saturating_sub(vp);
+
+        // Wheeling up at the top never underflows.
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
+        assert_eq!(m.places_scroll, 0, "the view never scrolls below 0");
+
+        // Wheeling down past the bottom clamps to max, never beyond.
+        for _ in 0..layout.total {
+            update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        }
+        assert_eq!(m.places_scroll, max, "the view never scrolls past max");
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(m.places_scroll, max, "an extra notch stays clamped");
+        assert_eq!(m.places_sel, 0, "wheeling never moved the selection");
+    }
+
+    #[test]
+    fn places_wheel_leaves_every_entry_reachable() {
+        // The regression: one notch used to jump the selection by WHEEL_STEP and
+        // skip entries. Now a notch does not move the selection at all, so the
+        // very next `j` steps by exactly one and no entry is skipped.
+        let mut m = with_nodes((80, 8), 20);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let sel = m.places_sel;
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(
+            m.places_sel,
+            sel + 1,
+            "after a wheel notch, j moves the selection by one, not by WHEEL_STEP"
+        );
+    }
+
+    #[test]
+    fn places_key_after_wheeling_off_screen_snaps_the_view_back() {
+        let mut m = with_nodes((80, 8), 20);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let sel_before = m.places_sel;
+
+        // Wheel the view down until the selected row is off-screen.
+        for _ in 0..layout_max_notches(&m) {
+            update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        }
+        assert!(!selected_visible(&m), "the selection is now off-screen");
+        assert_eq!(m.places_sel, sel_before, "wheeling did not move it");
+
+        // One `j` moves the selection by exactly one and the view snaps back so
+        // the selected row is inside the viewport again.
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, sel_before + 1, "j steps by exactly one");
+        assert!(
+            selected_visible(&m),
+            "the view scrolled back to the selection"
+        );
+    }
+
+    #[test]
+    fn places_wheel_is_a_no_op_when_the_panel_fits() {
+        // A tall terminal shows the whole (short) list, so there is nothing to
+        // scroll and the wheel changes neither the view nor the selection.
+        let mut m = with_nodes((80, 40), 3);
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        let layout = places_layout(&m);
+        let vp = places_viewport(&m, layout.total);
+        assert!(layout.total <= vp, "the whole list must fit for this test");
+
+        update(&mut m, AppEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(m.places_scroll, 0, "a fitting panel ignores the wheel");
+        assert_eq!(m.places_sel, 0, "and does not move the selection");
+    }
+
+    /// How many wheel notches it takes to reach the bottom of the places view.
+    fn layout_max_notches(m: &Model) -> usize {
+        let layout = places_layout(m);
+        let vp = places_viewport(m, layout.total);
+        let max = layout.total.saturating_sub(vp);
+        max.div_ceil(WHEEL_STEP)
     }
 
     /// The screen row the `idx`-th places entry is drawn on, through the same
