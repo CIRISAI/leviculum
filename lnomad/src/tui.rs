@@ -1327,26 +1327,35 @@ fn update_field_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                 model.clamp_scroll(vp);
             }
         }
-        FieldKind::Checkbox => {
+        FieldKind::Checkbox | FieldKind::Radio => {
             if key.code == KeyCode::Char(' ') {
-                if let Some(fe) = model.field_state.get_mut(fi - 1) {
-                    fe.checked = !fe.checked;
-                }
-                let (w, vp) = (model.width, model.viewport());
-                model.relayout(w);
-                model.clamp_scroll(vp);
-            }
-        }
-        FieldKind::Radio => {
-            if key.code == KeyCode::Char(' ') {
-                select_radio(model, fi);
-                let (w, vp) = (model.width, model.viewport());
-                model.relayout(w);
-                model.clamp_scroll(vp);
+                toggle_field(model, fi);
             }
         }
     }
     Vec::new()
+}
+
+/// Activate field `fi` (1-based): a checkbox toggles its checked state, a radio
+/// selects itself within its group, a text field does nothing. Re-lays the page
+/// out so the rendered widget shows the new state, keeping the scroll. The one
+/// activation body shared by the Space key and a mouse click.
+fn toggle_field(model: &mut Model, fi: usize) {
+    let Some(kind) = model.field_state.get(fi - 1).map(|fe| fe.kind) else {
+        return;
+    };
+    match kind {
+        FieldKind::Text => return,
+        FieldKind::Checkbox => {
+            if let Some(fe) = model.field_state.get_mut(fi - 1) {
+                fe.checked = !fe.checked;
+            }
+        }
+        FieldKind::Radio => select_radio(model, fi),
+    }
+    let (w, vp) = (model.width, model.viewport());
+    model.relayout(w);
+    model.clamp_scroll(vp);
 }
 
 /// Select radio field `fi` (1-based), deselecting every other radio sharing its
@@ -2465,10 +2474,13 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
             return follow_link(model, vl.index);
         }
     }
-    // A click on a form field focuses it (entering field-edit mode).
+    // A click on a form field focuses it (entering field-edit mode) and, for a
+    // checkbox or radio, also activates it — the same as pressing Space, and
+    // the same as the reference browser's mouse behaviour.
     for vf in visible_fields(model) {
         if row == vf.row && col >= vf.col_start && col < vf.col_end {
             apply_focus(model, Focus::Field(vf.index));
+            toggle_field(model, vf.index);
             return Vec::new();
         }
     }
@@ -8941,6 +8953,56 @@ mod tests {
         press(&mut m, KeyCode::Char(' '), KeyModifiers::NONE);
         assert!(!m.field_state[0].checked, "sibling radio not cleared");
         assert!(m.field_state[1].checked);
+    }
+
+    #[test]
+    fn click_toggles_checkbox() {
+        let src = "Agree: `<?|agree`Agree>";
+        let mut m = field_model(src, (80, 24));
+        let vf = visible_fields(&m)[0].clone();
+        update(&mut m, AppEvent::Mouse(click(vf.col_start, vf.row)));
+        assert!(m.field_state[0].checked, "click should check the box");
+        let vf = visible_fields(&m)[0].clone();
+        update(&mut m, AppEvent::Mouse(click(vf.col_start, vf.row)));
+        assert!(!m.field_state[0].checked, "second click should uncheck it");
+    }
+
+    #[test]
+    fn click_selects_radio() {
+        // Two radios sharing the name "col": clicking one selects it and clears
+        // its sibling; clicking the selected one keeps it selected (a radio can
+        // only be unselected by selecting another in its group).
+        let src = "`<^|col`Red>`<^|col`Blue>";
+        let mut m = field_model(src, (80, 24));
+        let vf = visible_fields(&m)[0].clone();
+        update(&mut m, AppEvent::Mouse(click(vf.col_start, vf.row)));
+        assert!(m.field_state[0].checked, "click should select the radio");
+        assert!(!m.field_state[1].checked);
+        let vf = visible_fields(&m)[1].clone();
+        update(&mut m, AppEvent::Mouse(click(vf.col_start, vf.row)));
+        assert!(!m.field_state[0].checked, "sibling radio not cleared");
+        assert!(m.field_state[1].checked);
+        let vf = visible_fields(&m)[1].clone();
+        update(&mut m, AppEvent::Mouse(click(vf.col_start, vf.row)));
+        assert!(
+            m.field_state[1].checked,
+            "clicking the selected radio must keep it selected"
+        );
+    }
+
+    #[test]
+    fn click_on_text_field_only_focuses() {
+        let src = "Name: `<name`bob>";
+        let mut m = field_model(src, (80, 24));
+        let vf = visible_fields(&m)[0].clone();
+        update(&mut m, AppEvent::Mouse(click(vf.col_start, vf.row)));
+        assert_eq!(m.mode, Mode::Field);
+        assert_eq!(m.field_focus, Some(1));
+        assert_eq!(
+            m.field_state[0].input.value(),
+            "bob",
+            "a click must not edit the text"
+        );
     }
 
     #[test]
