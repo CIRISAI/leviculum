@@ -16621,8 +16621,9 @@ mod tests {
             );
         }
 
-        /// Pin the mutual exclusion of Python's `if len(local_client_interfaces)
-        /// > 0: ... elif interface_to_shared_instance(...)`: on a node that HAS
+        /// Pin the mutual exclusion of Python's outer-gated increment
+        /// (`if len(local_client_interfaces) > 0 ... elif
+        /// interface_to_shared_instance(...)`): on a node that HAS
         /// local clients (it IS the shared instance), the `elif` can never run,
         /// so an interface that also carries the uplink marker must NOT be
         /// decremented. (#38)
