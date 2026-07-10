@@ -169,19 +169,34 @@ fn content_height(rows: u16) -> usize {
     rows.saturating_sub(CHROME_ROWS) as usize
 }
 
-/// Truncate `s` to at most `cols` display columns, unicode-width-aware, ending
-/// with a `…` when anything is cut. The returned string's display width never
-/// exceeds `cols`, so it fits an overlay of `cols` inner columns without
-/// spilling over the border. A zero budget yields an empty string.
+/// The column width a terminal actually PAINTS for `s`, used to fit text into a
+/// box. This is `unicode-width` PLUS one column for every `U+FE0F` VARIATION
+/// SELECTOR-16: `unicode-width` scores VS16 as 0 and a text-default base (e.g.
+/// `U+262F ☯`) as 1, but a terminal draws the resulting emoji-presentation
+/// sequence 2 columns wide. Over-counting is safe when fitting — we truncate a
+/// column early; under-counting overflows a border. ZWJ sequences are already
+/// over-counted by `unicode-width`, which is likewise safe, so they are left be.
+///
+/// This is deliberately a DIFFERENT notion of width from the plain
+/// `unicode-width` used for cell POSITIONS (`visible_links`, `visible_fields`,
+/// the search-match columns): those must keep agreeing with ratatui's own
+/// `unicode-width` cell layout for hit-testing. `fit_width` measures what the
+/// TERMINAL paints; the plain width measures what ratatui ADDRESSES.
+fn fit_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0) + usize::from(c == '\u{FE0F}'))
+        .sum()
+}
+
+/// Truncate `s` to at most `cols` display columns, ending with a `…` when
+/// anything is cut. Uses [`fit_width`] so an emoji-presentation sequence counts
+/// as the two columns a terminal paints, so the returned string never spills
+/// over a `cols`-wide overlay border. A zero budget yields an empty string.
 fn truncate_to_cols(s: &str, cols: usize) -> String {
     if cols == 0 {
         return String::new();
     }
-    let total: usize = s
-        .chars()
-        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum();
-    if total <= cols {
+    if fit_width(s) <= cols {
         return s.to_string();
     }
     // Reserve one column for the ellipsis, then take as many full characters as
@@ -191,7 +206,7 @@ fn truncate_to_cols(s: &str, cols: usize) -> String {
     let mut out = String::new();
     let mut width = 0usize;
     for c in s.chars() {
-        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        let w = UnicodeWidthChar::width(c).unwrap_or(0) + usize::from(c == '\u{FE0F}');
         if width + w > budget {
             break;
         }
@@ -8668,6 +8683,21 @@ mod tests {
     }
 
     #[test]
+    fn fit_width_counts_vs16_presentation_as_wide() {
+        assert_eq!(fit_width(""), 0);
+        assert_eq!(fit_width("a"), 1);
+        // Ordinary wide emoji: unicode-width already says 2.
+        assert_eq!(fit_width("🌐"), 2);
+        assert_eq!(fit_width("📰"), 2);
+        // Emoji-presentation sequences (base + U+FE0F): unicode-width scores
+        // these as 1, but a terminal paints them 2 wide.
+        assert_eq!(fit_width("☯️"), 2);
+        assert_eq!(fit_width("☸️"), 2);
+        // The bare base char without VS16 keeps its text-default single column.
+        assert_eq!(fit_width("☯"), 1);
+    }
+
+    #[test]
     fn truncate_to_cols_is_width_aware() {
         assert_eq!(truncate_to_cols("hello", 10), "hello");
         assert_eq!(truncate_to_cols("hello", 5), "hello");
@@ -8687,37 +8717,13 @@ mod tests {
         assert_eq!(truncate_to_cols("anything", 0), "");
     }
 
-    #[test]
-    fn places_row_truncates_and_keeps_border_intact() {
-        let mut m = loaded_model((80, 24));
-        // A bookmark whose label (title + url + emoji) far exceeds the panel's
-        // inner width, so the selected row must be truncated with an ellipsis.
-        m.bookmarks.add(Bookmark {
-            url: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/page/a-very-long-page-path.mu".to_string(),
-            title: "🚀 an extremely long bookmark title that cannot fit inside the panel"
-                .to_string(),
-        });
-        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
-        assert_eq!(m.places_sel, 0, "the long bookmark is the selected row");
-        let buffer = render(&m, 80, 24);
-
-        // Panel geometry: width 72 centred in an 80-column area → x=4, so the
-        // right border sits at column 75.
+    /// Assert the places panel's right border on `row` is intact and no
+    /// reversed selected-bar cell reaches or passes it (the overflow that
+    /// truncation fixes). Panel width 72 centred in 80 cols → x=4, border at 75.
+    fn assert_places_border_intact(buffer: &ratatui::buffer::Buffer, row: u16) {
         let width = 72u16;
         let x = (80 - width) / 2;
         let right_border = x + width - 1;
-
-        // The bookmark row is the one carrying the truncation ellipsis.
-        let mut row = None;
-        for y in 0..buffer.area.height {
-            if row_text(&buffer, y, 80).contains('…') {
-                row = Some(y);
-            }
-        }
-        let row = row.expect("a truncated bookmark row with an ellipsis");
-
-        // The right border cell is intact and no reversed selected-bar cell
-        // reaches or passes it (the overflow the truncation fixes).
         assert_eq!(
             buffer[(right_border, row)].symbol(),
             "│",
@@ -8728,6 +8734,73 @@ mod tests {
                 !buffer[(col, row)].modifier.contains(Modifier::REVERSED),
                 "selected bar spilled to column {col} on row {row}"
             );
+        }
+    }
+
+    /// The row carrying the truncation ellipsis, or panics.
+    fn ellipsis_row(buffer: &ratatui::buffer::Buffer) -> u16 {
+        let mut row = None;
+        for y in 0..buffer.area.height {
+            if row_text(buffer, y, 80).contains('…') {
+                row = Some(y);
+            }
+        }
+        row.expect("a truncated bookmark row with an ellipsis")
+    }
+
+    #[test]
+    fn places_row_truncates_and_keeps_border_intact() {
+        let mut m = loaded_model((80, 24));
+        // A bookmark whose label (title + url + emoji) far exceeds the panel's
+        // inner width, so the selected row must be truncated with an ellipsis.
+        // The title carries a VS16 emoji-presentation sequence (☯️ = U+262F +
+        // U+FE0F), which unicode-width under-counts as one column: with the old
+        // plain-width truncation the row spilled past the border, so this test
+        // would have caught the bug.
+        m.bookmarks.add(Bookmark {
+            url: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/page/a-very-long-page-path.mu".to_string(),
+            title: "☯️ an extremely long bookmark title that cannot fit inside the panel"
+                .to_string(),
+        });
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 0, "the long bookmark is the selected row");
+        let buffer = render(&m, 80, 24);
+        assert_places_border_intact(&buffer, ellipsis_row(&buffer));
+    }
+
+    #[test]
+    fn places_row_real_vs16_title_stays_inside_border() {
+        let mut m = loaded_model((80, 24));
+        // The exact real-world bookmark that overflowed: two emoji-presentation
+        // sequences (☯️ and ☸️, each base + U+FE0F). unicode-width scores each
+        // as one column, the terminal paints two, so the row shifted two
+        // columns right, past the panel's right border.
+        m.bookmarks.add(Bookmark {
+            url: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/page/index.mu".to_string(),
+            title: "☯️  Zen of Reticulum ☸️".to_string(),
+        });
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, 0, "the long bookmark is the selected row");
+        let buffer = render(&m, 80, 24);
+        assert_places_border_intact(&buffer, ellipsis_row(&buffer));
+    }
+
+    #[test]
+    fn places_row_ordinary_wide_emoji_still_truncates() {
+        // Regression guard: rows with ordinary wide emoji (🌐, 📰) that
+        // unicode-width already scores as two columns keep truncating cleanly.
+        for title in [
+            "🌐 a very long bookmark title that overflows the places panel border",
+            "📰 a very long bookmark title that overflows the places panel border",
+        ] {
+            let mut m = loaded_model((80, 24));
+            m.bookmarks.add(Bookmark {
+                url: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/page/a-very-long-page-path.mu".to_string(),
+                title: title.to_string(),
+            });
+            press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+            let buffer = render(&m, 80, 24);
+            assert_places_border_intact(&buffer, ellipsis_row(&buffer));
         }
     }
 
