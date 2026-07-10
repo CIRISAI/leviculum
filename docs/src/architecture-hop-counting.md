@@ -169,7 +169,7 @@ Recorded 2026-07-10 against `vendor/Reticulum` as vendored.
 | Path table store | `:1868`, `:2014` | `transport.rs:3140` | matches |
 | Path acceptance | `:1765`, `:2371` | `transport.rs:2610`, `:3056` | matches |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
-| Strict proof check | `:1656` disjunction | `transport.rs:3746` per direction, mismatch rewritten | **deliberate deviation**, see below |
+| Strict proof check | `:1656` disjunction | `transport.rs:3746` per direction; mismatch rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default), reference-exact behind the flag, see below |
 | Healing, no path | `:710` | `transport.rs:6542` | matches |
 | Healing, local client link (`taken_hops == 0`) | `:717` | absent | **defect** |
 | Healing, destination direct | `:726` | `transport.rs:6550` | matches |
@@ -193,6 +193,31 @@ It also costs three things:
 
 The rewrite must stay until the cause is fixed and the warning is shown to fall silent. Removing it
 today breaks NomadNet within five minutes. That is a measurement, not a guess.
+
+### The strict behaviour now exists behind a flag
+
+The reference-exact strict check is implemented behind `TransportConfig.lrproof_rewrite_on_asymmetry`
+(`transport.rs`), default `true`. The default keeps the rewrite above unchanged, so this is a no-op
+in the field. Set to `false`, the forward site DROPS a proof whose hop count matches neither frozen
+operand rather than rewriting it:
+
+* the `next_hop` direction (destination -> initiator) drops unless `packet.hops == remaining_hops`,
+  mapping to `Transport.py:2176` (LRPROOF / local-client-link) and `Transport.py:1664` (transit
+  link) — both reference arms check `remaining_hops` on this direction;
+* the `received` direction (initiator -> destination) drops unless `packet.hops == taken_hops`,
+  mapping to `Transport.py:1668` (the transit-link arm of the `:1656` disjunction).
+
+The drop is the healing sensor of "The control loop that makes strictness safe" above, and the mvr
+proves the loop closes: `leviculum-core/src/node/mvr_hop_asymmetry.rs` runs the honest asymmetry with
+the flag off and shows convergence — the first proof is dropped and the link stays unvalidated, the
+timed-out local-client link makes `clean_link_table` request a fresh path for the original
+destination, the short arm is relearned (A's path to R drops from 3 to 2 hops), and a second link
+attempt agrees (`packet_hops == remaining_hops`, no warning) and establishes. Fail once, heal,
+succeed.
+
+The flag stays `false`-capable but `true`-default until an interop A/B and a live NomadNet-retry
+check confirm the strict drop heals on the air as it does in the mvr; only then can `false` become
+the default.
 
 ## Rules to obey
 
