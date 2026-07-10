@@ -2307,43 +2307,191 @@ fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom()
 }
 
-/// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms.
-/// Returns `None` for keys that are not scroll motions.
+/// The modifier class a [`ScrollChord`] matches: any modifiers, none, Ctrl, or
+/// Alt. `Any` mirrors the bare arrow / paging keys, which scroll regardless of
+/// modifiers; `Plain` requires neither Ctrl nor Alt.
+#[derive(Clone, Copy)]
+enum ScrollMods {
+    Any,
+    Plain,
+    Ctrl,
+    Alt,
+}
+
+/// One key chord that produces a scroll motion: the key, the modifier class it
+/// needs, and the [`ScrollCmd`] it maps to.
+#[derive(Clone, Copy)]
+struct ScrollChord {
+    code: KeyCode,
+    mods: ScrollMods,
+    cmd: ScrollCmd,
+}
+
+/// One row of the scroll keymap: the keys as displayed in the help overlay, the
+/// description beside them, and every chord that triggers the row's motions.
+/// [`SCROLL_KEYS`] is the SINGLE source of truth read by BOTH [`key_to_scroll`]
+/// and the help overlay, so a scroll binding can never exist in one without
+/// appearing in the other.
+struct ScrollKey {
+    keys: &'static str,
+    desc: &'static str,
+    chords: &'static [ScrollChord],
+}
+
+/// The scroll keymap. Both the key handler and the help overlay read this table,
+/// so the two can never drift apart.
+const SCROLL_KEYS: &[ScrollKey] = &[
+    ScrollKey {
+        keys: "j / k  ↓ / ↑",
+        desc: "scroll a line",
+        chords: &[
+            ScrollChord {
+                code: KeyCode::Char('j'),
+                mods: ScrollMods::Plain,
+                cmd: ScrollCmd::LineDown,
+            },
+            ScrollChord {
+                code: KeyCode::Char('n'),
+                mods: ScrollMods::Ctrl,
+                cmd: ScrollCmd::LineDown,
+            },
+            ScrollChord {
+                code: KeyCode::Down,
+                mods: ScrollMods::Any,
+                cmd: ScrollCmd::LineDown,
+            },
+            ScrollChord {
+                code: KeyCode::Char('k'),
+                mods: ScrollMods::Plain,
+                cmd: ScrollCmd::LineUp,
+            },
+            ScrollChord {
+                code: KeyCode::Char('p'),
+                mods: ScrollMods::Ctrl,
+                cmd: ScrollCmd::LineUp,
+            },
+            ScrollChord {
+                code: KeyCode::Up,
+                mods: ScrollMods::Any,
+                cmd: ScrollCmd::LineUp,
+            },
+        ],
+    },
+    ScrollKey {
+        keys: "Ctrl-f / Ctrl-b",
+        desc: "page down / up",
+        chords: &[
+            ScrollChord {
+                code: KeyCode::Char('f'),
+                mods: ScrollMods::Ctrl,
+                cmd: ScrollCmd::PageDown,
+            },
+            ScrollChord {
+                code: KeyCode::Char('v'),
+                mods: ScrollMods::Ctrl,
+                cmd: ScrollCmd::PageDown,
+            },
+            ScrollChord {
+                code: KeyCode::Char(' '),
+                mods: ScrollMods::Plain,
+                cmd: ScrollCmd::PageDown,
+            },
+            ScrollChord {
+                code: KeyCode::PageDown,
+                mods: ScrollMods::Any,
+                cmd: ScrollCmd::PageDown,
+            },
+            ScrollChord {
+                code: KeyCode::Char('b'),
+                mods: ScrollMods::Ctrl,
+                cmd: ScrollCmd::PageUp,
+            },
+            ScrollChord {
+                code: KeyCode::Char('v'),
+                mods: ScrollMods::Alt,
+                cmd: ScrollCmd::PageUp,
+            },
+            ScrollChord {
+                code: KeyCode::PageUp,
+                mods: ScrollMods::Any,
+                cmd: ScrollCmd::PageUp,
+            },
+        ],
+    },
+    ScrollKey {
+        keys: "Ctrl-d / Ctrl-u",
+        desc: "half page down / up",
+        chords: &[
+            ScrollChord {
+                code: KeyCode::Char('d'),
+                mods: ScrollMods::Ctrl,
+                cmd: ScrollCmd::HalfPageDown,
+            },
+            ScrollChord {
+                code: KeyCode::Char('u'),
+                mods: ScrollMods::Ctrl,
+                cmd: ScrollCmd::HalfPageUp,
+            },
+        ],
+    },
+    ScrollKey {
+        keys: "g / G  Home / End",
+        desc: "top / bottom",
+        chords: &[
+            ScrollChord {
+                code: KeyCode::Char('g'),
+                mods: ScrollMods::Plain,
+                cmd: ScrollCmd::Top,
+            },
+            ScrollChord {
+                code: KeyCode::Char('<'),
+                mods: ScrollMods::Alt,
+                cmd: ScrollCmd::Top,
+            },
+            ScrollChord {
+                code: KeyCode::Home,
+                mods: ScrollMods::Any,
+                cmd: ScrollCmd::Top,
+            },
+            ScrollChord {
+                code: KeyCode::Char('G'),
+                mods: ScrollMods::Plain,
+                cmd: ScrollCmd::Bottom,
+            },
+            ScrollChord {
+                code: KeyCode::Char('>'),
+                mods: ScrollMods::Alt,
+                cmd: ScrollCmd::Bottom,
+            },
+            ScrollChord {
+                code: KeyCode::End,
+                mods: ScrollMods::Any,
+                cmd: ScrollCmd::Bottom,
+            },
+        ],
+    },
+];
+
+/// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms, by
+/// scanning [`SCROLL_KEYS`]. Returns `None` for keys that are not scroll motions.
 fn key_to_scroll(key: &KeyEvent) -> Option<ScrollCmd> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let plain = !ctrl && !alt;
-    match key.code {
-        // Line down: j, Ctrl-n, Down.
-        KeyCode::Char('j') if plain => Some(ScrollCmd::LineDown),
-        KeyCode::Char('n') if ctrl => Some(ScrollCmd::LineDown),
-        KeyCode::Down => Some(ScrollCmd::LineDown),
-        // Line up: k, Ctrl-p, Up.
-        KeyCode::Char('k') if plain => Some(ScrollCmd::LineUp),
-        KeyCode::Char('p') if ctrl => Some(ScrollCmd::LineUp),
-        KeyCode::Up => Some(ScrollCmd::LineUp),
-        // Page down: Ctrl-f, Ctrl-v, Space, PageDown.
-        KeyCode::Char('f') if ctrl => Some(ScrollCmd::PageDown),
-        KeyCode::Char('v') if ctrl => Some(ScrollCmd::PageDown),
-        KeyCode::Char(' ') if plain => Some(ScrollCmd::PageDown),
-        KeyCode::PageDown => Some(ScrollCmd::PageDown),
-        // Page up: Ctrl-b, Alt-v, PageUp.
-        KeyCode::Char('b') if ctrl => Some(ScrollCmd::PageUp),
-        KeyCode::Char('v') if alt => Some(ScrollCmd::PageUp),
-        KeyCode::PageUp => Some(ScrollCmd::PageUp),
-        // Half page: Ctrl-d / Ctrl-u.
-        KeyCode::Char('d') if ctrl => Some(ScrollCmd::HalfPageDown),
-        KeyCode::Char('u') if ctrl => Some(ScrollCmd::HalfPageUp),
-        // Top: g, Alt-< (Alt+Shift+,), Home.
-        KeyCode::Char('g') if plain => Some(ScrollCmd::Top),
-        KeyCode::Char('<') if alt => Some(ScrollCmd::Top),
-        KeyCode::Home => Some(ScrollCmd::Top),
-        // Bottom: G, Alt-> (Alt+Shift+.), End.
-        KeyCode::Char('G') if plain => Some(ScrollCmd::Bottom),
-        KeyCode::Char('>') if alt => Some(ScrollCmd::Bottom),
-        KeyCode::End => Some(ScrollCmd::Bottom),
-        _ => None,
+    for row in SCROLL_KEYS {
+        for chord in row.chords {
+            let mods_ok = match chord.mods {
+                ScrollMods::Any => true,
+                ScrollMods::Plain => plain,
+                ScrollMods::Ctrl => ctrl,
+                ScrollMods::Alt => alt,
+            };
+            if mods_ok && chord.code == key.code {
+                return Some(chord.cmd);
+            }
+        }
     }
+    None
 }
 
 /// The ` · ` separator drawn between the title and the address on the top bar.
@@ -3536,34 +3684,176 @@ fn focused_link_target(model: &Model) -> Option<String> {
     }
 }
 
-/// The keybindings listed in the help overlay.
-const HELP_LINES: &[&str] = &[
-    "lnomad — keys",
-    "",
-    "  j / k  ↓ / ↑        scroll a line",
-    "  Ctrl-f / Ctrl-b     page down / up",
-    "  Ctrl-d / Ctrl-u     half page down / up",
-    "  g / G  Home / End   top / bottom",
-    "  Tab / Shift-Tab     focus link / field",
-    "  Enter               follow the link",
-    "  (field) type        edit a text field",
-    "  (field) Space       toggle a checkbox / radio",
-    "  (field) Esc         leave field editing",
-    "  f                   hint a link",
-    "  / n N               search / next / prev",
-    "  click               follow link / press a footer button",
-    "  :                   enter an address",
-    "  d                   places panel",
-    "  m                   bookmark this page",
-    "  y                   copy link / page address",
-    "  Alt-← / Alt-→       back / forward",
-    "  R / Ctrl-R / F5     reload",
-    "  mouse back/forward  back / forward",
-    "  t                   toggle light / dark theme",
-    "  Esc / Ctrl-g        cancel a load",
-    "  ?                   toggle this help",
-    "  q / Ctrl-c          quit",
-];
+/// One keybinding shown in the help overlay: the keys and their description. The
+/// description column is COMPUTED from the widest `keys` across all groups (see
+/// [`help_lines`]), never hand-padded, so it can never misalign.
+struct HelpEntry {
+    keys: &'static str,
+    desc: &'static str,
+}
+
+/// A titled group of [`HelpEntry`]s in the help overlay.
+struct HelpGroup {
+    title: &'static str,
+    entries: Vec<HelpEntry>,
+}
+
+/// The heading line drawn above the groups in the help overlay.
+const HELP_HEADING: &str = "lnomad — keys";
+/// The indent applied to every entry (its keys and description) under a group.
+const HELP_INDENT: &str = "  ";
+/// The gap between the (padded) keys column and the description column.
+const HELP_GAP: usize = 2;
+
+/// The keybinding groups shown in the help overlay. The Move group's scroll rows
+/// are pulled straight from [`SCROLL_KEYS`], so the overlay can never list a
+/// scroll binding that the key handler does not honour, nor omit one it does.
+fn help_groups() -> Vec<HelpGroup> {
+    let move_entries = SCROLL_KEYS
+        .iter()
+        .map(|s| HelpEntry {
+            keys: s.keys,
+            desc: s.desc,
+        })
+        .collect();
+    vec![
+        HelpGroup {
+            title: "Move",
+            entries: move_entries,
+        },
+        HelpGroup {
+            title: "Follow",
+            entries: vec![
+                HelpEntry {
+                    keys: "Tab / Shift-Tab",
+                    desc: "focus link / field",
+                },
+                HelpEntry {
+                    keys: "Enter",
+                    desc: "follow the link",
+                },
+                HelpEntry {
+                    keys: "f",
+                    desc: "hint a link",
+                },
+                HelpEntry {
+                    keys: "click",
+                    desc: "follow link / press a footer button",
+                },
+                HelpEntry {
+                    keys: "Alt-← / Alt-→",
+                    desc: "back / forward",
+                },
+                HelpEntry {
+                    keys: "mouse back/forward",
+                    desc: "back / forward",
+                },
+            ],
+        },
+        HelpGroup {
+            title: "Page",
+            entries: vec![
+                HelpEntry {
+                    keys: ":",
+                    desc: "enter an address",
+                },
+                HelpEntry {
+                    keys: "R / Ctrl-R / F5",
+                    desc: "reload",
+                },
+                HelpEntry {
+                    keys: "Esc / Ctrl-g",
+                    desc: "cancel a load",
+                },
+                HelpEntry {
+                    keys: "m",
+                    desc: "bookmark this page",
+                },
+                HelpEntry {
+                    keys: "y",
+                    desc: "copy link / page address",
+                },
+                HelpEntry {
+                    keys: "d",
+                    desc: "places panel",
+                },
+                HelpEntry {
+                    keys: "/ n N",
+                    desc: "search / next / prev",
+                },
+            ],
+        },
+        HelpGroup {
+            title: "Fields",
+            entries: vec![
+                HelpEntry {
+                    keys: "type",
+                    desc: "edit a text field",
+                },
+                HelpEntry {
+                    keys: "Space",
+                    desc: "toggle a checkbox / radio",
+                },
+                HelpEntry {
+                    keys: "Esc",
+                    desc: "leave field editing",
+                },
+            ],
+        },
+        HelpGroup {
+            title: "App",
+            entries: vec![
+                HelpEntry {
+                    keys: "t",
+                    desc: "toggle light / dark theme",
+                },
+                HelpEntry {
+                    keys: "?",
+                    desc: "toggle this help",
+                },
+                HelpEntry {
+                    keys: "q / Ctrl-c",
+                    desc: "quit",
+                },
+            ],
+        },
+    ]
+}
+
+/// The widest `keys` display width across every entry of every group: the width
+/// the keys column is padded to so all descriptions align.
+fn help_key_col(groups: &[HelpGroup]) -> usize {
+    groups
+        .iter()
+        .flat_map(|g| g.entries.iter())
+        .map(|e| UnicodeWidthStr::width(e.keys))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The plain-text lines of the help overlay: a heading, then each group's title
+/// and its entries with every description aligned to the computed keys column.
+/// The renderer and the layout both derive from this, so widths can never
+/// disagree and no padding is hand-counted.
+fn help_lines() -> Vec<String> {
+    let groups = help_groups();
+    let col = help_key_col(&groups);
+    let mut lines = vec![HELP_HEADING.to_string()];
+    for group in &groups {
+        lines.push(String::new());
+        lines.push(group.title.to_string());
+        for e in &group.entries {
+            let pad = col.saturating_sub(UnicodeWidthStr::width(e.keys)) + HELP_GAP;
+            lines.push(format!(
+                "{HELP_INDENT}{}{}{}",
+                e.keys,
+                " ".repeat(pad),
+                e.desc
+            ));
+        }
+    }
+    lines
+}
 
 /// Draw the centered places panel: a chrome-styled overlay with a "Bookmarks"
 /// section and a "Discovered nodes" section, the selected row reverse-video
@@ -3726,25 +4016,21 @@ fn render_help(frame: &mut Frame, area: Rect) {
     // Size the overlay to the widest help line plus its two borders, so no line
     // wraps in a normal-width terminal. `Wrap` below stays as a safety net for
     // terminals too narrow to hold the widest line.
-    let inner = HELP_LINES
+    let lines = help_lines();
+    let inner = lines
         .iter()
-        .map(|l| UnicodeWidthStr::width(*l))
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
         .max()
         .unwrap_or(0) as u16;
     let width = (inner + 2).min(area.width);
-    let height = (HELP_LINES.len() as u16 + 2).min(area.height);
+    let height = (lines.len() as u16 + 2).min(area.height);
     let overlay = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
     };
-    let text = Text::from(
-        HELP_LINES
-            .iter()
-            .map(|l| RtLine::from(*l))
-            .collect::<Vec<_>>(),
-    );
+    let text = Text::from(lines.into_iter().map(RtLine::from).collect::<Vec<_>>());
     let block = Block::default().borders(Borders::ALL).title(" help ");
     frame.render_widget(Clear, overlay);
     frame.render_widget(
@@ -5735,9 +6021,9 @@ mod tests {
 
     #[test]
     fn help_overlay_widens_to_the_longest_line() {
-        let mut m = loaded_model((100, 30));
+        let mut m = loaded_model((120, 40));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let buffer = render(&m, 100, 30);
+        let buffer = render(&m, 120, 40);
         let text = flat(&buffer);
         // The widest description renders contiguously on one row: at the old fixed
         // width of 44 it wrapped ("toggle light / dark" | "theme").
@@ -5747,9 +6033,9 @@ mod tests {
             "widest help line wrapped:\n{text}"
         );
         // The overlay is at least the widest line plus its two borders wide.
-        let inner = HELP_LINES
+        let inner = help_lines()
             .iter()
-            .map(|l| UnicodeWidthStr::width(*l))
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
             .max()
             .unwrap();
         let border = text
@@ -5764,6 +6050,66 @@ mod tests {
             width >= inner + 2,
             "overlay width {width} < longest line {inner} + 2",
         );
+    }
+
+    #[test]
+    fn help_lists_every_scroll_binding() {
+        // Every keys-string in the scroll keymap appears verbatim in the rendered
+        // overlay: the table is the single source, so the help cannot omit a
+        // binding the key handler honours.
+        let mut m = loaded_model((120, 40));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let text = flat(&render(&m, 120, 40));
+        for row in SCROLL_KEYS {
+            assert!(
+                text.lines().any(|l| l.contains(row.keys)),
+                "scroll binding {:?} missing from help:\n{text}",
+                row.keys
+            );
+        }
+    }
+
+    #[test]
+    fn help_descriptions_all_align() {
+        // Every description starts at the same display column: the keys column is
+        // computed, never hand-padded, so alignment is structural.
+        let mut m = loaded_model((120, 40));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let text = flat(&render(&m, 120, 40));
+        let rows: Vec<&str> = text.lines().collect();
+        let mut cols = Vec::new();
+        for group in help_groups() {
+            for e in &group.entries {
+                let row = rows
+                    .iter()
+                    .find(|l| l.contains(e.keys) && l.contains(e.desc))
+                    .unwrap_or_else(|| panic!("help row for {:?} missing:\n{text}", e.keys));
+                // Char count, not byte offset: the border and arrows are multibyte
+                // but each occupies one display column.
+                let byte = row.find(e.desc).expect("desc column");
+                cols.push(row[..byte].chars().count());
+            }
+        }
+        let first = cols[0];
+        assert!(
+            cols.iter().all(|&c| c == first),
+            "descriptions misaligned: columns {cols:?}"
+        );
+    }
+
+    #[test]
+    fn help_lines_never_exceed_the_overlay_width() {
+        // The overlay sizes itself to its widest line, so no content line wraps:
+        // every built line renders intact on a single row.
+        let mut m = loaded_model((120, 40));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let text = flat(&render(&m, 120, 40));
+        for line in help_lines().iter().filter(|l| !l.is_empty()) {
+            assert!(
+                text.lines().any(|row| row.contains(line.as_str())),
+                "help line wrapped or missing: {line:?}\n{text}"
+            );
+        }
     }
 
     #[test]
