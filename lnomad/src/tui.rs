@@ -2250,6 +2250,13 @@ fn scroll_line_into_view(model: &mut Model, line: usize) {
 /// Hit-test a mouse click at `(col, row)`: follow the link under it, else
 /// activate the top-bar control under it, else do nothing.
 fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
+    // The help overlay is modal: a left click anywhere while it is open closes
+    // it, before any other hit-testing, so the click cannot fall through to a
+    // link, control or footer button underneath.
+    if model.show_help {
+        model.show_help = false;
+        return Vec::new();
+    }
     for vl in visible_links(model) {
         if row == vl.row && col >= vl.col_start && col < vl.col_end {
             return follow_link(model, vl.index);
@@ -2342,7 +2349,7 @@ struct ScrollKey {
 /// so the two can never drift apart.
 const SCROLL_KEYS: &[ScrollKey] = &[
     ScrollKey {
-        keys: "j / k  ↓ / ↑",
+        keys: "j / k   ↓ / ↑   Ctrl-n / Ctrl-p",
         desc: "scroll a line",
         chords: &[
             ScrollChord {
@@ -2378,7 +2385,7 @@ const SCROLL_KEYS: &[ScrollKey] = &[
         ],
     },
     ScrollKey {
-        keys: "Ctrl-f / Ctrl-b",
+        keys: "Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp",
         desc: "page down / up",
         chords: &[
             ScrollChord {
@@ -2420,7 +2427,7 @@ const SCROLL_KEYS: &[ScrollKey] = &[
     },
     ScrollKey {
         keys: "Ctrl-d / Ctrl-u",
-        desc: "half page down / up",
+        desc: "half a page",
         chords: &[
             ScrollChord {
                 code: KeyCode::Char('d'),
@@ -2435,7 +2442,7 @@ const SCROLL_KEYS: &[ScrollKey] = &[
         ],
     },
     ScrollKey {
-        keys: "g / G  Home / End",
+        keys: "g / G   Home / End",
         desc: "top / bottom",
         chords: &[
             ScrollChord {
@@ -2697,7 +2704,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
         render_places(model, frame, frame.area());
     }
     if model.show_help {
-        render_help(frame, frame.area());
+        render_help(model, frame, frame.area());
     }
     // The toast floats on top of everything so it is always visible.
     render_toast(model, frame, frame.area());
@@ -3698,8 +3705,6 @@ struct HelpGroup {
     entries: Vec<HelpEntry>,
 }
 
-/// The heading line drawn above the groups in the help overlay.
-const HELP_HEADING: &str = "lnomad — keys";
 /// The indent applied to every entry (its keys and description) under a group.
 const HELP_INDENT: &str = "  ";
 /// The gap between the (padded) keys column and the description column.
@@ -3709,13 +3714,19 @@ const HELP_GAP: usize = 2;
 /// are pulled straight from [`SCROLL_KEYS`], so the overlay can never list a
 /// scroll binding that the key handler does not honour, nor omit one it does.
 fn help_groups() -> Vec<HelpGroup> {
-    let move_entries = SCROLL_KEYS
+    // The scroll rows come straight from the keymap table; the mouse wheel is the
+    // one Move affordance that is not a key chord, so it is appended here.
+    let mut move_entries: Vec<HelpEntry> = SCROLL_KEYS
         .iter()
         .map(|s| HelpEntry {
             keys: s.keys,
             desc: s.desc,
         })
         .collect();
+    move_entries.push(HelpEntry {
+        keys: "wheel",
+        desc: "scroll",
+    });
     vec![
         HelpGroup {
             title: "Move",
@@ -3726,27 +3737,23 @@ fn help_groups() -> Vec<HelpGroup> {
             entries: vec![
                 HelpEntry {
                     keys: "Tab / Shift-Tab",
-                    desc: "focus link / field",
+                    desc: "focus a link or field",
                 },
                 HelpEntry {
-                    keys: "Enter",
-                    desc: "follow the link",
+                    keys: "Enter / click",
+                    desc: "follow a link or footer button",
                 },
                 HelpEntry {
                     keys: "f",
-                    desc: "hint a link",
+                    desc: "hint — type a label or the link text",
                 },
                 HelpEntry {
-                    keys: "click",
-                    desc: "follow link / press a footer button",
-                },
-                HelpEntry {
-                    keys: "Alt-← / Alt-→",
+                    keys: "Alt-← / Alt-→   mouse side buttons",
                     desc: "back / forward",
                 },
                 HelpEntry {
-                    keys: "mouse back/forward",
-                    desc: "back / forward",
+                    keys: "hover a link",
+                    desc: "show its address",
                 },
             ],
         },
@@ -3754,19 +3761,19 @@ fn help_groups() -> Vec<HelpGroup> {
             title: "Page",
             entries: vec![
                 HelpEntry {
-                    keys: ":",
+                    keys: ": / click address",
                     desc: "enter an address",
                 },
                 HelpEntry {
                     keys: "R / Ctrl-R / F5",
-                    desc: "reload",
+                    desc: "reload (always refetches)",
                 },
                 HelpEntry {
                     keys: "Esc / Ctrl-g",
                     desc: "cancel a load",
                 },
                 HelpEntry {
-                    keys: "m",
+                    keys: "m / click star",
                     desc: "bookmark this page",
                 },
                 HelpEntry {
@@ -3785,31 +3792,21 @@ fn help_groups() -> Vec<HelpGroup> {
         },
         HelpGroup {
             title: "Fields",
-            entries: vec![
-                HelpEntry {
-                    keys: "type",
-                    desc: "edit a text field",
-                },
-                HelpEntry {
-                    keys: "Space",
-                    desc: "toggle a checkbox / radio",
-                },
-                HelpEntry {
-                    keys: "Esc",
-                    desc: "leave field editing",
-                },
-            ],
+            entries: vec![HelpEntry {
+                keys: "type / Space / Esc",
+                desc: "edit / toggle / leave",
+            }],
         },
         HelpGroup {
             title: "App",
             entries: vec![
                 HelpEntry {
                     keys: "t",
-                    desc: "toggle light / dark theme",
+                    desc: "light / dark theme",
                 },
                 HelpEntry {
-                    keys: "?",
-                    desc: "toggle this help",
+                    keys: "? / Esc / click",
+                    desc: "close this help",
                 },
                 HelpEntry {
                     keys: "q / Ctrl-c",
@@ -3831,16 +3828,19 @@ fn help_key_col(groups: &[HelpGroup]) -> usize {
         .unwrap_or(0)
 }
 
-/// The plain-text lines of the help overlay: a heading, then each group's title
-/// and its entries with every description aligned to the computed keys column.
-/// The renderer and the layout both derive from this, so widths can never
-/// disagree and no padding is hand-counted.
+/// The plain-text lines of the help overlay: each group's title, then its
+/// entries with every description aligned to the computed keys column, with a
+/// blank line between groups. The renderer and the layout both derive from this,
+/// so widths can never disagree and no padding is hand-counted. The block's own
+/// border title carries the heading, so no heading line lives in the body.
 fn help_lines() -> Vec<String> {
     let groups = help_groups();
     let col = help_key_col(&groups);
-    let mut lines = vec![HELP_HEADING.to_string()];
-    for group in &groups {
-        lines.push(String::new());
+    let mut lines = Vec::new();
+    for (gi, group) in groups.iter().enumerate() {
+        if gi > 0 {
+            lines.push(String::new());
+        }
         lines.push(group.title.to_string());
         for e in &group.entries {
             let pad = col.saturating_sub(UnicodeWidthStr::width(e.keys)) + HELP_GAP;
@@ -4011,13 +4011,53 @@ fn render_toast(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
-/// Draw the centered help overlay listing the keybindings.
-fn render_help(frame: &mut Frame, area: Rect) {
-    // Size the overlay to the widest help line plus its two borders, so no line
-    // wraps in a normal-width terminal. `Wrap` below stays as a safety net for
-    // terminals too narrow to hold the widest line.
-    let lines = help_lines();
-    let inner = lines
+/// Draw the centered help overlay: the keybindings grouped under dim titles,
+/// each entry's keys in the bright chrome fg and BOLD and its description in the
+/// muted chrome fg — the same visual language as the footer strip, theme-aware
+/// and `no_color`-safe. The block's border title carries the heading and the
+/// close hints, so the body has no heading line.
+fn render_help(model: &Model, frame: &mut Frame, area: Rect) {
+    let groups = help_groups();
+    let col = help_key_col(&groups);
+
+    // Group titles are dim; under `no_color` the reverse-video fill already
+    // delineates them, so drop the DIM (no DIM under reverse) and let the plain
+    // style show through.
+    let muted = chrome_muted_style(model.no_color, model.theme);
+    let title_style = if model.no_color {
+        muted
+    } else {
+        muted.add_modifier(Modifier::DIM)
+    };
+    let keys_style = chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::BOLD);
+    let desc_style = muted;
+
+    // Build the styled lines. Each entry's keys cell and its (padded) description
+    // reproduce `help_lines` exactly, so the styled overlay and its plain-text
+    // projection stay byte-for-byte aligned.
+    let mut lines: Vec<RtLine> = Vec::new();
+    for (gi, group) in groups.iter().enumerate() {
+        if gi > 0 {
+            lines.push(RtLine::from(""));
+        }
+        lines.push(RtLine::from(RtSpan::styled(
+            group.title.to_string(),
+            title_style,
+        )));
+        for e in &group.entries {
+            let pad = col.saturating_sub(UnicodeWidthStr::width(e.keys)) + HELP_GAP;
+            lines.push(RtLine::from(vec![
+                RtSpan::styled(format!("{HELP_INDENT}{}", e.keys), keys_style),
+                RtSpan::styled(format!("{}{}", " ".repeat(pad), e.desc), desc_style),
+            ]));
+        }
+    }
+
+    // Size the overlay to the widest line plus its two borders, so no line wraps
+    // in a normal-width terminal. `Wrap` below stays as a safety net for
+    // terminals too narrow to hold the widest line. The plain projection gives
+    // the widths so the sizing can never drift from the rendered content.
+    let inner = help_lines()
         .iter()
         .map(|l| UnicodeWidthStr::width(l.as_str()))
         .max()
@@ -4030,11 +4070,15 @@ fn render_help(frame: &mut Frame, area: Rect) {
         width,
         height,
     };
-    let text = Text::from(lines.into_iter().map(RtLine::from).collect::<Vec<_>>());
-    let block = Block::default().borders(Borders::ALL).title(" help ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" help — Esc, ? or click to close ")
+        .style(chrome_style(model.no_color, model.theme));
     frame.render_widget(Clear, overlay);
     frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false }),
         overlay,
     );
 }
@@ -6007,10 +6051,10 @@ mod tests {
 
     #[test]
     fn help_overlay_renders_keybindings() {
-        let mut m = loaded_model((80, 24));
+        let mut m = loaded_model((120, 40));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
         assert!(m.show_help);
-        let buffer = render(&m, 80, 24);
+        let buffer = render(&m, 120, 40);
         let text = flat(&buffer);
         assert!(text.contains("help"), "help title missing:\n{text}");
         assert!(text.contains("quit"), "help body missing:\n{text}");
@@ -6025,11 +6069,10 @@ mod tests {
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
         let buffer = render(&m, 120, 40);
         let text = flat(&buffer);
-        // The widest description renders contiguously on one row: at the old fixed
-        // width of 44 it wrapped ("toggle light / dark" | "theme").
+        // A wide row renders contiguously rather than wrapping onto two lines.
         assert!(
             text.lines()
-                .any(|row| row.contains("toggle light / dark theme")),
+                .any(|row| row.contains("hint — type a label or the link text")),
             "widest help line wrapped:\n{text}"
         );
         // The overlay is at least the widest line plus its two borders wide.
@@ -7353,12 +7396,148 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_lists_back_forward_and_reload() {
-        let mut m = loaded_model((100, 30));
+    fn help_overlay_lists_all_bindings_and_affordances() {
+        let mut m = loaded_model((120, 40));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
-        let text = flat(&render(&m, 100, 30));
-        for line in ["Alt-← / Alt-→", "R / Ctrl-R / F5", "mouse back/forward"] {
-            assert!(text.contains(line), "help missing {line:?}:\n{text}");
+        let text = flat(&render(&m, 120, 40));
+        // The bindings the old hand-written list silently dropped.
+        for s in [
+            "Ctrl-n", "Ctrl-p", "Ctrl-v", "PageDown", "PageUp", "wheel", "Ctrl-R", "F5", "Alt-←",
+            "Alt-→",
+        ] {
+            assert!(text.contains(s), "help missing binding {s:?}:\n{text}");
+        }
+        // The mouse affordances: the clickable address, the star, the footer
+        // buttons, and the side buttons.
+        for s in [
+            "click address",
+            "click star",
+            "footer button",
+            "mouse side buttons",
+        ] {
+            assert!(text.contains(s), "help missing affordance {s:?}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn help_overlay_has_no_heading_and_a_closing_border_title() {
+        let mut m = loaded_model((120, 40));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let text = flat(&render(&m, 120, 40));
+        assert!(
+            !text.contains("lnomad — keys"),
+            "stale heading line present:\n{text}"
+        );
+        assert!(
+            text.contains("click to close"),
+            "border title must mention closing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn help_mentions_back_forward_exactly_once() {
+        let mut m = loaded_model((120, 40));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let text = flat(&render(&m, 120, 40));
+        let count = text
+            .lines()
+            .filter(|l| l.contains("back / forward"))
+            .count();
+        assert_eq!(count, 1, "back / forward must appear once:\n{text}");
+    }
+
+    #[test]
+    fn click_closes_help_without_falling_through() {
+        let mut m = loaded_model((120, 40));
+        // A footer button that WOULD act on a click were the help closed.
+        let slot = footer_slot(&m, FooterAction::Reload);
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(m.show_help);
+        let effects = update(&mut m, AppEvent::Mouse(click(slot.rect.x, slot.rect.y)));
+        assert!(!m.show_help, "a click must close the help");
+        assert!(
+            effects.is_empty(),
+            "the click must not fall through to the footer button: {effects:?}"
+        );
+        // Esc and ? still close it.
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(m.show_help);
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!m.show_help, "Esc must still close the help");
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(m.show_help);
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(!m.show_help, "? must still close the help");
+    }
+
+    #[test]
+    fn help_titles_dim_keys_bold_bright_desc_muted() {
+        // The first cell of `needle`'s run in the rendered buffer.
+        fn find_cell(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
+            let chars: Vec<char> = needle.chars().collect();
+            let area = buffer.area();
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    if (0..chars.len() as u16).all(|i| {
+                        let cx = x + i;
+                        cx < area.width && buffer[(cx, y)].symbol().starts_with(chars[i as usize])
+                    }) {
+                        return (x, y);
+                    }
+                }
+            }
+            panic!("cell for {needle:?} not found");
+        }
+
+        for theme in [Theme::Dark, Theme::Light] {
+            let mut m = loaded_model((120, 40));
+            if theme == Theme::Light {
+                m.toggle_theme();
+            }
+            press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+            let buffer = render(&m, 120, 40);
+
+            // A group title renders dim, in the muted chrome fg.
+            let title = &buffer[find_cell(&buffer, "Move")];
+            assert!(
+                title.modifier.contains(Modifier::DIM),
+                "group title must be dim ({theme:?})"
+            );
+            assert_eq!(
+                title.fg,
+                rgb(theme.chrome_muted_fg()),
+                "group title must use the muted chrome fg ({theme:?})"
+            );
+            // A key cell is BOLD in the bright chrome fg, never dim.
+            let key = &buffer[find_cell(&buffer, "wheel")];
+            assert!(
+                key.modifier.contains(Modifier::BOLD),
+                "key cell must be bold ({theme:?})"
+            );
+            assert!(
+                !key.modifier.contains(Modifier::DIM),
+                "key cell must not be dim ({theme:?})"
+            );
+            assert_eq!(
+                key.fg,
+                rgb(theme.chrome_fg()),
+                "key cell must use the bright chrome fg ({theme:?})"
+            );
+            // A description cell is muted, not bold.
+            let desc = &buffer[find_cell(&buffer, "scroll")];
+            assert_eq!(
+                desc.fg,
+                rgb(theme.chrome_muted_fg()),
+                "description must use the muted chrome fg ({theme:?})"
+            );
+            assert!(
+                !desc.modifier.contains(Modifier::BOLD),
+                "description must not be bold ({theme:?})"
+            );
+            assert_ne!(
+                key.fg, desc.fg,
+                "key and description must differ ({theme:?})"
+            );
         }
     }
 

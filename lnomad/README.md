@@ -94,7 +94,9 @@ collapses the rest to their keys. Links carry no `[N]` marker and there is
 no link legend; a link is set apart by its underline and colour, and is reached
 by focus, hint or click:
 
-- `j` / `k`, arrows, `Ctrl-f` / `Ctrl-b`, `g` / `G`  scroll
+- `j` / `k`, `↓` / `↑`, `Ctrl-n` / `Ctrl-p`  scroll a line; `Ctrl-f` / `Ctrl-b`,
+  `Ctrl-v`, `PageDown` / `PageUp`  page down / up; `Ctrl-d` / `Ctrl-u`  half a
+  page; `g` / `G`, `Home` / `End`  top / bottom; the mouse wheel scrolls too
 - `Tab` / `Shift-Tab`  move the focus cursor across links AND form fields, in
   document order (auto-scrolls)
 - `Enter`     follow the focused link
@@ -110,7 +112,8 @@ by focus, hint or click:
 - `Alt-←` / `Alt-→`  back / forward
 - mouse back / forward side buttons  back / forward
 - `Esc` / `Ctrl-g`  cancel a load
-- `?`         toggle the help overlay
+- `?`         toggle the help overlay (grouped keybindings; `Esc`, `?` or a
+  click anywhere closes it)
 - `q` / `Ctrl-c`  quit
 
 The focused or hovered link's target appears in a small floating field at the
