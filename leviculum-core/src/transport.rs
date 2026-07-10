@@ -3754,10 +3754,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         //     -> the path table never described the route the
                         //     proof travelled.
                         let now_ms = self.clock.now_ms();
+                        // Observability (#38): look the CURRENT path up with the
+                        // original destination (link_entry.destination_hash),
+                        // NOT dest_hash — for a link packet dest_hash is the link
+                        // id (Transport.py:1498), so the path table never keys on
+                        // it and every field read `none`. The destination survives
+                        // only at IDX_LT_DSTHASH (storage_types.rs:76).
                         let (path_hops_now, path_age_ms, path_next_hop, path_iface) =
-                            self.path_entry_log_fields(&dest_hash, now_ms);
+                            self.path_entry_log_fields(&link_entry.destination_hash, now_ms);
                         crate::tracing::warn!(
-                            dest = %HexShort(&dest_hash),
+                            link_id = %HexShort(&dest_hash),
+                            dest = %HexShort(&link_entry.destination_hash),
                             packet_hops = packet.hops,
                             hops = link_entry.hops,
                             remaining_hops = link_entry.remaining_hops,
@@ -3778,10 +3785,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // Observability (#38): same current-path snapshot as the
                         // next_hop branch (see interpretation above).
                         let now_ms = self.clock.now_ms();
+                        // Observability (#38): same fix as the next_hop branch —
+                        // key the path lookup on the original destination, not the
+                        // link id (see the next_hop branch comment).
                         let (path_hops_now, path_age_ms, path_next_hop, path_iface) =
-                            self.path_entry_log_fields(&dest_hash, now_ms);
+                            self.path_entry_log_fields(&link_entry.destination_hash, now_ms);
                         crate::tracing::warn!(
-                            dest = %HexShort(&dest_hash),
+                            link_id = %HexShort(&dest_hash),
+                            dest = %HexShort(&link_entry.destination_hash),
                             packet_hops = packet.hops,
                             hops = link_entry.hops,
                             remaining_hops = link_entry.remaining_hops,
