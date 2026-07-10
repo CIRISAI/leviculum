@@ -6041,13 +6041,37 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } else {
                     PATH_REQUEST_GRACE_MS
                 };
-                // Parse cached announce to get hop count
+                // Emit the STORED path-table count, matching Python
+                // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
+                // The cached raw's hop byte is the PRE-increment wire value
+                // (`stored - 1`): the receipt increment (`transport.rs:1620`) only
+                // touches the in-memory packet, never the raw buffer stashed by
+                // `set_announce_cache`. Using it here would put `stored - 1` on the
+                // wire and every peer that learns via this response would be one hop
+                // short, compounding on each re-learn (#38, D3). We reach this arm
+                // only because a path was accepted, so `get_path` is normally
+                // present; if the path table lost the entry while the cache
+                // survived, reconstruct the stored count as `cached + 1` (the value
+                // the receipt increment would have produced) rather than `unwrap`.
+                //
+                // Sibling emission sites audited for the same mistake and found
+                // correct: case 1 (local dest, `:5936`) emits the origin's own
+                // hops (0 for a freshly generated announce); case 2a (local client,
+                // `:5977`) does the explicit `+1` so it emits `stored`; the
+                // announce-forward path (`:6381`) puts `entry.hops`, itself the
+                // receipt-incremented `packet.hops` (`:3166`/`:3310`), and the
+                // local-client forward (`:3371`) likewise uses `packet.hops`.
                 if let Ok(cached_packet) = Packet::unpack(&cached_raw) {
+                    let stored_hops = self
+                        .storage
+                        .get_path(&requested_hash)
+                        .map(|p| p.hops)
+                        .unwrap_or_else(|| cached_packet.hops.saturating_add(1));
                     self.storage.set_announce(
                         requested_hash,
                         AnnounceEntry {
                             timestamp_ms: now,
-                            hops: cached_packet.hops,
+                            hops: stored_hops,
                             retries: 0,
                             retransmit_at_ms: Some(now + grace),
                             raw_packet: cached_raw,

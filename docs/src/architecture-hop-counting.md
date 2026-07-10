@@ -80,6 +80,16 @@ answering a path request, and `Transport.py:618`: `new_packet.hops = announce_en
 A path learned from a path response therefore inherits the responder's STORED count, not a freshly
 measured one. Staleness propagates through this channel.
 
+leviculum matches this as of 2026-07-10 (D3, fixed on branch `path-response-hops`). When a transport
+node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6074`)
+it now emits `self.storage.get_path(&requested_hash).map(|p| p.hops)`, the receipt-incremented stored
+count, exactly as `:2956` does. It previously emitted `cached_packet.hops`, the AS-RECEIVED wire byte
+(`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:1620`
+touches only the in-memory packet). That value is `stored - 1`, so every peer learning through our
+transport path response was one hop short, and the deficit COMPOUNDED on each re-learn through a
+leviculum transport. Case 1 (local dest) and case 2a (local-client answer, explicit `+1`) were already
+correct.
+
 ### 8. Link table
 
 Built at `Transport.py:1615-1625`, keyed by the link id:
@@ -171,6 +181,7 @@ Recorded 2026-07-10 against `vendor/Reticulum` as vendored.
 | Announce rebroadcast | `:2009` | `transport.rs:6235` | matches |
 | Path table store | `:1868`, `:2014` | `transport.rs:3140` | matches |
 | Path acceptance | `:1765`, `:2371` | `transport.rs:3082` (`should_update`) | matches |
+| Path-response hop emission | `:2956` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6074` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
 | LRPROOF relay check | `:2174-2206` (single `== remaining_hops`, drop else; the `:1656` disjunction is gated OUT for LRPROOF at `:1646`) | `transport.rs:3746`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
 | Healing, no path | `:710` | `transport.rs:6688` | matches |
