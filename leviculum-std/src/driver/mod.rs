@@ -91,7 +91,7 @@ use crate::interfaces::i2p::{
 };
 use crate::interfaces::tcp::{
     spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig,
-    DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
+    DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::udp::spawn_udp_interface;
 use crate::interfaces::{
@@ -1380,6 +1380,7 @@ impl ReticulumNode {
                             corrupt_every: self.corrupt_every,
                             reconnect_interval,
                             max_reconnect_tries: config.max_reconnect_tries,
+                            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
                             connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
                             reconnect_notify: Some(reconnect_tx.clone()),
                             // Tunnel-capable: a non-KISS TCP client initiates the
@@ -3631,6 +3632,7 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             corrupt_every: self.corrupt_every,
             reconnect_interval: Duration::from_secs(5),
             max_reconnect_tries: None,
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
             connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
             reconnect_notify: Some(self.reconnect_tx.clone()),
             // Auto-connected (discovered) TCP clients do not yet initiate the

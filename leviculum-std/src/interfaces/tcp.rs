@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{IncomingPacket, InterfaceCounters, InterfaceInfo, OutgoingPacket, ReadySignal};
 use leviculum_core::constants::MTU;
@@ -111,6 +111,11 @@ pub(crate) struct TcpClientConfig {
     pub corrupt_every: Option<u64>,
     pub reconnect_interval: Duration,
     pub max_reconnect_tries: Option<u64>,
+    /// Upper bound on the backoff delay between reconnect attempts. The base
+    /// `reconnect_interval` is doubled on each attempt past the third and
+    /// clamped here, so a permanently-dead peer is retried at most once per
+    /// this interval instead of every `reconnect_interval`. Default 60 s.
+    pub reconnect_max_interval: Duration,
     /// Upper bound on a single connect attempt. A connect that does not
     /// complete within this window is abandoned and counted as a failed
     /// attempt, so reconnect accounting (and give-up) stays responsive even
@@ -132,6 +137,9 @@ pub(crate) struct TcpClientConfig {
 
 /// Default per-attempt connect timeout for reconnecting TCP clients.
 pub(crate) const DEFAULT_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default cap on the exponential reconnect backoff. See [`backoff_delay`].
+pub(crate) const DEFAULT_RECONNECT_MAX_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Fast non-cryptographic PRNG (xorshift64). Seeded from OsRng once per task.
 struct Xorshift64(u64);
@@ -365,6 +373,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             config.corrupt_every,
             config.reconnect_interval,
             config.max_reconnect_tries,
+            config.reconnect_max_interval,
             config.connect_timeout,
             task_counters,
             config.reconnect_notify,
@@ -392,6 +401,80 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
     }
 }
 
+/// Bounded exponential backoff between reconnect attempts (no jitter).
+///
+/// Attempts `1..=3` wait exactly `base`, so a transient blip heals as fast as a
+/// Python peer would (see the deviation note on [`tcp_client_reconnect_task`]).
+/// From attempt 4 on the delay doubles each attempt, clamped at `max`. The
+/// result is monotonically non-decreasing in `attempt` and never exceeds `max`.
+fn backoff_delay(attempt: u64, base: Duration, max: Duration) -> Duration {
+    if attempt <= 3 {
+        return base.min(max);
+    }
+    // 1 doubling at attempt 4, 2 at attempt 5, ... All arithmetic saturates so
+    // a large attempt count can never overflow; it simply pins to `max`.
+    let doublings = attempt - 3;
+    let base_nanos = base.as_nanos();
+    let scaled = if doublings >= 128 {
+        u128::MAX
+    } else {
+        base_nanos.saturating_mul(1u128 << doublings)
+    };
+    let capped = scaled.min(max.as_nanos());
+    Duration::from_nanos(capped.min(u64::MAX as u128) as u64)
+}
+
+/// Deterministic +/-20 % jitter on a backoff delay, keyed on interface name and
+/// attempt. No RNG (so it is unit-testable), and two differently-named
+/// interfaces retrying the same dead peer draw different offsets, so a fleet of
+/// nodes does not reconnect in lockstep.
+fn backoff_jitter(name: &str, attempt: u64, delay: Duration) -> Duration {
+    // FNV-1a over the name bytes followed by the attempt number.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for b in attempt.to_le_bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Offset in parts-per-100_000, uniform over [-20_000, +20_000] => +/-20 %.
+    let offset = (hash % 40_001) as i64 - 20_000;
+    let nanos = delay.as_nanos() as i128;
+    let adjusted = nanos + nanos * offset as i128 / 100_000;
+    Duration::from_nanos(adjusted.max(0) as u64)
+}
+
+/// Whether a reconnect failure at this attempt should emit a `warn!` line.
+///
+/// Attempts `1..=3` always log (they mirror the base-rate retries). After that,
+/// log only on attempt-count doublings (4, 8, 16, ...): each doubling of the
+/// backoff delay gets at most one line, and once the delay caps the spacing
+/// keeps widening, so a permanently-dead peer logs at most once per capped
+/// interval instead of twice every `reconnect_interval`.
+fn should_log_failure(attempt: u64) -> bool {
+    attempt <= 3 || attempt.is_power_of_two()
+}
+
+/// The single info line emitted on a successful connect. A connect that
+/// followed at least one failed attempt reports the recovery (attempt count and
+/// how long the peer was gone); a clean first connect just states the endpoint.
+/// Exactly one line per successful connect, by construction.
+fn connect_log_line(
+    name: &str,
+    addr: SocketAddr,
+    failed_attempts: u64,
+    outage: Option<Duration>,
+) -> String {
+    if failed_attempts > 0 {
+        let elapsed = outage.unwrap_or_default();
+        format!("{name}: reconnected to {addr} after {failed_attempts} attempt(s), {elapsed:.1?}")
+    } else {
+        format!("{name}: connected to {addr}")
+    }
+}
+
 /// Reconnect wrapper for TCP client connections.
 ///
 /// Owns the channel endpoints and keeps them alive across reconnection cycles.
@@ -409,14 +492,31 @@ async fn tcp_client_reconnect_task(
     corrupt_every: Option<u64>,
     reconnect_interval: Duration,
     max_reconnect_tries: Option<u64>,
+    reconnect_max_interval: Duration,
     connect_timeout: Duration,
     counters: Arc<InterfaceCounters>,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     tunnel_notify: Option<mpsc::Sender<InterfaceId>>,
     ready: Arc<ReadySignal>,
 ) {
+    // Backoff DELIBERATELY DEVIATES from Python `RNS/Interfaces/TCPInterface.py`,
+    // which uses `RECONNECT_WAIT = 5` and `RECONNECT_MAX_TRIES = None`: a fixed
+    // 5 s retry, forever, logging each attempt. A dead peer there costs ~17,280
+    // attempts and ~34,560 journal lines per day. This deviation is permitted by
+    // the project deviation rule: a client's reconnect cadence and its local
+    // logging are wire-invisible and semantics-invisible (no peer observes them),
+    // and the change measurably improves Priority-1 operation on constrained
+    // nodes (far less wasted work, a readable journal). The trade is that a
+    // returning peer's reconnect latency rises from <=`reconnect_interval` to
+    // <=`reconnect_max_interval`. We still NEVER give up by default
+    // (`max_reconnect_tries = None`): backoff replaces abandonment, which would
+    // cost delivery. Attempts 1..=3 stay at the base interval so a transient
+    // blip heals exactly as fast as a Python peer would.
     let mut attempt = 0u64;
     let mut has_connected_before = false;
+    // Set on the first failed cycle of an outage, cleared on the next success,
+    // so the success line can report how long the peer was gone.
+    let mut outage_start: Option<Instant> = None;
     loop {
         // Bound each attempt: a connect that does not resolve within
         // `connect_timeout` (Windows SYN-retransmit to a closed loopback port,
@@ -436,7 +536,10 @@ async fn tcp_client_reconnect_task(
                 stream.set_nodelay(true).ok();
                 apply_liveness_options(&stream).ok();
                 let is_reconnect = has_connected_before;
+                let failed_attempts = attempt;
+                let outage = outage_start.take();
                 has_connected_before = true;
+                // RESET the backoff after any successful connect.
                 attempt = 0;
                 // Per the wait_for_interface_ready contract (Option α):
                 // ready fires when the kernel-level TCP three-way
@@ -444,7 +547,12 @@ async fn tcp_client_reconnect_task(
                 // reconnects after a drop are safe — the signal stays
                 // ready for the lifetime of the interface.
                 ready.signal_ready();
-                tracing::info!("{}: connected to {}", name, addr);
+
+                // Exactly ONE info line per successful connect.
+                tracing::info!(
+                    "{}",
+                    connect_log_line(&name, addr, failed_attempts, outage.map(|t| t.elapsed()))
+                );
 
                 // Notify the driver about reconnection so it can re-announce
                 // destinations on the recovered interface (Block D).
@@ -477,8 +585,22 @@ async fn tcp_client_reconnect_task(
                 tracing::warn!("{}: connection lost, will reconnect", name);
             }
             Err(e) => {
-                tracing::warn!("{}: connect to {} failed: {}", name, addr, e);
+                // The failure warn! is throttled: attempts 1,2,3 and each
+                // backoff doubling, then at most once per capped interval.
+                // `attempt + 1` is the value the tail below increments to.
+                if should_log_failure(attempt + 1) {
+                    tracing::warn!(
+                        "{}: connect to {} failed: {} (attempt {})",
+                        name,
+                        addr,
+                        e,
+                        attempt + 1
+                    );
+                }
             }
+        }
+        if outage_start.is_none() {
+            outage_start = Some(Instant::now());
         }
         attempt += 1;
         if let Some(max) = max_reconnect_tries {
@@ -492,13 +614,18 @@ async fn tcp_client_reconnect_task(
             tracing::debug!("{}: event loop shut down, stopping reconnect", name);
             return;
         }
-        tracing::info!(
-            "{}: reconnecting in {}s (attempt {})",
+        let delay = backoff_jitter(
+            &name,
+            attempt,
+            backoff_delay(attempt, reconnect_interval, reconnect_max_interval),
+        );
+        tracing::debug!(
+            "{}: reconnecting in {:.1?} (attempt {})",
             name,
-            reconnect_interval.as_secs(),
+            delay,
             attempt
         );
-        tokio::time::sleep(reconnect_interval).await;
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -605,6 +732,151 @@ async fn tcp_interface_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_backoff_delay_schedule() {
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(60);
+        // Attempts 1..=3 heal at base rate.
+        assert_eq!(backoff_delay(1, base, max), base);
+        assert_eq!(backoff_delay(2, base, max), base);
+        assert_eq!(backoff_delay(3, base, max), base);
+        // Then doubling.
+        assert_eq!(backoff_delay(4, base, max), Duration::from_secs(10));
+        assert_eq!(backoff_delay(5, base, max), Duration::from_secs(20));
+        assert_eq!(backoff_delay(6, base, max), Duration::from_secs(40));
+        // Clamped at max, never exceeding it.
+        assert_eq!(backoff_delay(7, base, max), max); // 80s -> 60s
+        assert_eq!(backoff_delay(8, base, max), max); // 160s -> 60s
+    }
+
+    #[test]
+    fn test_backoff_delay_bounds_and_monotonic() {
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(60);
+        let mut prev = Duration::ZERO;
+        for attempt in 1..=200u64 {
+            let d = backoff_delay(attempt, base, max);
+            assert!(d <= max, "attempt {attempt}: {d:?} exceeds max {max:?}");
+            assert!(
+                d >= prev,
+                "attempt {attempt}: {d:?} < prev {prev:?} (not monotonic)"
+            );
+            prev = d;
+        }
+        // A large attempt count saturates rather than overflowing.
+        assert_eq!(backoff_delay(u64::MAX, base, max), max);
+    }
+
+    #[test]
+    fn test_backoff_delay_base_above_max_clamps() {
+        let base = Duration::from_secs(90);
+        let max = Duration::from_secs(60);
+        // Even the base-rate attempts never exceed the cap.
+        assert_eq!(backoff_delay(1, base, max), max);
+        assert_eq!(backoff_delay(4, base, max), max);
+    }
+
+    #[test]
+    fn test_backoff_jitter_within_twenty_percent() {
+        let delay = Duration::from_secs(40);
+        let lo = Duration::from_secs(32); // 0.8x
+        let hi = Duration::from_secs(48); // 1.2x
+        for attempt in 1..=64u64 {
+            let j = backoff_jitter("tcp_client_0", attempt, delay);
+            assert!(
+                j >= lo && j <= hi,
+                "attempt {attempt}: {j:?} outside +/-20% of {delay:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_jitter_deterministic() {
+        let delay = Duration::from_secs(40);
+        for attempt in 1..=16u64 {
+            let a = backoff_jitter("autoconnect/peer_A", attempt, delay);
+            let b = backoff_jitter("autoconnect/peer_A", attempt, delay);
+            assert_eq!(
+                a, b,
+                "jitter must be deterministic for the same (name, attempt)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_jitter_differs_across_names() {
+        // Anti-lockstep: different interface names draw different offsets, so a
+        // fleet retrying the same dead peer does not knock in unison.
+        let delay = Duration::from_secs(40);
+        let mut differed = false;
+        for attempt in 1..=16u64 {
+            let a = backoff_jitter("tcp_client_0", attempt, delay);
+            let b = backoff_jitter("tcp_client_1", attempt, delay);
+            if a != b {
+                differed = true;
+                break;
+            }
+        }
+        assert!(
+            differed,
+            "distinct names must produce distinct jitter for at least one attempt"
+        );
+    }
+
+    #[test]
+    fn test_should_log_failure_throttle() {
+        // Always log the first three (base-rate) attempts.
+        assert!(should_log_failure(1));
+        assert!(should_log_failure(2));
+        assert!(should_log_failure(3));
+        // Log exactly on the doubling boundaries, silent in between.
+        assert!(should_log_failure(4));
+        assert!(!should_log_failure(5));
+        assert!(!should_log_failure(6));
+        assert!(!should_log_failure(7));
+        assert!(should_log_failure(8));
+        for a in 9..=15u64 {
+            assert!(!should_log_failure(a), "attempt {a} should be silent");
+        }
+        assert!(should_log_failure(16));
+        // Once capped, logging spacing keeps widening: at most one line per
+        // capped interval. Count the logging attempts in a wide window.
+        let logged = (17..=1024u64).filter(|&a| should_log_failure(a)).count();
+        // Only 32, 64, 128, 256, 512, 1024 -> 6 lines across ~1000 attempts.
+        assert_eq!(logged, 6);
+    }
+
+    #[test]
+    fn test_connect_log_line_single_variant() {
+        let addr: SocketAddr = "127.0.0.1:9050".parse().unwrap();
+        // Clean first connect: just the endpoint.
+        let clean = connect_log_line("tcp_client_0", addr, 0, None);
+        assert_eq!(clean, "tcp_client_0: connected to 127.0.0.1:9050");
+        // A connect that succeeded on attempt N (after N-1... here N failures)
+        // reports recovery with the count and elapsed outage as ONE line.
+        let recovered = connect_log_line("tcp_client_0", addr, 3, Some(Duration::from_secs(12)));
+        assert!(recovered.contains("reconnected to 127.0.0.1:9050"));
+        assert!(recovered.contains("after 3 attempt(s)"));
+        assert!(recovered.contains("12.0s"));
+        // Exactly one line either way — no embedded newline.
+        assert!(!clean.contains('\n'));
+        assert!(!recovered.contains('\n'));
+    }
+
+    #[test]
+    fn test_backoff_resets_after_success() {
+        // The reset is enforced in the task by `attempt = 0` on a successful
+        // connect. Model it here: after a success the counter is 0, so the next
+        // failure is attempt 1 and waits the base delay again.
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(60);
+        // Deep into backoff...
+        assert_eq!(backoff_delay(7, base, max), max);
+        // ...success resets the counter, so the next failure is attempt 1.
+        let after_reset = 1u64;
+        assert_eq!(backoff_delay(after_reset, base, max), base);
+    }
 
     #[test]
     fn test_tcp_interface_connect_refused() {
@@ -792,6 +1064,7 @@ mod tests {
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(200),
             max_reconnect_tries: Some(10),
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
             connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
             reconnect_notify: None,
             tunnel_notify: None,
@@ -860,6 +1133,7 @@ mod tests {
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(100),
             max_reconnect_tries: Some(2),
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
             // Short, explicit bound so give-up is deterministic regardless of
             // how long the OS takes to refuse a dead loopback port (instant on
             // Linux, ~1s+ SYN-retransmit on Windows). 2 tries × (≤300ms connect
