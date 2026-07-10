@@ -93,6 +93,12 @@ pub struct FieldValue {
     pub text: String,
     /// The current checked state of a checkbox/radio (ignored for text).
     pub checked: bool,
+    /// How far the text is scrolled inside the widget: the offset of the first
+    /// character drawn in the box. Lets a text longer than the field's width
+    /// still be typed and read — the editor keeps the caret in view by sliding
+    /// this window, exactly as the address bar does. Zero for checkbox/radio and
+    /// for the print sink, which never scrolls.
+    pub scroll: usize,
 }
 
 /// A form field collected while rendering, with its laid-out position (mirroring
@@ -859,10 +865,19 @@ fn field_display(field: &Field, over: Option<&FieldValue>) -> (String, String, b
             };
             // The widget spans the field's DECLARED micron width, not the width
             // of whatever is currently typed: NomadNet draws an empty field as a
-            // full-width input bar. `fit` pads with spaces (or truncates) to
-            // exactly that many columns. A zero width would leave no cell to
-            // focus or click, so keep at least one.
-            (fit(&shown, field.width.max(1), Align::Left), text, false)
+            // full-width input bar. A zero width would leave no cell to focus or
+            // click, so keep at least one.
+            let w = field.width.max(1);
+            // Text longer than the box is not lost: the editor slides a `w`-wide
+            // window over it (`scroll`) so the caret stays visible while typing,
+            // the same way the address bar scrolls. `fit` then pads the window
+            // out to exactly `w` columns.
+            let window: String = shown
+                .chars()
+                .skip(over.map_or(0, |o| o.scroll))
+                .take(w)
+                .collect();
+            (fit(&window, w, Align::Left), text, false)
         }
         FieldKind::Checkbox => {
             let checked = over.map(|o| o.checked).unwrap_or(field.prechecked);

@@ -748,9 +748,18 @@ impl Model {
     fn field_values(&self) -> Vec<FieldValue> {
         self.field_state
             .iter()
-            .map(|fe| FieldValue {
-                text: fe.input.value().to_string(),
-                checked: fe.checked,
+            .enumerate()
+            .map(|(i, fe)| {
+                // Slide the text window so the caret stays inside the box: a
+                // message longer than the field must still be typeable. The
+                // widths come from the previous layout and never change between
+                // relayouts, so reading them here is sound.
+                let w = self.field_defs.get(i).map_or(1, |d| d.width.max(1));
+                FieldValue {
+                    text: fe.input.value().to_string(),
+                    checked: fe.checked,
+                    scroll: fe.input.visual_scroll(w.saturating_sub(1)),
+                }
             })
             .collect()
     }
@@ -2450,10 +2459,13 @@ fn render_fields(model: &Model, frame: &mut Frame) {
             }
             if is_focused && vf.kind == FieldKind::Text {
                 if let Some(fe) = model.field_state.get(vf.index - 1) {
-                    // The box carries no bracket chrome any more: the cursor sits
-                    // directly at the editor offset inside it, clamped to the
-                    // box's last cell.
-                    let cx = vf.col_start + fe.input.visual_cursor() as u16;
+                    // The box carries no bracket chrome, and its text may be
+                    // scrolled: the caret sits at the editor offset minus the
+                    // window's scroll, clamped to the box's last cell. Same
+                    // window the relayout used, so caret and text agree.
+                    let w = (vf.col_end - vf.col_start) as usize;
+                    let scroll = fe.input.visual_scroll(w.saturating_sub(1));
+                    let cx = vf.col_start + fe.input.visual_cursor().saturating_sub(scroll) as u16;
                     let clamped = cx.min(vf.col_end.saturating_sub(1));
                     cursor = Some((clamped, vf.row));
                 }
@@ -6357,6 +6369,44 @@ mod tests {
         // place rather than growing the box.
         let vf = visible_fields(&m)[0].clone();
         assert_eq!((vf.col_end - vf.col_start) as usize, 24);
+    }
+
+    #[test]
+    fn long_text_scrolls_inside_the_field_box() {
+        // An 8-wide field typed full of 12 characters: nothing may be lost, and
+        // the box must slide so the caret — and the tail being typed — stay in
+        // view. This is what makes long chat messages enterable.
+        let src = "`<8|msg`>";
+        let mut m = field_model(src, (80, 24));
+        press(&mut m, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.field_focus, Some(1));
+        type_str(&mut m, "abcdefghijkl");
+        assert_eq!(
+            m.field_state[0].input.value(),
+            "abcdefghijkl",
+            "the editor must keep the whole text, not just what fits"
+        );
+
+        let vf = visible_fields(&m)[0].clone();
+        assert_eq!(
+            (vf.col_end - vf.col_start) as usize,
+            8,
+            "box keeps its width"
+        );
+
+        let line: String = m.page[m.field_defs[0].line]
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect();
+        assert!(
+            line.contains("fghijkl"),
+            "box did not scroll to the caret: {line:?}"
+        );
+        assert!(
+            !line.contains("abcde"),
+            "box still shows the head, so the caret is off-screen: {line:?}"
+        );
     }
 
     #[test]
