@@ -3011,12 +3011,12 @@ enum FooterAction {
 /// you can also click. The key cell renders bright + bold, the label muted.
 #[derive(Clone, Copy, Debug)]
 struct FooterItem {
-    /// The pressable key or glyph (bright + bold), e.g. `‹`, `f`, `Esc`.
+    /// The pressable key (bright + bold), e.g. `Alt-←`, `f`, `Esc`.
     key: &'static str,
     /// The muted descriptive label, e.g. `back`, `hint` (empty for a sentence).
     label: &'static str,
-    /// Whether the key renders before the label. The forward arrow trails its
-    /// word (`forward ›`); everything else leads (`‹ back`, `f hint`).
+    /// Whether the key renders before the label. Everything leads with its key
+    /// (`Alt-← back`, `f hint`).
     key_first: bool,
     /// What a press or click runs.
     action: FooterAction,
@@ -3075,25 +3075,23 @@ impl FooterItem {
     }
 }
 
-/// The footer's navigation trio, always first: back, forward, reload. Their
-/// availability tracks the history so an impossible motion reads muted.
+/// The footer's navigation trio, always first: back, forward, reload. They are
+/// ordinary `key + label` items like the rest of the strip, spelling their keys
+/// (`Alt-←`, `Alt-→`, `R`) rather than using glyphs. Their availability tracks
+/// the history so an impossible motion reads muted.
 fn footer_nav(model: &Model) -> [FooterItem; 3] {
     [
         FooterItem {
             available: model.history.can_back(),
-            ..FooterItem::action("‹", "back", FooterAction::Back)
+            ..FooterItem::action("Alt-←", "back", FooterAction::Back)
         },
         FooterItem {
-            key: "›",
-            label: "forward",
-            key_first: false,
-            action: FooterAction::Forward,
-            drop_rank: None,
             available: model.history.can_forward(),
+            ..FooterItem::action("Alt-→", "forward", FooterAction::Forward)
         },
         FooterItem {
             available: model.history.current().is_some(),
-            ..FooterItem::action("⟳", "reload", FooterAction::Reload)
+            ..FooterItem::action("R", "reload", FooterAction::Reload)
         },
     ]
 }
@@ -3558,10 +3556,10 @@ const HELP_LINES: &[&str] = &[
     "  d                   places panel",
     "  m                   bookmark this page",
     "  y                   copy link / page address",
-    "  R                   reload the page (always refetches)",
+    "  Alt-← / Alt-→       back / forward",
+    "  R / Ctrl-R / F5     reload",
+    "  mouse back/forward  back / forward",
     "  t                   toggle light / dark theme",
-    "  M-← / M-→           back / forward",
-    "  mouse back / fwd     back / forward",
     "  Esc / Ctrl-g        cancel a load",
     "  ?                   toggle this help",
     "  q / Ctrl-c          quit",
@@ -6950,6 +6948,75 @@ mod tests {
     }
 
     #[test]
+    fn footer_nav_trio_renders_keys_not_glyphs() {
+        // The nav trio reads as ordinary key + label items like the rest of the
+        // strip: `Alt-← back`, `Alt-→ forward`, `R reload`, no glyphs anywhere.
+        let m = loaded_model((120, 24));
+        let slots = footer_layout(&m, Rect::new(0, 23, 120, 1));
+        let trio: Vec<(&str, &str)> = slots[..3]
+            .iter()
+            .map(|s| (s.item.key, s.item.label))
+            .collect();
+        assert_eq!(
+            trio,
+            vec![("Alt-←", "back"), ("Alt-→", "forward"), ("R", "reload")]
+        );
+        let buffer = render(&m, 120, 24);
+        let row = row_text(&buffer, 23, 120);
+        for g in ['‹', '›', '⟳'] {
+            assert!(!row.contains(g), "glyph {g:?} still in footer: {row:?}");
+        }
+        assert!(row.contains("Alt-← back"), "back item text: {row:?}");
+        assert!(row.contains("Alt-→ forward"), "forward item text: {row:?}");
+        assert!(row.contains("R reload"), "reload item text: {row:?}");
+    }
+
+    #[test]
+    fn footer_reload_key_is_bright_bold_and_label_is_muted() {
+        // The reload item wears exactly the same chrome as every other footer
+        // item: KEY in the bright chrome fg + BOLD, LABEL in the muted chrome fg.
+        let m = loaded_model((80, 24));
+        let slot = footer_slot(&m, FooterAction::Reload);
+        let buffer = render(&m, 80, 24);
+        let key = &buffer[(slot.rect.x, 23u16)];
+        assert_eq!(
+            key.fg,
+            rgb(m.theme.chrome_fg()),
+            "reload key must be bright"
+        );
+        assert!(
+            key.modifier.contains(Modifier::BOLD),
+            "reload key must be BOLD"
+        );
+        // The label ("reload") starts two columns past the key ("R" + a space).
+        let label = &buffer[(slot.rect.x + 2, 23u16)];
+        assert_eq!(
+            label.fg,
+            rgb(m.theme.chrome_muted_fg()),
+            "reload label must be muted"
+        );
+    }
+
+    #[test]
+    fn footer_click_on_reload_reloads_the_page() {
+        let mut m = loaded_model((80, 24));
+        let slot = footer_slot(&m, FooterAction::Reload);
+        let effects = update(&mut m, AppEvent::Mouse(click(slot.rect.x, slot.rect.y)));
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], Effect::Navigate(_)));
+    }
+
+    #[test]
+    fn help_overlay_lists_back_forward_and_reload() {
+        let mut m = loaded_model((100, 30));
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let text = flat(&render(&m, 100, 30));
+        for line in ["Alt-← / Alt-→", "R / Ctrl-R / F5", "mouse back/forward"] {
+            assert!(text.contains(line), "help missing {line:?}:\n{text}");
+        }
+    }
+
+    #[test]
     fn footer_unavailable_nav_reads_muted_not_dim() {
         // loaded_model has a single history entry: back is unavailable and must
         // render in the readable muted chrome fg, never DIM.
@@ -6976,7 +7043,9 @@ mod tests {
 
     #[test]
     fn footer_click_on_places_opens_the_panel() {
-        let mut m = loaded_model((80, 24));
+        // Wide enough that `d places` survives the priority truncation (the
+        // spelled-out nav keys make the full strip a touch wider than before).
+        let mut m = loaded_model((120, 24));
         assert!(!m.show_places);
         let slot = footer_slot(&m, FooterAction::Places);
         let effects = update(&mut m, AppEvent::Mouse(click(slot.rect.x, slot.rect.y)));
@@ -7019,10 +7088,10 @@ mod tests {
             slots.iter().all(|s| s.collapsed),
             "a very narrow footer must collapse to keys"
         );
-        // Rendered: the key glyphs survive, the words do not.
+        // Rendered: the keys survive, the words do not.
         let buffer = render(&m, 30, 24);
         let row = row_text(&buffer, 23, 30);
-        assert!(row.contains('‹'), "back glyph missing: {row:?}");
+        assert!(row.contains("Alt-←"), "back key missing: {row:?}");
         assert!(row.contains('q'), "quit key missing: {row:?}");
         assert!(!row.contains("quit"), "labels should be gone: {row:?}");
         assert!(!row.contains("back"), "labels should be gone: {row:?}");

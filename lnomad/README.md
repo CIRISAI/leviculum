@@ -86,11 +86,11 @@ On a terminal, `lnomad` opens a full-screen browser: a one-row top-bar (the page
 title, a `·`, and the address, with a right-aligned status cluster: a bookmark
 star, a cache bolt, and the hop count to the node), the scrollable page, and a
 footer. The footer is a strip of clickable button-hints where a keybinding and a
-button are the same thing: the navigation trio (`‹ back`, `forward ›`,
-`⟳ reload`) first, then the current mode's actions. Each button's key reads
+button are the same thing: the navigation trio (`Alt-← back`, `Alt-→ forward`,
+`R reload`) first, then the current mode's actions. Each button's key reads
 bright and bold, its label muted; press the key or click the button. On a narrow
 terminal the footer drops the lowest-priority buttons and, if still too tight,
-collapses the rest to their key glyphs. Links carry no `[N]` marker and there is
+collapses the rest to their keys. Links carry no `[N]` marker and there is
 no link legend; a link is set apart by its underline and colour, and is reached
 by focus, hint or click:
 
@@ -107,7 +107,7 @@ by focus, hint or click:
 - `:`         enter an address
 - `R` / `Ctrl-R` / `F5`  reload the page (always refetches, bypassing the cache)
 - `t`         toggle the light / dark theme (correct a wrong auto-detection)
-- `M-←` / `M-→`  back / forward
+- `Alt-←` / `Alt-→`  back / forward
 - mouse back / forward side buttons  back / forward
 - `Esc` / `Ctrl-g`  cancel a load
 - `?`         toggle the help overlay
