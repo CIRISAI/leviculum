@@ -8,7 +8,7 @@ form in [`vectors/vectors.json`](vectors/vectors.json).
 Regenerate and verify (from the repository root):
 
 ```
-PYTHONPATH=vendor/Reticulum:vendor/LXMF \
+PYTHONPATH=reference/Reticulum:reference/LXMF \
     python3 docs/src/appendix/lxmf/vectors/gen_vectors.py
 ```
 

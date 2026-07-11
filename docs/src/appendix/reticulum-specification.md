@@ -2,7 +2,7 @@
 
 This appendix is an exact, English specification of the Reticulum (RNS) protocol,
 derived from and proven against the vendored Python reference
-(`vendor/Reticulum`, RNS 1.3.5, commit `d5e62d4`). It is the wire contract the
+(`reference/Reticulum`, RNS 1.3.5, commit `d5e62d4`). It is the wire contract the
 libreticulum `leviculum-core`/`leviculum-std` crates interoperate against, and
 the foundation the [LXMF Protocol Specification](lxmf-specification.md) builds
 on.

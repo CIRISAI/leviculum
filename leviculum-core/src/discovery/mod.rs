@@ -7,7 +7,7 @@
 //! [`DiscoveredInterface`] for higher layers to act on.
 //!
 //! This module is a byte-for-byte port of Python `RNS.Discovery`
-//! (`vendor/Reticulum/RNS/Discovery.py`) and the stamp scheme in
+//! (`reference/Reticulum/RNS/Discovery.py`) and the stamp scheme in
 //! `LXMF.LXStamper`. It covers sub-task (a) of interface auto-discovery:
 //! encode, decode, validate, and surface. It performs NO auto-connect and keeps
 //! NO persistent registry; those are later sub-tasks that consume the

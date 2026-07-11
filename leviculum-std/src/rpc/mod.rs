@@ -246,7 +246,7 @@ pub(crate) async fn rpc_client_call(
     let mut stream = RpcStream::from_std(std_stream)?;
 
     // Upstream Python-RNS migrated the shared-instance RPC payload from pickle to
-    // msgpack (vendor/Reticulum a2ef9782): the client now sends `mp.packb(req)`
+    // msgpack (reference/Reticulum a2ef9782): the client now sends `mp.packb(req)`
     // and reads `mp.unpackb(resp)`. We match that on the wire. The framing
     // (4-byte length prefix) and the HMAC handshake are unchanged. Our own server
     // still auto-detects pickle vs msgpack, so this stays compatible with both

@@ -2,13 +2,13 @@
 """Generate golden test vectors for the Reticulum protocol specification.
 
 Every binary claim in the specification is backed by a vector produced here.
-The harness imports the vendored Python reference (`vendor/Reticulum`, RNS
+The harness imports the vendored Python reference (`reference/Reticulum`, RNS
 1.3.5, pinned commit d5e62d4) and emits the genuine output of the reference
 code.
 
 Run from the repository root:
 
-    PYTHONPATH=vendor/Reticulum \
+    PYTHONPATH=reference/Reticulum \
         python3 docs/src/appendix/reticulum/vectors/gen_vectors.py
 
 Output: `vectors.json` next to this script. Re-running MUST reproduce it byte
@@ -593,7 +593,7 @@ def main():
                     "Do not edit by hand; re-run the harness.",
         "meta": {
             "rns_version": RNS.__version__,
-            "reticulum_commit": submodule_commit("vendor/Reticulum"),
+            "reticulum_commit": submodule_commit("reference/Reticulum"),
             "fixed_time": FIXED_TIME,
             "src_identity_prv_hex": SRC_PRV.hex(),
             "dst_identity_prv_hex": DST_PRV.hex(),

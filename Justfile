@@ -334,8 +334,8 @@ dfu-rak4631 PORT:
 # signature and provisioning are preserved (verified: a T-Beam stayed
 # "Validated, Local signature" across a full reflash).
 
-vendor_reticulum := justfile_directory() / "vendor" / "Reticulum"
-rnodeconf := "PYTHONPATH=" + vendor_reticulum + " python3 " + vendor_reticulum / "RNS" / "Utilities" / "rnodeconf.py"
+reference_reticulum := justfile_directory() / "reference" / "Reticulum"
+rnodeconf := "PYTHONPATH=" + reference_reticulum + " python3 " + reference_reticulum / "RNS" / "Utilities" / "rnodeconf.py"
 esptool := justfile_directory() / ".rnode-tools" / "bin" / "esptool.py"
 rnode_fw := justfile_directory() / ".rnode-fw"
 

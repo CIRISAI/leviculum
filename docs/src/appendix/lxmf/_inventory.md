@@ -13,10 +13,10 @@ a coverage gap.
 
 | Component | Version | Submodule commit |
 |-----------|---------|------------------|
-| LXMF (`vendor/LXMF`) | 0.9.6 | `8499729024a4cddfceb47ca07188bb5b1d11d179` |
-| Reticulum (`vendor/Reticulum`) | RNS 1.3.5 | `d5e62d4e15c5fe2e170f7bd9e120551671f21a27` |
+| LXMF (`reference/LXMF`) | 0.9.6 | `8499729024a4cddfceb47ca07188bb5b1d11d179` |
+| Reticulum (`reference/Reticulum`) | RNS 1.3.5 | `d5e62d4e15c5fe2e170f7bd9e120551671f21a27` |
 
-Reference files under `vendor/LXMF/LXMF/`: `LXMessage.py`, `LXMF.py`,
+Reference files under `reference/LXMF/LXMF/`: `LXMessage.py`, `LXMF.py`,
 `LXMRouter.py`, `LXMPeer.py`, `LXStamper.py`, `Handlers.py`, `_version.py`,
 `Utilities/lxmd.py`.
 
@@ -245,7 +245,7 @@ Daemon and CLI. **X** out of scope (not protocol). Listed for completeness only.
 
 ---
 
-## Deferred RNS primitives (cited into `vendor/Reticulum`, not re-specified)
+## Deferred RNS primitives (cited into `reference/Reticulum`, not re-specified)
 
 `RNS.Identity.full_hash` (SHA-256), `truncated_hash`, Ed25519 `sign`/`validate`,
 `RNS.Destination.encrypt`/`decrypt` (ECDH + AES token + ratchets),

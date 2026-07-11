@@ -1,7 +1,7 @@
 //! Wire-format tests for interface discovery.
 //!
 //! Golden vectors are captured byte-for-byte from Python `RNS.Discovery` +
-//! `LXMF.LXStamper` over the vendored tree (`vendor/Reticulum`, `vendor/LXMF`)
+//! `LXMF.LXStamper` over the vendored tree (`reference/Reticulum`, `reference/LXMF`)
 //! via `tests/discovery_golden_gen.py`. They pin:
 //!   * the deterministic `msgpack(info)` encoding (our encode == Python packb),
 //!   * that our validator accepts a Python-generated stamp at the reported

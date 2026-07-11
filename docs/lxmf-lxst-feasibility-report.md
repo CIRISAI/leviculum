@@ -9,13 +9,13 @@ and similar) as well as on hosts.
 
 It is grounded in four codebases:
 
-- `vendor/LXMF` (markqvist, v0.9.6) — the authoritative Python reference.
-- `vendor/LXST` (markqvist, v0.4.4) — the authoritative Python reference.
+- `reference/LXMF` (markqvist, v0.9.6) — the authoritative Python reference.
+- `reference/LXST` (markqvist, v0.4.4) — the authoritative Python reference.
 - `/home/lew/coding/rsLXMF` — a third-party Rust LXMF implementation.
 - `/home/lew/coding/rsLXST` — a third-party Rust LXST implementation.
 
-Both Python repos are now pinned as submodules under `vendor/` exactly like
-`vendor/Reticulum`.
+Both Python repos are now pinned as submodules under `reference/` exactly like
+`reference/Reticulum`.
 
 ---
 
@@ -54,7 +54,7 @@ also compatible). So the choice is purely technical, not legal:
   baked into the core type. Worse, it ships a **wire-incompatible message-stamp
   PoW** (a "simplified" iterated-SHA256 instead of the Python HKDF-expanded
   workblock). Mine its `constants.rs` and its msgpack layout as a *spec*; do not
-  adopt modules as code. The Python `vendor/LXMF` is the real authority.
+  adopt modules as code. The Python `reference/LXMF` is the real authority.
 
 Recommended path: two new workspace crates, `lxmf` and `lxst`, both
 `#![no_std] + alloc`, both depending only on `leviculum-core` for protocol
@@ -131,7 +131,7 @@ None of these is a structural blocker. (3) and (5) are the two that touch
 
 ---
 
-## 3. LXMF protocol (from `vendor/LXMF`, v0.9.6)
+## 3. LXMF protocol (from `reference/LXMF`, v0.9.6)
 
 `APP_NAME = "lxmf"` (`LXMF.py:1`). All of LXMF is opaque-byte movement over RNS;
 nothing in it is hostile to `no_std + alloc` except resource sizing, persistence,
@@ -243,7 +243,7 @@ part. A `no_std` *client* (send via a PN, fetch own mail) is realistic; running 
 
 ---
 
-## 4. LXST protocol (from `vendor/LXST`, v0.4.4)
+## 4. LXST protocol (from `reference/LXST`, v0.4.4)
 
 `APP_NAME = "lxst"`. The single most important finding: **LXST already splits
 cleanly into a tiny protocol layer and a large media layer, and a frame is
@@ -367,7 +367,7 @@ std/tokio, neither declares `#![no_std]`.
   intervals — Python-parity-asserted) and the msgpack layout in
   `message.rs:251-633` (bin-vs-str, negative-fixint field keys, rmpv round-trip
   of complex fields) are the genuinely hard-won parts. Re-derive them
-  independently against `vendor/LXMF`; do not copy modules.
+  independently against `reference/LXMF`; do not copy modules.
 
 **Verdict: reference-only.** Mine `constants.rs` and the msgpack layout as a
 checklist; treat Python as the authority; never copy `stamper.rs`'s message path.
@@ -485,8 +485,8 @@ the loop; on nRF52 the existing embassy executor drives it.
 4. **PoW on constrained targets.** Gate stamps behind a `pow` feature; default
    cost 0 on MCUs; stream the workblock. Validate bit-exact against Python.
 5. **Golden vectors.** Adopt rsLXST's reference-lock + Python-fixture harness for
-   both crates from day one; capture byte-for-byte vectors from `vendor/LXMF` and
-   `vendor/LXST` so we never repeat rsLXMF's stamp defect.
+   both crates from day one; capture byte-for-byte vectors from `reference/LXMF` and
+   `reference/LXST` so we never repeat rsLXMF's stamp defect.
 
 ### 6.4 Compatibility guardrails (Priority 1)
 
@@ -518,7 +518,7 @@ the loop; on nRF52 the existing embassy executor drives it.
 ## 8. Bottom line
 
 - **LXMF:** fully feasible as `no_std + alloc` on `leviculum-core`. Build fresh,
-  using `vendor/LXMF` as the authority and rsLXMF's `constants.rs` + msgpack
+  using `reference/LXMF` as the authority and rsLXMF's `constants.rs` + msgpack
   layout as a spec checklist only. Do not inherit its message-stamp PoW.
 - **LXST:** feasible as `no_std + alloc` **for the protocol layer**; media stays
   host-side by design. **Adopt-partial** from rsLXST's `lxst-core` (wire,

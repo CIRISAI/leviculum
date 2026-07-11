@@ -3,7 +3,7 @@
 //! app that started the transfer only sees `LinkClosed` and hangs forever.
 //!
 //! Reference-first (reviewer, 2026-06-21): RNS `Link.link_closed()`
-//! (vendor/Reticulum/RNS/Link.py) cancels BOTH directions on close —
+//! (reference/Reticulum/RNS/Link.py) cancels BOTH directions on close —
 //! `for resource in self.incoming_resources: resource.cancel()` and the same
 //! for `outgoing_resources` — and `resource.cancel()` fires the resource
 //! callback, so the RNS app IS notified on teardown. Our equivalent is

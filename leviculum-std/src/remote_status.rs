@@ -1,6 +1,6 @@
 //! Remote transport-instance status flow — `rnstatus -R` client (Codeberg #86).
 //!
-//! Mirrors Python `rnstatus -R` (`vendor/Reticulum/RNS/Utilities/rnstatus.py`,
+//! Mirrors Python `rnstatus -R` (`reference/Reticulum/RNS/Utilities/rnstatus.py`,
 //! `get_remote_status`): request a path to a remote transport instance's
 //! `rnstransport.remote.management` destination, recall its identity, establish
 //! an outbound link, identify with the management identity, and issue a
@@ -10,7 +10,7 @@
 //!
 //! The server side is a transport instance (Python `rnsd` or `lnsd`) with
 //! remote management enabled and the management identity's hash in its
-//! allow-list (`vendor/Reticulum/RNS/Transport.py:253-259`,
+//! allow-list (`reference/Reticulum/RNS/Transport.py:253-259`,
 //! `remote_status_handler`). The wire protocol is the single-packet
 //! request/response subprotocol proven against Python in
 //! `tests/rnsd_interop/request_tests.rs`.

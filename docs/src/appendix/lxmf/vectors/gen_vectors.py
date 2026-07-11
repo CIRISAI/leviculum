@@ -3,13 +3,13 @@
 
 Every binary claim in the specification is backed by a vector produced here.
 The harness imports the vendored Python reference implementations directly
-(``vendor/LXMF`` and ``vendor/Reticulum``) so the vectors are the genuine
+(``reference/LXMF`` and ``reference/Reticulum``) so the vectors are the genuine
 output of the reference code at the pinned submodule commits, not a
 reimplementation.
 
 Run from the repository root:
 
-    PYTHONPATH=vendor/Reticulum:vendor/LXMF \
+    PYTHONPATH=reference/Reticulum:reference/LXMF \
         python3 docs/src/appendix/lxmf/vectors/gen_vectors.py
 
 Output: ``vectors.json`` next to this script. The file is committed and the
@@ -434,8 +434,8 @@ def main():
         "meta": {
             "lxmf_version": LXMF.__version__,
             "rns_version": RNS.__version__,
-            "lxmf_commit": _submodule_commit("vendor/LXMF"),
-            "reticulum_commit": _submodule_commit("vendor/Reticulum"),
+            "lxmf_commit": _submodule_commit("reference/LXMF"),
+            "reticulum_commit": _submodule_commit("reference/Reticulum"),
             "fixed_timestamp": FIXED_TIMESTAMP,
             "src_identity_prv_hex": SRC_PRV.hex(),
             "dst_identity_prv_hex": DST_PRV.hex(),

@@ -1329,7 +1329,7 @@ mod tests {
 
     #[test]
     fn readme_mu_renders_without_panic() {
-        let src = include_str!("../../vendor/Reticulum/README.mu");
+        let src = include_str!("../../reference/Reticulum/README.mu");
         let d = parse(src);
         let page = render(&d, 80);
         assert!(!page.text.is_empty());

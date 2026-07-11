@@ -19,7 +19,7 @@ import sys
 from contextlib import redirect_stdout
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO, "vendor", "Reticulum"))
+sys.path.insert(0, os.path.join(REPO, "reference", "Reticulum"))
 
 import RNS  # noqa: E402
 import RNS.Interfaces.Interface  # noqa: E402  (ensure MODE_* path is importable)
@@ -29,7 +29,7 @@ import importlib.util  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location(
     "rnstatus",
-    os.path.join(REPO, "vendor", "Reticulum", "RNS", "Utilities", "rnstatus.py"),
+    os.path.join(REPO, "reference", "Reticulum", "RNS", "Utilities", "rnstatus.py"),
 )
 rnstatus = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rnstatus)

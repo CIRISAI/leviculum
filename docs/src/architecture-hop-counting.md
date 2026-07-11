@@ -8,7 +8,7 @@ and whether a link proof is accepted. Two stacks that disagree about it cannot e
 each other.
 
 This page records the rules as the reference implements them, and where leviculum diverges. Every
-claim cites a line in `vendor/Reticulum/RNS/Transport.py` (or `Packet.py` / `Link.py`) so it can be
+claim cites a line in `reference/Reticulum/RNS/Transport.py` (or `Packet.py` / `Link.py`) so it can be
 checked rather than believed.
 
 ## The invariant
@@ -171,7 +171,7 @@ the code makes it inevitable.
 
 ## Where leviculum diverges
 
-Recorded 2026-07-10 against `vendor/Reticulum` as vendored.
+Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 
 | Rule | Reference | leviculum | Verdict |
 |------|-----------|-----------|---------|

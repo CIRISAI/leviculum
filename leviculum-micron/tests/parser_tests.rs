@@ -541,7 +541,7 @@ fn empty_input_is_one_blank() {
 
 #[test]
 fn parses_full_readme_without_panicking() {
-    let readme = include_str!("../../vendor/Reticulum/README.mu");
+    let readme = include_str!("../../reference/Reticulum/README.mu");
     let doc = parse(readme);
 
     // Plausible block count: the file is a few hundred lines.

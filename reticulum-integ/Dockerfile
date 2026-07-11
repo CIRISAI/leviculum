@@ -9,12 +9,12 @@ RUN apt-get update && apt-get install -y \
 # Install Python RNS from vendor directory at build time.
 # This makes rnstatus/rnpath/rnprobe available in all containers
 # without runtime pip install (eliminates startup I/O contention).
-COPY vendor/Reticulum /tmp/rns-src
+COPY reference/Reticulum /tmp/rns-src
 RUN pip3 install --break-system-packages /tmp/rns-src && rm -rf /tmp/rns-src
 
 # Install Python LXMF from vendor directory at build time. Required by
 # the lxmf_node.py helper used in LXMF integration tests.
-COPY vendor/LXMF /tmp/lxmf-src
+COPY reference/LXMF /tmp/lxmf-src
 RUN pip3 install --break-system-packages /tmp/lxmf-src && rm -rf /tmp/lxmf-src
 
 # Create reticulum config directory

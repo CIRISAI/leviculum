@@ -51,7 +51,7 @@ expect_result = "success"
 # Tolerated: hops ∈ {2, 3}.
 #
 # n2 is a python rnsd. Python-RNS's path-update logic at
-# vendor/Reticulum/RNS/Transport.py:1620-1632 caches a
+# reference/Reticulum/RNS/Transport.py:1620-1632 caches a
 # random_blob per emission and rejects re-arrivals with
 # the same blob, even when they offer a shorter path.
 # Under this multi-path topology (ring 2-hop vs chain

@@ -8,7 +8,7 @@ This specification describes Reticulum as implemented by the pinned reference:
 |-----------|---------|--------|
 | Reticulum (RNS) | 1.3.5 | `d5e62d4e15c5fe2e170f7bd9e120551671f21a27` |
 
-Citations reference files under `vendor/Reticulum/RNS/` unless another path is
+Citations reference files under `reference/Reticulum/RNS/` unless another path is
 given.
 
 ## Scope
@@ -73,7 +73,7 @@ mapping is a coverage gap.
 From the repository root:
 
 ```
-PYTHONPATH=vendor/Reticulum \
+PYTHONPATH=reference/Reticulum \
     python3 docs/src/appendix/reticulum/vectors/gen_vectors.py
 ```
 

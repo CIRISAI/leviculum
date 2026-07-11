@@ -3,7 +3,7 @@
 # src/discovery/tests.rs from the vendored Python reference. Run from the repo
 # root:
 #
-#   PYTHONPATH=vendor/Reticulum:vendor/LXMF python3 \
+#   PYTHONPATH=reference/Reticulum:reference/LXMF python3 \
 #       leviculum-core/tests/discovery_golden_gen.py
 #
 # Emits, per vector: packed(msgpack) hex, full app_data hex, stamp value,

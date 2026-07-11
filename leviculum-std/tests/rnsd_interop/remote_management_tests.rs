@@ -5,8 +5,8 @@
 //! (`leviculum_std::remote_status::fetch_remote_status`) against a Python
 //! daemon with `enable_remote_management = yes` and the client's management
 //! identity hash in `remote_management_allowed`
-//! (`vendor/Reticulum/RNS/Transport.py:253-259`, `remote_status_handler`;
-//! `vendor/Reticulum/RNS/Reticulum.py:548-561`):
+//! (`reference/Reticulum/RNS/Transport.py:253-259`, `remote_status_handler`;
+//! `reference/Reticulum/RNS/Reticulum.py:548-561`):
 //!
 //! 1. request a path to the remote `rnstransport.remote.management` destination
 //!    (derived from the daemon's transport identity hash),

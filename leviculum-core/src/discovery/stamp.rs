@@ -1,7 +1,7 @@
 //! Proof-of-work stamp primitives for on-network interface discovery.
 //!
 //! This is a byte-for-byte port of the stamp scheme used by Python
-//! `LXMF.LXStamper` (`vendor/LXMF/LXMF/LXStamper.py`), restricted to the pieces
+//! `LXMF.LXStamper` (`reference/LXMF/LXMF/LXStamper.py`), restricted to the pieces
 //! that interface discovery needs. A stamp is a random 32-byte value whose
 //! `full_hash(workblock + stamp)` has at least `cost` leading zero bits, where
 //! the `workblock` is deterministically expanded from the announce material via

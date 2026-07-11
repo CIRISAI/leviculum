@@ -847,7 +847,7 @@ fn execute_step(
 }
 
 /// rnsd's warning when it attaches to an existing shared instance instead of
-/// starting its own transport (vendor/Reticulum/RNS/Utilities/rnsd.py). Its
+/// starting its own transport (reference/Reticulum/RNS/Utilities/rnsd.py). Its
 /// presence proves rnsd is a CLIENT of the running daemon.
 const RNSD_ATTACHED_MARKER: &str = "connected to another shared local instance";
 
@@ -1700,7 +1700,7 @@ fn execute_path_soak(
 /// interleaved with backspaces (0x08) and carriage-return line rewrites even
 /// when its stdout is a pipe — it does not gate the animation on
 /// `sys.stdout.isatty()` and offers no no-spinner flag (see
-/// `vendor/Reticulum/RNS/Utilities/rnpath.py` ~line 453). Captured verbatim
+/// `reference/Reticulum/RNS/Utilities/rnpath.py` ~line 453). Captured verbatim
 /// this is kilobytes of control-char soup that pollutes the detail string and
 /// makes the CI_HW result parser mislabel a clean `wait_for_path` failure as an
 /// unparseable harness error.
@@ -3049,7 +3049,7 @@ mod tests {
         // pipe when the path never resolves: the "requested" prime line, then
         // many spinner frames (`\b\b` + braille glyph + space), then the
         // clear-line rewrite followed by "Path not found". See
-        // vendor/Reticulum/RNS/Utilities/rnpath.py lines 449-476.
+        // reference/Reticulum/RNS/Utilities/rnpath.py lines 449-476.
         let hash = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
         let syms = ['⢄', '⢂', '⢁', '⡁', '⡈', '⡐', '⡠'];
         let mut raw = format!("Path to <{hash}> requested   ");

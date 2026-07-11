@@ -10,7 +10,7 @@ unclassified symbol is a coverage gap.
 
 | Component | Version | Submodule commit |
 |-----------|---------|------------------|
-| Reticulum (`vendor/Reticulum`) | RNS 1.3.5 | `d5e62d4e15c5fe2e170f7bd9e120551671f21a27` |
+| Reticulum (`reference/Reticulum`) | RNS 1.3.5 | `d5e62d4e15c5fe2e170f7bd9e120551671f21a27` |
 
 ## Classification key
 

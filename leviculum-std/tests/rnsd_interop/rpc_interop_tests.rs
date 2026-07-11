@@ -23,15 +23,15 @@ static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// Path to vendor Python utilities.
 const RNSTATUS_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnstatus.py"
+    "/../reference/Reticulum/RNS/Utilities/rnstatus.py"
 );
 pub(crate) const RNPATH_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnpath.py"
+    "/../reference/Reticulum/RNS/Utilities/rnpath.py"
 );
 
 /// Path to vendor Reticulum package (for PYTHONPATH).
-const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/Reticulum");
+const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../reference/Reticulum");
 
 /// Start a Rust daemon with shared instance + RPC and return the node,
 /// instance name, TCP address, and the identity's private key bytes

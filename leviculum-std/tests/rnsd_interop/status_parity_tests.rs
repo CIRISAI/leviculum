@@ -122,11 +122,11 @@ use crate::rpc_interop_tests::{run_python_tool, RNPATH_PY};
 
 const RNSD_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnsd.py"
+    "/../reference/Reticulum/RNS/Utilities/rnsd.py"
 );
 const RNSTATUS_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnstatus.py"
+    "/../reference/Reticulum/RNS/Utilities/rnstatus.py"
 );
 
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -319,7 +319,7 @@ impl ParityDaemon {
                 .arg(&config_dir)
                 .env(
                     "PYTHONPATH",
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/Reticulum"),
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/../reference/Reticulum"),
                 )
                 .stdout(Stdio::from(log))
                 .stderr(Stdio::from(log_err))

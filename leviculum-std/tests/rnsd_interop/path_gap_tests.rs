@@ -326,7 +326,7 @@ async fn test_announces_forwarded_through_transport() {
         .expect("announce A");
     // Spread the two announces so the relay fans them out to each peer
     // more than ~1 s apart; otherwise Python-RNS's Interface.ingress_control
-    // (vendor/Reticulum/RNS/Interfaces/Interface.py:117-138, threshold
+    // (reference/Reticulum/RNS/Interfaces/Interface.py:117-138, threshold
     // IC_BURST_FREQ_NEW=3.5/s) marks the spawned-peer interface as burst-
     // active and holds the second announce for up to 6 minutes.
     tokio::time::sleep(Duration::from_secs(2)).await;

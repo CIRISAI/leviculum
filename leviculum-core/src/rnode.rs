@@ -890,7 +890,7 @@ pub fn build_radio_config_frame(cfg: &RadioConfigWire) -> Vec<u8> {
 //
 // Mirrors the airtime lock in Mark Qvist's RNode firmware so the same host
 // airtime-limit value produces the same enforced fraction on our standalone
-// LNode as on a stock RNode. Reference (vendor/RNode_Firmware):
+// LNode as on a stock RNode. Reference (reference/RNode_Firmware):
 //   * Config.h:181-198  AIRTIME_LONGTERM / AIRTIME_BINLEN_MS / AIRTIME_BINS,
 //                       airtime_bins[], st_airtime_limit, lt_airtime_limit,
 //                       airtime_lock, current_airtime_bin().

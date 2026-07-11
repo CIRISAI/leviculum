@@ -18,7 +18,7 @@
 //!
 //! This mvr reproduces the failure without LoRa, Docker, or the
 //! `lnstest selftest` tool — just a Python `rnsd` from
-//! `vendor/Reticulum` (spawned via the existing
+//! `reference/Reticulum` (spawned via the existing
 //! `rnsd_interop::TestDaemon`) plus one Rust `ReticulumNode` built
 //! with `enable_transport(false)` mirroring the selftest client's
 //! construction.

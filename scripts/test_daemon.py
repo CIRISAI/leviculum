@@ -56,7 +56,7 @@ def find_reticulum_path():
 
     candidates = [
         os.environ.get("RETICULUM_PATH"),  # 1. Explicit override
-        os.path.join(project_root, "vendor", "Reticulum"),  # 2. Vendor submodule
+        os.path.join(project_root, "reference", "Reticulum"),  # 2. Reference submodule
     ]
 
     for path in candidates:
@@ -84,7 +84,7 @@ def find_lxmf_path():
     project_root = os.path.dirname(script_dir)
     candidates = [
         os.environ.get("LXMF_PATH"),
-        os.path.join(project_root, "vendor", "LXMF"),
+        os.path.join(project_root, "reference", "LXMF"),
     ]
     for path in candidates:
         if path and os.path.isdir(path) and os.path.exists(os.path.join(path, "LXMF")):
@@ -105,7 +105,7 @@ try:
 except ImportError:
     print("ERROR: Reticulum (RNS) not found.")
     print("Options:")
-    print("  1. Run: git submodule update --init vendor/Reticulum")
+    print("  1. Run: git submodule update --init reference/Reticulum")
     print("  2. Set RETICULUM_PATH=/path/to/Reticulum")
     print("  3. Install system-wide: pip install rns")
     sys.exit(1)

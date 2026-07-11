@@ -22,11 +22,11 @@ static PROBE_TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// Path to vendor rnprobe script.
 const RNPROBE_PY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../vendor/Reticulum/RNS/Utilities/rnprobe.py"
+    "/../reference/Reticulum/RNS/Utilities/rnprobe.py"
 );
 
 /// Path to vendor Reticulum package (for PYTHONPATH).
-const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../vendor/Reticulum");
+const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../reference/Reticulum");
 
 /// Create a temp config directory with a Python-compatible config file and
 /// transport_identity file so that Python tools derive the same RPC auth key.

@@ -11,7 +11,7 @@ This specification describes LXMF as implemented by the pinned reference:
 
 `APP_NAME` is `"lxmf"` (`LXMF.py:1`). Where the reference defers to a Reticulum
 primitive (hashing, signing, encryption, MDU sizes), this document cites
-`vendor/Reticulum` and does not re-specify the primitive; its behaviour-as-used
+`reference/Reticulum` and does not re-specify the primitive; its behaviour-as-used
 is pinned by test vectors instead.
 
 ## Scope
@@ -48,7 +48,7 @@ section and a proof; a normative symbol with no mapping is a coverage gap.
 - **RFC 2119 keywords** (MUST, MUST NOT, SHOULD, MAY) carry their usual meaning
   and mark normative requirements.
 - **Citations** take the form `(LXMessage.py:364)` and refer to the pinned
-  reference file under `vendor/LXMF/LXMF/` unless another path is given.
+  reference file under `reference/LXMF/LXMF/` unless another path is given.
 - **Byte layouts** are shown as offset tables or annotated hex. Concatenation is
   written `a || b`. A field width in bytes is shown as `name(16)`.
 - **Test vectors** are referenced by label, e.g. `[VEC-MSG-1]`, and are listed
@@ -62,7 +62,7 @@ section and a proof; a normative symbol with no mapping is a coverage gap.
 From the repository root:
 
 ```
-PYTHONPATH=vendor/Reticulum:vendor/LXMF \
+PYTHONPATH=reference/Reticulum:reference/LXMF \
     python3 docs/src/appendix/lxmf/vectors/gen_vectors.py
 ```
 

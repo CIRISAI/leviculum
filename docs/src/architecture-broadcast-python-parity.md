@@ -3,7 +3,7 @@
 This document is the source-of-truth reference that our Rust
 `leviculum-core` broadcast code must match. It records what
 Python-Reticulum does for every broadcast-related mechanism,
-citing `vendor/Reticulum/RNS/Transport.py` (and neighbouring files)
+citing `reference/Reticulum/RNS/Transport.py` (and neighbouring files)
 by line. The companion mapping table at the end records the
 Rust-side implementation or intentional divergence for each item.
 
@@ -32,12 +32,12 @@ Everything below walks each class.
 ### Trigger
 
 `Destination.announce(app_data, path_response=False, ...)` at
-`vendor/Reticulum/RNS/Destination.py:243`. Builds an announce
+`reference/Reticulum/RNS/Destination.py:243`. Builds an announce
 packet, calls `announce_packet.send()` once at line 322.
 
 ### On-wire behaviour
 
-`Packet.send()` at `vendor/Reticulum/RNS/Packet.py:273-299` calls
+`Packet.send()` at `reference/Reticulum/RNS/Packet.py:273-299` calls
 `Transport.outbound(self)` exactly once and returns a receipt (or
 `False`). There is **no retry loop** on the send path. A second
 call on the same packet raises `IOError` (Packet.py guard).
@@ -45,7 +45,7 @@ call on the same packet raises `IOError` (Packet.py guard).
 ### Fan-out across interfaces
 
 Inside `Transport.outbound()` at
-`vendor/Reticulum/RNS/Transport.py:1025-1167`: for broadcast
+`reference/Reticulum/RNS/Transport.py:1025-1167`: for broadcast
 packets (the "else" branch after the targeted-path and
 transport-id branches), the code iterates `Transport.interfaces`
 (line 1027) and transmits on each. There is **no
@@ -494,7 +494,7 @@ Not a concern in practice for single-day bench runs.
 change was first landed, caused a 3-node TCP relay test to fail,
 then resolved by spacing out the test's announce emissions): the
 Python reference has a per-interface **ingress control** at
-`vendor/Reticulum/RNS/Interfaces/Interface.py:117-138`. When two
+`reference/Reticulum/RNS/Interfaces/Interface.py:117-138`. When two
 announces arrive on the same interface faster than
 `IC_BURST_FREQ_NEW = 3.5/s` (≈ 285 ms apart), Python activates
 burst mode for at least `IC_BURST_HOLD = 60 s` then penalises for

@@ -591,7 +591,7 @@ fn discovered_record_msgpack_interops_with_python_umsgpack() {
     std::fs::write(&rust_bytes_path, &rust_bytes).unwrap();
 
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let vendor_dir = manifest_dir.join("../vendor/Reticulum");
+    let vendor_dir = manifest_dir.join("../reference/Reticulum");
 
     // Python: unpack our bytes with the real umsgpack, dump the fields (bytes ->
     // hex) as JSON, then build the equivalent record dict and pack it back.

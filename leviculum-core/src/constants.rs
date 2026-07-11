@@ -106,7 +106,7 @@ pub const RATCHET_INTERVAL_SECS: u64 = 60 * 30; // 30 minutes
 
 /// Transport constants
 pub const PATHFINDER_MAX_HOPS: u8 = 128;
-/// Matches Python's PATHFINDER_R (vendor/Reticulum/RNS/Transport.py:67).
+/// Matches Python's PATHFINDER_R (reference/Reticulum/RNS/Transport.py:67).
 /// Upper bound on the retries counter in the announce retry scheduler.
 /// Combined with LOCAL_REBROADCASTS_MAX=2 this makes a received
 /// non-local-client announce fire twice from the scheduler and a

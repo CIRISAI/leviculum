@@ -66,7 +66,7 @@ Then clone and build:
 ```sh
 git clone https://codeberg.org/Lew_Palm/leviculum.git
 cd leviculum
-git submodule update --init vendor/Reticulum
+git submodule update --init reference/Reticulum
 cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest
 ./target/release/lnsd -v
 ```

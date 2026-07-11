@@ -14,7 +14,7 @@ import sys
 
 # Add the repo's vendored Reticulum to path (this script lives in scripts/).
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(_repo_root, 'vendor', 'Reticulum'))
+sys.path.insert(0, os.path.join(_repo_root, 'reference', 'Reticulum'))
 
 import RNS
 from RNS.Cryptography import Token

@@ -2,8 +2,8 @@
 
 This appendix is an exact, English specification of the LXMF messaging protocol,
 derived from and proven against the vendored Python reference
-(`vendor/LXMF`, v0.9.6, commit `8499729`) running on Reticulum
-(`vendor/Reticulum`, RNS 1.3.5, commit `d5e62d4`). It is the contract the
+(`reference/LXMF`, v0.9.6, commit `8499729`) running on Reticulum
+(`reference/Reticulum`, RNS 1.3.5, commit `d5e62d4`). It is the contract the
 libreticulum `lxmf` crate is built and tested against.
 
 LXMF (Lightweight Extensible Message Format) is the store-and-forward messaging

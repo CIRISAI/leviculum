@@ -13,7 +13,7 @@
 //!
 //! Python converts it: `Transport.outbound` inserts the HEADER_2 transport
 //! header for a 1-hop destination when `is_connected_to_shared_instance`
-//! (vendor/Reticulum/RNS/Transport.py:1148-1166).
+//! (reference/Reticulum/RNS/Transport.py:1148-1166).
 //!
 //! ## The scenario
 //!

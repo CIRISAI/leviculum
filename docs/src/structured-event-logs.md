@@ -204,7 +204,7 @@ functionally equivalent to the previous
 built, so runtime overhead is whatever the fmt layer would
 otherwise impose.
 
-`rnsd` is Python-side (vendor/Reticulum); structured event
+`rnsd` is Python-side (reference/Reticulum); structured event
 capture for it is out of scope for the current Rust-side work.
 
 ## See also

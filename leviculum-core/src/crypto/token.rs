@@ -149,7 +149,7 @@ mod tests {
     /// wire-incompatible-but-self-consistent swap of the AES/HMAC/padding stack is
     /// caught by unit tests independent of the interop harness.
     ///
-    /// Source: vendored Python-RNS `RNS.Cryptography.Token` (vendor/Reticulum),
+    /// Source: vendored Python-RNS `RNS.Cryptography.Token` (reference/Reticulum),
     /// mode AES_256_CBC, with os.urandom monkeypatched to emit the fixed IV below so
     /// the encrypt is deterministic. Fixed 64-byte key (bytes 0x00..0x3f), fixed
     /// 16-byte IV (0x00..0x0f), fixed plaintext b"Reticulum KAT vector".

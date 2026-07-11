@@ -108,7 +108,7 @@ impl std::error::Error for HarnessError {}
 
 /// Ensure the Reticulum submodule is initialized if it exists.
 ///
-/// This checks for the vendor/Reticulum directory and initializes the submodule
+/// This checks for the reference/Reticulum directory and initializes the submodule
 /// if it exists but the RNS module is missing (indicating uninitialized state).
 fn ensure_reticulum_submodule() -> Result<(), HarnessError> {
     // Skip if RETICULUM_PATH is set (user override)
@@ -117,7 +117,7 @@ fn ensure_reticulum_submodule() -> Result<(), HarnessError> {
     }
 
     let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let vendor_dir = project_root.join("vendor/Reticulum");
+    let vendor_dir = project_root.join("reference/Reticulum");
     let rns_path = vendor_dir.join("RNS");
 
     if rns_path.exists() {
@@ -130,7 +130,7 @@ fn ensure_reticulum_submodule() -> Result<(), HarnessError> {
         eprintln!("Initializing Reticulum submodule...");
         let output = Command::new("git")
             .current_dir(&project_root)
-            .args(["submodule", "update", "--init", "vendor/Reticulum"])
+            .args(["submodule", "update", "--init", "reference/Reticulum"])
             .output()
             .map_err(|e| HarnessError::SubmoduleInitFailed(e.to_string()))?;
 
@@ -2777,7 +2777,7 @@ pub fn run_python_rnstatus_remote(
     ensure_reticulum_submodule()?;
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let vendor_dir = manifest_dir.join("../vendor/Reticulum");
+    let vendor_dir = manifest_dir.join("../reference/Reticulum");
     let rnstatus_script = vendor_dir.join("RNS/Utilities/rnstatus.py");
 
     // Isolated config + identity dir for this run; kept alive until the

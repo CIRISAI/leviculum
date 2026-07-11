@@ -78,7 +78,7 @@ cargo test-std
 **Interop tests** -- require Python 3 and the vendored Reticulum:
 
 ```sh
-git submodule update --init vendor/Reticulum
+git submodule update --init reference/Reticulum
 cargo test-interop
 ```
 
