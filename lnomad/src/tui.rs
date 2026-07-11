@@ -741,6 +741,10 @@ pub struct Model {
     /// [`places`], or `None`. Highlights that row so it reads as clickable; kept
     /// distinct from the selection ([`places_sel`]) so the two highlights differ.
     pub places_hover: Option<usize>,
+    /// The one-slot undo stash: the bookmark most recently deleted from the
+    /// places panel, restored by `u` ([`undo_delete_bookmark`]). A new deletion
+    /// overwrites it (only one level of undo).
+    pub last_deleted_bookmark: Option<DeletedBookmark>,
     /// The help overlay's VIEW offset: the first help line shown when the help
     /// is taller than the terminal. Reset to 0 when the help opens.
     pub help_scroll: usize,
@@ -1782,6 +1786,19 @@ pub enum Place {
     },
 }
 
+/// A bookmark deleted from the places panel, stashed for the one-slot `u` undo:
+/// enough to rebuild it and put it back where it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeletedBookmark {
+    /// The deleted bookmark's URL.
+    pub url: String,
+    /// The title it was saved under.
+    pub title: String,
+    /// Its position within the bookmarks list, so the undo restores it in
+    /// place (clamped to the list length at restore time).
+    pub index: usize,
+}
+
 /// The flat, ordered list of places: every bookmark (in insertion order), then
 /// every discovered node (in discovery order). The single source of truth for
 /// both the panel's rendering and its selection/activation, so a row index means
@@ -1827,8 +1844,9 @@ fn close_places(model: &mut Model) {
 /// as the content scroll: [`key_to_scroll`] maps `j`/`k`/`Ctrl-n`/`Ctrl-p`/arrows
 /// (line), `Ctrl-f`/`Ctrl-b`/`Ctrl-d`/`Ctrl-u` (page/half-page, clamped to the
 /// ends), and `g`/`G`/Home/End (first/last), applied to the panel SELECTION
-/// instead of the page. `Enter` opens the selected place, `x` deletes the
-/// selected bookmark, `Esc`/`d` close the panel.
+/// instead of the page. `Enter` opens the selected place, `x`/`Delete` delete
+/// the selected bookmark, `u` undoes the last deletion, `Esc`/`d` close the
+/// panel.
 fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     // Movement shares the content keymap, so the panel and the page scroll the
     // same way. This is checked first: `Ctrl-d` is a half-page motion here, not
@@ -1846,7 +1864,8 @@ fn update_places_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
             let idx = model.places_sel;
             activate_place(model, idx)
         }
-        KeyCode::Char('x') => delete_selected_place(model),
+        KeyCode::Char('x') | KeyCode::Delete => delete_bookmark_at(model, model.places_sel),
+        KeyCode::Char('u') => undo_delete_bookmark(model),
         _ => Vec::new(),
     }
 }
@@ -1948,6 +1967,39 @@ fn place_at(model: &Model, col: u16, row: u16) -> Option<usize> {
     layout.entry_line.iter().position(|&l| l == line)
 }
 
+/// Whether a places row shows the `×` delete marker: a bookmark row that is the
+/// selection or under the mouse (the browser-tab convention). A node row never
+/// shows one — discovered nodes are not deletable. The single predicate behind
+/// both the renderer and the click hit-test.
+fn marks_x(place: &Place, idx: usize, sel: usize, hover: Option<usize>) -> bool {
+    matches!(place, Place::Bookmark { .. }) && (idx == sel || hover == Some(idx))
+}
+
+/// The `×` delete marker's column within the panel's inner width: the LAST
+/// inner cell, or `None` when the panel is too narrow to reserve one. The one
+/// place the marker's cell is computed, so [`place_line`]'s rendering and the
+/// click hit-test can never disagree on where it sits.
+fn place_x_col(inner: usize) -> Option<usize> {
+    (inner >= 2).then(|| inner - 1)
+}
+
+/// The `×` marker's SCREEN column for the current overlay geometry, or `None`
+/// when the panel has no room for one. Derived from the same overlay rect and
+/// inner width `render_places` draws with.
+fn place_x_screen_col(model: &Model) -> Option<u16> {
+    let overlay = places_overlay_rect(model, model.frame_area());
+    let inner = overlay.width.saturating_sub(2) as usize;
+    place_x_col(inner).map(|c| overlay.x + 1 + c as u16)
+}
+
+/// Whether places row `idx` currently shows the `×` delete marker, through the
+/// same [`marks_x`] predicate the renderer uses.
+fn place_shows_x(model: &Model, idx: usize) -> bool {
+    places(model)
+        .get(idx)
+        .is_some_and(|p| marks_x(p, idx, model.places_sel, model.places_hover))
+}
+
 /// Scroll the places view the MINIMUM needed to keep the selected entry's row
 /// inside the viewport, then clamp it to the list. The single piece of view
 /// state, so the selected row can never end up off-screen (mirrors the content's
@@ -2030,17 +2082,66 @@ fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
     begin_navigation(model, target, HistoryAction::Push, None)
 }
 
-/// Delete the selected bookmark and persist, keeping the selection in range. A
-/// no-op (no save) when the selected row is a discovered node, not a bookmark.
-fn delete_selected_place(model: &mut Model) -> Vec<Effect> {
-    let Some(Place::Bookmark { url, .. }) = places(model).into_iter().nth(model.places_sel) else {
+/// Delete the bookmark on places row `idx` and persist: stash it in the
+/// one-slot undo ([`Model::last_deleted_bookmark`]), keep the selection in
+/// range, and toast the title with the undo hint. The single delete path,
+/// shared by `x`/`Delete` on the selection and a click on a row's `×` marker.
+/// A no-op (no save, no toast) when that row is a discovered node.
+fn delete_bookmark_at(model: &mut Model, idx: usize) -> Vec<Effect> {
+    let Some(Place::Bookmark { url, title }) = places(model).into_iter().nth(idx) else {
         return Vec::new();
     };
+    // Bookmarks lead the flat places list, so the place index IS the bookmark's
+    // position within the bookmarks list — the slot the undo restores it to.
+    model.last_deleted_bookmark = Some(DeletedBookmark {
+        url: url.clone(),
+        title: title.clone(),
+        index: idx,
+    });
     model.bookmarks.remove(&url);
+    // Keep the selection on the entry it was on (rows above the selection shift
+    // up by one), then clamp it into the shrunk list.
+    if model.places_sel > idx {
+        model.places_sel -= 1;
+    }
     let len = places(model).len();
     model.places_sel = model.places_sel.min(len.saturating_sub(1));
     clamp_places_scroll(model);
-    model.set_toast(ToastKind::Info, format!("removed bookmark {url}"));
+    let label = if title.is_empty() { url } else { title };
+    model.set_toast(ToastKind::Info, format!("removed {label} — u to undo"));
+    vec![Effect::SaveBookmarks]
+}
+
+/// Undo the last places-panel bookmark deletion (`u`): re-insert the stashed
+/// bookmark at its remembered position (clamped to the current length, so an
+/// out-of-range slot appends), clear the one-slot stash, select the restored
+/// row and persist. A muted no-op toast when there is nothing to undo, and no
+/// save when the URL was re-bookmarked in the meantime.
+fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
+    let Some(del) = model.last_deleted_bookmark.take() else {
+        model.set_toast(ToastKind::Info, "nothing to undo");
+        return Vec::new();
+    };
+    let at = del.index.min(model.bookmarks.len());
+    let restored = model.bookmarks.insert(
+        at,
+        Bookmark {
+            url: del.url.clone(),
+            title: del.title.clone(),
+        },
+    );
+    if !restored {
+        model.set_toast(ToastKind::Info, format!("already bookmarked: {}", del.url));
+        return Vec::new();
+    }
+    model.places_sel = at;
+    clamp_places_scroll(model);
+    let label = if del.title.is_empty() {
+        del.url
+    } else {
+        del.title
+    };
+    model.set_toast(ToastKind::Info, format!("restored {label}"));
     vec![Effect::SaveBookmarks]
 }
 
@@ -2555,6 +2656,17 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
     // control or footer button underneath.
     if model.show_places {
         if let Some(idx) = place_at(model, col, row) {
+            // The `×` marker's cell is special-cased before the normal row
+            // action: on a row showing the marker it deletes that bookmark; on
+            // any row without one (a node row never has one) it is inert, so a
+            // click there can never delete or activate. The cell comes from the
+            // same layout `place_line` renders, so click and draw agree.
+            if place_x_screen_col(model) == Some(col) {
+                if place_shows_x(model, idx) {
+                    return delete_bookmark_at(model, idx);
+                }
+                return Vec::new();
+            }
             model.places_sel = idx;
             return activate_place(model, idx);
         }
@@ -4337,7 +4449,8 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 /// One places-panel row: its label, reverse-video highlighted when it is the
-/// selected row.
+/// selected row. A selected or hovered BOOKMARK row additionally carries a
+/// right-aligned `×` delete marker on the last inner cell ([`marks_x`]).
 fn place_line(
     place: &Place,
     idx: usize,
@@ -4357,8 +4470,23 @@ fn place_line(
     } else {
         normal
     };
-    let label = truncate_to_cols(&place_label(place), inner);
-    RtLine::from(RtSpan::styled(label, style))
+    let x_col = place_x_col(inner).filter(|_| marks_x(place, idx, sel, hover));
+    let Some(x_col) = x_col else {
+        let label = truncate_to_cols(&place_label(place), inner);
+        return RtLine::from(RtSpan::styled(label, style));
+    };
+    // The marker's cell plus a one-column gap are reserved: the label truncates
+    // before them, so it can never overlap the `×` or spill past the border.
+    let label = truncate_to_cols(&place_label(place), x_col.saturating_sub(1));
+    // The pad is measured with ratatui's ADDRESSING width (see `fit_width`'s
+    // position-vs-paint note), so the `×` lands exactly on the cell
+    // `place_x_screen_col` hit-tests.
+    let pad = x_col.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+    RtLine::from(vec![
+        RtSpan::styled(label, style),
+        RtSpan::raw(" ".repeat(pad)),
+        RtSpan::styled("×", normal),
+    ])
 }
 
 /// The one-line label for a place: a bookmark's title and URL, or a node's name,
@@ -8869,6 +8997,28 @@ mod tests {
         m
     }
 
+    /// A model with three titled bookmarks (indices 0..=2) then one discovered
+    /// node (index 3), panel open on the first row.
+    fn bookmarks_model() -> Model {
+        let mut m = loaded_model((80, 24));
+        for (i, title) in ["Alpha", "Beta", "Gamma"].iter().enumerate() {
+            m.bookmarks.add(Bookmark {
+                url: format!("{}:/page/{i}.mu", "aa".repeat(16)),
+                title: title.to_string(),
+            });
+        }
+        m.node_registry.upsert_node(&disc_node(0xcd, "Node-C"));
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(m.show_places);
+        assert_eq!(m.places_sel, 0);
+        m
+    }
+
+    /// The titles of `m`'s bookmarks, in order.
+    fn bookmark_titles(m: &Model) -> Vec<String> {
+        m.bookmarks.list().iter().map(|b| b.title.clone()).collect()
+    }
+
     #[test]
     fn places_click_on_a_bookmark_row_activates_it() {
         let mut m = places_model();
@@ -9066,6 +9216,167 @@ mod tests {
         let fx = press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE);
         assert!(m.bookmarks.is_empty());
         assert_eq!(fx, vec![Effect::SaveBookmarks]);
+    }
+
+    #[test]
+    fn x_deletes_selected_bookmark_with_title_toast() {
+        let mut m = bookmarks_model();
+        let fx = press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(fx, vec![Effect::SaveBookmarks]);
+        assert_eq!(bookmark_titles(&m), ["Beta", "Gamma"]);
+        // The toast names the TITLE (not the URL) and carries the undo hint.
+        let toast = m.toast.clone().expect("a toast is shown");
+        assert_eq!(toast.text, "removed Alpha — u to undo");
+
+        // An untitled bookmark falls back to its URL in the toast.
+        let mut m = loaded_model((80, 24));
+        m.bookmarks.add(Bookmark {
+            url: "aa11:/page/index.mu".to_string(),
+            title: String::new(),
+        });
+        press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(
+            m.toast.clone().expect("a toast is shown").text,
+            "removed aa11:/page/index.mu — u to undo"
+        );
+    }
+
+    #[test]
+    fn delete_key_deletes_like_x() {
+        let mut via_x = bookmarks_model();
+        let mut via_del = bookmarks_model();
+        press(&mut via_x, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut via_del, KeyCode::Char('j'), KeyModifiers::NONE);
+        let fx_x = press(&mut via_x, KeyCode::Char('x'), KeyModifiers::NONE);
+        let fx_del = press(&mut via_del, KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(fx_del, fx_x, "Delete emits the same effects as x");
+        assert_eq!(fx_del, vec![Effect::SaveBookmarks]);
+        assert_eq!(bookmark_titles(&via_del), bookmark_titles(&via_x));
+        assert_eq!(bookmark_titles(&via_del), ["Alpha", "Gamma"]);
+        assert_eq!(via_del.toast, via_x.toast, "same toast either way");
+    }
+
+    #[test]
+    fn u_restores_the_last_deleted_bookmark() {
+        let mut m = bookmarks_model();
+        // Delete the middle bookmark ...
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(bookmark_titles(&m), ["Alpha", "Gamma"]);
+        // ... and `u` puts it back exactly where it was.
+        let fx = press(&mut m, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(fx, vec![Effect::SaveBookmarks]);
+        assert_eq!(
+            bookmark_titles(&m),
+            ["Alpha", "Beta", "Gamma"],
+            "restored in place"
+        );
+        assert_eq!(m.places_sel, 1, "the restored row is selected");
+        assert_eq!(
+            m.toast.clone().expect("a toast is shown").text,
+            "restored Beta"
+        );
+
+        // A second `u` has nothing left to undo: no save, list unchanged.
+        let fx = press(&mut m, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert!(fx.is_empty(), "an empty undo slot saves nothing");
+        assert_eq!(bookmark_titles(&m), ["Alpha", "Beta", "Gamma"]);
+
+        // A new deletion replaces the one slot: after deleting Alpha and then
+        // Gamma, `u` restores only Gamma (the newer); Alpha stays gone.
+        press(&mut m, KeyCode::Char('g'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(bookmark_titles(&m), ["Beta"]);
+        press(&mut m, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(
+            bookmark_titles(&m),
+            ["Beta", "Gamma"],
+            "u restores the newer deletion only"
+        );
+    }
+
+    #[test]
+    fn x_marker_shows_only_on_selected_or_hovered_bookmark_row() {
+        let mut m = bookmarks_model();
+        let x_col = place_x_screen_col(&m).expect("the panel reserves an × cell");
+        // Hover the third bookmark row while the first stays selected.
+        let (col, row) = (place_col(&m), place_row(&m, 2));
+        update(&mut m, AppEvent::Mouse(moved(col, row)));
+        assert_eq!(m.places_hover, Some(2));
+        let buffer = render(&m, 80, 24);
+        let sym = |idx: usize| buffer[(x_col, place_row(&m, idx))].symbol().to_string();
+        assert_eq!(sym(0), "×", "the selected bookmark row shows the marker");
+        assert_eq!(sym(2), "×", "a hovered bookmark row shows the marker");
+        assert_eq!(sym(1), " ", "an unmarked bookmark row shows none");
+        assert_eq!(sym(3), " ", "a node row shows none");
+
+        // Even a selected AND hovered node row shows no marker.
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        let (col, row) = (place_col(&m), place_row(&m, 3));
+        update(&mut m, AppEvent::Mouse(moved(col, row)));
+        assert_eq!((m.places_sel, m.places_hover), (3, Some(3)));
+        let buffer = render(&m, 80, 24);
+        assert_eq!(
+            buffer[(x_col, place_row(&m, 3))].symbol(),
+            " ",
+            "a selected + hovered node row shows no ×"
+        );
+    }
+
+    #[test]
+    fn click_on_x_deletes_that_bookmark() {
+        let mut m = bookmarks_model();
+        let x_col = place_x_screen_col(&m).expect("the panel reserves an × cell");
+        // Hover then click the × on the second bookmark row: THAT bookmark goes
+        // (not the selected one), the panel stays open, nothing navigates.
+        let row = place_row(&m, 1);
+        update(&mut m, AppEvent::Mouse(moved(x_col, row)));
+        assert_eq!(m.places_hover, Some(1));
+        let fx = update(&mut m, AppEvent::Mouse(click(x_col, row)));
+        assert_eq!(fx, vec![Effect::SaveBookmarks]);
+        assert_eq!(bookmark_titles(&m), ["Alpha", "Gamma"]);
+        assert!(m.show_places, "deleting keeps the panel open");
+
+        // A click elsewhere on the row keeps the select + activate behaviour.
+        let mut m = places_model();
+        let (col, row) = (place_col(&m), place_row(&m, 0));
+        let fx = update(&mut m, AppEvent::Mouse(click(col, row)));
+        assert!(
+            matches!(fx.as_slice(), [Effect::Navigate(_)]),
+            "a non-× click on a bookmark row still activates it: {fx:?}"
+        );
+        assert!(!m.show_places, "activating closes the panel");
+        assert_eq!(m.bookmarks.len(), 1, "nothing was deleted");
+    }
+
+    #[test]
+    fn node_row_has_no_x_and_is_not_deletable() {
+        let mut m = bookmarks_model();
+        let node_idx = 3;
+        // Select the node row; x and Delete are no-ops: nothing removed, no
+        // save, no toast, no undo slot.
+        press(&mut m, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(m.places_sel, node_idx);
+        assert!(press(&mut m, KeyCode::Char('x'), KeyModifiers::NONE).is_empty());
+        assert!(press(&mut m, KeyCode::Delete, KeyModifiers::NONE).is_empty());
+        assert_eq!(bookmark_titles(&m), ["Alpha", "Beta", "Gamma"]);
+        assert_eq!(places(&m).len(), 4, "the node is still listed");
+        assert!(m.toast.is_none(), "a node-row delete shows no toast");
+        assert!(m.last_deleted_bookmark.is_none(), "no undo slot is written");
+
+        // A click on the node row's would-be × cell (selected AND hovered) is
+        // inert: no delete, no activation, the panel stays open.
+        let x_col = place_x_screen_col(&m).expect("the panel reserves an × cell");
+        let row = place_row(&m, node_idx);
+        update(&mut m, AppEvent::Mouse(moved(x_col, row)));
+        assert_eq!(m.places_hover, Some(node_idx));
+        let fx = update(&mut m, AppEvent::Mouse(click(x_col, row)));
+        assert!(fx.is_empty(), "the × column of a node row does nothing");
+        assert!(m.show_places, "the panel stays open");
+        assert_eq!(places(&m).len(), 4, "nothing was deleted");
     }
 
     #[test]

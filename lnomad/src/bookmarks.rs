@@ -78,6 +78,19 @@ impl Bookmarks {
         true
     }
 
+    /// Insert `bookmark` at `index` (clamped to the list length), unless its
+    /// URL is already bookmarked (a no-op then, so the existing entry is kept).
+    /// Returns `true` when it was inserted. Restores an undone deletion to its
+    /// original position.
+    pub fn insert(&mut self, index: usize, bookmark: Bookmark) -> bool {
+        if self.contains(&bookmark.url) {
+            return false;
+        }
+        let at = index.min(self.items.len());
+        self.items.insert(at, bookmark);
+        true
+    }
+
     /// Remove the bookmark with `url`, if present. Returns `true` when one was
     /// removed.
     pub fn remove(&mut self, url: &str) -> bool {
@@ -161,6 +174,24 @@ mod tests {
         assert!(b.remove("u2"));
         assert!(!b.remove("u2"));
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn insert_restores_in_place_clamps_and_keeps_urls_unique() {
+        let mut b = Bookmarks::new();
+        b.add(bm("u1", "One"));
+        b.add(bm("u3", "Three"));
+        // Insert in the middle lands exactly there.
+        assert!(b.insert(1, bm("u2", "Two")));
+        let urls: Vec<&str> = b.list().iter().map(|x| x.url.as_str()).collect();
+        assert_eq!(urls, ["u1", "u2", "u3"]);
+        // An out-of-range index clamps to an append.
+        assert!(b.insert(99, bm("u4", "Four")));
+        assert_eq!(b.list()[3].url, "u4");
+        // An already-bookmarked URL is a no-op keeping the existing entry.
+        assert!(!b.insert(0, bm("u2", "Renamed")));
+        assert_eq!(b.len(), 4);
+        assert_eq!(b.list()[1].title, "Two");
     }
 
     #[test]
