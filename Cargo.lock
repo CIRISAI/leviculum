@@ -1056,11 +1056,17 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "lblogd"
 version = "0.7.1"
 dependencies = [
+ "hex",
+ "leviculum-core",
  "leviculum-micron",
+ "leviculum-std",
+ "lnomad",
  "pulldown-cmark",
+ "rmpv",
  "serde",
  "tempfile",
  "thiserror 2.0.17",
+ "tokio",
  "toml",
 ]
 
