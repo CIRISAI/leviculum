@@ -14,8 +14,12 @@ unsafe_code = "forbid"
 [dependencies]
 leviculum-core = { path = "../leviculum-core" }
 leviculum-std = { path = "../leviculum-std" }
+axum.workspace = true
+axum-server.workspace = true
+futures.workspace = true
 pulldown-cmark.workspace = true
 rmpv.workspace = true
+rustls-acme.workspace = true
 serde.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -26,6 +30,7 @@ leviculum-micron = { path = "../leviculum-micron" }
 lnomad = { path = "../lnomad" }
 hex = "0.4"
 tempfile = "3"
+tower.workspace = true
 
 [lib]
 name = "lblogd"

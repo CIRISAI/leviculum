@@ -84,6 +84,15 @@ libbz2-rs-sys = { version = "0.2", default-features = false, features = ["rust-a
 if-addrs = { version = "0.15", features = ["link-local"] }
 socket2 = { version = "0.6", features = ["all"] }
 
+# Web server (lblogd clearnet side). rustls-acme runs on ring instead of its
+# aws-lc-rs default: ring cross-builds cleanly for the musl-static default
+# target without a cmake toolchain.
+axum = "0.8"
+axum-server = "0.8"
+rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
+futures = "0.3"
+tower = { version = "0.5", features = ["util"] }
+
 # FFI
 libc = "0.2"
 
