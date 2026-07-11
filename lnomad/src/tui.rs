@@ -451,11 +451,13 @@ pub struct VisibleLink {
     pub col_end: u16,
 }
 
-/// What a hint label jumps to: a page link or a top-bar control.
+/// What a hint label jumps to: a page link, a form field or a top-bar control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintTarget {
     /// The page link with this 1-based index.
     Link(usize),
+    /// The form field with this 1-based index.
+    Field(usize),
     /// A top-bar control.
     Control(Control),
 }
@@ -1056,12 +1058,16 @@ pub fn hint_labels(n: usize) -> Vec<String> {
 }
 
 /// The hint badges for the current frame: one per visible link (in reading
-/// order) then one per top-bar control, each wearing a unique label.
+/// order), then one per visible form field, then one per top-bar control, each
+/// wearing a unique label.
 pub fn hints(model: &Model) -> Vec<Hint> {
     let [topbar, _content, _status] = regions(model.frame_area());
     let mut slots: Vec<(HintTarget, u16, u16)> = Vec::new();
     for vl in visible_links(model) {
         slots.push((HintTarget::Link(vl.index), vl.row, vl.col_start));
+    }
+    for vf in visible_fields(model) {
+        slots.push((HintTarget::Field(vf.index), vf.row, vf.col_start));
     }
     for cr in top_bar_controls(model, topbar) {
         slots.push((HintTarget::Control(cr.control), cr.rect.y, cr.rect.x));
@@ -1398,7 +1404,7 @@ fn update_field_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
 /// Activate field `fi` (1-based): a checkbox toggles its checked state, a radio
 /// selects itself within its group, a text field does nothing. Re-lays the page
 /// out so the rendered widget shows the new state, keeping the scroll. The one
-/// activation body shared by the Space key and a mouse click.
+/// activation body shared by the Space key, a mouse click and a field hint.
 fn toggle_field(model: &mut Model, fi: usize) {
     let Some(kind) = model.field_state.get(fi - 1).map(|fe| fe.kind) else {
         return;
@@ -1456,8 +1462,9 @@ fn update_search_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
 }
 
 /// Fold a key while hint mode is active. A character narrows the visible labels
-/// (by label prefix or link-text substring); a unique match follows the link or
-/// activates the control. `Esc` exits; a non-matching key is ignored.
+/// (by label prefix or link-text substring); a unique match follows the link,
+/// activates the form field, or drives the control. `Esc` exits; a non-matching
+/// key is ignored.
 fn update_hint_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     match key.code {
         KeyCode::Esc => {
@@ -2528,16 +2535,29 @@ fn collect_submit_fields(model: &Model, link: &RenderedLink) -> Vec<(String, Str
     out
 }
 
-/// Activate a hint target: follow the link, or drive the top-bar control.
+/// Activate a hint target: follow the link, activate the form field, or drive
+/// the top-bar control.
 fn activate_hint_target(model: &mut Model, target: HintTarget) -> Vec<Effect> {
     match target {
         HintTarget::Link(idx) => follow_link(model, idx),
+        HintTarget::Field(fi) => {
+            activate_field(model, fi);
+            Vec::new()
+        }
         HintTarget::Control(Control::Address) => {
             enter_address(model);
             Vec::new()
         }
         HintTarget::Control(Control::Bookmark) => toggle_bookmark_current(model),
     }
+}
+
+/// Focus and activate form field `fi` (1-based): a checkbox toggles, a radio
+/// selects, a text field only takes focus (entering [`Mode::Field`]). The one
+/// body shared by a mouse click and a hint activation, so they never diverge.
+fn activate_field(model: &mut Model, fi: usize) {
+    apply_focus(model, Focus::Field(fi));
+    toggle_field(model, fi);
 }
 
 /// The interactive elements (links and form fields) in document order: sorted by
@@ -2685,8 +2705,7 @@ fn handle_click(model: &mut Model, col: u16, row: u16) -> Vec<Effect> {
     // the same as the reference browser's mouse behaviour.
     for vf in visible_fields(model) {
         if row == vf.row && col >= vf.col_start && col < vf.col_end {
-            apply_focus(model, Focus::Field(vf.index));
-            toggle_field(model, vf.index);
+            activate_field(model, vf.index);
             return Vec::new();
         }
     }
@@ -6911,23 +6930,25 @@ mod tests {
     }
 
     #[test]
-    fn hints_cover_visible_links_then_controls_with_unique_labels() {
+    fn hints_cover_visible_links_then_fields_then_controls_with_unique_labels() {
         let m = loaded_model((80, 24));
         let hs = hints(&m);
-        // Two links + two top-bar controls (the address slot and the star).
-        assert_eq!(hs.len(), 4);
+        // Two links + one form field + two top-bar controls (the address slot
+        // and the star).
+        assert_eq!(hs.len(), 5);
         assert!(matches!(hs[0].target, HintTarget::Link(1)));
         assert!(matches!(hs[1].target, HintTarget::Link(2)));
+        assert!(matches!(hs[2].target, HintTarget::Field(1)));
         assert!(matches!(
-            hs[2].target,
+            hs[3].target,
             HintTarget::Control(Control::Address)
         ));
         assert!(matches!(
-            hs[3].target,
+            hs[4].target,
             HintTarget::Control(Control::Bookmark)
         ));
         let labels: std::collections::HashSet<_> = hs.iter().map(|h| &h.label).collect();
-        assert_eq!(labels.len(), 4, "labels must be unique");
+        assert_eq!(labels.len(), 5, "labels must be unique");
     }
 
     #[test]
@@ -9716,6 +9737,91 @@ mod tests {
             m.field_state[0].input.value(),
             "bob",
             "a click must not edit the text"
+        );
+    }
+
+    /// Enter hint mode and type the label of field `fi`'s hint badge.
+    fn activate_field_hint(m: &mut Model, fi: usize) {
+        press(m, KeyCode::Char('f'), KeyModifiers::NONE);
+        assert_eq!(m.mode, Mode::Hint);
+        let label = hints(m)
+            .into_iter()
+            .find(|h| h.target == HintTarget::Field(fi))
+            .expect("field hint present")
+            .label;
+        for c in label.chars() {
+            press(m, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn hints_include_visible_fields() {
+        let src = "`[Alpha`:/page/a.mu]\nAgree: `<?|agree`Agree>\nName: `<name`bob>";
+        let m = field_model(src, (80, 24));
+        let fields = visible_fields(&m);
+        assert_eq!(fields.len(), 2);
+        let hs = hints(&m);
+        for vf in fields {
+            let hint = hs
+                .iter()
+                .find(|h| h.target == HintTarget::Field(vf.index))
+                .expect("every visible field gets a hint");
+            assert_eq!((hint.row, hint.col), (vf.row, vf.col_start));
+        }
+    }
+
+    #[test]
+    fn hint_labels_cover_links_fields_and_controls() {
+        let src = "`[Alpha`:/page/a.mu]\nAgree: `<?|agree`Agree>\nName: `<name`bob>";
+        let m = field_model(src, (80, 24));
+        assert_eq!(visible_links(&m).len(), 1);
+        assert_eq!(visible_fields(&m).len(), 2);
+        let [topbar, _content, _status] = regions(m.frame_area());
+        let expected =
+            visible_links(&m).len() + visible_fields(&m).len() + top_bar_controls(&m, topbar).len();
+        let hs = hints(&m);
+        assert_eq!(hs.len(), expected, "no target dropped or double-counted");
+        let labels: std::collections::HashSet<_> = hs.iter().map(|h| &h.label).collect();
+        assert_eq!(labels.len(), hs.len(), "labels must be unique");
+    }
+
+    #[test]
+    fn hint_activate_checkbox_toggles() {
+        let src = "Agree: `<?|agree`Agree>";
+        let mut m = field_model(src, (80, 24));
+        activate_field_hint(&mut m, 1);
+        assert!(m.field_state[0].checked, "hint should check the box");
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        activate_field_hint(&mut m, 1);
+        assert!(!m.field_state[0].checked, "second hint should uncheck it");
+    }
+
+    #[test]
+    fn hint_activate_radio_selects() {
+        // Two radios sharing the name "col": hinting one selects it and clears
+        // its group sibling, same as a click.
+        let src = "`<^|col`Red>`<^|col`Blue>";
+        let mut m = field_model(src, (80, 24));
+        activate_field_hint(&mut m, 1);
+        assert!(m.field_state[0].checked, "hint should select the radio");
+        assert!(!m.field_state[1].checked);
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        activate_field_hint(&mut m, 2);
+        assert!(!m.field_state[0].checked, "sibling radio not cleared");
+        assert!(m.field_state[1].checked);
+    }
+
+    #[test]
+    fn hint_activate_text_field_focuses() {
+        let src = "Name: `<name`bob>";
+        let mut m = field_model(src, (80, 24));
+        activate_field_hint(&mut m, 1);
+        assert_eq!(m.mode, Mode::Field, "text field hint enters field editing");
+        assert_eq!(m.field_focus, Some(1));
+        assert_eq!(
+            m.field_state[0].input.value(),
+            "bob",
+            "a hint must not edit the text"
         );
     }
 
