@@ -60,6 +60,8 @@ mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_obs_endpoint;
 #[cfg(test)]
+mod mvr_orphaned_path_cache;
+#[cfg(test)]
 mod mvr_path_response_hops;
 #[cfg(test)]
 mod mvr_response_resource;

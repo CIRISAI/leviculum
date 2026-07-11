@@ -5982,7 +5982,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Python Transport.py:2723,2755-2756: when is_from_local_client, send cached
         // announce directly back to the requesting client (retransmit_timeout = now,
         // attached_interface = requesting_interface).
-        if from_local {
+        // Gated on the path table (Python Transport.py:2943 `destination_hash in
+        // Transport.path_table`): a dropped or expired path must not be answered
+        // from the orphaned announce cache; the request falls through to case 4
+        // and is forwarded instead (Codeberg #117).
+        if from_local && self.storage.get_path(&requested_hash).is_some() {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 // Convert cached Header1 announce to Header2 with the daemon's
                 // transport_id and receipt-incremented hops. This is required because
@@ -6021,7 +6025,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // 2b. Transport node with cached announce → schedule deferred rebroadcast.
         // Send only to the requesting interface (Python Transport.py:1037-1038).
-        if self.config.enable_transport {
+        // Gated on the path table (Python Transport.py:2943): with the path
+        // dropped or expired the orphaned cache must not answer; the request
+        // falls through to case 3 and re-originates discovery (Codeberg #117).
+        if self.config.enable_transport && self.storage.get_path(&requested_hash).is_some() {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 let mode = self.interface_mode(interface_index);
 
@@ -6104,134 +6111,134 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 }
                 return Ok(());
             }
+        }
 
-            // 3. Unknown destination from network → re-originate path request
-            //    Python Transport.py:2792-2806: create fresh packets with hops=0
-            //    on all interfaces except the requester, reusing the same tag.
-            //
+        // 3. Unknown destination from network → re-originate path request
+        //    Python Transport.py:2792-2806: create fresh packets with hops=0
+        //    on all interfaces except the requester, reusing the same tag.
+        //
+        // Codeberg #87: abort the recursive discovery when the receiving
+        // interface's PR ingress burst limiter is active (Python
+        // Transport.py:3022-3026 `return`s without recording a discovery
+        // request or forwarding). Answering already-known paths above is
+        // never limited, so this drops only the excess recursion.
+        if self.config.enable_transport && !from_local {
+            // Codeberg #104: active recursive path discovery for an unknown
+            // destination happens only when the receiving interface is in a
+            // mode listed in Python `DISCOVER_PATHS_FOR`
+            // (ACCESS_POINT / GATEWAY / ROAMING), matching Python
+            // `Transport.path_request` (Transport.py:2917-2918, 3015). A
+            // non-discovering interface (e.g. `Full`) still forwards the
+            // request to local clients (Python branch 5, Transport.py:3043-3048)
+            // but does not re-originate a recursive network discovery.
+            let discovers = self.interface_mode(interface_index).discovers_paths();
+
             // Codeberg #87: abort the recursive discovery when the receiving
             // interface's PR ingress burst limiter is active (Python
             // Transport.py:3022-3026 `return`s without recording a discovery
-            // request or forwarding). Answering already-known paths above is
-            // never limited, so this drops only the excess recursion.
-            if !from_local {
-                // Codeberg #104: active recursive path discovery for an unknown
-                // destination happens only when the receiving interface is in a
-                // mode listed in Python `DISCOVER_PATHS_FOR`
-                // (ACCESS_POINT / GATEWAY / ROAMING), matching Python
-                // `Transport.path_request` (Transport.py:2917-2918, 3015). A
-                // non-discovering interface (e.g. `Full`) still forwards the
-                // request to local clients (Python branch 5, Transport.py:3043-3048)
-                // but does not re-originate a recursive network discovery.
-                let discovers = self.interface_mode(interface_index).discovers_paths();
-
-                // Codeberg #87: abort the recursive discovery when the receiving
-                // interface's PR ingress burst limiter is active (Python
-                // Transport.py:3022-3026 `return`s without recording a discovery
-                // request or forwarding). The ingress limit only gates the
-                // discovering path; the non-discovering local-client forward is
-                // unaffected.
-                if discovers && pr_burst_limited {
-                    crate::tracing::debug!(
-                        dest = %HexShort(&requested_hash),
-                        iface = %self.iface_name(interface_index),
-                        "Not re-originating recursive path request, PR ingress burst limit active"
-                    );
-                } else {
-                    let active_discovery = discovers && !pr_burst_limited;
-                    let has_locals = self.has_local_clients();
-                    if active_discovery || has_locals {
-                        if active_discovery {
-                            let now = self.clock.now_ms();
-                            if self
-                                .storage
-                                .get_discovery_path_request(&requested_hash)
-                                .is_some()
-                            {
-                                crate::tracing::debug!(
-                                    "Already have a pending discovery path request for <{}>",
-                                    HexShort(&requested_hash)
-                                );
-                            } else {
-                                self.storage.set_discovery_path_request(
-                                    requested_hash,
-                                    interface_index,
-                                    now + DISCOVERY_TIMEOUT_MS,
-                                );
-                            }
+            // request or forwarding). The ingress limit only gates the
+            // discovering path; the non-discovering local-client forward is
+            // unaffected.
+            if discovers && pr_burst_limited {
+                crate::tracing::debug!(
+                    dest = %HexShort(&requested_hash),
+                    iface = %self.iface_name(interface_index),
+                    "Not re-originating recursive path request, PR ingress burst limit active"
+                );
+            } else {
+                let active_discovery = discovers && !pr_burst_limited;
+                let has_locals = self.has_local_clients();
+                if active_discovery || has_locals {
+                    if active_discovery {
+                        let now = self.clock.now_ms();
+                        if self
+                            .storage
+                            .get_discovery_path_request(&requested_hash)
+                            .is_some()
+                        {
                             crate::tracing::debug!(
+                                "Already have a pending discovery path request for <{}>",
+                                HexShort(&requested_hash)
+                            );
+                        } else {
+                            self.storage.set_discovery_path_request(
+                                requested_hash,
+                                interface_index,
+                                now + DISCOVERY_TIMEOUT_MS,
+                            );
+                        }
+                        crate::tracing::debug!(
                                 "Attempting to discover unknown path to <{}> on behalf of path request on {}",
                                 HexShort(&requested_hash),
                                 self.iface_name(interface_index)
                             );
-                        }
+                    }
 
-                        // Build a fresh path request packet with hops=0
-                        // (Python Transport.py:2555-2561). Used for both the
-                        // recursive network broadcast and the local-client forward.
-                        let pr_data = if self.config.enable_transport {
-                            let mut d = Vec::with_capacity(48);
-                            d.extend_from_slice(&requested_hash);
-                            d.extend_from_slice(self.identity.hash());
-                            d.extend_from_slice(&tag);
-                            d
-                        } else {
-                            let mut d = Vec::with_capacity(32);
-                            d.extend_from_slice(&requested_hash);
-                            d.extend_from_slice(&tag);
-                            d
-                        };
+                    // Build a fresh path request packet with hops=0
+                    // (Python Transport.py:2555-2561). Used for both the
+                    // recursive network broadcast and the local-client forward.
+                    let pr_data = if self.config.enable_transport {
+                        let mut d = Vec::with_capacity(48);
+                        d.extend_from_slice(&requested_hash);
+                        d.extend_from_slice(self.identity.hash());
+                        d.extend_from_slice(&tag);
+                        d
+                    } else {
+                        let mut d = Vec::with_capacity(32);
+                        d.extend_from_slice(&requested_hash);
+                        d.extend_from_slice(&tag);
+                        d
+                    };
 
-                        let fresh_packet = Packet {
-                            flags: PacketFlags {
-                                ifac_flag: false,
-                                header_type: HeaderType::Type1,
-                                context_flag: false,
-                                transport_type: TransportType::Broadcast,
-                                dest_type: crate::destination::DestinationType::Plain,
-                                packet_type: PacketType::Data,
-                            },
-                            hops: 0,
-                            transport_id: None,
-                            destination_hash: self.path_request_hash,
-                            context: PacketContext::None,
-                            data: PacketData::Owned(pr_data),
-                        };
+                    let fresh_packet = Packet {
+                        flags: PacketFlags {
+                            ifac_flag: false,
+                            header_type: HeaderType::Type1,
+                            context_flag: false,
+                            transport_type: TransportType::Broadcast,
+                            dest_type: crate::destination::DestinationType::Plain,
+                            packet_type: PacketType::Data,
+                        },
+                        hops: 0,
+                        transport_id: None,
+                        destination_hash: self.path_request_hash,
+                        context: PacketContext::None,
+                        data: PacketData::Owned(pr_data),
+                    };
 
-                        let mut buf = [0u8; crate::constants::MTU];
-                        let len = fresh_packet.pack(&mut buf)?;
+                    let mut buf = [0u8; crate::constants::MTU];
+                    let len = fresh_packet.pack(&mut buf)?;
 
-                        if active_discovery {
-                            self.send_on_all_interfaces_except(interface_index, &buf[..len]);
-                            // Outgoing path-request frequency for the re-originated
-                            // request (Codeberg #67 Stage 2a). The broadcast plus the
-                            // local-client forward below cover every registered
-                            // interface except the requester, so a single broadcast
-                            // record matches.
-                            self.record_outgoing_path_request_broadcast(Some(interface_index));
-                        }
+                    if active_discovery {
+                        self.send_on_all_interfaces_except(interface_index, &buf[..len]);
+                        // Outgoing path-request frequency for the re-originated
+                        // request (Codeberg #67 Stage 2a). The broadcast plus the
+                        // local-client forward below cover every registered
+                        // interface except the requester, so a single broadcast
+                        // record matches.
+                        self.record_outgoing_path_request_broadcast(Some(interface_index));
+                    }
 
-                        // Forward to local clients. In discovery mode this mirrors
-                        // Python branch 4's all-interfaces loop reaching local
-                        // clients (Transport.py:2808-2813); in non-discovery mode it
-                        // is Python branch 5 (Transport.py:3043-3048).
-                        if has_locals {
-                            let local_ifaces: Vec<usize> = self
-                                .local_client_interfaces
-                                .iter()
-                                .copied()
-                                .filter(|&id| id != interface_index)
-                                .collect();
-                            for client_iface in local_ifaces {
-                                if !active_discovery {
-                                    // The discovery broadcast above already recorded
-                                    // outgoing PR frequency for every interface; when
-                                    // only forwarding to local clients, record per
-                                    // client (Codeberg #67 Stage 2a).
-                                    self.record_outgoing_path_request(client_iface);
-                                }
-                                let _ = self.send_on_interface(client_iface, &buf[..len]);
+                    // Forward to local clients. In discovery mode this mirrors
+                    // Python branch 4's all-interfaces loop reaching local
+                    // clients (Transport.py:2808-2813); in non-discovery mode it
+                    // is Python branch 5 (Transport.py:3043-3048).
+                    if has_locals {
+                        let local_ifaces: Vec<usize> = self
+                            .local_client_interfaces
+                            .iter()
+                            .copied()
+                            .filter(|&id| id != interface_index)
+                            .collect();
+                        for client_iface in local_ifaces {
+                            if !active_discovery {
+                                // The discovery broadcast above already recorded
+                                // outgoing PR frequency for every interface; when
+                                // only forwarding to local clients, record per
+                                // client (Codeberg #67 Stage 2a).
+                                self.record_outgoing_path_request(client_iface);
                             }
+                            let _ = self.send_on_interface(client_iface, &buf[..len]);
                         }
                     }
                 }
