@@ -78,6 +78,7 @@ mod request_tests;
 mod resource_tests;
 mod responder_node_tests;
 mod responder_tests;
+mod response_resource_tests;
 mod retain_interop_tests;
 mod rpc_interop_tests;
 mod rust_relay_tests;

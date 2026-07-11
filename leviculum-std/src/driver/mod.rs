@@ -2884,6 +2884,33 @@ impl ReticulumNode {
         Ok(())
     }
 
+    /// Answer a received request with a response Resource, for responses
+    /// larger than the link MDU. Use after [`send_response`](Self::send_response)
+    /// returns [`RequestError`](leviculum_core::RequestError)`::PayloadTooLarge`.
+    /// The `[request_id, response]` msgpack wrapper is added internally; pass
+    /// the raw response value bytes as `response_data`.
+    ///
+    /// `response_data` must be exactly one valid msgpack-encoded value.
+    pub async fn send_response_resource(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        response_data: &[u8],
+    ) -> Result<(), Error> {
+        let output = {
+            let mut inner = self.inner.lock().unwrap();
+            let (_resource_hash, output) = inner
+                .send_response_resource(link_id, request_id, response_data)
+                .map_err(Error::Resource)?;
+            output
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
+    }
+
     /// Send a file-style response to a received request: a response Resource
     /// carrying the RAW bytes plus msgpack-encoded `metadata`, with no
     /// `[request_id, response]` wrapper — the wire form NomadNet's

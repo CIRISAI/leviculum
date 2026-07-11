@@ -449,6 +449,22 @@ impl Node {
             .await
     }
 
+    /// Answer a received request with a response Resource, for responses
+    /// larger than the link MDU. Use after `send_response` returns
+    /// `PayloadTooLarge`; the `[request_id, response]` msgpack wrapper is
+    /// added internally. `response_data` must be one valid msgpack-encoded
+    /// value.
+    pub async fn send_response_resource(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        response_data: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .send_response_resource(link_id, request_id, response_data)
+            .await
+    }
+
     /// Send a file-style response to a received request: a response Resource of
     /// the RAW bytes plus msgpack-encoded `metadata` (no `[request_id,
     /// response]` wrapper), the wire form NomadNet's `serve_file` uses.
