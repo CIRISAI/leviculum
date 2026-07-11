@@ -1887,12 +1887,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ) -> Result<(), TransportError> {
         // Read path data into locals to release the immutable borrow on storage
         // before we mutably borrow for hash caching.
-        let (interface_index, needs_relay, next_hop) = {
+        let (interface_index, needs_relay, is_direct, next_hop) = {
             let path = self
                 .storage
                 .get_path(dest_hash)
                 .ok_or(TransportError::NoPath)?;
-            (path.interface_index, path.needs_relay(), path.next_hop)
+            (
+                path.interface_index,
+                path.needs_relay(),
+                path.is_direct(),
+                path.next_hop,
+            )
         };
 
         // Consult the next-slot backchannel: if the interface is not yet
@@ -1922,8 +1927,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // already correctly formatted, pass them through unchanged.
         let is_type1 = data.len() >= 2 && (data[0] & 0x40) == 0;
 
-        if needs_relay && is_type1 {
-            // Multi-hop: convert Type1 packet to Type2 with transport header.
+        // Insert the transport header for a multi-hop path, and ALSO for a
+        // 1-hop path when this node is a client of a local shared instance:
+        // the destination is one hop beyond the instance, so the instance
+        // must transport the packet onto the network (Codeberg #119; Python
+        // Transport.py:1148-1166, the `hops == 1 and
+        // is_connected_to_shared_instance` branch).
+        let route_via_transport = needs_relay
+            || (is_direct && next_hop.is_some() && self.is_connected_to_shared_instance());
+
+        if route_via_transport && is_type1 {
+            // Convert Type1 packet to Type2 with transport header.
             // Python equivalent: Transport.py outbound() lines 980-991.
             //
             // Wire format change:
@@ -5148,6 +5162,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// only crossed the IPC hop, so `incoming_hop_count` leaves it unchanged.
     pub fn set_shared_instance_interface(&mut self, id: Option<usize>) {
         self.shared_instance_interface = id;
+    }
+
+    /// True when this node is a CLIENT of a local shared instance. Mirrors
+    /// Python's `is_connected_to_shared_instance`.
+    fn is_connected_to_shared_instance(&self) -> bool {
+        self.shared_instance_interface.is_some()
     }
 
     /// Return destination hashes that were announced by any local client.

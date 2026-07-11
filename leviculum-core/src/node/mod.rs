@@ -66,6 +66,8 @@ mod mvr_response_resource;
 #[cfg(all(test, feature = "compression"))]
 mod mvr_send_segmentation;
 #[cfg(test)]
+mod mvr_shared_client_1hop;
+#[cfg(test)]
 mod mvr_teardown_resource_fail;
 pub mod request;
 mod send;
