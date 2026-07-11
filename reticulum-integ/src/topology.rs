@@ -191,6 +191,20 @@ pub enum Step {
         #[serde(default = "default_expect_success")]
         expect_result: String,
     },
+    /// Path-discovery soak: `repeat` FRESH rnpath discoveries against one
+    /// destination in a single run. Each iteration drops the cached path
+    /// first, then measures one discovery. Records every attempt to the
+    /// PATHRESOLVE log and always passes: it is a measurement of the
+    /// resolve% distribution, not an assertion (Codeberg #117).
+    #[serde(rename = "path_soak")]
+    PathSoak {
+        on: String,
+        destination: String,
+        #[serde(default = "default_soak_repeat")]
+        repeat: u64,
+        #[serde(default = "default_soak_per_attempt_secs")]
+        per_attempt_secs: u64,
+    },
     #[serde(rename = "rnprobe")]
     RnProbe {
         from: String,
@@ -429,6 +443,14 @@ fn default_transfer_timeout() -> u64 {
 }
 
 fn default_step_timeout() -> u64 {
+    30
+}
+
+fn default_soak_repeat() -> u64 {
+    1
+}
+
+fn default_soak_per_attempt_secs() -> u64 {
     30
 }
 
@@ -1182,6 +1204,111 @@ hub-spoke2 = "tcp"
         let result = assign_interfaces(&links, "test");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("nodeA-nodeB"));
+    }
+
+    #[test]
+    fn parse_path_soak_step() {
+        let toml_str = r#"
+[test]
+name = "soak_test"
+
+[nodes.alpha]
+type = "rust"
+respond_to_probes = true
+
+[[steps]]
+action = "path_soak"
+on = "alpha"
+destination = "beta.probe"
+repeat = 100
+per_attempt_secs = 30
+"#;
+        let scenario = parse_scenario(toml_str).unwrap();
+        match &scenario.steps[0] {
+            Step::PathSoak {
+                on,
+                destination,
+                repeat,
+                per_attempt_secs,
+            } => {
+                assert_eq!(on, "alpha");
+                assert_eq!(destination, "beta.probe");
+                assert_eq!(*repeat, 100);
+                assert_eq!(*per_attempt_secs, 30);
+            }
+            other => panic!("expected PathSoak, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_path_soak_defaults() {
+        let toml_str = r#"
+[test]
+name = "soak_defaults"
+
+[nodes.alpha]
+type = "rust"
+respond_to_probes = true
+
+[[steps]]
+action = "path_soak"
+on = "alpha"
+destination = "beta.probe"
+"#;
+        let scenario = parse_scenario(toml_str).unwrap();
+        match &scenario.steps[0] {
+            Step::PathSoak {
+                repeat,
+                per_attempt_secs,
+                ..
+            } => {
+                assert_eq!(*repeat, 1);
+                assert_eq!(*per_attempt_secs, 30);
+            }
+            other => panic!("expected PathSoak, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_lora_lnode_path_soak_scenario() {
+        // The shipped #117 soak scenario parses under the scenario loader
+        // (the HW step itself is reviewer-run, never executed in CI).
+        let toml_str = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lora_lnode_path_soak.toml"
+        ))
+        .expect("lora_lnode_path_soak.toml not found");
+        let scenario = parse_scenario(&toml_str).expect("parse failed");
+
+        assert_eq!(scenario.test.name, "lora_lnode_path_soak");
+        assert_eq!(scenario.nodes.len(), 2);
+        assert!(scenario.nodes["alpha"].serial);
+        assert!(scenario.nodes["beta"].serial);
+
+        // Radio must match lora_lnode_lncp_bidir.toml exactly, so the soak
+        // reproduces the on-air conditions of the failing test.
+        let radio = scenario.radio.as_ref().expect("radio block required");
+        assert_eq!(radio.frequency, 869525000);
+        assert_eq!(radio.bandwidth, 125000);
+        assert_eq!(radio.spreading_factor, 7);
+        assert_eq!(radio.coding_rate, 5);
+        assert_eq!(radio.tx_power, 17);
+
+        assert_eq!(scenario.steps.len(), 2);
+        match &scenario.steps[1] {
+            Step::PathSoak {
+                on,
+                destination,
+                repeat,
+                per_attempt_secs,
+            } => {
+                assert_eq!(on, "alpha");
+                assert_eq!(destination, "beta.probe");
+                assert_eq!(*repeat, 100);
+                assert_eq!(*per_attempt_secs, 30);
+            }
+            other => panic!("expected PathSoak, got: {other:?}"),
+        }
     }
 
     #[test]

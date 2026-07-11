@@ -271,6 +271,68 @@ fn parse_delivery_measurement(line: &str) -> Option<(u64, u64, String)> {
 }
 
 // ---------------------------------------------------------------------------
+// Path-discovery diagnostics: LEVICULUM_PATHRESOLVE_LOG
+// ---------------------------------------------------------------------------
+
+/// Format one PATHRESOLVE measurement line (Codeberg #117):
+///
+///     PATHRESOLVE test=<name> attempt=<k> of=<attempts> result=<ok|fail> t_ms=<ms> dest=<hash>
+///
+/// One line per rnpath invocation, success and failure alike, so a soak
+/// run yields a resolve% and latency distribution instead of a single
+/// pass/fail verdict.
+fn pathresolve_line(
+    test: &str,
+    attempt: u64,
+    attempts: u64,
+    ok: bool,
+    t_ms: u128,
+    dest: &str,
+) -> String {
+    let result = if ok { "ok" } else { "fail" };
+    format!(
+        "PATHRESOLVE test={test} attempt={attempt} of={attempts} result={result} t_ms={t_ms} dest={dest}"
+    )
+}
+
+/// Append one PATHRESOLVE line to the file named by
+/// `LEVICULUM_PATHRESOLVE_LOG`. Unset env var = no-op (zero behaviour
+/// change). Mirrors the LEVICULUM_DELIVERY_LOG append pattern above.
+///
+/// WHEN TO USE: for path-discovery reliability investigations (the #117
+/// LNode wait_for_path flake), set this env var and either run the
+/// affected scenario N times or run a `path_soak` step; then read the
+/// resolve% and t_ms distribution from the log.
+fn append_pathresolve(test: &str, attempt: u64, attempts: u64, ok: bool, t_ms: u128, dest: &str) {
+    if let Ok(path) = std::env::var("LEVICULUM_PATHRESOLVE_LOG") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(
+                f,
+                "{}",
+                pathresolve_line(test, attempt, attempts, ok, t_ms, dest)
+            );
+        }
+    }
+}
+
+/// Format the `path_soak` end-of-step summary:
+///
+///     path_soak: resolved <M>/<N> (<pct>%) over <N> iterations
+fn path_soak_summary(resolved: u64, repeat: u64) -> String {
+    let pct = if repeat == 0 {
+        0.0
+    } else {
+        resolved as f64 * 100.0 / repeat as f64
+    };
+    format!("path_soak: resolved {resolved}/{repeat} ({pct:.1}%) over {repeat} iterations")
+}
+
+// ---------------------------------------------------------------------------
 // Step execution
 // ---------------------------------------------------------------------------
 
@@ -430,6 +492,17 @@ fn execute_step(
                 expect_result,
                 cache,
             )
+        }
+        Step::PathSoak {
+            on,
+            destination,
+            repeat,
+            per_attempt_secs,
+        } => {
+            println!(
+                "[{step_num}/{total}] path_soak on {on} for {destination} ({repeat} iterations)..."
+            );
+            execute_path_soak(runner, on, destination, *repeat, *per_attempt_secs, cache)
         }
         Step::RnProbe {
             from,
@@ -1465,7 +1538,10 @@ fn execute_wait_for_path(
     let mut last_stderr = String::new();
     let mut last_status = String::new();
 
+    let test_name = runner.scenario().test.name.clone();
+
     for attempt in 1..=attempts {
+        let rnpath_started = Instant::now();
         let output = runner.docker_exec(
             on,
             &[
@@ -1477,9 +1553,11 @@ fn execute_wait_for_path(
                 &per_attempt.to_string(),
             ],
         )?;
+        let t_ms = rnpath_started.elapsed().as_millis();
 
         match (expect_result, output.status.success()) {
             ("success", true) => {
+                append_pathresolve(&test_name, attempt, attempts, true, t_ms, &hash);
                 if attempt > 1 {
                     println!("  path resolved on attempt {attempt}: {hash}");
                 } else {
@@ -1505,6 +1583,7 @@ fn execute_wait_for_path(
                 });
             }
             ("success", false) => {
+                append_pathresolve(&test_name, attempt, attempts, false, t_ms, &hash);
                 last_stderr = sanitize_rnpath_output(&String::from_utf8_lossy(&output.stderr));
                 last_stdout = sanitize_rnpath_output(&String::from_utf8_lossy(&output.stdout));
                 last_status = output.status.to_string();
@@ -1544,6 +1623,74 @@ fn execute_wait_for_path(
             "rnpath exited {last_status} after {attempts} attempts: {last_stdout} {last_stderr}"
         ),
     })
+}
+
+/// Path-discovery soak (Codeberg #117): `repeat` FRESH rnpath discoveries
+/// against one destination in a single run (one flash), recording every
+/// attempt to the PATHRESOLVE log.
+///
+/// Each iteration first drops the cached path (`rnpath <hash> -d`, exits
+/// non-zero when no path exists, which is expected on the first iteration
+/// and after a miss) so every iteration measures a full discovery (path
+/// request + response), not a path-table lookup; without the drop only
+/// iteration 1 would measure discovery. Then one `rnpath <hash> -w
+/// <per_attempt_secs>` is timed and logged.
+///
+/// The step ALWAYS passes: it is a measurement of the resolve%
+/// distribution, not an assertion, and an individual miss never aborts
+/// the loop. Only an infrastructure failure (docker exec itself failing)
+/// is an error. `per_attempt_secs` is deliberately NOT scaled by
+/// `LORA_TIMEOUT_SCALE`: the discovery window is part of the measurement,
+/// so it stays exactly what the TOML says.
+fn execute_path_soak(
+    runner: &TestRunner,
+    on: &str,
+    destination: &str,
+    repeat: u64,
+    per_attempt_secs: u64,
+    cache: &mut BTreeMap<String, String>,
+) -> Result<(), StepError> {
+    let hash = resolve_destination(runner, destination, cache)?;
+    let test_name = runner.scenario().test.name.clone();
+    let window = per_attempt_secs.to_string();
+
+    let mut resolved: u64 = 0;
+    for iter in 1..=repeat {
+        let drop_output =
+            runner.docker_exec(on, &["rnpath", &hash, "--config", "/root/.reticulum", "-d"])?;
+
+        let rnpath_started = Instant::now();
+        let output = runner.docker_exec(
+            on,
+            &[
+                "rnpath",
+                &hash,
+                "--config",
+                "/root/.reticulum",
+                "-w",
+                &window,
+            ],
+        )?;
+        let t_ms = rnpath_started.elapsed().as_millis();
+        let ok = output.status.success();
+        if ok {
+            resolved += 1;
+        }
+
+        append_pathresolve(&test_name, iter, repeat, ok, t_ms, &hash);
+        println!(
+            "  path_soak iter {iter}/{repeat}: {} t_ms={t_ms} (drop {})",
+            if ok { "ok" } else { "fail" },
+            if drop_output.status.success() {
+                "ok"
+            } else {
+                "noop"
+            }
+        );
+    }
+
+    println!("  {}", path_soak_summary(resolved, repeat));
+    Ok(())
 }
 
 /// Strip Python `rnpath`'s animated progress spinner and terminal control
@@ -2988,6 +3135,61 @@ mod tests {
         // Periodic progress lines carry no parenthesised recv percentage.
         let line = "[selftest]   +5s:  sent=7  recv=4  ack=4  fails=0  retx=0  win=2 — ok";
         assert_eq!(parse_delivery_measurement(line), None);
+    }
+
+    #[test]
+    fn pathresolve_line_ok_format() {
+        assert_eq!(
+            pathresolve_line("lora_lnode_path_soak", 3, 100, true, 1523, "a1b2c3d4e5f6"),
+            "PATHRESOLVE test=lora_lnode_path_soak attempt=3 of=100 result=ok t_ms=1523 dest=a1b2c3d4e5f6"
+        );
+    }
+
+    #[test]
+    fn pathresolve_line_fail_format() {
+        assert_eq!(
+            pathresolve_line("lora_lnode_lncp_bidir", 2, 3, false, 30012, "cafebabe0000"),
+            "PATHRESOLVE test=lora_lnode_lncp_bidir attempt=2 of=3 result=fail t_ms=30012 dest=cafebabe0000"
+        );
+    }
+
+    #[test]
+    fn append_pathresolve_writes_one_line_per_call() {
+        // No other test reads LEVICULUM_PATHRESOLVE_LOG, so setting it
+        // here cannot race a parallel test.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pathresolve.log");
+        std::env::set_var("LEVICULUM_PATHRESOLVE_LOG", &path);
+        append_pathresolve("t", 1, 2, true, 10, "aa");
+        append_pathresolve("t", 2, 2, false, 20, "aa");
+        std::env::remove_var("LEVICULUM_PATHRESOLVE_LOG");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content,
+            "PATHRESOLVE test=t attempt=1 of=2 result=ok t_ms=10 dest=aa\n\
+             PATHRESOLVE test=t attempt=2 of=2 result=fail t_ms=20 dest=aa\n"
+        );
+
+        // Unset env var = no-op, the file does not grow.
+        append_pathresolve("t", 3, 3, true, 30, "aa");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn path_soak_summary_format() {
+        assert_eq!(
+            path_soak_summary(87, 100),
+            "path_soak: resolved 87/100 (87.0%) over 100 iterations"
+        );
+        assert_eq!(
+            path_soak_summary(1, 3),
+            "path_soak: resolved 1/3 (33.3%) over 3 iterations"
+        );
+        assert_eq!(
+            path_soak_summary(0, 0),
+            "path_soak: resolved 0/0 (0.0%) over 0 iterations"
+        );
     }
 
     /// Create a TestRunner, skipping (return) if devices are missing.
@@ -4562,6 +4764,51 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
                 "/tests/lora_lnode_lncp_bidir_slow.toml"
             ))
             .expect("lora_lnode_lncp_bidir_slow.toml not found");
+            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+            let mut runner = require_runner!(scenario);
+
+            run_test(&mut runner).expect("test failed");
+        });
+    }
+
+    #[test]
+    #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
+    #[serial(lora)]
+    fn lora_lnode_path_soak() {
+        // Reviewer-run #117 diagnostic, NOT part of any unattended tier:
+        // 100 fresh path discoveries take up to ~1 h, which would silently
+        // dominate a nightly. run-tier3-hw.sh discovers ignored tests too
+        // (--include-ignored --list), so #[ignore] alone does not keep it
+        // out; the opt-in is this env gate. An unattended run reports the
+        // skip on the SCENARIO_SKIPPED tally (mirroring require_runner!)
+        // instead of going silently green. Run it with
+        // LEVICULUM_PATH_SOAK=1 (and LEVICULUM_PATHRESOLVE_LOG=<file> for
+        // the per-attempt distribution).
+        if std::env::var("LEVICULUM_PATH_SOAK").is_err() {
+            let line = "SCENARIO_SKIPPED scenario=lora_lnode_path_soak \
+                        reason=diagnostic_opt_in_unset env=LEVICULUM_PATH_SOAK";
+            eprintln!("{line}");
+            if let Ok(path) = std::env::var("LEVICULUM_SKIP_LOG") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    let _ = writeln!(f, "{line}");
+                }
+            }
+            return;
+        }
+        // Wrapper budget = TOML timeout (4200 s worst case, every
+        // iteration missing its full 30 s window) + teardown margin.
+        crate::timeout::run_with_timeout("lora_lnode_path_soak", 4500, || {
+            let toml_str = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/lora_lnode_path_soak.toml"
+            ))
+            .expect("lora_lnode_path_soak.toml not found");
             let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
             let mut runner = require_runner!(scenario);

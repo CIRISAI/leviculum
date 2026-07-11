@@ -1,0 +1,52 @@
+# LNode<->LNode path-discovery soak (Codeberg #117).
+#
+# Reviewer-run diagnostic, not a pass/fail gate: measures path-discovery
+# reliability between the two LNodes as a resolve% distribution. One rig
+# run (one flash) performs 100 fresh discoveries: each iteration drops the
+# cached path, then runs one rnpath -w window and records result + latency
+# to the PATHRESOLVE log (set LEVICULUM_PATHRESOLVE_LOG=<file>). The step
+# always passes; read the distribution from the log and the summary line.
+#
+# Radio settings copied EXACTLY from lora_lnode_lncp_bidir.toml (the test
+# that goes RED at wait_for_path late in long runs) so the soak reproduces
+# the same on-air conditions.
+
+profile = "lnode_pair"
+
+[test]
+name = "lora_lnode_path_soak"
+description = "100 fresh LNode path discoveries in one run, resolve% distribution"
+# Worst case is every iteration missing: 100 x (30 s window + rnpath and
+# drop startup overhead) plus the settle sleep and container startup.
+timeout_secs = 4200
+rust_log = "leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
+
+[radio]
+# Matches lora_lnode_lncp_bidir.toml (leviculum-nrf::lora::RadioConfig::eu_medium).
+frequency = 869525000
+bandwidth = 125000
+sf = 7
+cr = 5
+txpower = 17
+
+[nodes.alpha]
+type = "rust"
+respond_to_probes = true
+serial = true
+
+[nodes.beta]
+type = "rust"
+respond_to_probes = true
+serial = true
+
+# Warm up: wait for announces to propagate, matching lora_lnode_lncp_bidir.
+[[steps]]
+action = "sleep"
+duration_secs = 25
+
+[[steps]]
+action = "path_soak"
+on = "alpha"
+destination = "beta.probe"
+repeat = 100
+per_attempt_secs = 30
