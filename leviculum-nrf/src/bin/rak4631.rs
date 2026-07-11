@@ -194,6 +194,9 @@ async fn main(spawner: Spawner) {
     // Register all three interfaces
     node.set_interface_name(0, alloc::string::String::from("serial_usb"));
     node.set_interface_hw_mtu(0, 564);
+    // Codeberg #117: the client-facing serial interface must be Gateway so the
+    // node discovers unknown paths on behalf of the host.
+    node.set_interface_mode(0, leviculum_core::InterfaceMode::Gateway);
     node.set_interface_name(1, alloc::string::String::from("lora_sx1262"));
     node.set_interface_hw_mtu(1, 255);
     node.set_interface_name(2, alloc::string::String::from("ble"));
