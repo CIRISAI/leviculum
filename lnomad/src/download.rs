@@ -7,17 +7,18 @@
 //! current working directory), and de-duplicating against an existing file so
 //! nothing is overwritten silently.
 //!
-//! The filename comes from the URL path, never from server-supplied Resource
-//! metadata, and is sanitised anyway: path separators are stripped and a
-//! dot-only name is replaced, so a hostile path can never escape the target
-//! directory.
+//! The filename prefers the server's Resource metadata name (NomadNet's
+//! `serve_file` sends `{"name": ...}`), falling back to the URL path basename.
+//! Either source is untrusted and goes through [`basename`]: path separators
+//! are stripped and a dot-only name is replaced, so a hostile name can never
+//! escape the target directory.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 /// The fallback filename when the URL path yields nothing usable (an empty
 /// basename, or a name that is only dots).
-const FALLBACK_NAME: &str = "download";
+pub(crate) const FALLBACK_NAME: &str = "download";
 
 /// The filename implied by a request path: everything after the last `/`,
 /// sanitised so it cannot escape the directory it is saved into. Any remaining
@@ -31,6 +32,55 @@ pub fn basename(path: &str) -> String {
     } else {
         name
     }
+}
+
+/// The filename a file response's Resource metadata carries: the msgpack map
+/// `{"name": <str or bin>}` NomadNet's `serve_file` sends. Returns the raw,
+/// UNSANITISED name (a bin name is decoded as lossy UTF-8), or `None` when the
+/// blob is not a map, has no `name` key, or the name is empty. Sanitisation is
+/// deliberately left to the caller (see [`choose_name`]) so this parse is
+/// testable in isolation.
+pub fn parse_metadata_name(metadata: &[u8]) -> Option<String> {
+    let mut cursor = std::io::Cursor::new(metadata);
+    let value = rmpv::decode::read_value(&mut cursor).ok()?;
+    let rmpv::Value::Map(entries) = value else {
+        return None;
+    };
+    let name = entries.iter().find_map(|(key, value)| {
+        let is_name = match key {
+            rmpv::Value::String(s) => s.as_bytes() == b"name",
+            rmpv::Value::Binary(b) => b.as_slice() == b"name",
+            _ => false,
+        };
+        if !is_name {
+            return None;
+        }
+        match value {
+            rmpv::Value::String(s) => Some(String::from_utf8_lossy(s.as_bytes()).into_owned()),
+            rmpv::Value::Binary(b) => Some(String::from_utf8_lossy(b).into_owned()),
+            _ => None,
+        }
+    })?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// The filename a download is saved under: the server-sent name when it
+/// survives sanitisation, else the URL path basename.
+///
+/// The server name is untrusted, so it is run through [`basename`], which
+/// strips path separators and maps `..`/`.`/empty to [`FALLBACK_NAME`]; a name
+/// like `../../etc/passwd` or `a/b/c` can therefore never write outside the
+/// download directory. A server name that sanitises to the bare fallback is
+/// discarded in favour of the URL basename.
+pub fn choose_name(server_name: Option<&str>, url_path: &str) -> String {
+    server_name
+        .map(basename)
+        .filter(|name| name != FALLBACK_NAME)
+        .unwrap_or_else(|| basename(url_path))
 }
 
 /// Resolve where a download lands for the CLI's `--output`.
@@ -125,6 +175,79 @@ mod tests {
         assert_eq!(basename("/file/"), FALLBACK_NAME);
         assert_eq!(basename(""), FALLBACK_NAME);
         assert_eq!(basename("/file/."), FALLBACK_NAME);
+    }
+
+    /// Msgpack-encode a single-entry map `{key: value}`.
+    fn msgpack_map(key: rmpv::Value, value: rmpv::Value) -> Vec<u8> {
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &rmpv::Value::Map(vec![(key, value)]))
+            .expect("encode metadata map");
+        buf
+    }
+
+    #[test]
+    fn parse_metadata_name_reads_a_str_name() {
+        let blob = msgpack_map("name".into(), "report.pdf".into());
+        assert_eq!(parse_metadata_name(&blob).as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn parse_metadata_name_reads_a_bin_name() {
+        // NomadNet may pack the name as bytes; it decodes as UTF-8.
+        let blob = msgpack_map("name".into(), rmpv::Value::Binary(b"report.pdf".to_vec()));
+        assert_eq!(parse_metadata_name(&blob).as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn parse_metadata_name_rejects_a_map_without_name() {
+        let blob = msgpack_map("size".into(), rmpv::Value::from(42));
+        assert_eq!(parse_metadata_name(&blob), None);
+    }
+
+    #[test]
+    fn parse_metadata_name_rejects_a_non_map() {
+        let mut blob = Vec::new();
+        rmpv::encode::write_value(&mut blob, &rmpv::Value::from(42)).expect("encode int");
+        assert_eq!(parse_metadata_name(&blob), None);
+    }
+
+    #[test]
+    fn parse_metadata_name_rejects_an_empty_name() {
+        let blob = msgpack_map("name".into(), "".into());
+        assert_eq!(parse_metadata_name(&blob), None);
+    }
+
+    #[test]
+    fn parse_metadata_name_does_not_sanitise() {
+        // Sanitisation is choose_name's job; the parse returns the raw name.
+        let blob = msgpack_map("name".into(), "../../etc/passwd".into());
+        assert_eq!(
+            parse_metadata_name(&blob).as_deref(),
+            Some("../../etc/passwd")
+        );
+    }
+
+    #[test]
+    fn choose_name_prefers_the_server_name() {
+        assert_eq!(choose_name(Some("report.pdf"), "/file/x.bin"), "report.pdf");
+    }
+
+    #[test]
+    fn choose_name_sanitises_the_server_name() {
+        // A hostile server name is reduced to its basename, so it can never
+        // write outside the download directory.
+        assert_eq!(choose_name(Some("a/b/evil.sh"), "/file/x.bin"), "evil.sh");
+        assert_eq!(
+            choose_name(Some("../../etc/passwd"), "/file/x.bin"),
+            "passwd"
+        );
+    }
+
+    #[test]
+    fn choose_name_falls_back_to_the_url_basename() {
+        assert_eq!(choose_name(None, "/file/x.bin"), "x.bin");
+        // A server name that sanitises to the bare fallback is discarded.
+        assert_eq!(choose_name(Some(".."), "/file/x.bin"), "x.bin");
     }
 
     #[test]

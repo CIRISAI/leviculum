@@ -1829,6 +1829,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id,
             request_id,
             response_data: response_data.to_vec(),
+            metadata: None,
         });
     }
 
@@ -2321,13 +2322,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                         if let Some((request_id, unwrapped)) = response_delivery {
                             self.pending_requests.remove(&request_id);
-                            // A file response's raw data IS the response value;
-                            // a wrapped one delivers the unpacked value.
-                            let response_data = unwrapped.unwrap_or(data);
+                            // A file response's raw data IS the response value
+                            // and its resource metadata (the `{"name": ...}`
+                            // blob) rides along; a wrapped one delivers the
+                            // unpacked value and has no metadata.
+                            let (response_data, metadata) = match unwrapped {
+                                Some(unwrapped) => (unwrapped, None),
+                                None => (data, metadata),
+                            };
                             self.events.push(NodeEvent::ResponseReceived {
                                 link_id,
                                 request_id,
                                 response_data,
+                                metadata,
                             });
                         } else {
                             self.events.push(NodeEvent::ResourceCompleted {

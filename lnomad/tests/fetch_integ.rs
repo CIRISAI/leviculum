@@ -138,14 +138,15 @@ async fn reply_loop(node: ReticulumNode, mut events: leviculum_std::EventReceive
         {
             // File targets are served exactly as NomadNet's `serve_file` sends
             // them: a response Resource of the RAW bytes (no msgpack wrapping)
-            // plus a msgpack `{"name": <basename>}` metadata map.
+            // plus a msgpack `{"name": ...}` metadata map. hello.bin's metadata
+            // name deliberately DIFFERS from the URL basename, so the tests
+            // prove the server-sent name wins over the URL-derived one.
             let file = match path.as_str() {
-                "/file/hello.bin" => Some(FILE_PAYLOAD.to_vec()),
-                "/file/big.bin" => Some(big_file()),
+                "/file/hello.bin" => Some((FILE_PAYLOAD.to_vec(), "greeting.txt")),
+                "/file/big.bin" => Some((big_file(), "big.bin")),
                 _ => None,
             };
-            if let Some(bytes) = file {
-                let name = path.rsplit('/').next().unwrap_or("file");
+            if let Some((bytes, name)) = file {
                 let mut metadata = Vec::new();
                 rmpv::encode::write_value(
                     &mut metadata,
@@ -438,17 +439,24 @@ async fn download_file_returns_raw_bytes_verbatim() {
     let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
 
     // The payload is deliberately NOT valid msgpack (leading 0xc1): a verbatim
-    // round trip proves download_file skips the page decode entirely.
+    // round trip proves download_file skips the page decode entirely. The
+    // responder's metadata names the file greeting.txt, NOT the URL basename.
     let target = parse_url(&format!("{dest_hex}:/file/hello.bin"), None).expect("parse url");
     assert!(target.is_file, "a /file/ path must be flagged as a file");
-    let bytes = session
+    let (bytes, server_name) = session
         .download_file(&target, Duration::from_secs(20))
         .await
         .expect("download small file");
     assert_eq!(bytes, FILE_PAYLOAD, "file bytes must arrive verbatim");
+    assert_eq!(
+        server_name.as_deref(),
+        Some("greeting.txt"),
+        "download_file must surface the server-sent metadata name"
+    );
 
     // End-to-end save path as `lnomad --print --output <dir>` runs it: the file
-    // lands in the directory under its URL basename and the save line names it.
+    // lands in the directory under the server-sent name (not the URL basename)
+    // and the save line names it.
     let dir = tempfile::tempdir().expect("download dir");
     let mut out: Vec<u8> = Vec::new();
     lnomad::browser::download_once(
@@ -460,7 +468,11 @@ async fn download_file_returns_raw_bytes_verbatim() {
     )
     .await
     .expect("download to dir");
-    let saved = dir.path().join("hello.bin");
+    assert!(
+        !dir.path().join("hello.bin").exists(),
+        "the URL basename must not be used when the server sent a name"
+    );
+    let saved = dir.path().join("greeting.txt");
     assert_eq!(
         std::fs::read(&saved).expect("saved file readable"),
         FILE_PAYLOAD,
@@ -472,7 +484,7 @@ async fn download_file_returns_raw_bytes_verbatim() {
         "save line must report the byte count: {line:?}"
     );
     assert!(
-        line.trim_end().ends_with("hello.bin"),
+        line.trim_end().ends_with("greeting.txt"),
         "save line must name the saved path: {line:?}"
     );
 
@@ -488,7 +500,7 @@ async fn download_large_file_over_resource_path() {
     // Well past one packet: the response arrives as an `is_response` Resource,
     // and the raw bytes must still round-trip exactly.
     let target = parse_url(&format!("{dest_hex}:/file/big.bin"), None).expect("parse url");
-    let bytes = session
+    let (bytes, server_name) = session
         .download_file(&target, Duration::from_secs(30))
         .await
         .expect("download large file");
@@ -496,6 +508,11 @@ async fn download_large_file_over_resource_path() {
         bytes,
         big_file(),
         "large file bytes must arrive verbatim over the Resource path"
+    );
+    assert_eq!(
+        server_name.as_deref(),
+        Some("big.bin"),
+        "the metadata name must survive the Resource path"
     );
 
     session.close().await.expect("close session");

@@ -285,6 +285,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
             link_id,
             request_id,
             response_data,
+            ..
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESPONSE_RECEIVED, is_control);
             e.link_id = Some(*link_id.as_bytes());

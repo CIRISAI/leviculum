@@ -354,10 +354,12 @@ pub async fn print_once<W: Write>(
 /// Download a `/file/` target, save it to disk, and print the save line
 /// (`saved <bytes> bytes to <abspath>`).
 ///
-/// `output` is the CLI's `--output`: an existing directory (or a path spelled
-/// with a trailing `/`) receives the file under its URL basename, any other
-/// path names the exact file to write (overwriting it), and `None` saves the
-/// basename into the current working directory. A computed (non-explicit)
+/// The filename prefers the sanitised server-sent metadata name, falling back
+/// to the URL basename (see [`crate::download::choose_name`]). `output` is the
+/// CLI's `--output`: an existing directory (or a path spelled with a trailing
+/// `/`) receives the file under that name, any other path names the exact file
+/// to write (overwriting it), and `None` saves the name into the current
+/// working directory. A computed (non-explicit)
 /// path that already exists is de-duplicated with ` (1)`, ` (2)`, ... before
 /// the extension, so nothing is overwritten silently.
 pub async fn download_once<W: Write>(
@@ -367,8 +369,8 @@ pub async fn download_once<W: Write>(
     output: Option<&Path>,
     timeout: Duration,
 ) -> Result<(), FetchError> {
-    let bytes = session.download_file(target, timeout).await?;
-    let name = crate::download::basename(&target.path);
+    let (bytes, server_name) = session.download_file(target, timeout).await?;
+    let name = crate::download::choose_name(server_name.as_deref(), &target.path);
     let cwd = std::env::current_dir().map_err(|e| FetchError::Save(e.to_string()))?;
     let (path, explicit) = crate::download::resolve_output(output, &name, &cwd);
     let path = if explicit {

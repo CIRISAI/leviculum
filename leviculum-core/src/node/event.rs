@@ -302,6 +302,9 @@ pub enum NodeEvent {
         request_id: [u8; TRUNCATED_HASHBYTES],
         /// Raw msgpack-encoded response data
         response_data: Vec<u8>,
+        /// Resource metadata from a file response (the msgpack
+        /// `{"name": ...}` blob), `None` for non-file responses.
+        metadata: Option<Vec<u8>>,
     },
 
     /// Pending request timed out without receiving a response.

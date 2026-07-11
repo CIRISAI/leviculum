@@ -245,20 +245,31 @@ impl Session {
         decode_page(&raw)
     }
 
-    /// Download a `/file/` target, returning the raw response bytes verbatim.
+    /// Download a `/file/` target, returning the raw response bytes verbatim
+    /// plus the sanitised filename the server sent, if any.
     ///
     /// NomadNet serves a file as a file object (`Node.serve_file`), which RNS
     /// transfers as a Resource of the raw file bytes — NOT the msgpack `bytes`
     /// value a page response is packed into. So unlike [`fetch`](Self::fetch)
     /// there is no [`decode_page`] step: the raw response IS the file. The
-    /// server's `{"name": ...}` Resource metadata is not consumed; callers
-    /// derive the filename from the URL path instead.
+    /// server's `{"name": ...}` Resource metadata yields the second tuple
+    /// element: the name run through [`crate::download::basename`] (the server
+    /// is untrusted, so path separators and dot-only names never survive), or
+    /// `None` when the response carried no metadata or no usable name. Callers
+    /// pick the filename via [`crate::download::choose_name`], which falls back
+    /// to the URL path basename.
     pub async fn download_file(
         &mut self,
         target: &Target,
         timeout: Duration,
-    ) -> Result<Vec<u8>, FetchError> {
-        self.request(target, timeout).await
+    ) -> Result<(Vec<u8>, Option<String>), FetchError> {
+        let (bytes, metadata) = self.request_with_metadata(target, timeout).await?;
+        let name = metadata
+            .as_deref()
+            .and_then(crate::download::parse_metadata_name)
+            .map(|raw| crate::download::basename(&raw))
+            .filter(|name| name != crate::download::FALLBACK_NAME);
+        Ok((bytes, name))
     }
 
     /// Issue the request and return the raw response value unchanged.
@@ -274,6 +285,19 @@ impl Session {
         target: &Target,
         timeout: Duration,
     ) -> Result<Vec<u8>, FetchError> {
+        self.request_with_metadata(target, timeout)
+            .await
+            .map(|(data, _)| data)
+    }
+
+    /// [`request`](Self::request) plus the response's Resource metadata blob
+    /// (the msgpack `{"name": ...}` map a file response carries), `None` for
+    /// single-packet and wrapped responses.
+    async fn request_with_metadata(
+        &mut self,
+        target: &Target,
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), FetchError> {
         let link_id = self.ensure_link(&target.dest_hash, timeout).await?;
         let data = encode_fields(&target.fields)?;
         let timeout_ms = timeout.as_millis() as u64;
@@ -487,13 +511,14 @@ impl Session {
 
     /// Wait for the `ResponseReceived` matching `request_id`, mapping a
     /// `RequestTimedOut` to [`FetchError::Timeout`] and a link loss to
-    /// [`FetchError::LinkFailed`].
+    /// [`FetchError::LinkFailed`]. Returns the response value plus its
+    /// Resource metadata blob (`None` except for file responses).
     async fn await_response(
         &mut self,
         request_id: [u8; 16],
         link_id: leviculum_std::LinkId,
         timeout: Duration,
-    ) -> Result<Vec<u8>, FetchError> {
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), FetchError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let event = match tokio::time::timeout_at(deadline, self.events.recv()).await {
@@ -505,8 +530,9 @@ impl Session {
                 NodeEvent::ResponseReceived {
                     request_id: id,
                     response_data,
+                    metadata,
                     ..
-                } if id == request_id => return Ok(response_data),
+                } if id == request_id => return Ok((response_data, metadata)),
                 NodeEvent::RequestTimedOut { request_id: id, .. } if id == request_id => {
                     return Err(FetchError::Timeout)
                 }

@@ -68,9 +68,10 @@ struct Args {
     timeout: u64,
 
     /// Where a `/file/` download is saved: an existing directory (or a path
-    /// ending in `/`) receives the file under its URL basename, any other path
-    /// names the exact file to write. Default: the basename in the current
-    /// working directory (existing files get ` (1)`, ` (2)`, ... appended).
+    /// ending in `/`) receives the file under the server-sent name (else the
+    /// URL basename), any other path names the exact file to write. Default:
+    /// that name in the current working directory (existing files get ` (1)`,
+    /// ` (2)`, ... appended).
     #[arg(long)]
     output: Option<PathBuf>,
 

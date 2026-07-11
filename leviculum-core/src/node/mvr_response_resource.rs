@@ -260,6 +260,7 @@ fn run_request_file_response() -> (Vec<NodeEvent>, [u8; TRUNCATED_HASHBYTES], Ve
 
 /// The initiator must observe a `ResponseReceived` whose `request_id` matches
 /// the request and whose `response_data` is the exact value the responder sent.
+/// A wrapped (non-file) response carries no metadata.
 ///
 /// RED before the fix: the default-AcceptNone initiator rejects the response
 /// ADV, so it sees neither `ResponseReceived` nor `ResourceCompleted`.
@@ -271,15 +272,20 @@ fn is_response_resource_surfaces_as_response_received() {
         NodeEvent::ResponseReceived {
             request_id: rid,
             response_data,
+            metadata,
             ..
-        } if *rid == request_id => Some(response_data.clone()),
+        } if *rid == request_id => Some((response_data.clone(), metadata.clone())),
         _ => None,
     });
 
+    let (response_data, metadata) = delivered.expect("initiator must get ResponseReceived");
     assert_eq!(
-        delivered.as_deref(),
-        Some(response_value.as_slice()),
+        response_data, response_value,
         "initiator must get ResponseReceived with the exact response value.\nevents: {events:?}"
+    );
+    assert_eq!(
+        metadata, None,
+        "a wrapped response must carry no metadata.\nevents: {events:?}"
     );
 }
 
@@ -307,7 +313,8 @@ fn is_response_resource_does_not_emit_generic_resource_completed() {
 }
 
 /// A raw file response (metadata + unwrapped data, Python's `has_metadata`
-/// branch) must surface as `ResponseReceived` carrying the file bytes verbatim.
+/// branch) must surface as `ResponseReceived` carrying the file bytes verbatim
+/// plus the resource metadata blob the responder sent.
 #[test]
 fn file_response_resource_delivers_raw_bytes() {
     let (events, request_id, data) = run_request_file_response();
@@ -316,15 +323,21 @@ fn file_response_resource_delivers_raw_bytes() {
         NodeEvent::ResponseReceived {
             request_id: rid,
             response_data,
+            metadata,
             ..
-        } if *rid == request_id => Some(response_data.clone()),
+        } if *rid == request_id => Some((response_data.clone(), metadata.clone())),
         _ => None,
     });
 
+    let (response_data, metadata) = delivered.expect("initiator must get ResponseReceived");
     assert_eq!(
-        delivered.as_deref(),
-        Some(data.as_slice()),
+        response_data, data,
         "initiator must get ResponseReceived with the exact raw file bytes.\nevents: {events:?}"
+    );
+    assert_eq!(
+        metadata,
+        Some(file_metadata()),
+        "a file response must carry the sent metadata blob.\nevents: {events:?}"
     );
 }
 

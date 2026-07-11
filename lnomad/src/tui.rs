@@ -4979,8 +4979,8 @@ fn spawn_download(
         let fetched = guard.download_file(&target, timeout).await;
         drop(guard);
         let result = match fetched {
-            Ok(bytes) => {
-                let name = crate::download::basename(&target.path);
+            Ok((bytes, server_name)) => {
+                let name = crate::download::choose_name(server_name.as_deref(), &target.path);
                 match crate::download::download_dir() {
                     Some(dir) => match crate::download::save_to_dir(&dir, &name, &bytes) {
                         Ok(path) => LoadResult::Downloaded {
