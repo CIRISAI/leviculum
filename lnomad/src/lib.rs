@@ -29,6 +29,7 @@ pub mod browser;
 pub mod cli;
 pub mod color;
 pub mod discovery;
+pub mod download;
 pub mod fetch;
 pub mod identify;
 pub mod identity;

@@ -1148,6 +1148,86 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok((resource_hash, self.process_events_and_actions()))
     }
 
+    /// Send a file-style request response: a response Resource carrying the
+    /// RAW response bytes plus a msgpack-encoded metadata value, with NO
+    /// `[request_id, response]` wrapper.
+    ///
+    /// Mirrors Python's file-response path (`Link.py` `handle_request`): a
+    /// request handler that returns a file object is sent as
+    /// `RNS.Resource(file_handle, self, metadata=metadata,
+    /// request_id=request_id, is_response=True)` — NomadNet's `serve_file`
+    /// serves downloads this way, with `{"name": <basename>}` metadata. The
+    /// receiver recognises the metadata block on an `is_response` resource and
+    /// delivers the raw data to its pending request (Python
+    /// `response_resource_concluded`, the `has_metadata` branch).
+    ///
+    /// `metadata` is mandatory — its presence is what distinguishes a raw file
+    /// response from a wrapped one on the wire — and must be msgpack-encoded
+    /// by the caller (Python packs it with `umsgpack.packb`).
+    pub fn send_file_response(
+        &mut self,
+        link_id: &LinkId,
+        request_id: &[u8; TRUNCATED_HASHBYTES],
+        data: &[u8],
+        metadata: &[u8],
+    ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::outgoing::OutgoingResource;
+        use crate::resource::ResourceError;
+
+        let now_ms = self.transport.clock().now_ms();
+
+        // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
+        // link) so every links.get/get_mut and the route use the wire id.
+        let link_id = &self.resolve_link_id(link_id);
+
+        let link = self
+            .links
+            .get(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+
+        if link.has_outgoing_resource() {
+            return Err(ResourceError::TransferInProgress);
+        }
+
+        let outgoing = OutgoingResource::new_response(
+            data,
+            Some(metadata),
+            Some(request_id),
+            link,
+            true,
+            &mut self.rng,
+            now_ms,
+        )?;
+        let resource_hash = *outgoing.resource_hash();
+        let adv_bytes = outgoing.adv_packet().to_vec();
+
+        let link = self
+            .links
+            .get_mut(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.set_outgoing_resource(outgoing);
+
+        match link.build_data_packet_with_context(
+            &adv_bytes,
+            PacketContext::ResourceAdv,
+            &mut self.rng,
+        ) {
+            Ok(pkt) => {
+                self.route_link_packet(link_id, &pkt);
+            }
+            Err(e) => {
+                if let Some(link) = self.links.get_mut(link_id) {
+                    link.clear_outgoing_resource();
+                }
+                crate::tracing::debug!("Failed to build file response ADV packet: {e}");
+                return Err(ResourceError::InvalidRequest);
+            }
+        }
+
+        Ok((resource_hash, self.process_events_and_actions()))
+    }
+
     /// Accept a pending resource advertisement on a link.
     ///
     /// Call this after receiving a `NodeEvent::ResourceAdvertised` event.

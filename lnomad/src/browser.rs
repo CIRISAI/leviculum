@@ -9,6 +9,7 @@
 //! [`crate::url::parse_url`], the single source of truth for URL grammar.
 
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::time::Duration;
 
 use leviculum_micron::MicronDocument;
@@ -350,6 +351,42 @@ pub async fn print_once<W: Write>(
         .map(|_| ())
 }
 
+/// Download a `/file/` target, save it to disk, and print the save line
+/// (`saved <bytes> bytes to <abspath>`).
+///
+/// `output` is the CLI's `--output`: an existing directory (or a path spelled
+/// with a trailing `/`) receives the file under its URL basename, any other
+/// path names the exact file to write (overwriting it), and `None` saves the
+/// basename into the current working directory. A computed (non-explicit)
+/// path that already exists is de-duplicated with ` (1)`, ` (2)`, ... before
+/// the extension, so nothing is overwritten silently.
+pub async fn download_once<W: Write>(
+    out: &mut W,
+    session: &mut Session,
+    target: &Target,
+    output: Option<&Path>,
+    timeout: Duration,
+) -> Result<(), FetchError> {
+    let bytes = session.download_file(target, timeout).await?;
+    let name = crate::download::basename(&target.path);
+    let cwd = std::env::current_dir().map_err(|e| FetchError::Save(e.to_string()))?;
+    let (path, explicit) = crate::download::resolve_output(output, &name, &cwd);
+    let path = if explicit {
+        path
+    } else {
+        crate::download::dedup_path(&path)
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| FetchError::Save(e.to_string()))?;
+        }
+    }
+    std::fs::write(&path, &bytes).map_err(|e| FetchError::Save(e.to_string()))?;
+    let shown = std::path::absolute(&path).unwrap_or(path);
+    let _ = writeln!(out, "saved {} bytes to {}", bytes.len(), shown.display());
+    Ok(())
+}
+
 /// Run node discovery for `duration`, then print the accumulated list once and
 /// return. Used for `--discover --print` and non-tty stdout, so a scripted or
 /// piped invocation never blocks on a prompt.
@@ -445,7 +482,6 @@ fn error_message(err: &FetchError) -> String {
         FetchError::Timeout => "request timed out".to_string(),
         FetchError::NotFound => "page not found on destination".to_string(),
         FetchError::LinkFailed => "link to destination failed".to_string(),
-        FetchError::UnsupportedFile => "file downloads are not supported yet".to_string(),
         other => other.to_string(),
     }
 }
@@ -496,6 +532,15 @@ pub async fn run<R: BufRead, W: Write>(
                         continue;
                     }
                 };
+                // A /file/ link downloads (to the working directory) rather
+                // than navigating: the current page and history stay put.
+                if target.is_file {
+                    if let Err(err) = download_once(out, session, &target, None, opts.timeout).await
+                    {
+                        writeln!(out, "error: {}", error_message(&err))?;
+                    }
+                    continue;
+                }
                 nav.visit(target);
                 links = show_current(out, session, &nav, opts, anchor.as_deref()).await;
             }
@@ -517,6 +562,13 @@ pub async fn run<R: BufRead, W: Write>(
                         continue;
                     }
                 };
+                if target.is_file {
+                    if let Err(err) = download_once(out, session, &target, None, opts.timeout).await
+                    {
+                        writeln!(out, "error: {}", error_message(&err))?;
+                    }
+                    continue;
+                }
                 nav.visit(target);
                 links = show_current(out, session, &nav, opts, None).await;
             }

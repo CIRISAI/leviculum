@@ -670,7 +670,8 @@ impl IncomingResource {
         self.total_segments
     }
 
-    #[allow(dead_code)] // Resource accessor API — see Codeberg issues #27/#28
+    /// The request id carried in the advertisement (`is_response` transfers),
+    /// correlating a raw file response to its pending request.
     pub(crate) fn request_id(&self) -> Option<&[u8]> {
         self.request_id.as_deref()
     }

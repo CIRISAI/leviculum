@@ -89,6 +89,7 @@ fn make_responder() -> (EndpointNode, crate::DestinationHash, [u8; 32]) {
     let dest_hash = *dest.hash();
     node.register_destination(dest);
     node.register_request_handler(dest_hash, "/page/large.mu", RequestPolicy::AllowAll);
+    node.register_request_handler(dest_hash, "/file/data.bin", RequestPolicy::AllowAll);
     (node, dest_hash, signing_key)
 }
 
@@ -142,21 +143,26 @@ fn large_response_value() -> Vec<u8> {
     v
 }
 
-/// Full request -> response-resource -> ResponseReceived round trip. Returns
-/// every event the initiator observed and the request_id / response value used.
-fn run_request_response_resource() -> (Vec<NodeEvent>, [u8; TRUNCATED_HASHBYTES], Vec<u8>) {
+/// Full request -> response-resource -> ResponseReceived round trip, with the
+/// responder's answer produced by `respond` (a wrapped response resource, or a
+/// raw file response). Returns every event the initiator observed and the
+/// request_id.
+fn run_request_roundtrip<F>(path: &str, respond: F) -> (Vec<NodeEvent>, [u8; TRUNCATED_HASHBYTES])
+where
+    F: FnOnce(&mut EndpointNode, &LinkId, &[u8; TRUNCATED_HASHBYTES]) -> TickOutput,
+{
     let (mut initiator, mut responder, i_iface, r_iface, caller_link_id) = establish();
 
-    // Initiator issues the page request. The initiator link keeps the DEFAULT
+    // Initiator issues the request. The initiator link keeps the DEFAULT
     // AcceptNone strategy: the response resource must ride the is_response
     // bypass, not a broad accept-all opt-in.
     let (request_id, out) = initiator
-        .send_request(&caller_link_id, "/page/large.mu", None, None)
+        .send_request(&caller_link_id, path, None, None)
         .expect("send_request on active link");
     let req_pkts = action_data(&out);
     let mut init_events: Vec<NodeEvent> = out.events;
 
-    // Responder dispatches the request and answers with a > MDU response resource.
+    // Responder dispatches the request and answers with a response resource.
     let mut resp_out_events = Vec::new();
     let mut to_initiator = Vec::new();
     for pkt in req_pkts {
@@ -171,10 +177,7 @@ fn run_request_response_resource() -> (Vec<NodeEvent>, [u8; TRUNCATED_HASHBYTES]
         "responder request_id must match the initiator's"
     );
 
-    let response_value = large_response_value();
-    let (_res_hash, adv_out) = responder
-        .send_response_resource(&resp_link, &resp_request_id, &response_value)
-        .expect("send_response_resource must advertise");
+    let adv_out = respond(&mut responder, &resp_link, &resp_request_id);
     to_initiator.extend(action_data(&adv_out));
 
     // Bounce every packet between the two nodes until the transfer quiesces.
@@ -200,7 +203,55 @@ fn run_request_response_resource() -> (Vec<NodeEvent>, [u8; TRUNCATED_HASHBYTES]
         to_initiator.extend(next_to_initiator);
     }
 
-    (init_events, request_id, response_value)
+    (init_events, request_id)
+}
+
+/// The wrapped (`[request_id, response]`) round trip the page path uses.
+fn run_request_response_resource() -> (Vec<NodeEvent>, [u8; TRUNCATED_HASHBYTES], Vec<u8>) {
+    let response_value = large_response_value();
+    let sent = response_value.clone();
+    let (events, request_id) =
+        run_request_roundtrip("/page/large.mu", move |responder, link, rid| {
+            let (_res_hash, out) = responder
+                .send_response_resource(link, rid, &sent)
+                .expect("send_response_resource must advertise");
+            out
+        });
+    (events, request_id, response_value)
+}
+
+/// Raw file bytes as NomadNet's `serve_file` sends them. Deliberately NOT a
+/// valid msgpack value (leading 0xc1, the one byte msgpack never uses): the
+/// receiver must deliver them verbatim, without any unwrap attempt.
+fn file_bytes() -> Vec<u8> {
+    core::iter::once(0xc1)
+        .chain((0..3000usize).map(|i| (i % 251) as u8))
+        .collect()
+}
+
+/// The `{"name": "data.bin"}` metadata map NomadNet sends with a file
+/// response, hand-encoded as msgpack (fixmap(1) + fixstr + fixstr).
+fn file_metadata() -> Vec<u8> {
+    let mut m = std::vec![0x81, 0xa4];
+    m.extend_from_slice(b"name");
+    m.push(0xa8);
+    m.extend_from_slice(b"data.bin");
+    m
+}
+
+/// The raw file-response round trip (`send_file_response`: raw data + metadata,
+/// no wrapper).
+fn run_request_file_response() -> (Vec<NodeEvent>, [u8; TRUNCATED_HASHBYTES], Vec<u8>) {
+    let data = file_bytes();
+    let sent = data.clone();
+    let (events, request_id) =
+        run_request_roundtrip("/file/data.bin", move |responder, link, rid| {
+            let (_res_hash, out) = responder
+                .send_file_response(link, rid, &sent, &file_metadata())
+                .expect("send_file_response must advertise");
+            out
+        });
+    (events, request_id, data)
 }
 
 // ----------------------------------------------------------------------------
@@ -252,5 +303,49 @@ fn is_response_resource_does_not_emit_generic_resource_completed() {
     assert!(
         !leaked,
         "an is_response resource must not surface a receiver-side ResourceCompleted.\nevents: {events:?}"
+    );
+}
+
+/// A raw file response (metadata + unwrapped data, Python's `has_metadata`
+/// branch) must surface as `ResponseReceived` carrying the file bytes verbatim.
+#[test]
+fn file_response_resource_delivers_raw_bytes() {
+    let (events, request_id, data) = run_request_file_response();
+
+    let delivered = events.iter().find_map(|e| match e {
+        NodeEvent::ResponseReceived {
+            request_id: rid,
+            response_data,
+            ..
+        } if *rid == request_id => Some(response_data.clone()),
+        _ => None,
+    });
+
+    assert_eq!(
+        delivered.as_deref(),
+        Some(data.as_slice()),
+        "initiator must get ResponseReceived with the exact raw file bytes.\nevents: {events:?}"
+    );
+}
+
+/// A file response is delivered only through the request path, exactly like a
+/// wrapped response: no generic receiver-side `ResourceCompleted` leaks.
+#[test]
+fn file_response_resource_does_not_emit_generic_resource_completed() {
+    let (events, _request_id, _data) = run_request_file_response();
+
+    let leaked = events.iter().any(|e| {
+        matches!(
+            e,
+            NodeEvent::ResourceCompleted {
+                is_sender: false,
+                ..
+            }
+        )
+    });
+
+    assert!(
+        !leaked,
+        "a file response resource must not surface a receiver-side ResourceCompleted.\nevents: {events:?}"
     );
 }

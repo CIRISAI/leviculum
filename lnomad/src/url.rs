@@ -38,7 +38,9 @@ pub struct Target {
     /// these to the page handler as `var_*` request variables.
     pub fields: Vec<(String, String)>,
     /// Whether the path targets a `/file/` download rather than a `/page/`.
-    /// Only page fetches are implemented; [`crate::fetch`] rejects file targets.
+    /// A file target is downloaded to disk
+    /// ([`Session::download_file`](crate::fetch::Session::download_file))
+    /// instead of being rendered as a page.
     pub is_file: bool,
 }
 

@@ -449,6 +449,21 @@ impl Node {
             .await
     }
 
+    /// Send a file-style response to a received request: a response Resource of
+    /// the RAW bytes plus msgpack-encoded `metadata` (no `[request_id,
+    /// response]` wrapper), the wire form NomadNet's `serve_file` uses.
+    pub async fn send_file_response(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        data: &[u8],
+        metadata: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .send_file_response(link_id, request_id, data, metadata)
+            .await
+    }
+
     /// Send a resource over an established link, returning the resource hash.
     /// `metadata`, if present, must be msgpack-encoded by the caller.
     pub async fn send_resource(

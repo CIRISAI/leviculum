@@ -481,7 +481,7 @@ pub struct Hint {
 /// from the middle discards the forward branch) and pushes. [`back`](History::back)
 /// and [`forward`](History::forward) move the cursor and return the target now
 /// under it, so the shell can re-fetch it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct History {
     /// Visited targets in order.
     pub stack: Vec<Target>,
@@ -574,6 +574,11 @@ pub struct Pending {
 pub enum Effect {
     /// Start (or restart) a fetch for this target.
     Navigate(Target),
+    /// Download this `/file/` target: the IO shell fetches the raw bytes,
+    /// saves them into the download directory, and folds the outcome back as
+    /// [`AppEvent::DownloadDone`] / [`AppEvent::DownloadFailed`]. A download is
+    /// not a navigation: the page and history stay put.
+    Download(Target),
     /// Open this external URL in the user's default handler (the IO shell runs
     /// `open::that`). Only whitelisted safe schemes ever reach this effect.
     OpenExternal(String),
@@ -655,6 +660,10 @@ pub struct Model {
     pub current_dest: Option<[u8; 16]>,
     /// A navigation in flight, or `None` when idle. `Some` means "loading".
     pub pending: Option<Pending>,
+    /// A file download in flight: the filename being fetched, or `None` when
+    /// idle. Drives the loading indicator like [`pending`](Model::pending)
+    /// does, but its completion raises a toast instead of replacing the page.
+    pub download: Option<String>,
     /// The `#anchor` the in-flight navigation should scroll to once its page
     /// loads, or `None`. Kept beside `pending` so the anchor survives the async
     /// round-trip and is resolved against the freshly-loaded page's lines.
@@ -876,9 +885,9 @@ impl Model {
         content_height(self.size.1)
     }
 
-    /// Whether a fetch is currently in flight.
+    /// Whether a fetch or a file download is currently in flight.
     pub fn is_loading(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.download.is_some()
     }
 
     /// Show a transient toast, stamped with the current tick so it can expire.
@@ -1121,6 +1130,17 @@ pub enum AppEvent {
     },
     /// A navigation failed with a human-readable message.
     LoadFailed(String),
+    /// A file download completed and was saved to disk.
+    DownloadDone {
+        /// The filename it was saved as.
+        name: String,
+        /// The number of bytes saved.
+        bytes: usize,
+        /// The directory it was saved into, for the toast.
+        dir: String,
+    },
+    /// A file download failed with a human-readable message.
+    DownloadFailed(String),
     /// A NomadNet node announce was seen on the session's event stream; fold it
     /// into the model's discovered-node registry.
     NodeDiscovered(DiscoveredNode),
@@ -1148,6 +1168,19 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::LoadFailed(msg) => {
             model.pending = None;
+            model.set_toast(ToastKind::Error, msg);
+            Vec::new()
+        }
+        AppEvent::DownloadDone { name, bytes, dir } => {
+            model.download = None;
+            model.set_toast(
+                ToastKind::Info,
+                format!("downloaded {name} ({bytes} bytes) to {dir}"),
+            );
+            Vec::new()
+        }
+        AppEvent::DownloadFailed(msg) => {
+            model.download = None;
             model.set_toast(ToastKind::Error, msg);
             Vec::new()
         }
@@ -1547,10 +1580,12 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
         return vec![Effect::Quit];
     }
 
-    // Cancel an in-flight fetch (Esc or Ctrl-g), returning to the current page.
+    // Cancel an in-flight fetch or download (Esc or Ctrl-g), returning to the
+    // current page.
     if model.is_loading() && (key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g')))
     {
         model.pending = None;
+        model.download = None;
         model.set_toast(ToastKind::Info, "cancelled");
         return vec![Effect::Cancel];
     }
@@ -2287,6 +2322,12 @@ fn begin_navigation(
     action: HistoryAction,
     anchor: Option<String>,
 ) -> Vec<Effect> {
+    // A /file/ target is a download, not a navigation: the shown page and the
+    // history stay put while the IO shell fetches and saves the bytes.
+    if target.is_file {
+        return begin_download(model, target);
+    }
+
     // Remember where the reader was on the page being left, so a later revisit
     // of it restores the scroll position.
     model.stash_scroll();
@@ -2303,7 +2344,20 @@ fn begin_navigation(
         action,
     });
     model.pending_anchor = anchor;
+    // The fetch supersedes any download in flight (they share the IO slot).
+    model.download = None;
     vec![Effect::Navigate(target)]
+}
+
+/// Start a file download for `target`: mark it in flight (which shows the
+/// loading indicator) and hand the fetch+save to the IO shell. Supersedes any
+/// fetch or download already in flight, exactly as starting a fetch does.
+fn begin_download(model: &mut Model, target: Target) -> Vec<Effect> {
+    model.dismiss_toast();
+    model.pending = None;
+    model.pending_anchor = None;
+    model.download = Some(crate::download::basename(&target.path));
+    vec![Effect::Download(target)]
 }
 
 /// Show `target` from its cached parsed document: relayout at the current width/
@@ -2322,6 +2376,7 @@ fn load_from_cache(
     let was_loading = model.is_loading();
     model.pending = None;
     model.pending_anchor = None;
+    model.download = None;
 
     model.doc = entry.doc;
     model.title = entry.title;
@@ -2382,6 +2437,7 @@ fn reload_current(model: &mut Model) -> Vec<Effect> {
         action: HistoryAction::Goto(idx),
     });
     model.pending_anchor = None;
+    model.download = None;
     model.dismiss_toast();
     vec![Effect::Navigate(target)]
 }
@@ -4026,6 +4082,16 @@ fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
             vec![spinner_span(model.spin), RtSpan::styled(label, text_style)],
             w,
         )
+    } else if let Some(name) = &model.download {
+        let label = truncate_to_cols(
+            &format!(" downloading {name}"),
+            inner_budget.saturating_sub(1),
+        );
+        let w = 1 + UnicodeWidthStr::width(label.as_str()) as u16;
+        (
+            vec![spinner_span(model.spin), RtSpan::styled(label, text_style)],
+            w,
+        )
     } else if let Some(target) = focused_link_target(model) {
         let body = truncate_to_cols(&format!("→ {target}"), inner_budget);
         let w = UnicodeWidthStr::width(body.as_str()) as u16;
@@ -4837,6 +4903,14 @@ enum LoadResult {
         identifying: bool,
     },
     Err(String),
+    /// A file download completed and was saved to disk.
+    Downloaded {
+        name: String,
+        bytes: usize,
+        dir: String,
+    },
+    /// A file download (or the save to disk) failed.
+    DownloadErr(String),
 }
 
 /// Start (or restart) a background fetch for `target`. Aborts any in-flight
@@ -4871,6 +4945,62 @@ fn spawn_fetch(
                 }
             }
             Err(err) => LoadResult::Err(err.to_string()),
+        };
+        let _ = tx.send(FetchOutcome {
+            generation: generation_now,
+            result,
+        });
+    });
+    *inflight = Some(handle);
+}
+
+/// Start a background file download for `target`, sharing the in-flight slot
+/// and generation counter with fetches: starting either supersedes the other.
+/// The spawned task fetches the raw bytes over the session, saves them into
+/// the download directory (`$XDG_DOWNLOAD_DIR`, else `$HOME/Downloads`,
+/// created if missing, existing names de-duplicated), and reports the outcome.
+fn spawn_download(
+    inflight: &mut Option<tokio::task::JoinHandle<()>>,
+    generation: &mut u64,
+    session: &Arc<Mutex<Session>>,
+    tx: &mpsc::UnboundedSender<FetchOutcome>,
+    timeout: Duration,
+    target: Target,
+) {
+    if let Some(handle) = inflight.take() {
+        handle.abort();
+    }
+    *generation = generation.wrapping_add(1);
+    let generation_now = *generation;
+    let session = session.clone();
+    let tx = tx.clone();
+    let handle = tokio::spawn(async move {
+        let mut guard = session.lock().await;
+        let fetched = guard.download_file(&target, timeout).await;
+        drop(guard);
+        let result = match fetched {
+            Ok(bytes) => {
+                let name = crate::download::basename(&target.path);
+                match crate::download::download_dir() {
+                    Some(dir) => match crate::download::save_to_dir(&dir, &name, &bytes) {
+                        Ok(path) => LoadResult::Downloaded {
+                            name: path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or(name),
+                            bytes: bytes.len(),
+                            dir: dir.to_string_lossy().into_owned(),
+                        },
+                        Err(err) => {
+                            LoadResult::DownloadErr(format!("could not save {name}: {err}"))
+                        }
+                    },
+                    None => LoadResult::DownloadErr(
+                        "no download directory (neither XDG_DOWNLOAD_DIR nor HOME set)".to_string(),
+                    ),
+                }
+            }
+            Err(err) => LoadResult::DownloadErr(err.to_string()),
         };
         let _ = tx.send(FetchOutcome {
             generation: generation_now,
@@ -4937,6 +5067,9 @@ async fn run_effects(
         match effect {
             Effect::Navigate(target) => {
                 spawn_fetch(inflight, generation, session, tx, timeout, target);
+            }
+            Effect::Download(target) => {
+                spawn_download(inflight, generation, session, tx, timeout, target);
             }
             Effect::SetIdentify { dest, on } => {
                 // The decision must be stored (and the reused link dropped)
@@ -5175,6 +5308,12 @@ pub async fn run_tui(
                         }
                         LoadResult::Err(msg) => {
                             update(&mut model, AppEvent::LoadFailed(msg));
+                        }
+                        LoadResult::Downloaded { name, bytes, dir } => {
+                            update(&mut model, AppEvent::DownloadDone { name, bytes, dir });
+                        }
+                        LoadResult::DownloadErr(msg) => {
+                            update(&mut model, AppEvent::DownloadFailed(msg));
                         }
                     }
                 }
@@ -7108,6 +7247,94 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(effects, vec![Effect::Navigate(expected)]);
+    }
+
+    #[test]
+    fn following_file_link_downloads_instead_of_navigating() {
+        let mut m = loaded_model((80, 24));
+        m.links = vec![RenderedLink {
+            index: 1,
+            label: "Manual".to_string(),
+            target: ":/file/docs/manual.pdf".to_string(),
+            ..RenderedLink::default()
+        }];
+        let history_before = m.history.clone();
+        let effects = follow_link(&mut m, 1);
+        let expected = Target {
+            dest_hash: [0xab; 16],
+            path: "/file/docs/manual.pdf".to_string(),
+            fields: Vec::new(),
+            is_file: true,
+        };
+        assert_eq!(effects, vec![Effect::Download(expected)]);
+        assert!(
+            m.pending.is_none(),
+            "a download must not start a page fetch"
+        );
+        assert_eq!(
+            m.history, history_before,
+            "a download must not change history"
+        );
+        assert_eq!(m.download.as_deref(), Some("manual.pdf"));
+        assert!(m.is_loading(), "a download shows the loading indicator");
+    }
+
+    #[test]
+    fn download_done_clears_the_flight_and_raises_info_toast() {
+        let mut m = loaded_model((80, 24));
+        m.download = Some("manual.pdf".to_string());
+        let effects = update(
+            &mut m,
+            AppEvent::DownloadDone {
+                name: "manual.pdf".to_string(),
+                bytes: 1234,
+                dir: "/home/x/Downloads".to_string(),
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(m.download.is_none(), "the flight must be cleared");
+        let toast = m.toast.as_ref().expect("a completion toast is raised");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(
+            toast.text,
+            "downloaded manual.pdf (1234 bytes) to /home/x/Downloads"
+        );
+    }
+
+    #[test]
+    fn download_failed_raises_error_toast() {
+        let mut m = loaded_model((80, 24));
+        m.download = Some("manual.pdf".to_string());
+        let effects = update(
+            &mut m,
+            AppEvent::DownloadFailed("request timed out".to_string()),
+        );
+        assert!(effects.is_empty());
+        assert!(m.download.is_none(), "the flight must be cleared");
+        let toast = m.toast.as_ref().expect("a failure toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert_eq!(toast.text, "request timed out");
+    }
+
+    #[test]
+    fn esc_cancels_an_inflight_download() {
+        let mut m = loaded_model((80, 24));
+        m.download = Some("manual.pdf".to_string());
+        let effects = press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(effects, vec![Effect::Cancel]);
+        assert!(m.download.is_none(), "Esc must clear the download flight");
+    }
+
+    #[test]
+    fn navigation_supersedes_an_inflight_download() {
+        let mut m = loaded_model((80, 24));
+        m.download = Some("manual.pdf".to_string());
+        let effects = begin_navigation(&mut m, tgt(2), HistoryAction::Push, None);
+        assert_eq!(effects, vec![Effect::Navigate(tgt(2))]);
+        assert!(
+            m.download.is_none(),
+            "a fresh navigation supersedes the download flight"
+        );
     }
 
     #[test]

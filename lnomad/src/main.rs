@@ -67,6 +67,13 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     timeout: u64,
 
+    /// Where a `/file/` download is saved: an existing directory (or a path
+    /// ending in `/`) receives the file under its URL basename, any other path
+    /// names the exact file to write. Default: the basename in the current
+    /// working directory (existing files get ` (1)`, ` (2)`, ... appended).
+    #[arg(long)]
+    output: Option<PathBuf>,
+
     /// Fetch, render and print the page once, then exit (non-interactive).
     #[arg(long)]
     print: bool,
@@ -222,8 +229,26 @@ async fn main() -> ExitCode {
             }
         }
     } else if let Some(target) = target {
-        // Page mode: target was validated as present above.
-        if interactive {
+        // A /file/ target downloads to disk (never rendered, never a TUI
+        // session): fetch the raw bytes, save them, print the save path.
+        if target.is_file {
+            let mut out = std::io::stdout();
+            match browser::download_once(
+                &mut out,
+                &mut session,
+                &target,
+                args.output.as_deref(),
+                opts.timeout,
+            )
+            .await
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("lnomad: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        } else if interactive {
             // The TUI owns the session and drives navigation: it does the
             // initial fetch of `target` and every subsequent navigation (links,
             // the address bar, history) itself, keeping the UI live while a page

@@ -2884,6 +2884,31 @@ impl ReticulumNode {
         Ok(())
     }
 
+    /// Send a file-style response to a received request: a response Resource
+    /// carrying the RAW bytes plus msgpack-encoded `metadata`, with no
+    /// `[request_id, response]` wrapper — the wire form NomadNet's
+    /// `serve_file` uses for `/file/` downloads.
+    pub async fn send_file_response(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        data: &[u8],
+        metadata: &[u8],
+    ) -> Result<(), Error> {
+        let output = {
+            let mut inner = self.inner.lock().unwrap();
+            let (_resource_hash, output) = inner
+                .send_file_response(link_id, request_id, data, metadata)
+                .map_err(Error::Resource)?;
+            output
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
+    }
+
     // Resource Transfer API
     /// Initiate a resource transfer on an established link.
     ///

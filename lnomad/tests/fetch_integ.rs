@@ -30,6 +30,18 @@ use lnomad::url::parse_url;
 
 const SMALL_PAGE: &[u8] = b"`F222`Bce2>Welcome\n\nThis is a small NomadNet page.\n";
 
+/// A raw file payload as NomadNet's `serve_file` delivers it: the file's bytes
+/// with NO msgpack wrapping. The leading `0xc1` is the one byte msgpack never
+/// uses, so any accidental decode attempt on this payload fails loudly: a
+/// verbatim round trip proves the download path performs no page decode.
+const FILE_PAYLOAD: &[u8] = b"\xc1raw file bytes \x00\x01\x02 not msgpack\xff";
+
+/// A deterministic multi-kilobyte raw file body, well past one link packet so
+/// the response arrives over the `is_response` Resource path.
+fn big_file() -> Vec<u8> {
+    (0..16384u32).map(|i| (i * 31 % 251) as u8).collect()
+}
+
 /// A multi-kilobyte micron page: a heading, a link, and enough body to exceed a
 /// single link packet so the response comes back over the `is_response` Resource
 /// path. Rendered output and the collected link drive the print-mode assertions.
@@ -98,6 +110,8 @@ impl PageResponder {
         node.register_request_handler(dest_hash, "/page/large.mu", RequestPolicy::AllowAll);
         node.register_request_handler(dest_hash, "/page/echo.mu", RequestPolicy::AllowAll);
         node.register_request_handler(dest_hash, "/page/whoami.mu", RequestPolicy::AllowAll);
+        node.register_request_handler(dest_hash, "/file/hello.bin", RequestPolicy::AllowAll);
+        node.register_request_handler(dest_hash, "/file/big.bin", RequestPolicy::AllowAll);
         node.announce_destination(&dest_hash, Some(b"lnomad-page-node"))
             .await
             .expect("responder announce");
@@ -122,6 +136,30 @@ async fn reply_loop(node: ReticulumNode, mut events: leviculum_std::EventReceive
             ..
         } = event
         {
+            // File targets are served exactly as NomadNet's `serve_file` sends
+            // them: a response Resource of the RAW bytes (no msgpack wrapping)
+            // plus a msgpack `{"name": <basename>}` metadata map.
+            let file = match path.as_str() {
+                "/file/hello.bin" => Some(FILE_PAYLOAD.to_vec()),
+                "/file/big.bin" => Some(big_file()),
+                _ => None,
+            };
+            if let Some(bytes) = file {
+                let name = path.rsplit('/').next().unwrap_or("file");
+                let mut metadata = Vec::new();
+                rmpv::encode::write_value(
+                    &mut metadata,
+                    &rmpv::Value::Map(vec![(
+                        rmpv::Value::String("name".into()),
+                        rmpv::Value::String(name.into()),
+                    )]),
+                )
+                .expect("encode file metadata");
+                let _ = node
+                    .send_file_response(&link_id, &request_id, &bytes, &metadata)
+                    .await;
+                continue;
+            }
             let response = match path.as_str() {
                 "/page/small.mu" => msgpack_bin(SMALL_PAGE),
                 "/page/large.mu" => msgpack_bin(&large_page()),
@@ -388,6 +426,76 @@ async fn anonymous_fetch_reveals_nothing() {
         observed.is_empty(),
         "anonymous fetch must reveal no identity, responder saw {}",
         hex::encode(&observed)
+    );
+
+    session.close().await.expect("close session");
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+#[tokio::test]
+async fn download_file_returns_raw_bytes_verbatim() {
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
+
+    // The payload is deliberately NOT valid msgpack (leading 0xc1): a verbatim
+    // round trip proves download_file skips the page decode entirely.
+    let target = parse_url(&format!("{dest_hex}:/file/hello.bin"), None).expect("parse url");
+    assert!(target.is_file, "a /file/ path must be flagged as a file");
+    let bytes = session
+        .download_file(&target, Duration::from_secs(20))
+        .await
+        .expect("download small file");
+    assert_eq!(bytes, FILE_PAYLOAD, "file bytes must arrive verbatim");
+
+    // End-to-end save path as `lnomad --print --output <dir>` runs it: the file
+    // lands in the directory under its URL basename and the save line names it.
+    let dir = tempfile::tempdir().expect("download dir");
+    let mut out: Vec<u8> = Vec::new();
+    lnomad::browser::download_once(
+        &mut out,
+        &mut session,
+        &target,
+        Some(dir.path()),
+        Duration::from_secs(20),
+    )
+    .await
+    .expect("download to dir");
+    let saved = dir.path().join("hello.bin");
+    assert_eq!(
+        std::fs::read(&saved).expect("saved file readable"),
+        FILE_PAYLOAD,
+        "saved file must hold the exact payload"
+    );
+    let line = String::from_utf8(out).expect("save line is utf8");
+    assert!(
+        line.starts_with(&format!("saved {} bytes to ", FILE_PAYLOAD.len())),
+        "save line must report the byte count: {line:?}"
+    );
+    assert!(
+        line.trim_end().ends_with("hello.bin"),
+        "save line must name the saved path: {line:?}"
+    );
+
+    session.close().await.expect("close session");
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+#[tokio::test]
+async fn download_large_file_over_resource_path() {
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
+
+    // Well past one packet: the response arrives as an `is_response` Resource,
+    // and the raw bytes must still round-trip exactly.
+    let target = parse_url(&format!("{dest_hex}:/file/big.bin"), None).expect("parse url");
+    let bytes = session
+        .download_file(&target, Duration::from_secs(30))
+        .await
+        .expect("download large file");
+    assert_eq!(
+        bytes,
+        big_file(),
+        "large file bytes must arrive verbatim over the Resource path"
     );
 
     session.close().await.expect("close session");

@@ -63,9 +63,9 @@ pub enum FetchError {
     /// The responder indicated the path is not served.
     #[error("path not found on destination")]
     NotFound,
-    /// The target names a `/file/` download, which is not implemented yet.
-    #[error("file downloads are not supported yet")]
-    UnsupportedFile,
+    /// Downloaded bytes could not be written to disk.
+    #[error("could not save download: {0}")]
+    Save(String),
     /// The response was not a well-formed msgpack page value.
     #[error("malformed response payload")]
     Decode,
@@ -245,21 +245,35 @@ impl Session {
         decode_page(&raw)
     }
 
-    /// Issue the request and return the raw msgpack response value unchanged.
+    /// Download a `/file/` target, returning the raw response bytes verbatim.
     ///
-    /// This is the general request/response primitive: [`fetch`](Self::fetch) is
-    /// this plus page decoding. It is exposed for callers that need the raw
-    /// response value, e.g. a handler that echoes back its request fields as a
-    /// msgpack map rather than a page `bytes` value.
+    /// NomadNet serves a file as a file object (`Node.serve_file`), which RNS
+    /// transfers as a Resource of the raw file bytes — NOT the msgpack `bytes`
+    /// value a page response is packed into. So unlike [`fetch`](Self::fetch)
+    /// there is no [`decode_page`] step: the raw response IS the file. The
+    /// server's `{"name": ...}` Resource metadata is not consumed; callers
+    /// derive the filename from the URL path instead.
+    pub async fn download_file(
+        &mut self,
+        target: &Target,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.request(target, timeout).await
+    }
+
+    /// Issue the request and return the raw response value unchanged.
+    ///
+    /// This is the general request/response primitive shared by page and file
+    /// targets: [`fetch`](Self::fetch) is this plus msgpack page decoding,
+    /// [`download_file`](Self::download_file) is this verbatim. It is also
+    /// exposed for callers that need the raw response value, e.g. a handler
+    /// that echoes back its request fields as a msgpack map rather than a page
+    /// `bytes` value.
     pub async fn request(
         &mut self,
         target: &Target,
         timeout: Duration,
     ) -> Result<Vec<u8>, FetchError> {
-        if target.is_file {
-            return Err(FetchError::UnsupportedFile);
-        }
-
         let link_id = self.ensure_link(&target.dest_hash, timeout).await?;
         let data = encode_fields(&target.fields)?;
         let timeout_ms = timeout.as_millis() as u64;

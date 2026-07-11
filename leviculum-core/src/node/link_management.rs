@@ -2287,23 +2287,43 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                         // Python `response_resource_concluded` (Link.py): a
                         // completed resource whose ADV flagged `is_response` and
-                        // whose wrapped `[request_id, response]` matches an
-                        // outstanding request is delivered to the request path as
-                        // `ResponseReceived` — the SAME shape as the single-packet
-                        // response — not the generic `ResourceCompleted`.
+                        // that matches an outstanding request is delivered to the
+                        // request path as `ResponseReceived` — the SAME shape as
+                        // the single-packet response — not the generic
+                        // `ResourceCompleted`. A response resource WITH metadata
+                        // is a file response (Python's `has_metadata` branch,
+                        // NomadNet `serve_file`): its data is the RAW response,
+                        // correlated by the request_id carried in the ADV. One
+                        // WITHOUT metadata carries the wrapped
+                        // `[request_id, response]` and is unpacked here.
                         // Responses up to RESOURCE_MAX_EFFICIENT_SIZE (~1 MiB) are
                         // single-segment, which covers every request response; a
                         // (never-in-practice) multi-segment response falls through
                         // to the generic resource path.
                         let response_delivery = if incoming.is_response() && total_segs == 1 {
-                            Self::parse_wrapped_response(&data)
-                                .filter(|(rid, _)| self.pending_requests.contains_key(rid))
+                            if metadata.is_some() {
+                                incoming
+                                    .request_id()
+                                    .and_then(|rid| {
+                                        <[u8; crate::constants::TRUNCATED_HASHBYTES]>::try_from(rid)
+                                            .ok()
+                                    })
+                                    .filter(|rid| self.pending_requests.contains_key(rid))
+                                    .map(|rid| (rid, None))
+                            } else {
+                                Self::parse_wrapped_response(&data)
+                                    .filter(|(rid, _)| self.pending_requests.contains_key(rid))
+                                    .map(|(rid, unwrapped)| (rid, Some(unwrapped)))
+                            }
                         } else {
                             None
                         };
 
-                        if let Some((request_id, response_data)) = response_delivery {
+                        if let Some((request_id, unwrapped)) = response_delivery {
                             self.pending_requests.remove(&request_id);
+                            // A file response's raw data IS the response value;
+                            // a wrapped one delivers the unpacked value.
+                            let response_data = unwrapped.unwrap_or(data);
                             self.events.push(NodeEvent::ResponseReceived {
                                 link_id,
                                 request_id,
