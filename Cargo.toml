@@ -4,6 +4,7 @@ members = [
     "leviculum-core",
     "leviculum-micron",
     "lnomad",
+    "lblogd",
     "leviculum-std",
     "leviculum-ffi",
     "leviculum-cli",
@@ -20,6 +21,7 @@ default-members = [
     "leviculum-core",
     "leviculum-micron",
     "lnomad",
+    "lblogd",
     "leviculum-std",
     "leviculum-cli",
     "reticulum-integ",
@@ -72,6 +74,7 @@ rmpv = "1"
 serde-pickle = "1"
 toml = "0.8"
 thiserror = "2"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 bytes = "1"
 
 # Compression (no_std compatible)

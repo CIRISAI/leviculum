@@ -1,0 +1,30 @@
+[package]
+name = "lblogd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Dev-blog server: serves Markdown posts over HTTP/HTTPS and as a NomadNet node"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+pulldown-cmark.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+leviculum-micron = { path = "../leviculum-micron" }
+tempfile = "3"
+
+[lib]
+name = "lblogd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lblogd"
+path = "src/main.rs"
