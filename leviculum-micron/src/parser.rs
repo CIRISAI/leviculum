@@ -1,10 +1,9 @@
 //! The stateful micron parser.
 //!
-//! Ported from NomadNet `MicronParser.py`: [`parse`] mirrors
-//! `markup_to_attrmaps`/`parse_line` for line-level constructs and
-//! `make_output` for inline formatting. Formatting and colour state persists
-//! across lines until reset, exactly as in the reference. The parser is
-//! lenient: unterminated sequences degrade gracefully and no input can panic.
+//! An implementation of the micron markup format: [`parse`] handles line-level
+//! constructs and inline formatting. Formatting and colour state persists
+//! across lines until reset. The parser is lenient: unterminated sequences
+//! degrade gracefully and no input can panic.
 
 use crate::color::Color;
 use crate::model::{Align, Block, Field, FieldKind, Line, Link, MicronDocument, Span, Style};

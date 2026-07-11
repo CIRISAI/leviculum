@@ -7,10 +7,9 @@
 //! attributes as plain flags, so a downstream renderer decides how to draw
 //! them.
 //!
-//! The parser is a faithful port of NomadNet's `MicronParser.py`
-//! (`markup_to_attrmaps`/`parse_line`/`make_output`): formatting and colour
-//! state persists across lines until reset, and malformed input degrades
-//! gracefully rather than panicking.
+//! An implementation of the micron markup format: formatting and colour state
+//! persists across lines until reset, and malformed input degrades gracefully
+//! rather than panicking.
 //!
 //! ```
 //! use leviculum_micron::{parse, Block};

@@ -1,9 +1,9 @@
 //! Rendering + formatting for the native `lnstatus` binary (Codeberg #86,
 //! Stage 1: local mode).
 //!
-//! This is a faithful port of the local-mode output of Python
-//! `RNS/Utilities/rnstatus.py` (lines 344-671) plus the size/speed/frequency/
-//! time helpers from `RNS/__init__.py`. The renderer consumes the JSON that
+//! This matches the local-mode output format of Python
+//! `RNS/Utilities/rnstatus.py` plus the size/speed/frequency/time formatting
+//! from `RNS/__init__.py`. The renderer consumes the JSON that
 //! `leviculum_std::rpc_query("interface_stats")` returns (msgpack maps decoded
 //! to objects, `bin` values to lowercase hex, `nil` to null), which is the
 //! same `interface_stats` dict a Python `rnsd` exposes. Feeding an identical
