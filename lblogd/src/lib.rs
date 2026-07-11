@@ -8,8 +8,11 @@
 //! running `lnsd` daemon that serves the rendered Micron pages over
 //! Reticulum. The [`web`] module is the clearnet side: an axum server that
 //! serves the rendered HTML over HTTP and automatic-HTTPS (Let's Encrypt via
-//! rustls-acme). The daemon wiring (main, config) comes in a later batch.
+//! rustls-acme). The [`config`] module maps the single TOML config file onto
+//! the node and web configs, and [`cli`] holds the binary's argument parser.
 
+pub mod cli;
+pub mod config;
 pub mod node;
 pub mod post;
 pub mod render;

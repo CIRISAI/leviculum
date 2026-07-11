@@ -16,6 +16,7 @@ leviculum-core = { path = "../leviculum-core" }
 leviculum-std = { path = "../leviculum-std" }
 axum.workspace = true
 axum-server.workspace = true
+clap = { version = "4", features = ["derive"] }
 futures.workspace = true
 pulldown-cmark.workspace = true
 rmpv.workspace = true

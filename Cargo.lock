@@ -1565,6 +1565,7 @@ version = "0.7.1"
 dependencies = [
  "axum",
  "axum-server",
+ "clap",
  "futures",
  "hex",
  "leviculum-core",

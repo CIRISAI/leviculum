@@ -28,6 +28,9 @@ use crate::render::{render_index_micron, render_post_micron};
 /// Truncated request id length (matches the driver's request/response API).
 const REQUEST_ID_LEN: usize = 16;
 
+/// The request path of the blog's index page.
+const INDEX_PATH: &str = "/page/index.mu";
+
 /// A queued large response: the request id it answers and the encoded page.
 type PendingResponse = ([u8; REQUEST_ID_LEN], Vec<u8>);
 
@@ -128,19 +131,8 @@ impl BlogNode {
 
         // A blog whose destination hash changes on restart is useless, so the
         // identity persists across runs.
-        let identity =
-            load_or_generate_identity(&config.data_dir.join("identities").join("lblogd"))?;
-
-        let mut dest = Destination::new(
-            Some(identity),
-            Direction::In,
-            DestinationType::Single,
-            "nomadnetwork",
-            &["node"],
-        )
-        .map_err(|e| NodeError::Destination(e.to_string()))?;
-        dest.set_accepts_links(true);
-        dest.set_proof_strategy(ProofStrategy::All);
+        let identity = load_or_generate_identity(&identity_path(&config.data_dir))?;
+        let dest = blog_destination(identity)?;
         let dest_hash = *dest.hash();
         node.register_destination(dest);
 
@@ -167,6 +159,13 @@ impl BlogNode {
     /// The node's destination hash (what a browser dials).
     pub fn destination_hash(&self) -> DestinationHash {
         self.dest_hash
+    }
+
+    /// The request paths this node serves, sorted.
+    pub fn served_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.pages.keys().cloned().collect();
+        paths.sort();
+        paths
     }
 
     /// Announce the destination and serve page requests until the daemon
@@ -288,6 +287,47 @@ impl BlogNode {
     }
 }
 
+/// Where the persistent node identity lives under the data directory.
+fn identity_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("identities").join("lblogd")
+}
+
+/// Build the node's `nomadnetwork.node` destination from its identity.
+fn blog_destination(identity: Identity) -> Result<Destination, NodeError> {
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "nomadnetwork",
+        &["node"],
+    )
+    .map_err(|e| NodeError::Destination(e.to_string()))?;
+    dest.set_accepts_links(true);
+    dest.set_proof_strategy(ProofStrategy::All);
+    Ok(dest)
+}
+
+/// Resolve the node's destination hash from the persistent identity alone,
+/// without connecting to a daemon. Generates and saves the identity on first
+/// use, so the hash printed before the first serve run stays valid.
+pub fn resolve_destination_hash(data_dir: &Path) -> Result<DestinationHash, NodeError> {
+    let identity = load_or_generate_identity(&identity_path(data_dir))?;
+    Ok(*blog_destination(identity)?.hash())
+}
+
+/// The request paths the node serves for these posts: the index page plus
+/// one page per post. Matches the keys [`build_pages`] renders.
+pub fn page_paths(posts: &[Post]) -> Vec<String> {
+    std::iter::once(INDEX_PATH.to_string())
+        .chain(posts.iter().map(post_page_path))
+        .collect()
+}
+
+/// The request path a post's page is served under.
+fn post_page_path(post: &Post) -> String {
+    format!("/page/{}.mu", post.slug)
+}
+
 /// Load the persistent identity from `path`, generating and saving a fresh
 /// one on first run.
 fn load_or_generate_identity(path: &Path) -> Result<Identity, NodeError> {
@@ -321,12 +361,12 @@ fn load_or_generate_identity(path: &Path) -> Result<Identity, NodeError> {
 fn build_pages(posts: &[Post]) -> Result<HashMap<String, Vec<u8>>, NodeError> {
     let mut pages = HashMap::new();
     pages.insert(
-        "/page/index.mu".to_string(),
+        INDEX_PATH.to_string(),
         msgpack_bin(render_index_micron(posts).as_bytes())?,
     );
     for post in posts {
         pages.insert(
-            format!("/page/{}.mu", post.slug),
+            post_page_path(post),
             msgpack_bin(render_post_micron(post).as_bytes())?,
         );
     }
