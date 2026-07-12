@@ -1,0 +1,52 @@
+# Resource window policy A/B over direct LoRa (Codeberg #85).
+# One lncp push of a fixed 50 KiB file, repeated 5 times, in the divergent
+# ~342 B/s band. Run the whole test twice with the executor environment
+# variable LEVICULUM_RESOURCE_WINDOW_POLICY set to current and pythonlike,
+# then compare transfer times and delivery. The policy is receiver local,
+# so beta's lncp listener is the node under test.
+
+profile = "rnode_pair"
+
+[test]
+name = "lora_window_ab"
+description = "window policy A/B: lncp push of one fixed size over direct LoRa, run twice with LEVICULUM_RESOURCE_WINDOW_POLICY set"
+timeout_secs = 1800
+rust_log = "leviculum_core::resource=debug,leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
+
+[radio]
+frequency = 869525000
+bandwidth = 62500
+sf = 7
+cr = 5
+txpower = 17
+
+[nodes.alpha]
+type = "rust"
+respond_to_probes = true
+rnode = true
+
+[nodes.beta]
+type = "rust"
+respond_to_probes = true
+rnode = true
+
+[[steps]]
+action = "sleep"
+duration_secs = 25
+
+[[steps]]
+action = "wait_for_path"
+on = "alpha"
+destination = "beta.probe"
+timeout_secs = 90
+
+[[steps]]
+action = "file_transfer"
+sender = "alpha"
+receiver = "beta"
+sender_tool = "lncp"
+receiver_tool = "lncp"
+file_sizes = [51200]
+direction = "a_to_b"
+repeats = 5
+timeout_secs = 1500

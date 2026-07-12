@@ -18,6 +18,9 @@ use crate::topology::TestScenario;
 ///   binaries are mounted from `{target_dir}/release/{lnsd,lnstest,lncp}`
 /// * `proxy_devices` — for nodes with `rnode_proxy`, maps node name to the PTY
 ///   slave device path that should be mounted instead of the raw serial device
+/// * `window_policy` — resource receive-window policy (Codeberg #85),
+///   forwarded to every node's environment so the lnsd daemons honor it;
+///   `None` leaves the output byte-identical
 pub fn generate_compose(
     scenario: &TestScenario,
     run_id: u32,
@@ -25,6 +28,7 @@ pub fn generate_compose(
     repo_root: &Path,
     target_dir: &Path,
     proxy_devices: &BTreeMap<String, PathBuf>,
+    window_policy: Option<&str>,
 ) -> String {
     let test_name = &scenario.test.name;
     let lnsd_path = crate::paths::release_bin(target_dir, "lnsd");
@@ -61,6 +65,16 @@ pub fn generate_compose(
         // daemon, instead of silently falling back to an own Python transport.
         // Our vendored RNS patch (Reticulum.py) checks this env var.
         writeln!(out, "      RNS_REQUIRE_SHARED: \"1\"").ok();
+        if let Some(policy) = window_policy {
+            // Resource receive-window policy pass-through (Codeberg #85):
+            // reaches lnsd via the container environment.
+            writeln!(
+                out,
+                "      {}: {policy}",
+                crate::window_policy::RESOURCE_WINDOW_POLICY_ENV
+            )
+            .ok();
+        }
         if needs_auto_network {
             // Tells entrypoint.sh to wait for IPv6 link-local DAD to clear
             // on eth0 before launching the daemon — AutoInterface unicast
@@ -205,10 +219,44 @@ mod tests {
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         assert!(yaml.contains("\n  alice:\n"), "missing alice service block");
         assert!(yaml.contains("\n  bob:\n"), "missing bob service block");
+    }
+
+    #[test]
+    fn window_policy_reaches_every_node_environment() {
+        let scenario = load_basic_probe();
+        let (base_dir, repo_root, target_dir) = sample_paths();
+        let yaml = generate_compose(
+            &scenario,
+            0,
+            &base_dir,
+            &repo_root,
+            &target_dir,
+            &BTreeMap::new(),
+            Some("pythonlike"),
+        );
+
+        assert_eq!(
+            yaml.matches("      LEVICULUM_RESOURCE_WINDOW_POLICY: pythonlike\n")
+                .count(),
+            scenario.nodes.len(),
+            "every node environment must carry the policy"
+        );
+
+        let yaml_unset = generate_compose(
+            &scenario,
+            0,
+            &base_dir,
+            &repo_root,
+            &target_dir,
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(!yaml_unset.contains("LEVICULUM_RESOURCE_WINDOW_POLICY"));
     }
 
     #[test]
@@ -222,6 +270,7 @@ mod tests {
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         // Split into per-service blocks to check each independently.
@@ -255,6 +304,7 @@ mod tests {
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         for node in ["alice", "bob"] {
@@ -325,6 +375,7 @@ cnode-rnode = "tcp"
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         let cnode_idx = yaml.find("  cnode:").expect("no cnode");
@@ -364,6 +415,7 @@ cnode-rnode = "tcp"
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         let expected = format!("context: {}", repo_root.display());
@@ -388,6 +440,7 @@ cnode-rnode = "tcp"
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         assert!(
@@ -435,6 +488,7 @@ duration_secs = 5
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         assert!(yaml.contains("\n  alice:\n"), "missing alice");
@@ -475,6 +529,7 @@ respond_to_probes = true
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         // alpha has rnode, should have privileged and devices
@@ -521,6 +576,7 @@ respond_to_probes = true
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         assert!(!yaml.contains("ports:"), "should not contain ports:");
@@ -557,6 +613,7 @@ alice-bob = "auto"
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
 
         assert!(yaml.contains("\nnetworks:\n"), "missing networks block");
@@ -604,6 +661,7 @@ alice-bob = "auto"
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
         assert!(
             yaml.contains("subnet: fd00:dead:beef:2345::/64"),
@@ -632,6 +690,7 @@ alice-bob = "auto"
             &repo_root,
             &target_dir,
             &BTreeMap::new(),
+            None,
         );
         let compose_file = tmp.path().join("docker-compose.yml");
         fs::write(&compose_file, &yaml).unwrap();

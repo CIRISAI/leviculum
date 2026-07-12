@@ -1270,6 +1270,63 @@ destination = "beta.probe"
     }
 
     #[test]
+    fn parse_lora_window_ab_scenario() {
+        // The shipped #85 window-policy A/B scenario parses under the
+        // scenario loader (the rig run itself is reviewer-run, never CI).
+        let toml_str = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lora_window_ab.toml"
+        ))
+        .expect("lora_window_ab.toml not found");
+        let scenario = parse_scenario(&toml_str).expect("parse failed");
+
+        assert_eq!(scenario.test.name, "lora_window_ab");
+        assert_eq!(scenario.nodes.len(), 2);
+        assert!(scenario.nodes["alpha"].rnode);
+        assert!(scenario.nodes["beta"].rnode);
+        assert!(
+            scenario
+                .test
+                .rust_log
+                .as_deref()
+                .unwrap_or_default()
+                .contains("leviculum_core::resource=debug"),
+            "RESOURCE_RW window-trajectory events must be logged"
+        );
+
+        // The divergent ~342 B/s band from the WINBENCH sweep.
+        let radio = scenario.radio.as_ref().expect("radio block required");
+        assert_eq!(radio.frequency, 869525000);
+        assert_eq!(radio.bandwidth, 62500);
+        assert_eq!(radio.spreading_factor, 7);
+        assert_eq!(radio.coding_rate, 5);
+        assert_eq!(radio.tx_power, 17);
+
+        assert_eq!(scenario.steps.len(), 3);
+        match &scenario.steps[2] {
+            Step::FileTransfer {
+                sender,
+                receiver,
+                sender_tool,
+                receiver_tool,
+                file_sizes,
+                direction,
+                repeats,
+                ..
+            } => {
+                assert_eq!(sender, "alpha");
+                assert_eq!(receiver, "beta");
+                assert_eq!(sender_tool, "lncp");
+                assert_eq!(receiver_tool, "lncp");
+                assert_eq!(file_sizes, &[51200]);
+                assert_eq!(direction, "a_to_b");
+                assert_eq!(*repeats, 5);
+            }
+            other => panic!("expected FileTransfer, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_lora_lnode_path_soak_scenario() {
         // The shipped #117 soak scenario parses under the scenario loader
         // (the HW step itself is reviewer-run, never executed in CI).

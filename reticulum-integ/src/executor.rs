@@ -2491,7 +2491,13 @@ fn execute_transfer_direction(
     //    docker exec -d runs detached, the Docker client returns immediately.
     //    Use sh -c to redirect output to a log file for debugging.
     let container = runner.container_name(recv_node);
-    let listener_cmd = build_listener_cmd(recv_tool, receiver_flags, auth_identity_hash);
+    let window_policy = crate::window_policy::from_env();
+    let listener_cmd = build_listener_cmd(
+        recv_tool,
+        receiver_flags,
+        auth_identity_hash,
+        window_policy.as_deref(),
+    );
     println!("  listener cmd: {listener_cmd}");
     let listener_output = std::process::Command::new("docker")
         .args(["exec", "-d", &container, "sh", "-c", &listener_cmd])
@@ -2650,6 +2656,15 @@ fn execute_transfer_direction(
             // (`timeout_str`, size-based for LoRa scenarios — see step 5 above)
             // and the test-level `run_with_timeout` wrapper.
             let start = Instant::now();
+            // Window-policy pass-through to the sender too (Codeberg #85):
+            // in fetch mode the sender terminates the download. With the
+            // variable unset, sender_env is empty and docker_exec_with_env
+            // builds the exact same docker command as docker_exec.
+            let sender_env: Vec<(&str, &str)> = window_policy
+                .as_deref()
+                .map(|v| (crate::window_policy::RESOURCE_WINDOW_POLICY_ENV, v))
+                .into_iter()
+                .collect();
             let send_output = if is_fetch {
                 // Fetch mode: sender runs `<tool> -f <remote_path> <dest_hash> -s /tmp/received`
                 let mut args: Vec<String> = vec![
@@ -2667,7 +2682,7 @@ fn execute_transfer_direction(
                     args.push(flag.into());
                 }
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                runner.docker_exec(send_node, &args_ref)?
+                runner.docker_exec_with_env(send_node, &args_ref, &sender_env)?
             } else {
                 // Push mode: sender runs `<tool> <file> <dest_hash>`
                 let mut args: Vec<String> = vec![
@@ -2681,7 +2696,7 @@ fn execute_transfer_direction(
                     args.push(flag.into());
                 }
                 let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                runner.docker_exec(send_node, &args_ref)?
+                runner.docker_exec_with_env(send_node, &args_ref, &sender_env)?
             };
             let elapsed = start.elapsed();
 
@@ -2922,8 +2937,15 @@ fn build_listener_cmd(
     recv_tool: &str,
     receiver_flags: &str,
     auth_identity_hash: Option<&str>,
+    window_policy: Option<&str>,
 ) -> String {
-    let mut parts = vec![format!("RUST_LOG=debug {recv_tool} -l")];
+    // Resource receive-window policy pass-through (Codeberg #85): the
+    // listener terminates the resource download, so it is the node whose
+    // receive window the policy controls.
+    let policy_prefix = window_policy
+        .map(|v| format!("{}={v} ", crate::window_policy::RESOURCE_WINDOW_POLICY_ENV))
+        .unwrap_or_default();
+    let mut parts = vec![format!("{policy_prefix}RUST_LOG=debug {recv_tool} -l")];
 
     // Auth or no-auth flag
     if let Some(hash) = auth_identity_hash {
@@ -3042,6 +3064,54 @@ fn parse_hops_from_output(output: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn listener_cmd_without_window_policy_is_unchanged() {
+        let cmd = build_listener_cmd("lncp", "", None, None);
+        assert_eq!(
+            cmd,
+            "RUST_LOG=debug lncp -l -n -s /tmp/received -b 0 > /tmp/recv_tool.log 2>&1"
+        );
+        assert!(!cmd.contains(crate::window_policy::RESOURCE_WINDOW_POLICY_ENV));
+    }
+
+    #[test]
+    fn listener_cmd_with_window_policy_prepends_env() {
+        let cmd = build_listener_cmd("lncp", "", None, Some("pythonlike"));
+        assert_eq!(
+            cmd,
+            "LEVICULUM_RESOURCE_WINDOW_POLICY=pythonlike RUST_LOG=debug lncp -l -n \
+             -s /tmp/received -b 0 > /tmp/recv_tool.log 2>&1"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn window_policy_env_threads_into_listener_cmd() {
+        // Set and unset are covered in ONE test so no parallel test can
+        // observe the temporarily mutated process environment.
+        std::env::remove_var(crate::window_policy::RESOURCE_WINDOW_POLICY_ENV);
+        let cmd = build_listener_cmd(
+            "lncp",
+            "",
+            None,
+            crate::window_policy::from_env().as_deref(),
+        );
+        assert!(!cmd.contains(crate::window_policy::RESOURCE_WINDOW_POLICY_ENV));
+
+        std::env::set_var(
+            crate::window_policy::RESOURCE_WINDOW_POLICY_ENV,
+            "pythonlike",
+        );
+        let cmd = build_listener_cmd(
+            "lncp",
+            "",
+            None,
+            crate::window_policy::from_env().as_deref(),
+        );
+        assert!(cmd.contains("LEVICULUM_RESOURCE_WINDOW_POLICY=pythonlike"));
+        std::env::remove_var(crate::window_policy::RESOURCE_WINDOW_POLICY_ENV);
+    }
 
     #[test]
     fn sanitize_rnpath_strips_spinner_path_not_found() {

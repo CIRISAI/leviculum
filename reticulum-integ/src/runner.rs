@@ -411,6 +411,11 @@ impl TestRunner {
         generate_node_configs(&scenario, &base_dir)
             .map_err(|e| RunnerError::ConfigGeneration(e.to_string()))?;
 
+        // Resource receive-window policy pass-through (Codeberg #85): when
+        // set in the executor's environment, forward it into every node's
+        // container environment so the lnsd daemons honor it. Unset means
+        // the compose file stays byte-identical.
+        let window_policy = crate::window_policy::from_env();
         let yaml = generate_compose(
             &scenario,
             run_id,
@@ -418,6 +423,7 @@ impl TestRunner {
             &repo_root,
             &target_dir,
             &proxy_devices,
+            window_policy.as_deref(),
         );
         let compose_file = tempdir.path().join("docker-compose.yml");
         fs::write(&compose_file, &yaml)?;
