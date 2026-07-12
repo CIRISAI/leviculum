@@ -289,6 +289,30 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add a UDP interface that forwards each outgoing datagram to several
+    /// addresses (Rust-only extension; Python's UDPInterface supports one).
+    /// Stored as a comma-separated `forward_ip` with per-entry ports.
+    pub fn add_udp_multi_forward_interface(
+        mut self,
+        listen_addr: SocketAddr,
+        forward_addrs: &[SocketAddr],
+    ) -> Self {
+        let forward_ip = forward_addrs
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.interfaces.push(InterfaceConfig {
+            interface_type: "UDPInterface".to_string(),
+            listen_ip: Some(listen_addr.ip().to_string()),
+            listen_port: Some(listen_addr.port()),
+            forward_ip: Some(forward_ip),
+            forward_port: None,
+            ..Default::default()
+        });
+        self
+    }
+
     /// Add an RNode (LoRa) interface programmatically, the equivalent of an
     /// `[[RNode]]` config block. The six parameters are the required radio
     /// settings; optional tuning (airtime limits, flow control, buffer size)
@@ -963,6 +987,22 @@ mod tests {
             Some("192.168.1.255".to_string())
         );
         assert_eq!(builder.interfaces[0].forward_port, Some(4242));
+    }
+
+    #[test]
+    fn test_builder_add_udp_multi_forward_interface() {
+        let listen: SocketAddr = "0.0.0.0:4242".parse().unwrap();
+        let forward_1: SocketAddr = "192.168.1.255:4242".parse().unwrap();
+        let forward_2: SocketAddr = "10.0.0.255:5000".parse().unwrap();
+        let builder = ReticulumNodeBuilder::new()
+            .add_udp_multi_forward_interface(listen, &[forward_1, forward_2]);
+        assert_eq!(builder.interfaces.len(), 1);
+        assert_eq!(builder.interfaces[0].interface_type, "UDPInterface");
+        assert_eq!(
+            builder.interfaces[0].forward_ip,
+            Some("192.168.1.255:4242,10.0.0.255:5000".to_string())
+        );
+        assert_eq!(builder.interfaces[0].forward_port, None);
     }
 
     #[test]

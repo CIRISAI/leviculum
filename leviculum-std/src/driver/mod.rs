@@ -1477,32 +1477,44 @@ impl ReticulumNode {
                             .ok_or_else(|| {
                                 Error::Config("UDPInterface requires forward_ip".to_string())
                             })?;
-                        let forward_port = config.forward_port.ok_or_else(|| {
-                            Error::Config("UDPInterface requires forward_port".to_string())
-                        })?;
 
                         let listen_addr: SocketAddr = format!("{}:{}", listen_ip, listen_port)
                             .parse()
                             .map_err(|e| {
                                 Error::Config(format!("UDPInterface invalid listen address: {}", e))
                             })?;
-                        let forward_addr: SocketAddr = format!("{}:{}", forward_ip, forward_port)
-                            .parse()
-                            .map_err(|e| {
+                        // `forward_ip` may hold several comma-separated
+                        // addresses (Rust-only extension); each outgoing
+                        // datagram goes to every one of them.
+                        let forward_addrs = crate::interfaces::udp::parse_forward_addrs(
+                            forward_ip,
+                            config.forward_port,
+                        )
+                        .map_err(|e| match e {
+                            crate::interfaces::udp::ForwardAddrError::MissingPort => {
+                                Error::Config("UDPInterface requires forward_port".to_string())
+                            }
+                            crate::interfaces::udp::ForwardAddrError::Invalid(msg) => {
                                 Error::Config(format!(
                                     "UDPInterface invalid forward address: {}",
-                                    e
+                                    msg
                                 ))
-                            })?;
+                            }
+                        })?;
 
                         let iface_name = format!("udp_{}", idx);
                         let id = InterfaceId(idx);
+                        let forward_desc = forward_addrs
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         let handle =
-                            spawn_udp_interface(id, iface_name, listen_addr, forward_addr)?;
+                            spawn_udp_interface(id, iface_name, listen_addr, forward_addrs)?;
                         tracing::info!(
                             "UDP interface listening on {}, forwarding to {}",
                             listen_addr,
-                            forward_addr
+                            forward_desc
                         );
                         registry.register(handle);
                     }

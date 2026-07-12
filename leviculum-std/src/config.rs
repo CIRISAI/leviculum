@@ -295,9 +295,15 @@ pub struct InterfaceConfig {
     pub target_host: Option<String>,
     /// Target port for client connections
     pub target_port: Option<u16>,
-    /// Forward IP (for UDP broadcast)
+    /// Forward address(es) for outgoing UDP datagrams. A single plain IP
+    /// (combined with `forward_port`) matches Python's UDPInterface. As a
+    /// Rust-only extension the value may be a comma-separated list, each
+    /// entry a plain IP (using `forward_port`) or an `ip:port` (IPv6:
+    /// `[ip]:port`) with its own port; every datagram is sent to all of
+    /// them. Python supports one forward address.
     pub forward_ip: Option<String>,
-    /// Forward port (for UDP broadcast)
+    /// Forward port (for UDP broadcast); used by `forward_ip` entries that
+    /// do not carry their own port
     pub forward_port: Option<u16>,
 
     // Serial specific
