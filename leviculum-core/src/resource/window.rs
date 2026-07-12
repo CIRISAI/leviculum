@@ -3,16 +3,34 @@
 //! Codeberg #85: the window adaptation logic is extracted out of
 //! [`IncomingResource`](super::incoming::IncomingResource) into a swappable
 //! [`WindowPolicy`] so candidate algorithms can be benchmarked against each
-//! other in the same harness. The only policy today is [`WindowPolicy::Current`],
-//! which reproduces the historical behavior exactly.
+//! other in the same harness. [`WindowPolicy::Current`] reproduces the
+//! historical behavior exactly; [`WindowPolicy::PythonLike`] mirrors the
+//! Python-RNS reference algorithm as the baseline to beat.
 
 use crate::constants::{
     RESOURCE_WINDOW_INITIAL, RESOURCE_WINDOW_MAX_FAST, RESOURCE_WINDOW_MAX_SLOW,
+    RESOURCE_WINDOW_MIN,
 };
 use crate::resource::{
     FAST_RATE_THRESHOLD, RESOURCE_WINDOW_FLEXIBILITY, RESOURCE_WINDOW_MAX_VERY_SLOW,
     SLOW_RATE_THRESHOLD, VERY_SLOW_RATE_THRESHOLD,
 };
+
+/// Python Resource.RATE_FAST: (50 * 1000) / 8 B/s. Round goodput above this
+/// counts toward the fast tier.
+const RATE_FAST: u64 = 50 * 1000 / 8;
+
+/// Python Resource.RATE_VERY_SLOW: (2 * 1000) / 8 B/s. Round goodput below
+/// this counts toward the very-slow tier.
+const RATE_VERY_SLOW: u64 = 2 * 1000 / 8;
+
+/// Python Resource.FAST_RATE_THRESHOLD = WINDOW_MAX_SLOW - WINDOW - 2: rounds
+/// of sustained fast rate before window_max opens to WINDOW_MAX_FAST.
+const FAST_RATE_ROUNDS: usize = RESOURCE_WINDOW_MAX_SLOW - RESOURCE_WINDOW_INITIAL - 2;
+
+/// Python Resource.VERY_SLOW_RATE_THRESHOLD: rounds of sustained very slow
+/// rate before window_max is capped to WINDOW_MAX_VERY_SLOW.
+const VERY_SLOW_RATE_ROUNDS: usize = 2;
 
 /// Receiver-side rate measurements for one completed window round.
 ///
@@ -31,9 +49,9 @@ pub struct RateSample {
 
 /// Selects the receive-window adaptation algorithm (Codeberg #85).
 ///
-/// Only `Current` exists in this batch; candidate algorithms are added as
-/// further variants and selected via the `LEVICULUM_RESOURCE_WINDOW_POLICY`
-/// environment variable in `lnsd` and `lncp`.
+/// Candidate algorithms are added as further variants and selected via the
+/// `LEVICULUM_RESOURCE_WINDOW_POLICY` environment variable in `lnsd` and
+/// `lncp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WindowPolicy {
     /// The historical algorithm: grow the window by 1 once
@@ -42,6 +60,11 @@ pub enum WindowPolicy {
     /// Timeouts never touch the window.
     #[default]
     Current,
+    /// Mirror of the Python-RNS reference algorithm (Resource.py): grow the
+    /// window by 1 every completed round (with window_min creep), pick the
+    /// window_max tier from the whole-round goodput with round-count
+    /// hysteresis, shrink window and window_max on receiver timeout.
+    PythonLike,
 }
 
 impl WindowPolicy {
@@ -50,6 +73,7 @@ impl WindowPolicy {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "current" => Some(Self::Current),
+            "pythonlike" => Some(Self::PythonLike),
             _ => None,
         }
     }
@@ -74,6 +98,15 @@ pub(crate) struct WindowState {
     consecutive_completed_windows: usize,
     /// Total completed rounds over the transfer (observability only).
     rounds_completed: usize,
+    /// Floor the window may shrink to; creeps up as the window grows
+    /// (Python's window_min). Only PythonLike uses it, Current ignores it.
+    window_min: usize,
+    /// Rounds with round goodput above RATE_FAST (tier hysteresis).
+    /// Only PythonLike uses it, Current ignores it.
+    fast_rate_rounds: usize,
+    /// Rounds with round goodput below RATE_VERY_SLOW (tier hysteresis).
+    /// Only PythonLike uses it, Current ignores it.
+    very_slow_rate_rounds: usize,
 }
 
 impl WindowState {
@@ -85,6 +118,9 @@ impl WindowState {
             bytes_received_this_window: 0,
             consecutive_completed_windows: 0,
             rounds_completed: 0,
+            window_min: RESOURCE_WINDOW_MIN,
+            fast_rate_rounds: 0,
+            very_slow_rate_rounds: 0,
         }
     }
 
@@ -125,6 +161,7 @@ impl WindowState {
         self.rounds_completed += 1;
         match policy {
             WindowPolicy::Current => self.round_complete_current(sample.first_part_rate),
+            WindowPolicy::PythonLike => self.round_complete_pythonlike(sample.round_rate),
         }
     }
 
@@ -133,6 +170,7 @@ impl WindowState {
         match policy {
             // The historical logic never touches the window on timeout.
             WindowPolicy::Current => {}
+            WindowPolicy::PythonLike => self.timeout_pythonlike(),
         }
     }
 
@@ -161,6 +199,59 @@ impl WindowState {
             self.window_max = RESOURCE_WINDOW_MAX_SLOW;
             if self.window > self.window_max {
                 self.window = self.window_max;
+            }
+        }
+    }
+
+    /// Python's round-complete logic (Resource.py receive_part, outstanding
+    /// == 0 branch): grow the window by 1 every round while below window_max,
+    /// creeping window_min up behind it, THEN update the tier counters from
+    /// the whole-round goodput. Growth precedes the tier update, exactly as
+    /// in the reference, so the round that opens a tier only grows the window
+    /// from the next round on. Python never clamps the window down when the
+    /// very-slow cap engages; neither does this mirror.
+    fn round_complete_pythonlike(&mut self, round_rate: u64) {
+        if self.window < self.window_max {
+            self.window += 1;
+            if (self.window - self.window_min) > (RESOURCE_WINDOW_FLEXIBILITY - 1) {
+                self.window_min += 1;
+            }
+        }
+
+        if round_rate > RATE_FAST && self.fast_rate_rounds < FAST_RATE_ROUNDS {
+            self.fast_rate_rounds += 1;
+            if self.fast_rate_rounds == FAST_RATE_ROUNDS {
+                self.window_max = RESOURCE_WINDOW_MAX_FAST;
+            }
+        }
+
+        if self.fast_rate_rounds == 0
+            && round_rate < RATE_VERY_SLOW
+            && self.very_slow_rate_rounds < VERY_SLOW_RATE_ROUNDS
+        {
+            self.very_slow_rate_rounds += 1;
+            if self.very_slow_rate_rounds == VERY_SLOW_RATE_ROUNDS {
+                self.window_max = RESOURCE_WINDOW_MAX_VERY_SLOW;
+            }
+        }
+    }
+
+    /// Python's receiver-timeout shrink (Resource.py:616-621): step the
+    /// window down toward window_min and pull window_max down with it, twice
+    /// if the max-to-window gap exceeds the flexibility.
+    fn timeout_pythonlike(&mut self) {
+        if self.window > self.window_min {
+            self.window -= 1;
+            if self.window_max > self.window_min {
+                self.window_max -= 1;
+                // The window may sit above window_max (the very-slow cap lowers
+                // window_max without clamping the window, mirroring Python).
+                // Python compares a float that simply goes negative here; use a
+                // saturating diff so `window > window_max` yields 0 (no double
+                // step) rather than a usize underflow panic.
+                if self.window_max.saturating_sub(self.window) > (RESOURCE_WINDOW_FLEXIBILITY - 1) {
+                    self.window_max -= 1;
+                }
             }
         }
     }
@@ -251,7 +342,123 @@ mod tests {
             WindowPolicy::parse(" Current "),
             Some(WindowPolicy::Current)
         );
+        assert_eq!(
+            WindowPolicy::parse("pythonlike"),
+            Some(WindowPolicy::PythonLike)
+        );
+        assert_eq!(
+            WindowPolicy::parse(" PythonLike "),
+            Some(WindowPolicy::PythonLike)
+        );
         assert_eq!(WindowPolicy::parse("bogus"), None);
         assert_eq!(WindowPolicy::parse(""), None);
+    }
+
+    fn round_sample(round_rate: u64) -> RateSample {
+        RateSample {
+            first_part_rate: 0,
+            round_rate,
+        }
+    }
+
+    /// A mid rate: neither fast nor very slow, window_max stays SLOW.
+    const MID_RATE: u64 = RATE_VERY_SLOW + 1;
+
+    #[test]
+    fn test_pythonlike_grows_every_round_with_window_min_creep() {
+        let mut ws = WindowState::new();
+        for round in 1..=(RESOURCE_WINDOW_MAX_SLOW - RESOURCE_WINDOW_INITIAL) {
+            ws.on_round_complete(WindowPolicy::PythonLike, round_sample(MID_RATE));
+            assert_eq!(ws.window(), RESOURCE_WINDOW_INITIAL + round);
+            // window_min trails the window at flexibility - 1 behind, once
+            // the window has moved that far from WINDOW_MIN.
+            let expected_min = RESOURCE_WINDOW_MIN
+                .max(ws.window().saturating_sub(RESOURCE_WINDOW_FLEXIBILITY - 1));
+            assert_eq!(ws.window_min, expected_min);
+        }
+        assert_eq!(ws.window(), RESOURCE_WINDOW_MAX_SLOW);
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_SLOW);
+        // At the SLOW ceiling the window stops growing.
+        ws.on_round_complete(WindowPolicy::PythonLike, round_sample(MID_RATE));
+        assert_eq!(ws.window(), RESOURCE_WINDOW_MAX_SLOW);
+    }
+
+    #[test]
+    fn test_pythonlike_fast_tier_needs_sustained_rounds() {
+        let mut ws = WindowState::new();
+        for _ in 0..(FAST_RATE_ROUNDS - 1) {
+            ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_FAST + 1));
+            assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_SLOW);
+        }
+        ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_FAST + 1));
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_FAST);
+        // A rate exactly at the threshold must not count (strict >).
+        let mut ws = WindowState::new();
+        for _ in 0..(FAST_RATE_ROUNDS + 1) {
+            ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_FAST));
+        }
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_SLOW);
+    }
+
+    #[test]
+    fn test_pythonlike_very_slow_tier_caps_after_two_rounds() {
+        let mut ws = WindowState::new();
+        ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_VERY_SLOW - 1));
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_SLOW);
+        ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_VERY_SLOW - 1));
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_VERY_SLOW);
+        // Python leaves the already grown window untouched (no clamp): two
+        // growth rounds happened before the cap engaged.
+        assert_eq!(ws.window(), RESOURCE_WINDOW_INITIAL + 2);
+        // Capped below the window, it can no longer grow.
+        ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_VERY_SLOW - 1));
+        assert_eq!(ws.window(), RESOURCE_WINDOW_INITIAL + 2);
+    }
+
+    #[test]
+    fn test_pythonlike_fast_history_blocks_very_slow_cap() {
+        let mut ws = WindowState::new();
+        ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_FAST + 1));
+        // fast_rate_rounds > 0: very slow rounds no longer count.
+        for _ in 0..(VERY_SLOW_RATE_ROUNDS + 2) {
+            ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_VERY_SLOW - 1));
+        }
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_SLOW);
+    }
+
+    #[test]
+    fn test_pythonlike_timeout_shrinks_window_and_max() {
+        let mut ws = WindowState::new();
+        // Grow to the SLOW ceiling first.
+        for _ in 0..(RESOURCE_WINDOW_MAX_SLOW - RESOURCE_WINDOW_INITIAL) {
+            ws.on_round_complete(WindowPolicy::PythonLike, round_sample(MID_RATE));
+        }
+        assert_eq!((ws.window(), ws.window_max()), (10, 10));
+        ws.on_timeout(WindowPolicy::PythonLike);
+        // window 10 -> 9, window_max 10 -> 9 (gap 0, no second step).
+        assert_eq!((ws.window(), ws.window_max()), (9, 9));
+        // Shrink to the floor: window never drops below window_min.
+        for _ in 0..20 {
+            ws.on_timeout(WindowPolicy::PythonLike);
+        }
+        assert_eq!(ws.window(), ws.window_min);
+        assert!(ws.window_max() >= ws.window_min);
+        ws.on_timeout(WindowPolicy::PythonLike);
+        assert_eq!(ws.window(), ws.window_min);
+    }
+
+    #[test]
+    fn test_pythonlike_timeout_double_steps_window_max_on_wide_gap() {
+        let mut ws = WindowState::new();
+        // Open the fast tier: window_max 75, window still small.
+        for _ in 0..FAST_RATE_ROUNDS {
+            ws.on_round_complete(WindowPolicy::PythonLike, round_sample(RATE_FAST + 1));
+        }
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_FAST);
+        let (w, m) = (ws.window(), ws.window_max());
+        ws.on_timeout(WindowPolicy::PythonLike);
+        // Gap far above flexibility: window_max steps down twice.
+        assert_eq!(ws.window(), w - 1);
+        assert_eq!(ws.window_max(), m - 2);
     }
 }

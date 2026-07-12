@@ -599,6 +599,80 @@ fn transfer_50kib_at_342bps_current_round_count() {
 }
 
 // ----------------------------------------------------------------------------
+// PythonLike vs Current, measured in the same harness (Codeberg #85). PythonLike
+// mirrors Python-RNS and is the baseline our own algorithm must beat.
+// ----------------------------------------------------------------------------
+
+/// Unlike Current, PythonLike does not fall into the VERY_SLOW cap at 342 B/s:
+/// it tiers on whole-round goodput (not the REQ-dominated first-part rate), so
+/// window_max stays SLOW and the window climbs to 10.
+#[test]
+fn pythonlike_reaches_window_10_at_342bps() {
+    let r = run_transfer(WindowPolicy::PythonLike, 51200, 342, TURNAROUND_MS, None);
+    assert_eq!(
+        r.final_window, RESOURCE_WINDOW_MAX_SLOW,
+        "PythonLike must climb to the SLOW ceiling (10), not cap at 4 like Current \
+         (trajectory: {:?})",
+        r.window_trajectory
+    );
+    assert_eq!(
+        r.final_window_max, RESOURCE_WINDOW_MAX_SLOW,
+        "window_max must stay SLOW (10), not clamp to VERY_SLOW (trajectory: {:?})",
+        r.window_trajectory
+    );
+}
+
+/// The headline #85 win on a clean slow link: PythonLike completes the same
+/// 50 KiB transfer at 342 B/s in far fewer rounds than Current (a bigger window
+/// means fewer REQ round trips), with identical integrity.
+#[test]
+fn pythonlike_beats_current_lossless_at_342bps() {
+    let cur = run_transfer(WindowPolicy::Current, 51200, 342, TURNAROUND_MS, None);
+    let py = run_transfer(WindowPolicy::PythonLike, 51200, 342, TURNAROUND_MS, None);
+    assert_eq!(cur.retransmits, 0, "lossless Current must not retransmit");
+    assert_eq!(py.retransmits, 0, "lossless PythonLike must not retransmit");
+    assert!(
+        py.rounds < cur.rounds,
+        "PythonLike must use fewer rounds than Current on a clean slow link \
+         (PythonLike {} vs Current {})",
+        py.rounds,
+        cur.rounds
+    );
+    assert!(
+        py.final_window > cur.final_window,
+        "PythonLike must run a larger window (PythonLike {} vs Current {})",
+        py.final_window,
+        cur.final_window
+    );
+}
+
+/// The flip side of divergence #4: unlike Current, PythonLike shrinks the window
+/// on a receiver timeout (Python's loss response). This is the mechanism that
+/// makes it more conservative under loss; whether that helps or hurts on a real
+/// lossy half-duplex link is the rig question a better algorithm must answer.
+#[test]
+fn pythonlike_shrinks_on_timeout() {
+    let r = run_transfer(
+        WindowPolicy::PythonLike,
+        51200,
+        342,
+        TURNAROUND_MS,
+        Some(10),
+    );
+    assert!(
+        r.receiver_timeouts >= 1,
+        "the 10% loss pattern must force at least one receiver timeout"
+    );
+    assert!(
+        r.timeout_window_pairs
+            .iter()
+            .any(|&(before, after)| after < before),
+        "PythonLike must shrink the window on at least one timeout (pairs: {:?})",
+        r.timeout_window_pairs
+    );
+}
+
+// ----------------------------------------------------------------------------
 // WINBENCH sweep (a bench, not a pass/fail test).
 // ----------------------------------------------------------------------------
 
@@ -611,7 +685,7 @@ fn transfer_50kib_at_342bps_current_round_count() {
 #[ignore]
 fn window_bench_sweep() {
     // Adding a WindowPolicy variant extends the sweep here, nothing else.
-    let policies = [WindowPolicy::Current];
+    let policies = [WindowPolicy::Current, WindowPolicy::PythonLike];
     // Straddles every threshold boundary of both stacks (VERY_SLOW 1000,
     // SLOW 15000, FAST 50000 B/s) so units/threshold divergence is visible.
     let rates: [u64; 8] = [250, 342, 500, 1500, 3000, 6250, 15000, 50000];
