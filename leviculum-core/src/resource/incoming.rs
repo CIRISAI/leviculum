@@ -688,6 +688,13 @@ impl IncomingResource {
     pub(crate) fn is_response(&self) -> bool {
         self.flags.is_response
     }
+
+    /// Receive-window observability for the deterministic measurement
+    /// harness (Codeberg #85, `node::mvr_resource_window`).
+    #[cfg(test)]
+    pub(crate) fn window_state(&self) -> &WindowState {
+        &self.window_state
+    }
 }
 
 #[cfg(test)]
