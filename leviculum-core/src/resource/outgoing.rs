@@ -102,7 +102,11 @@ pub(crate) struct OutgoingResource {
     parts: Vec<Vec<u8>>,
     hashmap: Vec<[u8; RESOURCE_HASHMAP_LEN]>,
     num_parts: u32,
-    sent_parts: usize,
+    /// Which parts have been transmitted at least once. Retransmissions must
+    /// not count toward completion: the AwaitingProof transition requires
+    /// every DISTINCT part sent, mirroring Python's first-send-only
+    /// `sent_parts` (Resource.py:1013).
+    sent_mask: Vec<bool>,
     receiver_min_consecutive_height: usize,
     total_hashmap_segments: u32,
     window: usize,
@@ -430,6 +434,7 @@ impl OutgoingResource {
         };
         let adv_packet = adv.pack();
 
+        let sent_mask = vec![false; parts.len()];
         Ok(Self {
             status: ResourceStatus::Advertised,
             flags,
@@ -442,7 +447,7 @@ impl OutgoingResource {
             parts,
             hashmap,
             num_parts,
-            sent_parts: 0,
+            sent_mask,
             receiver_min_consecutive_height: 0,
             total_hashmap_segments,
             window: crate::constants::RESOURCE_WINDOW_INITIAL,
@@ -528,7 +533,7 @@ impl OutgoingResource {
                     .build_raw_data_packet(&self.parts[i], PacketContext::Resource)
                     .map_err(|_| ResourceError::LinkNotActive)?;
                 packets.push(raw_pkt);
-                self.sent_parts += 1;
+                self.sent_mask[i] = true;
             }
         }
 
@@ -580,8 +585,8 @@ impl OutgoingResource {
             }
         }
 
-        // Check if all parts sent → transition to AwaitingProof
-        if self.sent_parts >= self.parts.len() {
+        // Check if all distinct parts sent at least once → AwaitingProof
+        if self.distinct_parts_sent() == self.parts.len() {
             self.status = ResourceStatus::AwaitingProof;
             self.retries = 0;
         }
@@ -744,11 +749,16 @@ impl OutgoingResource {
         &self.adv_packet
     }
 
+    /// Number of distinct parts transmitted at least once.
+    fn distinct_parts_sent(&self) -> usize {
+        self.sent_mask.iter().filter(|&&sent| sent).count()
+    }
+
     pub(crate) fn progress(&self) -> f32 {
         if self.num_parts == 0 {
             return 1.0;
         }
-        self.sent_parts as f32 / self.num_parts as f32
+        self.distinct_parts_sent() as f32 / self.num_parts as f32
     }
 
     pub(crate) fn transfer_size(&self) -> u64 {
@@ -1194,6 +1204,58 @@ mod tests {
             res.poll(t, rtt_ms);
         }
         assert_eq!(res.status(), ResourceStatus::Failed);
+    }
+
+    /// Codeberg #85: retransmissions must not count toward completion. A lossy
+    /// receiver re-REQs the same parts repeatedly; the sender must stay in
+    /// Transferring until every DISTINCT part has been sent at least once,
+    /// no matter how many transmissions have accumulated (Python only counts
+    /// first sends, Resource.py:1013).
+    #[test]
+    fn test_retransmissions_do_not_trigger_awaiting_proof() {
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+        use rand_core::{OsRng, RngCore};
+        let mut data = vec![0u8; 2000];
+        OsRng.fill_bytes(&mut data);
+
+        let mut res =
+            OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let total = res.parts.len();
+        assert!(total >= 2, "need multi-part resource");
+
+        // Re-request only the first part more times than there are parts, so
+        // the cumulative transmission count crosses the part count while only
+        // one distinct part has ever been sent.
+        let mut req = Vec::new();
+        req.push(0x00); // not exhausted
+        req.extend_from_slice(&res.resource_hash);
+        req.extend_from_slice(&res.hashmap[0]);
+        for n in 0..=total {
+            let pkts = res
+                .handle_request(&req, &link, &mut rng, 2000 + n as u64)
+                .unwrap();
+            assert_eq!(pkts.len(), 1, "each REQ resends the one requested part");
+            assert_eq!(
+                res.status(),
+                ResourceStatus::Transferring,
+                "retransmissions alone must not trigger AwaitingProof \
+                 (after {} transmissions of part 0, {} parts total)",
+                n + 1,
+                total
+            );
+        }
+
+        // Once every distinct part has been requested and sent, the
+        // transition fires as before.
+        let mut req_all = Vec::new();
+        req_all.push(0x00);
+        req_all.extend_from_slice(&res.resource_hash);
+        for h in &res.hashmap {
+            req_all.extend_from_slice(h);
+        }
+        let _ = res.handle_request(&req_all, &link, &mut rng, 9000).unwrap();
+        assert_eq!(res.status(), ResourceStatus::AwaitingProof);
     }
 
     #[test]

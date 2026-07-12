@@ -35,7 +35,8 @@ use crate::link::LinkId;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::packet::{Packet, PacketContext};
 use crate::resource::{
-    ResourceStrategy, WindowPolicy, RESOURCE_WINDOW_FLEXIBILITY, RESOURCE_WINDOW_MAX_VERY_SLOW,
+    ResourceStatus, ResourceStrategy, WindowPolicy, RESOURCE_WINDOW_FLEXIBILITY,
+    RESOURCE_WINDOW_MAX_VERY_SLOW,
 };
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::{Clock, NoStorage};
@@ -144,6 +145,11 @@ struct TransferResult {
     receiver_timeouts: usize,
     /// Receiver window immediately (before, after) each such timeout.
     timeout_window_pairs: Vec<(usize, usize)>,
+    /// Distinct parts the sender had emitted (transmitted or queued) at the
+    /// moment it first entered AwaitingProof. Equal to `unique_parts` iff the
+    /// sender waited for every distinct part to be sent at least once
+    /// (Codeberg #85: retransmissions must not count toward completion).
+    awaiting_proof_flip_unique: Option<usize>,
 }
 
 /// Two-`NodeCore` in-process link with paced, optionally lossy delivery.
@@ -169,6 +175,7 @@ struct PacedDelivery {
     last_rounds: usize,
     receiver_timeouts: usize,
     timeout_window_pairs: Vec<(usize, usize)>,
+    awaiting_proof_flip_unique: Option<usize>,
 }
 
 impl PacedDelivery {
@@ -209,6 +216,7 @@ impl PacedDelivery {
                 last_rounds: 0,
                 receiver_timeouts: 0,
                 timeout_window_pairs: Vec::new(),
+                awaiting_proof_flip_unique: None,
             },
             dest_hash,
             signing_key,
@@ -247,6 +255,32 @@ impl PacedDelivery {
                 self.last_rounds = rounds;
                 self.trajectory.push((rounds, window, window_max));
             }
+        }
+    }
+
+    /// Record, once, how many distinct parts the sender had emitted when it
+    /// first flipped to AwaitingProof. Parts the sender generated but the
+    /// harness has not yet put on the air still sit in `to_receiver`, so the
+    /// count is the union of transmitted and queued distinct part packets
+    /// (part packets are deterministic bytes, see `transfer_50kib_..._count`).
+    fn observe_sender_status(&mut self) {
+        if self.awaiting_proof_flip_unique.is_some() {
+            return;
+        }
+        let awaiting = self
+            .sender
+            .links
+            .get(&self.link_id)
+            .and_then(|l| l.outgoing_resource())
+            .is_some_and(|r| r.status() == ResourceStatus::AwaitingProof);
+        if awaiting {
+            let mut emitted = self.unique_part_packets.clone();
+            for pkt in &self.to_receiver {
+                if packet_context(pkt) == Some(PacketContext::Resource) {
+                    emitted.insert(pkt.clone());
+                }
+            }
+            self.awaiting_proof_flip_unique = Some(emitted.len());
         }
     }
 
@@ -308,6 +342,7 @@ impl PacedDelivery {
                         self.failed = true;
                     }
                 }
+                self.observe_sender_status();
             }
         }
     }
@@ -454,6 +489,7 @@ fn run_transfer(
         final_window_max,
         receiver_timeouts: h.receiver_timeouts,
         timeout_window_pairs: h.timeout_window_pairs,
+        awaiting_proof_flip_unique: h.awaiting_proof_flip_unique,
     }
 }
 
@@ -551,6 +587,33 @@ fn current_reaches_only_slow_growth() {
         r.final_window < RESOURCE_WINDOW_MAX_SLOW,
         "a 50 KiB transfer must end before the slow ramp reaches window_max, got {}",
         r.final_window
+    );
+}
+
+/// Codeberg #85 fix regression: the sender must not count retransmissions as
+/// progress. On a lossy link the receiver re-REQs missing parts, so cumulative
+/// transmissions cross the part count long before every distinct part has been
+/// sent; a transmission-count trigger flips the sender to AwaitingProof
+/// prematurely while the receiver still lacks parts. The transfer must
+/// complete with intact data (run_transfer asserts that) and the sender must
+/// only enter AwaitingProof once every distinct part was sent at least once.
+#[test]
+fn lossy_transfer_proof_waits_for_all_distinct_parts() {
+    let r = run_transfer(WindowPolicy::Current, 20480, 3000, TURNAROUND_MS, Some(3));
+    assert!(
+        r.retransmits >= 1,
+        "the loss pattern must force retransmissions so cumulative \
+         transmissions cross the part count (transmitted {} vs unique {})",
+        r.parts_transmitted,
+        r.unique_parts
+    );
+    assert_eq!(
+        r.awaiting_proof_flip_unique,
+        Some(r.unique_parts),
+        "sender entered AwaitingProof before every distinct part was sent \
+         at least once ({} of {} parts)",
+        r.awaiting_proof_flip_unique.unwrap_or(0),
+        r.unique_parts
     );
 }
 
