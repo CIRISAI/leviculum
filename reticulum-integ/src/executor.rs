@@ -4646,6 +4646,31 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
         );
     }
 
+    /// Codeberg #85 resource-window A/B: five 51200 B lncp pushes over direct
+    /// LoRa at ~342 B/s. Run twice with LEVICULUM_RESOURCE_WINDOW_POLICY set
+    /// (current vs pythonlike) and compare transfer time and completion.
+    #[test]
+    #[ignore] // Requires RNode hardware
+    #[serial(lora)]
+    fn lora_window_ab() {
+        crate::timeout::run_with_timeout(
+            "lora_window_ab",
+            crate::timeout::lncp_lora_wrapper_secs(51200 * 5, 5),
+            || {
+                let toml_str = std::fs::read_to_string(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/lora_window_ab.toml"
+                ))
+                .expect("lora_window_ab.toml not found");
+                let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+                let mut runner = require_runner!(scenario);
+
+                run_test(&mut runner).expect("test failed");
+            },
+        );
+    }
+
     #[test]
     #[ignore] // Requires RNode hardware
     #[serial(lora)]
