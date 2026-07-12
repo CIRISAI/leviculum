@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeCoreBuilder;
+use leviculum_core::resource::WindowPolicy;
 use leviculum_core::ProofStrategy;
 
 use crate::clock::SystemClock;
@@ -135,6 +136,15 @@ impl ReticulumNodeBuilder {
     /// Set the proof strategy for the node
     pub fn proof_strategy(mut self, strategy: ProofStrategy) -> Self {
         self.core_builder = self.core_builder.proof_strategy(strategy);
+        self
+    }
+
+    /// Set the resource receive-window adaptation policy (Codeberg #85).
+    /// Default: [`WindowPolicy::Current`]. Endpoint tools read it from the
+    /// `LEVICULUM_RESOURCE_WINDOW_POLICY` environment variable via
+    /// [`crate::resource_policy::resource_window_policy_from_env`].
+    pub fn resource_window_policy(mut self, policy: WindowPolicy) -> Self {
+        self.core_builder = self.core_builder.resource_window_policy(policy);
         self
     }
 

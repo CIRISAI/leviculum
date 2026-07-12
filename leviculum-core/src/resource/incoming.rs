@@ -6,20 +6,18 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::constants::{
-    RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_INITIAL, RESOURCE_WINDOW_MAX_FAST,
-    RESOURCE_WINDOW_MAX_SLOW,
-};
+use crate::constants::RESOURCE_HASHMAP_LEN;
 use crate::crypto::full_hash;
+use crate::hex_fmt::HexFmt;
 use crate::link::Link;
 use crate::resource::hashmap::map_hash;
 use crate::resource::msgpack;
+use crate::resource::window::{RateSample, WindowPolicy, WindowState};
 use crate::resource::{
-    ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus, FAST_RATE_THRESHOLD,
-    HASHMAP_IS_EXHAUSTED, HASHMAP_IS_NOT_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
+    ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus, HASHMAP_IS_EXHAUSTED,
+    HASHMAP_IS_NOT_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
     PART_TIMEOUT_FACTOR_INITIAL, PER_RETRY_DELAY_MS, RESOURCE_MAX_RETRIES,
-    RESOURCE_RANDOM_HASH_SIZE, RESOURCE_WINDOW_FLEXIBILITY, RESOURCE_WINDOW_MAX_VERY_SLOW,
-    RETRY_GRACE_TIME_MS, SLOW_RATE_THRESHOLD, VERY_SLOW_RATE_THRESHOLD,
+    RESOURCE_RANDOM_HASH_SIZE, RESOURCE_WINDOW_FLEXIBILITY, RETRY_GRACE_TIME_MS,
 };
 
 use super::outgoing::ResourcePollResult;
@@ -62,16 +60,13 @@ pub(crate) struct IncomingResource {
     hashmap: Vec<Option<[u8; RESOURCE_HASHMAP_LEN]>>,
     hashmap_height: usize,
     consecutive_completed_height: usize,
-    // Window
-    window: usize,
-    window_max: usize,
+    // Window (Codeberg #85: state + policy live in resource::window)
+    window_state: WindowState,
+    window_policy: WindowPolicy,
     outstanding_parts: usize,
     // Timing
     last_activity_ms: u64,
     req_sent_ms: Option<u64>,
-    // Rate tracking
-    parts_received_this_window: usize,
-    consecutive_completed_windows: usize,
     // Transfer metrics
     eifr: u64,
     data_received: bool,
@@ -96,6 +91,7 @@ impl IncomingResource {
         sdu: usize,
         now_ms: u64,
         max_size: usize,
+        window_policy: WindowPolicy,
     ) -> Result<(Self, Vec<u8>), ResourceError> {
         // Reject oversized resources before allocating
         if adv.transfer_size as usize > max_size {
@@ -147,13 +143,11 @@ impl IncomingResource {
             hashmap,
             hashmap_height,
             consecutive_completed_height: 0,
-            window: RESOURCE_WINDOW_INITIAL,
-            window_max: RESOURCE_WINDOW_MAX_SLOW,
+            window_state: WindowState::new(),
+            window_policy,
             outstanding_parts: 0,
             last_activity_ms: now_ms,
             req_sent_ms: None,
-            parts_received_this_window: 0,
-            consecutive_completed_windows: 0,
             eifr: 0,
             data_received: false,
             retries: 0,
@@ -188,7 +182,10 @@ impl IncomingResource {
         }
 
         let search_start = self.consecutive_completed_height;
-        let search_end = core::cmp::min(search_start + self.window, self.num_parts as usize);
+        let search_end = core::cmp::min(
+            search_start + self.window_state.window(),
+            self.num_parts as usize,
+        );
 
         for pn in search_start..search_end {
             if self.parts[pn].is_none() {
@@ -222,7 +219,7 @@ impl IncomingResource {
                         last_hash[0], last_hash[1], last_hash[2], last_hash[3],
                         self.outstanding_parts,
                         self.consecutive_completed_height,
-                        self.window,
+                        self.window_state.window(),
                     );
                     req.extend_from_slice(&last_hash);
                 } else {
@@ -240,14 +237,14 @@ impl IncomingResource {
                 self.outstanding_parts,
                 self.consecutive_completed_height,
                 self.hashmap_height,
-                self.window,
+                self.window_state.window(),
             );
         }
 
         req.extend_from_slice(&self.resource_hash);
         req.extend_from_slice(&requested_hashes);
 
-        self.parts_received_this_window = 0;
+        self.window_state.start_round();
         self.last_req = Some(req.clone());
         req
     }
@@ -269,7 +266,7 @@ impl IncomingResource {
         // Search within window scope for matching hashmap entry
         let search_start = self.consecutive_completed_height;
         let search_end = core::cmp::min(
-            search_start + self.window + RESOURCE_WINDOW_FLEXIBILITY,
+            search_start + self.window_state.window() + RESOURCE_WINDOW_FLEXIBILITY,
             self.num_parts as usize,
         );
 
@@ -292,7 +289,7 @@ impl IncomingResource {
         // Store the part
         self.parts[index] = Some(part_data.to_vec());
         self.outstanding_parts = self.outstanding_parts.saturating_sub(1);
-        self.parts_received_this_window += 1;
+        self.window_state.record_part(part_data.len());
         self.last_activity_ms = now_ms;
         self.data_received = true;
         self.retries = 0;
@@ -300,7 +297,7 @@ impl IncomingResource {
         // Update EIFR based on RTT
         if let Some(req_sent) = self.req_sent_ms {
             let elapsed = now_ms.saturating_sub(req_sent);
-            if elapsed > 0 && self.parts_received_this_window == 1 {
+            if elapsed > 0 && self.window_state.parts_received_this_window() == 1 {
                 // First part of this window, measure data RTT rate
                 let bytes_per_part = if self.num_parts > 0 {
                     self.transfer_size / self.num_parts as u64
@@ -313,33 +310,39 @@ impl IncomingResource {
 
         // Check if all outstanding parts are received
         if self.outstanding_parts == 0 {
-            // Window promotion logic
-            self.consecutive_completed_windows += 1;
+            // Round complete: hand the rate measurements to the window policy
+            // (Codeberg #85). first_part_rate is the persisted eifr the
+            // historical logic reacted to; round_rate is the whole-round
+            // goodput for future policies.
+            let round_elapsed_ms = self
+                .req_sent_ms
+                .map(|req_sent| now_ms.saturating_sub(req_sent))
+                .unwrap_or(0);
+            let sample = RateSample {
+                first_part_rate: self.eifr,
+                round_rate: self
+                    .window_state
+                    .bytes_received_this_window()
+                    .saturating_mul(1000)
+                    / core::cmp::max(round_elapsed_ms, 1),
+            };
+            self.window_state
+                .on_round_complete(self.window_policy, sample);
 
-            if self.consecutive_completed_windows >= self.window + RESOURCE_WINDOW_FLEXIBILITY {
-                if self.window < self.window_max {
-                    self.window += 1;
-                }
-                self.consecutive_completed_windows = 0;
-            }
-
-            // Rate-based window tier adjustment
-            if self.eifr > FAST_RATE_THRESHOLD {
-                self.window_max = RESOURCE_WINDOW_MAX_FAST;
-            } else if self.eifr < VERY_SLOW_RATE_THRESHOLD {
-                self.window_max = RESOURCE_WINDOW_MAX_VERY_SLOW;
-                if self.window > self.window_max {
-                    self.window = self.window_max;
-                }
-            } else if self.eifr < SLOW_RATE_THRESHOLD {
-                self.window_max = RESOURCE_WINDOW_MAX_SLOW;
-                if self.window > self.window_max {
-                    self.window = self.window_max;
-                }
-            }
+            let missing_parts = self.parts.iter().filter(|p| p.is_none()).count();
+            crate::tracing::debug!(
+                event = "RESOURCE_RW",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                round = self.window_state.rounds_completed(),
+                window = self.window_state.window(),
+                wmax = self.window_state.window_max(),
+                rate = sample.first_part_rate,
+                outst = missing_parts,
+                t = round_elapsed_ms,
+            );
 
             // Check if ALL parts received
-            let all_received = self.parts.iter().all(|p| p.is_some());
+            let all_received = missing_parts == 0;
             if all_received {
                 self.status = ResourceStatus::Assembling;
                 return ResourcePartResult::Assembling;
@@ -585,6 +588,9 @@ impl IncomingResource {
                         self.status = ResourceStatus::Failed;
                         ResourcePollResult::TimedOut
                     } else {
+                        // Policy hook (Codeberg #85): Current is a no-op, the
+                        // historical logic never touches the window on timeout.
+                        self.window_state.on_timeout(self.window_policy);
                         self.last_activity_ms = now_ms;
                         // Rebuild request with only the currently missing parts
                         // (matches Python Resource.py:622, request_next() on timeout).
@@ -714,8 +720,15 @@ mod tests {
         let hashmap_data = vec![0x11, 0x22, 0x33, 0x44];
         let adv = make_test_adv(1, hashmap_data);
 
-        let (incoming, req) =
-            IncomingResource::from_advertisement(&adv, 431, 464, 1000, usize::MAX).unwrap();
+        let (incoming, req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
 
         assert_eq!(incoming.status(), ResourceStatus::Transferring);
         assert_eq!(incoming.num_parts, 1);
@@ -728,8 +741,15 @@ mod tests {
         let hashmap_data = vec![0x11, 0x22, 0x33, 0x44];
         let adv = make_test_adv(1, hashmap_data);
 
-        let (_, req) =
-            IncomingResource::from_advertisement(&adv, 431, 464, 1000, usize::MAX).unwrap();
+        let (_, req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
 
         // REQ: [0x00 (not exhausted)] [32: resource_hash] [4: requested_hash]
         assert_eq!(req[0], HASHMAP_IS_NOT_EXHAUSTED);
@@ -744,8 +764,15 @@ mod tests {
         let mut adv = make_test_adv(2, hashmap_data);
         adv.transfer_size = 928; // 2 * 464 sdu
 
-        let (_, req) =
-            IncomingResource::from_advertisement(&adv, 431, 464, 1000, usize::MAX).unwrap();
+        let (_, req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
 
         // Should be exhausted since we only have 1 hash but need 2+ parts
         // Window is 4 (initial), so parts 0 and 1 will be scanned
@@ -763,8 +790,15 @@ mod tests {
         let mut adv = make_test_adv(2, hashmap_data);
         adv.transfer_size = 928; // 2 * 464 sdu
 
-        let (incoming, _) =
-            IncomingResource::from_advertisement(&adv, 431, 464, 1000, usize::MAX).unwrap();
+        let (incoming, _) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
 
         assert_eq!(incoming.progress(), 0.0);
     }
@@ -775,8 +809,15 @@ mod tests {
         let mut adv = make_test_adv(3, hashmap_data);
         adv.transfer_size = 1392; // 3 * 464 sdu
 
-        let (mut incoming, _) =
-            IncomingResource::from_advertisement(&adv, 431, 464, 1000, usize::MAX).unwrap();
+        let (mut incoming, _) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
 
         assert_eq!(incoming.hashmap_height, 1);
 
@@ -804,8 +845,15 @@ mod tests {
         let hashmap_data = vec![0x11, 0x22, 0x33, 0x44];
         let adv = make_test_adv(1, hashmap_data);
 
-        let (mut incoming, _) =
-            IncomingResource::from_advertisement(&adv, 431, 464, 1000, usize::MAX).unwrap();
+        let (mut incoming, _) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
 
         // State machine fields accessible via accessors
         assert_eq!(incoming.original_hash(), &[0xCC; 32]);
@@ -823,7 +871,14 @@ mod tests {
     fn test_resource_too_large_rejected() {
         let mut adv = make_test_adv(1, vec![0u8; RESOURCE_HASHMAP_LEN]);
         adv.transfer_size = 100_000;
-        let result = IncomingResource::from_advertisement(&adv, 431, 400, 1000, 8 * 1024);
+        let result = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            400,
+            1000,
+            8 * 1024,
+            WindowPolicy::Current,
+        );
         match result {
             Err(ResourceError::ResourceTooLarge) => {}
             Err(e) => panic!("expected ResourceTooLarge, got {e}"),
@@ -835,15 +890,224 @@ mod tests {
     fn test_resource_within_limit_accepted() {
         let adv = make_test_adv(1, vec![0u8; RESOURCE_HASHMAP_LEN]);
         // transfer_size = 464, limit = 8KB
-        let result = IncomingResource::from_advertisement(&adv, 431, 400, 1000, 8 * 1024);
+        let result = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            400,
+            1000,
+            8 * 1024,
+            WindowPolicy::Current,
+        );
         assert!(result.is_ok(), "expected Ok, got Err");
+    }
+
+    /// Pins the exact receive-window trajectory of the window adaptation
+    /// logic (Codeberg #85). Drives an IncomingResource through 19 rounds
+    /// with controlled first-part timing so the measured rate crosses the
+    /// SLOW, FAST and VERY_SLOW tiers, and asserts the exact
+    /// (window, window_max) value after every completed round. This test
+    /// is the behavior-identical proof for the WindowState/WindowPolicy
+    /// extraction: it must stay green, unchanged, through the refactor.
+    #[test]
+    fn test_window_trajectory_pinned() {
+        const NUM_PARTS: usize = 100;
+        const SDU: usize = 464;
+        let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
+
+        // Build real parts and a full hashmap so REQs are never exhausted.
+        let parts: Vec<Vec<u8>> = (0..NUM_PARTS)
+            .map(|i| {
+                let mut p = vec![0u8; SDU];
+                p[0] = (i & 0xff) as u8;
+                p[1] = ((i >> 8) & 0xff) as u8;
+                p
+            })
+            .collect();
+        let mut hashmap_data = Vec::new();
+        for p in &parts {
+            hashmap_data.extend_from_slice(&map_hash(p, &random_hash));
+        }
+
+        let mut adv = make_test_adv(NUM_PARTS as u32, hashmap_data);
+        adv.transfer_size = (NUM_PARTS * SDU) as u64; // bytes_per_part = 464
+
+        let mut now: u64 = 1000;
+        let (mut incoming, first_req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            SDU,
+            now,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
+
+        // First-part delay per round: with bytes_per_part = 464 the measured
+        // rate is 464_000 / elapsed_ms. 50 ms -> 9280 B/s (SLOW tier),
+        // 5 ms -> 92800 B/s (FAST tier), 600 ms -> 773 B/s (VERY_SLOW tier).
+        let first_part_delay_ms: [u64; 19] = [
+            50, 50, 50, 50, 50, 50, 50, 50, 50, // rounds 1-9: slow
+            5, 5, 5, 5, 5, 5, 5, 5, 5,   // rounds 10-18: fast
+            600, // round 19: very slow
+        ];
+
+        // Number of part hashes a not-exhausted REQ carries:
+        // [1: flag][32: resource_hash][N*4: hashes].
+        fn requested_parts(req: &[u8]) -> usize {
+            assert_eq!(req[0], HASHMAP_IS_NOT_EXHAUSTED);
+            (req.len() - 1 - 32) / RESOURCE_HASHMAP_LEN
+        }
+
+        let mut req = first_req;
+        let mut next_part = 0;
+        let mut trajectory = Vec::new();
+        for delay in first_part_delay_ms {
+            let count = requested_parts(&req);
+            now += delay;
+            let mut last = ResourcePartResult::Continue;
+            for _ in 0..count {
+                last = incoming.receive_part(&parts[next_part], now, 100);
+                assert!(
+                    !matches!(last, ResourcePartResult::InvalidPart),
+                    "part {next_part} must match its hashmap entry"
+                );
+                next_part += 1;
+            }
+            trajectory.push((
+                incoming.window_state.window(),
+                incoming.window_state.window_max(),
+            ));
+            req = match last {
+                ResourcePartResult::SendRequest(r) => r,
+                other => panic!("round must complete with a next REQ, got {other:?}"),
+            };
+        }
+
+        // Hand-computed against the current algorithm: window grows by 1
+        // once consecutive_completed_windows reaches window + FLEXIBILITY(4),
+        // window_max follows the rate tier of the round's first-part rate,
+        // and a lowered window_max clamps the window down.
+        let expected = vec![
+            (4, 10), // round 1: slow rate keeps window_max at SLOW
+            (4, 10),
+            (4, 10),
+            (4, 10),
+            (4, 10),
+            (4, 10),
+            (4, 10),
+            (5, 10), // round 8: 8 completed rounds >= 4+4, window grows
+            (5, 10),
+            (5, 75), // round 10: fast rate lifts window_max to FAST
+            (5, 75),
+            (5, 75),
+            (5, 75),
+            (5, 75),
+            (5, 75),
+            (5, 75),
+            (6, 75), // round 17: 9 completed rounds >= 5+4, window grows
+            (6, 75),
+            (4, 4), // round 19: very slow rate clamps window to VERY_SLOW max
+        ];
+        assert_eq!(trajectory, expected, "pinned window trajectory changed");
+    }
+
+    /// The round-complete point emits the RESOURCE_RW observability event
+    /// (Codeberg #85) with the receiver-side rate the policy reacted to.
+    #[test]
+    fn test_round_complete_emits_resource_rw_event() {
+        extern crate std;
+        use std::string::String;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CaptureWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        const NUM_PARTS: usize = 8;
+        const SDU: usize = 464;
+        let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
+        let parts: Vec<Vec<u8>> = (0..NUM_PARTS)
+            .map(|i| {
+                let mut p = vec![0u8; SDU];
+                p[0] = i as u8;
+                p
+            })
+            .collect();
+        let mut hashmap_data = Vec::new();
+        for p in &parts {
+            hashmap_data.extend_from_slice(&map_hash(p, &random_hash));
+        }
+        let mut adv = make_test_adv(NUM_PARTS as u32, hashmap_data);
+        adv.transfer_size = (NUM_PARTS * SDU) as u64;
+
+        let (mut incoming, _req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            SDU,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
+
+        use tracing_subscriber::util::SubscriberInitExt;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CaptureWriter(buf.clone()))
+            .with_max_level(::tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        let guard = subscriber.set_default();
+        // Complete the first window (4 parts), first part 50 ms after the REQ.
+        for part in parts.iter().take(4) {
+            incoming.receive_part(part, 1050, 100);
+        }
+        drop(guard);
+
+        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let line = logs
+            .lines()
+            .find(|l| l.contains("RESOURCE_RW"))
+            .expect("round completion must emit a RESOURCE_RW event");
+        for key in [
+            "rh=aaaaaaaa",
+            "round=1",
+            "window=4",
+            "wmax=10",
+            "rate=9280",
+            "outst=4",
+            "t=50",
+        ] {
+            assert!(line.contains(key), "RESOURCE_RW missing {key}: {line}");
+        }
     }
 
     #[test]
     fn test_inconsistent_num_parts_rejected() {
         let mut adv = make_test_adv(10_000, vec![0u8; RESOURCE_HASHMAP_LEN]);
         adv.transfer_size = 100; // 100 bytes can't have 10000 parts
-        let result = IncomingResource::from_advertisement(&adv, 431, 400, 1000, usize::MAX);
+        let result = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            400,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        );
         match result {
             Err(ResourceError::InvalidAdvertisement) => {}
             Err(e) => panic!("expected InvalidAdvertisement, got {e}"),

@@ -51,10 +51,19 @@ impl Reticulum {
     /// (broadcasts, directed sends, local-client routing) is unaffected,
     /// it runs entirely on `output.actions`.
     ///
+    /// `resource_window_policy` selects the resource receive-window
+    /// adaptation algorithm (Codeberg #85); the daemon binary reads it from
+    /// the `LEVICULUM_RESOURCE_WINDOW_POLICY` environment variable via
+    /// [`crate::resource_policy::resource_window_policy_from_env`].
+    ///
     /// After this constructor, `take_event_receiver()` returns `None`.
-    pub fn with_config_daemon(config: Config) -> Result<Self> {
+    pub fn with_config_daemon(
+        config: Config,
+        resource_window_policy: leviculum_core::resource::WindowPolicy,
+    ) -> Result<Self> {
         let builder = ReticulumNodeBuilder::new()
             .config(config.clone())
+            .resource_window_policy(resource_window_policy)
             .without_events();
 
         Ok(Self {

@@ -69,7 +69,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     config.reticulum.storage_path = Some(storage_path);
 
-    let mut rns = Reticulum::with_config_daemon(config)?;
+    // Resource receive-window policy (Codeberg #85): env var, not a config
+    // key, because the config format is shared with Python rnsd.
+    let window_policy = leviculum_std::resource_policy::resource_window_policy_from_env();
+
+    let mut rns = Reticulum::with_config_daemon(config, window_policy)?;
     rns.start().await?;
 
     info!("Reticulum daemon running");

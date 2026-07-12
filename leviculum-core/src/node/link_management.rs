@@ -2029,6 +2029,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 sdu,
                 now_ms,
                 self.max_incoming_resource_size,
+                self.resource_window_policy,
             ) {
                 Ok((incoming, req_payload)) => {
                     let req_packet = link.build_data_packet_with_context(

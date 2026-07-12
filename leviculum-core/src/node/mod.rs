@@ -221,6 +221,9 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// Maximum incoming resource size in bytes. Resources larger than this
     /// are rejected at advertisement time, before any allocation.
     max_incoming_resource_size: usize,
+    /// Receive-window adaptation policy for incoming resources (Codeberg
+    /// #85). Passed into every `IncomingResource` this node creates.
+    resource_window_policy: crate::resource::WindowPolicy,
     /// Optional policy hook for per-destination announce suppression.
     /// `None` (default) announces every eligible destination — historical
     /// behaviour. Consulted on every scheduled announce; see
@@ -238,11 +241,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// * `rng` - Random number generator (moved into NodeCore)
     /// * `clock` - Clock instance (moved into NodeCore)
     /// * `storage` - Storage instance (moved into NodeCore)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         identity: Identity,
         config: TransportConfig,
         proof_strategy: ProofStrategy,
         max_incoming_resource_size: usize,
+        resource_window_policy: crate::resource::WindowPolicy,
         rng: R,
         clock: C,
         storage: S,
@@ -274,6 +279,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
             max_incoming_resource_size,
+            resource_window_policy,
             announce_control: None,
         }
     }
@@ -1265,6 +1271,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             sdu,
             now_ms,
             self.max_incoming_resource_size,
+            self.resource_window_policy,
         )?;
 
         let req_packet = link

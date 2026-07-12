@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::destination::ProofStrategy;
 use crate::identity::Identity;
-use crate::resource::RESOURCE_MAX_INCOMING_SIZE;
+use crate::resource::{WindowPolicy, RESOURCE_MAX_INCOMING_SIZE};
 use crate::transport::TransportConfig;
 use rand_core::CryptoRngCore;
 
@@ -45,6 +45,7 @@ pub struct NodeCoreBuilder {
     remote_management: bool,
     remote_management_allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
     max_incoming_resource_size: usize,
+    resource_window_policy: WindowPolicy,
 }
 
 impl Default for NodeCoreBuilder {
@@ -64,6 +65,7 @@ impl NodeCoreBuilder {
             remote_management: false,
             remote_management_allowed: Vec::new(),
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
+            resource_window_policy: WindowPolicy::Current,
         }
     }
 
@@ -173,6 +175,14 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Set the receive-window adaptation policy for incoming resources
+    /// (Codeberg #85). Default: [`WindowPolicy::Current`], the historical
+    /// algorithm. Applied to every `IncomingResource` this node creates.
+    pub fn resource_window_policy(mut self, policy: WindowPolicy) -> Self {
+        self.resource_window_policy = policy;
+        self
+    }
+
     /// Set the full transport configuration
     pub fn transport_config(mut self, config: TransportConfig) -> Self {
         self.transport_config = config;
@@ -214,6 +224,7 @@ impl NodeCoreBuilder {
             self.transport_config,
             self.proof_strategy,
             self.max_incoming_resource_size,
+            self.resource_window_policy,
             rng,
             clock,
             storage,

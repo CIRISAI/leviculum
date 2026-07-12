@@ -181,6 +181,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Connect to daemon
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
+        // Resource receive-window policy (Codeberg #85): the window lives in
+        // the endpoint process terminating the link, so lncp reads the env
+        // var itself rather than inheriting anything from the daemon.
+        .resource_window_policy(leviculum_std::resource_policy::resource_window_policy_from_env())
         .connect_to_shared_instance(&instance_name)
         // Safe to share storage path with lnsd: a client with
         // enable_transport(false) writes no paths, announces, or
