@@ -70,13 +70,16 @@ fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Runs in background
 # after every commit via the post-commit hook.
 # Tier 1 (~15 min): Tier 0 + core/tests + ffi (incl. C-program + Python interop)
-# + proxy + rnsd_interop.
+# + proxy + rnsd_interop + the TCP-hub endurance smoke soak.
 standard: fast test-ffi verify-packaging
     cargo test -p leviculum-core --tests
     cargo test -p leviculum-proxy
     cargo test -p leviculum-std --test rnsd_interop
     cargo test -p leviculum-std --test event_log_subscriber -- --test-threads=1
     cargo test -p leviculum-std --test event_log_multiprocess
+    # Endurance gate (#101): builds lnsd, boots it as a hub, asserts 100%
+    # delivery + RSS plateau + no fd leak. ~15 s smoke; `--full` is on demand.
+    bash scripts/run-soak.sh
 
 # Build the production binaries the integ runner mounts into Docker
 # containers. Explicit per-bin list avoids `--workspace --bins` which

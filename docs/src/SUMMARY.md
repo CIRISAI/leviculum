@@ -54,6 +54,7 @@
 - [Hop counting](architecture-hop-counting.md)
 - [Testing quick reference](development-testing.md)
 - [CI pipeline](development-ci.md)
+- [Soak and endurance](soak-and-endurance.md)
 
 # Appendix
 
