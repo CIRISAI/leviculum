@@ -251,6 +251,12 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         "respond_to_probes" => {
             config.respond_to_probes = parse_bool(value);
         }
+        // Whether links prove implicitly (RNS default true, Reticulum.py:575-578).
+        // Filled on the TOML path via serde; add it to the INI path too so a
+        // stock rnsd config that sets it is honoured rather than silently dropped.
+        "use_implicit_proof" => {
+            config.use_implicit_proof = parse_bool(value);
+        }
         // `enable_remote_management` is the upstream rnsd key
         // (Reticulum.py:548); `remote_management_enabled` is accepted as a
         // Leviculum-side alias so either spelling works.
@@ -1636,6 +1642,18 @@ mod tests {
         // peek_loglevel reads the same value without a full parse.
         assert_eq!(peek_loglevel("[logging]\n  loglevel = 6\n"), Some(6));
         assert_eq!(peek_loglevel("[reticulum]\n  loglevel = 6\n"), None);
+    }
+
+    #[test]
+    fn test_parse_use_implicit_proof() {
+        // RNS default is true (Reticulum.py:575-578); an explicit `No` on the
+        // INI path must disable it.
+        let off = parse_ini("[reticulum]\n  use_implicit_proof = No\n").unwrap();
+        assert!(!off.reticulum.use_implicit_proof);
+
+        // Absent key keeps the default true.
+        let default = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert!(default.reticulum.use_implicit_proof);
     }
 
     #[test]
