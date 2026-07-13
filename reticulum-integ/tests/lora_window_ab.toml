@@ -50,3 +50,8 @@ file_sizes = [51200]
 direction = "a_to_b"
 repeats = 5
 timeout_secs = 1500
+# Sender lncp at debug so its captured stdout/stderr shows the resource
+# sender events (RESOURCE_REQ_RX, RESOURCE_TX_STATE) in the failure detail.
+# Note: docker exec inherits the container RUST_LOG (the rust_log above),
+# which takes precedence over -vv and already includes resource=debug.
+sender_flags = "-vv"

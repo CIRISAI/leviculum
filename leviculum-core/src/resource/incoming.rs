@@ -257,6 +257,12 @@ impl IncomingResource {
         _rtt_ms: u64,
     ) -> ResourcePartResult {
         if self.status != ResourceStatus::Transferring {
+            crate::tracing::debug!(
+                event = "RESOURCE_PART_REJECT",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                reason = "not_transferring",
+                status = ?self.status,
+            );
             return ResourcePartResult::InvalidPart;
         }
 
@@ -283,6 +289,17 @@ impl IncomingResource {
         }
 
         let Some(index) = matched_index else {
+            // An arriving-but-rejected part (#85): the part crossed the air
+            // but matched no hashmap entry in the current window scope.
+            crate::tracing::debug!(
+                event = "RESOURCE_PART_REJECT",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                reason = "no_matching_hash",
+                mh = %HexFmt(&mh),
+                consecutive = self.consecutive_completed_height,
+                win_start = search_start,
+                win_end = search_end,
+            );
             return ResourcePartResult::InvalidPart;
         };
 
@@ -293,6 +310,16 @@ impl IncomingResource {
         self.last_activity_ms = now_ms;
         self.data_received = true;
         self.retries = 0;
+
+        // Per stored part (#85): between round boundaries a stored part
+        // previously logged nothing.
+        crate::tracing::debug!(
+            event = "RESOURCE_PART_RX",
+            rh = %HexFmt(&self.resource_hash[..4]),
+            idx = index,
+            outstanding = self.outstanding_parts,
+            consecutive = self.consecutive_completed_height,
+        );
 
         // Update EIFR based on RTT
         if let Some(req_sent) = self.req_sent_ms {

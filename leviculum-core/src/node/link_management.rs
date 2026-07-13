@@ -2097,6 +2097,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         };
         if link.state() != LinkState::Active {
+            // A retry REQ arriving on a not-yet/no-longer Active link is
+            // silently dropped here; make that visible (#85).
+            crate::tracing::debug!(
+                event = "RESOURCE_REQ_DROP",
+                reason = "link_not_active",
+                link = %HexFmt(&link_id.as_bytes()[..4]),
+                state = ?link.state(),
+            );
             return;
         }
         link.record_inbound(now_secs);
@@ -2194,6 +2202,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         };
         if link.state() != LinkState::Active {
+            // A resource part arriving on a not-Active link is silently
+            // dropped here; make that visible (#85).
+            crate::tracing::debug!(
+                event = "RESOURCE_PART_DROP",
+                reason = "link_not_active",
+                link = %HexFmt(&link_id.as_bytes()[..4]),
+                state = ?link.state(),
+            );
             return;
         }
         link.record_inbound(now_secs);
@@ -2362,7 +2378,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
             ResourcePartResult::InvalidPart => {
                 link.set_incoming_resource(incoming);
-                crate::tracing::trace!("Received resource part with no matching hash");
+                // Raised from trace to debug (#85): pairs with the detailed
+                // RESOURCE_PART_REJECT event emitted inside receive_part.
+                crate::tracing::debug!(
+                    "Received resource part with no matching hash (rh={}, len={})",
+                    HexFmt(&resource_hash[..4]),
+                    part_data.len(),
+                );
             }
         }
 

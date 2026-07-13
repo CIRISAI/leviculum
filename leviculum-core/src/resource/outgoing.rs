@@ -12,6 +12,7 @@ use rand_core::CryptoRngCore;
 use crate::constants::RESOURCE_AUTO_COMPRESS_MAX;
 use crate::constants::{RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_MAX_FAST};
 use crate::crypto::full_hash;
+use crate::hex_fmt::HexFmt;
 use crate::link::Link;
 use crate::packet::PacketContext;
 use crate::resource::hashmap::map_hash;
@@ -474,11 +475,21 @@ impl OutgoingResource {
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, ResourceError> {
         if self.status == ResourceStatus::Failed {
+            crate::tracing::warn!(
+                event = "RESOURCE_REQ_ERR",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                reason = "cancelled",
+            );
             return Err(ResourceError::Cancelled);
         }
 
         // Parse REQ wire format: [1:exhausted_flag][4?:last_map_hash][32:resource_hash][N*4:requested_hashes]
         if req_data.is_empty() {
+            crate::tracing::warn!(
+                event = "RESOURCE_REQ_ERR",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                reason = "empty_req",
+            );
             return Err(ResourceError::InvalidRequest);
         }
 
@@ -491,17 +502,35 @@ impl OutgoingResource {
 
         // resource_hash starts at offset `pad`
         if req_data.len() < pad + 32 {
+            crate::tracing::warn!(
+                event = "RESOURCE_REQ_ERR",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                reason = "truncated_req",
+                len = req_data.len(),
+            );
             return Err(ResourceError::InvalidRequest);
         }
 
         let req_resource_hash = &req_data[pad..pad + 32];
         if req_resource_hash != self.resource_hash {
+            crate::tracing::warn!(
+                event = "RESOURCE_REQ_ERR",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                reason = "hash_mismatch",
+                req_rh = %HexFmt(&req_resource_hash[..4]),
+            );
             return Err(ResourceError::InvalidRequest);
         }
 
         // Transition to transferring on first REQ
         if self.status == ResourceStatus::Advertised {
             self.status = ResourceStatus::Transferring;
+            crate::tracing::debug!(
+                event = "RESOURCE_TX_STATE",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                status = ?self.status,
+                retries = self.retries,
+            );
         }
 
         self.req_received = true;
@@ -526,14 +555,30 @@ impl OutgoingResource {
         let search_start = self.receiver_min_consecutive_height;
         let search_end = core::cmp::min(search_start + COLLISION_GUARD_SIZE, self.parts.len());
 
+        // Measurement-only counters for the RESOURCE_REQ_RX event (#85).
+        let mut matched: usize = 0;
+        let mut first_req_idx: isize = -1;
+
         for i in search_start..search_end {
             if requested_hashes.contains(&self.hashmap[i]) {
                 // Build raw data packet (no per-packet encryption)
                 let raw_pkt = link
                     .build_raw_data_packet(&self.parts[i], PacketContext::Resource)
-                    .map_err(|_| ResourceError::LinkNotActive)?;
+                    .map_err(|_| {
+                        crate::tracing::warn!(
+                            event = "RESOURCE_REQ_ERR",
+                            rh = %HexFmt(&self.resource_hash[..4]),
+                            reason = "link_not_active_part",
+                            idx = i,
+                        );
+                        ResourceError::LinkNotActive
+                    })?;
                 packets.push(raw_pkt);
                 self.sent_mask[i] = true;
+                if first_req_idx < 0 {
+                    first_req_idx = i as isize;
+                }
+                matched += 1;
             }
         }
 
@@ -580,7 +625,14 @@ impl OutgoingResource {
                 // Wrap in encrypted link packet
                 let hmu_pkt = link
                     .build_data_packet_with_context(&hmu, PacketContext::ResourceHmu, rng)
-                    .map_err(|_| ResourceError::LinkNotActive)?;
+                    .map_err(|_| {
+                        crate::tracing::warn!(
+                            event = "RESOURCE_REQ_ERR",
+                            rh = %HexFmt(&self.resource_hash[..4]),
+                            reason = "link_not_active_hmu",
+                        );
+                        ResourceError::LinkNotActive
+                    })?;
                 packets.push(hmu_pkt);
             }
         }
@@ -589,6 +641,34 @@ impl OutgoingResource {
         if self.distinct_parts_sent() == self.parts.len() {
             self.status = ResourceStatus::AwaitingProof;
             self.retries = 0;
+            crate::tracing::debug!(
+                event = "RESOURCE_TX_STATE",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                status = ?self.status,
+                retries = self.retries,
+            );
+        }
+
+        // One structured event per received REQ (#85): what the REQ asked
+        // for, what was resent, and where the sender state stands.
+        crate::tracing::debug!(
+            event = "RESOURCE_REQ_RX",
+            rh = %HexFmt(&self.resource_hash[..4]),
+            n_req = num_requested,
+            matched = matched,
+            first_req_idx = first_req_idx,
+            distinct_sent = self.distinct_parts_sent(),
+            num_parts = self.parts.len(),
+            status = ?self.status,
+        );
+        if matched == 0 && num_requested > 0 {
+            crate::tracing::warn!(
+                event = "RESOURCE_REQ_NO_MATCH",
+                rh = %HexFmt(&self.resource_hash[..4]),
+                n_req = num_requested,
+                search_start = search_start,
+                search_end = search_end,
+            );
         }
 
         Ok(packets)
@@ -622,6 +702,12 @@ impl OutgoingResource {
         }
 
         self.status = ResourceStatus::Complete;
+        crate::tracing::debug!(
+            event = "RESOURCE_TX_STATE",
+            rh = %HexFmt(&self.resource_hash[..4]),
+            status = ?self.status,
+            retries = self.retries,
+        );
         Ok(ResourceStatus::Complete)
     }
 
@@ -635,11 +721,25 @@ impl OutgoingResource {
                 let timeout = rtt_ms.saturating_mul(6) + PROCESSING_GRACE_MS;
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.adv_retries += 1;
+                    crate::tracing::debug!(
+                        event = "RESOURCE_TX_STATE",
+                        rh = %HexFmt(&self.resource_hash[..4]),
+                        status = ?self.status,
+                        retries = self.retries,
+                        adv_retries = self.adv_retries,
+                    );
                     if self.adv_retries < RESOURCE_MAX_ADV_RETRIES {
                         self.last_activity_ms = now_ms;
                         ResourcePollResult::RetransmitAdv(self.adv_packet.clone())
                     } else {
                         self.status = ResourceStatus::Failed;
+                        crate::tracing::debug!(
+                            event = "RESOURCE_TX_STATE",
+                            rh = %HexFmt(&self.resource_hash[..4]),
+                            status = ?self.status,
+                            retries = self.retries,
+                            adv_retries = self.adv_retries,
+                        );
                         ResourcePollResult::TimedOut
                     }
                 } else {
@@ -662,8 +762,20 @@ impl OutgoingResource {
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.retries += 1;
                     self.last_activity_ms = now_ms;
+                    crate::tracing::debug!(
+                        event = "RESOURCE_TX_STATE",
+                        rh = %HexFmt(&self.resource_hash[..4]),
+                        status = ?self.status,
+                        retries = self.retries,
+                    );
                     if self.retries >= RESOURCE_MAX_RETRIES {
                         self.status = ResourceStatus::Failed;
+                        crate::tracing::debug!(
+                            event = "RESOURCE_TX_STATE",
+                            rh = %HexFmt(&self.resource_hash[..4]),
+                            status = ?self.status,
+                            retries = self.retries,
+                        );
                         ResourcePollResult::TimedOut
                     } else {
                         // Just wait for another REQ
@@ -682,8 +794,20 @@ impl OutgoingResource {
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.retries += 1;
                     self.last_activity_ms = now_ms;
+                    crate::tracing::debug!(
+                        event = "RESOURCE_TX_STATE",
+                        rh = %HexFmt(&self.resource_hash[..4]),
+                        status = ?self.status,
+                        retries = self.retries,
+                    );
                     if self.retries >= RESOURCE_MAX_RETRIES {
                         self.status = ResourceStatus::Failed;
+                        crate::tracing::debug!(
+                            event = "RESOURCE_TX_STATE",
+                            rh = %HexFmt(&self.resource_hash[..4]),
+                            status = ?self.status,
+                            retries = self.retries,
+                        );
                         ResourcePollResult::TimedOut
                     } else {
                         // Send CacheRequest so receiver re-sends the proof
@@ -734,6 +858,12 @@ impl OutgoingResource {
     #[allow(dead_code)] // Resource cancel API — see Codeberg issues #27/#28
     pub(crate) fn cancel(&mut self) {
         self.status = ResourceStatus::Failed;
+        crate::tracing::debug!(
+            event = "RESOURCE_TX_STATE",
+            rh = %HexFmt(&self.resource_hash[..4]),
+            status = ?self.status,
+            retries = self.retries,
+        );
     }
 
     // Accessors
@@ -1256,6 +1386,91 @@ mod tests {
         }
         let _ = res.handle_request(&req_all, &link, &mut rng, 9000).unwrap();
         assert_eq!(res.status(), ResourceStatus::AwaitingProof);
+    }
+
+    /// Every received REQ emits the RESOURCE_REQ_RX observability event
+    /// (Codeberg #85) with the request/resend accounting the stall
+    /// diagnosis needs.
+    #[test]
+    fn test_handle_request_emits_resource_req_rx_event() {
+        extern crate std;
+        use std::string::String;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CaptureWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+        let data = vec![0x42u8; 200];
+        let mut res =
+            OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let rh_prefix = {
+            let mut s = String::new();
+            for b in &res.resource_hash[..4] {
+                s.push_str(&std::format!("{b:02x}"));
+            }
+            s
+        };
+
+        // Full REQ requesting all parts.
+        let mut req = Vec::new();
+        req.push(0x00);
+        req.extend_from_slice(&res.resource_hash);
+        for h in &res.hashmap {
+            req.extend_from_slice(h);
+        }
+
+        use tracing_subscriber::util::SubscriberInitExt;
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CaptureWriter(buf.clone()))
+            .with_max_level(::tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        let guard = subscriber.set_default();
+        let _ = res.handle_request(&req, &link, &mut rng, 2000).unwrap();
+        drop(guard);
+
+        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let line = logs
+            .lines()
+            .find(|l| l.contains("RESOURCE_REQ_RX"))
+            .expect("handle_request must emit a RESOURCE_REQ_RX event");
+        let num_parts = res.parts.len();
+        for key in [
+            std::format!("rh={rh_prefix}"),
+            std::format!("n_req={num_parts}"),
+            std::format!("matched={num_parts}"),
+            String::from("first_req_idx=0"),
+            std::format!("distinct_sent={num_parts}"),
+            std::format!("num_parts={num_parts}"),
+            String::from("status=AwaitingProof"),
+        ] {
+            assert!(
+                line.contains(&*key),
+                "RESOURCE_REQ_RX missing {key}: {line}"
+            );
+        }
+        assert!(
+            logs.lines().any(|l| l.contains("RESOURCE_TX_STATE")),
+            "status transitions must emit RESOURCE_TX_STATE: {logs}"
+        );
     }
 
     #[test]
