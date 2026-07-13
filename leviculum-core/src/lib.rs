@@ -126,7 +126,10 @@ pub mod transport;
 pub mod tunnel;
 
 // Re-export key types
-pub use announce::{AnnounceControl, AnnounceError, ReceivedAnnounce};
+pub use announce::{
+    announce_app_data_budget, announce_payload_fixed_len, AnnounceControl, AnnounceError,
+    ReceivedAnnounce,
+};
 pub use destination::{
     Destination, DestinationError, DestinationHash, DestinationType, Direction, ProofStrategy,
 };

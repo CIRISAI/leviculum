@@ -557,10 +557,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let packet = dest.announce(app_data, &mut self.rng, now_ms)?;
         let ratchet_pub = dest.current_ratchet_public();
 
+        // Size was already gated at compose time in `Destination::announce`, so
+        // any failure here is a genuine pack error — report it as itself rather
+        // than misattributing all five PacketError variants to the MTU.
         let mut buf = [0u8; crate::constants::MTU];
-        let len = packet
-            .pack(&mut buf)
-            .map_err(|_| AnnounceError::PacketTooLarge)?;
+        let len = packet.pack(&mut buf).map_err(AnnounceError::Pack)?;
 
         self.transport
             .storage_mut()
