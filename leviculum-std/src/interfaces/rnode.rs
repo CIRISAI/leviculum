@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +45,234 @@ const IO_READ_BUF: usize = 1024;
 const FREQ_TOLERANCE_HZ: u32 = 100;
 /// Device reset notification marker
 const DEVICE_RESET_MARKER: u8 = 0xF8;
+
+// ---------------------------------------------------------------------------
+// Firmware airtime-lock gate (Codeberg #121)
+// ---------------------------------------------------------------------------
+
+/// Cadence at which the RNode firmware refreshes CMD_STAT_CHTM (~2 s). While
+/// the airtime-lock gate is engaged, `InterfaceHandle::next_slot_ms` defers
+/// retry wakeups by this amount so the driver re-polls at the next-stat
+/// cadence instead of busy-looping.
+pub(crate) const CHTM_REFRESH_MS: u64 = 2000;
+
+/// Fail-open window for the airtime-lock gate: if the gate is engaged and no
+/// CHTM frame arrives for 5x the stat cadence, release the gate with a warn.
+/// A wedged firmware must degrade to the pre-gate behavior, never leave the
+/// interface permanently dark.
+const CHTM_STALE_WINDOW_MS: u64 = 5 * CHTM_REFRESH_MS;
+
+/// Fraction of the configured airtime cap at which the Approaching phase
+/// (and the AIRTIME_APPROACHING event) begins.
+const AIRTIME_APPROACH_FRACTION: f64 = 0.8;
+
+/// Release hysteresis in percent points below the cap. Avoids chattering at
+/// the CHTM quantization boundary (raw values are percent x100).
+const AIRTIME_RELEASE_MARGIN: f64 = 0.05;
+
+/// TX gate raised while the firmware airtime lock is engaged.
+///
+/// When a sender saturates an armed duty-cycle limit (`st_alock`/`lt_alock`)
+/// the firmware silently stops radiating but keeps accepting CMD_DATA into
+/// its opaque queue. This gate makes the sender hold packets host-side
+/// instead: written only by the CHTM state machine in the io task, read by
+/// `InterfaceHandle::try_send_prioritized` (returns BufferFull, so packets
+/// land in the driver retry queue), by `InterfaceHandle::next_slot_ms`
+/// (defers the retry wake), and by the io task's own TX pop condition
+/// (holds frames already queued when the lock engages).
+pub(crate) struct TxGate {
+    engaged: AtomicBool,
+}
+
+impl TxGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            engaged: AtomicBool::new(false),
+        })
+    }
+
+    /// Whether the firmware airtime lock is currently engaged.
+    pub(crate) fn engaged(&self) -> bool {
+        self.engaged.load(Ordering::Acquire)
+    }
+
+    fn set(&self, engaged: bool) {
+        self.engaged.store(engaged, Ordering::Release);
+    }
+}
+
+/// Phase of one per-limit airtime state machine.
+#[derive(Clone, Copy, PartialEq)]
+enum LockPhase {
+    Clear,
+    Approaching,
+    Engaged,
+}
+
+/// Edge-triggered transition produced by one CHTM sample; at most one per
+/// sample per limit.
+enum LockEvent {
+    Approaching,
+    Engaged,
+    Released,
+}
+
+/// State machine for one configured airtime limit (short or long term).
+struct LimitState {
+    /// Cap in percent (`alock / 100.0`).
+    cap: f64,
+    phase: LockPhase,
+}
+
+impl LimitState {
+    /// `None` when the limit is not configured or its cap is 0, which the
+    /// firmware reads as unlimited.
+    fn new(alock: Option<u16>) -> Option<Self> {
+        let raw = alock?;
+        if raw == 0 {
+            return None;
+        }
+        Some(Self {
+            cap: raw as f64 / 100.0,
+            phase: LockPhase::Clear,
+        })
+    }
+
+    /// Feed one CHTM airtime sample (percent) and return the transition to
+    /// emit, if any. Edge-triggered: repeated samples in the same phase
+    /// return `None`.
+    fn on_sample(&mut self, airtime: f64) -> Option<LockEvent> {
+        let approach = AIRTIME_APPROACH_FRACTION * self.cap;
+        match self.phase {
+            LockPhase::Engaged => {
+                if airtime <= self.cap - AIRTIME_RELEASE_MARGIN {
+                    self.phase = if airtime >= approach {
+                        LockPhase::Approaching
+                    } else {
+                        LockPhase::Clear
+                    };
+                    Some(LockEvent::Released)
+                } else {
+                    None
+                }
+            }
+            LockPhase::Approaching => {
+                if airtime >= self.cap {
+                    self.phase = LockPhase::Engaged;
+                    Some(LockEvent::Engaged)
+                } else {
+                    if airtime < approach {
+                        self.phase = LockPhase::Clear;
+                    }
+                    None
+                }
+            }
+            LockPhase::Clear => {
+                if airtime >= self.cap {
+                    self.phase = LockPhase::Engaged;
+                    Some(LockEvent::Engaged)
+                } else if airtime >= approach {
+                    self.phase = LockPhase::Approaching;
+                    Some(LockEvent::Approaching)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Drives the airtime-lock events and the TX gate from CMD_STAT_CHTM samples.
+///
+/// Gate and events are one state machine: the gate is engaged exactly while
+/// at least one limit is in the Engaged phase. Owned by the io task; a fresh
+/// controller is built per (re)connection, which also resets the gate.
+struct AirtimeLockCtl {
+    gate: Arc<TxGate>,
+    short: Option<LimitState>,
+    long: Option<LimitState>,
+    /// Fail-open window the io task arms while the gate is engaged. Always
+    /// `CHTM_STALE_WINDOW_MS` in production; tests shorten it to keep the
+    /// staleness test fast (the arming and release path is identical).
+    stale_window_ms: u64,
+}
+
+impl AirtimeLockCtl {
+    fn new(gate: Arc<TxGate>, st_alock: Option<u16>, lt_alock: Option<u16>) -> Self {
+        gate.set(false);
+        Self {
+            gate,
+            short: LimitState::new(st_alock),
+            long: LimitState::new(lt_alock),
+            stale_window_ms: CHTM_STALE_WINDOW_MS,
+        }
+    }
+
+    fn engaged(&self) -> bool {
+        self.gate.engaged()
+    }
+
+    /// Feed one decoded CHTM frame (airtime values in percent) into both
+    /// limit machines and update the gate.
+    fn on_chtm(&mut self, iface: &str, airtime_short: f64, airtime_long: f64) {
+        if let Some(state) = &mut self.long {
+            if let Some(ev) = state.on_sample(airtime_long) {
+                let cap = state.cap;
+                match ev {
+                    LockEvent::Approaching => {
+                        tracing::info!(event = "AIRTIME_APPROACHING", iface, airtime_long, cap)
+                    }
+                    LockEvent::Engaged => {
+                        tracing::warn!(event = "AIRTIME_LOCK_ENGAGED", iface, airtime_long, cap)
+                    }
+                    LockEvent::Released => {
+                        tracing::info!(event = "AIRTIME_LOCK_RELEASED", iface, airtime_long)
+                    }
+                }
+            }
+        }
+        if let Some(state) = &mut self.short {
+            if let Some(ev) = state.on_sample(airtime_short) {
+                let cap = state.cap;
+                match ev {
+                    LockEvent::Approaching => {
+                        tracing::info!(event = "AIRTIME_APPROACHING", iface, airtime_short, cap)
+                    }
+                    LockEvent::Engaged => {
+                        tracing::warn!(event = "AIRTIME_LOCK_ENGAGED", iface, airtime_short, cap)
+                    }
+                    LockEvent::Released => {
+                        tracing::info!(event = "AIRTIME_LOCK_RELEASED", iface, airtime_short)
+                    }
+                }
+            }
+        }
+        let engaged =
+            |s: &Option<LimitState>| s.as_ref().is_some_and(|s| s.phase == LockPhase::Engaged);
+        self.gate.set(engaged(&self.long) || engaged(&self.short));
+    }
+
+    /// Fail-open release after CHTM staleness: the firmware stopped
+    /// reporting while the lock was engaged, so degrade to the pre-gate
+    /// behavior. The machines reset to Clear; the next CHTM re-drives them.
+    fn release_stale(&mut self, iface: &str) {
+        if !self.gate.engaged() {
+            return;
+        }
+        tracing::warn!(
+            event = "AIRTIME_LOCK_STALE_RELEASE",
+            iface,
+            window_ms = self.stale_window_ms
+        );
+        for state in [self.long.as_mut(), self.short.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            state.phase = LockPhase::Clear;
+        }
+        self.gate.set(false);
+    }
+}
 
 /// Result of an RNode detection probe
 #[derive(Debug)]
@@ -564,6 +793,7 @@ async fn rnode_io_task<S>(
     _bandwidth_hz: u32,
     _sf: u8,
     _cr: u8,
+    mut lock_ctl: AirtimeLockCtl,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -586,6 +816,10 @@ where
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
     let mut heartbeat_timer = Box::pin(tokio::time::sleep(HEARTBEAT_INTERVAL));
     let mut heartbeat_pending = false;
+
+    // CHTM staleness guard for the airtime-lock gate, armed only while the
+    // gate is engaged and re-armed on every CHTM frame. See Branch 5.
+    let mut chtm_stale_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
 
     loop {
         tokio::select! {
@@ -739,6 +973,30 @@ where
                                     | rnode::CMD_STAT_BAT
                                     | rnode::CMD_STAT_TEMP) => {
                                         apply_radio_stat(&counters, cmd, &payload);
+                                        // Airtime-lock gate (Codeberg #121):
+                                        // CHTM carries the rolling airtime the
+                                        // firmware enforces its lock with.
+                                        // Drive the per-limit state machines
+                                        // and (re)arm the staleness guard.
+                                        if cmd == rnode::CMD_STAT_CHTM {
+                                            if let Some(cs) =
+                                                rnode::decode_channel_stats(&payload)
+                                            {
+                                                lock_ctl.on_chtm(
+                                                    &name,
+                                                    cs.airtime_short as f64 / 100.0,
+                                                    cs.airtime_long as f64 / 100.0,
+                                                );
+                                            }
+                                            chtm_stale_timer =
+                                                lock_ctl.engaged().then(|| {
+                                                    Box::pin(tokio::time::sleep(
+                                                        Duration::from_millis(
+                                                            lock_ctl.stale_window_ms,
+                                                        ),
+                                                    ))
+                                                });
+                                        }
                                     }
                                     _ => {
                                         tracing::trace!(
@@ -842,12 +1100,30 @@ where
                 tracing::debug!("{}: heartbeat sent", name);
                 heartbeat_timer = Box::pin(tokio::time::sleep(HEARTBEAT_INTERVAL));
             }
+
+            // Branch 5: CHTM staleness guard, armed only while the airtime
+            // lock gate is engaged. Fail-open: a firmware that stops emitting
+            // CHTM must degrade to the pre-gate behavior instead of leaving
+            // the interface permanently dark. Full serial death is covered by
+            // the 5 minute CMD_DETECT heartbeat above; this is the softer
+            // stats-only staleness guard.
+            _ = async {
+                if let Some(ref mut timer) = chtm_stale_timer {
+                    timer.await;
+                }
+            }, if chtm_stale_timer.is_some() => {
+                chtm_stale_timer = None;
+                lock_ctl.release_stale(&name);
+            }
         }
 
-        // After any branch: try to send if both gates are open
+        // After any branch: try to send if all gates are open
         //   Gate 1: timer_ready (jitter/spacing delay elapsed)
         //   Gate 2: interface_ready || !flow_control
-        if timer_ready && (interface_ready || !flow_control) {
+        //   Gate 3: airtime lock not engaged. Frames already queued when the
+        //           lock engages are held (preserving the firmware queue
+        //           depth 1 invariant) and drain when it releases.
+        if timer_ready && (interface_ready || !flow_control) && !lock_ctl.engaged() {
             if let Some(queued) = send_queue.pop_front() {
                 if let Err(e) = port.write_all(&queued.data).await {
                     tracing::warn!("{}: write error: {}", name, e);
@@ -924,6 +1200,9 @@ struct RNodeReconnectCtx {
     flow_control: bool,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     jitter_max_ms: u64,
+    /// Airtime-lock TX gate (Codeberg #121), shared with the
+    /// `InterfaceHandle` via `InterfaceCounters::set_tx_gate`.
+    gate: Arc<TxGate>,
 }
 
 /// Reconnect loop: open channel → configure → I/O → on disconnect → wait → retry.
@@ -993,6 +1272,11 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     }
                 }
 
+                // Fresh lock controller per connection: the state machines
+                // restart from Clear and the gate resets, so a reconnect
+                // never starts gated by a stale engagement.
+                let lock_ctl =
+                    AirtimeLockCtl::new(Arc::clone(&ctx.gate), radio.st_alock, radio.lt_alock);
                 outgoing_rx = rnode_io_task(
                     ctx.name.clone(),
                     port,
@@ -1004,6 +1288,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     radio.bandwidth,
                     radio.sf,
                     radio.cr,
+                    lock_ctl,
                 )
                 .await;
 
@@ -1183,6 +1468,10 @@ where
     // radio-capable so interface_stats always emits the radio keys (with their
     // defaults) even before the first frame arrives.
     counters.enable_radio_stats();
+    // Codeberg #121: expose the airtime-lock TX gate to the handle's
+    // backpressure paths (try_send_prioritized, next_slot_ms). Only RNode
+    // spawns set this; every other interface type leaves it unset.
+    counters.set_tx_gate(Arc::clone(&ctx.gate));
 
     let id = ctx.id;
     let name = ctx.name.clone();
@@ -1248,6 +1537,7 @@ fn reconnect_ctx_from_radio(
         flow_control,
         reconnect_notify,
         jitter_max_ms,
+        gate: TxGate::new(),
     }
 }
 
@@ -2330,6 +2620,7 @@ mod tests {
                 125_000,
                 7,
                 5,
+                AirtimeLockCtl::new(TxGate::new(), None, None),
             )
             .await;
         });
@@ -2426,6 +2717,7 @@ mod tests {
                 125_000,
                 7,
                 5,
+                AirtimeLockCtl::new(TxGate::new(), None, None),
             )
             .await;
         });
@@ -2504,6 +2796,7 @@ mod tests {
                 125_000,
                 7,
                 5,
+                AirtimeLockCtl::new(TxGate::new(), None, None),
             )
             .await;
         });
@@ -2912,6 +3205,7 @@ mod tests {
                 125_000,
                 7,
                 5,
+                AirtimeLockCtl::new(TxGate::new(), None, None),
             )
             .await;
         });
@@ -3072,5 +3366,378 @@ mod tests {
         let c = InterfaceCounters::new();
         assert!(!apply_radio_stat(&c, rnode::CMD_DATA, &[1, 2, 3]));
         assert!(c.radio_stats().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Airtime-lock gate (Codeberg #121)
+    // -----------------------------------------------------------------------
+
+    /// Capture tracing output for the duration of the returned guard. Uses a
+    /// thread-local default subscriber, which sees the io task's events
+    /// because the current-thread tokio test runtime runs every task on the
+    /// test thread. Same pattern as the core TUNNEL event test.
+    #[derive(Clone)]
+    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = LogSink;
+        fn make_writer(&'a self) -> LogSink {
+            self.clone()
+        }
+    }
+
+    fn capture_logs() -> (
+        Arc<std::sync::Mutex<Vec<u8>>>,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(LogSink(Arc::clone(&buf)))
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (buf, guard)
+    }
+
+    fn count_event(logs: &str, event: &str) -> usize {
+        let needle = format!("event=\"{event}\"");
+        logs.lines().filter(|l| l.contains(&needle)).count()
+    }
+
+    /// Build a framed single-interface CMD_STAT_CHTM injection with the given
+    /// raw airtime values (percent x100), zero channel load, and a quiet
+    /// noise floor.
+    fn chtm_frame(airtime_short_raw: u16, airtime_long_raw: u16) -> Vec<u8> {
+        let s = airtime_short_raw.to_be_bytes();
+        let l = airtime_long_raw.to_be_bytes();
+        let payload = [s[0], s[1], l[0], l[1], 0, 0, 0, 0, 0xC8, 100, 0xFF];
+        let mut out = Vec::new();
+        kiss::frame(rnode::CMD_STAT_CHTM, &payload, &mut out);
+        out
+    }
+
+    /// Scripted firmware stub for the airtime-lock tests: answers the detect
+    /// probe, echoes radio-config confirmations, records every CMD_DATA
+    /// payload it receives, and writes any raw bytes sent on `inject_rx` to
+    /// the port (used to inject CMD_STAT_CHTM at scripted points).
+    async fn rnode_firmware_stub_scripted(
+        mut peer: tokio::io::DuplexStream,
+        mut inject_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        data_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) {
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut buf = [0u8; 1024];
+        let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
+            let mut one = Vec::new();
+            kiss::frame(cmd, payload, &mut one);
+            reply.extend_from_slice(&one);
+        };
+        loop {
+            tokio::select! {
+                read = peer.read(&mut buf) => {
+                    let n = match read {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    let mut reply: Vec<u8> = Vec::new();
+                    for f in deframer.process(&buf[..n]) {
+                        if let KissDeframeResult::Frame { command, payload } = f {
+                            match command {
+                                rnode::CMD_DETECT => {
+                                    push(&mut reply, rnode::CMD_DETECT, &[rnode::DETECT_RESP]);
+                                    push(
+                                        &mut reply,
+                                        rnode::CMD_FW_VERSION,
+                                        &[rnode::REQUIRED_FW_MAJ, rnode::REQUIRED_FW_MIN],
+                                    );
+                                    push(&mut reply, rnode::CMD_PLATFORM, &[rnode::PLATFORM_ESP32]);
+                                    push(&mut reply, rnode::CMD_MCU, &[0x00]);
+                                }
+                                rnode::CMD_FREQUENCY
+                                | rnode::CMD_BANDWIDTH
+                                | rnode::CMD_TXPOWER
+                                | rnode::CMD_SF
+                                | rnode::CMD_CR
+                                | rnode::CMD_RADIO_STATE => {
+                                    push(&mut reply, command, &payload);
+                                }
+                                rnode::CMD_DATA => {
+                                    let _ = data_tx.try_send(payload.to_vec());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if !reply.is_empty() && peer.write_all(&reply).await.is_err() {
+                        return;
+                    }
+                }
+                inj = inject_rx.recv() => {
+                    match inj {
+                        Some(bytes) => {
+                            if peer.write_all(&bytes).await.is_err() {
+                                return;
+                            }
+                        }
+                        None => return,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawn a channel-backed RNode with a 10 percent long-term airtime cap
+    /// (lt_alock = 1000) against the scripted stub. Returns the interface
+    /// handle, the raw-bytes injection sender, and the receiver that yields
+    /// every CMD_DATA payload the fake firmware sees.
+    fn spawn_airtime_gated_rnode() -> (
+        InterfaceHandle,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(port);
+        let halves: std::sync::Mutex<Option<RNodeChannelHalves>> = std::sync::Mutex::new(Some((
+            Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
+            Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        )));
+        struct MockFactory(std::sync::Mutex<Option<RNodeChannelHalves>>);
+        impl RNodeChannelFactory for MockFactory {
+            fn open(&self) -> RNodeChannelOpenFuture {
+                let taken = self.0.lock().unwrap().take();
+                Box::pin(async move { taken.ok_or_else(|| "channel already opened".into()) })
+            }
+        }
+
+        let (inject_tx, inject_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        tokio::spawn(rnode_firmware_stub_scripted(peer, inject_rx, data_tx));
+
+        let handle = spawn_rnode_channel_interface(
+            RNodeChannelInterfaceConfig {
+                id: InterfaceId(0),
+                name: "rnode_airtime_gate_test".to_string(),
+                channel_factory: Arc::new(MockFactory(halves)),
+                frequency: 868_000_000,
+                bandwidth: 125_000,
+                tx_power: 17,
+                sf: 7,
+                cr: 5,
+                st_alock: None,
+                lt_alock: Some(1000),
+                flow_control: false,
+                buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
+                reconnect_notify: None,
+            },
+            None,
+        );
+        (handle, inject_tx, data_rx)
+    }
+
+    /// Inject over-cap CHTM frames until the io task's gate engages. Frames
+    /// injected before the io phase starts are swallowed by the config
+    /// validation read window, hence the loop (the config phase takes about
+    /// 2.8 s of detect/validate/settle windows).
+    async fn engage_gate(handle: &InterfaceHandle, inject_tx: &tokio::sync::mpsc::Sender<Vec<u8>>) {
+        let gate = handle
+            .counters
+            .tx_gate()
+            .expect("rnode spawn sets the gate");
+        let over = chtm_frame(0, 1000);
+        for _ in 0..60 {
+            inject_tx.send(over.clone()).await.expect("stub alive");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if gate.engaged() {
+                return;
+            }
+        }
+        panic!("gate did not engage after 60 over-cap CHTM injections");
+    }
+
+    /// Failure mode: over-cap CHTM engages the lock. AIRTIME_LOCK_ENGAGED is
+    /// edge-triggered (exactly once across repeated over-cap frames), the
+    /// handle raises the existing generic backpressure (BufferFull, deferred
+    /// next slot), and a frame already queued in the io task is held, so no
+    /// CMD_DATA reaches the fake port while the lock is engaged.
+    #[tokio::test]
+    async fn airtime_lock_engaged_gates_tx_and_emits_once() {
+        use leviculum_core::traits::{Interface, InterfaceError};
+        let (logs, guard) = capture_logs();
+        let (mut handle, inject_tx, mut data_rx) = spawn_airtime_gated_rnode();
+        engage_gate(&handle, &inject_tx).await;
+
+        // Repeated over-cap frames must not re-emit the event.
+        let over = chtm_frame(0, 1000);
+        for _ in 0..3 {
+            inject_tx.send(over.clone()).await.expect("stub alive");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let err = handle
+            .try_send_prioritized(b"gated", false)
+            .expect_err("engaged gate must refuse TX");
+        assert!(matches!(err, InterfaceError::BufferFull));
+
+        let slot = handle.next_slot_ms(50, 1_000);
+        assert_eq!(slot, 1_000 + CHTM_REFRESH_MS, "defer to next stat refresh");
+
+        // A frame that already entered the io task queue is held. High
+        // priority bypasses the jitter timer, so the only thing keeping it
+        // off the wire is the gate.
+        handle
+            .outgoing
+            .send(OutgoingPacket {
+                data: b"held".to_vec(),
+                high_priority: true,
+            })
+            .await
+            .expect("io task alive");
+        let got = tokio::time::timeout(Duration::from_millis(500), data_rx.recv()).await;
+        assert!(
+            got.is_err(),
+            "no CMD_DATA may reach the fake port while the lock is engaged"
+        );
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "AIRTIME_LOCK_ENGAGED"),
+            1,
+            "edge-triggered: exactly one AIRTIME_LOCK_ENGAGED\n--- logs ---\n{logs}"
+        );
+    }
+
+    /// Failure mode: CHTM below the release margin releases the lock exactly
+    /// once and a frame queued during the lock drains to the fake port.
+    #[tokio::test]
+    async fn airtime_lock_release_emits_once_and_drains_held_frame() {
+        let (logs, guard) = capture_logs();
+        let (handle, inject_tx, mut data_rx) = spawn_airtime_gated_rnode();
+        engage_gate(&handle, &inject_tx).await;
+
+        handle
+            .outgoing
+            .send(OutgoingPacket {
+                data: b"held-during-lock".to_vec(),
+                high_priority: true,
+            })
+            .await
+            .expect("io task alive");
+        let held = tokio::time::timeout(Duration::from_millis(400), data_rx.recv()).await;
+        assert!(
+            held.is_err(),
+            "frame must be held while the lock is engaged"
+        );
+
+        // 9.9 percent is below the 10.0 cap minus the 0.05 release margin.
+        inject_tx
+            .send(chtm_frame(0, 990))
+            .await
+            .expect("stub alive");
+        let drained = tokio::time::timeout(Duration::from_secs(2), data_rx.recv())
+            .await
+            .expect("held frame must drain after release")
+            .expect("data channel open");
+        assert_eq!(drained, b"held-during-lock");
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "AIRTIME_LOCK_RELEASED"),
+            1,
+            "edge-triggered: exactly one AIRTIME_LOCK_RELEASED\n--- logs ---\n{logs}"
+        );
+    }
+
+    /// Failure mode: the firmware stops emitting CHTM while the lock is
+    /// engaged. The gate fails open after the staleness window with a warn
+    /// instead of leaving the interface permanently dark, and held frames
+    /// drain again.
+    ///
+    /// Drives `rnode_io_task` directly (the same harness as the flow-control
+    /// tests above) with a shortened stale window: the production window is
+    /// a fixed 5x CHTM cadence = 10 s, which does not fit the test budget.
+    /// The arming and release path is the production code.
+    #[tokio::test]
+    async fn airtime_lock_stale_chtm_fails_open() {
+        let (logs, guard) = capture_logs();
+        let (port, mut peer) = tokio::io::duplex(8192);
+        let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+        let counters = Arc::new(InterfaceCounters::new());
+
+        let gate = TxGate::new();
+        let mut lock_ctl = AirtimeLockCtl::new(Arc::clone(&gate), None, Some(1000));
+        lock_ctl.stale_window_ms = 300;
+
+        let task_counters = Arc::clone(&counters);
+        let task = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_stale".to_string(),
+                port,
+                incoming_tx,
+                outgoing_rx,
+                task_counters,
+                /* flow_control = */ false,
+                /* jitter_max_ms = */ 1,
+                125_000,
+                7,
+                5,
+                lock_ctl,
+            )
+            .await;
+        });
+
+        // Engage: write one over-cap CHTM straight to the io task.
+        peer.write_all(&chtm_frame(0, 1000))
+            .await
+            .expect("write CHTM");
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if gate.engaged() {
+                break;
+            }
+        }
+        assert!(gate.engaged(), "gate must engage on over-cap CHTM");
+
+        // No further CHTM. Cross the fail-open window.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert!(!gate.engaged(), "gate must fail open on CHTM staleness");
+
+        // TX flows again after the fail-open release.
+        outgoing_tx
+            .send(OutgoingPacket {
+                data: b"after-fail-open".to_vec(),
+                high_priority: true,
+            })
+            .await
+            .expect("send to io task");
+        let frames = drain_kiss_frames(&mut peer, Duration::from_secs(1)).await;
+        assert!(
+            frames
+                .iter()
+                .any(|(c, p)| *c == rnode::CMD_DATA && p == b"after-fail-open"),
+            "frame must reach the port after the fail-open release"
+        );
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "AIRTIME_LOCK_STALE_RELEASE"),
+            1,
+            "exactly one stale-release warn\n--- logs ---\n{logs}"
+        );
+
+        drop(outgoing_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
     }
 }

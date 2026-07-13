@@ -36,6 +36,7 @@ use leviculum_core::transport::InterfaceId;
 use tokio::sync::{mpsc, Notify};
 
 use self::airtime::AirtimeCredit;
+use self::rnode::TxGate;
 
 /// Monotonic wall-clock in milliseconds since the process-local anchor.
 ///
@@ -124,11 +125,18 @@ pub(crate) struct RadioStats {
 /// `None` for non-radio interfaces (TCP/UDP/Auto/Local); RNode interfaces set
 /// it to `Some(RadioStats::default())` at spawn so the stats keys are always
 /// present (mirroring Python's `hasattr(interface, "r_airtime_short")` gate).
+/// `tx_gate` is the RNode firmware airtime-lock gate (Codeberg #121), set
+/// once at RNode spawn and unset for every other interface type. It lives
+/// here rather than as an `InterfaceHandle` field parallel to `credit`
+/// because the counters are the established handle to io-task shared state
+/// for RNode-only signals (`radio`), and the handle is built by struct
+/// literal in every interface module, which a new field would all touch.
 pub(crate) struct InterfaceCounters {
     pub rx_bytes: AtomicU64,
     pub tx_bytes: AtomicU64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
+    tx_gate: OnceLock<Arc<TxGate>>,
 }
 
 impl InterfaceCounters {
@@ -144,7 +152,19 @@ impl InterfaceCounters {
                 cached_txs: 0.0,
             }),
             radio: std::sync::Mutex::new(None),
+            tx_gate: OnceLock::new(),
         }
+    }
+
+    /// Attach the RNode airtime-lock TX gate (Codeberg #121). Called once at
+    /// RNode spawn; non-RNode interfaces never set it.
+    pub(crate) fn set_tx_gate(&self, gate: Arc<TxGate>) {
+        let _ = self.tx_gate.set(gate);
+    }
+
+    /// The RNode airtime-lock TX gate, or `None` for every other interface.
+    pub(crate) fn tx_gate(&self) -> Option<&Arc<TxGate>> {
+        self.tx_gate.get()
     }
 
     /// Mark this interface as radio-capable so `interface_stats` always emits
@@ -422,7 +442,18 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         data: &[u8],
         high_priority: bool,
     ) -> Result<(), InterfaceError> {
-        // First: airtime-credit check for constrained interfaces. LoRa-Serial
+        // Firmware airtime-lock gate (RNode, Codeberg #121): while the lock
+        // is engaged the firmware silently stops radiating, so the interface
+        // must not feed its opaque queue. Same backpressure signal as credit
+        // exhaustion; the packet lands in the driver retry queue via the
+        // existing dispatch_actions path. Checked before the credit charge so
+        // a gated packet does not burn airtime credit.
+        if let Some(gate) = self.counters.tx_gate() {
+            if gate.engaged() {
+                return Err(InterfaceError::BufferFull);
+            }
+        }
+        // Next: airtime-credit check for constrained interfaces. LoRa-Serial
         // populates `credit`; TCP/UDP/Local leave it `None` and skip the
         // charge entirely. See `airtime.rs` for the bucket semantics.
         if let Some(credit) = &self.credit {
@@ -444,6 +475,14 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
     }
 
     fn next_slot_ms(&self, size: usize, now_ms: u64) -> u64 {
+        // While the RNode firmware airtime lock is engaged, defer to the
+        // next expected CMD_STAT_CHTM refresh so the driver retry wake and
+        // the transport broadcast deferral re-poll at the stat cadence.
+        if let Some(gate) = self.counters.tx_gate() {
+            if gate.engaged() {
+                return now_ms + rnode::CHTM_REFRESH_MS;
+            }
+        }
         // LoRa-Serial: ask the credit bucket when it will next fit a
         // packet of this size. TCP/UDP/Local have credit == None and
         // fall through to the trait default's always-ready semantics.
