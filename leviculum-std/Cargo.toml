@@ -57,6 +57,9 @@ thiserror.workspace = true
 ignored = ["md-5"]
 
 [dev-dependencies]
+# test-util enables tokio::test(start_paused) for the RX watchdog wiring
+# tests, which run minutes of virtual link time instantly.
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 hex = "0.4"
 regex = "1"
