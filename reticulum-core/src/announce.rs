@@ -27,9 +27,9 @@
 //! The signature covers: destination_hash + public_key + name_hash + random_hash + \[ratchet\] + app_data
 
 use crate::constants::{
-    slice_to_array, ED25519_SIGNATURE_SIZE, IDENTITY_KEY_SIZE, NAME_HASHBYTES, RANDOM_HASHBYTES,
-    RANDOM_HASH_RANDOM_SIZE, RANDOM_HASH_TIMESTAMP_OFFSET, RANDOM_HASH_TIMESTAMP_SIZE,
-    RATCHET_SIZE, TRUNCATED_HASHBYTES,
+    slice_to_array, ED25519_SIGNATURE_SIZE, HEADER_MINSIZE, IDENTITY_KEY_SIZE, IFAC_MIN_SIZE, MTU,
+    NAME_HASHBYTES, RANDOM_HASHBYTES, RANDOM_HASH_RANDOM_SIZE, RANDOM_HASH_TIMESTAMP_OFFSET,
+    RANDOM_HASH_TIMESTAMP_SIZE, RATCHET_SIZE, TRUNCATED_HASHBYTES,
 };
 use crate::destination::DestinationHash;
 
@@ -50,6 +50,47 @@ const OFFSET_SIG_RATCHETED: usize = OFFSET_RATCHET_OR_SIG + RATCHET_SIZE; // 116
 const OFFSET_APP_DATA: usize = OFFSET_RATCHET_OR_SIG + ED25519_SIGNATURE_SIZE; // 148
 /// Offset of app_data in ratcheted announces
 const OFFSET_APP_DATA_RATCHETED: usize = OFFSET_SIG_RATCHETED + ED25519_SIGNATURE_SIZE; // 180
+
+/// Fixed (non-`app_data`) length of an announce payload, in bytes.
+///
+/// This is exactly the `app_data` offset: everything ahead of `app_data` is
+/// fixed-size (public key, name hash, random hash, optional ratchet, signature).
+pub const fn announce_payload_fixed_len(with_ratchet: bool) -> usize {
+    if with_ratchet {
+        OFFSET_APP_DATA_RATCHETED // 180
+    } else {
+        OFFSET_APP_DATA // 148
+    }
+}
+
+/// Bytes of `app_data` an announce can carry before it overruns the MTU.
+///
+/// The rest of the MTU is consumed by the packet header, the identity public
+/// key, the name and random hashes, the optional ratchet, the signature, and a
+/// reserved [`IFAC_MIN_SIZE`] byte for interface access codes:
+///
+/// ```text
+/// MTU(500) − IFAC_MIN_SIZE(1) − HEADER_MINSIZE(19) − fixed_payload
+///   = 332 bytes  (no ratchet, fixed_payload = 148)
+///   = 300 bytes  (with ratchet, fixed_payload = 180)
+/// ```
+///
+/// Announces always use a Type 1 header (they carry no transport ID), so
+/// [`HEADER_MINSIZE`] is the exact header cost, not a lower bound.
+///
+/// Callers should gate on this at **compose** time. An announce that exceeds it
+/// is refused by [`crate::destination::Destination::announce`] with
+/// [`AnnounceError::PacketTooLarge`], which reports the byte counts.
+///
+/// ```
+/// # use reticulum_core::announce_app_data_budget;
+/// assert_eq!(announce_app_data_budget(false), 332);
+/// assert_eq!(announce_app_data_budget(true), 300);
+/// ```
+pub const fn announce_app_data_budget(with_ratchet: bool) -> usize {
+    MTU - IFAC_MIN_SIZE - HEADER_MINSIZE - announce_payload_fixed_len(with_ratchet)
+}
+
 use crate::crypto::truncated_hash;
 use crate::identity::{Identity, IdentityError};
 use crate::packet::{Packet, PacketType};
@@ -228,8 +269,24 @@ pub enum AnnounceError {
     WrongDirection,
     /// Only SINGLE destinations can announce
     OnlySingleCanAnnounce,
-    /// Packet too large to fit in MTU
-    PacketTooLarge,
+    /// The announce does not fit the MTU, because `app_data` overran the
+    /// budget reported by [`announce_app_data_budget`].
+    ///
+    /// Carries the numbers the caller needs to act: how large the announce
+    /// would have been, the MTU it had to fit, how many `app_data` bytes were
+    /// supplied, and how many were allowed.
+    PacketTooLarge {
+        /// Wire length the announce packet would have had, in bytes.
+        packed: usize,
+        /// The MTU it had to fit within, in bytes.
+        mtu: usize,
+        /// `app_data` bytes supplied by the caller.
+        app_data: usize,
+        /// `app_data` bytes actually available — [`announce_app_data_budget`].
+        budget: usize,
+    },
+    /// Packing the announce packet failed for a reason other than size.
+    Pack(crate::packet::PacketError),
     /// Destination not registered
     DestinationNotFound,
     /// Destination carries an explicit (override) hash and must never be
@@ -255,7 +312,17 @@ impl core::fmt::Display for AnnounceError {
             AnnounceError::OnlySingleCanAnnounce => {
                 write!(f, "Only SINGLE destinations can announce")
             }
-            AnnounceError::PacketTooLarge => write!(f, "Announce packet too large for MTU"),
+            AnnounceError::PacketTooLarge {
+                packed,
+                mtu,
+                app_data,
+                budget,
+            } => write!(
+                f,
+                "Announce is {packed} B against a {mtu} B MTU: app_data is {app_data} B of a {budget} B budget ({} B over)",
+                app_data.saturating_sub(*budget)
+            ),
+            AnnounceError::Pack(e) => write!(f, "Failed to pack announce packet: {e}"),
             AnnounceError::DestinationNotFound => {
                 write!(f, "Destination not registered on this node")
             }
