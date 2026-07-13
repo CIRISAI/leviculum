@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use leviculum_core::constants::TRUNCATED_HASHBYTES;
+use leviculum_core::constants::{DEFAULT_PER_HOP_TIMEOUT, MTU, TRUNCATED_HASHBYTES};
 use serde_pickle::value::{HashableValue, Value};
 
 use super::error::RpcError;
@@ -40,9 +40,13 @@ pub(super) fn handle_request(
         RpcRequest::GetNextHopIfName { destination_hash } => {
             get_next_hop_if_name(core, destination_hash)
         }
-        RpcRequest::GetFirstHopTimeout { .. } => {
-            // Python DEFAULT_PER_HOP_TIMEOUT = 6 seconds
-            pickle_float(6.0)
+        RpcRequest::GetFirstHopTimeout { destination_hash } => {
+            // Mirror Python Transport.first_hop_timeout (Transport.py:2700):
+            // scales with the next-hop interface bitrate, falling back to the
+            // flat DEFAULT_PER_HOP_TIMEOUT when the path/bitrate is unknown.
+            let bitrate =
+                try_into_hash(destination_hash).and_then(|h| core.next_hop_interface_bitrate(&h));
+            pickle_float(first_hop_timeout_secs(bitrate))
         }
         RpcRequest::DropPath { destination_hash } => drop_path(core, destination_hash),
         RpcRequest::DropAllVia { destination_hash } => drop_all_via(core, destination_hash),
@@ -635,6 +639,30 @@ fn build_rate_table(core: &StdNodeCore, start_time: std::time::Instant) -> Value
     pickle_list(list)
 }
 
+/// Compute Python's `Transport.first_hop_timeout` in seconds.
+///
+/// Python (Transport.py:2700-2703):
+/// ```text
+/// latency = next_hop_per_byte_latency(dest)   # = 8 / bitrate  (s/byte)
+/// if latency != None: return MTU * latency + DEFAULT_PER_HOP_TIMEOUT
+/// else:               return DEFAULT_PER_HOP_TIMEOUT
+/// ```
+///
+/// `bitrate_bps` is the next-hop interface bitrate for the destination, or
+/// `None` when the path (or its interface bitrate) is unknown; in that case
+/// Python returns the flat per-hop default. Note the reference formula scales
+/// with the next-hop bitrate, not the hop count.
+fn first_hop_timeout_secs(bitrate_bps: Option<u32>) -> f64 {
+    let per_hop = DEFAULT_PER_HOP_TIMEOUT as f64;
+    match bitrate_bps {
+        Some(bitrate) if bitrate > 0 => {
+            let per_byte_latency = 8.0 / bitrate as f64;
+            MTU as f64 * per_byte_latency + per_hop
+        }
+        _ => per_hop,
+    }
+}
+
 // Path Lookups (rnpath)
 fn get_next_hop(core: &StdNodeCore, destination_hash: &[u8]) -> Value {
     let hash = match try_into_hash(destination_hash) {
@@ -902,6 +930,30 @@ fn activation_to_epoch(epoch_base: f64, activated_mono_secs: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mirrors Python `Transport.first_hop_timeout` (Transport.py:2700-2703):
+    /// a known next-hop bitrate yields `MTU * 8 / bitrate + DEFAULT_PER_HOP_TIMEOUT`
+    /// (not the flat 6.0 the stub returned); an unknown path yields the
+    /// DEFAULT_PER_HOP_TIMEOUT fallback.
+    #[test]
+    fn test_first_hop_timeout_secs_matches_python() {
+        // Unknown destination/bitrate -> Python fallback DEFAULT_PER_HOP_TIMEOUT.
+        assert_eq!(first_hop_timeout_secs(None), DEFAULT_PER_HOP_TIMEOUT as f64);
+        assert_eq!(
+            first_hop_timeout_secs(Some(0)),
+            DEFAULT_PER_HOP_TIMEOUT as f64
+        );
+
+        // Known bitrate: 500 * 8 / 9600 + 6 = 6.41666...
+        let expected = MTU as f64 * 8.0 / 9600.0 + DEFAULT_PER_HOP_TIMEOUT as f64;
+        let got = first_hop_timeout_secs(Some(9600));
+        assert!((got - expected).abs() < 1e-9, "got {got}, want {expected}");
+        assert!(got > 6.0, "known bitrate must exceed the flat 6.0 stub");
+
+        // Slow LoRa link (1200 bps): 500 * 8 / 1200 + 6 = 9.33333...
+        let expected_lora = MTU as f64 * 8.0 / 1200.0 + DEFAULT_PER_HOP_TIMEOUT as f64;
+        assert!((first_hop_timeout_secs(Some(1200)) - expected_lora).abs() < 1e-9);
+    }
 
     #[test]
     fn test_short_name_with_brackets() {

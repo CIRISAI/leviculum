@@ -1987,6 +1987,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.get_path_clone(hash)
     }
 
+    /// Bitrate (bps) of the next-hop interface toward a destination, or `None`
+    /// when no path is known or the interface has no bitrate cap. Mirrors
+    /// Python `Transport.next_hop_interface_bitrate()`.
+    pub fn next_hop_interface_bitrate(
+        &self,
+        hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> Option<u32> {
+        self.transport.next_hop_interface_bitrate(hash)
+    }
+
     /// Remove a path entry by destination hash. Returns true if found.
     pub fn remove_path(&mut self, hash: &[u8; crate::constants::TRUNCATED_HASHBYTES]) -> bool {
         self.transport.remove_path(hash)
