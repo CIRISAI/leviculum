@@ -65,6 +65,11 @@ pub enum WindowPolicy {
     /// window_max tier from the whole-round goodput with round-count
     /// hysteresis, shrink window and window_max on receiver timeout.
     PythonLike,
+    /// PythonLike growth and rate tiering, but the timeout response shrinks
+    /// only the in-flight window toward window_min and leaves window_max
+    /// intact, so a transient loss does not permanently lower the ceiling
+    /// the window can re-grow to.
+    Adaptive,
 }
 
 impl WindowPolicy {
@@ -74,6 +79,7 @@ impl WindowPolicy {
         match value.trim().to_ascii_lowercase().as_str() {
             "current" => Some(Self::Current),
             "pythonlike" => Some(Self::PythonLike),
+            "adaptive" => Some(Self::Adaptive),
             _ => None,
         }
     }
@@ -161,7 +167,11 @@ impl WindowState {
         self.rounds_completed += 1;
         match policy {
             WindowPolicy::Current => self.round_complete_current(sample.first_part_rate),
-            WindowPolicy::PythonLike => self.round_complete_pythonlike(sample.round_rate),
+            // Adaptive shares PythonLike's round-complete logic verbatim so
+            // the two cannot drift; they differ only in on_timeout.
+            WindowPolicy::PythonLike | WindowPolicy::Adaptive => {
+                self.round_complete_pythonlike(sample.round_rate)
+            }
         }
     }
 
@@ -171,6 +181,7 @@ impl WindowState {
             // The historical logic never touches the window on timeout.
             WindowPolicy::Current => {}
             WindowPolicy::PythonLike => self.timeout_pythonlike(),
+            WindowPolicy::Adaptive => self.timeout_adaptive(),
         }
     }
 
@@ -253,6 +264,17 @@ impl WindowState {
                     self.window_max -= 1;
                 }
             }
+        }
+    }
+
+    /// Adaptive's timeout response: step the in-flight window down toward
+    /// window_min to relieve burst pressure on a lossy half-duplex channel,
+    /// but leave window_max alone so the window re-grows to the full ceiling
+    /// as soon as the loss passes. Contrast timeout_pythonlike, which drags
+    /// window_max down with the window and permanently throttles recovery.
+    fn timeout_adaptive(&mut self) {
+        if self.window > self.window_min {
+            self.window -= 1;
         }
     }
 }
@@ -350,6 +372,14 @@ mod tests {
             WindowPolicy::parse(" PythonLike "),
             Some(WindowPolicy::PythonLike)
         );
+        assert_eq!(
+            WindowPolicy::parse("adaptive"),
+            Some(WindowPolicy::Adaptive)
+        );
+        assert_eq!(
+            WindowPolicy::parse(" Adaptive "),
+            Some(WindowPolicy::Adaptive)
+        );
         assert_eq!(WindowPolicy::parse("bogus"), None);
         assert_eq!(WindowPolicy::parse(""), None);
     }
@@ -445,6 +475,53 @@ mod tests {
         assert!(ws.window_max() >= ws.window_min);
         ws.on_timeout(WindowPolicy::PythonLike);
         assert_eq!(ws.window(), ws.window_min);
+    }
+
+    #[test]
+    fn test_adaptive_round_complete_matches_pythonlike() {
+        // Adaptive and PythonLike share the round-complete logic verbatim:
+        // identical state after any round sequence spanning all tiers.
+        let mut py = WindowState::new();
+        let mut ad = WindowState::new();
+        let rates = [
+            MID_RATE,
+            RATE_FAST + 1,
+            RATE_VERY_SLOW - 1,
+            MID_RATE,
+            RATE_VERY_SLOW - 1,
+            RATE_FAST + 1,
+        ];
+        for rate in rates {
+            py.on_round_complete(WindowPolicy::PythonLike, round_sample(rate));
+            ad.on_round_complete(WindowPolicy::Adaptive, round_sample(rate));
+            assert_eq!(
+                (py.window(), py.window_max(), py.window_min),
+                (ad.window(), ad.window_max(), ad.window_min)
+            );
+        }
+    }
+
+    #[test]
+    fn test_adaptive_timeout_shrinks_window_but_keeps_window_max() {
+        let mut ws = WindowState::new();
+        for _ in 0..(RESOURCE_WINDOW_MAX_SLOW - RESOURCE_WINDOW_INITIAL) {
+            ws.on_round_complete(WindowPolicy::Adaptive, round_sample(MID_RATE));
+        }
+        assert_eq!((ws.window(), ws.window_max()), (10, 10));
+        ws.on_timeout(WindowPolicy::Adaptive);
+        // window 10 -> 9, window_max untouched (contrast timeout_pythonlike).
+        assert_eq!((ws.window(), ws.window_max()), (9, 10));
+        // Shrink to the floor: window stops at window_min, ceiling intact.
+        for _ in 0..20 {
+            ws.on_timeout(WindowPolicy::Adaptive);
+        }
+        assert_eq!(ws.window(), ws.window_min);
+        assert_eq!(ws.window_max(), RESOURCE_WINDOW_MAX_SLOW);
+        // After the loss passes the window re-grows to the full ceiling.
+        while ws.window() < ws.window_max() {
+            ws.on_round_complete(WindowPolicy::Adaptive, round_sample(MID_RATE));
+        }
+        assert_eq!(ws.window(), RESOURCE_WINDOW_MAX_SLOW);
     }
 
     #[test]

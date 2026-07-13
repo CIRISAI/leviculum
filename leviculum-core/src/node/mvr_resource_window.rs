@@ -736,6 +736,101 @@ fn pythonlike_shrinks_on_timeout() {
 }
 
 // ----------------------------------------------------------------------------
+// Adaptive vs PythonLike (Codeberg #85): same growth and tiering, but the
+// timeout response shrinks only the in-flight window, never window_max, so a
+// transient loss does not permanently lower the ceiling.
+// ----------------------------------------------------------------------------
+
+/// Adaptive must keep PythonLike's clean-link win: on a lossless 342 B/s link
+/// the two policies are identical (they share the round-complete logic and no
+/// timeout ever fires), so Adaptive reaches the same SLOW ceiling in the same
+/// number of rounds.
+#[test]
+fn adaptive_matches_pythonlike_on_clean_link() {
+    let py = run_transfer(WindowPolicy::PythonLike, 51200, 342, TURNAROUND_MS, None);
+    let ad = run_transfer(WindowPolicy::Adaptive, 51200, 342, TURNAROUND_MS, None);
+    assert_eq!(ad.retransmits, 0, "lossless Adaptive must not retransmit");
+    assert_eq!(
+        ad.final_window, RESOURCE_WINDOW_MAX_SLOW,
+        "Adaptive must climb to the SLOW ceiling like PythonLike (trajectory: {:?})",
+        ad.window_trajectory
+    );
+    assert!(
+        ad.rounds <= py.rounds,
+        "Adaptive must keep the clean-link round count (Adaptive {} vs PythonLike {})",
+        ad.rounds,
+        py.rounds
+    );
+}
+
+/// The one behavioral difference: under the same 10% loss that makes
+/// PythonLike drag window_max down (pythonlike_shrinks_on_timeout), Adaptive
+/// shrinks the in-flight window on timeout but leaves window_max at the SLOW
+/// ceiling for the whole transfer.
+#[test]
+fn adaptive_keeps_window_max_on_timeout() {
+    let ad = run_transfer(WindowPolicy::Adaptive, 51200, 342, TURNAROUND_MS, Some(10));
+    assert!(
+        ad.receiver_timeouts >= 1,
+        "the 10% loss pattern must force at least one receiver timeout"
+    );
+    assert!(
+        ad.timeout_window_pairs
+            .iter()
+            .any(|&(before, after)| after < before),
+        "Adaptive must shrink the window on at least one timeout (pairs: {:?})",
+        ad.timeout_window_pairs
+    );
+    assert!(
+        ad.window_trajectory
+            .iter()
+            .all(|&(_, _, m)| m == RESOURCE_WINDOW_MAX_SLOW),
+        "Adaptive must never lower window_max (trajectory: {:?})",
+        ad.window_trajectory
+    );
+    assert_eq!(
+        ad.final_window_max, RESOURCE_WINDOW_MAX_SLOW,
+        "Adaptive's ceiling must stay at SLOW under loss"
+    );
+    // The contrast that motivates the policy: PythonLike's ceiling drops.
+    let py = run_transfer(
+        WindowPolicy::PythonLike,
+        51200,
+        342,
+        TURNAROUND_MS,
+        Some(10),
+    );
+    assert!(
+        py.final_window_max < RESOURCE_WINDOW_MAX_SLOW,
+        "PythonLike must have dragged its ceiling below SLOW here, got {}",
+        py.final_window_max
+    );
+}
+
+/// The intact ceiling must pay off: at 342 B/s with 10% loss Adaptive
+/// re-grows to the full window between loss bursts while PythonLike stays
+/// throttled, so Adaptive completes in fewer or equal rounds (integrity is
+/// asserted inside run_transfer for both).
+#[test]
+fn adaptive_beats_pythonlike_under_loss() {
+    let py = run_transfer(
+        WindowPolicy::PythonLike,
+        51200,
+        342,
+        TURNAROUND_MS,
+        Some(10),
+    );
+    let ad = run_transfer(WindowPolicy::Adaptive, 51200, 342, TURNAROUND_MS, Some(10));
+    assert!(
+        ad.rounds <= py.rounds,
+        "Adaptive must complete in fewer or equal rounds under loss \
+         (Adaptive {} vs PythonLike {})",
+        ad.rounds,
+        py.rounds
+    );
+}
+
+// ----------------------------------------------------------------------------
 // WINBENCH sweep (a bench, not a pass/fail test).
 // ----------------------------------------------------------------------------
 
@@ -748,7 +843,11 @@ fn pythonlike_shrinks_on_timeout() {
 #[ignore]
 fn window_bench_sweep() {
     // Adding a WindowPolicy variant extends the sweep here, nothing else.
-    let policies = [WindowPolicy::Current, WindowPolicy::PythonLike];
+    let policies = [
+        WindowPolicy::Current,
+        WindowPolicy::PythonLike,
+        WindowPolicy::Adaptive,
+    ];
     // Straddles every threshold boundary of both stacks (VERY_SLOW 1000,
     // SLOW 15000, FAST 50000 B/s) so units/threshold divergence is visible.
     let rates: [u64; 8] = [250, 342, 500, 1500, 3000, 6250, 15000, 50000];
