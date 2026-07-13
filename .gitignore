@@ -15,8 +15,10 @@ leviculum-nrf/Cargo.lock
 # Repo-local venv with a working esptool (just flash-rnode-setup).
 /.rnode-tools/
 
-# Generated headers (cbindgen)
-leviculum-ffi/*.h
+# Generated headers (cbindgen). The `*-ffi` glob also catches stray
+# old-name artifacts (e.g. a leftover reticulum-ffi/) so they cannot be
+# committed by an over-broad `git add`.
+*-ffi/*.h
 
 # Markdown files
 IMPLEMENTATION_PLAN.md

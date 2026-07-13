@@ -115,7 +115,7 @@ nightly: extensive
 # Build leviculum-ffi as a real glibc-dynamic cdylib + staticlib for
 # C-API consumers ("apt install libreticulum-dev" ergonomics). This
 # deliberately overrides the workspace musl default — see the comment
-# in .cargo/config.toml. cbindgen regenerates reticulum.h as a side
+# in .cargo/config.toml. cbindgen regenerates leviculum.h as a side
 # effect of the build.rs.
 # Comprehensive C API test suite on the glibc target: the Rust unit,
 # integration, and Python-interop suites plus the C acceptance programs linked
