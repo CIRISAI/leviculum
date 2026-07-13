@@ -40,9 +40,11 @@ pub(crate) fn decode_known_destinations(
             _ => continue, // Skip invalid keys (Python does the same length check)
         };
 
-        // Value: array of 4 elements
+        // Value: array of at least 4 elements. rnsd writes 5-element values
+        // `[ts, packet_hash, pubkey, app_data, 0]` (Identity.py:107); accept
+        // those, reading the first four fields and ignoring trailing elements.
         let arr = match val.as_array() {
-            Some(a) if a.len() == 4 => a,
+            Some(a) if a.len() >= 4 => a,
             _ => continue,
         };
 
@@ -371,6 +373,62 @@ mod tests {
             Some(b"original_app".to_vec()),
             "merge should not overwrite existing entries"
         );
+    }
+
+    /// rnsd writes 5-element values `[ts, packet_hash, pubkey, app_data, 0]`
+    /// (Identity.py:107). The decoder must accept them, reading the first four
+    /// fields and ignoring the trailing element, so a warm rnsd identity cache
+    /// survives a swap to lnsd.
+    #[test]
+    fn test_decode_rnsd_five_element_entry() {
+        use rmpv::Value;
+
+        let hash = [0x11; TRUNCATED_HASHBYTES];
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let pubkey = identity.public_key_bytes();
+
+        let val = Value::Array(vec![
+            Value::from(1708300000u64),
+            Value::Binary(vec![0x22; PACKET_HASH_LEN]),
+            Value::Binary(pubkey.to_vec()),
+            Value::Binary(b"app".to_vec()),
+            Value::from(0u64),
+        ]);
+        let map = Value::Map(vec![(Value::Binary(hash.to_vec()), val)]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &map).unwrap();
+
+        let decoded = decode_known_destinations(&buf).unwrap();
+        assert_eq!(decoded.len(), 1, "5-element rnsd entry must be accepted");
+        let entry = &decoded[&hash];
+        assert_eq!(entry.public_key, pubkey);
+        assert_eq!(entry.packet_hash, vec![0x22; PACKET_HASH_LEN]);
+        assert_eq!(entry.app_data, Some(b"app".to_vec()));
+    }
+
+    /// A canonical 4-element entry (our own encoding) must still decode.
+    #[test]
+    fn test_decode_four_element_entry_still_works() {
+        use rmpv::Value;
+
+        let hash = [0x33; TRUNCATED_HASHBYTES];
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let pubkey = identity.public_key_bytes();
+
+        let val = Value::Array(vec![
+            Value::F64(1708300000.0),
+            Value::Binary(vec![0x44; PACKET_HASH_LEN]),
+            Value::Binary(pubkey.to_vec()),
+            Value::Nil,
+        ]);
+        let map = Value::Map(vec![(Value::Binary(hash.to_vec()), val)]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &map).unwrap();
+
+        let decoded = decode_known_destinations(&buf).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[&hash].public_key, pubkey);
+        assert_eq!(decoded[&hash].app_data, None);
     }
 
     #[test]
