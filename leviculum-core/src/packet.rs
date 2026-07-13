@@ -282,8 +282,11 @@ impl Packet {
     }
 
     /// Calculate the total packed size
+    ///
+    /// `header_size()` already covers flags + hops + destination hash(es) +
+    /// context, so the payload is all that is added.
     pub fn packed_size(&self) -> usize {
-        2 + self.header_size() + 1 + self.data.len()
+        self.header_size() + self.data.len()
     }
 
     /// Pack the packet into a byte buffer
@@ -535,6 +538,72 @@ mod tests {
         assert_eq!(decoded.transport_type as u8, flags.transport_type as u8);
         assert_eq!(decoded.dest_type as u8, flags.dest_type as u8);
         assert_eq!(decoded.packet_type as u8, flags.packet_type as u8);
+    }
+
+    /// `packed_size()` must report exactly the number of bytes `pack()` writes.
+    ///
+    /// `header_size()` already accounts for flags + hops + context (that is what
+    /// HEADER_MINSIZE/HEADER_MAXSIZE mean), so adding `2 + ... + 1` on top of it
+    /// double-counts them. Callers treat `packed_size()` as the wire length and
+    /// as the MTU budget, so an over-count silently steals usable payload.
+    #[test]
+    fn test_packed_size_matches_packed_len() {
+        for (header_type, transport_id) in [
+            (HeaderType::Type1, None),
+            (HeaderType::Type2, Some([0x11; TRUNCATED_HASHBYTES])),
+        ] {
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id,
+                destination_hash: [0x42; TRUNCATED_HASHBYTES],
+                context: PacketContext::None,
+                data: PacketData::Owned(b"Hello".to_vec()),
+            };
+
+            let mut buffer = [0u8; MTU];
+            let written = packet.pack(&mut buffer).unwrap();
+
+            assert_eq!(
+                packet.packed_size(),
+                written,
+                "packed_size() disagrees with pack() for {header_type:?}"
+            );
+        }
+    }
+
+    /// A packet whose true wire length is exactly the MTU must pack into an
+    /// MTU-sized buffer. An over-counting `packed_size()` rejects it as
+    /// `TooShort` — the buffer is "too short" only for the phantom bytes.
+    #[test]
+    fn test_packet_of_exactly_mtu_packs() {
+        let payload_len = MTU - HEADER_MINSIZE;
+        let packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: DestinationType::Single,
+                packet_type: PacketType::Data,
+            },
+            hops: 0,
+            transport_id: None,
+            destination_hash: [0x42; TRUNCATED_HASHBYTES],
+            context: PacketContext::None,
+            data: PacketData::Owned(alloc::vec![0xAA; payload_len]),
+        };
+
+        let mut buffer = [0u8; MTU];
+        let written = packet.pack(&mut buffer).expect("MTU-sized packet must pack");
+        assert_eq!(written, MTU);
     }
 
     #[test]
