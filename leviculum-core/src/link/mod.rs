@@ -761,6 +761,19 @@ impl Link {
             .map_err(|_| LinkError::InvalidRtt)?;
         let rtt_seconds = f64::from_be_bytes(rtt_bytes);
 
+        // The RTT float is HMAC-authenticated but still peer-supplied. Reject a
+        // non-finite or non-positive value and clamp an implausibly large one:
+        // NaN collapses the RTT-derived keepalive/stale timers to 0 (the link is
+        // then marked Stale and closed within seconds of establishment), and
+        // +inf pushes the stale-close timeout to effectively never (the Stale
+        // link entry is pinned in the table forever). A real peer sends a small
+        // positive measurement.
+        if !rtt_seconds.is_finite() || rtt_seconds <= 0.0 {
+            return Err(LinkError::InvalidRtt);
+        }
+        const MAX_PLAUSIBLE_RTT_SECS: f64 = 3600.0;
+        let rtt_seconds = rtt_seconds.min(MAX_PLAUSIBLE_RTT_SECS);
+
         // Store RTT (convert to microseconds for internal storage)
         self.rtt_us = Some((rtt_seconds * 1_000_000.0) as u64);
         crate::tracing::debug!(
@@ -2866,6 +2879,55 @@ mod tests {
         assert_eq!(responder.state(), LinkState::Active);
         assert!((received_rtt - rtt_seconds).abs() < 0.001);
         assert!(responder.rtt_us().is_some());
+    }
+
+    #[test]
+    fn test_process_rtt_rejects_non_finite() {
+        use crate::identity::Identity;
+
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let dest_identity = Identity::generate(&mut OsRng);
+        let mut initiator = Link::new_outgoing(dest_hash, &mut OsRng);
+        let request_data = initiator.create_link_request();
+        let mut raw_packet = Vec::new();
+        raw_packet.push(0x02);
+        raw_packet.push(0x00);
+        raw_packet.extend_from_slice(dest_hash.as_bytes());
+        raw_packet.push(0x00);
+        raw_packet.extend_from_slice(&request_data);
+        let link_id = Link::calculate_link_id(&raw_packet);
+        initiator.set_link_id(link_id);
+        let mut responder =
+            Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
+        let proof_packet = responder
+            .build_proof_packet(&dest_identity, MTU as u32, 1)
+            .unwrap();
+        initiator
+            .set_destination_keys(dest_identity.ed25519_verifying().as_bytes())
+            .unwrap();
+        initiator.process_proof(&proof_packet[19..]).unwrap();
+
+        // A non-finite or non-positive RTT must be rejected, leaving the
+        // responder in Handshake (not Active) so the poisoned keepalive/stale
+        // timers never take effect. build_rtt_packet is &self, so reuse it.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            let rtt_packet = initiator.build_rtt_packet(bad, &mut OsRng).unwrap();
+            let result = responder.process_rtt(&rtt_packet[19..]);
+            assert!(
+                matches!(result, Err(LinkError::InvalidRtt)),
+                "RTT {bad} must be rejected, got {result:?}"
+            );
+        }
+        assert_eq!(
+            responder.state(),
+            LinkState::Handshake,
+            "a rejected RTT must not activate the link"
+        );
+
+        // A plausible finite RTT still activates the link (control).
+        let good = initiator.build_rtt_packet(0.05, &mut OsRng).unwrap();
+        responder.process_rtt(&good[19..]).unwrap();
+        assert_eq!(responder.state(), LinkState::Active);
     }
 
     #[test]
