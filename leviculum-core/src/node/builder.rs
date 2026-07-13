@@ -65,7 +65,7 @@ impl NodeCoreBuilder {
             remote_management: false,
             remote_management_allowed: Vec::new(),
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
-            resource_window_policy: WindowPolicy::Current,
+            resource_window_policy: WindowPolicy::default(),
         }
     }
 
