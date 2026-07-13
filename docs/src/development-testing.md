@@ -150,6 +150,25 @@ All hardware tests are gated behind `#[ignore]`; `--ignored`
 unlocks them. `#[ignore]` is reserved for hardware tests — don't
 use it for slow-but-CPU-only tests (wrong tier).
 
+### Radio duty-cycle lock is OFF by default in tests
+
+The harness writes `airtime_limit_long = 0` into every generated
+radio interface (single RNode, multi-vport RNode, serial LNode), so
+the firmware duty-cycle airtime lock never engages mid-run. Without
+this, the driver's lawful-by-default ETSI cap (#55) silently stops a
+saturating sender once its rolling-hour airtime hits 10 %, which
+reads as an intermittent resource stall (#121). A test that itself
+exercises the duty-cycle lock opts back in explicitly:
+
+```toml
+[radio]
+frequency = 869525000
+airtime_limit_long = 10   # percent; arms the 10 % ETSI cap
+```
+
+or per subinterface under `[[nodes.x.rnode_interfaces]]`, or for a
+one-off run with `LORA_AIRTIME_LIMIT_LONG=10`.
+
 ## Concurrent runs
 
 Only one integ test process can run at a time — Docker names and
