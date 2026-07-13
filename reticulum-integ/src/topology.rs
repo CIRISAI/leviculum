@@ -170,6 +170,14 @@ pub struct RadioConfig {
     pub tx_power: u8,
     #[serde(default)]
     pub csma_enabled: bool,
+    /// Explicit long-term airtime lock (percent duty cycle) passed to the
+    /// RNode interface. `Some(0.0)` disables the lock (firmware reads 0 as
+    /// unlimited); absent leaves the daemon's lawful-by-default behaviour,
+    /// which arms the ETSI EU868 10% cap on EU sub-band frequencies. Used to
+    /// isolate the firmware airtime lock in slow-LoRa diagnostics (Codeberg
+    /// #121).
+    #[serde(default)]
+    pub airtime_limit_long: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -521,6 +529,8 @@ pub fn scale_timeout(secs: u64) -> u64 {
 ///   - `LORA_SF` (u8, spreading factor)
 ///   - `LORA_CR` (u8, coding rate)
 ///   - `LORA_TXPOWER` (u8, dBm)
+///   - `LORA_AIRTIME_LIMIT_LONG` (f64, percent duty cycle; 0 disables the
+///     firmware airtime lock, isolating it in slow-LoRa diagnostics, #121)
 ///
 /// This allows running the same TOML test files with different radio settings
 /// without modifying them.
@@ -553,6 +563,11 @@ pub fn apply_radio_overrides(scenario: &mut TestScenario) {
     if let Ok(val) = std::env::var("LORA_TXPOWER") {
         if let Ok(v) = val.parse::<u8>() {
             radio.tx_power = v;
+        }
+    }
+    if let Ok(val) = std::env::var("LORA_AIRTIME_LIMIT_LONG") {
+        if let Ok(v) = val.parse::<f64>() {
+            radio.airtime_limit_long = Some(v);
         }
     }
 }
@@ -781,6 +796,18 @@ pub fn render_config(
         writeln!(out, "    spreadingfactor = {}", radio.spreading_factor).ok();
         writeln!(out, "    codingrate = {}", radio.coding_rate).ok();
         writeln!(out, "    txpower = {}", radio.tx_power).ok();
+        // The harness disables the firmware duty-cycle lock by default (0 =
+        // unlimited) so a long slow-LoRa transfer is never silently throttled
+        // mid-run, which the driver's lawful-by-default ETSI cap (#55) would
+        // otherwise do on EU 868 sub-bands and which reads as a false stall
+        // bug (#121). Duty-cycle tests opt back in with an explicit
+        // airtime_limit_long in their [radio] section (or LORA_AIRTIME_LIMIT_LONG).
+        writeln!(
+            out,
+            "    airtime_limit_long = {}",
+            radio.airtime_limit_long.unwrap_or(0.0)
+        )
+        .ok();
         writeln!(out, "    ingress_control = false").ok();
     }
 
@@ -816,6 +843,13 @@ pub fn render_config(
             writeln!(out, "    spreadingfactor = {}", r.spreading_factor).ok();
             writeln!(out, "    codingrate = {}", r.coding_rate).ok();
             writeln!(out, "    txpower = {}", r.tx_power).ok();
+            // Duty-cycle lock off by default for tests, see the RNode path above.
+            writeln!(
+                out,
+                "    airtime_limit_long = {}",
+                r.airtime_limit_long.unwrap_or(0.0)
+            )
+            .ok();
             writeln!(
                 out,
                 "    csma_enabled = {}",
@@ -1418,6 +1452,7 @@ rnode = true
             coding_rate: 5,
             tx_power: 17,
             csma_enabled: false,
+            airtime_limit_long: None,
         };
         let config = render_config(&node, &[], Some(&radio));
         assert!(
@@ -1433,6 +1468,72 @@ rnode = true
         assert!(config.contains("codingrate = 5"));
         assert!(config.contains("txpower = 17"));
         assert!(config.contains("ingress_control = false"));
+        // Absent airtime_limit_long defaults the harness to lock-off (0) so a
+        // slow-LoRa transfer is never falsely throttled by the driver's
+        // lawful-by-default ETSI cap (#121).
+        assert!(config.contains("airtime_limit_long = 0"));
+    }
+
+    #[test]
+    fn rnode_config_emits_explicit_airtime_limit_long() {
+        let node = NodeDef {
+            node_type: "rust".into(),
+            respond_to_probes: true,
+            enable_transport: true,
+            rnode: true,
+            rnode_proxy: false,
+            listen_port: None,
+            rnode_interfaces: None,
+            serial: false,
+            rnode_path: Some("/dev/ttyACM0".into()),
+            serial_path: None,
+            debug_serial_path: None,
+        };
+        let radio = RadioConfig {
+            frequency: 869525000,
+            bandwidth: 62500,
+            spreading_factor: 7,
+            coding_rate: 5,
+            tx_power: 17,
+            csma_enabled: false,
+            // A duty-cycle test opts back into an explicit cap (5%).
+            airtime_limit_long: Some(5.0),
+        };
+        let config = render_config(&node, &[], Some(&radio));
+        assert!(
+            config.contains("airtime_limit_long = 5"),
+            "explicit airtime_limit_long not rendered: {config}"
+        );
+    }
+
+    #[test]
+    fn lora_airtime_limit_long_env_overrides_radio() {
+        let toml_str = r#"
+[test]
+name = "airtime_env"
+
+[nodes.alpha]
+type = "rust"
+rnode = true
+
+[radio]
+frequency = 869525000
+bandwidth = 62500
+sf = 7
+cr = 5
+txpower = 17
+"#;
+        let mut scenario = parse_scenario(toml_str).unwrap();
+        assert_eq!(
+            scenario.radio.as_ref().unwrap().airtime_limit_long,
+            None,
+            "no explicit airtime_limit_long in the toml"
+        );
+        // SAFETY: single-threaded test, var removed before return.
+        std::env::set_var("LORA_AIRTIME_LIMIT_LONG", "0");
+        apply_radio_overrides(&mut scenario);
+        std::env::remove_var("LORA_AIRTIME_LIMIT_LONG");
+        assert_eq!(scenario.radio.unwrap().airtime_limit_long, Some(0.0));
     }
 
     #[test]
@@ -1525,6 +1626,7 @@ rnode = true
             coding_rate: 5,
             tx_power: 17,
             csma_enabled: false,
+            airtime_limit_long: None,
         };
         let config = render_config(&node, &[], Some(&radio));
         assert!(
