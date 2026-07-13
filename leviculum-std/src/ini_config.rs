@@ -84,7 +84,10 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         // Key = value
         if let Some((key, value)) = trimmed.split_once('=') {
             let key = key.trim();
-            let value = value.trim();
+            // ConfigObj value semantics: strip an inline ` #` comment and a
+            // single pair of surrounding quotes (Item 4). `strip_value` trims.
+            let value = strip_value(value);
+            let value = value.as_str();
 
             if let Some(ref mut sub) = current_subinterface {
                 // Inside a [[[subinterface]]] block.
@@ -583,13 +586,63 @@ fn normalize_backbone_interface(iface: &mut InterfaceConfig) {
     };
 }
 
-/// Parse a ConfigObj boolean value.
+/// Parse a ConfigObj boolean value (case-insensitive, like ConfigObj).
 ///
-/// Accepts: Yes, yes, True, true, 1 → true
-///          No, no, False, false, 0 → false
-///          Anything else → false (conservative default)
+/// Accepts (any case): yes, true, on, 1 → true
+///                     no, false, off, 0 → false
+///                     Anything else → false (conservative default, unchanged
+///                     contract).
 fn parse_bool(value: &str) -> bool {
-    matches!(value, "Yes" | "yes" | "True" | "true" | "1" | "on" | "On")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "yes" | "true" | "on" | "1"
+    )
+}
+
+/// Apply ConfigObj value semantics to a raw `key = <value>` right-hand side.
+///
+/// 1. Strip an inline comment starting at the first UNQUOTED ` #` (whitespace
+///    then hash). A `#` inside quotes, or not preceded by whitespace (URLs,
+///    ifac hashes like `abc#def`), is preserved.
+/// 2. Trim surrounding whitespace.
+/// 3. Strip a single pair of surrounding double or single quotes.
+fn strip_value(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev_ws = false;
+    let mut cut = None;
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double && prev_ws => {
+                cut = Some(i);
+                break;
+            }
+            _ => {}
+        }
+        prev_ws = c.is_whitespace();
+    }
+    let sliced: String = match cut {
+        Some(i) => chars[..i].iter().collect(),
+        None => raw.to_string(),
+    };
+    strip_surrounding_quotes(sliced.trim()).to_string()
+}
+
+/// Strip a single pair of matching surrounding quotes (`"..."` or `'...'`).
+/// A lone or mismatched quote is left untouched.
+fn strip_surrounding_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
 }
 
 #[cfg(test)]
@@ -615,6 +668,62 @@ mod tests {
         assert!(!parse_bool("0"));
         assert!(!parse_bool("off"));
         assert!(!parse_bool(""));
+    }
+
+    #[test]
+    fn test_parse_bool_case_insensitive() {
+        // ConfigObj is case-insensitive for bools and accepts on/off.
+        assert!(parse_bool("TRUE"));
+        assert!(parse_bool("Yes"));
+        assert!(parse_bool("ON"));
+        assert!(parse_bool("On"));
+        assert!(!parse_bool("OFF"));
+        assert!(!parse_bool("off"));
+        assert!(!parse_bool("No"));
+        assert!(!parse_bool("FALSE"));
+        assert!(!parse_bool("0"));
+        assert!(parse_bool("1"));
+        // Unknown input keeps the current contract: false.
+        assert!(!parse_bool("maybe"));
+    }
+
+    #[test]
+    fn test_inline_comment_and_quote_stripping() {
+        // ConfigObj strips an inline comment starting at the first unquoted
+        // ` #`, and a single pair of surrounding quotes. A `#` not preceded by
+        // whitespace (an ifac hash) is preserved.
+        let config = parse_ini(
+            r#"
+[reticulum]
+  enable_transport = TRUE
+
+[interfaces]
+  [[Srv]]
+    type = TCPServerInterface
+    listen_port = 4242  # main port
+    enabled = off
+
+  [[Cli]]
+    type = TCPClientInterface
+    target_host = "example.com"
+    target_port = 4243
+    network_name = abc#def
+"#,
+        )
+        .unwrap();
+
+        assert!(config.reticulum.enable_transport, "TRUE is truthy");
+
+        let srv = config.interfaces.get("Srv").expect("srv");
+        // Inline comment stripped -> value parses as a number, not None.
+        assert_eq!(srv.listen_port, Some(4242));
+        assert!(!srv.enabled, "off is falsy");
+
+        let cli = config.interfaces.get("Cli").expect("cli");
+        // Surrounding quotes stripped.
+        assert_eq!(cli.target_host.as_deref(), Some("example.com"));
+        // A `#` with no leading space (ifac hash) is preserved.
+        assert_eq!(cli.networkname.as_deref(), Some("abc#def"));
     }
 
     #[test]
