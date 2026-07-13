@@ -857,6 +857,7 @@ async fn steady_client(
 /// One churn worker: until `deadline`, repeatedly open a connection with a fresh
 /// client_id, send `churn_pkts` packets, flush, briefly settle, close. Returns
 /// the `(client_id, sent)` for every connection it opened.
+#[allow(clippy::too_many_arguments)]
 async fn churn_worker(
     hub_addr: std::net::SocketAddr,
     dest: Arc<Destination>,
