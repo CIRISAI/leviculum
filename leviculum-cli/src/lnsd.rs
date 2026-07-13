@@ -36,6 +36,11 @@ struct Args {
     #[arg(short, long)]
     service: bool,
 
+    /// Print an example configuration to stdout and exit (rnsd
+    /// `--exampleconfig`). The output loads through lnsd's own config loader.
+    #[arg(long)]
+    exampleconfig: bool,
+
     /// Increase log verbosity (repeat for more: -v debug, -vv trace)
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -48,6 +53,13 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    // --exampleconfig prints a config template and exits, before any logging
+    // or stack init (rnsd.py:75-77).
+    if args.exampleconfig {
+        print!("{}", example_config());
+        return Ok(());
+    }
 
     // RUST_LOG env takes precedence; otherwise use -v/-q flags
     let default_filter = match (args.verbose as i8) - (args.quiet as i8) {
@@ -113,6 +125,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A concise, representative example configuration, printed by
+/// `--exampleconfig`. It is deliberately short (a `[reticulum]` block, a
+/// `[logging]` level, a `[[Default Interface]]` AutoInterface, and a commented
+/// TCPClient example) and MUST round-trip through [`Config::load`].
+fn example_config() -> &'static str {
+    r#"# Example Reticulum configuration for lnsd.
+# Edit to add the interfaces and settings you need.
+
+[reticulum]
+
+# Enable Transport to route traffic for other peers and pass announces.
+# Recommended for always-on, stationary transport nodes.
+enable_transport = No
+
+# Share this instance with other local programs over a local socket.
+share_instance = Yes
+
+[logging]
+
+# Log level 0-7: 0 critical, 1 error, 2 warning, 3 notice,
+# 4 info (default), 5 verbose, 6 debug, 7 extreme.
+loglevel = 4
+
+[interfaces]
+
+  # Communicate with link-local Reticulum peers over UDP/IPv6.
+  # Needs no routers or DHCP, only link-local IPv6 (on by default).
+  [[Default Interface]]
+    type = AutoInterface
+    enabled = yes
+
+  # Connect out to a remote TCP server interface. Uncomment and edit
+  # target_host / target_port, then set enabled = yes.
+  # [[TCP Client Interface]]
+  #   type = TCPClientInterface
+  #   enabled = no
+  #   target_host = 127.0.0.1
+  #   target_port = 4242
+"#
+}
+
 #[cfg(test)]
 mod cli_tests {
     use super::*;
@@ -142,5 +195,28 @@ mod cli_tests {
         // and -s itself does not consume a value as storage.
         assert!(parse(&["-s"]).storage.is_none());
         assert!(Args::try_parse_from(["lnsd", "-s", "/tmp/store"]).is_err());
+    }
+
+    #[test]
+    fn exampleconfig_flag_parses() {
+        assert!(parse(&["--exampleconfig"]).exampleconfig);
+        assert!(!parse(&[]).exampleconfig);
+    }
+
+    #[test]
+    fn example_config_roundtrips_through_loader() {
+        // The printed example must load through our own INI loader without
+        // error and yield at least the Default AutoInterface.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config");
+        std::fs::write(&path, example_config()).expect("write");
+
+        let config = Config::load(&path).expect("example config must load");
+        let auto = config
+            .interfaces
+            .get("Default Interface")
+            .expect("Default Interface present");
+        assert_eq!(auto.interface_type, "AutoInterface");
+        assert!(auto.enabled);
     }
 }
