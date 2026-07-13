@@ -6,6 +6,8 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+
+use crate::sync_ext::MutexRecover;
 use std::time::Duration;
 
 use leviculum_core::constants::MTU;
@@ -201,14 +203,11 @@ async fn send_radio_config(
                                 // subsequent charges under the newly-applied
                                 // radio profile.
                                 if let Some(credit) = credit {
-                                    credit
-                                        .lock()
-                                        .expect("airtime credit mutex poisoned")
-                                        .update_radio_params(
-                                            config.bandwidth,
-                                            config.spreading_factor,
-                                            config.coding_rate,
-                                        );
+                                    credit.lock_recover().update_radio_params(
+                                        config.bandwidth,
+                                        config.spreading_factor,
+                                        config.coding_rate,
+                                    );
                                 }
                                 return true;
                             }

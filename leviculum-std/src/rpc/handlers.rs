@@ -2,6 +2,8 @@
 
 use std::sync::atomic::Ordering;
 
+use crate::sync_ext::MutexRecover;
+
 use leviculum_core::constants::{DEFAULT_PER_HOP_TIMEOUT, MTU, TRUNCATED_HASHBYTES};
 use serde_pickle::value::{HashableValue, Value};
 
@@ -288,8 +290,8 @@ pub(crate) fn build_interface_stats(
     let transport_enabled = core.transport_config().enable_transport;
     let uptime = start_time.elapsed().as_secs_f64();
     let epoch_base = epoch_base_secs(start_time);
-    let counters_map = iface_stats_map.lock().unwrap();
-    let online_map = iface_online_map.lock().unwrap();
+    let counters_map = iface_stats_map.lock_recover();
+    let online_map = iface_online_map.lock_recover();
     let ifac_configs = core.clone_ifac_configs();
 
     // Count local clients for the "clients" field on LocalInterface

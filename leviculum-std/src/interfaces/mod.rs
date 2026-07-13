@@ -29,6 +29,8 @@ pub(crate) mod udp;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::sync_ext::MutexRecover;
 use std::time::{Duration, Instant};
 
 use leviculum_core::traits::{InterfaceError, InterfaceMode};
@@ -171,7 +173,7 @@ impl InterfaceCounters {
     /// the RNode radio keys (with their `0.0`/`None` defaults) even before the
     /// first `CMD_STAT_*` frame arrives. Called once at RNode spawn.
     pub(crate) fn enable_radio_stats(&self) {
-        let mut guard = self.radio.lock().unwrap();
+        let mut guard = self.radio.lock_recover();
         if guard.is_none() {
             *guard = Some(RadioStats::default());
         }
@@ -181,13 +183,13 @@ impl InterfaceCounters {
     /// interface was not pre-marked. Called by the RNode I/O task on each
     /// parsed `CMD_STAT_*` frame.
     pub(crate) fn update_radio(&self, f: impl FnOnce(&mut RadioStats)) {
-        let mut guard = self.radio.lock().unwrap();
+        let mut guard = self.radio.lock_recover();
         f(guard.get_or_insert_with(RadioStats::default));
     }
 
     /// Snapshot the latest radio stats, or `None` for non-radio interfaces.
     pub(crate) fn radio_stats(&self) -> Option<RadioStats> {
-        *self.radio.lock().unwrap()
+        *self.radio.lock_recover()
     }
 
     /// Sample current byte counters and recompute cached speeds.
@@ -195,7 +197,7 @@ impl InterfaceCounters {
     /// Called every second by the traffic counter task. Formula matches
     /// Python's `count_traffic_loop`: `(byte_diff * 8) / time_diff`.
     pub(crate) fn update_speed(&self) {
-        let mut state = self.speed.lock().unwrap();
+        let mut state = self.speed.lock_recover();
         let now = Instant::now();
         let elapsed = now.duration_since(state.prev_time).as_secs_f64();
         if elapsed > 0.0 {
@@ -213,7 +215,7 @@ impl InterfaceCounters {
     ///
     /// Returns the values last computed by `update_speed()`.
     pub(crate) fn speeds(&self) -> (f64, f64) {
-        let state = self.speed.lock().unwrap();
+        let state = self.speed.lock_recover();
         (state.cached_rxs, state.cached_txs)
     }
 }
@@ -243,7 +245,7 @@ pub(crate) fn spawn_traffic_counter(iface_stats_map: InterfaceStatsMap) {
             let Some(map) = stats.upgrade() else {
                 break; // owning node dropped — nothing left to sample
             };
-            for counters in map.lock().unwrap().values() {
+            for counters in map.lock_recover().values() {
                 counters.update_speed();
             }
         });
@@ -457,7 +459,7 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         // populates `credit`; TCP/UDP/Local leave it `None` and skip the
         // charge entirely. See `airtime.rs` for the bucket semantics.
         if let Some(credit) = &self.credit {
-            let mut c = credit.lock().expect("airtime credit mutex poisoned");
+            let mut c = credit.lock_recover();
             if c.try_charge(data.len() as u32, now_ms()).is_err() {
                 return Err(InterfaceError::BufferFull);
             }
@@ -487,10 +489,7 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         // packet of this size. TCP/UDP/Local have credit == None and
         // fall through to the trait default's always-ready semantics.
         match &self.credit {
-            Some(credit) => credit
-                .lock()
-                .expect("airtime credit mutex poisoned")
-                .earliest_fit_time(size as u32, now_ms),
+            Some(credit) => credit.lock_recover().earliest_fit_time(size as u32, now_ms),
             None => now_ms,
         }
     }

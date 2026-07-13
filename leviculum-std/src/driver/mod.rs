@@ -59,6 +59,8 @@ pub use stream::LinkHandle;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
+
+use crate::sync_ext::MutexRecover;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -894,7 +896,7 @@ impl ReticulumNode {
         // node's transport identity hash + transport-enabled flag for the
         // descriptors while the lock is held.
         let (dest_hash, transport_id, transport_enabled) = {
-            let mut core = self.inner.lock().unwrap();
+            let mut core = self.inner.lock_recover();
             let transport_enabled = core.transport_config().enable_transport;
             let transport_id: [u8; TRUNCATED_HASHBYTES] = *core.identity().hash();
             let dest_identity: leviculum_core::Identity = match &network_identity {
@@ -1064,13 +1066,13 @@ impl ReticulumNode {
         };
 
         {
-            let mut core = self.inner.lock().unwrap();
+            let mut core = self.inner.lock_recover();
 
             // Register human-readable interface names, HW_MTU, and counters with core
             {
-                let mut stats = self.iface_stats_map.lock().unwrap();
-                let mut online = self.iface_online_map.lock().unwrap();
-                let mut ready = self.iface_ready_map.lock().unwrap();
+                let mut stats = self.iface_stats_map.lock_recover();
+                let mut online = self.iface_online_map.lock_recover();
+                let mut ready = self.iface_ready_map.lock_recover();
                 for handle in registry.handles() {
                     core.set_interface_name(handle.info.id.0, handle.info.name.clone());
                     if let Some(hw_mtu) = handle.info.hw_mtu {
@@ -1223,8 +1225,7 @@ impl ReticulumNode {
         // `TickOutput`, not the forwarded event stream.
         let remote_mgmt = self
             .inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .remote_mgmt_dest_hash()
             .is_some()
             .then(|| {
@@ -2101,7 +2102,7 @@ impl ReticulumNode {
             // interface_to_shared_instance branch, Transport.py:1484). Without
             // this the client's whole path table would read one hop too many.
             {
-                let mut core = self.inner.lock().unwrap();
+                let mut core = self.inner.lock_recover();
                 core.set_interface_shared_instance(Some(id.0));
             }
             registry.register(handle);
@@ -2118,7 +2119,7 @@ impl ReticulumNode {
 
             // Start RPC server for Python CLI tool compatibility (rnstatus, rnpath, rnprobe)
             let authkey = {
-                let core = self.inner.lock().unwrap();
+                let core = self.inner.lock_recover();
                 match core.identity().private_key_bytes() {
                     Ok(prv) => {
                         use sha2::Digest;
@@ -2194,7 +2195,7 @@ impl ReticulumNode {
     /// and packet_hashlist in Python-compatible formats.
     fn save_persistent_state(&self) {
         use leviculum_core::traits::Storage as _;
-        let mut core = self.inner.lock().unwrap();
+        let mut core = self.inner.lock_recover();
         core.storage_mut().flush();
     }
 
@@ -2231,7 +2232,7 @@ impl ReticulumNode {
 
     /// Register a destination for incoming links
     pub fn register_destination(&self, destination: Destination) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock_recover();
         inner.register_destination(destination);
     }
 
@@ -2239,7 +2240,7 @@ impl ReticulumNode {
     /// policy. Suppressed destinations stay routable but are never gossiped.
     /// See [`AnnounceControl`].
     pub fn set_announce_control(&self, policy: Option<Box<dyn AnnounceControl>>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock_recover();
         inner.set_announce_control(policy);
     }
 
@@ -2330,7 +2331,7 @@ impl ReticulumNode {
     ) -> Result<LinkHandle, Error> {
         // Request link from NodeCore
         let (link_id, _was_routed, output) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner.connect(*dest_hash, dest_signing_key)
         };
         // Send output to event loop for dispatch (backpressure, waits if full)
@@ -2412,7 +2413,7 @@ impl ReticulumNode {
             return Err(InterfaceReadyError::NotStarted);
         }
         let signal = {
-            let map = self.iface_ready_map.lock().unwrap();
+            let map = self.iface_ready_map.lock_recover();
             map.get(&idx).cloned()
         };
         match signal {
@@ -2439,7 +2440,7 @@ impl ReticulumNode {
             return Err(vec![(0, ReadyState::NotStarted)]);
         }
         let signals: Vec<(usize, std::sync::Arc<crate::interfaces::ReadySignal>)> = {
-            let map = self.iface_ready_map.lock().unwrap();
+            let map = self.iface_ready_map.lock_recover();
             map.iter()
                 .map(|(k, v)| (*k, std::sync::Arc::clone(v)))
                 .collect()
@@ -2469,24 +2470,24 @@ impl ReticulumNode {
 
     /// Get the number of active (established) links
     pub fn active_link_count(&self) -> usize {
-        self.inner.lock().unwrap().active_link_count()
+        self.inner.lock_recover().active_link_count()
     }
 
     /// Get the number of pending (not yet established) links
     pub fn pending_link_count(&self) -> usize {
-        self.inner.lock().unwrap().pending_link_count()
+        self.inner.lock_recover().pending_link_count()
     }
 
     /// Get the node's identity hash (16 bytes)
     pub fn identity_hash(&self) -> [u8; 16] {
-        *self.inner.lock().unwrap().identity().hash()
+        *self.inner.lock_recover().identity().hash()
     }
 
     /// Every tunnel id this node has advertised as a tunnel initiator (Codeberg
     /// #64). A peer that validated our synthesize keys its tunnel table by one
     /// of these ids. Observability / interop-test hook.
     pub fn tunnel_ids(&self) -> Vec<[u8; 32]> {
-        self.inner.lock().unwrap().own_tunnel_ids()
+        self.inner.lock_recover().own_tunnel_ids()
     }
 
     /// Get the negotiated MTU for a link
@@ -2494,8 +2495,7 @@ impl ReticulumNode {
     /// Returns `None` if the link does not exist.
     pub fn link_negotiated_mtu(&self, link_id: &LinkId) -> Option<u32> {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .link(link_id)
             .map(|l| l.negotiated_mtu())
     }
@@ -2504,7 +2504,7 @@ impl ReticulumNode {
     ///
     /// Returns `None` if the link does not exist.
     pub fn link_mdu(&self, link_id: &LinkId) -> Option<usize> {
-        self.inner.lock().unwrap().link(link_id).map(|l| l.mdu())
+        self.inner.lock_recover().link(link_id).map(|l| l.mdu())
     }
 
     /// Register a known identity for a destination
@@ -2516,8 +2516,7 @@ impl ReticulumNode {
         identity: leviculum_core::Identity,
     ) {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .remember_identity(dest_hash, identity);
     }
 
@@ -2531,7 +2530,7 @@ impl ReticulumNode {
 
     /// Check if a path to a destination is known
     pub fn has_path(&self, dest_hash: &leviculum_core::DestinationHash) -> bool {
-        self.inner.lock().unwrap().has_path(dest_hash)
+        self.inner.lock_recover().has_path(dest_hash)
     }
 
     /// Look up a known identity for a destination hash.
@@ -2544,8 +2543,7 @@ impl ReticulumNode {
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Option<leviculum_core::Identity> {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .storage()
             .get_identity(dest_hash.as_bytes())
             .cloned()
@@ -2560,7 +2558,7 @@ impl ReticulumNode {
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner.request_path(dest_hash)
         };
         self.action_dispatch_tx
@@ -2620,7 +2618,7 @@ impl ReticulumNode {
 
     /// Get hop count to a destination
     pub fn hops_to(&self, dest_hash: &leviculum_core::DestinationHash) -> Option<u8> {
-        self.inner.lock().unwrap().hops_to(dest_hash)
+        self.inner.lock_recover().hops_to(dest_hash)
     }
 
     /// Returns the current ratchet public key for a registered destination.
@@ -2629,8 +2627,7 @@ impl ReticulumNode {
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Option<[u8; 32]> {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .destination_ratchet_public(dest_hash)
     }
 
@@ -2640,12 +2637,12 @@ impl ReticulumNode {
         &self,
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Option<[u8; 32]> {
-        self.inner.lock().unwrap().known_remote_ratchet(dest_hash)
+        self.inner.lock_recover().known_remote_ratchet(dest_hash)
     }
 
     /// Get the number of known paths
     pub fn path_count(&self) -> usize {
-        self.inner.lock().unwrap().path_count()
+        self.inner.lock_recover().path_count()
     }
 
     /// Read the current monotonic-clock value (milliseconds since
@@ -2656,7 +2653,7 @@ impl ReticulumNode {
     /// (both monotonic) into wall-clock projections by anchoring
     /// against `std::time::SystemTime::now()` at call time.
     pub fn now_ms(&self) -> u64 {
-        self.inner.lock().unwrap().now_ms()
+        self.inner.lock_recover().now_ms()
     }
 
     /// Snapshot every known path-table entry.
@@ -2668,7 +2665,7 @@ impl ReticulumNode {
     /// diagnostics). Snapshot reflects the table at call time; entries
     /// may be evicted by subsequent expiry sweeps.
     pub fn path_table_entries(&self) -> Vec<leviculum_core::transport::PathTableExport> {
-        self.inner.lock().unwrap().path_table_entries()
+        self.inner.lock_recover().path_table_entries()
     }
 
     /// Snapshot every announce-rate-table entry.
@@ -2678,7 +2675,7 @@ impl ReticulumNode {
     /// operator tools that need to inspect per-source announce
     /// frequency / ban state.
     pub fn rate_table_entries(&self) -> Vec<leviculum_core::transport::RateTableExport> {
-        self.inner.lock().unwrap().rate_table_entries()
+        self.inner.lock_recover().rate_table_entries()
     }
 
     /// Look up a single path entry by destination hash.
@@ -2690,8 +2687,7 @@ impl ReticulumNode {
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Option<leviculum_core::storage_types::PathEntry> {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .get_path_clone(dest_hash.as_bytes())
     }
 
@@ -2701,7 +2697,7 @@ impl ReticulumNode {
     /// when it was not present. The local path cache only — does
     /// not emit any wire-level invalidation packet.
     pub fn remove_path(&self, dest_hash: &leviculum_core::DestinationHash) -> bool {
-        self.inner.lock().unwrap().remove_path(dest_hash.as_bytes())
+        self.inner.lock_recover().remove_path(dest_hash.as_bytes())
     }
 
     /// Drop every path whose `next_hop` matches the supplied transport
@@ -2716,14 +2712,13 @@ impl ReticulumNode {
     /// the table and calling [`Self::remove_path`] per entry.
     pub fn drop_all_paths_via(&self, via_hash: &leviculum_core::DestinationHash) -> usize {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .drop_all_paths_via(via_hash.as_bytes())
     }
 
     /// Get transport statistics (packets sent, received, forwarded, dropped)
     pub fn transport_stats(&self) -> leviculum_core::transport::TransportStats {
-        self.inner.lock().unwrap().transport_stats()
+        self.inner.lock_recover().transport_stats()
     }
 
     /// A read-only snapshot of every interface: its name and online status
@@ -2733,9 +2728,9 @@ impl ReticulumNode {
         use std::sync::atomic::Ordering;
         // Take the core's name/status list first, then release that lock before
         // touching the byte/online maps, so the three locks never nest.
-        let entries = { self.inner.lock().unwrap().interface_stats() };
-        let bytes = self.iface_stats_map.lock().unwrap();
-        let online = self.iface_online_map.lock().unwrap();
+        let entries = { self.inner.lock_recover().interface_stats() };
+        let bytes = self.iface_stats_map.lock_recover();
+        let online = self.iface_online_map.lock_recover();
         entries
             .into_iter()
             .map(|e| {
@@ -2767,7 +2762,7 @@ impl ReticulumNode {
         &self,
         link_id: &leviculum_core::link::LinkId,
     ) -> Option<leviculum_core::node::LinkStats> {
-        self.inner.lock().unwrap().link_stats(link_id)
+        self.inner.lock_recover().link_stats(link_id)
     }
 
     /// Announce a registered destination on all interfaces
@@ -2785,8 +2780,7 @@ impl ReticulumNode {
     ) -> Result<(), Error> {
         let output = self
             .inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .announce_destination(dest_hash, app_data)?;
         // Send output to event loop for dispatch (backpressure, waits if full)
         self.action_dispatch_tx
@@ -2804,7 +2798,7 @@ impl ReticulumNode {
     /// * `link_id` - The link ID of the link to close
     pub async fn close_link(&self, link_id: &LinkId) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner.close_link(link_id)
         };
         self.action_dispatch_tx
@@ -2823,7 +2817,7 @@ impl ReticulumNode {
         identity: &leviculum_core::Identity,
     ) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner.identify_link(link_id, identity)?
         };
         self.action_dispatch_tx
@@ -2835,7 +2829,7 @@ impl ReticulumNode {
 
     /// Get the remote identity for a link, if the peer has identified.
     pub fn get_remote_identity(&self, link_id: &LinkId) -> Option<leviculum_core::Identity> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock_recover();
         inner.get_remote_identity(link_id).cloned()
     }
 
@@ -2847,7 +2841,7 @@ impl ReticulumNode {
         path: &str,
         policy: leviculum_core::RequestPolicy,
     ) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock_recover();
         inner.register_request_handler(destination_hash, path, policy);
     }
 
@@ -2862,7 +2856,7 @@ impl ReticulumNode {
         timeout_ms: Option<u64>,
     ) -> Result<[u8; 16], Error> {
         let (request_id, output) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner
                 .send_request(link_id, path, data, timeout_ms)
                 .map_err(Error::Request)?
@@ -2884,7 +2878,7 @@ impl ReticulumNode {
         response_data: &[u8],
     ) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner
                 .send_response(link_id, request_id, response_data)
                 .map_err(Error::Request)?
@@ -2910,7 +2904,7 @@ impl ReticulumNode {
         response_data: &[u8],
     ) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             let (_resource_hash, output) = inner
                 .send_response_resource(link_id, request_id, response_data)
                 .map_err(Error::Resource)?;
@@ -2935,7 +2929,7 @@ impl ReticulumNode {
         metadata: &[u8],
     ) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             let (_resource_hash, output) = inner
                 .send_file_response(link_id, request_id, data, metadata)
                 .map_err(Error::Resource)?;
@@ -2967,7 +2961,7 @@ impl ReticulumNode {
         auto_compress: bool,
     ) -> Result<[u8; 32], Error> {
         let (resource_hash, output) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner
                 .send_resource(link_id, data, metadata, auto_compress)
                 .map_err(Error::Resource)?
@@ -2990,8 +2984,7 @@ impl ReticulumNode {
         strategy: leviculum_core::resource::ResourceStrategy,
     ) -> Result<(), Error> {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .set_resource_strategy(link_id, strategy)
             .map_err(Error::Resource)
     }
@@ -3001,7 +2994,7 @@ impl ReticulumNode {
     /// Call this after receiving a `NodeEvent::ResourceAdvertised` event.
     pub async fn accept_resource(&self, link_id: &LinkId) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner.accept_resource(link_id).map_err(Error::Resource)?
         };
         self.action_dispatch_tx
@@ -3016,7 +3009,7 @@ impl ReticulumNode {
     /// Call this after receiving a `NodeEvent::ResourceAdvertised` event.
     pub async fn reject_resource(&self, link_id: &LinkId) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner.reject_resource(link_id).map_err(Error::Resource)?
         };
         self.action_dispatch_tx
@@ -3043,7 +3036,7 @@ impl ReticulumNode {
         data: &[u8],
     ) -> Result<[u8; TRUNCATED_HASHBYTES], Error> {
         let (packet_hash, output) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner.send_single_packet(dest_hash, data)?
         };
         self.action_dispatch_tx
@@ -3062,7 +3055,7 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
     ) -> Result<(), Error> {
         let output = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock_recover();
             inner
                 .send_proof(packet_hash, dest_hash)
                 .map_err(|e| match e {
@@ -3093,14 +3086,13 @@ impl ReticulumNode {
 
     /// Return a diagnostic dump of all protocol state memory usage
     pub fn diagnostic_dump(&self) -> String {
-        self.inner.lock().unwrap().diagnostic_dump()
+        self.inner.lock_recover().diagnostic_dump()
     }
 
     /// Check if transport mode (relay/routing) is enabled
     pub fn is_transport_enabled(&self) -> bool {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .transport_config()
             .enable_transport
     }
@@ -3194,7 +3186,7 @@ async fn run_event_loop(
     // This is the canonical source of truth for "what IFAC config does interface N have
     // according to the INI config". On reconnect, we re-apply from this map.
     let mut ifac_configs: BTreeMap<usize, leviculum_core::ifac::IfacConfig> = {
-        let core = inner.lock().unwrap();
+        let core = inner.lock_recover();
         core.clone_ifac_configs()
     };
 
@@ -3230,7 +3222,7 @@ async fn run_event_loop(
         // tokio::time::sleep_until arm below. When all queues are empty
         // or the head is already ready, no sleep arm is activated.
         let retry_wake_instant: Option<tokio::time::Instant> = {
-            let now_ms = inner.lock().unwrap().now_ms();
+            let now_ms = inner.lock_recover().now_ms();
             compute_retry_wake_deadline_ms(&retry_queues, &registry, now_ms)
                 .and_then(|slot_ms| slot_ms.checked_sub(now_ms))
                 .map(|delta_ms| tokio::time::Instant::now() + Duration::from_millis(delta_ms))
@@ -3248,7 +3240,7 @@ async fn run_event_loop(
                     None => core::future::pending::<()>().await,
                 }
             } => {
-                let now_ms = inner.lock().unwrap().now_ms();
+                let now_ms = inner.lock_recover().now_ms();
                 drain_retry_queues(&mut retry_queues, &mut registry, now_ms);
                 push_interface_state(&mut registry, &inner);
             }
@@ -3264,7 +3256,7 @@ async fn run_event_loop(
                             registry.name_of(iface_id),
                         );
                         let (output, now_ms) = {
-                            let mut core = inner.lock().unwrap();
+                            let mut core = inner.lock_recover();
                             let output = core.handle_packet(iface_id, &pkt.data);
                             let now_ms = core.now_ms();
                             (output, now_ms)
@@ -3298,7 +3290,7 @@ async fn run_event_loop(
                     RecvEvent::Disconnected(iface_id) => {
                         tracing::warn!("Interface {} ({}) disconnected", iface_id, registry.name_of(iface_id));
                         let output = {
-                            let mut core = inner.lock().unwrap();
+                            let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
                         };
                         dispatch_output(
@@ -3319,11 +3311,11 @@ async fn run_event_loop(
                         retry_queues.remove(&iface_id.0);
                         registry.remove(iface_id);
                         {
-                            let mut stats = iface_stats_map.lock().unwrap();
+                            let mut stats = iface_stats_map.lock_recover();
                             stats.remove(&iface_id.0);
                         }
                         {
-                            let mut online = iface_online_map.lock().unwrap();
+                            let mut online = iface_online_map.lock_recover();
                             online.remove(&iface_id.0);
                         }
                         // Drop auto-connect tracking so a later rediscovery may
@@ -3353,7 +3345,7 @@ async fn run_event_loop(
             // Branch 3: Timer, persistent deadline, not recomputed per iteration
             _ = tokio::time::sleep_until(next_poll) => {
                 let (output, now_ms) = {
-                    let mut core = inner.lock().unwrap();
+                    let mut core = inner.lock_recover();
                     let output = core.handle_timeout();
                     // Blackhole `until` timestamps are unix wall-clock values
                     // from the Python RPC, so the expiry sweep needs wall time
@@ -3432,7 +3424,7 @@ async fn run_event_loop(
                 let inherited_ifac = handle.info.ifac.clone();
                 let inherited_mode = handle.info.mode;
                 {
-                    let mut core = inner.lock().unwrap();
+                    let mut core = inner.lock_recover();
                     core.set_interface_name(iface_idx, handle.info.name.clone());
                     if let Some(hw_mtu) = handle.info.hw_mtu {
                         core.set_interface_hw_mtu(iface_idx, hw_mtu);
@@ -3463,11 +3455,11 @@ async fn run_event_loop(
                     ifac_configs.insert(iface_idx, ifac);
                 }
                 {
-                    let mut stats = iface_stats_map.lock().unwrap();
+                    let mut stats = iface_stats_map.lock_recover();
                     stats.insert(iface_idx, Arc::clone(&handle.counters));
                 }
                 {
-                    let mut online = iface_online_map.lock().unwrap();
+                    let mut online = iface_online_map.lock_recover();
                     online.insert(iface_idx, true);
                 }
                 registry.register(handle);
@@ -3477,7 +3469,7 @@ async fn run_event_loop(
                 // original announce was sent before the connection was established.
                 if !is_local {
                     let output = {
-                        let mut core = inner.lock().unwrap();
+                        let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
                     dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
@@ -3494,11 +3486,11 @@ async fn run_event_loop(
                 tracing::info!("Interface {} reconnected, re-announcing destinations", iface_id);
                 // Re-apply IFAC config to core (E29: handle_interface_down removed it)
                 if let Some(cfg) = ifac_configs.get(&iface_id.0) {
-                    let mut core = inner.lock().unwrap();
+                    let mut core = inner.lock_recover();
                     core.set_ifac_config(iface_id.0, cfg.clone());
                 }
                 let output = {
-                    let mut core = inner.lock().unwrap();
+                    let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
                 dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
@@ -3512,7 +3504,7 @@ async fn run_event_loop(
             // paths it learned from us. A no-op for non-tunnel interfaces.
             Some(iface_id) = tunnel_notify_rx.recv() => {
                 let output = {
-                    let mut core = inner.lock().unwrap();
+                    let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
                 dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
@@ -3522,7 +3514,7 @@ async fn run_event_loop(
             _ = tokio::time::sleep_until(next_flush) => {
                 {
                     use leviculum_core::traits::Storage as _;
-                    let mut core = inner.lock().unwrap();
+                    let mut core = inner.lock_recover();
                     core.storage_mut().flush();
                 }
                 next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
@@ -3568,7 +3560,7 @@ async fn run_event_loop(
                             registry.name_of(iface_id),
                         );
                         let output = {
-                            let mut core = inner.lock().unwrap();
+                            let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
                         };
                         dispatch_output(
@@ -3584,11 +3576,11 @@ async fn run_event_loop(
                         retry_queues.remove(&iface_id.0);
                         registry.remove(iface_id);
                         {
-                            let mut stats = iface_stats_map.lock().unwrap();
+                            let mut stats = iface_stats_map.lock_recover();
                             stats.remove(&iface_id.0);
                         }
                         {
-                            let mut online = iface_online_map.lock().unwrap();
+                            let mut online = iface_online_map.lock_recover();
                             online.remove(&iface_id.0);
                         }
                     }
@@ -3632,7 +3624,7 @@ async fn run_event_loop(
                         let app_data = job.app_data.clone();
                         let label = job.label.clone();
                         let output = {
-                            let mut core = inner.lock().unwrap();
+                            let mut core = inner.lock_recover();
                             core.announce_destination(&wiring.dest_hash, Some(&app_data))
                         };
                         match output {
@@ -3725,8 +3717,7 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
 
     fn is_online(&self, id: InterfaceId) -> bool {
         self.online
-            .lock()
-            .unwrap()
+            .lock_recover()
             .get(&id.0)
             .copied()
             .unwrap_or(false)
@@ -3797,7 +3788,7 @@ fn dispatch_output(
     discovery_network_identity: Option<&leviculum_core::Identity>,
 ) {
     // Drain retry queues before dispatching new actions
-    let drain_now_ms = inner.lock().unwrap().now_ms();
+    let drain_now_ms = inner.lock_recover().now_ms();
     drain_retry_queues(retry_queues, registry, drain_now_ms);
 
     // Dispatch new actions to interfaces (protocol logic in core)
@@ -3990,8 +3981,7 @@ fn record_discovery_announce(
     };
 
     let hops = inner
-        .lock()
-        .unwrap()
+        .lock_recover()
         .hops_to(announce.destination_hash())
         .map(|h| h as u32)
         .unwrap_or(1);
@@ -4144,18 +4134,15 @@ fn drain_retry_queues(
 /// driver; called from `dispatch_output`.
 fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdNodeCore>>) {
     use leviculum_core::traits::Interface;
-    let now_ms = inner.lock().unwrap().now_ms();
-    let mut core = inner.lock().unwrap();
+    let now_ms = inner.lock_recover().now_ms();
+    let mut core = inner.lock_recover();
     for handle in registry.handles_mut_slice().iter_mut() {
         let mtu = handle.mtu();
         let iface_idx = handle.id().0;
         let slot = handle.next_slot_ms(mtu, now_ms);
         core.set_interface_next_slot_ms(iface_idx, slot);
         if let Some(credit) = handle.credit.as_ref() {
-            let max_airtime = credit
-                .lock()
-                .expect("airtime credit mutex poisoned")
-                .max_airtime_ms();
+            let max_airtime = credit.lock_recover().max_airtime_ms();
             core.set_interface_max_airtime_ms(iface_idx, max_airtime);
         }
     }

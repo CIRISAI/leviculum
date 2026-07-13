@@ -7,6 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::sync_ext::MutexRecover;
+
 use tokio::sync::mpsc;
 
 use leviculum_core::link::LinkId;
@@ -89,7 +91,7 @@ impl LinkHandle {
         }
 
         let output = {
-            let mut core = self.inner.lock().unwrap();
+            let mut core = self.inner.lock_recover();
             core.send_on_link(&self.link_id, data)?
         };
 
@@ -112,7 +114,7 @@ impl LinkHandle {
             }
 
             let result = {
-                let mut core = self.inner.lock().unwrap();
+                let mut core = self.inner.lock_recover();
                 core.send_on_link(&self.link_id, data)
             };
 
@@ -125,7 +127,7 @@ impl LinkHandle {
                     return Ok(());
                 }
                 Err(SendError::PacingDelay { ready_at_ms }) => {
-                    let now_ms = self.inner.lock().unwrap().now_ms();
+                    let now_ms = self.inner.lock_recover().now_ms();
                     let delay = ready_at_ms.saturating_sub(now_ms);
                     if delay > 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -149,7 +151,7 @@ impl LinkHandle {
         self.closed = true;
 
         let output = {
-            let mut core = self.inner.lock().unwrap();
+            let mut core = self.inner.lock_recover();
             core.close_link(&self.link_id)
         };
 

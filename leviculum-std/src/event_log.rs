@@ -82,6 +82,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::sync_ext::MutexRecover;
 use std::time::Instant;
 
 use tracing::field::{Field, Visit};
@@ -316,7 +318,7 @@ impl EventLogHandle {
     /// non-panicking tests.  Other parallel tests may have
     /// contributed lines — filter by event name.
     pub fn dump(&self) -> Vec<String> {
-        self.buffer.lock().unwrap().clone()
+        self.buffer.lock_recover().clone()
     }
 }
 
@@ -332,7 +334,7 @@ impl Drop for EventLogHandle {
             return;
         }
 
-        let buffer = self.buffer.lock().unwrap();
+        let buffer = self.buffer.lock_recover();
         let body = buffer.join("\n");
         let dump = format!(
             "=== EVENT LOG DUMP (test panicked, {} lines) ===\n{}\n=== END EVENT LOG DUMP ===\n",
@@ -365,7 +367,7 @@ pub(crate) fn new_handle(
     let buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let active = active_list();
     {
-        let mut list = active.lock().unwrap();
+        let mut list = active.lock_recover();
         list.push(ActiveHandle {
             buffer: Arc::clone(&buffer),
             extra_schemas,
@@ -560,9 +562,9 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
         //   3. push one EVENT_SCHEMA_VIOLATION if the handle's
         //      catalogue (production + extra_schemas) declares this
         //      event with required keys absent from the record.
-        let active = self.active.lock().unwrap();
+        let active = self.active.lock_recover();
         for handle in active.iter() {
-            let mut buf = handle.buffer.lock().unwrap();
+            let mut buf = handle.buffer.lock_recover();
             buf.push(line.clone());
 
             for v in &field_violation_lines {

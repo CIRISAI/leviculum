@@ -37,6 +37,7 @@ pub mod resource_policy;
 pub mod reticulum;
 pub(crate) mod rpc;
 pub(crate) mod storage;
+pub(crate) mod sync_ext;
 pub mod test_support;
 
 // Re-export commonly used core types for the high-level API

@@ -5,6 +5,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::sync_ext::MutexRecover;
+
 use tokio::sync::mpsc;
 
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
@@ -73,7 +75,7 @@ impl PacketSender {
     /// The truncated packet hash, usable for tracking delivery proofs.
     pub async fn send(&self, data: &[u8]) -> Result<[u8; TRUNCATED_HASHBYTES], Error> {
         let (packet_hash, output) = {
-            let mut core = self.inner.lock().unwrap();
+            let mut core = self.inner.lock_recover();
             core.send_single_packet(&self.dest_hash, data)?
         };
         self.action_dispatch_tx

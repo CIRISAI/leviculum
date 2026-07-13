@@ -16,6 +16,8 @@ pub(crate) mod pickle;
 
 use std::sync::{Arc, Mutex};
 
+use crate::sync_ext::MutexRecover;
+
 // RPC transport. Python `multiprocessing.connection` runs over Unix sockets on
 // Unix and over TCP loopback (AF_INET, default local_control_port 37429) on
 // Windows; we mirror that so `rnstatus`/`rnpath` interop on each platform. The
@@ -199,7 +201,7 @@ async fn handle_rpc_connection(
     tracing::debug!("RPC request: {:?} ({:?})", request, codec);
 
     let response_bytes = {
-        let mut core = core.lock().unwrap();
+        let mut core = core.lock_recover();
         let peer_count = auto_peer_count.total();
         handle_request(
             &request,

@@ -22,6 +22,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::sync_ext::MutexRecover;
+
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::link::LinkId;
 use leviculum_core::{RequestError, TickOutput};
@@ -87,7 +89,7 @@ impl RemoteMgmtResponder {
         let include_lstats = decode_include_lstats(data);
         let auto_peer_count = self.auto_peer_count.total();
 
-        let mut core = inner.lock().unwrap();
+        let mut core = inner.lock_recover();
 
         // Build the same bundle the local `interface_stats` RPC serves, then
         // append the link count when requested (Python appends
