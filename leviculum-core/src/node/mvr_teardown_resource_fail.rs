@@ -351,6 +351,73 @@ fn teardown_without_resource_emits_no_resource_failed() {
     );
 }
 
+/// #123 Test A: a HEALTHY but silent responder must survive past the RTT-retry
+/// budget. The initiator sends the RTT packet, gets nothing back (an Active idle
+/// responder stays silent until the initiator's first keepalive, which for a
+/// LoRa-scale RTT is scheduled well after the ~60s retry budget), so the RTT
+/// stays unconfirmed. The removed teardown used to close the link at ~66s; now
+/// it is left to the keepalive/stale watchdog, matching Python-RNS.
+///
+/// RED before removing the Phase-3 teardown (fails at the ~66s tick); GREEN after.
+#[test]
+fn healthy_silent_responder_survives_past_rtt_retry_budget() {
+    let (mut initiator, _r, _i, _ri, link_id) = establish();
+
+    // Force a LoRa-scale RTT so keepalive_secs > 60s (keepalive 360s, stale 720s),
+    // i.e. the confirming first keepalive is scheduled after the retry budget.
+    {
+        let l = initiator.link_mut(&link_id).unwrap();
+        l.set_rtt_ms(2000);
+        l.update_keepalive_from_rtt(2.0);
+    }
+
+    // Advance across the retry budget and beyond; the responder stays silent, so
+    // nothing is delivered back to confirm the RTT.
+    let mut saw_timeout_close = false;
+    for k in 1..=8u64 {
+        initiator.transport().clock().set(TEST_TIME_MS + k * 11_000);
+        let out = initiator.handle_timeout();
+        if has_link_closed(&out.events, LinkCloseReason::Timeout) {
+            saw_timeout_close = true;
+        }
+    }
+
+    assert!(
+        initiator.link(&link_id).is_some(),
+        "healthy silent-responder link must survive past the RTT retry budget"
+    );
+    assert!(
+        !saw_timeout_close,
+        "no LinkClosed(Timeout) may be emitted for a healthy idle link"
+    );
+}
+
+/// #123 Test B: a genuinely-dead responder must still be reaped by the
+/// keepalive/stale watchdog. Leaving rtt=0 keeps stale_close fast (~15s); jumping
+/// the clock past the stale horizon must close the link with `Stale`. Guards the
+/// reaping obligation that survives removing the RTT-retry teardown.
+///
+/// GREEN before AND after the change.
+#[test]
+fn dead_responder_is_still_reaped_by_stale_watchdog() {
+    let (mut initiator, _r, _i, _ri, link_id) = establish();
+
+    // Never deliver anything to/from the responder; jump past the stale horizon.
+    let now = initiator.transport().clock().now_ms();
+    initiator.transport().clock().set(now + 1_000_000_000);
+    let out = initiator.handle_timeout();
+
+    assert!(
+        initiator.link(&link_id).is_none(),
+        "a genuinely-dead link must be reaped by the stale watchdog"
+    );
+    assert!(
+        has_link_closed(&out.events, LinkCloseReason::Stale),
+        "reaping must emit LinkClosed(Stale).\nevents: {:?}",
+        out.events
+    );
+}
+
 /// Guard B: the establishment re-key/alias path (Codeberg #66) tears the old
 /// link id down via `self.links.remove` directly (pre-activation, no resource)
 /// and must NEVER emit a spurious `ResourceFailed`.

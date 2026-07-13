@@ -7278,7 +7278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rtt_retry_limit_tears_down_link() {
+    fn test_rtt_retry_limit_does_not_tear_down_link() {
         use crate::constants::{RTT_RETRY_MAX_ATTEMPTS, RTT_RETRY_MIN_INTERVAL_MS};
 
         let (mut initiator, _responder, init_link_id, _resp_link_id, _rtt_data) =
@@ -7311,19 +7311,21 @@ mod tests {
             "link should still exist at retry limit"
         );
 
-        // One more tick, should tear down
+        // One more tick, past the retry budget. The link must NOT be torn down:
+        // exhausted-but-unconfirmed links are left to the keepalive/stale
+        // watchdog (Python-parity reaping), not closed by an RTT-retry teardown.
         initiator.transport().clock().set(
             TEST_TIME_MS + (RTT_RETRY_MAX_ATTEMPTS as u64 + 1) * (RTT_RETRY_MIN_INTERVAL_MS + 1),
         );
         let output = initiator.handle_timeout();
 
-        // Link should be gone
+        // Link should still exist
         assert!(
-            initiator.link(&init_link_id).is_none(),
-            "link should be torn down after exhausting retries"
+            initiator.link(&init_link_id).is_some(),
+            "link must survive exhausted RTT retries (no teardown)"
         );
 
-        // Should have LinkClosed event with Timeout reason
+        // No LinkClosed event with Timeout reason should be emitted
         let has_closed = output.events.iter().any(|e| {
             matches!(
                 e,
@@ -7333,7 +7335,10 @@ mod tests {
                 }
             )
         });
-        assert!(has_closed, "should emit LinkClosed with Timeout reason");
+        assert!(
+            !has_closed,
+            "must not emit LinkClosed with Timeout reason after exhausting retries"
+        );
     }
 
     #[test]

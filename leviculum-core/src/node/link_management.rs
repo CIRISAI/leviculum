@@ -2794,8 +2794,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// The initiator sends the RTT packet once in `handle_link_proof()`. If the
     /// packet is lost (common on LoRa), this method retransmits at intervals of
     /// `max(rtt_ms * 3, 10s)` up to [`RTT_RETRY_MAX_ATTEMPTS`] retries. Any
-    /// inbound link packet sets `rtt_confirmed`, stopping retries. Links that
-    /// exhaust retries without confirmation are torn down.
+    /// inbound link packet sets `rtt_confirmed`, stopping retries. Retries are
+    /// bounded by [`RTT_RETRY_MAX_ATTEMPTS`]; links that exhaust them without
+    /// confirmation are left to the keepalive/stale watchdog (Python-parity
+    /// reaping), not torn down here.
     pub(super) fn check_rtt_retry(&mut self, now_ms: u64) {
         // Phase 1: Collect link_ids needing an RTT retry
         let need_retry: Vec<LinkId> = self
@@ -2836,56 +2838,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     }
                 }
             }
-        }
-
-        // Phase 3: Tear down links that exhausted retries without confirmation.
-        // Wait one interval after the last send so the final retry has time
-        // to be delivered and confirmed before we give up.
-        let exhausted: Vec<LinkId> = self
-            .links
-            .iter()
-            .filter(|(_, link)| {
-                link.is_initiator()
-                    && link.state() == LinkState::Active
-                    && !link.rtt_confirmed()
-                    && link.rtt_send_count() > RTT_RETRY_MAX_ATTEMPTS
-                    && link.rtt_sent_at_ms().is_some_and(|sent| {
-                        now_ms.saturating_sub(sent) >= link.rtt_retry_interval_ms()
-                    })
-            })
-            .map(|(id, _)| *id)
-            .collect();
-
-        for link_id in exhausted {
-            crate::tracing::warn!(
-                "RTT delivery failed after {} attempts on link <{}>",
-                RTT_RETRY_MAX_ATTEMPTS + 1,
-                HexShort(link_id.as_bytes()),
-            );
-            let (is_initiator, destination_hash) = self
-                .links
-                .get(&link_id)
-                .map(|l| {
-                    crate::tracing::debug!(
-                        target: "leviculum_core::link",
-                        "LINK_DIED link={} reason=other detail=rtt_retry_exhausted elapsed_since_activity_ms={} threshold_ms={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
-                        HexShort(link_id.as_bytes()),
-                        now_ms.saturating_sub(l.last_inbound_secs().saturating_mul(MS_PER_SECOND)),
-                        l.rtt_retry_interval_ms(),
-                        l.rtt_ms(),
-                        l.keepalives_sent(),
-                        l.keepalives_acked(),
-                    );
-                    (l.is_initiator(), *l.destination_hash())
-                })
-                .unwrap_or((true, DestinationHash::new([0; 16])));
-            self.remove_link(&link_id);
-            self.emit_link_closed(
-                link_id,
-                LinkCloseReason::Timeout,
-                is_initiator,
-                destination_hash,
-            );
         }
     }
 

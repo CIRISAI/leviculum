@@ -213,10 +213,13 @@ pub const UNKNOWN_BITRATE_ASSUMPTION_BPS: u32 = 300;
 /// Responder establishment bonus (milliseconds).
 /// With RTT retry (5 attempts at 10s intervals = ~50s budget), the
 /// responder no longer needs Python's 360s bonus. 54s gives 4s margin
-/// above the initiator's retry budget.
+/// above the initiator's retry budget; reaping of dead links is handled
+/// by the keepalive/stale watchdog, not the retry budget.
 pub const ESTABLISHMENT_RESPONDER_BONUS_MS: u64 = 54_000;
 
 /// RTT packet retry: max additional attempts after the initial send.
+/// This only bounds redelivery of the RTT packet; it never closes the link.
+/// Reaping is handled by the keepalive/stale watchdog (Python-parity).
 pub const RTT_RETRY_MAX_ATTEMPTS: u8 = 5;
 
 /// Link request retry: minimum number of retries after the initial attempt.
