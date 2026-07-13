@@ -395,6 +395,7 @@ impl IncomingResource {
     /// Process a hashmap update (HMU) packet.
     pub(crate) fn handle_hashmap_update(
         &mut self,
+        now_ms: u64,
         hmu_data: &[u8],
     ) -> Result<Option<Vec<u8>>, ResourceError> {
         if self.status == ResourceStatus::Failed {
@@ -460,8 +461,12 @@ impl IncomingResource {
         // not data progress, so the timeout should continue from the last data part.
         self.retries = 0;
 
-        // Now that we have more hashmap entries, build next request
+        // Now that we have more hashmap entries, build next request. Reset
+        // req_sent_ms like every other REQ producer, so the next round's rate
+        // samples measure the REQ to first part interval instead of spanning
+        // the previous round plus the HMU round trip (Python Resource.py:971).
         let req = self.build_request();
+        self.req_sent_ms = Some(now_ms);
         Ok(Some(req))
     }
 
@@ -863,7 +868,7 @@ mod tests {
         let hmu_hashes = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11];
         msgpack::write_bin(&mut hmu, &hmu_hashes);
 
-        let result = incoming.handle_hashmap_update(&hmu);
+        let result = incoming.handle_hashmap_update(1000, &hmu);
         assert!(result.is_ok());
 
         // Should have added 2 more hashmap entries at positions seg_len*1..
@@ -872,6 +877,127 @@ mod tests {
         // The entries are at segment*seg_len + i = 74 + 0 = 74, 74 + 1 = 75
         // Both are >= 3 (num_parts), so they won't be stored
         // This test mainly verifies parsing doesn't crash
+    }
+
+    /// The REQ built in response to an HMU must reset `req_sent_ms`, exactly
+    /// like every other REQ producer. Otherwise the next round's rate samples
+    /// (eifr and round_rate) are measured from the PREVIOUS round's REQ,
+    /// spanning that round plus the HMU round trip, which under-measures the
+    /// link by 2-3x and can push a healthy slow link below the VERY_SLOW rate
+    /// tier, permanently pinning window_max to 4 on >74-part transfers.
+    /// Python resets it on every REQ including HMU-driven ones
+    /// (Resource.py:971-974, request_next).
+    #[test]
+    fn test_hmu_req_resets_rate_measurement_baseline() {
+        const NUM_PARTS: usize = 100;
+        const SDU: usize = 464;
+        let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
+
+        let parts: Vec<Vec<u8>> = (0..NUM_PARTS)
+            .map(|i| {
+                let mut p = vec![0u8; SDU];
+                p[0] = (i & 0xff) as u8;
+                p[1] = ((i >> 8) & 0xff) as u8;
+                p
+            })
+            .collect();
+
+        // The advertisement carries only the first HASHMAP_MAX_LEN (74)
+        // entries, so the receiver must exhaust the hashmap and wait for an
+        // HMU before it can request parts 74..100.
+        let mut adv_hashmap = Vec::new();
+        for p in parts.iter().take(HASHMAP_MAX_LEN) {
+            adv_hashmap.extend_from_slice(&map_hash(p, &random_hash));
+        }
+        let mut adv = make_test_adv(NUM_PARTS as u32, adv_hashmap);
+        adv.transfer_size = (NUM_PARTS * SDU) as u64; // bytes_per_part = 464
+
+        let mut now: u64 = 1000;
+        let (mut incoming, first_req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            SDU,
+            now,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
+
+        fn hashes_in_req(req: &[u8]) -> usize {
+            let header = if req[0] == HASHMAP_IS_EXHAUSTED {
+                1 + RESOURCE_HASHMAP_LEN + 32
+            } else {
+                1 + 32
+            };
+            (req.len() - header) / RESOURCE_HASHMAP_LEN
+        }
+
+        // Drive rounds at a healthy pace (first part 50 ms after each REQ,
+        // 464_000 / 50 = 9280 B/s) until the REQ comes back exhausted and the
+        // receiver waits for the HMU.
+        let mut req = first_req;
+        let mut next_part = 0;
+        loop {
+            let exhausted = req[0] == HASHMAP_IS_EXHAUSTED;
+            let count = hashes_in_req(&req);
+            assert!(count > 0, "every driven REQ must request parts");
+            now += 50;
+            let mut last = ResourcePartResult::Continue;
+            for _ in 0..count {
+                last = incoming.receive_part(&parts[next_part], now, 100);
+                assert!(
+                    !matches!(last, ResourcePartResult::InvalidPart),
+                    "part {next_part} must match its hashmap entry"
+                );
+                next_part += 1;
+            }
+            if exhausted {
+                assert!(
+                    matches!(last, ResourcePartResult::Continue),
+                    "exhausted round must wait for the HMU, got {last:?}"
+                );
+                break;
+            }
+            req = match last {
+                ResourcePartResult::SendRequest(r) => r,
+                other => panic!("round must complete with a next REQ, got {other:?}"),
+            };
+        }
+        assert_eq!(next_part, HASHMAP_MAX_LEN, "all advertised hashes consumed");
+
+        // The HMU (segment 1: hashes 74..100) arrives well after the round
+        // completed; the gap models the HMU round trip on a slow link.
+        now += 5000;
+        let mut hmu = Vec::new();
+        hmu.extend_from_slice(&[0xAA; 32]);
+        msgpack::write_fixarray_header(&mut hmu, 2);
+        msgpack::write_uint(&mut hmu, 1);
+        let mut seg1 = Vec::new();
+        for p in parts.iter().skip(HASHMAP_MAX_LEN) {
+            seg1.extend_from_slice(&map_hash(p, &random_hash));
+        }
+        msgpack::write_bin(&mut hmu, &seg1);
+
+        let req = incoming
+            .handle_hashmap_update(now, &hmu)
+            .unwrap()
+            .expect("HMU must produce the next REQ");
+        assert!(hashes_in_req(&req) > 0, "post-HMU REQ must request parts");
+        assert_eq!(
+            incoming.req_sent_ms,
+            Some(now),
+            "HMU-driven REQ must reset req_sent_ms (Python Resource.py:971)"
+        );
+
+        // First part of the post-HMU round lands 50 ms later. The measured
+        // first-part rate must cover ONLY those 50 ms (9280 B/s), not the
+        // previous round plus the HMU round trip.
+        now += 50;
+        incoming.receive_part(&parts[next_part], now, 100);
+        assert_eq!(
+            incoming.eifr, 9280,
+            "post-HMU first-part rate must be measured from the HMU REQ"
+        );
     }
 
     #[test]

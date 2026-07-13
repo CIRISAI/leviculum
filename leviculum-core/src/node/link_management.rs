@@ -2401,7 +2401,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         _raw_packet: &[u8],
-        _now_ms: u64,
+        now_ms: u64,
         now_secs: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -2433,7 +2433,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
 
-        match incoming.handle_hashmap_update(&plaintext) {
+        match incoming.handle_hashmap_update(now_ms, &plaintext) {
             Ok(Some(req_payload)) => {
                 // Send the new REQ
                 let req_pkt = link.build_data_packet_with_context(

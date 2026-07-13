@@ -532,30 +532,22 @@ fn window_caps_at_4_at_342bps_current() {
 /// rounds per +1 step, so a whole 50 KiB transfer ends before the window
 /// reaches its ceiling.
 ///
-/// The harness also exposes a second Current quirk this test tolerates and
-/// documents: `handle_hashmap_update` builds the post-HMU REQ WITHOUT
-/// refreshing `req_sent_ms`, so the next round's first-part rate is measured
-/// from the stale previous REQ timestamp. That collapses the measured rate
-/// below VERY_SLOW for exactly that round, clamps the window (6 -> 4 here),
-/// and restarts the ramp from 4.
+/// The harness also pins the HMU-boundary regression fix: the post-HMU REQ
+/// refreshes `req_sent_ms`, so the next round's first-part rate is measured
+/// from the HMU REQ instead of the stale previous REQ timestamp. Without the
+/// refresh the measured rate collapsed below VERY_SLOW for exactly that
+/// round, clamped the window (6 -> 4 here) and restarted the ramp from 4.
 #[test]
 fn current_reaches_only_slow_growth() {
     let r = run_transfer(WindowPolicy::Current, 51200, 3000, TURNAROUND_MS, None);
-    // Every round sits in the SLOW tier except the HMU-boundary artifact
-    // rounds described above, which clamp to VERY_SLOW for one round.
-    for &(round, w, m) in &r.window_trajectory {
-        if m == RESOURCE_WINDOW_MAX_VERY_SLOW {
-            assert!(
-                w <= RESOURCE_WINDOW_MAX_VERY_SLOW,
-                "a VERY_SLOW clamp must also clamp the window (round {round})"
-            );
-        } else {
-            assert_eq!(
-                m, RESOURCE_WINDOW_MAX_SLOW,
-                "mid rate must never leave the SLOW tier upward: {:?}",
-                r.window_trajectory
-            );
-        }
+    // Every round sits in the SLOW tier: no HMU-boundary round may collapse
+    // the measured rate into the VERY_SLOW tier on this healthy mid link.
+    for &(round, _, m) in &r.window_trajectory {
+        assert_eq!(
+            m, RESOURCE_WINDOW_MAX_SLOW,
+            "round {round} left the SLOW tier (HMU rate poisoning?): {:?}",
+            r.window_trajectory
+        );
     }
     // Growth cadence: every +1 step needs at least window + FLEXIBILITY
     // completed rounds since the previous growth.
