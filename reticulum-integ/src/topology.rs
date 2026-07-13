@@ -152,6 +152,11 @@ pub struct RNodeInterfaceDef {
     pub coding_rate: u8,
     #[serde(alias = "txpower")]
     pub tx_power: u8,
+    /// Explicit long-term airtime lock (percent duty cycle). Absent defaults
+    /// the harness to lock-off (0); duty-cycle tests set it explicitly. See
+    /// `RadioConfig::airtime_limit_long` (#121).
+    #[serde(default)]
+    pub airtime_limit_long: Option<f64>,
 
     /// Resolved device path (filled by runner, not in TOML).
     #[serde(skip)]
@@ -824,6 +829,13 @@ pub fn render_config(
             writeln!(out, "    spreadingfactor = {}", iface.spreading_factor).ok();
             writeln!(out, "    codingrate = {}", iface.coding_rate).ok();
             writeln!(out, "    txpower = {}", iface.tx_power).ok();
+            // Duty-cycle lock off by default for tests, see the RNode path above.
+            writeln!(
+                out,
+                "    airtime_limit_long = {}",
+                iface.airtime_limit_long.unwrap_or(0.0)
+            )
+            .ok();
             writeln!(out, "    ingress_control = false").ok();
         }
     }
@@ -1503,6 +1515,41 @@ rnode = true
         assert!(
             config.contains("airtime_limit_long = 5"),
             "explicit airtime_limit_long not rendered: {config}"
+        );
+    }
+
+    #[test]
+    fn multi_rnode_iface_config_defaults_airtime_lock_off() {
+        let toml_str = r#"
+[test]
+name = "multi_iface_airtime"
+
+[nodes.relay]
+type = "rust"
+enable_transport = true
+
+[[nodes.relay.rnode_interfaces]]
+frequency = 869525000
+bandwidth = 62500
+sf = 7
+cr = 5
+txpower = 17
+
+[[nodes.relay.rnode_interfaces]]
+frequency = 868100000
+bandwidth = 62500
+sf = 7
+cr = 5
+txpower = 17
+"#;
+        let scenario = parse_scenario(toml_str).unwrap();
+        let node = &scenario.nodes["relay"];
+        let config = render_config(node, &[], scenario.radio.as_ref());
+        // Both multi-vport RNode interfaces default the lock off.
+        assert_eq!(
+            config.matches("airtime_limit_long = 0").count(),
+            2,
+            "each multi-iface RNode should default airtime_limit_long off: {config}"
         );
     }
 
