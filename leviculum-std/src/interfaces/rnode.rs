@@ -45,39 +45,6 @@ const FREQ_TOLERANCE_HZ: u32 = 100;
 /// Device reset notification marker
 const DEVICE_RESET_MARKER: u8 = 0xF8;
 
-// RX-deafness watchdog (Codeberg #121). The RNode radio can wedge under
-// sustained slow LoRa load: it stops delivering received air packets
-// (CMD_DATA) to the host while still answering heartbeats and emitting stat
-// frames, so only CMD_DATA traffic counts as an RX health signal. A serial
-// reconnect (DTR toggle reboots the RNode, configure_stream re-arms RX)
-// recovers it. The watchdog detects the wedge and returns from the online
-// loop so the existing reconnect wrapper performs that recovery.
-
-/// How often the watchdog evaluates the RX health decision
-const RX_WATCHDOG_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-/// Only consider the radio wedged if we transmitted an air packet this recently
-const RX_WATCHDOG_TX_ACTIVE_WINDOW: Duration = Duration::from_secs(20);
-/// No received air packet for this long while TX-active means wedged
-const RX_WATCHDOG_RX_DEAF_THRESHOLD: Duration = Duration::from_secs(30);
-
-/// RX-deafness decision: we are actively transmitting air packets but have
-/// received none for too long. Both timestamps track CMD_DATA frames only,
-/// never heartbeats, stats or config traffic. An idle link (no recent TX) is
-/// quiet, not wedged, and must never be rebooted; the `tx_active_window`
-/// guard ensures that. On an active half-duplex link the peer's proofs and
-/// retries arrive within seconds, far below the threshold, so a healthy link
-/// never trips this.
-fn rx_wedged(
-    now: tokio::time::Instant,
-    last_tx_data: tokio::time::Instant,
-    last_rx_data: tokio::time::Instant,
-    tx_active_window: Duration,
-    rx_deaf_threshold: Duration,
-) -> bool {
-    now.duration_since(last_tx_data) < tx_active_window
-        && now.duration_since(last_rx_data) >= rx_deaf_threshold
-}
-
 /// Result of an RNode detection probe
 #[derive(Debug)]
 struct RNodeDetectResult {
@@ -620,17 +587,6 @@ where
     let mut heartbeat_timer = Box::pin(tokio::time::sleep(HEARTBEAT_INTERVAL));
     let mut heartbeat_pending = false;
 
-    // RX-deafness watchdog state (Codeberg #121): timestamps of the last
-    // CMD_DATA air packet in each direction. Initialized to now so a freshly
-    // opened quiet link does not trip the watchdog.
-    let mut last_rx_data = tokio::time::Instant::now();
-    let mut last_tx_data = tokio::time::Instant::now();
-    let mut rx_watchdog = tokio::time::interval_at(
-        tokio::time::Instant::now() + RX_WATCHDOG_CHECK_INTERVAL,
-        RX_WATCHDOG_CHECK_INTERVAL,
-    );
-    rx_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
     loop {
         tokio::select! {
             // Branch 1: Read from serial port
@@ -646,7 +602,6 @@ where
                             if let KissDeframeResult::Frame { command, payload } = frame {
                                 match command {
                                     rnode::CMD_DATA => {
-                                        last_rx_data = tokio::time::Instant::now();
                                         tracing::debug!("{}: RX {} bytes from radio", name, payload.len());
                                         // Bug #25 capture-compare: structured
                                         // event at the RNode → host serial
@@ -887,31 +842,6 @@ where
                 tracing::debug!("{}: heartbeat sent", name);
                 heartbeat_timer = Box::pin(tokio::time::sleep(HEARTBEAT_INTERVAL));
             }
-
-            // Branch 5: RX-deafness watchdog (Codeberg #121). If we are
-            // actively transmitting air packets but have received none for
-            // the threshold, the radio has wedged RX-deaf. Recover exactly
-            // like the error paths: return outgoing_rx so the reconnect
-            // wrapper reopens the serial (DTR reboots the RNode) and re-arms
-            // RX. Idle links never trip this, see rx_wedged.
-            _ = rx_watchdog.tick() => {
-                let now = tokio::time::Instant::now();
-                if rx_wedged(
-                    now,
-                    last_tx_data,
-                    last_rx_data,
-                    RX_WATCHDOG_TX_ACTIVE_WINDOW,
-                    RX_WATCHDOG_RX_DEAF_THRESHOLD,
-                ) {
-                    tracing::warn!(
-                        "RNODE_RX_WEDGED iface={} tx_active_ms={} rx_silent_ms={}",
-                        name,
-                        now.duration_since(last_tx_data).as_millis(),
-                        now.duration_since(last_rx_data).as_millis()
-                    );
-                    return outgoing_rx;
-                }
-            }
         }
 
         // After any branch: try to send if both gates are open
@@ -945,10 +875,6 @@ where
                     "LORA_TX iface={name} len={}",
                     queued.payload_len
                 );
-                // Watchdog TX health signal: every frame in send_queue is a
-                // CMD_DATA air packet (built by build_data_frame in branch 2),
-                // config and heartbeat writes bypass this path.
-                last_tx_data = tokio::time::Instant::now();
 
                 timer_ready = false;
                 if flow_control {
@@ -3146,186 +3072,5 @@ mod tests {
         let c = InterfaceCounters::new();
         assert!(!apply_radio_stat(&c, rnode::CMD_DATA, &[1, 2, 3]));
         assert!(c.radio_stats().is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // RX-deafness watchdog (Codeberg #121)
-    // -----------------------------------------------------------------------
-
-    /// Helper: a reference "now" far enough from process start that
-    /// subtracting test offsets can never underflow.
-    fn watchdog_now() -> tokio::time::Instant {
-        tokio::time::Instant::now() + Duration::from_secs(3600)
-    }
-
-    /// TX-active and RX silent past the threshold: wedged, must recover.
-    #[test]
-    fn rx_wedged_tx_active_rx_silent_is_wedged() {
-        let now = watchdog_now();
-        assert!(rx_wedged(
-            now,
-            now - Duration::from_secs(5),
-            now - Duration::from_secs(31),
-            RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            RX_WATCHDOG_RX_DEAF_THRESHOLD,
-        ));
-    }
-
-    /// TX-active but RX recent: healthy active link, must NOT recover.
-    #[test]
-    fn rx_wedged_tx_active_rx_recent_is_healthy() {
-        let now = watchdog_now();
-        assert!(!rx_wedged(
-            now,
-            now - Duration::from_secs(5),
-            now - Duration::from_secs(2),
-            RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            RX_WATCHDOG_RX_DEAF_THRESHOLD,
-        ));
-    }
-
-    /// No recent TX: the link is idle, not wedged. An idle radio must NEVER
-    /// be rebooted no matter how long RX has been silent.
-    #[test]
-    fn rx_wedged_idle_link_is_never_wedged() {
-        let now = watchdog_now();
-        assert!(!rx_wedged(
-            now,
-            now - Duration::from_secs(120),
-            now - Duration::from_secs(3000),
-            RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            RX_WATCHDOG_RX_DEAF_THRESHOLD,
-        ));
-        // TX exactly at the window edge counts as idle (strict less-than).
-        assert!(!rx_wedged(
-            now,
-            now - RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            now - Duration::from_secs(3000),
-            RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            RX_WATCHDOG_RX_DEAF_THRESHOLD,
-        ));
-    }
-
-    /// RX silence exactly at the threshold trips (greater-or-equal); one
-    /// nanosecond less does not.
-    #[test]
-    fn rx_wedged_threshold_boundary() {
-        let now = watchdog_now();
-        assert!(rx_wedged(
-            now,
-            now - Duration::from_secs(5),
-            now - RX_WATCHDOG_RX_DEAF_THRESHOLD,
-            RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            RX_WATCHDOG_RX_DEAF_THRESHOLD,
-        ));
-        assert!(!rx_wedged(
-            now,
-            now - Duration::from_secs(5),
-            now - (RX_WATCHDOG_RX_DEAF_THRESHOLD - Duration::from_nanos(1)),
-            RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            RX_WATCHDOG_RX_DEAF_THRESHOLD,
-        ));
-    }
-
-    /// Fresh loop entry: both timestamps are "now", so a just-opened quiet
-    /// link never trips the watchdog.
-    #[test]
-    fn rx_wedged_fresh_link_is_healthy() {
-        let now = watchdog_now();
-        assert!(!rx_wedged(
-            now,
-            now,
-            now,
-            RX_WATCHDOG_TX_ACTIVE_WINDOW,
-            RX_WATCHDOG_RX_DEAF_THRESHOLD,
-        ));
-    }
-
-    /// Wiring test with virtual time: the io task keeps transmitting air
-    /// packets while the peer stays completely silent (the wedged-radio
-    /// shape). The watchdog branch must exit the online loop so the
-    /// reconnect wrapper can reboot the RNode.
-    #[tokio::test(start_paused = true)]
-    async fn watchdog_exits_io_task_when_tx_active_and_rx_deaf() {
-        let (port, _peer) = tokio::io::duplex(65536);
-        let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(64);
-        let counters = Arc::new(InterfaceCounters::new());
-
-        let task = tokio::spawn(rnode_io_task(
-            "test_rnode".to_string(),
-            port,
-            incoming_tx,
-            outgoing_rx,
-            counters,
-            /* flow_control = */ false,
-            /* jitter_max_ms = */ 1,
-            125_000,
-            7,
-            5,
-        ));
-
-        // Keep the link TX-active well past the deaf threshold, then stop.
-        let feeder = tokio::spawn(async move {
-            for _ in 0..20 {
-                if outgoing_tx
-                    .send(OutgoingPacket {
-                        data: b"air packet".to_vec(),
-                        high_priority: false,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
-
-        // The watchdog fires at the first tick where RX silence reaches 30 s
-        // while TX is active, well within the 120 s (virtual) budget.
-        tokio::time::timeout(Duration::from_secs(120), task)
-            .await
-            .expect("watchdog must exit the io task while TX-active and RX-deaf")
-            .expect("io task must not panic");
-        feeder.abort();
-    }
-
-    /// Wiring test with virtual time: an idle link (nothing to transmit, peer
-    /// silent) must NOT be rebooted, even long past every watchdog threshold.
-    #[tokio::test(start_paused = true)]
-    async fn watchdog_leaves_idle_io_task_alone() {
-        let (port, _peer) = tokio::io::duplex(65536);
-        let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
-        let counters = Arc::new(InterfaceCounters::new());
-
-        let mut task = tokio::spawn(rnode_io_task(
-            "test_rnode".to_string(),
-            port,
-            incoming_tx,
-            outgoing_rx,
-            counters,
-            /* flow_control = */ false,
-            /* jitter_max_ms = */ 1,
-            125_000,
-            7,
-            5,
-        ));
-
-        // 10 minutes of virtual idle: far beyond RX_DEAF_THRESHOLD.
-        assert!(
-            tokio::time::timeout(Duration::from_secs(600), &mut task)
-                .await
-                .is_err(),
-            "watchdog must not reboot an idle link"
-        );
-
-        // Closing the outgoing channel shuts the task down cleanly.
-        drop(outgoing_tx);
-        tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("io task must exit on channel close")
-            .expect("io task must not panic");
     }
 }
