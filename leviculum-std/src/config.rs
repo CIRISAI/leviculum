@@ -29,6 +29,11 @@ pub struct ReticulumConfig {
     /// Use implicit proof for link identification
     #[serde(default = "default_true")]
     pub use_implicit_proof: bool,
+    /// RNS `[logging] loglevel` (0-7), parsed from the INI config for drop-in
+    /// rnsd compatibility. `None` when unset. lnsd folds this into the default
+    /// tracing filter with CLI `-v/-q` and `RUST_LOG` taking precedence.
+    #[serde(default)]
+    pub loglevel: Option<u8>,
     /// Allow sharing instance across processes via local Unix socket.
     /// When enabled, the daemon listens on `\0rns/{instance_name}` for local clients.
     #[serde(default)]
@@ -196,6 +201,7 @@ impl Default for ReticulumConfig {
         Self {
             enable_transport: true,
             use_implicit_proof: true,
+            loglevel: None,
             shared_instance: false,
             instance_name: default_instance_name(),
             shared_instance_type: None,
@@ -663,6 +669,16 @@ impl Config {
     /// Get the default config file path
     pub fn default_config_path() -> PathBuf {
         Self::default_config_dir().join("config")
+    }
+
+    /// Cheaply read `[logging] loglevel` (0-7) from a config file, without a
+    /// full parse. lnsd calls this to fold the config level into its default
+    /// tracing filter BEFORE installing the subscriber (a full load would emit
+    /// warnings that no subscriber is yet capturing). Returns `None` when the
+    /// file is unreadable, is TOML, or has no `[logging] loglevel`.
+    pub fn peek_loglevel<P: AsRef<Path>>(path: P) -> Option<u8> {
+        let content = std::fs::read_to_string(path).ok()?;
+        crate::ini_config::peek_loglevel(&content)
     }
 }
 

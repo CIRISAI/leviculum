@@ -96,8 +96,10 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                 }
             } else {
                 // Inside a top-level section
-                if current_section.as_str() == "reticulum" {
-                    apply_reticulum_key(&mut reticulum, key, value);
+                match current_section.as_str() {
+                    "reticulum" => apply_reticulum_key(&mut reticulum, key, value),
+                    "logging" => apply_logging_key(&mut reticulum, key, value),
+                    _ => {}
                 }
             }
         }
@@ -296,6 +298,47 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         // config a current rnsd would accept.
         _ => {}
     }
+}
+
+/// Apply one `key = value` from the `[logging]` section. Only `loglevel` (the
+/// RNS 0-7 level, Reticulum.py:66-73) is consumed; other keys (`logtimestamps`,
+/// `logfile`, ...) are tolerated so a stock rnsd config is not rejected. Before
+/// this the whole `[logging]` section was silently dropped.
+fn apply_logging_key(config: &mut ReticulumConfig, key: &str, value: &str) {
+    if key == "loglevel" {
+        // A non-numeric or out-of-u8-range value leaves loglevel unset rather
+        // than aborting the parse (matches the tolerant reticulum-key contract).
+        config.loglevel = value.trim().parse().ok();
+    }
+}
+
+/// Lightweight scan for `[logging] loglevel`, used to pick the default log
+/// filter BEFORE the tracing subscriber is installed. A full `parse_ini` would
+/// emit warnings with no subscriber to capture them (and re-run IFAC key
+/// derivation), so this reads just the one key. Returns `None` if absent or
+/// unparseable.
+pub(crate) fn peek_loglevel(content: &str) -> Option<u8> {
+    let mut in_logging = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Any header (`[section]`, `[[sub]]`, `[[[subsub]]]`) switches context.
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let name = trimmed.trim_matches(|c| c == '[' || c == ']').trim();
+            in_logging = name == "logging";
+            continue;
+        }
+        if in_logging {
+            if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim() == "loglevel" {
+                    return v.trim().parse().ok();
+                }
+            }
+        }
+    }
+    None
 }
 
 fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
@@ -1468,6 +1511,22 @@ mod tests {
             config.reticulum.flush_interval_secs,
             crate::config::DEFAULT_FLUSH_INTERVAL_SECS
         );
+    }
+
+    #[test]
+    fn test_parse_logging_loglevel() {
+        // Codeberg #89-adjacent drop-in: the [logging] section is no longer
+        // dropped; `loglevel = 6` parses into the struct field.
+        let config = parse_ini("[logging]\n  loglevel = 6\n").unwrap();
+        assert_eq!(config.reticulum.loglevel, Some(6));
+
+        // Absent -> None; lnsd then falls back to its default filter.
+        let none = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert_eq!(none.reticulum.loglevel, None);
+
+        // peek_loglevel reads the same value without a full parse.
+        assert_eq!(peek_loglevel("[logging]\n  loglevel = 6\n"), Some(6));
+        assert_eq!(peek_loglevel("[reticulum]\n  loglevel = 6\n"), None);
     }
 
     #[test]

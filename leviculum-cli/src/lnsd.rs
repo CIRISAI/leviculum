@@ -61,25 +61,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // RUST_LOG env takes precedence; otherwise use -v/-q flags
-    let default_filter = match (args.verbose as i8) - (args.quiet as i8) {
-        2.. => "trace",
-        1 => "debug",
-        0 => "info",
-        -1 => "warn",
-        _ => "error",
+    // --config is a directory (like Python rnsd), config file is {dir}/config.
+    // Resolved before the subscriber so we can peek the config loglevel.
+    let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+    let config_file = config_dir.join("config");
+    let storage_path = args.storage.unwrap_or_else(|| config_dir.join("storage"));
+
+    // Log-level precedence (matches rnsd, CLI overrides config):
+    //   RUST_LOG > CLI -v/-q (when non-zero) > config [logging] loglevel > info.
+    // RUST_LOG is applied by EnvFilter inside install_global_subscriber; here we
+    // peek the config loglevel BEFORE installing the subscriber so it can seed
+    // the default filter when no RUST_LOG / CLI verbosity is given.
+    let rust_log_present = std::env::var("RUST_LOG").is_ok();
+    let config_loglevel = if config_file.exists() {
+        Config::peek_loglevel(&config_file)
+    } else {
+        None
     };
-    leviculum_std::event_log::install_global_subscriber(default_filter);
+    let default_filter =
+        resolve_default_filter(config_loglevel, args.verbose, args.quiet, rust_log_present);
+    leviculum_std::event_log::install_global_subscriber(&default_filter);
 
     info!("Starting lnsd v{}", env!("CARGO_PKG_VERSION"));
     if args.service {
         info!("Service mode (-s): logging to stdout for systemd/journald capture");
     }
-
-    // --config is a directory (like Python rnsd), config file is {dir}/config
-    let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
-    let config_file = config_dir.join("config");
-    let storage_path = args.storage.unwrap_or_else(|| config_dir.join("storage"));
 
     info!("Config dir: {}", config_dir.display());
     info!("Config file: {}", config_file.display());
@@ -123,6 +129,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rns.stop().await?;
 
     Ok(())
+}
+
+/// Map an RNS log level (0-7) to a tracing env-filter directive.
+///
+/// RNS levels: 0 critical, 1 error, 2 warning, 3 notice, 4 info, 5 verbose,
+/// 6 debug, 7 extreme (reference/Reticulum/RNS/__init__.py:66-73). tracing has
+/// no notice/verbose/extreme, so notice folds into info, verbose into debug,
+/// and extreme into trace. Values above 7 map to trace.
+fn rns_loglevel_to_filter(level: u8) -> &'static str {
+    match level {
+        0 | 1 => "error",
+        2 => "warn",
+        3 | 4 => "info",
+        5 | 6 => "debug",
+        _ => "trace",
+    }
+}
+
+/// Map the CLI `-v/-q` net verbosity delta to a tracing directive, matching the
+/// historical lnsd behaviour.
+fn cli_verbosity_to_filter(delta: i8) -> &'static str {
+    match delta {
+        2.. => "trace",
+        1 => "debug",
+        0 => "info",
+        -1 => "warn",
+        _ => "error",
+    }
+}
+
+/// Select the default tracing filter used when `RUST_LOG` is unset.
+///
+/// Precedence matches rnsd (CLI overrides config): `RUST_LOG` > CLI `-v/-q`
+/// (when non-zero) > config `[logging] loglevel` > default `info`. `RUST_LOG`
+/// itself is applied one layer up by `EnvFilter::try_from_default_env`, so when
+/// `rust_log_present` is true this returned default is unused by the subscriber;
+/// we still avoid letting config override it here.
+fn resolve_default_filter(
+    loglevel: Option<u8>,
+    verbose: u8,
+    quiet: u8,
+    rust_log_present: bool,
+) -> String {
+    let delta = (verbose as i8) - (quiet as i8);
+    if delta != 0 {
+        // Explicit CLI verbosity wins over config loglevel.
+        return cli_verbosity_to_filter(delta).to_string();
+    }
+    if !rust_log_present {
+        if let Some(level) = loglevel {
+            return rns_loglevel_to_filter(level).to_string();
+        }
+    }
+    "info".to_string()
 }
 
 /// A concise, representative example configuration, printed by
@@ -195,6 +255,34 @@ mod cli_tests {
         // and -s itself does not consume a value as storage.
         assert!(parse(&["-s"]).storage.is_none());
         assert!(Args::try_parse_from(["lnsd", "-s", "/tmp/store"]).is_err());
+    }
+
+    #[test]
+    fn loglevel_precedence_cli_over_config() {
+        // Config loglevel applies when neither CLI -v/-q nor RUST_LOG is set.
+        assert_eq!(resolve_default_filter(Some(6), 0, 0, false), "debug");
+        assert_eq!(resolve_default_filter(Some(2), 0, 0, false), "warn");
+        // CLI -v wins over config loglevel.
+        assert_eq!(resolve_default_filter(Some(2), 1, 0, false), "debug");
+        // CLI -q wins over config loglevel.
+        assert_eq!(resolve_default_filter(Some(6), 0, 2, false), "error");
+        // RUST_LOG present -> config is not applied (EnvFilter uses RUST_LOG,
+        // so the returned default is the CLI/default only).
+        assert_eq!(resolve_default_filter(Some(6), 0, 0, true), "info");
+        // No config, no CLI -> default info.
+        assert_eq!(resolve_default_filter(None, 0, 0, false), "info");
+    }
+
+    #[test]
+    fn rns_loglevel_maps_to_tracing() {
+        assert_eq!(rns_loglevel_to_filter(0), "error");
+        assert_eq!(rns_loglevel_to_filter(1), "error");
+        assert_eq!(rns_loglevel_to_filter(2), "warn");
+        assert_eq!(rns_loglevel_to_filter(3), "info");
+        assert_eq!(rns_loglevel_to_filter(4), "info");
+        assert_eq!(rns_loglevel_to_filter(5), "debug");
+        assert_eq!(rns_loglevel_to_filter(6), "debug");
+        assert_eq!(rns_loglevel_to_filter(7), "trace");
     }
 
     #[test]
