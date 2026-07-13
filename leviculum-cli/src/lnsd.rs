@@ -23,9 +23,18 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Storage directory path (default: <config_dir>/storage)
-    #[arg(short, long)]
+    /// Storage directory path (default: <config_dir>/storage).
+    ///
+    /// Long-only: rnsd's `-s` means `--service`, so `-s` is reserved for that
+    /// and storage keeps only its long spelling (a Leviculum extension).
+    #[arg(long)]
     storage: Option<PathBuf>,
+
+    /// Running as a service (rnsd `-s/--service`). Recognised for drop-in
+    /// compatibility with `rnsd -s`. lnsd keeps logging to stdout, which
+    /// systemd/journald captures; it does not redirect to a log file.
+    #[arg(short, long)]
+    service: bool,
 
     /// Increase log verbosity (repeat for more: -v debug, -vv trace)
     #[arg(short, long, action = ArgAction::Count)]
@@ -51,6 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     leviculum_std::event_log::install_global_subscriber(default_filter);
 
     info!("Starting lnsd v{}", env!("CARGO_PKG_VERSION"));
+    if args.service {
+        info!("Service mode (-s): logging to stdout for systemd/journald capture");
+    }
 
     // --config is a directory (like Python rnsd), config file is {dir}/config
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
@@ -99,4 +111,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rns.stop().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Args {
+        let mut v = vec!["lnsd"];
+        v.extend_from_slice(args);
+        Args::try_parse_from(v).expect("parse ok")
+    }
+
+    #[test]
+    fn service_short_and_long_set_flag() {
+        assert!(parse(&["-s"]).service);
+        assert!(parse(&["--service"]).service);
+        assert!(!parse(&[]).service);
+    }
+
+    #[test]
+    fn storage_is_long_only_and_s_is_not_storage() {
+        // --storage still parses to a path.
+        let a = parse(&["--storage", "/tmp/store"]);
+        assert_eq!(a.storage, Some(PathBuf::from("/tmp/store")));
+        assert!(!a.service);
+
+        // -s is the service flag, never storage: `-s /tmp/store` treats
+        // /tmp/store as a positional (which lnsd has none of) -> error,
+        // and -s itself does not consume a value as storage.
+        assert!(parse(&["-s"]).storage.is_none());
+        assert!(Args::try_parse_from(["lnsd", "-s", "/tmp/store"]).is_err());
+    }
 }
