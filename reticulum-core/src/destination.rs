@@ -840,6 +840,23 @@ impl Destination {
         let ratchet = self.current_ratchet_public();
         let has_ratchet = ratchet.is_some();
 
+        // Reject an over-budget announce here, at compose time, with the byte
+        // counts the caller needs. Packing would otherwise fail with a
+        // buffer-relative `PacketError::TooShort` — named from the buffer's
+        // point of view, the exact opposite of the caller's problem.
+        let app_data_len = app_data.map_or(0, <[u8]>::len);
+        let budget = crate::announce::announce_app_data_budget(has_ratchet);
+        if app_data_len > budget {
+            return Err(AnnounceError::PacketTooLarge {
+                packed: crate::constants::HEADER_MINSIZE
+                    + crate::announce::announce_payload_fixed_len(has_ratchet)
+                    + app_data_len,
+                mtu: crate::constants::MTU,
+                app_data: app_data_len,
+                budget,
+            });
+        }
+
         // Get identity (safe because we checked above)
         let identity = self.identity.as_ref().unwrap();
 
@@ -2091,5 +2108,84 @@ mod tests {
             Destination::new(None, Direction::In, DestinationType::Plain, "plain", &[]).unwrap();
 
         assert!(dest.serialize_ratchets_signed().is_none());
+    }
+
+    fn announceable_dest(with_ratchet: bool) -> Destination {
+        let mut dest = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["budget"],
+        )
+        .unwrap();
+        if with_ratchet {
+            dest.enable_ratchets(&mut OsRng, TEST_TIME_MS).unwrap();
+        }
+        dest
+    }
+
+    /// The exported budget must be exactly the largest `app_data` that packs:
+    /// `budget` bytes fit the MTU, and the resulting packet's true wire length
+    /// never exceeds it.
+    #[test]
+    fn test_announce_at_app_data_budget_packs_within_mtu() {
+        for with_ratchet in [false, true] {
+            let mut dest = announceable_dest(with_ratchet);
+            let budget = crate::announce::announce_app_data_budget(with_ratchet);
+            let app_data = alloc::vec![0xAAu8; budget];
+
+            let packet = dest
+                .announce(Some(&app_data), &mut OsRng, TEST_TIME_MS)
+                .unwrap_or_else(|e| {
+                    panic!("announce at budget must succeed (ratchet={with_ratchet}): {e}")
+                });
+
+            let mut buf = [0u8; crate::constants::MTU];
+            let written = packet.pack(&mut buf).unwrap_or_else(|e| {
+                panic!("announce at budget must pack (ratchet={with_ratchet}): {e}")
+            });
+
+            assert!(
+                written <= crate::constants::MTU,
+                "announce at budget overran the MTU (ratchet={with_ratchet}): {written} B"
+            );
+        }
+    }
+
+    /// One byte over budget is refused at compose time — and the error carries
+    /// the numbers, rather than an unactionable "too large for MTU".
+    #[test]
+    fn test_announce_over_budget_reports_byte_counts() {
+        for with_ratchet in [false, true] {
+            let mut dest = announceable_dest(with_ratchet);
+            let budget = crate::announce::announce_app_data_budget(with_ratchet);
+            let oversized = alloc::vec![0xAAu8; budget + 1];
+
+            let err = dest
+                .announce(Some(&oversized), &mut OsRng, TEST_TIME_MS)
+                .expect_err("announce one byte over budget must be refused");
+
+            match err {
+                AnnounceError::PacketTooLarge {
+                    packed,
+                    mtu,
+                    app_data,
+                    budget: reported_budget,
+                } => {
+                    assert_eq!(app_data, budget + 1);
+                    assert_eq!(reported_budget, budget);
+                    assert_eq!(mtu, crate::constants::MTU);
+                    // `packed` is the true wire length the announce would have had.
+                    assert_eq!(
+                        packed,
+                        crate::constants::HEADER_MINSIZE
+                            + crate::announce::announce_payload_fixed_len(with_ratchet)
+                            + app_data
+                    );
+                }
+                other => panic!("expected PacketTooLarge, got {other:?}"),
+            }
+        }
     }
 }

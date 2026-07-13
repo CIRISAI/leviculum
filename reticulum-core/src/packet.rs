@@ -602,7 +602,9 @@ mod tests {
         };
 
         let mut buffer = [0u8; MTU];
-        let written = packet.pack(&mut buffer).expect("MTU-sized packet must pack");
+        let written = packet
+            .pack(&mut buffer)
+            .expect("MTU-sized packet must pack");
         assert_eq!(written, MTU);
     }
 
