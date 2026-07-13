@@ -76,14 +76,29 @@ pub(crate) fn spawn_udp_interface(
     listen_addr: SocketAddr,
     forward_addrs: Vec<SocketAddr>,
 ) -> io::Result<InterfaceHandle> {
+    // Bind synchronously so errors propagate to the caller immediately.
+    let std_socket = std::net::UdpSocket::bind(listen_addr)?;
+    spawn_udp_interface_from_socket(id, name, std_socket, forward_addrs)
+}
+
+/// Like [`spawn_udp_interface`] but adopts an already-bound socket instead of
+/// binding `listen_addr` itself. A caller that must learn the OS-assigned
+/// ephemeral port BEFORE spawning (e.g. two interfaces that forward to each
+/// other) can bind, read `local_addr()`, and hand over the live socket without
+/// the bind -> drop -> rebind window that races another binder for the same
+/// port under parallel test execution.
+pub(crate) fn spawn_udp_interface_from_socket(
+    id: InterfaceId,
+    name: String,
+    std_socket: std::net::UdpSocket,
+    forward_addrs: Vec<SocketAddr>,
+) -> io::Result<InterfaceHandle> {
     if forward_addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "UDP interface needs at least one forward address",
         ));
     }
-    // Bind synchronously so errors propagate to the caller immediately
-    let std_socket = std::net::UdpSocket::bind(listen_addr)?;
     std_socket.set_nonblocking(true)?;
     // SO_BROADCAST is a permission flag, harmless on non-broadcast sockets.
     // Matches Python behavior (UDPInterface.py:123).
@@ -215,21 +230,23 @@ mod tests {
         let addr_a: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let addr_b: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-        // Bind A first to learn its port
+        // Bind both sockets up front to learn the OS-assigned ports, then hand
+        // the LIVE sockets to the interfaces. Dropping and rebinding the same
+        // port opens a window where a parallel test binding an ephemeral port
+        // steals it, which is the source of this test's flakiness.
         let std_a = std::net::UdpSocket::bind(addr_a).unwrap();
         let bound_a = std_a.local_addr().unwrap();
-        drop(std_a);
-
         let std_b = std::net::UdpSocket::bind(addr_b).unwrap();
         let bound_b = std_b.local_addr().unwrap();
-        drop(std_b);
 
         // A listens on bound_a, forwards to bound_b
         let mut handle_a =
-            spawn_udp_interface(InterfaceId(0), "udp_a".into(), bound_a, vec![bound_b]).unwrap();
+            spawn_udp_interface_from_socket(InterfaceId(0), "udp_a".into(), std_a, vec![bound_b])
+                .unwrap();
         // B listens on bound_b, forwards to bound_a
         let mut handle_b =
-            spawn_udp_interface(InterfaceId(1), "udp_b".into(), bound_b, vec![bound_a]).unwrap();
+            spawn_udp_interface_from_socket(InterfaceId(1), "udp_b".into(), std_b, vec![bound_a])
+                .unwrap();
 
         // Send from A → B
         let payload = b"hello from A";
@@ -273,14 +290,15 @@ mod tests {
         // Port 1 is almost certainly unreachable/firewalled
         let unreachable: SocketAddr = "192.0.2.1:1".parse().unwrap();
 
+        // Hand the live socket to the interface (no drop/rebind race); `bound`
+        // is reused below to send a datagram directly to the interface's port.
         let std_sock = std::net::UdpSocket::bind(listen).unwrap();
         let bound = std_sock.local_addr().unwrap();
-        drop(std_sock);
 
-        let mut handle = spawn_udp_interface(
+        let mut handle = spawn_udp_interface_from_socket(
             InterfaceId(0),
             "udp_unreachable".into(),
-            bound,
+            std_sock,
             vec![unreachable],
         )
         .unwrap();
