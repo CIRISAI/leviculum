@@ -89,6 +89,14 @@ const PR_FREQ_SAMPLES: usize = ANNOUNCE_FREQ_SAMPLES;
 /// decaying asymptotically; rnstatus-style polling relies on it.
 const FREQ_DECAY_MS: u64 = 10_000;
 
+/// How often the diagnostic path-table snapshot dumps one PATH_TABLE_ENTRY line
+/// per path. The lightweight PATH_TABLE size heartbeat still fires every 10 s
+/// (liveness), but the full per-entry dump is expensive on a large public-mesh
+/// table: at 10 s it was ~98% of the miauhaus soak event log (#39). PATH_ADD
+/// already records every insertion, so a 5-minute full snapshot is ample for
+/// detailed inspection while cutting entry volume ~30x.
+const PATH_ENTRIES_DUMP_INTERVAL_MS: u64 = 5 * 60 * 1000;
+
 /// Ingress-control burst thresholds (Codeberg #87; Python Interface.py:75-84).
 /// Interfaces younger than this window use the stricter "new" frequency
 /// thresholds (Python IC_NEW_TIME = 2 hours).
@@ -1049,6 +1057,7 @@ pub struct Transport<C: Clock, S: Storage> {
 
     /// Timestamp of last path table snapshot log (for diagnostic tracing)
     last_path_snapshot_ms: u64,
+    last_path_entries_dump_ms: u64,
 
     /// Well-known hash for path request destination (rnstransport.path.request)
     path_request_hash: [u8; TRUNCATED_HASHBYTES],
@@ -1248,6 +1257,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             events: Vec::new(),
             stats: TransportStats::default(),
             last_path_snapshot_ms: 0,
+            last_path_entries_dump_ms: 0,
             path_request_hash,
             tunnel_synthesize_hash,
             // announce_cache: migrated to Storage
@@ -2008,26 +2018,34 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.process_held_announces(iface);
         }
 
-        // Periodic path table snapshot for diagnostic tracing (every 10s)
+        // Periodic path-table liveness heartbeat (size + drop counters, every
+        // 10s). The full per-entry dump is throttled separately below.
         if now.saturating_sub(self.last_path_snapshot_ms) >= 10_000 {
             self.last_path_snapshot_ms = now;
-            let entries = self.storage.path_entries();
-            crate::tracing::debug!(event = "PATH_TABLE", size = entries.len());
-            for (dst, entry) in &entries {
-                let age_ms = entry.expires_ms.saturating_sub(now);
-                let next_hop_str = entry
-                    .next_hop
-                    .as_ref()
-                    .map(|h| alloc::format!("{}", HexShort(&h[..])))
-                    .unwrap_or_else(|| String::from("None"));
-                crate::tracing::debug!(
-                    event = "PATH_TABLE_ENTRY",
-                    dst = %HexShort(&dst[..]),
-                    hops = entry.hops,
-                    iface = %self.iface_name(entry.interface_index),
-                    next_hop = %next_hop_str,
-                    expires_in_ms = age_ms,
-                );
+            crate::tracing::debug!(event = "PATH_TABLE", size = self.storage.path_count());
+
+            // Full per-entry dump only every PATH_ENTRIES_DUMP_INTERVAL_MS. On a
+            // large public-mesh table (~10k entries) a 10s full dump dominated
+            // the event log (#39); the size line above keeps 10s liveness and
+            // PATH_ADD already records every insertion.
+            if now.saturating_sub(self.last_path_entries_dump_ms) >= PATH_ENTRIES_DUMP_INTERVAL_MS {
+                self.last_path_entries_dump_ms = now;
+                for (dst, entry) in &self.storage.path_entries() {
+                    let age_ms = entry.expires_ms.saturating_sub(now);
+                    let next_hop_str = entry
+                        .next_hop
+                        .as_ref()
+                        .map(|h| alloc::format!("{}", HexShort(&h[..])))
+                        .unwrap_or_else(|| String::from("None"));
+                    crate::tracing::debug!(
+                        event = "PATH_TABLE_ENTRY",
+                        dst = %HexShort(&dst[..]),
+                        hops = entry.hops,
+                        iface = %self.iface_name(entry.interface_index),
+                        next_hop = %next_hop_str,
+                        expires_in_ms = age_ms,
+                    );
+                }
             }
 
             // Per-reason drop summary at the same cadence (OBS-2). Surfaces the
@@ -2581,7 +2599,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         event = "TUNNEL_ESTABLISHED",
                         tunnel = %HexShort(&tunnel_id[..]),
                         iface = %self.iface_name(interface_index),
-                        "Tunnel endpoint established"
                     );
                     return;
                 }
@@ -2715,7 +2732,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     event = "TUNNEL_VOIDED",
                     tunnel = %HexShort(&tunnel_id[..]),
                     iface = %self.iface_name(interface_index),
-                    "Tunnel interface voided (paths retained for restore)"
                 );
             }
         }
@@ -2811,7 +2827,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             event = "TUNNEL_SYNTHESIZE_SENT",
             tunnel = %HexShort(&tunnel_id[..]),
             iface = %self.iface_name(interface_index),
-            "Sent tunnel synthesize to peer"
         );
         Ok(Some(tunnel_id))
     }
@@ -22148,6 +22163,89 @@ mod tunnel_restore_tests {
             Some(next_hop),
             "restored next hop preserved"
         );
+    }
+
+    /// Regression (miauhaus soak): the TUNNEL_* structured events must not carry
+    /// a free-text tracing message. The trailing message rendered as a
+    /// whitespace-bearing `message` field, which the event-log validator flagged
+    /// 21364 times and the sanitizer had to mangle. After the fix the events emit
+    /// structured fields only.
+    #[test]
+    fn tunnel_events_have_no_free_text_message() {
+        extern crate std;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        #[derive(Clone)]
+        struct W(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for W {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for W {
+            type Writer = W;
+            fn make_writer(&'a self) -> W {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let logs = {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(W(buf.clone()))
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_target(true)
+                .finish();
+            let guard = subscriber.set_default();
+
+            // A synthesizes (SENT), B establishes (ESTABLISHED), B voids (VOIDED).
+            let mut a = enabled_transport();
+            let mut b = enabled_transport();
+            let a_if = a.register_interface(Box::new(MockInterface::new("tcp[a->b]", 1)));
+            a.set_interface_name(a_if, "tcp[a->b]".into());
+            a.register_tunnel_interface(a_if, crate::crypto::full_hash(b"tcp_client_0"));
+            let mut r = [0u8; SYNTH_RANDHASH_LEN];
+            OsRng.fill_bytes(&mut r);
+            a.send_tunnel_synthesize(a_if, &r)
+                .unwrap()
+                .expect("tunnel-capable interface initiates synthesize");
+            let synth = take_send_packet(&mut a, a_if);
+
+            let b_if = b.register_interface(Box::new(MockInterface::new("tcp[from-a]", 2)));
+            b.set_interface_name(b_if, "tcp[from-a]".into());
+            b.process_incoming(b_if, &synth).unwrap();
+            b.void_tunnel_for_interface(b_if);
+
+            drop(guard);
+            String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+        };
+
+        for (ev, old_message) in [
+            ("TUNNEL_SYNTHESIZE_SENT", "Sent tunnel synthesize"),
+            ("TUNNEL_ESTABLISHED", "Tunnel endpoint established"),
+            ("TUNNEL_VOIDED", "Tunnel interface voided"),
+        ] {
+            let lines: Vec<&str> = logs
+                .lines()
+                .filter(|l| l.contains(&std::format!("event=\"{ev}\"")))
+                .collect();
+            assert!(
+                !lines.is_empty(),
+                "expected at least one {ev} line.\n--- logs ---\n{logs}"
+            );
+            for line in lines {
+                assert!(
+                    !line.contains(old_message),
+                    "{ev} still carries the free-text message: {line}"
+                );
+            }
+        }
     }
 
     /// A non-tunnel interface never initiates a synthesize (no behaviour change
