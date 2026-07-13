@@ -475,12 +475,20 @@ impl ResourceAdvertisement {
         Ok(Self {
             transfer_size: transfer_size.ok_or(ResourceError::InvalidAdvertisement)?,
             data_size: data_size.ok_or(ResourceError::InvalidAdvertisement)?,
-            num_parts: num_parts.ok_or(ResourceError::InvalidAdvertisement)? as u32,
+            // Reject rather than silently truncate a u64 that does not fit u32
+            // (a malformed/hostile ADV could otherwise smuggle e.g. 2^32+5 as 5
+            // past the consistency check).
+            num_parts: u32::try_from(num_parts.ok_or(ResourceError::InvalidAdvertisement)?)
+                .map_err(|_| ResourceError::InvalidAdvertisement)?,
             resource_hash: resource_hash.ok_or(ResourceError::InvalidAdvertisement)?,
             random_hash: random_hash.ok_or(ResourceError::InvalidAdvertisement)?,
             original_hash: original_hash.ok_or(ResourceError::InvalidAdvertisement)?,
-            segment_index: segment_index.ok_or(ResourceError::InvalidAdvertisement)? as u32,
-            total_segments: total_segments.ok_or(ResourceError::InvalidAdvertisement)? as u32,
+            segment_index: u32::try_from(segment_index.ok_or(ResourceError::InvalidAdvertisement)?)
+                .map_err(|_| ResourceError::InvalidAdvertisement)?,
+            total_segments: u32::try_from(
+                total_segments.ok_or(ResourceError::InvalidAdvertisement)?,
+            )
+            .map_err(|_| ResourceError::InvalidAdvertisement)?,
             request_id: request_id.ok_or(ResourceError::InvalidAdvertisement)?,
             flags: ResourceFlags::from_u8(flags.ok_or(ResourceError::InvalidAdvertisement)?),
             hashmap_data: hashmap_data.ok_or(ResourceError::InvalidAdvertisement)?,
@@ -671,6 +679,44 @@ mod tests {
         assert_eq!(
             ResourceAdvertisement::unpack(&buf),
             Err(ResourceError::InvalidAdvertisement)
+        );
+    }
+
+    #[test]
+    fn test_advertisement_unpack_rejects_num_parts_over_u32() {
+        // A well-formed ADV whose num_parts is encoded as a u64 beyond u32::MAX
+        // must be REJECTED, not silently truncated (2^32+5 would otherwise pass
+        // the consistency check as 5).
+        let mut buf = Vec::new();
+        msgpack::write_fixmap_header(&mut buf, 11);
+        msgpack::write_fixstr(&mut buf, "t");
+        msgpack::write_uint(&mut buf, 1000);
+        msgpack::write_fixstr(&mut buf, "d");
+        msgpack::write_uint(&mut buf, 1000);
+        msgpack::write_fixstr(&mut buf, "n");
+        msgpack::write_uint(&mut buf, (u32::MAX as u64) + 5);
+        msgpack::write_fixstr(&mut buf, "h");
+        msgpack::write_bin(&mut buf, &[0u8; 32]);
+        msgpack::write_fixstr(&mut buf, "r");
+        msgpack::write_bin(&mut buf, &[0u8; RESOURCE_RANDOM_HASH_SIZE]);
+        msgpack::write_fixstr(&mut buf, "o");
+        msgpack::write_bin(&mut buf, &[0u8; 32]);
+        msgpack::write_fixstr(&mut buf, "i");
+        msgpack::write_uint(&mut buf, 0);
+        msgpack::write_fixstr(&mut buf, "l");
+        msgpack::write_uint(&mut buf, 1);
+        msgpack::write_fixstr(&mut buf, "q");
+        msgpack::write_nil(&mut buf);
+        msgpack::write_fixstr(&mut buf, "f");
+        msgpack::write_uint(&mut buf, 0);
+        msgpack::write_fixstr(&mut buf, "m");
+        msgpack::write_bin(&mut buf, &[]);
+        assert!(
+            matches!(
+                ResourceAdvertisement::unpack(&buf),
+                Err(ResourceError::InvalidAdvertisement)
+            ),
+            "num_parts > u32::MAX must be rejected, not truncated"
         );
     }
 
