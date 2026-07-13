@@ -990,6 +990,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .unwrap_or(false);
 
         if is_valid {
+            // A validated inbound proof is link activity: refresh the activity
+            // clock and recover a Stale link so a flow whose only inbound is
+            // proofs (e.g. this node streaming to a peer that proves every
+            // packet) is not marked Stale and closed mid-transfer (#124).
+            // Python parity: Packet.py:463 sets last_proof; Link.py:789's stale
+            // check uses max(last_inbound, last_proof, activated_at).
+            let now_secs = self.transport.clock().now_ms() / MS_PER_SECOND;
+            self.try_recover_stale(link_id, now_secs);
+            if let Some(link) = self.links.get_mut(link_id) {
+                link.record_inbound(now_secs);
+            }
+
             self.try_confirm_rtt(link_id);
 
             // confirm_delivery removes the entry entirely (fixes orphan path #1).
@@ -2528,7 +2540,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
             Ok(_) => {
+                // A validated resource proof keeps the link alive (#124): drop
+                // the `link` borrow (set_outgoing_resource is its last use) then
+                // refresh the activity clock and recover a Stale link, so a
+                // proof-confirmed transfer is not torn down mid-flight.
                 link.set_outgoing_resource(res);
+                let now_secs = now_ms / MS_PER_SECOND;
+                self.try_recover_stale(&link_id, now_secs);
+                if let Some(link) = self.links.get_mut(&link_id) {
+                    link.record_inbound(now_secs);
+                }
             }
             Err(e) => {
                 let resource_hash = *res.resource_hash();
