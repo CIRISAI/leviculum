@@ -3,7 +3,7 @@
 Two independent lines of evidence back the claim that `lnsd` runs as a stable,
 long-lived transport node: an in-repo soak test that runs as a CI gate, and a
 permanent node in the public Reticulum mesh. A third measure, poison-tolerant
-locking, contains a crash to a single interface rather than the whole daemon.
+locking, keeps a task panic under a lock from crashing the whole daemon.
 
 ## In-repo soak: the TCP-hub endurance test
 
@@ -122,7 +122,9 @@ turning an isolated task panic into a whole-daemon crash.
 `MutexRecover::lock_recover()` (`leviculum-std/src/sync_ext.rs`) locks with
 `lock().unwrap_or_else(PoisonError::into_inner)` and is applied uniformly to the
 non-test std-mutex locks across the driver, interfaces, RPC, and event-log
-paths. A poisoned lock now degrades the offending path — typically a single
-interface — instead of the process. Combined with the leak-free soak behaviour
-above, a task panic contains to one interface rather than dropping every peer the
-node routes for.
+paths. This is "continue degraded, do not crash," not "isolate one interface":
+the dominant lock is the node-wide `core` mutex, held on every RPC, connect, and
+dispatch, so recovery continues node-wide state that may be mid-mutation from the
+task that panicked. The guarantee is that one task panic no longer cascades into
+a whole-daemon crash that drops every peer the node routes for; the first such
+recovery logs a `tracing::warn` so the degraded state is visible in the logs.
