@@ -607,28 +607,32 @@ fn parse_bool(value: &str) -> bool {
 
 /// Apply ConfigObj value semantics to a raw `key = <value>` right-hand side.
 ///
-/// 1. Strip an inline comment starting at the first UNQUOTED ` #` (whitespace
-///    then hash). A `#` inside quotes, or not preceded by whitespace (URLs,
-///    ifac hashes like `abc#def`), is preserved.
+/// 1. Strip an inline comment starting at the first UNQUOTED `#`. ConfigObj
+///    terminates an unquoted value at the first `#` regardless of preceding
+///    whitespace (`_valueexp`, vendor/configobj.py:1099 — the unquoted branch
+///    `[^'",\#\s][^,]*?` is non-greedy against the optional `\s*(\#.*)?$`
+///    comment). A `#` inside single/double quotes is preserved.
 /// 2. Trim surrounding whitespace.
 /// 3. Strip a single pair of surrounding double or single quotes.
+///
+/// This matters for wire compatibility: `passphrase = s3cr#et` must yield the
+/// same `s3cr` that rnsd derives its IFAC key from, or the two nodes silently
+/// fail to authenticate on that interface.
 fn strip_value(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut in_single = false;
     let mut in_double = false;
-    let mut prev_ws = false;
     let mut cut = None;
     for (i, &c) in chars.iter().enumerate() {
         match c {
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
-            '#' if !in_single && !in_double && prev_ws => {
+            '#' if !in_single && !in_double => {
                 cut = Some(i);
                 break;
             }
             _ => {}
         }
-        prev_ws = c.is_whitespace();
     }
     let sliced: String = match cut {
         Some(i) => chars[..i].iter().collect(),
@@ -694,10 +698,25 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_value_configobj_semantics() {
+        // ConfigObj terminates an unquoted value at the FIRST `#`, whether or
+        // not whitespace precedes it (vendor/configobj.py:1099 `_valueexp`).
+        assert_eq!(strip_value("abc#def"), "abc");
+        assert_eq!(strip_value("s3cr#et"), "s3cr");
+        assert_eq!(strip_value("http://x#z"), "http://x");
+        assert_eq!(strip_value("4242 # main"), "4242");
+        // A `#` inside quotes is protected; the surrounding quotes are stripped.
+        assert_eq!(strip_value("\"abc#def\""), "abc#def");
+        assert_eq!(strip_value("'s3cr#et'"), "s3cr#et");
+        // No comment: value passes through, surrounding quotes stripped.
+        assert_eq!(strip_value("plain"), "plain");
+        assert_eq!(strip_value("\"example.com\""), "example.com");
+    }
+
+    #[test]
     fn test_inline_comment_and_quote_stripping() {
         // ConfigObj strips an inline comment starting at the first unquoted
-        // ` #`, and a single pair of surrounding quotes. A `#` not preceded by
-        // whitespace (an ifac hash) is preserved.
+        // `#`, and a single pair of surrounding quotes.
         let config = parse_ini(
             r#"
 [reticulum]
@@ -728,8 +747,29 @@ mod tests {
         let cli = config.interfaces.get("Cli").expect("cli");
         // Surrounding quotes stripped.
         assert_eq!(cli.target_host.as_deref(), Some("example.com"));
-        // A `#` with no leading space (ifac hash) is preserved.
+        // An unquoted `#` terminates the value like ConfigObj does; only the
+        // text before the hash survives.
+        assert_eq!(cli.networkname.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn test_quoted_hash_survives_stripping() {
+        // Quoting protects a `#` so an IFAC network_name/passphrase that really
+        // contains a hash is preserved verbatim.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Cli]]
+    type = TCPClientInterface
+    network_name = "abc#def"
+    passphrase = 's3cr#et'
+"#,
+        )
+        .unwrap();
+
+        let cli = config.interfaces.get("Cli").expect("cli");
         assert_eq!(cli.networkname.as_deref(), Some("abc#def"));
+        assert_eq!(cli.passphrase.as_deref(), Some("s3cr#et"));
     }
 
     #[test]
