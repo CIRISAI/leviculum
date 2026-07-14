@@ -214,7 +214,15 @@ fn locate_lnsd() -> PathBuf {
     if let Ok(entries) = std::fs::read_dir(&target) {
         for e in entries.flatten() {
             if e.path().is_dir() {
-                roots.push(e.path());
+                // Only consider per-triple subdirs for the HOST architecture. A
+                // machine that has cross-built (e.g. aarch64-unknown-linux-gnu on
+                // an x86_64 host) leaves a wrong-arch `lnsd` here; picking it would
+                // spawn with "Exec format error". The host arch string appears in
+                // its own triple dir name (x86_64-*, aarch64-*), never in another's.
+                let name = e.file_name();
+                if name.to_string_lossy().contains(std::env::consts::ARCH) {
+                    roots.push(e.path());
+                }
             }
         }
     }
