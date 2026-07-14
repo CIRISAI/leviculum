@@ -6161,7 +6161,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     "Not re-originating recursive path request, PR ingress burst limit active"
                 );
             } else {
-                let active_discovery = discovers && !pr_burst_limited;
+                // Codeberg #117 regression fix: a Full-mode relay
+                // (`discovers_paths() == false`) with no local clients used to
+                // answer a path request from its cached announce (pre-#117 case
+                // 2b). #117 correctly gated that answer on a live path entry to
+                // avoid serving a stale next hop, but left this relay silent
+                // when the path had expired while the announce cache survived,
+                // breaking downstream discovery under load. Re-originate a fresh
+                // hops=0 discovery for a destination we have provably seen (a
+                // cached announce) but hold no current path to, instead of
+                // re-serving the stale cache. This is a deliberate,
+                // deviation-justified divergence from Python's DISCOVER_PATHS_FOR
+                // mode-gating (#104): wire/semantic-compatible (an ordinary
+                // hops=0 path-request broadcast) and it restores P1 discovery
+                // robustness. All existing dedup/limits still apply: the
+                // `get_discovery_path_request` guard prevents duplicate
+                // re-origination and the #87 PR ingress burst limiter still
+                // gates it via `!pr_burst_limited`.
+                let has_cached_announce_no_path =
+                    self.storage.get_announce_cache(&requested_hash).is_some()
+                        && self.storage.get_path(&requested_hash).is_none();
+                let active_discovery =
+                    (discovers || has_cached_announce_no_path) && !pr_burst_limited;
                 let has_locals = self.has_local_clients();
                 if active_discovery || has_locals {
                     if active_discovery {

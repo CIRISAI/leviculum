@@ -265,6 +265,79 @@ fn orphaned_cache_local_request_forwards_instead_of_stale_answer() {
     );
 }
 
+/// #117 REGRESSION (Full-mode relay, no local clients): #117 gated the case 2b
+/// cache answer on a live path entry. A `Full`-mode relay
+/// (`discovers_paths() == false`) with NO local clients then hits neither case
+/// 2b (path gone) nor the old case 3 (`active_discovery == false`,
+/// `has_locals == false`) and SILENTLY DROPS a request whose path expired but
+/// whose announce cache survives, breaking downstream discovery under load.
+/// The fix re-originates a fresh hops=0 discovery for a destination we have
+/// provably seen (a cached announce) but hold no path to, WITHOUT re-serving
+/// the stale cache. RED on master (pre-fix): no re-originated broadcast, no
+/// path entry, silent drop. GREEN after the fix: a case 3 broadcast excludes N.
+#[test]
+fn orphaned_cache_full_mode_relay_rediscovers_instead_of_silent_drop() {
+    // setup_node(false) leaves iface_n in the default Full mode (no
+    // set_interface_mode call): discovers_paths() == false, and there are no
+    // local clients on this node.
+    let (mut node, iface_a, iface_n, dest_x) = setup_node(false);
+    assert!(
+        !crate::traits::InterfaceMode::Full.discovers_paths(),
+        "precondition: the requester interface is a non-discovering Full mode"
+    );
+
+    assert!(
+        node.remove_path(dest_x.as_bytes()),
+        "path entry must exist to remove"
+    );
+    assert_eq!(node.hops_to(&dest_x), None);
+
+    let path_req_hash = *node.transport().path_request_hash();
+    let requester_id = [0x11u8; TRUNCATED_HASHBYTES];
+    let tag = [0x22u8; TRUNCATED_HASHBYTES];
+    let request = build_path_request(&path_req_hash, &dest_x, &requester_id, &tag);
+
+    let out = node.handle_packet(InterfaceId(iface_n), &request);
+
+    // The fix re-originates discovery: a fresh path request is broadcast on all
+    // interfaces except the requester N (reaching iface_a). RED on master: the
+    // Full relay drops the request with no broadcast at all.
+    assert!(
+        broadcasts(&out)
+            .iter()
+            .any(|(excl, d)| *excl == Some(iface_n)
+                && is_path_request_for(d, &path_req_hash, &dest_x)),
+        "a Full-mode relay with a cached-but-pathless destination must \
+         re-originate discovery (case 3); master silently drops the request"
+    );
+    let _ = iface_a;
+
+    // The re-origination must NOT resurrect a path or answer from the stale
+    // cache (guards against reintroducing the #117 bug): no path entry is
+    // created, and no announce is sent toward the requester N, immediately ...
+    assert_eq!(
+        node.hops_to(&dest_x),
+        None,
+        "re-origination must not create a path table entry from the stale cache"
+    );
+    assert!(
+        !send_packets(&out)
+            .iter()
+            .any(|(i, d)| *i == iface_n && is_announce_for(d, &dest_x)),
+        "no stale announce may be served to the requester N"
+    );
+    // ... nor as a deferred case 2b rebroadcast.
+    let now = node.transport().clock().now_ms();
+    node.transport().clock().set(now + 100_000);
+    let deferred = node.handle_timeout();
+    assert!(
+        !send_packets(&deferred)
+            .iter()
+            .any(|(i, d)| *i == iface_n && is_announce_for(d, &dest_x)),
+        "no deferred stale announce may reach the requester N"
+    );
+}
+
 /// POSITIVE CONTROL (green before and after the fix): with BOTH the path table
 /// and the announce cache present, the same local request is answered with an
 /// announce on the requester interface B and NOT forwarded to A. Guards
