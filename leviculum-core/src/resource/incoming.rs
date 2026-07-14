@@ -1173,6 +1173,9 @@ mod tests {
 
     /// The round-complete point emits the RESOURCE_RW observability event
     /// (Codeberg #85) with the receiver-side rate the policy reacted to.
+    // Log-capture assertion needs the tracing feature; gated so the
+    // --no-default-features (tracing-off) build does not compile `tracing::`.
+    #[cfg(feature = "tracing")]
     #[test]
     fn test_round_complete_emits_resource_rw_event() {
         extern crate std;

@@ -22170,6 +22170,9 @@ mod tunnel_restore_tests {
     /// whitespace-bearing `message` field, which the event-log validator flagged
     /// 21364 times and the sanitizer had to mangle. After the fix the events emit
     /// structured fields only.
+    // Log-capture assertion needs the tracing feature; gated so the
+    // --no-default-features (tracing-off) build does not compile `tracing::`.
+    #[cfg(feature = "tracing")]
     #[test]
     fn tunnel_events_have_no_free_text_message() {
         extern crate std;

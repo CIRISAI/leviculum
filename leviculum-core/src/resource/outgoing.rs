@@ -1391,6 +1391,9 @@ mod tests {
     /// Every received REQ emits the RESOURCE_REQ_RX observability event
     /// (Codeberg #85) with the request/resend accounting the stall
     /// diagnosis needs.
+    // Log-capture assertion needs the tracing feature; gated so the
+    // --no-default-features (tracing-off) build does not compile `tracing::`.
+    #[cfg(feature = "tracing")]
     #[test]
     fn test_handle_request_emits_resource_req_rx_event() {
         extern crate std;
