@@ -342,7 +342,10 @@ pub(crate) fn peek_loglevel(content: &str) -> Option<u8> {
         if in_logging {
             if let Some((k, v)) = trimmed.split_once('=') {
                 if k.trim() == "loglevel" {
-                    return v.trim().parse().ok();
+                    // Strip an inline comment (`loglevel = 6  # verbose`) the
+                    // same way a full parse would, or the raw RHS fails to
+                    // parse and the daemon silently drops to info.
+                    return strip_value(v).parse().ok();
                 }
             }
         }
@@ -1682,6 +1685,16 @@ mod tests {
         // peek_loglevel reads the same value without a full parse.
         assert_eq!(peek_loglevel("[logging]\n  loglevel = 6\n"), Some(6));
         assert_eq!(peek_loglevel("[reticulum]\n  loglevel = 6\n"), None);
+    }
+
+    #[test]
+    fn test_peek_loglevel_strips_inline_comment() {
+        // An inline comment on the loglevel line must not defeat the parse, or
+        // the daemon silently runs at info instead of the configured level.
+        assert_eq!(
+            peek_loglevel("[logging]\n  loglevel = 6  # verbose\n"),
+            Some(6)
+        );
     }
 
     #[test]
