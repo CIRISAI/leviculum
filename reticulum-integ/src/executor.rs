@@ -276,7 +276,9 @@ fn parse_delivery_measurement(line: &str) -> Option<(u64, u64, String)> {
 
 /// Format one PATHRESOLVE measurement line (Codeberg #117):
 ///
-///     PATHRESOLVE test=<name> attempt=<k> of=<attempts> result=<ok|fail> t_ms=<ms> dest=<hash>
+/// ```text
+/// PATHRESOLVE test=<name> attempt=<k> of=<attempts> result=<ok|fail> t_ms=<ms> dest=<hash>
+/// ```
 ///
 /// One line per rnpath invocation, success and failure alike, so a soak
 /// run yields a resolve% and latency distribution instead of a single
@@ -322,7 +324,9 @@ fn append_pathresolve(test: &str, attempt: u64, attempts: u64, ok: bool, t_ms: u
 
 /// Format the `path_soak` end-of-step summary:
 ///
-///     path_soak: resolved <M>/<N> (<pct>%) over <N> iterations
+/// ```text
+/// path_soak: resolved <M>/<N> (<pct>%) over <N> iterations
+/// ```
 fn path_soak_summary(resolved: u64, repeat: u64) -> String {
     let pct = if repeat == 0 {
         0.0
