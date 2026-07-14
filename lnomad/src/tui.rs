@@ -687,7 +687,7 @@ pub struct Model {
     /// interactive element is focused at a time.
     pub focus: Option<usize>,
     /// The form field's laid-out positions and metadata, refreshed on every
-    /// relayout from the parsed document and the current [`field_state`].
+    /// relayout from the parsed document and the current `field_state`.
     pub field_defs: Vec<RenderedField>,
     /// The editable field store (typed text / toggled state), the source of
     /// truth for rendering and submission. Indexed by a field's 1-based index
@@ -714,7 +714,7 @@ pub struct Model {
     pub now_tick: u64,
     /// The loading spinner's animation tick: advances once per redraw while a
     /// fetch is in flight, driving both the circling glyph and the shimmering
-    /// rainbow hue. See [`spinner_span`].
+    /// rainbow hue. See `spinner_span`.
     pub spin: usize,
     /// Whether the keybinding help overlay is shown.
     pub show_help: bool,
@@ -744,16 +744,16 @@ pub struct Model {
     /// The selected row in the places panel, an index into [`places`].
     pub places_sel: usize,
     /// The places overlay's VIEW offset: the first entry-line shown when the
-    /// panel is taller than the terminal. Distinct from [`places_sel`] (the
+    /// panel is taller than the terminal. Distinct from `places_sel` (the
     /// selection); the view is scrolled the minimum needed to keep the selected
     /// row visible. Reset to 0 when the panel opens.
     pub places_scroll: usize,
     /// The places-panel entry the mouse is hovering over, an index into
     /// [`places`], or `None`. Highlights that row so it reads as clickable; kept
-    /// distinct from the selection ([`places_sel`]) so the two highlights differ.
+    /// distinct from the selection (`places_sel`) so the two highlights differ.
     pub places_hover: Option<usize>,
     /// The one-slot undo stash: the bookmark most recently deleted from the
-    /// places panel, restored by `u` ([`undo_delete_bookmark`]). A new deletion
+    /// places panel, restored by `u` (`undo_delete_bookmark`). A new deletion
     /// overwrites it (only one level of undo).
     pub last_deleted_bookmark: Option<DeletedBookmark>,
     /// The help overlay's VIEW offset: the first help line shown when the help
@@ -763,7 +763,7 @@ pub struct Model {
     /// revisit (including back/forward) renders instantly from here; a reload
     /// bypasses it and form submits are never stored. See [`PageCache`].
     pub page_cache: PageCache,
-    /// Whether the page currently shown was served from [`page_cache`] rather
+    /// Whether the page currently shown was served from `page_cache` rather
     /// than a fresh fetch. Drives the subtle "cached" top-bar marker; cleared on
     /// the next fresh load.
     pub cached_view: bool,
@@ -775,7 +775,7 @@ pub struct Model {
     /// Whether the session identifies to [`current_dest`](Model::current_dest).
     /// The `i` toggle flips it optimistically so the UI updates immediately;
     /// the IO shell's refresh after each fresh load is authoritative, and a
-    /// cache-served navigation restores it from [`identify_known`]
+    /// cache-served navigation restores it from `identify_known`
     /// (Model::identify_known). Drives the top-bar marker and the footer label.
     pub identifying: bool,
     /// The destinations the model has learned the session identifies to: every

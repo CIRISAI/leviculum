@@ -1,7 +1,7 @@
 //! Receiver-side resource sliding-window state and adaptation policy.
 //!
 //! Codeberg #85: the window adaptation logic is extracted out of
-//! [`IncomingResource`](super::incoming::IncomingResource) into a swappable
+//! `IncomingResource` into a swappable
 //! [`WindowPolicy`] so candidate algorithms can be benchmarked against each
 //! other in the same harness. [`WindowPolicy::Current`] reproduces the
 //! historical behavior exactly; [`WindowPolicy::PythonLike`] mirrors the

@@ -316,7 +316,7 @@ pub fn resolve_destination_hash(data_dir: &Path) -> Result<DestinationHash, Node
 }
 
 /// The request paths the node serves for these posts: the index page plus
-/// one page per post. Matches the keys [`build_pages`] renders.
+/// one page per post. Matches the keys `build_pages` renders.
 pub fn page_paths(posts: &[Post]) -> Vec<String> {
     std::iter::once(INDEX_PATH.to_string())
         .chain(posts.iter().map(post_page_path))

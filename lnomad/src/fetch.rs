@@ -251,7 +251,7 @@ impl Session {
     /// NomadNet serves a file as a file object (`Node.serve_file`), which RNS
     /// transfers as a Resource of the raw file bytes — NOT the msgpack `bytes`
     /// value a page response is packed into. So unlike [`fetch`](Self::fetch)
-    /// there is no [`decode_page`] step: the raw response IS the file. The
+    /// there is no `decode_page` step: the raw response IS the file. The
     /// server's `{"name": ...}` Resource metadata yields the second tuple
     /// element: the name run through [`crate::download::basename`] (the server
     /// is untrusted, so path separators and dot-only names never survive), or

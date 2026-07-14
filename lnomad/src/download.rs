@@ -23,7 +23,7 @@ pub(crate) const FALLBACK_NAME: &str = "download";
 /// The filename implied by a request path: everything after the last `/`,
 /// sanitised so it cannot escape the directory it is saved into. Any remaining
 /// path separator (`\` survives the split) is stripped, and an empty or
-/// dot-only result (``, `.`, `..`) falls back to [`FALLBACK_NAME`].
+/// dot-only result (``, `.`, `..`) falls back to `FALLBACK_NAME`.
 pub fn basename(path: &str) -> String {
     let raw = path.rsplit('/').next().unwrap_or("");
     let name: String = raw.chars().filter(|&c| c != '/' && c != '\\').collect();
@@ -72,7 +72,7 @@ pub fn parse_metadata_name(metadata: &[u8]) -> Option<String> {
 /// survives sanitisation, else the URL path basename.
 ///
 /// The server name is untrusted, so it is run through [`basename`], which
-/// strips path separators and maps `..`/`.`/empty to [`FALLBACK_NAME`]; a name
+/// strips path separators and maps `..`/`.`/empty to `FALLBACK_NAME`; a name
 /// like `../../etc/passwd` or `a/b/c` can therefore never write outside the
 /// download directory. A server name that sanitises to the bare fallback is
 /// discarded in favour of the URL basename.
