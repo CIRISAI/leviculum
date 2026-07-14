@@ -1529,6 +1529,29 @@ impl ReticulumNode {
         self.inner.lock().unwrap().pending_link_count()
     }
 
+    /// Whether the link `link_id` is ESTABLISHED (handshake complete → `Active`).
+    ///
+    /// Resolves the `link_id` through the `#66` re-key alias table
+    /// (`link()` → `resolve_link_id`), so a caller holding the ORIGINAL id from
+    /// `connect` still gets a correct answer after an establishment-retry re-key
+    /// (Codeberg #66) that re-keyed the link under a fresh wire id. Returns
+    /// `false` for an unknown link OR a link still `Pending` (i.e. inserted by
+    /// `connect` but not yet handshake-complete) — unlike a raw `links.contains`
+    /// or `link_negotiated_mtu(..).is_some()`, both of which are true for a
+    /// pending link too.
+    ///
+    /// This is the establishment gate a sender must poll before `send_resource`:
+    /// a consumer tracking establishment by its own event-populated set keyed on
+    /// the original id misses the re-keyed id the `LinkEstablished` event
+    /// carries, waits forever, and never sends (CIRISEdge#342).
+    pub fn link_is_established(&self, link_id: &LinkId) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .link(link_id)
+            .is_some_and(reticulum_core::link::Link::is_active)
+    }
+
     /// Get the node's identity hash (16 bytes)
     pub fn identity_hash(&self) -> [u8; 16] {
         *self.inner.lock().unwrap().identity().hash()
