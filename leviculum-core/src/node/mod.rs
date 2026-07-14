@@ -55,6 +55,8 @@ mod mvr_establishment_loss;
 mod mvr_hop_asymmetry;
 #[cfg(test)]
 mod mvr_link_rekey_alias;
+#[cfg(test)]
+mod mvr_lnode_pathresolve;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]
