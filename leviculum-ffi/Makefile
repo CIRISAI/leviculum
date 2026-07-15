@@ -18,6 +18,10 @@ INCLUDEDIR  ?= $(PREFIX)/include
 PKGCONFIGDIR ?= $(LIBDIR)/pkgconfig
 TARGET      ?= x86_64-unknown-linux-gnu
 
+# cargo build honors CARGO_TARGET_DIR; the install rule must read the artifacts
+# from the same place, else it copies stale bits from ../target (or fails).
+TARGET_DIR  ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),../target)
+
 # Version from the workspace package table; major drives the SONAME.
 VERSION       := $(shell sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
 SONAME_MAJOR  := 0
@@ -25,8 +29,8 @@ SONAME_MAJOR  := 0
 SO      := libleviculum.so
 STATIC  := libleviculum.a
 HEADER  := leviculum.h
-BUILT   := ../target/$(TARGET)/release/$(SO)
-BUILT_A := ../target/$(TARGET)/release/$(STATIC)
+BUILT   := $(TARGET_DIR)/$(TARGET)/release/$(SO)
+BUILT_A := $(TARGET_DIR)/$(TARGET)/release/$(STATIC)
 
 .PHONY: build install uninstall clean
 
