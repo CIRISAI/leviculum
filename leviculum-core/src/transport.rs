@@ -8527,41 +8527,9 @@ mod tests {
             // Capture all `leviculum_core` tracing into a string for the current
             // thread, so a test can assert that a structured event fired (or did
             // NOT fire) without changing any wire/behaviour.
-            fn capture_core_logs<R>(body: impl FnOnce() -> R) -> (R, std::string::String) {
-                use std::sync::{Arc, Mutex};
-                use tracing_subscriber::util::SubscriberInitExt;
-
-                #[derive(Clone)]
-                struct W(Arc<Mutex<std::vec::Vec<u8>>>);
-                impl std::io::Write for W {
-                    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                        self.0.lock().unwrap().extend_from_slice(buf);
-                        std::io::Result::Ok(buf.len())
-                    }
-                    fn flush(&mut self) -> std::io::Result<()> {
-                        std::io::Result::Ok(())
-                    }
-                }
-                impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for W {
-                    type Writer = W;
-                    fn make_writer(&'a self) -> W {
-                        self.clone()
-                    }
-                }
-
-                let buf = Arc::new(Mutex::new(std::vec::Vec::new()));
-                let subscriber = tracing_subscriber::fmt()
-                    .with_writer(W(buf.clone()))
-                    .with_max_level(tracing::Level::DEBUG)
-                    .with_ansi(false)
-                    .with_target(true)
-                    .finish();
-                let guard = subscriber.set_default();
-                let out = body();
-                drop(guard);
-                let logs = std::string::String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-                (out, logs)
-            }
+            // Capture routes through the shared global-subscriber helper so a
+            // callsite registered by an earlier parallel test cannot hide events.
+            use crate::test_log_capture::with_captured_logs as capture_core_logs;
 
             // OBS-1: a transport-enabled node that receives a forwardable announce
             // emits ANN_TX with dst/hops/iface when the retry scheduler actually
@@ -22197,37 +22165,10 @@ mod tunnel_restore_tests {
     #[test]
     fn tunnel_events_have_no_free_text_message() {
         extern crate std;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::util::SubscriberInitExt;
 
-        #[derive(Clone)]
-        struct W(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for W {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for W {
-            type Writer = W;
-            fn make_writer(&'a self) -> W {
-                self.clone()
-            }
-        }
-
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let logs = {
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(W(buf.clone()))
-                .with_max_level(tracing::Level::DEBUG)
-                .with_ansi(false)
-                .with_target(true)
-                .finish();
-            let guard = subscriber.set_default();
-
+        // Capture routes through the shared global-subscriber helper so a
+        // callsite registered by an earlier parallel test cannot hide events.
+        let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
             // A synthesizes (SENT), B establishes (ESTABLISHED), B voids (VOIDED).
             let mut a = enabled_transport();
             let mut b = enabled_transport();
@@ -22245,10 +22186,7 @@ mod tunnel_restore_tests {
             b.set_interface_name(b_if, "tcp[from-a]".into());
             b.process_incoming(b_if, &synth).unwrap();
             b.void_tunnel_for_interface(b_if);
-
-            drop(guard);
-            String::from_utf8(buf.lock().unwrap().clone()).unwrap()
-        };
+        });
 
         for (ev, old_message) in [
             ("TUNNEL_SYNTHESIZE_SENT", "Sent tunnel synthesize"),

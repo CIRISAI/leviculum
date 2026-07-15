@@ -1178,28 +1178,6 @@ mod tests {
     #[cfg(feature = "tracing")]
     #[test]
     fn test_round_complete_emits_resource_rw_event() {
-        extern crate std;
-        use std::string::String;
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Clone)]
-        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for CaptureWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-            type Writer = CaptureWriter;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
         const NUM_PARTS: usize = 8;
         const SDU: usize = 464;
         let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
@@ -1227,21 +1205,12 @@ mod tests {
         )
         .unwrap();
 
-        use tracing_subscriber::util::SubscriberInitExt;
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(CaptureWriter(buf.clone()))
-            .with_max_level(::tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
-        let guard = subscriber.set_default();
         // Complete the first window (4 parts), first part 50 ms after the REQ.
-        for part in parts.iter().take(4) {
-            incoming.receive_part(part, 1050, 100);
-        }
-        drop(guard);
-
-        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
+            for part in parts.iter().take(4) {
+                incoming.receive_part(part, 1050, 100);
+            }
+        });
         let line = logs
             .lines()
             .find(|l| l.contains("RESOURCE_RW"))

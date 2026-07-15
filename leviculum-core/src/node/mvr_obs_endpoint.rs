@@ -16,9 +16,7 @@
 
 extern crate std;
 
-use std::cell::RefCell;
 use std::string::String;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::vec::Vec;
 
 use rand_core::OsRng;
@@ -34,91 +32,11 @@ use crate::transport::{Action, InterfaceId, TickOutput};
 
 type EndpointNode = NodeCore<OsRng, MockClock, NoStorage>;
 
-// ----------------------------------------------------------------------------
-// Tracing capture (assert on the exact structured event lines).
-//
-// Zero-flake requirement (root cause). `tracing` caches a per-callsite
-// `Interest`, computed FIRST-HIT-WINS from whichever thread's `get_default`
-// touches the callsite first (tracing_core::callsite, `has_just_one` path).
-// Hot callsites like PKT_LOCAL live in transport.rs and are exercised by
-// hundreds of OTHER unit tests that run under NO capturing subscriber; the
-// first such hit caches the callsite as `Interest::never()` PROCESS-GLOBALLY,
-// so a plain scoped (`set_default`) DEBUG subscriber added later never sees
-// those events and the assertion flakes (~6%). A scoped subscriber cannot
-// win that race for an already-registered callsite, and `rebuild_interest_cache`
-// cannot un-poison a callsite that is still unregistered at rebuild time.
-//
-// Fix: install ONE process-global DEBUG subscriber (via `set_global_default`)
-// that routes events to a THREAD-LOCAL buffer. Being registered makes the
-// global default the dispatcher every no-scoped thread consults, so callsites
-// resolve DEBUG-enabled regardless of hit order; `rebuild_interest_cache`
-// (called against the now-global default) un-poisons any callsite an earlier
-// test already cached `never`. Thread-local routing keeps per-invocation
-// isolation: only the thread that armed a buffer collects the events emitted
-// on it (the sans-I/O scenario runs entirely on the test thread), and every
-// other thread discards into `None`, so there is no cross-test pollution and
-// no unbounded process-wide buffer growth.
-// ----------------------------------------------------------------------------
-
-std::thread_local! {
-    static CAPTURE: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
-}
-
-/// A `MakeWriter` that appends to whatever buffer the current thread has armed
-/// via [`with_captured_logs`], and discards otherwise.
-#[derive(Clone, Copy)]
-struct ThreadLocalWriter;
-
-impl std::io::Write for ThreadLocalWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        CAPTURE.with(|c| {
-            if let Some(sink) = c.borrow().as_ref() {
-                sink.lock().unwrap().extend_from_slice(buf);
-            }
-        });
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
-    type Writer = ThreadLocalWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        *self
-    }
-}
-
-fn ensure_global_subscriber() {
-    static INIT: OnceLock<()> = OnceLock::new();
-    INIT.get_or_init(|| {
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(ThreadLocalWriter)
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .with_target(true)
-            .finish();
-        // Ignore the error: only this module installs a global default in the
-        // leviculum-core test binary, so this succeeds. If it ever loses the
-        // race the capture buffer stays empty and the assertions fail loudly.
-        let _ = tracing::subscriber::set_global_default(subscriber);
-    });
-}
-
-fn with_captured_logs<R>(body: impl FnOnce() -> R) -> (R, String) {
-    ensure_global_subscriber();
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    CAPTURE.with(|c| *c.borrow_mut() = Some(Arc::clone(&buf)));
-    // Un-poison any callsite an earlier no-subscriber test cached as `never`
-    // before our global DEBUG default existed. Rebuilds every already-
-    // registered callsite against the global default (now ours).
-    tracing::callsite::rebuild_interest_cache();
-    let out = body();
-    CAPTURE.with(|c| *c.borrow_mut() = None);
-    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    (out, logs)
-}
+// Tracing capture (assert on the exact structured event lines) routes through
+// the shared global-subscriber helper. This module originated the design;
+// crate::test_log_capture now owns the single process-global subscriber so all
+// mvr tests share one, and no callsite-interest race can hide events.
+use crate::test_log_capture::with_captured_logs;
 
 // ----------------------------------------------------------------------------
 // Sans-I/O node helpers.

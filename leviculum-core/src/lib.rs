@@ -119,6 +119,8 @@ pub(crate) mod receipt;
 pub mod resource;
 pub mod rnode;
 pub mod storage_types;
+#[cfg(all(test, feature = "tracing"))]
+pub(crate) mod test_log_capture;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod traits;

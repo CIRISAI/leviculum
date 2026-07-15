@@ -73,24 +73,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
     }
 }
 
-/// Run `body` with all `leviculum_core` tracing captured into the returned
-/// string. Scoped to the current thread so parallel tests don't interfere.
-fn with_captured_logs<R>(body: impl FnOnce() -> R) -> (R, String) {
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(CaptureWriter(buf.clone()))
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .with_target(true)
-        .finish();
-    let guard = subscriber.set_default();
-    let out = body();
-    drop(guard);
-    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    (out, logs)
-}
+// Unfiltered DEBUG capture routes through the shared global-subscriber helper
+// so a callsite registered by an earlier parallel test cannot hide events. The
+// `with_field_filtered_logs` helper below keeps its own scoped `EnvFilter`
+// subscriber: it deliberately reproduces the field `RUST_LOG` shape.
+use crate::test_log_capture::with_captured_logs;
 
 /// The EXACT `RUST_LOG` filter the cold-8node integ run uses
 /// (`reticulum-integ/tests/lora_late_announce_8node.toml`). It enables

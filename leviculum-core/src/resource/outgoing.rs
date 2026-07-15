@@ -1398,25 +1398,6 @@ mod tests {
     fn test_handle_request_emits_resource_req_rx_event() {
         extern crate std;
         use std::string::String;
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Clone)]
-        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for CaptureWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-            type Writer = CaptureWriter;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
 
         let (link, _) = make_test_link();
         let mut rng = rand_core::OsRng;
@@ -1439,18 +1420,9 @@ mod tests {
             req.extend_from_slice(h);
         }
 
-        use tracing_subscriber::util::SubscriberInitExt;
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(CaptureWriter(buf.clone()))
-            .with_max_level(::tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
-        let guard = subscriber.set_default();
-        let _ = res.handle_request(&req, &link, &mut rng, 2000).unwrap();
-        drop(guard);
-
-        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
+            let _ = res.handle_request(&req, &link, &mut rng, 2000).unwrap();
+        });
         let line = logs
             .lines()
             .find(|l| l.contains("RESOURCE_REQ_RX"))

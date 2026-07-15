@@ -46,7 +46,6 @@
 extern crate std;
 
 use std::string::String;
-use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 use rand_core::OsRng;
@@ -60,51 +59,10 @@ use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::{NoStorage, Storage};
 use crate::transport::{Action, InterfaceId, TickOutput};
 
-// ----------------------------------------------------------------------------
-// Tracing capture: prove the EXACT drop reason rather than only "no link".
-// ----------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// Run `body` with all `leviculum_core` tracing captured into the returned
-/// string. Scoped to the current thread so parallel tests don't interfere.
-fn with_captured_logs<R>(body: impl FnOnce() -> R) -> (R, String) {
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(CaptureWriter(buf.clone()))
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .with_target(true)
-        .finish();
-    // Thread-local default for the duration of `body` (the `tracing` crate's
-    // own `with_default` is gated behind its `std` feature, which this crate
-    // does not enable; `tracing-subscriber` provides the guard with std on).
-    let guard = subscriber.set_default();
-    let out = body();
-    drop(guard);
-    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    (out, logs)
-}
+// Tracing capture (prove the EXACT drop reason rather than only "no link")
+// routes through the shared global-subscriber helper so a callsite registered
+// by an earlier parallel test cannot hide events.
+use crate::test_log_capture::with_captured_logs;
 
 // ----------------------------------------------------------------------------
 // Sans-I/O node helpers
