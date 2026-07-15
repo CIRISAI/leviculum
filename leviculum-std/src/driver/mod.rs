@@ -2523,6 +2523,30 @@ impl ReticulumNode {
             .map(|l| l.negotiated_mtu())
     }
 
+    /// The DESTINATION a link points at — the dest hash the initiator dialed
+    /// (`Link::destination_hash()`). Resolves `link_id` through the `#66`
+    /// re-key alias table (`link()` → `resolve_link_id`), so a caller holding
+    /// either the original id from `connect` or the re-keyed id an event
+    /// carried gets the same answer.
+    ///
+    /// Returns `None` if the link does not exist.
+    ///
+    /// Rationale (CIRISEdge#353): a link INITIATOR receiving data back over
+    /// its own dialed link needs to attribute the sender. It cannot rely on a
+    /// `LinkIdentified` event (only the initiator may identify a link, so the
+    /// responder's reply direction never produces one) and it cannot key state
+    /// on the original link id (a `#66` establishment-retry re-keys the link
+    /// under a fresh wire id, and later events carry the re-keyed id). The
+    /// stateless, re-key-proof basis is the link's destination: the initiator
+    /// knows which dest it dialed and can map that dest back to a peer.
+    pub fn link_destination(&self, link_id: &LinkId) -> Option<DestinationHash> {
+        self.inner
+            .lock()
+            .unwrap()
+            .link(link_id)
+            .map(|l| *l.destination_hash())
+    }
+
     /// Get the encrypted link MDU (maximum data unit) for a link
     ///
     /// Returns `None` if the link does not exist.
