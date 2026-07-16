@@ -58,6 +58,7 @@ pub enum WindowPolicy {
     /// `window + FLEXIBILITY` consecutive rounds completed, pick the
     /// window_max tier from the first-part rate, clamp down on tier drop.
     /// Timeouts never touch the window.
+    #[default]
     Current,
     /// Mirror of the Python-RNS reference algorithm (Resource.py): grow the
     /// window by 1 every completed round (with window_min creep), pick the
@@ -67,10 +68,7 @@ pub enum WindowPolicy {
     /// PythonLike growth and rate tiering, but the timeout response shrinks
     /// only the in-flight window toward window_min and leaves window_max
     /// intact, so a transient loss does not permanently lower the ceiling
-    /// the window can re-grow to. The default since the #85 rig A/B (matches
-    /// PythonLike on a clean link, cannot be worse under loss, beats Current
-    /// by ~15% throughput at 100% delivery).
-    #[default]
+    /// the window can re-grow to.
     Adaptive,
 }
 
@@ -384,6 +382,11 @@ mod tests {
         );
         assert_eq!(WindowPolicy::parse("bogus"), None);
         assert_eq!(WindowPolicy::parse(""), None);
+    }
+
+    #[test]
+    fn test_default_policy_is_current() {
+        assert_eq!(WindowPolicy::default(), WindowPolicy::Current);
     }
 
     fn round_sample(round_rate: u64) -> RateSample {

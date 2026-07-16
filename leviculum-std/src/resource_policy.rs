@@ -13,30 +13,29 @@ pub const RESOURCE_WINDOW_POLICY_ENV: &str = "LEVICULUM_RESOURCE_WINDOW_POLICY";
 
 /// Read the resource receive-window policy from
 /// `LEVICULUM_RESOURCE_WINDOW_POLICY`. Unset means the default
-/// [`WindowPolicy::Adaptive`]; an unknown value falls back to the default
-/// with a warning. Adaptive is the default since the #85 rig A/B: it matches
-/// PythonLike on a clean link, cannot be worse under loss (it keeps
-/// window_max where PythonLike lowers it), and beats the legacy Current
-/// window-4 cap by ~15% throughput with far lower variance, all at 100%
-/// delivery. The policy stays receiver-local and never rides the wire, so
-/// Python-RNS interop is unaffected.
+/// [`WindowPolicy::Current`]; an unknown value falls back to `Current`
+/// with a warning. Current is the proven-reliable default (Priority 1
+/// robustness): the Adaptive policy can grow its window large enough to
+/// trigger a SF10 half-duplex livelock, so it stays an explicit opt-in
+/// until that is fixed. The policy stays receiver-local and never rides
+/// the wire, so Python-RNS interop is unaffected.
 pub fn resource_window_policy_from_env() -> WindowPolicy {
     match std::env::var(RESOURCE_WINDOW_POLICY_ENV) {
         Ok(value) => parse_resource_window_policy(&value),
-        Err(_) => WindowPolicy::Adaptive,
+        Err(_) => WindowPolicy::Current,
     }
 }
 
 /// Parse a `LEVICULUM_RESOURCE_WINDOW_POLICY` value. Unknown values fall
-/// back to the default [`WindowPolicy::Adaptive`] with a warning.
+/// back to the default [`WindowPolicy::Current`] with a warning.
 pub fn parse_resource_window_policy(value: &str) -> WindowPolicy {
     match WindowPolicy::parse(value) {
         Some(policy) => policy,
         None => {
             tracing::warn!(
-                "unknown {RESOURCE_WINDOW_POLICY_ENV} value {value:?}, using \"adaptive\""
+                "unknown {RESOURCE_WINDOW_POLICY_ENV} value {value:?}, using \"current\""
             );
-            WindowPolicy::Adaptive
+            WindowPolicy::Current
         }
     }
 }
@@ -58,12 +57,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unknown_falls_back_to_default_adaptive() {
-        assert_eq!(
-            parse_resource_window_policy("bogus"),
-            WindowPolicy::Adaptive
-        );
-        assert_eq!(parse_resource_window_policy(""), WindowPolicy::Adaptive);
+    fn test_parse_unknown_falls_back_to_current() {
+        assert_eq!(parse_resource_window_policy("bogus"), WindowPolicy::Current);
+        assert_eq!(parse_resource_window_policy(""), WindowPolicy::Current);
     }
 
     #[test]
@@ -80,5 +76,16 @@ mod tests {
             parse_resource_window_policy("pythonlike"),
             WindowPolicy::PythonLike
         );
+    }
+
+    #[test]
+    fn test_default_policy_is_current() {
+        assert_eq!(WindowPolicy::default(), WindowPolicy::Current);
+    }
+
+    #[test]
+    fn test_from_env_unset_is_current() {
+        std::env::remove_var(RESOURCE_WINDOW_POLICY_ENV);
+        assert_eq!(resource_window_policy_from_env(), WindowPolicy::Current);
     }
 }
