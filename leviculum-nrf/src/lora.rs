@@ -271,10 +271,7 @@ fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
 /// (see [`RadioConfig::effective_lt_alock`]). Emits a one-line log when the
 /// firmware applies its own lawful default so the derived cap is visible in the
 /// debug capture.
-fn apply_airtime_limits(
-    airtime: &mut leviculum_core::rnode::AirtimeTracker,
-    config: &RadioConfig,
-) {
+fn apply_airtime_limits(airtime: &mut leviculum_core::rnode::AirtimeTracker, config: &RadioConfig) {
     let lt_alock = config.effective_lt_alock();
     airtime.set_st_limit_u16(config.st_alock);
     airtime.set_lt_limit_u16(lt_alock);
@@ -323,6 +320,32 @@ async fn transmit_all_frames(
 
     let mut tx_ok = true;
     for (i, frame) in frames.iter().enumerate() {
+        // Per-frame TX identity, mirrors the RX-side [T114_SX_RX] first8 line so
+        // a merged two-board timeline can pair each transmitted frame with the
+        // peer's RX event (fate classification). Uses the same bytes (frame[1..],
+        // skipping the split-sequence header byte) the peer logs as
+        // [T114_SX_RX] first8=, and len= the full on-air frame length.
+        {
+            let n = frame.len().min(9);
+            let mut first8 = [0u8; 8];
+            let copy_len = n.saturating_sub(1).min(8);
+            first8[..copy_len].copy_from_slice(&frame[1..1 + copy_len]);
+            crate::log::log_fmt(
+                "[T114_TX_FRAME] ",
+                format_args!(
+                    "first8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} len={}",
+                    first8[0],
+                    first8[1],
+                    first8[2],
+                    first8[3],
+                    first8[4],
+                    first8[5],
+                    first8[6],
+                    first8[7],
+                    frame.len()
+                ),
+            );
+        }
         match radio.transmit(frame, 5000).await {
             Ok(()) => {
                 // Record this frame's on-air time (header included, matching

@@ -52,6 +52,8 @@ mod reg {
 mod irq {
     pub const TX_DONE: u16 = 0x0001;
     pub const RX_DONE: u16 = 0x0002;
+    pub const PREAMBLE_DETECTED: u16 = 0x0004; // bit 2
+    pub const HEADER_VALID: u16 = 0x0010; // bit 4
     pub const CRC_ERR: u16 = 0x0040;
     pub const TIMEOUT: u16 = 0x0200;
 
@@ -107,6 +109,25 @@ fn u24_be(val: u32) -> [u8; 3] {
     ]
 }
 
+/// Convert an SX1262 bandwidth register code back to bandwidth in Hz
+/// (inverse of the table in `RadioConfig::from_wire`, datasheet Table 14-47).
+/// Returns 0 for an unknown code so callers can treat it as "not configured".
+fn bw_code_to_hz(code: u8) -> u32 {
+    match code {
+        0x00 => 7_810,
+        0x08 => 10_420,
+        0x01 => 15_630,
+        0x09 => 20_830,
+        0x02 => 31_250,
+        0x0A => 41_670,
+        0x03 => 62_500,
+        0x04 => 125_000,
+        0x05 => 250_000,
+        0x06 => 500_000,
+        _ => 0,
+    }
+}
+
 /// SX1262 driver, generic over the SPI device type.
 pub struct Sx1262<SPI> {
     spi: SPI,
@@ -117,6 +138,12 @@ pub struct Sx1262<SPI> {
     /// SetDIO3AsTcxoCtrl voltage select byte (0x02 = 1.8 V).
     /// Board-specific; stored at construction so `init_radio` is parameter-free.
     tcxo_voltage_reg: u8,
+    /// Cached human-readable modulation params from the last `configure_lora`,
+    /// used only to size the RX software-wait extension in `receive()`. `bw_hz`
+    /// is 0 until the radio is configured (guards the airtime computation).
+    rx_ext_sf: u8,
+    rx_ext_bw_hz: u32,
+    rx_ext_cr_denom: u8,
 }
 
 impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
@@ -138,6 +165,9 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             dio1,
             preamble_len: 24,
             tcxo_voltage_reg,
+            rx_ext_sf: 0,
+            rx_ext_bw_hz: 0,
+            rx_ext_cr_denom: 0,
         }
     }
 
@@ -376,6 +406,12 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         preamble_len: u16,
     ) -> Result<(), Error> {
         self.preamble_len = preamble_len;
+        // Cache the modulation profile so `receive()` can size its software-wait
+        // extension. `cr` is the SX1262 code (denominator - 4); `bw` is the
+        // register code (see `bw_code_to_hz`).
+        self.rx_ext_sf = sf;
+        self.rx_ext_bw_hz = bw_code_to_hz(bw);
+        self.rx_ext_cr_denom = cr.saturating_add(4);
         self.set_rf_frequency(freq_hz).await?;
         // PA config for target power (datasheet Table 13-21)
         let (pa_duty, hp_max) = match power_dbm {
@@ -545,7 +581,44 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         )
         .await;
 
-        let flags = self.get_irq_status().await?;
+        let mut flags = self.get_irq_status().await?;
+
+        // The software wait (timeout_ms + 500) can expire while a slow-SF frame
+        // is still on the air: StopRxTimerOnPreambleDetect halts the HW RX timer
+        // once a preamble is detected, so a long frame (up to ~7s airtime) keeps
+        // being received past the sw deadline. If the IRQ register shows a
+        // preamble/header was detected (these bits latch even though they are
+        // not routed to DIO1) but neither RxDone nor Timeout has fired, the
+        // reception is still in progress; extend the wait by one max
+        // single-frame airtime rather than aborting it with set_standby_rc.
+        // Bounded to a single extension so a dead channel still times out.
+        // The IRQ status is deliberately NOT cleared before the extension so a
+        // pending RxDone survives into the extended wait.
+        if self.rx_ext_bw_hz != 0
+            && flags & (irq::RX_DONE | irq::TIMEOUT) == 0
+            && flags & (irq::PREAMBLE_DETECTED | irq::HEADER_VALID) != 0
+        {
+            let extend_ms = leviculum_core::rnode::airtime_ms(
+                (leviculum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32,
+                self.rx_ext_bw_hz,
+                self.rx_ext_sf,
+                self.rx_ext_cr_denom,
+            );
+            crate::log::log_fmt(
+                "[SX_RX_EXTEND] ",
+                format_args!(
+                    "flags={:#06x} extend_ms={} sf={} bw_hz={}",
+                    flags, extend_ms, self.rx_ext_sf, self.rx_ext_bw_hz
+                ),
+            );
+            let _ = with_timeout(
+                Duration::from_millis(extend_ms.max(1)),
+                self.dio1.wait_for_high(),
+            )
+            .await;
+            flags = self.get_irq_status().await?;
+        }
+
         self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
             .await?;
 
