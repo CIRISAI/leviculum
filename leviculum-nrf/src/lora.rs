@@ -225,6 +225,17 @@ const CSMA_CW_MAX: u8 = 64;
 /// Floor for slot time, matches the 24ms slot used by the RNode firmware.
 const CSMA_SLOT_MS_MIN: u64 = 24;
 
+/// Peer-turn yield tunable: after this many consecutive empty post-TX ack
+/// windows, the sender stops draining its own queue for one bounded RX so the
+/// peer gets a guaranteed clear listening window to CSMA-backoff and send its
+/// REQ/ACK. A deep outgoing queue (adaptive's large receive window queues many
+/// parts) otherwise keeps the sender TXing back-to-back, never reaching the
+/// queue-empty continuous-RX branch, so it never hears the peer's REQ and the
+/// transfer livelocks (#23 Bug B). 2 back-to-back empties is the smallest
+/// signal that the peer is not getting a turn; "current" drains fast and rarely
+/// stacks 2, so it is unaffected.
+const PEER_YIELD_AFTER_EMPTY: u32 = 2;
+
 /// xorshift32 PRNG step. Mutates state and returns the updated value.
 fn xorshift32(state: &mut u32) -> u32 {
     *state ^= *state << 13;
@@ -392,7 +403,7 @@ async fn rx_once(
     reassembler: &mut leviculum_core::rnode::SplitReassembler,
     incoming_tx: &Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
     rx_timeout_count: &mut u32,
-) {
+) -> bool {
     let rx_start = embassy_time::Instant::now();
     let rx_result = radio.receive(rx_buf, timeout_ms).await;
     let rx_ms = rx_start.elapsed().as_millis();
@@ -461,6 +472,10 @@ async fn rx_once(
             } else if len < 2 {
                 crate::log::log_fmt("[LORA] ", format_args!("RX too short ({})", len));
             }
+            // A packet was received this window (full delivery, split part, or
+            // runt). The caller uses this to reset its consecutive-empty-ack
+            // counter: any reception means the peer is being heard.
+            true
         }
         Err(crate::sx1262::Error::Timeout) => {
             *rx_timeout_count = rx_timeout_count.wrapping_add(1);
@@ -472,6 +487,8 @@ async fn rx_once(
             if rx_timeout_count.is_multiple_of(60) {
                 crate::log::log_fmt("[LORA] ", format_args!("RX idle ({})", *rx_timeout_count));
             }
+            // Window expired with no reception.
+            false
         }
         Err(e) => {
             crate::log::log_fmt("[T114_SX_ERR] ", format_args!("error={:?}", e));
@@ -480,6 +497,8 @@ async fn rx_once(
                 format_args!("op=rx_err duration_ms={}", rx_ms),
             );
             crate::log::log_fmt("[LORA] ", format_args!("RX err: {:?}", e));
+            // Radio error, treat as no reception.
+            false
         }
     }
 }
@@ -587,6 +606,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
     let mut csma_attempt: u8 = 0;
     let mut csma_cw: u8 = CSMA_CW_INITIAL;
     let mut slot_ms: u64 = compute_slot_ms(&config);
+    // Count of consecutive post-TX ack windows that expired with no reception.
+    // Drives the peer-turn yield (see PEER_YIELD_AFTER_EMPTY). Reset to 0 on any
+    // reception, anywhere rx_once returns true.
+    let mut consecutive_empty_acks: u32 = 0;
 
     // Regulatory airtime lock (mirrors the RNode firmware). The bin histogram
     // lives in the task's static future, off the heap (960 bytes). Limits of 0
@@ -665,7 +688,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 );
                 let hold_ms = post_tx_rx_window_ms(&config);
                 reassembler.check_timeout(rx_timeout_count, 10);
-                rx_once(
+                if rx_once(
                     &mut radio,
                     &mut rx_buf,
                     hold_ms,
@@ -673,7 +696,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     &incoming_tx,
                     &mut rx_timeout_count,
                 )
-                .await;
+                .await
+                {
+                    consecutive_empty_acks = 0;
+                }
                 continue;
             }
 
@@ -737,7 +763,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                             // Clamp to >=1ms, the SX1262 needs a non-zero timeout.
                             let rx_ms = backoff_ms.clamp(1, 10_000) as u32;
                             reassembler.check_timeout(rx_timeout_count, 10);
-                            rx_once(
+                            if rx_once(
                                 &mut radio,
                                 &mut rx_buf,
                                 rx_ms,
@@ -745,7 +771,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                                 &incoming_tx,
                                 &mut rx_timeout_count,
                             )
-                            .await;
+                            .await
+                            {
+                                consecutive_empty_acks = 0;
+                            }
                             continue;
                         }
                     }
@@ -789,7 +818,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             // unchanged below.
             let ack_window_ms = post_tx_rx_window_ms(&config);
             reassembler.check_timeout(rx_timeout_count, 10);
-            rx_once(
+            let ack_received = rx_once(
                 &mut radio,
                 &mut rx_buf,
                 ack_window_ms,
@@ -798,6 +827,42 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 &mut rx_timeout_count,
             )
             .await;
+            if ack_received {
+                consecutive_empty_acks = 0;
+            } else {
+                consecutive_empty_acks += 1;
+            }
+
+            // Peer-turn yield: with a deep outgoing queue the loop would now
+            // `continue` and immediately drain the next frame, TXing again
+            // without ever parking in the queue-empty continuous-RX branch. The
+            // peer, waiting to CSMA-backoff and send its REQ, never gets a clear
+            // window, so the transfer livelocks (#23 Bug B). After
+            // PEER_YIELD_AFTER_EMPTY consecutive empty ack windows, give the
+            // peer one guaranteed listening window that does NOT consult the
+            // outgoing queue. Length is two ack windows: one peer reply window
+            // plus headroom for the peer's CSMA backoff before it transmits.
+            if consecutive_empty_acks >= PEER_YIELD_AFTER_EMPTY {
+                let yield_ms = post_tx_rx_window_ms(&config).saturating_mul(2);
+                crate::log::log_fmt(
+                    "[T114_PEER_YIELD] ",
+                    format_args!(
+                        "after_empty={} yield_ms={}",
+                        consecutive_empty_acks, yield_ms
+                    ),
+                );
+                reassembler.check_timeout(rx_timeout_count, 10);
+                rx_once(
+                    &mut radio,
+                    &mut rx_buf,
+                    yield_ms,
+                    &mut reassembler,
+                    &incoming_tx,
+                    &mut rx_timeout_count,
+                )
+                .await;
+                consecutive_empty_acks = 0;
+            }
             continue;
         }
 
@@ -825,8 +890,13 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
         {
             // RX finished (packet delivered or single-mode wait elapsed). Loop
             // re-arms RX immediately; the only gap is this brief re-arm, taken
-            // right after a reception.
-            Either::First(()) => {}
+            // right after a reception. A reception here also means the peer is
+            // being heard, so clear the empty-ack counter.
+            Either::First(received) => {
+                if received {
+                    consecutive_empty_acks = 0;
+                }
+            }
             // The daemon has outgoing data. The RX future was dropped while the
             // radio was in continuous RX, so force standby before the CSMA/TX
             // path drives SetTx; the dropped RX leaves no half-state. A packet
