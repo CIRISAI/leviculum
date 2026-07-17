@@ -71,7 +71,7 @@ use tokio::sync::watch;
 use crate::interfaces::IncomingPacket;
 use reticulum_core::constants::TRUNCATED_HASHBYTES;
 use reticulum_core::link::LinkId;
-use reticulum_core::node::{EventClass, NodeCore, NodeEvent};
+use reticulum_core::node::{EventClass, FrameDropReason, NodeCore, NodeEvent};
 use reticulum_core::traits::{InterfaceError, Storage as StorageTrait};
 use reticulum_core::transport::{InterfaceId, TickOutput};
 use reticulum_core::{AnnounceControl, Destination, DestinationHash};
@@ -2261,7 +2261,32 @@ async fn run_event_loop(
                         // Transport's interface_next_slot_ms falls back to
                         // now_ms once the interface is removed from the
                         // backchannel, which happens naturally.
-                        retry_queues.remove(&iface_id.0);
+                        //
+                        // #25 — the frames in that queue are DESTROYED here. The
+                        // driver cannot re-home them (they are bound to this
+                        // interface, and link traffic's link died with it), but
+                        // destroying them SILENTLY is what made the loss
+                        // invisible above the driver. Count them, say so, and
+                        // emit it so the sender can re-send on a fresh link.
+                        // For an accept-only node serving a NAT'd initiator this
+                        // is the steady state (rebind ≈60 s), not an edge case.
+                        if let Some(purged) = retry_queues.remove(&iface_id.0) {
+                            if !purged.is_empty() {
+                                tracing::warn!(
+                                    "Interface {} destroyed {} queued frame(s) on disconnect — \
+                                     the sender MUST re-send on a fresh link (#25)",
+                                    iface_id,
+                                    purged.len()
+                                );
+                                if let Some(sink) = event_sink.as_mut() {
+                                    sink.emit(NodeEvent::FramesDropped {
+                                        iface_id: iface_id.0,
+                                        count: purged.len(),
+                                        reason: FrameDropReason::RetryQueuePurged,
+                                    });
+                                }
+                            }
+                        }
                         registry.remove(iface_id);
                         {
                             let mut stats = iface_stats_map.lock().unwrap();
@@ -2496,7 +2521,15 @@ fn dispatch_output(
     let result =
         reticulum_core::transport::dispatch_actions(&mut ifaces, output.actions, ifac_configs);
 
-    // Log dispatch errors
+    // Log dispatch errors.
+    //
+    // #25 — a `Disconnected` error here means the frame was DESTROYED: the
+    // interface died with it in flight and the driver cannot re-home it (its
+    // link died too). Logging alone made that loss invisible above the driver,
+    // so a consumer's (correct) retry/backoff path was never told the dispatch
+    // failed and could never engage. Count the losses per interface and EMIT
+    // them, so the sender can re-send on a fresh link.
+    let mut disconnected_drops: BTreeMap<usize, usize> = BTreeMap::new();
     for (iface_id, error) in &result.errors {
         match error {
             InterfaceError::BufferFull => {
@@ -2504,9 +2537,26 @@ fn dispatch_output(
             }
             InterfaceError::Disconnected => {
                 tracing::warn!("Interface {} disconnected during dispatch", iface_id);
+                *disconnected_drops.entry(iface_id.0).or_default() += 1;
             }
         }
     }
+    let drop_events: Vec<NodeEvent> = disconnected_drops
+        .into_iter()
+        .map(|(iface_id, count)| {
+            tracing::warn!(
+                "Interface {} destroyed {} in-flight frame(s) on dispatch — the sender MUST \
+                 re-send on a fresh link (#25)",
+                iface_id,
+                count
+            );
+            NodeEvent::FramesDropped {
+                iface_id,
+                count,
+                reason: FrameDropReason::DispatchDisconnected,
+            }
+        })
+        .collect();
 
     // Queue SendPacket retries (with cap enforcement)
     for retry in result.retries {
@@ -2559,6 +2609,13 @@ fn dispatch_output(
     // events are dropped here without forwarding — the events vector
     // simply falls out of scope at the end of this function.
     if let Some(event_sink) = event_sink {
+        // #25 — the frames-destroyed signal rides the SAME sink as core's own
+        // events, so a consumer learns of the loss on the stream it already
+        // reads. Emitted first: the loss happened before anything core queued
+        // here, and a sender reacting to it should not have to wait behind them.
+        for event in drop_events {
+            event_sink.emit(event);
+        }
         for event in output.events {
             if let NodeEvent::LinkEstablished { link_id, .. } = &event {
                 tracing::debug!("Link established: {:?}", link_id);
@@ -2817,6 +2874,99 @@ mod tests {
             &mut retry_queue_max_depth,
             &ifac_configs,
         );
+    }
+
+    /// #25 — a dispatch that fails `Disconnected` must EMIT the loss, not just
+    /// log it. Before this, `dispatch_output` returned `()` and dropped
+    /// `result.errors` on the floor, so a consumer's retry/backoff path was
+    /// never told the dispatch failed and could never engage — the field trace
+    /// lost 8 frames invisibly. Guards the emission, which is the whole
+    /// recoverability contract.
+    #[tokio::test]
+    async fn dispatch_disconnected_emits_frames_dropped() {
+        use crate::interfaces::{InterfaceCounters, InterfaceHandle, InterfaceInfo};
+        use reticulum_core::node::NodeCoreBuilder;
+        use reticulum_core::transport::{Action, InterfaceId};
+
+        let tmp = std::env::temp_dir().join(format!("frames-dropped-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let core: Arc<Mutex<StdNodeCore>> = {
+            let node = NodeCoreBuilder::new().enable_transport(true).build(
+                rand_core::OsRng,
+                SystemClock::new(),
+                crate::storage::Storage::new(&tmp).unwrap(),
+            );
+            Arc::new(Mutex::new(node))
+        };
+
+        let mut registry = InterfaceRegistry::new();
+        let (_inc_tx, inc_rx) = mpsc::channel(4);
+        let (out_tx, out_rx) = mpsc::channel(4);
+        // DROP the outgoing receiver: the interface is now dead, so any send to
+        // it fails `InterfaceError::Disconnected` — exactly the field case (the
+        // socket died with frames in flight).
+        drop(out_rx);
+        registry.register(InterfaceHandle {
+            info: InterfaceInfo {
+                id: InterfaceId(12),
+                name: "tcp_server/dead".into(),
+                hw_mtu: None,
+                is_local_client: false,
+                bitrate: None,
+                ifac: None,
+            },
+            incoming: inc_rx,
+            outgoing: out_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
+        });
+
+        let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let mut retry_queue_warned: std::collections::BTreeSet<usize> =
+            std::collections::BTreeSet::new();
+        let mut retry_queue_max_depth: BTreeMap<usize, usize> = BTreeMap::new();
+        let ifac_configs: BTreeMap<usize, reticulum_core::ifac::IfacConfig> = BTreeMap::new();
+
+        // Two frames in flight to the dead interface.
+        let mut output = TickOutput::empty();
+        output.actions.push(Action::SendPacket {
+            iface: InterfaceId(12),
+            data: vec![0xAA; 32],
+        });
+        output.actions.push(Action::SendPacket {
+            iface: InterfaceId(12),
+            data: vec![0xBB; 32],
+        });
+
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut retry_queues,
+            &mut retry_queue_warned,
+            &mut retry_queue_max_depth,
+            &ifac_configs,
+        );
+
+        let ev = rx
+            .recv()
+            .await
+            .expect("a FramesDropped event must be emitted (#25)");
+        match ev {
+            NodeEvent::FramesDropped {
+                iface_id,
+                count,
+                reason,
+            } => {
+                assert_eq!(iface_id, 12);
+                assert_eq!(count, 2, "both in-flight frames must be reported destroyed");
+                assert_eq!(reason, FrameDropReason::DispatchDisconnected);
+            }
+            other => panic!("expected FramesDropped, got {other:?}"),
+        }
     }
 
     /// Build a connected control/data sink + merged receiver for the
