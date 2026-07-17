@@ -12,6 +12,22 @@ use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::DestinationHash;
 use crate::link::{LinkCloseReason, LinkId};
 
+/// Why the driver destroyed frames bound to an interface (#25).
+///
+/// Both variants mean the same thing to a sender: **these bytes are gone; re-send
+/// on a fresh link.** They are distinguished so an operator can tell an in-flight
+/// dispatch failure from the purge of an already-queued backlog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FrameDropReason {
+    /// `dispatch_actions` returned `InterfaceError::Disconnected` for this frame —
+    /// the interface died with the frame in flight.
+    DispatchDisconnected,
+    /// The interface's retry queue was purged when the interface was removed.
+    /// These frames had been queued for a later drain that will never come.
+    RetryQueuePurged,
+}
+
 /// Unified event enum for all node operations
 ///
 /// This combines events from transport, link management, and channels into a
@@ -319,6 +335,28 @@ pub enum NodeEvent {
     /// An interface went offline
     InterfaceDown(usize),
 
+    /// Frames were **destroyed** because their interface died (#25).
+    ///
+    /// The driver cannot re-home these bytes: a queued/in-flight frame is bound
+    /// to the interface it was dispatched on (and, for link traffic, to the link
+    /// that died with it). They are gone, and the SENDER must re-send on a fresh
+    /// link. Emitting this is what makes the loss observable above the driver —
+    /// without it, a consumer's (correct) retry/backoff path is never told the
+    /// dispatch failed and so can never engage, which is exactly how #25's field
+    /// trace lost 8 frames invisibly across three repos.
+    ///
+    /// For an accept-only server talking to a NAT'd initiator, interface
+    /// replacement is the STEADY STATE (NAT rebinding, ~60 s) — so this event is
+    /// load-bearing for reliable delivery to any mobile peer, not an edge case.
+    FramesDropped {
+        /// The interface whose death destroyed the frames.
+        iface_id: usize,
+        /// How many frames were destroyed.
+        count: usize,
+        /// Why they were destroyed.
+        reason: FrameDropReason,
+    },
+
     // Control-plane backpressure signalling (Codeberg #71)
     /// One or more control-plane events were dropped because the bounded
     /// control channel was full.
@@ -390,7 +428,8 @@ impl NodeEvent {
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::PacketProofRequested { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
-            | NodeEvent::InterfaceDown(_) => None,
+            | NodeEvent::InterfaceDown(_)
+            | NodeEvent::FramesDropped { .. } => None,
         }
     }
 
@@ -463,9 +502,9 @@ impl NodeEvent {
             | NodeEvent::RequestTimedOut { .. } => EventClass::Control,
 
             // Interface lifecycle and the overflow marker itself.
-            NodeEvent::InterfaceDown(_) | NodeEvent::ControlPlaneOverflow { .. } => {
-                EventClass::Control
-            }
+            NodeEvent::InterfaceDown(_)
+            | NodeEvent::FramesDropped { .. }
+            | NodeEvent::ControlPlaneOverflow { .. } => EventClass::Control,
         }
     }
 
@@ -505,6 +544,7 @@ impl NodeEvent {
             NodeEvent::ResponseReceived { .. } => "ResponseReceived",
             NodeEvent::RequestTimedOut { .. } => "RequestTimedOut",
             NodeEvent::InterfaceDown(_) => "InterfaceDown",
+            NodeEvent::FramesDropped { .. } => "FramesDropped",
             NodeEvent::ControlPlaneOverflow { .. } => "ControlPlaneOverflow",
         }
     }
