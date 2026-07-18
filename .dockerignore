@@ -1,0 +1,13 @@
+# Docker build context for reticulum-integ/Dockerfile is the repo root, but
+# the image only needs reticulum-integ/entrypoint.sh (RNS is installed from
+# PyPI). Without this file the context was the whole tree (~3.5 GB, dominated
+# by target/), shipped to the daemon on every per-scenario `compose up
+# --build` — making bring-up slow and variable enough to blow heavy scenarios'
+# timeouts under the full sequential suite. Excluding build output keeps the
+# context to a few KB so `up` is fast and deterministic.
+target/
+.git/
+reticulum-integ/logs/
+**/*.log
+**/*.deb
+docs/book/
