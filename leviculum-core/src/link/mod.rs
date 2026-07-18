@@ -465,6 +465,18 @@ pub struct Link {
     /// Cleanup: entries are replaced on each new resource proof (insert overwrites).
     /// All entries are dropped when the link is closed or dropped.
     cached_resource_proofs: alloc::collections::BTreeMap<[u8; 32], Vec<u8>>,
+    /// Per-link random establishment-timeout jitter, in permille of the base
+    /// timeout (Codeberg #129). Drawn at construction and re-rolled on every
+    /// establishment retransmit so concurrent initiators de-sync instead of
+    /// retrying in lockstep. `0..=MAX_ESTABLISHMENT_JITTER_PERMILLE`; purely
+    /// local timing, never on the wire.
+    establishment_jitter_permille: u16,
+}
+
+/// Draw a fresh establishment-timeout jitter value (Codeberg #129):
+/// uniform in `0..=MAX_ESTABLISHMENT_JITTER_PERMILLE`.
+fn draw_establishment_jitter(rng: &mut impl CryptoRngCore) -> u16 {
+    (rng.next_u32() % (crate::constants::MAX_ESTABLISHMENT_JITTER_PERMILLE as u32 + 1)) as u16
 }
 
 impl Link {
@@ -485,6 +497,8 @@ impl Link {
 
         // Temporary link ID (will be set properly after receiving proof)
         let id = LinkId::new([0u8; TRUNCATED_HASHBYTES]);
+
+        let establishment_jitter_permille = draw_establishment_jitter(rng);
 
         Self {
             id,
@@ -529,6 +543,7 @@ impl Link {
             remote_identity: None,
             cached_proof: None,
             cached_resource_proofs: alloc::collections::BTreeMap::new(),
+            establishment_jitter_permille,
         }
     }
 
@@ -598,6 +613,8 @@ impl Link {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&ed25519_seed);
         let verifying_key = signing_key.verifying_key();
 
+        let establishment_jitter_permille = draw_establishment_jitter(rng);
+
         Ok(Self {
             id: link_id,
             state: LinkState::Pending,
@@ -641,6 +658,7 @@ impl Link {
             remote_identity: None,
             cached_proof: None,
             cached_resource_proofs: alloc::collections::BTreeMap::new(),
+            establishment_jitter_permille,
         })
     }
 
@@ -914,9 +932,15 @@ impl Link {
     /// Responder (PendingIncoming):
     ///   `ESTABLISHMENT_TIMEOUT_PER_HOP × max(1, hops) + KEEPALIVE`
     ///   The KEEPALIVE term gives the RTT packet time to travel back.
+    ///
+    /// Both branches then add the per-link random jitter (Codeberg #129):
+    /// `base + base × jitter_permille / 1000`, additive only, so concurrent
+    /// initiators de-sync instead of retransmitting in lockstep. The jitter
+    /// field is set once (re-rolled only on retransmit), so this stays a
+    /// pure getter returning a stable value between rolls.
     pub fn establishment_timeout_ms(&self) -> u64 {
         let hops = core::cmp::max(1, self.hops as u64);
-        if self.initiator {
+        let base = if self.initiator {
             // Python: first_hop_timeout(dest) + ESTABLISHMENT_TIMEOUT_PER_HOP * max(1, hops)
             // first_hop_timeout = MTU * per_byte_latency + DEFAULT_PER_HOP_TIMEOUT
             // We split it: first_hop_timeout_extra_ms carries the MTU*latency part,
@@ -924,7 +948,23 @@ impl Link {
             self.first_hop_timeout_extra_ms + ESTABLISHMENT_TIMEOUT_PER_HOP_MS * (hops + 1)
         } else {
             ESTABLISHMENT_TIMEOUT_PER_HOP_MS * hops + ESTABLISHMENT_RESPONDER_BONUS_MS
-        }
+        };
+        base + base * self.establishment_jitter_permille as u64 / 1000
+    }
+
+    /// Re-draw the establishment jitter (Codeberg #129). Called on every
+    /// establishment retransmit so each retry attempt de-syncs afresh —
+    /// with a single per-link roll, two links whose draws happened to land
+    /// close together would stay close on every retry.
+    pub(crate) fn reroll_establishment_jitter(&mut self, rng: &mut impl CryptoRngCore) {
+        self.establishment_jitter_permille = draw_establishment_jitter(rng);
+    }
+
+    /// Force a specific jitter permille. Test hook: exact-value timeout
+    /// tests pin it to 0 to assert the Python-parity base formula.
+    #[cfg(test)]
+    pub(crate) fn set_establishment_jitter_permille(&mut self, permille: u16) {
+        self.establishment_jitter_permille = permille;
     }
 
     /// Set the first-hop timeout extra from interface bitrate.
@@ -3761,10 +3801,101 @@ mod tests {
         );
     }
 
+    // ============ ESTABLISHMENT JITTER (Codeberg #129) ============
+
+    /// Deterministic CryptoRngCore for jitter tests: a stepping counter, so
+    /// consecutive draws differ predictably and the tests can never flake.
+    struct SeqRng(u32);
+    impl rand_core::RngCore for SeqRng {
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9);
+            self.0
+        }
+        fn next_u64(&mut self) -> u64 {
+            ((self.next_u32() as u64) << 32) | self.next_u32() as u64
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for b in dest.iter_mut() {
+                *b = self.next_u32() as u8;
+            }
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+    impl rand_core::CryptoRng for SeqRng {}
+
+    /// The jitter is ADDITIVE and bounded: the timeout never drops below the
+    /// base formula and never exceeds base + MAX permille.
+    #[test]
+    fn establishment_jitter_is_bounded() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let base = 12_000u64; // 0 hops, no bitrate extra
+        let max = base + base * crate::constants::MAX_ESTABLISHMENT_JITTER_PERMILLE as u64 / 1000;
+        for _ in 0..200 {
+            let link = Link::new_outgoing(dest_hash, &mut OsRng);
+            let t = link.establishment_timeout_ms();
+            assert!(t >= base, "jitter must never fire early: {t} < {base}");
+            assert!(t <= max, "jitter above the +25% cap: {t} > {max}");
+        }
+    }
+
+    /// The de-sync property (#129): two links drawn from one RNG get
+    /// different jittered timeouts, so concurrent initiators drift apart.
+    #[test]
+    fn establishment_jitter_varies_between_links() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut rng = SeqRng(0);
+        let a = Link::new_outgoing(dest_hash, &mut rng);
+        let b = Link::new_outgoing(dest_hash, &mut rng);
+        assert_ne!(
+            a.establishment_timeout_ms(),
+            b.establishment_timeout_ms(),
+            "two concurrent initiators must not share a timeout"
+        );
+    }
+
+    /// Each retry attempt de-syncs afresh: rerolling the jitter changes the
+    /// timeout (within a bounded number of draws — a single draw may repeat).
+    #[test]
+    fn establishment_jitter_reroll_changes_timeout() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut rng = SeqRng(7);
+        let mut link = Link::new_outgoing(dest_hash, &mut rng);
+        let before = link.establishment_timeout_ms();
+        let changed = (0..16).any(|_| {
+            link.reroll_establishment_jitter(&mut rng);
+            link.establishment_timeout_ms() != before
+        });
+        assert!(changed, "16 rerolls never changed the jittered timeout");
+    }
+
+    /// Python-parity base preserved: with the jitter forced to 0 the timeout
+    /// is byte-identical to the pre-#129 formula, both branches.
+    #[test]
+    fn establishment_timeout_base_formula_with_zero_jitter() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(0);
+        assert_eq!(link.establishment_timeout_ms(), 12_000);
+        link.set_hops(3);
+        assert_eq!(link.establishment_timeout_ms(), 24_000);
+
+        let link_id = LinkId::new([0x01; TRUNCATED_HASHBYTES]);
+        let outgoing = Link::new_outgoing(dest_hash, &mut OsRng);
+        let request_data = outgoing.create_link_request();
+        let mut responder =
+            Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
+        responder.set_establishment_jitter_permille(0);
+        assert_eq!(responder.establishment_timeout_ms(), 60_000);
+    }
+
     #[test]
     fn establishment_timeout_initiator_0_hops() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
-        let link = Link::new_outgoing(dest_hash, &mut OsRng);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(0);
         assert_eq!(link.hops(), 0);
         // max(1,0)=1, (1+1)*6000 = 12000
         assert_eq!(link.establishment_timeout_ms(), 12_000);
@@ -3774,6 +3905,7 @@ mod tests {
     fn establishment_timeout_initiator_3_hops() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(0);
         link.set_hops(3);
         // (3+1)*6000 = 24000
         assert_eq!(link.establishment_timeout_ms(), 24_000);
@@ -3785,7 +3917,9 @@ mod tests {
         let link_id = LinkId::new([0x01; TRUNCATED_HASHBYTES]);
         let outgoing = Link::new_outgoing(dest_hash, &mut OsRng);
         let request_data = outgoing.create_link_request();
-        let link = Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
+        let mut link =
+            Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
+        link.set_establishment_jitter_permille(0);
         assert!(!link.is_initiator());
         assert_eq!(link.hops(), 0);
         // max(1,0)*6000 + 54000 = 60000
@@ -3800,6 +3934,7 @@ mod tests {
         let request_data = outgoing.create_link_request();
         let mut link =
             Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
+        link.set_establishment_jitter_permille(0);
         link.set_hops(3);
         // 3*6000 + 54000 = 72000
         assert_eq!(link.establishment_timeout_ms(), 72_000);
@@ -3809,6 +3944,7 @@ mod tests {
     fn establishment_timeout_initiator_with_lora_bitrate() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(0);
         // SF10/BW125k ≈ 976 bps
         link.set_first_hop_timeout_from_bitrate(976);
         // first_hop_extra = 500 * 8 * 1000 / 976 = 4098 ms
@@ -3820,6 +3956,7 @@ mod tests {
     fn establishment_timeout_initiator_lora_3_hops() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(0);
         link.set_hops(3);
         link.set_first_hop_timeout_from_bitrate(976);
         // 4098 + 6000 * (3+1) = 4098 + 24000 = 28098
@@ -3830,6 +3967,7 @@ mod tests {
     fn first_hop_timeout_zero_bitrate_is_noop() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(0);
         link.set_first_hop_timeout_from_bitrate(0);
         // No extra timeout added
         assert_eq!(link.establishment_timeout_ms(), 12_000);
@@ -3842,6 +3980,7 @@ mod tests {
         // so connect() uses UNKNOWN_BITRATE_ASSUMPTION_BPS (300 bps).
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(0);
         link.set_hops(2);
         link.set_first_hop_timeout_from_bitrate(crate::constants::UNKNOWN_BITRATE_ASSUMPTION_BPS);
         // first_hop_extra = 500 * 8 * 1000 / 300 = 13333 ms

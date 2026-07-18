@@ -217,6 +217,18 @@ pub const UNKNOWN_BITRATE_ASSUMPTION_BPS: u32 = 300;
 /// by the keepalive/stale watchdog, not the retry budget.
 pub const ESTABLISHMENT_RESPONDER_BONUS_MS: u64 = 54_000;
 
+/// Upper bound (permille of the base timeout) for the per-link random
+/// establishment jitter (Codeberg #129). Two nodes that initiate links to
+/// each other simultaneously otherwise time out and retransmit their
+/// LinkRequests in lockstep (the base timeout is deterministic), colliding
+/// again on a shared half-duplex medium — a phase-lock that kills both
+/// handshakes. Up to +25% of the base spreads concurrent initiators apart
+/// while scaling with the medium (the base already scales with bitrate and
+/// hops). ADDITIVE only: the jittered timeout never drops below the base,
+/// so it can never fire early. Local timing only, never on the wire, so it
+/// is fully Python-RNS compatible. Tunable.
+pub const MAX_ESTABLISHMENT_JITTER_PERMILLE: u16 = 250;
+
 /// RTT packet retry: max additional attempts after the initial send.
 /// This only bounds redelivery of the RTT packet; it never closes the link.
 /// Reaping is handled by the keepalive/stale watchdog (Python-parity).

@@ -2695,6 +2695,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             };
                         let hw_mtu = self.transport.next_hop_interface_hw_mtu(&dest_hash_bytes);
                         link.regenerate_ephemeral_keys(&mut self.rng);
+                        // Codeberg #129: fresh timeout jitter per retry so
+                        // concurrent initiators keep de-syncing instead of
+                        // retransmitting in lockstep.
+                        link.reroll_establishment_jitter(&mut self.rng);
                         let packet =
                             link.build_link_request_packet_with_transport(next_hop, hops, hw_mtu);
                         let new_link_id = *link.id();
