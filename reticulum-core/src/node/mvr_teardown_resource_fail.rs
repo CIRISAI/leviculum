@@ -397,3 +397,60 @@ fn rekey_retry_emits_no_resource_failed() {
         "link must establish via the re-keyed retry"
     );
 }
+
+/// leviculum#27 / CIRISEdge#353 ask #2 — DETERMINISTIC REPRODUCTION of the
+/// reverse-path resource-transfer contention that stalled the first mobile
+/// trace (and that the previous edge-side `force_busy` test seam could not
+/// reproduce, because it faked the busy instead of holding a real transfer).
+///
+/// A NAT'd initiator's only reachability is its live inbound link. When the
+/// responder must ship a small reply (an anti-entropy Summary/Diff carrying the
+/// Key + IdentityOccurrence planes that promote the peer to a KEX'd delivery
+/// target) AND a resource transfer is already in flight on that link, the
+/// reply-as-a-resource is REFUSED `TransferInProgress`. In the field the retry
+/// window (8s) was provably shorter than the transfer (16 attempts, link busy
+/// throughout) -> fallback outbound dial -> NAT-blocked -> the planes never land.
+///
+/// Proves BOTH halves with NO timing race — the resource is in flight
+/// synchronously from `send_resource` until an event-loop tick completes it:
+///   1. a RESOURCE reply during an in-flight transfer -> `TransferInProgress`
+///      (the bug), and
+///   2. a link PACKET (`send_on_link`) during the SAME in-flight transfer is
+///      accepted (the fix — it checks the link Channel, never
+///      `has_outgoing_resource()`, so it categorically bypasses the gate).
+#[test]
+fn reverse_path_packet_interleaves_a_busy_resource_transfer() {
+    let (mut initiator, _responder, _i_iface, _r_iface, link) = establish();
+
+    // A large resource is in flight on the link (the peer's own payload).
+    let _big = start_outgoing(&mut initiator, &link);
+
+    // (1) THE BUG — a small reply sent as a RESOURCE is refused: one resource
+    //     transfer per link at a time.
+    let small = std::vec![0x11u8; 64];
+    let resource_reply = initiator.send_resource(&link, &small, None, false);
+    assert!(
+        matches!(resource_reply, Err(ResourceError::TransferInProgress)),
+        "a resource reply during an in-flight transfer MUST be refused \
+         TransferInProgress (the field bug); got {resource_reply:?}"
+    );
+
+    // (2) THE FIX — the SAME small reply sent as a LINK PACKET is accepted
+    //     WHILE the resource is still in flight.
+    assert!(
+        initiator.link(&link).expect("link").has_outgoing_resource(),
+        "precondition: the resource is still in flight"
+    );
+    let packet_reply = initiator.send_on_link(&link, &small);
+    assert!(
+        packet_reply.is_ok(),
+        "a link-packet reply MUST interleave a busy resource transfer \
+         (CIRISEdge#353 ask #2); got {packet_reply:?}"
+    );
+
+    // The in-flight resource is undisturbed by the interleaved packet.
+    assert!(
+        initiator.link(&link).expect("link").has_outgoing_resource(),
+        "the in-flight resource must be undisturbed by the interleaved packet"
+    );
+}
