@@ -1,0 +1,66 @@
+# LNode<->LNode lncp SIMULTANEOUS bidirectional transfer over LoRa at SF10.
+#
+# Codeberg #15: unlike direction="both" (sequential, one direction at a
+# time), direction="simultaneous" overlaps both directions' sends in time,
+# so both nodes transmit and receive concurrently over the one shared
+# half-duplex channel — the hardest contention case. This is the test that
+# exercises the LNode burst-pacing bounds (MAX_BURST_FRAMES /
+# MAX_BURST_AIRTIME_MS in leviculum-nrf lora.rs) under real reverse-traffic
+# competition: each node's burst must yield often enough for the peer's
+# opposing transfer to make progress, or one direction starves and its
+# send times out.
+#
+# 2KB each way (the channel is shared, so effective per-direction
+# throughput roughly halves versus the sequential 4KB test). Radio config
+# matches lora_lnode_lncp_bidir_slow: SF10 / BW125000 / CR8 / CSMA on.
+# Timeouts carry generous margin so a PASS is never cut short by SF10
+# airtime under contention.
+
+profile = "lnode_pair"
+
+[test]
+name = "lora_lnode_lncp_bidir_simul"
+description = "lncp simultaneous bidirectional 2KB between two LNodes over direct LoRa at SF10"
+timeout_secs = 900
+rust_log = "leviculum_core::link=debug,leviculum_core::transport=debug,leviculum_std::interfaces=debug,info"
+
+[radio]
+# Matches lora_lnode_lncp_bidir_slow: slow spreading factor, CSMA/CA on.
+frequency = 869525000
+bandwidth = 125000
+sf = 10
+cr = 8
+txpower = 17
+csma_enabled = true
+
+[nodes.alpha]
+type = "rust"
+respond_to_probes = true
+serial = true
+
+[nodes.beta]
+type = "rust"
+respond_to_probes = true
+serial = true
+
+# Warm up: wait for announces to propagate
+[[steps]]
+action = "sleep"
+duration_secs = 25
+
+[[steps]]
+action = "wait_for_path"
+on = "alpha"
+destination = "beta.probe"
+timeout_secs = 300
+
+[[steps]]
+action = "file_transfer"
+sender = "alpha"
+receiver = "beta"
+sender_tool = "lncp"
+receiver_tool = "lncp"
+file_sizes = [2048]
+direction = "simultaneous"
+repeats = 1
+timeout_secs = 600

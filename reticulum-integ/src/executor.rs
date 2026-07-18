@@ -2415,11 +2415,36 @@ fn execute_file_transfer(
                 has_rnode,
             )?;
         }
+        // Codeberg #15: both directions with their sends overlapping in time
+        // over the shared channel. "both" above stays sequential.
+        "simultaneous" => {
+            execute_simultaneous_transfer(
+                runner,
+                step_index,
+                sender,
+                receiver,
+                sender_tool,
+                receiver_tool,
+                file_sizes,
+                repeats,
+                timeout_secs,
+                mode,
+                receiver_flags,
+                sender_flags,
+                auth_identity_hash.as_deref(),
+                expect_result,
+                fetch_path,
+                &mut results,
+                has_rnode,
+            )?;
+        }
         other => {
             return Err(StepError::StepFailed {
                 step_index,
                 action: "file_transfer".into(),
-                detail: format!("unknown direction '{other}', use 'a_to_b', 'b_to_a', or 'both'"),
+                detail: format!(
+                    "unknown direction '{other}', use 'a_to_b', 'b_to_a', 'both', or 'simultaneous'"
+                ),
             });
         }
     }
@@ -2794,6 +2819,403 @@ fn execute_transfer_direction(
     Ok(())
 }
 
+/// Verdict for one simultaneous send pair (Codeberg #15). Normally both
+/// sends must succeed. With `expect_failure`, both must fail: a one-way
+/// success means the channel still worked in that direction, which
+/// falsifies the failure expectation.
+fn simultaneous_pair_passes(a_success: bool, b_success: bool, expect_failure: bool) -> bool {
+    if expect_failure {
+        !a_success && !b_success
+    } else {
+        a_success && b_success
+    }
+}
+
+/// True simultaneous bidirectional transfer (Codeberg #15): both directions'
+/// SENDS overlap in time over the one shared half-duplex channel, so each
+/// node transmits and receives concurrently — the hardest contention case,
+/// and the only shape that exercises the LNode burst-pacing bounds against
+/// real reverse traffic. `direction = "both"` (sequential) is untouched.
+///
+/// Setup (dest hashes, listeners, path resolution) runs sequentially for
+/// both directions; only the blocking sends run concurrently, one scoped
+/// thread per direction. `TestRunner::docker_exec*` take `&self`, spawn
+/// independent subprocesses, and touch no interior-mutable runner state
+/// (the only `Mutex` field, `lxmf_helpers`, is not on this path), so two
+/// concurrent execs under a shared `&runner` are safe — the same pattern
+/// `execute_parallel_file_transfers` already uses.
+#[allow(clippy::too_many_arguments)]
+fn execute_simultaneous_transfer(
+    runner: &TestRunner,
+    step_index: usize,
+    node_a: &str,
+    node_b: &str,
+    tool_a: &str,
+    tool_b: &str,
+    file_sizes: &[u64],
+    repeats: u32,
+    timeout_secs: u64,
+    mode: &str,
+    receiver_flags: &str,
+    sender_flags: &str,
+    auth_identity_hash: Option<&str>,
+    expect_result: &str,
+    fetch_path: &str,
+    results: &mut Vec<TransferResult>,
+    has_rnode: bool,
+) -> Result<(), StepError> {
+    // Push mode only: in fetch mode the "send" side terminates the download,
+    // which inverts the file locations per direction and has no simultaneous
+    // use case yet. Reject instead of silently doing the wrong thing.
+    if mode == "fetch" || !fetch_path.is_empty() {
+        return Err(StepError::StepFailed {
+            step_index,
+            action: "file_transfer".into(),
+            detail: "direction=\"simultaneous\" supports mode=\"push\" only".into(),
+        });
+    }
+    let expect_failure = expect_result == "failure";
+
+    // The two directions: each node is the sender of one and the receiver of
+    // the other, with its own tool (mirrors how "b_to_a" swaps tools with
+    // nodes). Send files (/tmp/test_transfer.bin) and received files
+    // (/tmp/received/) live on different nodes per direction, so the
+    // per-container paths never collide.
+    struct SimulDirection<'n> {
+        send_node: &'n str,
+        recv_node: &'n str,
+        send_tool: &'n str,
+        recv_tool: &'n str,
+        label: String,
+        dest_hash: String,
+    }
+    let mut dirs = [
+        SimulDirection {
+            send_node: node_a,
+            recv_node: node_b,
+            send_tool: tool_a,
+            recv_tool: tool_b,
+            label: format!("{node_a} -> {node_b}"),
+            dest_hash: String::new(),
+        },
+        SimulDirection {
+            send_node: node_b,
+            recv_node: node_a,
+            send_tool: tool_b,
+            recv_tool: tool_a,
+            label: format!("{node_b} -> {node_a}"),
+            dest_hash: String::new(),
+        },
+    ];
+    println!(
+        "  === simultaneous {} <-> {} (mode={mode}) ===",
+        node_a, node_b
+    );
+
+    let window_policy = crate::window_policy::from_env();
+
+    // Per-direction setup, sequential: dest hash, save dir, detached listener.
+    for d in dirs.iter_mut() {
+        let print_output = runner.docker_exec_with_env(
+            d.recv_node,
+            &["timeout", "30", d.recv_tool, "-p"],
+            &[("PYTHONUNBUFFERED", "1")],
+        )?;
+        if !print_output.status.success() {
+            return Err(StepError::StepFailed {
+                step_index,
+                action: "file_transfer".into(),
+                detail: format!(
+                    "{} -p on {} failed (exit {}): {}",
+                    d.recv_tool,
+                    d.recv_node,
+                    print_output.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&print_output.stderr)
+                ),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&print_output.stdout);
+        d.dest_hash =
+            parse_dest_hash_from_print_identity(&stdout).map_err(|e| StepError::StepFailed {
+                step_index,
+                action: "file_transfer".into(),
+                detail: format!("failed to parse dest hash from {} -p: {e}", d.recv_tool),
+            })?;
+        println!("  receiver hash ({}): {}", d.recv_node, d.dest_hash);
+
+        runner.docker_exec(d.recv_node, &["mkdir", "-p", "/tmp/received"])?;
+
+        let container = runner.container_name(d.recv_node);
+        let listener_cmd = build_listener_cmd(
+            d.recv_tool,
+            receiver_flags,
+            auth_identity_hash,
+            window_policy.as_deref(),
+        );
+        println!("  listener cmd ({}): {listener_cmd}", d.recv_node);
+        let listener_output = std::process::Command::new("docker")
+            .args(["exec", "-d", &container, "sh", "-c", &listener_cmd])
+            .output()
+            .map_err(|e| StepError::Runner(RunnerError::Io(e)))?;
+        if !listener_output.status.success() {
+            return Err(StepError::StepFailed {
+                step_index,
+                action: "file_transfer".into(),
+                detail: format!(
+                    "failed to start listener on {}: {}",
+                    d.recv_node,
+                    String::from_utf8_lossy(&listener_output.stderr)
+                ),
+            });
+        }
+        println!("  listener started on {}", d.recv_node);
+    }
+
+    // Dumps a receiver's listener log (mirrors the sequential path's failure
+    // dump) — used on rnpath and send failures.
+    let dump_recv_log = |recv_node: &str, recv_tool: &str, why: &str| {
+        if let Ok(out) = runner.docker_exec(recv_node, &["cat", "/tmp/recv_tool.log"]) {
+            let log = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = log.lines().collect();
+            println!(
+                "  --- {recv_tool} log on {recv_node} ({} lines, {why}) ---",
+                lines.len()
+            );
+            for line in &lines {
+                println!("  {line}");
+            }
+            println!("  --- end of {recv_tool} log ---");
+        }
+    };
+
+    // One announce-propagation wait covers both listeners (they were both
+    // started above), then resolve the path for each direction.
+    let announce_wait = if has_rnode { 30 } else { 15 };
+    thread::sleep(Duration::from_secs(announce_wait));
+    for d in &dirs {
+        println!(
+            "  waiting for path to {} on {}...",
+            d.dest_hash, d.send_node
+        );
+        let path_output = runner.docker_exec(
+            d.send_node,
+            &[
+                "rnpath",
+                &d.dest_hash,
+                "--config",
+                "/root/.reticulum",
+                "-w",
+                "60",
+            ],
+        )?;
+        if !path_output.status.success() {
+            dump_recv_log(d.recv_node, d.recv_tool, "on rnpath failure");
+            return Err(StepError::StepFailed {
+                step_index,
+                action: "file_transfer".into(),
+                detail: format!(
+                    "announce from {} did not reach {} (rnpath failed): {}",
+                    d.recv_node,
+                    d.send_node,
+                    sanitize_rnpath_output(&String::from_utf8_lossy(&path_output.stderr))
+                ),
+            });
+        }
+        println!("  path found ({})", d.label);
+    }
+
+    // Per-transfer shell `timeout` backstop, sized like the sequential path
+    // (#53: ultra-generous, must never false-kill a slow LoRa transfer) but
+    // for the sum of BOTH directions' bytes: the channel is shared, so each
+    // send's wall clock covers roughly both transfers' airtime.
+    let timeout_str = if has_rnode {
+        let max_size = file_sizes.iter().copied().max().unwrap_or(0);
+        crate::timeout::lncp_lora_wrapper_secs(max_size.saturating_mul(2), 1).to_string()
+    } else {
+        timeout_secs.to_string()
+    };
+    let sender_env: Vec<(&str, &str)> = window_policy
+        .as_deref()
+        .map(|v| (crate::window_policy::RESOURCE_WINDOW_POLICY_ENV, v))
+        .into_iter()
+        .collect();
+
+    for &size in file_sizes {
+        for repeat in 1..=repeats {
+            let size_label = format_size(size);
+            println!("  [{size_label} run {repeat}/{repeats}, simultaneous]");
+
+            // Create one test file per sender; each direction carries its own
+            // random payload, verified by its own md5.
+            let (bs, count) = if size >= 1_048_576 {
+                ("1048576", size / 1_048_576)
+            } else {
+                ("1024", size / 1024)
+            };
+            let count_str = count.to_string();
+            let mut expected_md5 = [String::new(), String::new()];
+            for (i, d) in dirs.iter().enumerate() {
+                let dd_output = runner.docker_exec(
+                    d.send_node,
+                    &[
+                        "dd",
+                        "if=/dev/urandom",
+                        "of=/tmp/test_transfer.bin",
+                        &format!("bs={bs}"),
+                        &format!("count={count_str}"),
+                    ],
+                )?;
+                if !dd_output.status.success() {
+                    return Err(StepError::StepFailed {
+                        step_index,
+                        action: "file_transfer".into(),
+                        detail: format!(
+                            "dd failed on {}: {}",
+                            d.send_node,
+                            String::from_utf8_lossy(&dd_output.stderr)
+                        ),
+                    });
+                }
+                let md5_output =
+                    runner.docker_exec(d.send_node, &["md5sum", "/tmp/test_transfer.bin"])?;
+                expected_md5[i] = String::from_utf8_lossy(&md5_output.stdout)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+            }
+
+            // Both sends concurrently, one scoped thread per direction. Each
+            // thread runs the same blocking docker exec the sequential path
+            // uses; the scope joins both before continuing.
+            let build_args = |d: &SimulDirection| -> Vec<String> {
+                let mut args: Vec<String> = vec![
+                    "timeout".into(),
+                    timeout_str.clone(),
+                    d.send_tool.into(),
+                    "/tmp/test_transfer.bin".into(),
+                    d.dest_hash.clone(),
+                ];
+                for flag in sender_flags.split_whitespace() {
+                    args.push(flag.into());
+                }
+                args
+            };
+            let start = Instant::now();
+            let (join_a, join_b) = std::thread::scope(|s| {
+                let handles = [&dirs[0], &dirs[1]].map(|d| {
+                    let args = build_args(d);
+                    let sender_env = &sender_env;
+                    s.spawn(move || {
+                        let start = Instant::now();
+                        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                        let out = runner.docker_exec_with_env(d.send_node, &args_ref, sender_env);
+                        (out, start.elapsed())
+                    })
+                });
+                let [a, b] = handles;
+                (a.join(), b.join())
+            });
+            let mut outcomes = Vec::new();
+            for (d, joined) in [(&dirs[0], join_a), (&dirs[1], join_b)] {
+                let (out, elapsed) = joined.map_err(|_| StepError::StepFailed {
+                    step_index,
+                    action: "file_transfer".into(),
+                    detail: format!("simultaneous send thread ({}) panicked", d.label),
+                })?;
+                outcomes.push((out?, elapsed));
+            }
+            println!(
+                "    both sends returned after {:.2}s wall clock",
+                start.elapsed().as_secs_f64()
+            );
+
+            let ok = [
+                outcomes[0].0.status.success(),
+                outcomes[1].0.status.success(),
+            ];
+            if !simultaneous_pair_passes(ok[0], ok[1], expect_failure) {
+                for d in &dirs {
+                    dump_recv_log(d.recv_node, d.recv_tool, "on simultaneous send failure");
+                }
+                let detail = dirs
+                    .iter()
+                    .zip(outcomes.iter())
+                    .map(|(d, (out, _))| {
+                        format!(
+                            "{}: exit {}\nstdout: {}\nstderr: {}",
+                            d.label,
+                            out.status.code().unwrap_or(-1),
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(StepError::StepFailed {
+                    step_index,
+                    action: "file_transfer".into(),
+                    detail: format!(
+                        "simultaneous transfer ({size_label} run {repeat}) failed \
+                         (expect_result={expect_result})\n{detail}"
+                    ),
+                });
+            }
+            if expect_failure {
+                println!("    {size_label} run {repeat}: both sends correctly failed");
+                continue;
+            }
+
+            // Verify each direction's file on its receiver, then clean up.
+            for (i, d) in dirs.iter().enumerate() {
+                let verify_output = runner
+                    .docker_exec(d.recv_node, &["md5sum", "/tmp/received/test_transfer.bin"])?;
+                let actual_md5 = String::from_utf8_lossy(&verify_output.stdout)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if actual_md5 != expected_md5[i] {
+                    return Err(StepError::StepFailed {
+                        step_index,
+                        action: "file_transfer".into(),
+                        detail: format!(
+                            "md5 mismatch ({}, {size_label} run {repeat}): expected {}, got {actual_md5}",
+                            d.label, expected_md5[i]
+                        ),
+                    });
+                }
+                runner.docker_exec(d.recv_node, &["rm", "/tmp/received/test_transfer.bin"])?;
+
+                let elapsed = outcomes[i].1;
+                println!(
+                    "    {size_label} run {repeat} {}: {:.2}s (md5 ok)",
+                    d.label,
+                    elapsed.as_secs_f64()
+                );
+                results.push(TransferResult {
+                    direction: d.label.clone(),
+                    size,
+                    repeat,
+                    duration: elapsed,
+                    sender_tool: d.send_tool.to_string(),
+                    receiver_tool: d.recv_tool.to_string(),
+                });
+            }
+        }
+    }
+
+    for d in &dirs {
+        let _ = runner.docker_exec(
+            d.recv_node,
+            &["pkill", "-f", &format!("{} -l", d.recv_tool)],
+        );
+        println!("  listener stopped on {}", d.recv_node);
+    }
+
+    Ok(())
+}
+
 /// Run multiple file transfers simultaneously in separate threads.
 ///
 /// Each transfer runs in its own thread via `std::thread::scope()`.
@@ -3068,6 +3490,23 @@ fn parse_hops_from_output(output: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// Simultaneous-bidir verdict: normally BOTH sends must succeed; with
+    /// expect_failure BOTH must fail (a one-way success means the channel
+    /// still worked in that direction, falsifying the expectation).
+    #[test]
+    fn simultaneous_pair_verdict_covers_all_outcomes() {
+        // expect_result = success: only (true, true) passes.
+        assert!(simultaneous_pair_passes(true, true, false));
+        assert!(!simultaneous_pair_passes(true, false, false));
+        assert!(!simultaneous_pair_passes(false, true, false));
+        assert!(!simultaneous_pair_passes(false, false, false));
+        // expect_result = failure: only (false, false) passes.
+        assert!(simultaneous_pair_passes(false, false, true));
+        assert!(!simultaneous_pair_passes(true, false, true));
+        assert!(!simultaneous_pair_passes(false, true, true));
+        assert!(!simultaneous_pair_passes(true, true, true));
+    }
 
     #[test]
     fn listener_cmd_without_window_policy_is_unchanged() {
@@ -4863,6 +5302,28 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
                 "/tests/lora_lnode_lncp_bidir_slow.toml"
             ))
             .expect("lora_lnode_lncp_bidir_slow.toml not found");
+            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+            let mut runner = require_runner!(scenario);
+
+            run_test(&mut runner).expect("test failed");
+        });
+    }
+
+    #[test]
+    #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
+    #[serial(lora)]
+    fn lora_lnode_lncp_bidir_simul() {
+        // Codeberg #15: SIMULTANEOUS bidirectional transfer — both sends
+        // overlap over the shared SF10 channel, so the LNode burst-pacing
+        // bounds compete with real reverse traffic. The sequential variant
+        // (lora_lnode_lncp_bidir_slow) cannot exercise this.
+        crate::timeout::run_with_timeout("lora_lnode_lncp_bidir_simul", 900, || {
+            let toml_str = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/lora_lnode_lncp_bidir_simul.toml"
+            ))
+            .expect("lora_lnode_lncp_bidir_simul.toml not found");
             let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
 
             let mut runner = require_runner!(scenario);
