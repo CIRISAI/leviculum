@@ -1013,6 +1013,26 @@ pub fn packet_airtime_ms(data_len: usize, bandwidth_hz: u32, sf: u8, cr: u8) -> 
     }
 }
 
+/// Whether a bursting LoRa transmitter must yield the channel (open its
+/// post-TX ack window) instead of draining the next queued frame.
+///
+/// Receivers REQ/ACK per transfer window, not per part, so a full ack window
+/// after every part only adds dead air between parts of the same requested
+/// window. The burst is bounded by a frame count (anti-livelock ceiling) and
+/// an airtime budget (fairness: the peer gets a clear window before its
+/// receiver-side timeout), and always ends when the queue is empty. Pure
+/// decision on counters only, byte-agnostic, so the firmware loop can call it
+/// and the bounds are host-testable.
+pub fn burst_should_yield(
+    queue_empty: bool,
+    frames_since_yield: u32,
+    airtime_since_yield_ms: u64,
+    max_frames: u32,
+    max_airtime_ms: u64,
+) -> bool {
+    queue_empty || frames_since_yield >= max_frames || airtime_since_yield_ms >= max_airtime_ms
+}
+
 /// Rolling airtime histogram + duty-cycle lock, mirroring the RNode firmware.
 ///
 /// Holds a fixed `[u16; AIRTIME_BINS]` bin array (960 bytes, no heap), the
@@ -1261,6 +1281,47 @@ mod tests {
     use super::*;
     use crate::framing::kiss::{KissDeframeResult, KissDeframer};
     use alloc::vec;
+
+    /// An empty outgoing queue must always yield (open the post-TX ack
+    /// window), regardless of the burst counters.
+    #[test]
+    fn burst_yields_on_empty_queue_regardless_of_counters() {
+        assert!(burst_should_yield(true, 0, 0, 16, 8000));
+        assert!(burst_should_yield(true, 1, 100, 16, 8000));
+    }
+
+    /// The frame bound forces a yield even with a non-empty queue and low
+    /// airtime (anti-livelock ceiling).
+    #[test]
+    fn burst_yields_when_frame_bound_reached() {
+        assert!(burst_should_yield(false, 16, 100, 16, 8000));
+        assert!(burst_should_yield(false, 17, 0, 16, 8000));
+    }
+
+    /// The airtime bound forces a yield even with a non-empty queue and few
+    /// frames (fairness knob).
+    #[test]
+    fn burst_yields_when_airtime_bound_reached() {
+        assert!(burst_should_yield(false, 2, 8000, 16, 8000));
+        assert!(burst_should_yield(false, 0, 9500, 16, 8000));
+    }
+
+    /// Mid-burst, below every bound, with more queued: keep bursting (this is
+    /// the case that kills the per-part over-yield).
+    #[test]
+    fn burst_does_not_yield_mid_burst_below_bounds() {
+        assert!(!burst_should_yield(false, 1, 2700, 16, 8000));
+        assert!(!burst_should_yield(false, 15, 7999, 16, 8000));
+    }
+
+    /// Threshold boundaries: `>=` on both bounds, one below stays in burst.
+    #[test]
+    fn burst_yield_bounds_are_inclusive() {
+        assert!(!burst_should_yield(false, 15, 0, 16, 8000));
+        assert!(burst_should_yield(false, 16, 0, 16, 8000));
+        assert!(!burst_should_yield(false, 0, 7999, 16, 8000));
+        assert!(burst_should_yield(false, 0, 8000, 16, 8000));
+    }
 
     /// Deframe a single KISS frame and assert it matches the expected command and payload.
     fn assert_single_frame(frame: &[u8], expected_cmd: u8, expected_payload: &[u8]) {

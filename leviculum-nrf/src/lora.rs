@@ -236,6 +236,17 @@ const CSMA_SLOT_MS_MIN: u64 = 24;
 /// stacks 2, so it is unaffected.
 const PEER_YIELD_AFTER_EMPTY: u32 = 2;
 
+/// Anti-livelock ceiling: force a peer-turn yield after this many un-yielded
+/// TX frames, even mid-burst. >= the largest window core enqueues so a legit
+/// batch is never split by the frame bound; the airtime bound is the real
+/// fairness knob. STARTING value, rig-tuned.
+const MAX_BURST_FRAMES: u32 = 16;
+/// Fairness bound: force a yield once a burst has consumed this much airtime,
+/// so the peer gets a clear window before its receiver-side timeout fires.
+/// Must sit BELOW the receiver resource timeout (~8-15s at SF10). STARTING
+/// value, rig-tuned.
+const MAX_BURST_AIRTIME_MS: u64 = 8000;
+
 /// xorshift32 PRNG step. Mutates state and returns the updated value.
 fn xorshift32(state: &mut u32) -> u32 {
     *state ^= *state << 13;
@@ -610,6 +621,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
     // Drives the peer-turn yield (see PEER_YIELD_AFTER_EMPTY). Reset to 0 on any
     // reception, anywhere rx_once returns true.
     let mut consecutive_empty_acks: u32 = 0;
+    // Bounded-burst accounting: TX frames and airtime since the last channel
+    // yield (post-TX ack window). Reset whenever a yield actually runs.
+    let mut frames_since_yield: u32 = 0;
+    let mut airtime_since_yield_ms: u64 = 0;
 
     // Regulatory airtime lock (mirrors the RNode firmware). The bin histogram
     // lives in the task's static future, off the heap (960 bytes). Limits of 0
@@ -703,9 +718,20 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 continue;
             }
 
+            // Whole-packet on-air cost (all split frames) for the burst
+            // airtime bound, computed while the packet is still borrowed.
+            let tx_cost_ms = leviculum_core::rnode::packet_airtime_ms(
+                data.len(),
+                config.bw_hz,
+                config.sf,
+                config.cr_denom,
+            );
+
             if !config.csma_enabled {
                 transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut airtime).await;
                 pending_tx = None;
+                frames_since_yield += 1;
+                airtime_since_yield_ms += tx_cost_ms;
             } else {
                 match radio.cad(config.sf).await {
                     Ok(false) => {
@@ -731,6 +757,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                         )
                         .await;
                         pending_tx = None;
+                        frames_since_yield += 1;
+                        airtime_since_yield_ms += tx_cost_ms;
                     }
                     Ok(true) => {
                         crate::log::log_fmt(
@@ -755,6 +783,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                             )
                             .await;
                             pending_tx = None;
+                            frames_since_yield += 1;
+                            airtime_since_yield_ms += tx_cost_ms;
                         } else {
                             let slots = (xorshift32(&mut rng_state) as u64) % (csma_cw as u64);
                             let backoff_ms = slots * slot_ms;
@@ -801,6 +831,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                             )
                             .await;
                             pending_tx = None;
+                            // This forced-TX path skips the ack window below
+                            // (pre-existing continue); still account its
+                            // airtime so the burst bounds stay accurate.
+                            frames_since_yield += 1;
+                            airtime_since_yield_ms += tx_cost_ms;
                         }
                         continue;
                     }
@@ -816,6 +851,47 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             // window is airtime-aware and self-shortens: rx_once returns as
             // soon as a packet arrives. Idle continuous RX (queue empty) is
             // unchanged below.
+            //
+            // Bounded burst (Bug B): receivers REQ/ACK per transfer window,
+            // not per part, so a full ack window after every part of the same
+            // requested window is dead air that spaces parts further apart
+            // than the receiver's timeout, provoking premature re-REQs. Keep
+            // draining queued frames back-to-back (CSMA/CAD before each TX
+            // still spaces them and listens during backoff) until the queue
+            // empties or a burst bound trips; only then yield exactly as
+            // before. Embassy's try_receive consumes, so a peeked frame is
+            // stashed into pending_tx and transmitted next iteration through
+            // the normal CSMA/CAD TX path.
+            let queue_empty = match outgoing_rx.try_receive() {
+                Ok(next) => {
+                    if config.radio_silent {
+                        drop(next);
+                        true
+                    } else {
+                        pending_tx = Some(next);
+                        csma_attempt = 0;
+                        csma_cw = CSMA_CW_INITIAL;
+                        false
+                    }
+                }
+                Err(_) => true,
+            };
+            if !leviculum_core::rnode::burst_should_yield(
+                queue_empty,
+                frames_since_yield,
+                airtime_since_yield_ms,
+                MAX_BURST_FRAMES,
+                MAX_BURST_AIRTIME_MS,
+            ) {
+                crate::log::log_fmt(
+                    "[LORA_BURST] ",
+                    format_args!(
+                        "continue frames={} airtime_ms={}",
+                        frames_since_yield, airtime_since_yield_ms
+                    ),
+                );
+                continue;
+            }
             let ack_window_ms = post_tx_rx_window_ms(&config);
             reassembler.check_timeout(rx_timeout_count, 10);
             let ack_received = rx_once(
@@ -863,6 +939,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 .await;
                 consecutive_empty_acks = 0;
             }
+            // A yield ran (ack window, plus backstop if it triggered): the
+            // channel was handed back, restart the burst accounting.
+            frames_since_yield = 0;
+            airtime_since_yield_ms = 0;
             continue;
         }
 
