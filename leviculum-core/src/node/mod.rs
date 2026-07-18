@@ -7360,7 +7360,14 @@ mod tests {
         let (mut _initiator, mut responder, _init_link_id, resp_link_id, _rtt_data) =
             establish_link_pair_without_rtt();
 
-        // Responder link should be in Handshake state
+        // Responder link should be in Handshake state. Pin the #129
+        // establishment jitter to 0 so the timeout is the exact base value
+        // (the jitter is additive-random, 0..=25%, and would flake the
+        // upper-bound assertion under OsRng).
+        responder
+            .link_mut(&resp_link_id)
+            .unwrap()
+            .set_establishment_jitter_permille(0);
         let link = responder.link(&resp_link_id).unwrap();
         assert_eq!(link.state(), LinkState::Handshake);
         let timeout = link.establishment_timeout_ms();
