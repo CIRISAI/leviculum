@@ -1561,7 +1561,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lblogd"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "axum",
  "axum-server",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-cli"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-ffi"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "cbindgen",
  "hex",
@@ -1645,11 +1645,11 @@ dependencies = [
 
 [[package]]
 name = "leviculum-micron"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 
 [[package]]
 name = "leviculum-proxy"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -1662,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "clap",
  "hex",
@@ -1763,7 +1763,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lnomad"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "clap",
  "crossterm 0.29.0",
@@ -2627,7 +2627,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "reticulum-integ"
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 dependencies = [
  "base64",
  "leviculum-core",

@@ -289,6 +289,13 @@ pub enum AnnounceError {
     Pack(crate::packet::PacketError),
     /// Destination not registered
     DestinationNotFound,
+    /// Destination carries an explicit (override) hash and must never be
+    /// announced. Announcing it would emit a destination_hash that does not
+    /// match `truncated_hash(name_hash || identity_hash)`, which every
+    /// Python-RNS peer recomputes and rejects — a wire/semantic break.
+    /// Explicit-hash destinations are reachable only via direct link
+    /// (the link path carries an opaque hash), never via the announce stream.
+    ExplicitHashCannotAnnounce,
 }
 
 impl core::fmt::Display for AnnounceError {
@@ -318,6 +325,9 @@ impl core::fmt::Display for AnnounceError {
             AnnounceError::Pack(e) => write!(f, "Failed to pack announce packet: {e}"),
             AnnounceError::DestinationNotFound => {
                 write!(f, "Destination not registered on this node")
+            }
+            AnnounceError::ExplicitHashCannotAnnounce => {
+                write!(f, "Explicit-hash destinations cannot be announced")
             }
         }
     }

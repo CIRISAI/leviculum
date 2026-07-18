@@ -41,7 +41,7 @@ exclude = ["leviculum-nrf", "vendor/crossterm"]
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-version = "0.10.0+ciris.1"
+version = "0.10.1+ciris.1"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
