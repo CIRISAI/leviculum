@@ -5,146 +5,147 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- CIRIS fork releases carry a `+ciris.N` build-metadata marker so their tags
+never collide with upstream's own version line. Downstream (CIRISEdge) pins the
+git tag, not the version string. -->
+
+## [0.10.0+ciris.1] — CIRIS fork
+
+Re-anchored the CIRIS fork on upstream `Lew_Palm/leviculum` (master @ `fdf8d50`,
+crates `0.7.1`), adopting upstream's `reticulum-* → leviculum-*` crate rename.
+Everything the fork had upstreamed — explicit-hash destinations (#16),
+`AnnounceControl` suppression (#17), the `RNodeChannelFactory` byte-channel
+interface (#19), the `announce_app_data_budget` / `packed_size` announce fixes,
+the `destination_data` RPC (#12), and `send_on_link` — is now carried by
+upstream itself and dropped from the fork's patch series.
+
+### Carried forward (CIRIS-only, not yet upstream)
+
+- **`driver::link_is_established`** — alias-resolving establishment gate
+  (CIRISEdge#342).
+- **`driver::link_destination`** — alias-resolving accessor for the destination
+  a link dialed (CIRISEdge#353).
+- **`FramesDropped` node event** — the driver emits `FramesDropped` with a
+  `FrameDropReason` instead of silently destroying in-flight frames when an
+  interface dies mid-send (#25). Being offered upstream.
+
 ## [Unreleased]
 
-### Added
+### Changed
 
-- The gap the LoRa interface leaves between two packets on the air is
-  settable without a reflash — `lnflash --set-tx-spacing <MS>`, envelope
-  frame `0x06`. The default imposes nothing (#345).
+- `just complete`, in the `extensive` tier, runs the whole workspace by
+  construction instead of the tiers naming packages; 327 tests were
+  executed by no gate (#194).
+- Test listener ports come from one counter per host, so concurrent test
+  processes are never handed the same port (#194).
+- `just standard` runs the `status_parity` two-daemon suite (#191).
+- The number of `#[ignore]`d tests is pinned per test unit and checked
+  in `just standard` (#191).
+- A connection accepted by a listener inherits the listener's
+  `ingress_control` instead of always having it off, and a listener
+  defaults it on as the reference does (#189).
+- `lnstest selftest` sizes its single-packet delivery window from the
+  link's own bitrate and pre-TX jitter ceiling instead of a fixed sleep,
+  and reports an expiry as a budget expiry rather than as loss (#190).
+- `lnstest -c <dir> selftest` asks the daemon that owns the radio for
+  that link profile; without it the phases keep the fixed wait (#190).
+- The drain budget prices the frame as it crosses the air, including the
+  address field a forwarder inserts, not as the tool packed it (#190).
+- `interface_stats` reports a radio interface's own on-air bitrate
+  instead of the TCP `BITRATE_GUESS`, and adds `tx_jitter_max` (#190).
+- `interface_stats` reports the listeners the daemon runs (shared
+  instance, TCP server) next to its routable interfaces, and names every
+  accepted connection like the reference does (#177).
+- Signing an LXMF message with a `NaN` or infinite timestamp is refused
+  (#184).
+- The LXMF router resolves wall time from `NodeCore::emission_secs`
+  instead of a `now_unix` parameter, and refuses to issue a ticket on a
+  node with no plausible clock (#182).
 
 ### Fixed
 
-- The LNode radio is listening again before a received frame is handed to
-  the stack, instead of after it has been processed.
-- The LoRa loop keeps a receive window that already has the parameters it
-  wants instead of standing it down and arming an identical one, so a
-  frame arriving 20 ms behind another is no longer ended mid-air by the
-  loop's own next decision (#276).
-- A telemetry report whose dispatch was lost is retried no sooner than the
-  policy's own `min_interval_ms`, instead of on the next main-loop tick
-  (#344).
+- `generate_stamp` refuses a cost above the 256-bit hash width instead
+  of searching for a stamp that cannot exist: `stamp_valid` rejects every
+  candidate at that cost, so the loop could not terminate at all and one
+  off-by-one past the legal maximum left the node permanently dead.
+- A `CoreProcessor`'s `on_tick` output is dispatched on its own instead
+  of being merged into the core's, so it no longer re-enters the event
+  tap, the `/status` responder — which answers on the strength of a
+  core-side authorisation that never ran for a synthesised request — or
+  the discovery registry, which would persist a synthesised announce.
+  The two hooks are now isolated identically (#196).
+- A `CoreProcessor` sees the `FramesDropped` its own send caused. The
+  notice is built inside `dispatch_output` and never passes through
+  `handle_packet`, so it was the one #25 loss signal a processor could
+  not learn any other way (#196).
+- The processor budget report is measured from inside the core lock, so
+  another thread's contention is no longer charged to a processor that
+  did nothing (#196).
+- A `next_deadline_ms` returned from `on_event` is honoured, as one
+  returned from `on_tick` already was (#196).
+- The `status_parity` freeze waits out the 1 Hz traffic sampler, so a
+  speed that has not been sampled yet is no longer read as an idle one
+  (#195).
+- Every gate wrapper keeps its full output on disk, and a failure's copy
+  survives the green runs after it (#195).
+- A targeted path response is transmitted once instead of twice, so a
+  requester no longer gets a duplicate announce five seconds later
+  (#192).
+- An LXMF message whose timestamp is any msgpack number, not only
+  float64, is accepted, and an unstamped payload is hashed as received
+  instead of re-encoded; both dropped messages from writers other than
+  Python LXMF (#183).
+- One direct LXMF delivery cycle now consumes one delivery attempt
+  instead of two, and a failed outgoing Resource tears its link down
+  before the retry; a receiver's cancel is terminal and keeps the link
+  (#179, contributed by nilu96).
+- A repeated propagation stamp request no longer writes an identical
+  router snapshot every processing interval (#179, contributed by
+  nilu96).
+- An announced LXMF stamp cost outside the reference's `0 < cost < 255`
+  window is no longer sent, and an announced 255 from a peer is no
+  longer mined; both would run forever (#181).
+- A re-originated recursive path request now honours the per-interface
+  egress limit, so an interface already saturated with path requests is
+  skipped instead of carrying every one (#172).
+- Creating a destination with a dot in `app_name` or an aspect is
+  rejected like the reference, closing a destination-hash collision
+  (#163).
+- A corrupt discovery record is warned about once per record instead of
+  on every scan pass (#157).
+- A path request for a destination hosted on a shared-instance client
+  is now forwarded to that client and answered with the client's fresh
+  path response instead of only the cached announce (#171).
+- A local destination that has not announced since process start now
+  answers its first path request instead of only the retry (#169).
+- A path request from the transport instance that is our own next hop
+  toward the requested destination is no longer answered, matching the
+  reference's loop-avoidance rule (#168).
+- The resource advertisement `o` field carries the salted per-transfer
+  hash like the reference, so a Python receiver can no longer append
+  two transfers of identical content into one reassembly file (#165).
+- Request timestamps carry epoch seconds from the emission timebase
+  instead of process uptime, so a Python peer's request handlers see a
+  real `requested_at` (#164).
 
-### Changed
+- UDPInterface accepts a hostname in `forward_ip` like rnsd, resolves
+  it at runtime with periodic re-resolution, and reports resolution
+  failures as interface errors instead of config errors (#148).
+- Announces now carry wall-clock unix time in the emission timestamp
+  instead of process uptime, so Python peers order our paths correctly
+  and a restarted node reclaims its own path entries (#155). Clockless
+  nodes (LNode) learn the timebase from received announces or a host
+  injection.
+- The learned emission timebase refuses implausible values, a single
+  announce can only advance an existing timebase by a bounded step,
+  and emitted timestamps saturate at the 40-bit field maximum, so a
+  crafted or wrong-clock announce can no longer capture a clockless
+  node's timebase or truncate its emissions (#160).
 
-- Every firmware debug line ends in `t=<uptime-ms>`, stamped on the board
-  when the line is formatted, so a capture measures the board and not the
-  USB drain loop (#344).
-
-- The firmware's outbound LoRa queue holds 64 packets or 6 KiB, whichever
-  binds first, instead of four packets; a refusal names which bound it hit
-  (#344).
-
-### Added
-
-- The firmware logs every arming of the receiver as `[SX_RX_ARM] site=
-  timeout_ms= dark_ms=`, so a capture says how long the radio was not
-  listening between two windows instead of leaving it to be inferred (#344).
-
-- Standing the receiver down logs `[SX_RX_TEARDOWN] site= preamble=
-  header= rxdone= armed_ms=` from every caller, `site=` naming the caller,
-  so a capture says whether a frame was already arriving when the window
-  came down (#276).
-
-- A receive window that is kept instead of re-armed logs `[SX_RX_ADOPT]
-  latched= preamble= header= rxdone= stood_ms=`, which counts the
-  receptions the previous firmware destroyed.
-
-- The firmware receives at boosted SX1262 gain and applies the errata-15.4
-  IQ correction, and prints both registers before and after it writes them
-  (`[SX_REG]`, `[SX_REG_IQ]`), so the change is visible in a capture rather
-  than taken on trust (#258).
-
-- The nRF firmware prints its transport counters every 30 s as
-  `[TRANSPORT] fwd= rx= tx= nopath= dup= overheard= maxhops= paths=`, so
-  a board that does not relay a packet says which decision discarded it
-  (#344).
-
-- A transport-id mismatch names both ids it compared, and a packet
-  dropped that way for a destination this node serves locally is
-  reported per packet instead of only counted (#344).
-
-- The lnflash bundle carries the RAK4631 as well as the T114, so a
-  WisMesh Pocket V2 can be flashed and configured from the tarball
-  (#261).
-
-- `just nrf-shellcheck` runs shellcheck over the flash-runner scripts and
-  is part of `just fast` (#345).
-
-- The Pocket V2 reports its position and battery over LXMF: an
-  announced `lxmf.delivery` destination, a target set by address alone
-  (the node resolves the key over the air and says `awaiting-key` until
-  it has), tracker and station cadence profiles, and one immediate
-  report when a target becomes usable (#236).
-
-- Every published artifact now carries `THIRD-PARTY-NOTICES`, generated
-  from the lockfiles, so the MIT- and BSD-licensed crates linked into
-  the binaries travel with their required notices (#288).
-
-- The GNSS wake ends with an explicit UBX-CFG-ANT step: antenna supply
-  on, every automatic power-down path off, so the init no longer
-  depends on what the factory clear left behind (#324).
-
-- The GNSS heartbeat reports satellites in view and best C/N0 (`sv=`,
-  `cno=`) from GSV, so a receiver that hears the sky but never fixes is
-  distinguishable from a deaf antenna (#324).
-
-- The Pocket V2 wakes its GNSS module at boot with a minimal UBX init
-  (factory clear, cold start, full power), so a persisted module
-  configuration from earlier firmware cannot suppress acquisition (#324).
-
-- One framed control envelope on the LNode USB channel (type, length,
-  named refusals, capability report); radio config and reset migrated,
-  legacy magics stay accepted for a transition window (#238).
-- `lnflash --set-time` teaches a running LNode wall time over the
-  envelope; the banner then reports `[TIME_SOURCE] source=host` (#166).
-- The Pocket V2 firmware seeds its calendar from the GNSS receiver's RMC
-  UTC, and every LNode states its time source (`[TIME_SOURCE]` beside
-  `[FW_BUILD]`) (#166).
-- Single-destination decrypt misses are now counted (`single-decrypt-fail`
-  in `PKT_DROP_SUMMARY`) and journey-logged instead of dropped silently.
-
-- `Destination::with_explicit_hash`: a Single destination indexed by a
-  caller-supplied 16-byte hash; never announced, reachable by direct link
-  only (#254).
-- Driver completion futures (`connect_awaited`, `send_resource_awaited`,
-  `send_request_awaited`) and a bounded multi-consumer event tap, replacing
-  consumer poll loops (#253).
-- `lnmsg`, a new LXMF messenger: `lnmsg send <address>` queues one message
-  through a running `lnsd`/`rnsd` shared instance and says nothing. Exit 0
-  means queued, never delivered.
-
-### Changed
-
-- The GNSS wake no longer forces a UBX-CFG-RST cold start on every boot,
-  so a reboot keeps the module's assistance data and refixes in seconds
-  instead of re-downloading the sky (#324).
-
-### Removed
-
-- The host-side airtime gate on the RNode interface (#121). Duty-cycle
-  enforcement is the firmware's; the host no longer holds packets back
-  when it sees the firmware's lock in `CMD_STAT_CHTM`.
-
-### Fixed
-
-- A frame the firmware could not hand to an interface is no longer lost
-  in silence: `DispatchResult` is `#[must_use]`, every call site reports
-  what it lost, an action addressed to an unknown interface is counted
-  as `no-such-interface` instead of vanishing, and a full outbound queue
-  says so at the interface (#344).
-
-- A telemetry report the dispatch lost no longer counts as sent, so the
-  next tick reports again instead of the node going quiet for a whole
-  cadence interval (#344).
-
-## [0.8.1] - 2026-08-16
+## [0.8.1] - 2026-08-12
 
 ### Added
 
-- `no_std` Telemeter codec in `leviculum-lxmf`: encode/decode of Sideband's
-  `FIELD_TELEMETRY` sensor map and `FIELD_TELEMETRY_STREAM` rows, with
-  golden vectors verified against Sideband and Columba (#237).
 - `lnflash`, a new LNode flashing tool: the full bootloader/SoftDevice
   sequence with Nordic's S140 7.3.0 vendored (licence included), refusal
   of an image that would soft-brick the board, `just lnflash-bundle` for
@@ -181,10 +182,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rendered as micron tables, per-day served-request counts.
 - lnomad: pictures drawn inline (Kitty/iTerm2/Sixel or half-blocks),
   with a bounded in-memory cache (`--image-cache`).
-- `api::NodeBuilder` installs a `CoreProcessor` and re-exports
-  `TickOutput`, so the facade covers the processor seam (#222, PAzter1101).
-- The LNode debug port replays the panic count and stored post-mortem
-  block on demand.
 
 ### Changed
 
@@ -207,52 +204,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-hashed outside it (#29 stage 1, emoore); a resource build can be
   handed to the caller, and superseded builds are refused (#196,
   PAzter1101).
-- Announce verify and single-destination decrypt run off the node lock
-  (#29 stages 2-3; #243, emoore); the verified memo is discarded when
-  the IFAC strip rewrites the bytes, and ratchet enforcement is read
-  live at the consume site.
 
 ### Fixed
-
-- `lnflash --set-time` and `--set-telemetry` run without a firmware
-  bundle on disk: the board catalogue is compiled into the binary and
-  only the flashing paths need images (#342).
-
-- The flash runner reads the firmware back off the board before it names
-  one, so the summary reports which board actually received the image
-  instead of whichever candidate its USB enumeration reached first
-  (#343).
-
-- The flash runner enumerates every attached bootloader volume and picks
-  the one whose `Board-ID` matches, instead of taking the first it finds,
-  so a board parked in its bootloader no longer blocks flashing every
-  other board; volumes it mounts are always unmounted again (#341).
-
-- The BLE interface waits for the SoftDevice notification queue to
-  drain instead of discarding the refusal, so a packet larger than one
-  fragment — every announce — reaches the peer; what still cannot be
-  sent is reported as `BLE_TX_DROP` (#264).
-
-- A relay forwards packets whose context byte it does not know instead
-  of dropping them at parse time; only local delivery abstains, counted
-  as `unknown-context` (#332).
-
-- Discovery announces are minted at stamp value 16, so RNS 1.5.0
-  listeners no longer discard them; the receive gate stays at 14 so
-  1.3.5 neighbours still decode (#328).
 
 - A transport relay forwards path-directed packets back onto the
   receiving interface, so multi-hop over a single shared LoRa channel
   delivers (A-B-C repeater).
-- Shared-medium relays no longer echo-storm a link: a link request is
-  transported only by its designated hop, link DATA repeats are
-  deduplicated, and same-interface echoes drop as `LinkRepeatEcho`
-  (#226, #227).
-- A local client no longer hears an echo of every link data packet it
-  sends through its relay (#226).
-- A relayed link's timeout is a rolling inactivity window: the
-  link-table entry refreshes on every repeat, so a held link survives
-  past 15 minutes (#226).
 - COMPAT: path handling matches the reference — a shared-instance
   client's destination answers with a fresh path response (#171), a
   never-announced local destination answers its first request (#169),
@@ -289,16 +246,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails any firmware frame above 16 KB.
 - lnomad sizes half-block pictures by half-block geometry and renders
   table cells as the inline micron they are.
-- COMPAT: HKDF derives past the RFC 5869 block limit, as Python does
-  (#225, PAzter1101).
-- A channel send past the u16 envelope wire ceiling is refused instead
-  of panicking with the node lock held (#242, emoore).
-- The 1200-baud flash touch writes GPREGRET through SoftDevice
-  syscalls (#249), and the RNG never falls back to peripheral
-  registers while the SoftDevice runs (#250).
-- The repository checks out on Windows: no ':' in committed fixture
-  paths (#244/#245, emoore); the supervised-spawn probe builds off
-  Linux (#246, emoore).
 
 ### Internal
 
