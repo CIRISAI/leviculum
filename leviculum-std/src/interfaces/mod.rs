@@ -838,13 +838,20 @@ mod tests {
         use leviculum_core::traits::Interface;
         let (mut h, _rx) = make_handle(11);
         let mut credit = AirtimeCredit::new(125_000, 10, 8, 500);
-        // Charge a full MTU at t=0 so `current() == threshold_ms`; any
-        // subsequent charge at t≈0 has to fail.
-        credit.try_charge(500, 0).expect("first charge should fit");
+        // Charge a full MTU at the SAME clock the send will read, so the
+        // exhaustion is measured relative to it. Charging at a fixed t=0 was
+        // flaky: now_ms() is ms since the clock's start instant, not 0, so in a
+        // long-running (parallel) test process it can be large enough that the
+        // bucket fully regenerates between t=0 and the send — and the follow-up
+        // charge then wrongly succeeds. Anchoring at now_ms() removes the race.
+        let now = now_ms();
+        credit
+            .try_charge(500, now)
+            .expect("first charge should fit");
         h.credit = Some(Arc::new(Mutex::new(credit)));
 
-        // Immediate follow-up: now_ms() is only slightly > 0, far below the
-        // regeneration needed to accept another charge. Expect BufferFull.
+        // Immediate follow-up at ~the same instant: no meaningful regeneration,
+        // so the second charge must fail. Expect BufferFull.
         let err = h
             .try_send_prioritized(&[0u8; 500], true)
             .expect_err("exhausted credit → BufferFull");
