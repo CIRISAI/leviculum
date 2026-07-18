@@ -1402,6 +1402,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 Some(d) => d,
                 None => continue,
             };
+            // Explicit-hash destinations are reachable only by direct link and
+            // must never announce (would emit a Python-RNS-rejected hash); skip
+            // silently rather than warn every management cycle.
+            if dest.is_explicit_hash() {
+                continue;
+            }
             let packet = match dest.announce(None, &mut self.rng, now_ms) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1771,6 +1777,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             if let Some(dest) = self.destinations.get_mut(dest_hash) {
+                // Explicit-hash destinations never announce (direct-link only).
+                if dest.is_explicit_hash() {
+                    continue;
+                }
                 match dest.announce(None, &mut self.rng, now_ms) {
                     Ok(packet) => {
                         let mut buf = [0u8; crate::constants::MTU];
