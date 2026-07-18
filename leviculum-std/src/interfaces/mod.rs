@@ -838,20 +838,22 @@ mod tests {
         use leviculum_core::traits::Interface;
         let (mut h, _rx) = make_handle(11);
         let mut credit = AirtimeCredit::new(125_000, 10, 8, 500);
-        // Charge a full MTU at the SAME clock the send will read, so the
-        // exhaustion is measured relative to it. Charging at a fixed t=0 was
-        // flaky: now_ms() is ms since the clock's start instant, not 0, so in a
-        // long-running (parallel) test process it can be large enough that the
-        // bucket fully regenerates between t=0 and the send — and the follow-up
-        // charge then wrongly succeeds. Anchoring at now_ms() removes the race.
-        let now = now_ms();
-        credit
-            .try_charge(500, now)
-            .expect("first charge should fit");
+        // Drive the bucket to its floor at a FAR-FUTURE instant, then let the
+        // send read the real clock. `try_send_prioritized` charges against the
+        // global `now_ms()`, which we can't inject; anchoring the exhaustion in
+        // the future means the send sees zero (saturating) elapsed against
+        // `last_update_ms`, so no wall-clock regeneration between here and the
+        // send can lift the bucket back over the threshold. This removes the
+        // timing race that made the test flaky on fast CI runners: at a fixed
+        // t=0 the bucket had already regenerated (now_ms() is ms-since-anchor,
+        // often large by the time this test runs), so the follow-up charge
+        // wrongly succeeded.
+        let exhaust_at = now_ms() + 60_000;
+        while credit.try_charge(500, exhaust_at).is_ok() {}
         h.credit = Some(Arc::new(Mutex::new(credit)));
 
-        // Immediate follow-up at ~the same instant: no meaningful regeneration,
-        // so the second charge must fail. Expect BufferFull.
+        // The bucket is at its floor as of a time strictly after any real
+        // now_ms() the send can read, so the next charge must fail.
         let err = h
             .try_send_prioritized(&[0u8; 500], true)
             .expect_err("exhausted credit → BufferFull");

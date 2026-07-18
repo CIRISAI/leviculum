@@ -5350,9 +5350,17 @@ mod tests {
             lora_slot > now_ms,
             "saturated LoRa should map to future slot, got {lora_slot} vs now {now_ms}"
         );
-        // Plain (idx=2, no credit): slot equals now_ms (trait default).
+        // Plain (idx=2, no credit): not deferred — its slot is "now or already
+        // past", never a future slot like the saturated LoRa above. We assert
+        // `<= now_ms` rather than `== now_ms`: `push_interface_state` records the
+        // slot against the `now_ms()` it read internally, which can be an
+        // earlier millisecond than the one this line reads on a fast runner, so
+        // exact equality raced. The invariant that matters is no future deferral.
         let plain_slot = core.lock().unwrap().next_slot_ms_for_interface(2, now_ms);
-        assert_eq!(plain_slot, now_ms, "non-LoRa should map to now_ms");
+        assert!(
+            plain_slot <= now_ms,
+            "non-LoRa must not be deferred to a future slot, got {plain_slot} vs now {now_ms}"
+        );
     }
 
     /// One LoRa-Serial handle at SF7 → Transport's
