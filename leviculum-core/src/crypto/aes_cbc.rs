@@ -41,20 +41,19 @@ fn pkcs7_pad(data: &[u8], output: &mut [u8]) -> usize {
     total_len
 }
 
-/// Remove PKCS7 padding and return valid length
+/// Remove Reticulum's PKCS7-style padding and return the valid length.
+///
+/// Python Reticulum validates only the final padding-length byte before
+/// truncating the authenticated plaintext. Mirror that behaviour here. This
+/// also accepts packets produced by microReticulum versions which zero-fill
+/// the preceding padding bytes instead of repeating the padding length.
 fn pkcs7_unpad(data: &[u8]) -> Result<usize, AesError> {
     if data.is_empty() {
         return Err(AesError::DecryptionFailed);
     }
     let padding_len = data[data.len() - 1] as usize;
-    if padding_len == 0 || padding_len > AES_BLOCK_SIZE || padding_len > data.len() {
+    if padding_len > AES_BLOCK_SIZE || padding_len > data.len() {
         return Err(AesError::DecryptionFailed);
-    }
-    // Verify all padding bytes are correct
-    for &byte in &data[data.len() - padding_len..] {
-        if byte as usize != padding_len {
-            return Err(AesError::DecryptionFailed);
-        }
     }
     Ok(data.len() - padding_len)
 }
@@ -337,16 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_padding_zero() {
-        // Padding byte of 0 is invalid
-        // Test pkcs7_unpad directly with invalid padding
+    fn test_zero_padding_length_matches_python_reticulum() {
         let mut bad_block = [0u8; 16];
-        bad_block[15] = 0; // Invalid padding value
+        bad_block[15] = 0;
 
-        // Create "ciphertext" that would decrypt to this bad padding
-        // Instead, let's test pkcs7_unpad directly
-        let result = pkcs7_unpad(&bad_block);
-        assert_eq!(result, Err(AesError::DecryptionFailed));
+        assert_eq!(pkcs7_unpad(&bad_block), Ok(16));
     }
 
     #[test]
@@ -360,17 +354,37 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_padding_inconsistent() {
-        // All padding bytes must be the same value
+    fn test_inconsistent_padding_matches_python_reticulum() {
         let mut bad_block = [0u8; 16];
-        // Claim 4 bytes of padding
         bad_block[15] = 4;
         bad_block[14] = 4;
         bad_block[13] = 4;
-        bad_block[12] = 3; // Inconsistent!
+        bad_block[12] = 3;
 
-        let result = pkcs7_unpad(&bad_block);
-        assert_eq!(result, Err(AesError::DecryptionFailed));
+        assert_eq!(pkcs7_unpad(&bad_block), Ok(12));
+    }
+
+    #[test]
+    fn test_decrypts_microreticulum_zero_filled_padding() {
+        let key = [0x42u8; 32];
+        let iv = [0x13u8; 16];
+        let plaintext = [0xabu8; 135];
+        let mut padded = [0u8; 144];
+        padded[..plaintext.len()].copy_from_slice(&plaintext);
+        // microReticulum pads with zero bytes and stores the padding length
+        // only in the last byte. For 135 bytes the padding length is 9.
+        padded[143] = 9;
+
+        let mut cipher =
+            Aes256CbcEnc::new_from_slices(&key, &iv).expect("fixed key and IV are valid");
+        for chunk in padded.chunks_exact_mut(AES_BLOCK_SIZE) {
+            cipher.encrypt_block_mut(chunk.into());
+        }
+
+        let mut decrypted = [0u8; 144];
+        let length = aes256_cbc_decrypt(&key, &iv, &padded, &mut decrypted).unwrap();
+        assert_eq!(length, plaintext.len());
+        assert_eq!(&decrypted[..length], &plaintext);
     }
 
     #[test]
