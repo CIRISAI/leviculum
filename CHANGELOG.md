@@ -5,6 +5,30 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- CIRIS fork releases carry a `+ciris.N` build-metadata marker so their tags
+never collide with upstream's own version line. Downstream (CIRISEdge) pins the
+git tag, not the version string. -->
+
+## [0.10.0+ciris.1] — CIRIS fork
+
+Re-anchored the CIRIS fork on upstream `Lew_Palm/leviculum` (master @ `fdf8d50`,
+crates `0.7.1`), adopting upstream's `reticulum-* → leviculum-*` crate rename.
+Everything the fork had upstreamed — explicit-hash destinations (#16),
+`AnnounceControl` suppression (#17), the `RNodeChannelFactory` byte-channel
+interface (#19), the `announce_app_data_budget` / `packed_size` announce fixes,
+the `destination_data` RPC (#12), and `send_on_link` — is now carried by
+upstream itself and dropped from the fork's patch series.
+
+### Carried forward (CIRIS-only, not yet upstream)
+
+- **`driver::link_is_established`** — alias-resolving establishment gate
+  (CIRISEdge#342).
+- **`driver::link_destination`** — alias-resolving accessor for the destination
+  a link dialed (CIRISEdge#353).
+- **`FramesDropped` node event** — the driver emits `FramesDropped` with a
+  `FrameDropReason` instead of silently destroying in-flight frames when an
+  interface dies mid-send (#25). Being offered upstream.
+
 ## [Unreleased]
 
 ### Changed
