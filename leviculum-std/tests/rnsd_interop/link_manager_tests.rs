@@ -1386,9 +1386,10 @@ async fn test_rust_to_rust_multiple_messages() {
 ///
 /// Link-request retry gives max(LINK_REQUEST_MAX_RETRIES, hops) = max(2, 1) = 2
 /// retries, so 3 total attempts. Each attempt resets the timeout to
-/// establishment_timeout_ms(). For hops=1, no bitrate: establishment_timeout_ms
-/// = 6000 * (1+1) = 12_000ms. We must exhaust all retries before the link is
-/// removed.
+/// establishment_timeout_ms(). For hops=1, no bitrate the base is
+/// 6000 * (1+1) = 12_000ms, plus the per-attempt #129 jitter (0..=25%,
+/// re-rolled per retry) — the test reads the live value per attempt.
+/// We must exhaust all retries before the link is removed.
 #[tokio::test]
 async fn test_manager_handshake_timeout() {
     let clock = SharedMockClock::new(1_000_000);
@@ -1406,10 +1407,13 @@ async fn test_manager_handshake_timeout() {
     assert_eq!(node.pending_link_count(), 1);
     assert!(node.link(&link_id).is_some());
 
-    // Three attempts × 12_000ms timeout each. Advance past each attempt
-    // and call handle_timeout() to trigger the retry/removal cycle.
+    // Three attempts, each with its own timeout. The base is 12_000ms but
+    // the #129 establishment jitter adds up to 25% and re-rolls per retry,
+    // so read the LIVE timeout from the link before each advance (the node's
+    // link accessor resolves the re-keyed id via aliases).
     // Attempt 1: times out → retry (remaining: 2 → 1)
-    clock_handle.advance(12_001);
+    let timeout_ms = node.link(&link_id).unwrap().establishment_timeout_ms();
+    clock_handle.advance(timeout_ms + 1);
     let _ = node.handle_timeout();
     assert!(
         node.link(&link_id).is_some(),
@@ -1417,7 +1421,8 @@ async fn test_manager_handshake_timeout() {
     );
 
     // Attempt 2: times out → retry (remaining: 1 → 0)
-    clock_handle.advance(12_001);
+    let timeout_ms = node.link(&link_id).unwrap().establishment_timeout_ms();
+    clock_handle.advance(timeout_ms + 1);
     let _ = node.handle_timeout();
     assert!(
         node.link(&link_id).is_some(),
@@ -1425,7 +1430,8 @@ async fn test_manager_handshake_timeout() {
     );
 
     // Attempt 3: times out → no retries left → link removed
-    clock_handle.advance(12_001);
+    let timeout_ms = node.link(&link_id).unwrap().establishment_timeout_ms();
+    clock_handle.advance(timeout_ms + 1);
     let output = node.handle_timeout();
 
     // Link should be removed
