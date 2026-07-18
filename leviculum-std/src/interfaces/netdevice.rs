@@ -111,22 +111,35 @@ pub(crate) fn resolve_if_broadcast(device: &str) -> io::Result<IpAddr> {
 mod tests {
     use super::*;
 
-    // The loopback interface is named `lo` on Linux and always carries
-    // 127.0.0.1 (v4) and ::1 (v6), so it is a stable target for asserting the
-    // resolver picks the right family without needing multi-NIC hardware.
-    const LOOPBACK: &str = "lo";
+    // The loopback interface is a stable target for asserting the resolver
+    // picks the right family without multi-NIC hardware — it always carries
+    // 127.0.0.1 (v4) and ::1 (v6). But its *device name* is platform-specific
+    // (`lo` on Linux, `lo0` on macOS, "Loopback Pseudo-Interface 1" on Windows),
+    // so resolve it from the same enumeration the production code uses rather
+    // than hardcoding the Linux name. This keeps the tests portable across the
+    // macOS/Windows CI lanes and exercises the real resolver on each OS's own
+    // loopback (`addrs_for_device` and this both go through `if_addrs`, so the
+    // name is guaranteed to round-trip).
+    fn loopback_device() -> String {
+        if_addrs::get_if_addrs()
+            .expect("enumerate interfaces")
+            .into_iter()
+            .find(|i| i.addr.ip().is_loopback())
+            .map(|i| i.name)
+            .expect("host must have a loopback interface")
+    }
 
     #[test]
     fn resolves_loopback_to_v4_by_default() {
-        let addr = resolve_if_bind_address(LOOPBACK, 4242, false)
-            .expect("lo should resolve to a bind address");
+        let addr = resolve_if_bind_address(&loopback_device(), 4242, false)
+            .expect("loopback should resolve to a bind address");
         assert_eq!(addr, "127.0.0.1:4242".parse().unwrap());
     }
 
     #[test]
     fn prefer_ipv6_selects_v6_on_loopback() {
-        let addr = resolve_if_bind_address(LOOPBACK, 4242, true)
-            .expect("lo should resolve to a v6 bind address");
+        let addr = resolve_if_bind_address(&loopback_device(), 4242, true)
+            .expect("loopback should resolve to a v6 bind address");
         assert_eq!(addr, "[::1]:4242".parse().unwrap());
     }
 
@@ -142,9 +155,9 @@ mod tests {
     #[test]
     fn resolved_loopback_address_is_bindable() {
         // Functional check: the resolved address is a real, bindable local
-        // address (the socket is bound as configured, on lo).
-        let addr = resolve_if_bind_address(LOOPBACK, 0, false).expect("resolve lo");
-        let listener = std::net::TcpListener::bind(addr).expect("bind resolved lo address");
+        // address (the socket is bound as configured, on the loopback).
+        let addr = resolve_if_bind_address(&loopback_device(), 0, false).expect("resolve loopback");
+        let listener = std::net::TcpListener::bind(addr).expect("bind resolved loopback address");
         assert_eq!(
             listener.local_addr().expect("local_addr").ip(),
             "127.0.0.1".parse::<IpAddr>().unwrap()
