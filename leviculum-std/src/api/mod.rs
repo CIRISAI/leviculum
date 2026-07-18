@@ -538,7 +538,14 @@ mod tests {
     fn version_matches_crate() {
         let (major, minor, patch) = version();
         let s = format!("{major}.{minor}.{patch}");
-        assert_eq!(s, version_string());
+        // CIRIS fork tags carry a `+ciris.N` build-metadata suffix (and a
+        // pre-release could carry `-rc.N`); neither is part of the
+        // (major, minor, patch) triple, so compare against the base version.
+        let base = version_string()
+            .split(['+', '-'])
+            .next()
+            .unwrap_or(version_string());
+        assert_eq!(s, base);
     }
 
     #[test]
