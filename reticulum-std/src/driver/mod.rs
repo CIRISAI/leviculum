@@ -1959,6 +1959,37 @@ impl ReticulumNode {
         Ok(resource_hash)
     }
 
+    /// Send `data` as a PLAIN LINK PACKET on an existing link (leviculum#27 /
+    /// CIRISEdge#353 ask #2).
+    ///
+    /// Unlike [`Self::send_resource`], this does NOT contend with an in-flight
+    /// resource transfer: `send_on_link` goes through the link's `Channel` and
+    /// never consults `has_outgoing_resource()`, so a small control reply (an
+    /// anti-entropy Summary/Diff) interleaves a busy link instead of being
+    /// refused `TransferInProgress`. The reverse path a NAT'd initiator depends
+    /// on needs exactly this: its only reachability is its live inbound link,
+    /// and that link is routinely mid-transfer when a reply must go out.
+    ///
+    /// Data MUST fit the link MDU ([`Self::link_mdu`]) — a plain packet is not
+    /// chunked; oversized data belongs on a resource. `SendError::Busy` /
+    /// `PacingDelay` are TRANSIENT channel backpressure (the caller may retry),
+    /// distinct from the hard one-resource-per-link gate.
+    ///
+    /// # Errors
+    /// [`Error::Send`] on no link / too-large / channel failure; [`Error::NotRunning`]
+    /// if the event loop has stopped.
+    pub async fn send_on_link(&self, link_id: &LinkId, data: &[u8]) -> Result<(), Error> {
+        let output = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.send_on_link(link_id, data).map_err(Error::Send)?
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
+    }
+
     /// Set the resource acceptance strategy for a link.
     ///
     /// # Arguments
