@@ -66,16 +66,7 @@ exclude = ["leviculum-nrf", "leviculum-esp", "vendor/crossterm"]
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-# The development window, not a release. Every build between 0.9.0 and
-# 0.10.0 says so, so a package installed anywhere reads as on the way to
-# something instead of claiming a release it is not. The tag for 0.9.0
-# points at the commit below this one; this line opens the window after it.
-#
-# `-dev` is the semver spelling. Debian reads a `-` as the start of a
-# Debian revision and sorts it ABOVE the release, so the packaging
-# translates it to `~` when it derives a Debian version — the comparison
-# is run, not reasoned, in scripts/deb-stamp.sh and its selftest.
-version = "0.10.0-dev"
+version = "0.10.0+ciris.1"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
