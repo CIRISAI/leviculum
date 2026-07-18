@@ -2478,6 +2478,29 @@ impl ReticulumNode {
         self.inner.lock_recover().pending_link_count()
     }
 
+    /// Whether the link `link_id` is ESTABLISHED (handshake complete → `Active`).
+    ///
+    /// Resolves the `link_id` through the `#66` re-key alias table
+    /// (`link()` → `resolve_link_id`), so a caller holding the ORIGINAL id from
+    /// `connect` still gets a correct answer after an establishment-retry re-key
+    /// (Codeberg #66) that re-keyed the link under a fresh wire id. Returns
+    /// `false` for an unknown link OR a link still `Pending` (i.e. inserted by
+    /// `connect` but not yet handshake-complete) — unlike a raw `links.contains`
+    /// or `link_negotiated_mtu(..).is_some()`, both of which are true for a
+    /// pending link too.
+    ///
+    /// This is the establishment gate a sender must poll before `send_resource`:
+    /// a consumer tracking establishment by its own event-populated set keyed on
+    /// the original id misses the re-keyed id the `LinkEstablished` event
+    /// carries, waits forever, and never sends (CIRISEdge#342).
+    pub fn link_is_established(&self, link_id: &LinkId) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .link(link_id)
+            .is_some_and(leviculum_core::link::Link::is_active)
+    }
+
     /// Get the node's identity hash (16 bytes)
     pub fn identity_hash(&self) -> [u8; 16] {
         *self.inner.lock_recover().identity().hash()
@@ -2498,6 +2521,30 @@ impl ReticulumNode {
             .lock_recover()
             .link(link_id)
             .map(|l| l.negotiated_mtu())
+    }
+
+    /// The DESTINATION a link points at — the dest hash the initiator dialed
+    /// (`Link::destination_hash()`). Resolves `link_id` through the `#66`
+    /// re-key alias table (`link()` → `resolve_link_id`), so a caller holding
+    /// either the original id from `connect` or the re-keyed id an event
+    /// carried gets the same answer.
+    ///
+    /// Returns `None` if the link does not exist.
+    ///
+    /// Rationale (CIRISEdge#353): a link INITIATOR receiving data back over
+    /// its own dialed link needs to attribute the sender. It cannot rely on a
+    /// `LinkIdentified` event (only the initiator may identify a link, so the
+    /// responder's reply direction never produces one) and it cannot key state
+    /// on the original link id (a `#66` establishment-retry re-keys the link
+    /// under a fresh wire id, and later events carry the re-keyed id). The
+    /// stateless, re-key-proof basis is the link's destination: the initiator
+    /// knows which dest it dialed and can map that dest back to a peer.
+    pub fn link_destination(&self, link_id: &LinkId) -> Option<DestinationHash> {
+        self.inner
+            .lock()
+            .unwrap()
+            .link(link_id)
+            .map(|l| *l.destination_hash())
     }
 
     /// Get the encrypted link MDU (maximum data unit) for a link
