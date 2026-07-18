@@ -1,0 +1,201 @@
+# GitHub Actions CI for Leviculum (CIRIS fork).
+#
+# Mirrors the CIRIS "substrate sisters" CI *pattern* (CIRISEdge / CIRISPersist /
+# CIRISVerify): GitHub Actions on push+PR, dtolnay/rust-toolchain +
+# Swatinem/rust-cache, a clippy+fmt `-D warnings` gate, a cargo-deny license/
+# advisory audit, and a real multi-platform matrix. It is CIRIS-fork-only infra
+# (upstream Lew_Palm/leviculum runs Woodpecker nightly, not per-PR CI).
+#
+# Crate names track upstream's reticulum-* -> leviculum-* rename; reticulum-integ
+# is the one crate upstream did NOT rename.
+#
+# The `cross-check` job is a pre-flight for CIRISEdge: edge consumes
+# leviculum-core/std as Rust source crates and recompiles them for each of its
+# targets (android ABIs, iOS). Checking leviculum-core on those targets HERE
+# catches a Leviculum change that breaks an Edge target before Edge's much
+# heavier NDK/maturin pipeline hits it.
+#
+# Submodule note: lnomad `include_str!`s reference/Reticulum/README.mu at compile
+# time, and the rnsd_interop harness uses the vendored reference Reticulum as its
+# Python-RNS peer, so jobs that compile the full workspace or run interop init
+# that one submodule explicitly (public GitHub, no auth).
+
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── lint: clippy + fmt (rejection gate) ────────────────────────────
+  lint:
+    name: clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # lnomad include_str!s reference/Reticulum at compile time, so a
+      # --workspace clippy needs the submodule present.
+      - name: init reference/Reticulum submodule
+        run: git submodule update --init reference/Reticulum
+      # musl-gcc: the workspace defaults to x86_64-unknown-linux-musl
+      # (.cargo/config.toml), so every cargo invocation needs the musl linker.
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      # -D warnings is scoped to clippy (not a global RUSTFLAGS) so upstream
+      # dependency warnings don't fail the gate — only our own code does.
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace -- -D warnings
+
+  # ─── test-linux: core + std unit tests (musl) ───────────────────────
+  test-linux:
+    name: test linux-x86_64 (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test -p leviculum-core --lib
+        run: cargo test -p leviculum-core --lib
+      - name: cargo test -p leviculum-std --lib
+        run: cargo test -p leviculum-std --lib
+
+  # ─── interop: real Python-RNS CLI tools vs the Rust daemon ──────────
+  # Uses the vendored reference Reticulum (reallew fork, tracks upstream RNS) as
+  # the Python-RNS peer — the source the harness self-initializes and the peer
+  # upstream's own nightly tests against. (Testing additionally against a stock
+  # PyPI RNS would need the fork's pip-fallback resolver ported forward.)
+  interop:
+    name: rnsd interop (vendored reference RNS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: init reference/Reticulum submodule
+        run: git submodule update --init reference/Reticulum
+      - name: install musl-tools + python3
+        run: sudo apt-get update && sudo apt-get install -y musl-tools python3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test -p leviculum-std --test rnsd_interop
+        run: cargo test -p leviculum-std --test rnsd_interop
+
+  # ─── macos: exercise the non-Linux filesystem-socket path ───────────
+  # Leviculum falls back to filesystem sockets on non-Linux. CARGO_BUILD_TARGET
+  # overrides the musl default for the native Apple-silicon target.
+  macos:
+    name: test darwin-aarch64
+    runs-on: macos-14
+    env:
+      CARGO_BUILD_TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false   # avoid the rustup-init shim cache-poison on macOS
+      - name: cargo test (core + std libs)
+        run: |
+          cargo test -p leviculum-core --lib
+          cargo test -p leviculum-std --lib
+
+  # ─── windows: the crates CIRISEdge's pyo3 wheel consumes ────────────
+  # leviculum-core + leviculum-std must build on windows-x86_64 so edge/lens can
+  # ship Windows wheels. CARGO_BUILD_TARGET overrides the workspace musl default
+  # for the native MSVC target.
+  windows:
+    name: test windows-x86_64 (msvc)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build (core + std)
+        run: |
+          cargo build -p leviculum-core
+          cargo build -p leviculum-std
+      - name: cargo test (core + std libs)
+        run: |
+          cargo test -p leviculum-core --lib
+          cargo test -p leviculum-std --lib
+
+  # ─── embedded: no_std core cross-build for MCU targets ──────────────
+  # leviculum-core is no_std and must keep building for the firmware targets.
+  # thumbv7em (nrf52, Cortex-M4) has atomic CAS, so it builds with the default
+  # feature set. thumbv6m (rp2040, Cortex-M0/M0+) lacks atomic CAS (which
+  # tracing-core requires), so it builds --no-default-features (core's tracing
+  # feature off; the level macros become no-ops via the lib.rs shim).
+  embedded:
+    name: build leviculum-core (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: thumbv7em-none-eabihf, args: "" }
+          - { target: thumbv6m-none-eabi, args: "--no-default-features" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: embedded-${{ matrix.target }}
+      - name: cargo build -p leviculum-core --target ${{ matrix.target }}
+        run: cargo build -p leviculum-core --target ${{ matrix.target }} ${{ matrix.args }}
+
+  # ─── cross-check: pre-flight leviculum-core on CIRISEdge's targets ──
+  # `cargo check` (no link → no NDK needed) on the targets edge cross-compiles
+  # leviculum-core for. A Leviculum change that breaks one of these fails here,
+  # not in Edge's heavier NDK/maturin pipeline.
+  cross-check:
+    name: cross-check core (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android
+          - x86_64-linux-android
+          - armv7-linux-androideabi
+          - aarch64-apple-ios
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-check-${{ matrix.target }}
+      - name: cargo check -p leviculum-core --target ${{ matrix.target }}
+        run: cargo check -p leviculum-core --target ${{ matrix.target }}
+
+  # ─── license-audit: cargo-deny (licenses + advisories) ──────────────
+  # Leviculum is AGPL-3.0-or-later; this flags incompatible dependency licenses
+  # and RUSTSEC advisories.
+  license-audit:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
