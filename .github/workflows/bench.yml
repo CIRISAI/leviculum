@@ -60,23 +60,32 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build the benchmark
-        run: cargo test -p leviculum-std --test transport_fanout_bench --no-run
+      - name: Build the benchmark (release — what the field runs)
+        run: cargo test --release -p leviculum-std --test transport_fanout_bench --no-run
 
       - name: Run the fan-out sweep, emit bench_results.json
         run: |
           GIT_COMMIT="$GITHUB_SHA" \
           BENCH_DATE="$(date -u +%Y-%m-%d)" \
-          BENCH_RUNNER="github/ubuntu-latest" \
+          BENCH_RUNNER="github/ubuntu-latest (release)" \
           BENCH_JSON_OUT="$PWD/bench_results.json" \
-            cargo test -p leviculum-std --test transport_fanout_bench \
-              -- --ignored --nocapture
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              transport_fanout_sweep -- --ignored --nocapture
           echo "── emitted bench_results.json ──"; cat bench_results.json
+
+      - name: Run the outbound-under-flood mode (sealed-envelope field case)
+        run: |
+          FLOOD_N=20 RESOURCE_KIB=1024 RESOURCE_SENDS=10 COMPRESS=1 \
+          BENCH_JSON_OUT_OUTBOUND="$PWD/bench_outbound.json" \
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              outbound_resource_latency_under_flood -- --ignored --nocapture
+          echo "── emitted bench_outbound.json ──"; cat bench_outbound.json
 
       - name: Render the interpreted page
         run: |
           python3 scripts/bench_report.py \
             --bench-results bench_results.json \
+            --outbound-results bench_outbound.json \
             --out bench-site \
             --commit "$GITHUB_SHA" \
             --date "$(date -u +%Y-%m-%d)"
@@ -87,6 +96,7 @@ jobs:
           name: bench-results
           path: |
             bench_results.json
+            bench_outbound.json
             bench-site
           if-no-files-found: error
 
