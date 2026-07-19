@@ -62,3 +62,7 @@ scripts/deploy-*.fish
 # Claude Code local state (never leaves this machine — see pre-push guard)
 .claude/
 
+
+# CI-generated bench report (deployed to Pages, not committed)
+/bench-site/
+/bench_results.json
