@@ -1747,6 +1747,18 @@ impl Link {
         self.link_key.as_ref()
     }
 
+    /// Snapshot the link-derived inputs a resource build needs, so the
+    /// CPU-heavy build can run without holding a borrow of this link (or the
+    /// node lock above it) — leviculum#29.
+    pub(crate) fn resource_crypt_params(&self) -> crate::resource::ResourceCryptParams {
+        crate::resource::ResourceCryptParams {
+            active: self.is_active(),
+            negotiated_mtu: self.negotiated_mtu(),
+            mdu: self.mdu(),
+            token_key: self.link_key,
+        }
+    }
+
     /// Build the complete link request packet data with MTU signaling.
     ///
     /// Always includes 3-byte signaling bytes (67-byte payload) for interop

@@ -3007,11 +3007,44 @@ impl ReticulumNode {
         metadata: Option<&[u8]>,
         auto_compress: bool,
     ) -> Result<[u8; 32], Error> {
-        let (resource_hash, output) = {
-            let mut inner = self.inner.lock_recover();
-            inner
-                .send_resource(link_id, data, metadata, auto_compress)
-                .map_err(Error::Resource)?
+        // Phased so the CPU-heavy resource build — bz2 compress, bulk token
+        // encrypt, full/map hashing — runs OUTSIDE the node mutex
+        // (leviculum#29). Before this split, a round-sized send_resource held
+        // the one lock for the whole build, blocking every inbound
+        // decrypt/route and every other outbound call for milliseconds at a
+        // time. Now the lock is held only to snapshot params and to install
+        // the finished transfer.
+        //
+        // If the link re-keys mid-build (#66), commit refuses the stale
+        // ciphertext with LinkStateChanged; rebuild once against fresh params.
+        let mut attempts = 0;
+        let (resource_hash, output) = loop {
+            let params = {
+                let inner = self.inner.lock_recover();
+                inner
+                    .resource_send_params(link_id)
+                    .map_err(Error::Resource)?
+            };
+            let prepared = leviculum_core::resource::prepare_resource_send(
+                &params,
+                data,
+                metadata,
+                auto_compress,
+                &mut rand_core::OsRng,
+            )
+            .map_err(Error::Resource)?;
+            let committed = {
+                let mut inner = self.inner.lock_recover();
+                inner.commit_resource_send(prepared)
+            };
+            match committed {
+                Ok(pair) => break pair,
+                Err(leviculum_core::resource::ResourceError::LinkStateChanged) if attempts == 0 => {
+                    attempts += 1;
+                    continue;
+                }
+                Err(e) => return Err(Error::Resource(e)),
+            }
         };
         self.action_dispatch_tx
             .send(output)
@@ -3302,9 +3335,16 @@ async fn run_event_loop(
                             iface_id,
                             registry.name_of(iface_id),
                         );
+                        // Dedup SHA-256 is a pure function of the raw bytes —
+                        // compute it BEFORE taking the node lock so it never
+                        // contributes to the serialized critical section
+                        // (leviculum#29). Core recomputes it itself in the one
+                        // case the bytes change under it (IFAC strip).
+                        let pre_hash = leviculum_core::packet::packet_hash(&pkt.data);
                         let (output, now_ms) = {
                             let mut core = inner.lock_recover();
-                            let output = core.handle_packet(iface_id, &pkt.data);
+                            let output =
+                                core.handle_packet_prehashed(iface_id, &pkt.data, pre_hash);
                             let now_ms = core.now_ms();
                             (output, now_ms)
                         };

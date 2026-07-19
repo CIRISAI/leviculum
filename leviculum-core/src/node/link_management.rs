@@ -2604,7 +2604,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let Some(link) = self.links.get(link_id) else {
                 return SegmentAdvance::Done { total_segments };
             };
-            plan.build_segment(index, link, &mut self.rng, now_ms)
+            plan.build_segment(index, &link.resource_crypt_params(), &mut self.rng, now_ms)
         };
 
         let outgoing = match build {
