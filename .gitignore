@@ -60,3 +60,7 @@ scripts/deploy-*.fish
 .claude/scheduled_tasks.lock
 .claude/projects/
 
+
+# CI-generated bench report (deployed to Pages, not committed)
+/bench-site/
+/bench_results.json
