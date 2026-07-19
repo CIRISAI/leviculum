@@ -87,13 +87,15 @@ struct Client {
 
 /// Spin up the serve node: TCP server, one registered destination, an event
 /// drain that counts inbound `LinkDataReceived`. Returns the node, its dest
-/// hash + signing key, the shared inbound counter, and the drain handle.
+/// hash + signing key, the shared inbound counter, the responder-side link ids
+/// (as clients establish), and the drain handle.
 async fn build_serve_node() -> (
     ReticulumNode,
     SocketAddr,
     leviculum_core::DestinationHash,
     [u8; 32],
     Arc<AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<leviculum_core::link::LinkId>>>,
     tokio::task::JoinHandle<()>,
 ) {
     let addr: SocketAddr = format!("127.0.0.1:{}", next_port()).parse().unwrap();
@@ -124,6 +126,8 @@ async fn build_serve_node() -> (
 
     let received = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&received);
+    let responder_links = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let links_sink = Arc::clone(&responder_links);
     let mut rx = node.take_event_receiver().expect("serve event rx");
     let drain = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
@@ -131,45 +135,37 @@ async fn build_serve_node() -> (
             // (`MessageReceived`); `LinkDataReceived` is the raw non-channel
             // variant. Count both so the metric tracks decrypted+routed link
             // payloads regardless of framing.
-            if matches!(
-                ev,
-                NodeEvent::LinkDataReceived { .. } | NodeEvent::MessageReceived { .. }
-            ) {
-                counter.fetch_add(1, Ordering::Relaxed);
+            match ev {
+                NodeEvent::LinkDataReceived { .. } | NodeEvent::MessageReceived { .. } => {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                NodeEvent::LinkEstablished {
+                    link_id,
+                    is_initiator: false,
+                } => {
+                    links_sink.lock().unwrap().push(link_id);
+                }
+                _ => {}
             }
         }
     });
 
-    (node, addr, hash, signing_key, received, drain)
+    (
+        node,
+        addr,
+        hash,
+        signing_key,
+        received,
+        responder_links,
+        drain,
+    )
 }
 
 async fn run_level(n: usize, packets: usize, payload: usize) -> LevelResult {
-    let (serve, serve_addr, hash, signing_key, received, _serve_drain) = build_serve_node().await;
+    let (serve, serve_addr, hash, signing_key, received, _links, _serve_drain) =
+        build_serve_node().await;
 
-    // Bring all clients' TCP connections up first, then announce once so every
-    // connected client can install the path from the same announce.
-    let mut connecting = Vec::with_capacity(n);
-    for _ in 0..n {
-        connecting.push(bring_up_client_tcp_only(serve_addr).await);
-    }
-    // Settle the TCP peerings, then announce.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    serve
-        .announce_destination(&hash, Some(b"bench"))
-        .await
-        .expect("serve announce");
-
-    // Finish establishment for each client concurrently.
-    let mut tasks = Vec::with_capacity(n);
-    for node in connecting.into_iter().flatten() {
-        tasks.push(tokio::spawn(finish_client(node, hash, signing_key)));
-    }
-    let mut clients = Vec::with_capacity(n);
-    for t in tasks {
-        if let Ok(Some(c)) = t.await {
-            clients.push(c);
-        }
-    }
+    let clients = bring_up_fleet(&serve, serve_addr, hash, signing_key, n).await;
     let established = clients.len();
     eprintln!("[bench] N={n}: established {established}/{n} links");
 
@@ -229,6 +225,42 @@ async fn run_level(n: usize, packets: usize, payload: usize) -> LevelResult {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     result
+}
+
+/// Bring up N clients against the serve node: TCP first, one announce, then
+/// concurrent path-install + link establishment. Returns the established set.
+async fn bring_up_fleet(
+    serve: &ReticulumNode,
+    serve_addr: SocketAddr,
+    hash: leviculum_core::DestinationHash,
+    signing_key: [u8; 32],
+    n: usize,
+) -> Vec<Client> {
+    // Bring all clients' TCP connections up first, then announce once so every
+    // connected client can install the path from the same announce.
+    let mut connecting = Vec::with_capacity(n);
+    for _ in 0..n {
+        connecting.push(bring_up_client_tcp_only(serve_addr).await);
+    }
+    // Settle the TCP peerings, then announce.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    serve
+        .announce_destination(&hash, Some(b"bench"))
+        .await
+        .expect("serve announce");
+
+    // Finish establishment for each client concurrently.
+    let mut tasks = Vec::with_capacity(n);
+    for node in connecting.into_iter().flatten() {
+        tasks.push(tokio::spawn(finish_client(node, hash, signing_key)));
+    }
+    let mut clients = Vec::with_capacity(n);
+    for t in tasks {
+        if let Ok(Some(c)) = t.await {
+            clients.push(c);
+        }
+    }
+    clients
 }
 
 /// Bring up only the client node + TCP connection (no path/link yet).
@@ -330,6 +362,138 @@ async fn transport_fanout_sweep() {
     // schema): one file, published as an artifact and rendered to GitHub Pages.
     if let Ok(path) = std::env::var("BENCH_JSON_OUT") {
         write_bench_json(&path, packets, payload, &results);
+        eprintln!("[bench] wrote {path}");
+    }
+}
+
+/// Mode 2 — the field symptom (leviculum#29 / CIRISEdge#370): outbound
+/// `send_resource` latency while N links flood the node inbound.
+///
+/// Today `send_resource` runs the whole resource build — bulk encrypt + full
+/// hash + per-part map hash (and bz2 when compressing) — INSIDE the one
+/// `Mutex<StdNodeCore>` critical section, so each call both stalls behind the
+/// inbound flood's lock holds and, worse, blocks ALL inbound decrypt/route for
+/// the duration of the build (ms-scale for round-sized payloads). This mode
+/// measures both directions of that exclusion: the `send_resource()` call
+/// latency distribution, and the inbound throughput dip while sends happen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "load benchmark; run explicitly with --ignored --nocapture"]
+async fn outbound_resource_latency_under_flood() {
+    let n = env_usize("FLOOD_N", 20);
+    let payload = env_usize("PAYLOAD", 64);
+    let resource_kib = env_usize("RESOURCE_KIB", 256);
+    let sends = env_usize("RESOURCE_SENDS", 20);
+
+    let (serve, serve_addr, hash, signing_key, received, responder_links, _drain) =
+        build_serve_node().await;
+    let clients = bring_up_fleet(&serve, serve_addr, hash, signing_key, n).await;
+    eprintln!("[bench] flood_n={n}: established {}/{n}", clients.len());
+    assert!(!clients.is_empty(), "no links established");
+
+    // Continuous inbound flood until stopped.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut senders = Vec::new();
+    for c in &clients {
+        let handle = c.node.link_handle(&c.link_id);
+        let data = vec![0xABu8; payload];
+        let stop2 = Arc::clone(&stop);
+        senders.push(tokio::spawn(async move {
+            while !stop2.load(Ordering::Relaxed) {
+                if handle.try_send(&data).await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        }));
+    }
+
+    // Warm up, then measure the inbound baseline rate with no outbound sends.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let b0 = received.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let baseline_rate = (received.load(Ordering::Relaxed) - b0) as f64 / 3.0;
+
+    // Resource phase: send a round-sized blob on responder links (round-robin,
+    // so TransferInProgress from an earlier in-flight transfer is avoided while
+    // sends <= links), measuring each send_resource() call's wall latency.
+    //
+    // auto_compress=false: bz2 of an incompressible blob would dominate the
+    // build and then be discarded; the deterministic cost we care about is the
+    // bulk encrypt + hashing.
+    let rlinks = responder_links.lock().unwrap().clone();
+    assert!(!rlinks.is_empty(), "no responder links captured");
+    // COMPRESS=1: auto_compress on with an incompressible (pseudo-random)
+    // blob — the sealed-envelope field case, where bz2 burns CPU and is then
+    // discarded because ciphertext doesn't compress. Default: compressible
+    // constant fill with compression off (deterministic encrypt+hash cost).
+    let compress = std::env::var("COMPRESS").is_ok_and(|v| v == "1");
+    let blob: Vec<u8> = if compress {
+        let mut b = vec![0u8; resource_kib * 1024];
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        for c in b.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *c = x as u8;
+        }
+        b
+    } else {
+        vec![0x5Au8; resource_kib * 1024]
+    };
+    let mut lat_ms: Vec<f64> = Vec::new();
+    let mut send_errs = 0usize;
+    let r0 = received.load(Ordering::Relaxed);
+    let t_phase = Instant::now();
+    for i in 0..sends {
+        let lid = rlinks[i % rlinks.len()];
+        let t0 = Instant::now();
+        match serve.send_resource(&lid, &blob, None, compress).await {
+            Ok(_) => lat_ms.push(t0.elapsed().as_secs_f64() * 1000.0),
+            Err(_) => send_errs += 1,
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let phase_s = t_phase.elapsed().as_secs_f64();
+    let during_rate = (received.load(Ordering::Relaxed) - r0) as f64 / phase_s;
+    stop.store(true, Ordering::Relaxed);
+    for s in senders {
+        s.abort();
+    }
+
+    lat_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |f: f64| -> f64 {
+        if lat_ms.is_empty() {
+            0.0
+        } else {
+            lat_ms[((lat_ms.len() - 1) as f64 * f) as usize]
+        }
+    };
+    let (p50, p95, max) = (q(0.5), q(0.95), q(1.0));
+    let dip_pct = if baseline_rate > 0.0 {
+        (1.0 - during_rate / baseline_rate) * 100.0
+    } else {
+        0.0
+    };
+
+    println!();
+    println!("outbound send_resource under flood — leviculum#29 mode 2");
+    println!(
+        "flood: {} links x {payload}B | resource: {resource_kib} KiB x {} sends ({send_errs} errs)",
+        clients.len(),
+        lat_ms.len(),
+    );
+    println!("send_resource latency ms: p50={p50:.1} p95={p95:.1} max={max:.1}");
+    println!(
+        "inbound pkts/s: baseline={baseline_rate:.0} during-sends={during_rate:.0} (dip {dip_pct:.0}%)"
+    );
+    println!();
+
+    if let Ok(path) = std::env::var("BENCH_JSON_OUT_OUTBOUND") {
+        let json = format!(
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"outbound_resource_under_flood\",\n  \"issue\": \"leviculum#29\",\n  \"params\": {{\"flood_links\": {}, \"payload_bytes\": {payload}, \"resource_kib\": {resource_kib}, \"sends\": {}}},\n  \"send_latency_ms\": {{\"p50\": {p50:.2}, \"p95\": {p95:.2}, \"max\": {max:.2}}},\n  \"inbound_pkts_s\": {{\"baseline\": {baseline_rate:.1}, \"during_sends\": {during_rate:.1}, \"dip_pct\": {dip_pct:.1}}}\n}}\n",
+            clients.len(),
+            lat_ms.len(),
+        );
+        std::fs::write(&path, json).expect("write outbound bench json");
         eprintln!("[bench] wrote {path}");
     }
 }
