@@ -1,0 +1,100 @@
+name: bench
+
+# Runs the native transport fan-out benchmark (leviculum#29), turns the sweep
+# into an interpreted page (throughput-vs-active-links, with the serialization
+# ceiling drawn in), and publishes to GitHub Pages. Mirrors CIRISServer's
+# publish-only bench discipline — a published TREND, not a pass/fail gate
+# (shared runners are noisy) — with an interpretation layer on top
+# (scripts/bench_report.py).
+#
+# Published at: https://cirisai.github.io/leviculum/
+# One-time: Settings -> Pages -> Source = "GitHub Actions" (the configure-pages
+# step sets enablement: true to do this automatically on first run).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "leviculum-std/tests/transport_fanout_bench.rs"
+      - "scripts/bench_report.py"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-flight Pages deploy; let bench runs serialize.
+concurrency:
+  group: bench-pages
+  cancel-in-progress: false
+
+jobs:
+  bench-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      # Conservative sweep for a shared runner: enough points to show the
+      # plateau without a long tail of many-node setups. Tune via re-dispatch.
+      SIZES: "1 10 20 40"
+      PACKETS: "300"
+      PAYLOAD: "64"
+      LOAD_DEADLINE: "90"
+    steps:
+      - uses: actions/checkout@v4
+      # The workspace defaults to x86_64-unknown-linux-musl (.cargo/config.toml),
+      # so every cargo invocation needs the musl linker.
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the benchmark
+        run: cargo test -p leviculum-std --test transport_fanout_bench --no-run
+
+      - name: Run the fan-out sweep, emit bench_results.json
+        run: |
+          GIT_COMMIT="$GITHUB_SHA" \
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+          BENCH_RUNNER="github/ubuntu-latest" \
+          BENCH_JSON_OUT="$PWD/bench_results.json" \
+            cargo test -p leviculum-std --test transport_fanout_bench \
+              -- --ignored --nocapture
+          echo "── emitted bench_results.json ──"; cat bench_results.json
+
+      - name: Render the interpreted page
+        run: |
+          python3 scripts/bench_report.py \
+            --bench-results bench_results.json \
+            --out bench-site \
+            --commit "$GITHUB_SHA" \
+            --date "$(date -u +%Y-%m-%d)"
+
+      - name: Upload bench_results.json + rendered site as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            bench_results.json
+            bench-site
+          if-no-files-found: error
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: bench-site
+      - id: deploy
+        uses: actions/deploy-pages@v4
