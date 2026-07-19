@@ -135,6 +135,32 @@ def render(data) -> str:
             f'<td class="num {good}">{fmt(r["throughput_pkts_s"])}</td></tr>'
         )
 
+    ob = data.get("outbound")
+    if ob:
+        lat = ob.get("send_latency_ms", {})
+        inp = ob.get("inbound_pkts_s", {})
+        prm = ob.get("params", {})
+        outbound_section = f"""<section>
+    <h2>Outbound reply under flood (leviculum#29 fix)</h2>
+    <p class="note">The field symptom: a round-sized <code>send_resource</code> while
+    {fmt(prm.get("flood_links"))} links flood inbound. The resource build (bz2 +
+    bulk encrypt + hashing, {fmt(prm.get("resource_kib"))} KiB sealed-envelope case)
+    now runs <b>outside</b> the node lock, so inbound processing no longer stalls
+    during it.</p>
+    <table class="data">
+      <thead><tr><th>metric</th><th>value</th></tr></thead>
+      <tbody>
+        <tr><td>send_resource latency p50 / p95 / max</td>
+            <td class="num">{fmt(lat.get("p50"),1)} / {fmt(lat.get("p95"),1)} / {fmt(lat.get("max"),1)} ms</td></tr>
+        <tr><td>inbound while sending vs baseline</td>
+            <td class="num good">{fmt(inp.get("during_sends"))} vs {fmt(inp.get("baseline"))} pkts/s
+            (dip {fmt(inp.get("dip_pct"),1)}%)</td></tr>
+      </tbody>
+    </table>
+    <p class="note">Raw data: <a href="bench_outbound.json">bench_outbound.json</a>.</p>
+  </section>"""
+    else:
+        outbound_section = ""
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -178,6 +204,8 @@ def render(data) -> str:
     </table>
   </section>
 
+  {outbound_section}
+
   <div class="foot">
     <p>Measured on <code>{H(data.get("runner","?"))}</code> at commit
     <code>{H(str(data.get("commit","?"))[:12])}</code> on {H(data.get("date","?"))}.
@@ -192,6 +220,7 @@ def render(data) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bench-results", required=True)
+    ap.add_argument("--outbound-results", default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--commit", default=None)
     ap.add_argument("--date", default=None)
@@ -199,6 +228,9 @@ def main():
 
     with open(args.bench_results) as f:
         data = json.load(f)
+    if args.outbound_results and os.path.exists(args.outbound_results):
+        with open(args.outbound_results) as f:
+            data["outbound"] = json.load(f)
     if args.commit:
         data["commit"] = args.commit
     if args.date:
@@ -208,6 +240,8 @@ def main():
     with open(os.path.join(args.out, "index.html"), "w") as f:
         f.write(render(data))
     shutil.copyfile(args.bench_results, os.path.join(args.out, "bench_results.json"))
+    if args.outbound_results and os.path.exists(args.outbound_results):
+        shutil.copyfile(args.outbound_results, os.path.join(args.out, "bench_outbound.json"))
     print(f"wrote {args.out}/index.html + bench_results.json")
 
 
