@@ -987,92 +987,104 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         metadata: Option<&[u8]>,
         auto_compress: bool,
     ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
-        use crate::packet::PacketContext;
-        use crate::resource::outgoing::{segment_count, OutgoingResource, OutgoingSegmentPlan};
-        use crate::resource::{ResourceError, RESOURCE_MAX_EFFICIENT_SIZE};
+        // Composed from the phased API so there is exactly one build path.
+        // no_std / FFI callers keep this single-call form (build under the
+        // caller's borrow); the std driver calls the three phases itself so
+        // the CPU-heavy prepare runs OUTSIDE the node mutex (leviculum#29).
+        let params = self.resource_send_params(link_id)?;
+        let prepared = crate::resource::prepare_resource_send(
+            &params,
+            data,
+            metadata,
+            auto_compress,
+            &mut self.rng,
+        )?;
+        self.commit_resource_send(prepared)
+    }
 
-        let now_ms = self.transport.clock().now_ms();
+    /// Phase 1 of the off-lock resource send (leviculum#29): snapshot the
+    /// link-derived inputs [`crate::resource::prepare_resource_send`] needs.
+    /// Fails fast with [`ResourceError::TransferInProgress`] /
+    /// [`ResourceError::InvalidRequest`] so no build work is wasted on a link
+    /// that cannot accept a transfer.
+    pub fn resource_send_params(
+        &self,
+        link_id: &LinkId,
+    ) -> Result<crate::resource::ResourceSendParams, crate::resource::ResourceError> {
+        use crate::resource::ResourceError;
 
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
-        // link) so every links.get/get_mut and the route use the wire id.
-        let link_id = &self.resolve_link_id(link_id);
-
+        // link) so the capture and the commit both use the wire id.
+        let link_id = self.resolve_link_id(link_id);
         let link = self
             .links
-            .get(link_id)
+            .get(&link_id)
             .ok_or(ResourceError::InvalidRequest)?;
-
         if link.has_outgoing_resource() {
             return Err(ResourceError::TransferInProgress);
         }
+        Ok(crate::resource::ResourceSendParams {
+            crypt: link.resource_crypt_params(),
+            link_id,
+            now_ms: self.transport.clock().now_ms(),
+        })
+    }
 
-        // The split boundary is the combined metadata+data length, matching
-        // Python (`metadata_size + len(data) > MAX_EFFICIENT_SIZE`). The
-        // metadata block is a 3-byte length prefix plus the metadata bytes.
-        let metadata_size = metadata.map(|m| 3 + m.len()).unwrap_or(0);
-        let total_size = metadata_size + data.len();
+    /// Phase 3 of the off-lock resource send (leviculum#29): install a
+    /// [`crate::resource::PreparedResourceSend`] on its link and emit the
+    /// advertisement.
+    ///
+    /// Re-validates what may have changed while the build ran off-lock:
+    /// - link gone → [`ResourceError::InvalidRequest`]
+    /// - a transfer started meanwhile → [`ResourceError::TransferInProgress`]
+    /// - the link re-keyed (#66) → [`ResourceError::LinkStateChanged`] — the
+    ///   ciphertext was built under the old key and the peer could never
+    ///   decrypt it; the caller should re-run the phases once.
+    pub fn commit_resource_send(
+        &mut self,
+        prepared: crate::resource::PreparedResourceSend,
+    ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::{outgoing::PreparedSendKind, ResourceError};
 
-        let (resource_hash, adv_bytes) = if total_size <= RESOURCE_MAX_EFFICIENT_SIZE {
-            // Single-segment transfer (unchanged behaviour for small files).
-            let outgoing = OutgoingResource::new(
-                data,
-                metadata,
-                None,
-                link,
-                auto_compress,
-                &mut self.rng,
-                now_ms,
-            )?;
-            let resource_hash = *outgoing.resource_hash();
-            let adv_bytes = outgoing.adv_packet().to_vec();
-
-            let link = self
-                .links
-                .get_mut(link_id)
-                .ok_or(ResourceError::InvalidRequest)?;
-            link.set_outgoing_resource(outgoing);
-            (resource_hash, adv_bytes)
-        } else {
-            // Split transfer: build and advertise segment 1 now, and store a
-            // plan so each later segment is advertised after the previous
-            // segment's proof arrives (see advance_outgoing_segments()).
-            let total_segments = segment_count(total_size);
-            let mut plan = OutgoingSegmentPlan::new(
-                data.to_vec(),
-                metadata.map(|m| m.to_vec()),
-                metadata_size,
-                total_segments,
-                auto_compress,
-            );
-
-            let segment1 = plan.build_segment(1, link, &mut self.rng, now_ms)?;
-            let resource_hash = *segment1.resource_hash();
-            let adv_bytes = segment1.adv_packet().to_vec();
-            // All later segments carry segment 1's resource hash as `o`.
-            plan.set_original_hash(resource_hash);
-
-            let link = self
-                .links
-                .get_mut(link_id)
-                .ok_or(ResourceError::InvalidRequest)?;
-            link.set_outgoing_resource(segment1);
-            link.set_outgoing_segments(plan);
-            (resource_hash, adv_bytes)
-        };
+        let link_id = self.resolve_link_id(&prepared.link_id);
+        let link = self
+            .links
+            .get_mut(&link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        if link.has_outgoing_resource() {
+            return Err(ResourceError::TransferInProgress);
+        }
+        if link.link_key() != Some(&prepared.token_key) {
+            return Err(ResourceError::LinkStateChanged);
+        }
+        match prepared.kind {
+            PreparedSendKind::Single(outgoing) => {
+                link.set_outgoing_resource(outgoing);
+            }
+            PreparedSendKind::Split { segment1, plan } => {
+                link.set_outgoing_resource(segment1);
+                link.set_outgoing_segments(plan);
+            }
+        }
 
         // Send the advertisement (encrypted)
         let adv_pkt = self
             .links
-            .get_mut(link_id)
+            .get_mut(&link_id)
             .ok_or(ResourceError::InvalidRequest)?
-            .build_data_packet_with_context(&adv_bytes, PacketContext::ResourceAdv, &mut self.rng);
+            .build_data_packet_with_context(
+                &prepared.adv_bytes,
+                PacketContext::ResourceAdv,
+                &mut self.rng,
+            );
         match adv_pkt {
             Ok(pkt) => {
-                self.route_link_packet(link_id, &pkt);
+                self.route_link_packet(&link_id, &pkt);
             }
             Err(e) => {
                 // Failed to build ADV, clean up
-                if let Some(link) = self.links.get_mut(link_id) {
+                if let Some(link) = self.links.get_mut(&link_id) {
                     link.clear_outgoing_resource();
                 }
                 crate::tracing::debug!("Failed to build resource ADV packet: {e}");
@@ -1080,7 +1092,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         }
 
-        Ok((resource_hash, self.process_events_and_actions()))
+        Ok((prepared.resource_hash, self.process_events_and_actions()))
     }
 
     /// Send a request response that exceeds the link MDU as a response Resource.
@@ -1133,7 +1145,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             &wrapped,
             None,
             Some(request_id),
-            link,
+            &link.resource_crypt_params(),
             true,
             &mut self.rng,
             now_ms,
@@ -1213,7 +1225,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             data,
             Some(metadata),
             Some(request_id),
-            link,
+            &link.resource_crypt_params(),
             true,
             &mut self.rng,
             now_ms,
@@ -1372,6 +1384,29 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         // Run the full event pipeline (same as tick() but without polling interfaces)
+        self.process_events_and_actions()
+    }
+
+    /// Like [`handle_packet`](Self::handle_packet), but with the dedup
+    /// SHA-256 already computed by the caller over `data` (leviculum#29: the
+    /// std driver computes it before taking the node lock). Ignored — and
+    /// recomputed — when an IFAC strip rewrites the bytes.
+    pub fn handle_packet_prehashed(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        data: &[u8],
+        precomputed_hash: [u8; 32],
+    ) -> crate::transport::TickOutput {
+        if let Err(e) = self
+            .transport
+            .process_incoming_prehashed(iface.0, data, precomputed_hash)
+        {
+            crate::tracing::trace!(
+                "Failed to process incoming packet on {}: {}",
+                self.transport.iface_name(iface.0),
+                e
+            );
+        }
         self.process_events_and_actions()
     }
 
