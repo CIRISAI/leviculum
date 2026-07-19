@@ -456,6 +456,7 @@ verify_lnode_banner() {
 }
 
 flash_lnodes() {
+    if [ -n "${LEVICULUM_SKIP_FLASH:-}" ]; then return 0; fi
     local head_sha; head_sha=$(cd "$REPO_DIR" && git rev-parse --short HEAD)
     log "[CI_HW] flashing LNodes from HEAD $head_sha"
 
