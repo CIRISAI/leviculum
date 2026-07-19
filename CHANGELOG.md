@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.10.2+ciris.1] — CIRIS fork
+
+Stage 1 of the transport concurrency work (leviculum#29, the transport-side
+root of CIRISEdge#370 "rounds time out at scale").
+
+### Changed
+
+- **Resource sends no longer stall the node.** `send_resource`'s bulk build —
+  bz2 compress, bulk token encrypt, full/map hashing — previously ran inside
+  the one `Mutex<StdNodeCore>` critical section: 141 ms for a 1 MiB
+  incompressible (sealed-envelope) payload with compression on, in release,
+  during which every inbound decrypt/route and every other outbound call
+  blocked. Measured as a **32% inbound throughput stall** while round-sized
+  sends run (20-link flood); now **~0%** — the build runs off-lock via a new
+  phased core API (`resource_send_params` → `prepare_resource_send` →
+  `commit_resource_send`, with a token-key epoch guard so a #66 mid-build
+  re-key is caught and retried rather than shipping stale ciphertext).
+  `NodeCore::send_resource` composes the same phases, so no_std/FFI callers
+  and the wire format are unchanged (rnsd interop 295/295 against Python RNS).
+- The per-packet dedup SHA-256 is computed by the driver before taking the
+  node lock (`handle_packet_prehashed`); recomputed internally when an IFAC
+  strip rewrites the bytes.
+
+### Added
+
+- `ResourceError::LinkStateChanged` — retryable: the link re-keyed between an
+  off-lock resource build and its commit.
+- Benchmark: `outbound_resource_latency_under_flood` mode (send-call latency +
+  inbound-dip under N-link flood, `COMPRESS=1` for the incompressible+bz2
+  field case); the published bench (cirisai.github.io/leviculum) now runs in
+  **release** and renders the outbound-under-flood metrics.
+
+## [0.10.1+ciris.1] — CIRIS fork
+
+Restores the explicit-hash **listen** API that the `v0.10.0+ciris.1` re-anchor
+dropped by mistake. The `#16` commit bundled explicit-hash destinations *and*
+`AnnounceControl` (#17); upstream absorbed only `AnnounceControl`, so dropping
+the commit as "absorbed" lost the explicit-hash half. This was the sole blocker
+for CIRISEdge adopting `leviculum-*` (leviculum#30 / CIRISEdge#371).
+
+### Restored (CIRIS-only, not upstream)
+
+- **`Destination::with_explicit_hash(...)`** — build a Single destination indexed
+  by a caller-supplied 16-byte hash (e.g. `sha256(fed_pubkey)[..16]`) instead of
+  the derived `truncated_hash(name_hash || identity_hash)`. Identity crypto is
+  untouched; only the routing index changes.
+- **`Destination::is_explicit_hash()`** and the never-announce guard:
+  `Destination::announce()` returns `AnnounceError::ExplicitHashCannotAnnounce`
+  for such a destination, and the node's scheduled-announce paths skip it — so an
+  explicit-hash destination is reachable only by direct link (opaque hash on the
+  wire) and the announce stream stays Python-RNS compatible.
+
+Not restored (edge migrated to upstream-native equivalents): `connect_at`,
+`register_destination_at`, `send_on_link`.
+
 ## [0.10.0+ciris.1] — CIRIS fork
 
 Re-anchored the CIRIS fork on upstream `Lew_Palm/leviculum` (master @ `fdf8d50`,
