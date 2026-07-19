@@ -1707,6 +1707,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         interface_index: usize,
         raw: &[u8],
     ) -> Result<(), TransportError> {
+        self.process_incoming_inner(interface_index, raw, None)
+    }
+
+    /// Like [`process_incoming`](Self::process_incoming), but with the dedup
+    /// SHA-256 already computed by the caller over the exact bytes of `raw`
+    /// (leviculum#29: the std driver computes it before taking the node lock,
+    /// shaving the hash off every packet's critical section). The precomputed
+    /// hash is only honoured when no IFAC strip rewrites the bytes; on an
+    /// IFAC-protected interface it is discarded and recomputed post-strip.
+    pub fn process_incoming_prehashed(
+        &mut self,
+        interface_index: usize,
+        raw: &[u8],
+        precomputed_hash: [u8; 32],
+    ) -> Result<(), TransportError> {
+        self.process_incoming_inner(interface_index, raw, Some(precomputed_hash))
+    }
+
+    fn process_incoming_inner(
+        &mut self,
+        interface_index: usize,
+        raw: &[u8],
+        precomputed_hash: Option<[u8; 32]>,
+    ) -> Result<(), TransportError> {
         self.stats.packets_received += 1;
 
         // IFAC verification: verify and strip IFAC on protected interfaces,
@@ -1736,6 +1760,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         };
 
+        // A precomputed dedup hash is over the caller's bytes; if the IFAC
+        // strip produced different bytes, it no longer applies.
+        let precomputed_hash = match &raw {
+            Cow::Owned(_) => None,
+            Cow::Borrowed(_) => precomputed_hash,
+        };
+
         let mut packet = Packet::unpack(&raw)?;
 
         // Adjust the on-wire hop count for the interface this packet arrived on.
@@ -1756,7 +1787,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // disabled path is unchanged (the high-volume overheard fast path
         // stays hash-free).
         let journey_hash: Option<[u8; 32]> = if self.pkt_journey_enabled() {
-            Some(packet_hash(&raw))
+            // The driver may have hashed these exact bytes off-lock already
+            // (#29); the precomputed value is cleared above when an IFAC strip
+            // rewrote them, so it is always safe to reuse here.
+            Some(precomputed_hash.unwrap_or_else(|| packet_hash(&raw)))
         } else {
             None
         };
@@ -1855,8 +1889,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // (for reverse_table routing). Dedup uses full 32-byte SHA-256, matching
         // Python Transport.py:1227 which checks `packet.packet_hash` (full hash).
         // When the journey target already hashed above, reuse that value —
-        // never hash the same packet twice.
-        let full_packet_hash = journey_hash.unwrap_or_else(|| packet_hash(&raw));
+        // never hash the same packet twice. Otherwise take the driver's
+        // off-lock precomputation (#29) when the bytes are unchanged, and
+        // only hash here as the last resort.
+        let full_packet_hash = journey_hash
+            .or(precomputed_hash)
+            .unwrap_or_else(|| packet_hash(&raw));
+        debug_assert_eq!(
+            full_packet_hash,
+            packet_hash(&raw),
+            "precomputed packet hash must match the post-IFAC bytes"
+        );
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_packet_hash[..TRUNCATED_HASHBYTES]);
 
