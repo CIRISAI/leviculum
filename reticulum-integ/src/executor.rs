@@ -5335,6 +5335,31 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     #[test]
     #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
     #[serial(lora)]
+    fn lora_lnode_rncp_bidir_simul() {
+        // Reference-first Python twin of lora_lnode_lncp_bidir_simul
+        // (Codeberg #131): identical radio config, payload and steps on the
+        // same LNodes, but rnsd drives the serial radios and rncp runs the
+        // transfers. The A/B against the lncp variant decides whether the
+        // reverse-direction starvation is our fairness bug or a half-duplex
+        // channel limit. Budget is the lncp variant's 900 s plus margin for
+        // Python cold-start and rncp pacing.
+        crate::timeout::run_with_timeout("lora_lnode_rncp_bidir_simul", 1080, || {
+            let toml_str = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/lora_lnode_rncp_bidir_simul.toml"
+            ))
+            .expect("lora_lnode_rncp_bidir_simul.toml not found");
+            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+            let mut runner = require_runner!(scenario);
+
+            run_test(&mut runner).expect("test failed");
+        });
+    }
+
+    #[test]
+    #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
+    #[serial(lora)]
     fn lora_lnode_path_soak() {
         // Reviewer-run #117 diagnostic, NOT part of any unattended tier:
         // 100 fresh path discoveries take up to ~1 h, which would silently

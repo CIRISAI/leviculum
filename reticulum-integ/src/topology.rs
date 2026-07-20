@@ -1415,6 +1415,65 @@ destination = "beta.probe"
     }
 
     #[test]
+    fn parse_lora_lnode_rncp_bidir_simul_scenario() {
+        // The #131 reference-first Python twin parses, drives the Python
+        // stack (rnsd nodes, rncp tools), and keeps every on-air condition
+        // byte-identical to the lncp original — asserted against the
+        // original's parsed [radio] so the two cannot drift apart and
+        // silently invalidate the A/B.
+        let toml_str = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lora_lnode_rncp_bidir_simul.toml"
+        ))
+        .expect("lora_lnode_rncp_bidir_simul.toml not found");
+        let scenario = parse_scenario(&toml_str).expect("parse failed");
+
+        assert_eq!(scenario.test.name, "lora_lnode_rncp_bidir_simul");
+        assert_eq!(scenario.nodes.len(), 2);
+        for node in scenario.nodes.values() {
+            assert_eq!(node.node_type, "python");
+            assert!(node.serial);
+        }
+
+        let lncp_toml = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lora_lnode_lncp_bidir_simul.toml"
+        ))
+        .expect("lora_lnode_lncp_bidir_simul.toml not found");
+        let lncp = parse_scenario(&lncp_toml).expect("parse failed");
+
+        let radio = scenario.radio.as_ref().expect("radio block required");
+        let lncp_radio = lncp.radio.as_ref().expect("radio block required");
+        assert_eq!(radio.frequency, lncp_radio.frequency);
+        assert_eq!(radio.bandwidth, lncp_radio.bandwidth);
+        assert_eq!(radio.spreading_factor, lncp_radio.spreading_factor);
+        assert_eq!(radio.coding_rate, lncp_radio.coding_rate);
+        assert_eq!(radio.tx_power, lncp_radio.tx_power);
+        assert_eq!(radio.csma_enabled, lncp_radio.csma_enabled);
+
+        assert_eq!(scenario.steps.len(), 3);
+        match &scenario.steps[2] {
+            Step::FileTransfer {
+                sender_tool,
+                receiver_tool,
+                file_sizes,
+                direction,
+                repeats,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(sender_tool, "rncp");
+                assert_eq!(receiver_tool, "rncp");
+                assert_eq!(file_sizes, &[2048]);
+                assert_eq!(direction, "simultaneous");
+                assert_eq!(*repeats, 1);
+                assert_eq!(*timeout_secs, 600);
+            }
+            other => panic!("expected FileTransfer, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_radio_config() {
         let toml_str = r#"
 [test]

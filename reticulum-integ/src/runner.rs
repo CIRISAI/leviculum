@@ -1546,6 +1546,30 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
         }
     }
 
+    // Pre-set the scenario radio config on every LNode bound to a Python
+    // (rnsd) node. lnsd's SerialInterface pushes the radio parameters to
+    // the LNode firmware itself at startup; Python's SerialInterface is a
+    // plain HDLC data pipe and never does, so without this push the board
+    // would run the compiled firmware default (eu_medium: SF7/CR5) instead
+    // of the scenario PHY — silently invalidating any A/B against the
+    // Rust stack. No ACK is an infra skip, not a RED: running at the
+    // wrong PHY must never look like a protocol result.
+    if let Some(ref radio) = scenario.radio {
+        for (name, node) in &scenario.nodes {
+            if node.node_type != "python" {
+                continue;
+            }
+            if let Some(ref port) = node.serial_path {
+                let usb_serial = assign_lnodes
+                    .iter()
+                    .find(|l| &l.data_port == port)
+                    .map(|l| l.usb_serial.as_str())
+                    .unwrap_or("unknown");
+                preconfigure_python_lnode(port, usb_serial, name, radio)?;
+            }
+        }
+    }
+
     // Silence every discovered T114 the scenario did not bind. A fresh-flashed
     // T114 defaults to csma=false and emits Reticulum announces on the
     // benchmark channel, which the sender's RNode reads as CSMA-busy and
@@ -1573,9 +1597,7 @@ fn resolve_and_probe_rnodes(scenario: &mut TestScenario) -> Result<(), RunnerErr
 /// current scenario does not bind. Best-effort: failures warn and continue./// a silent failure here only reintroduces the CSMA-busy backoff on the
 /// sender.
 fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topology::RadioConfig) {
-    use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
-    use leviculum_core::rnode::{build_radio_config_frame, RadioConfigWire, RADIO_CONFIG_ACK};
-    use std::io::{Read, Write};
+    use leviculum_core::rnode::RadioConfigWire;
 
     // Codeberg #50 Bug-A forensic instrumentation.  Structured Stage-6
     // event at function entry; matching EXIT event at every return
@@ -1608,7 +1630,83 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
         // the receiver parses the lt_alock field as present regardless.
         lt_alock_present: true,
     };
-    let payload = build_radio_config_frame(&wire);
+    let result = push_lnode_radio_config(port_path, usb_serial, &wire, "silence");
+    match result {
+        "acked" => eprintln!("[silence] T114 {usb_serial} at {port_path}: csma=on acked"),
+        "open_failed" => {}
+        _ => eprintln!(
+            "[silence] T114 {usb_serial} at {port_path}: NO ACK after 3 attempts — idle T114 may still disturb channel"
+        ),
+    }
+    tracing::debug!(
+        event = "SILENCE_LNODE_EXIT",
+        usb_serial = usb_serial,
+        port_path = port_path,
+        result = result,
+    );
+}
+
+/// Push the scenario radio config to an LNode bound to a Python (rnsd)
+/// node, mirroring the exact frame lnsd's SerialInterface sends at
+/// startup (preamble 24, airtime locks 0, radio_silent off, csma from the
+/// scenario [radio] section). rnsd's SerialInterface is a plain HDLC data
+/// pipe and never configures the radio itself, so this push is what puts
+/// the board on the scenario PHY. A missing ACK aborts the scenario as an
+/// infra skip: running at the firmware-default PHY (eu_medium, SF7/CR5)
+/// would silently invalidate the Rust-vs-Python A/B this exists for (#131).
+fn preconfigure_python_lnode(
+    port_path: &str,
+    usb_serial: &str,
+    node_name: &str,
+    radio: &crate::topology::RadioConfig,
+) -> Result<(), RunnerError> {
+    use leviculum_core::rnode::RadioConfigWire;
+
+    let wire = RadioConfigWire {
+        frequency_hz: radio.frequency as u32,
+        bandwidth_hz: radio.bandwidth,
+        sf: radio.spreading_factor,
+        cr: radio.coding_rate,
+        tx_power_dbm: radio.tx_power as i8,
+        preamble_len: 24,
+        csma_enabled: radio.csma_enabled,
+        radio_silent: false,
+        st_alock: 0,
+        lt_alock: 0,
+        // Send-side only (cosmetic): the built frame is always full-length, so
+        // the receiver parses the lt_alock field as present regardless.
+        lt_alock_present: true,
+    };
+    let result = push_lnode_radio_config(port_path, usb_serial, &wire, "preconfig");
+    if result == "acked" {
+        eprintln!(
+            "[preconfig] node '{node_name}' LNode {usb_serial} at {port_path}: radio config acked (sf={} bw={} cr={} csma={})",
+            radio.spreading_factor, radio.bandwidth, radio.coding_rate, radio.csma_enabled
+        );
+        Ok(())
+    } else {
+        Err(RunnerError::InsufficientRNodes(format!(
+            "reason=lnode_radio_config_failed node={node_name} serial={usb_serial} device={port_path} result={result}"
+        )))
+    }
+}
+
+/// Send one radio-config frame to an LNode data port and wait for the
+/// firmware ACK (3 attempts, 2 s ACK window each). Shared by the
+/// unused-board silence path and the Python-node preconfigure path; the
+/// returned tag ∈ {open_failed, write_error, no_ack_after_3, acked} feeds
+/// each caller's own logging and verdict.
+fn push_lnode_radio_config(
+    port_path: &str,
+    usb_serial: &str,
+    wire: &leviculum_core::rnode::RadioConfigWire,
+    log_prefix: &str,
+) -> &'static str {
+    use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+    use leviculum_core::rnode::{build_radio_config_frame, RADIO_CONFIG_ACK};
+    use std::io::{Read, Write};
+
+    let payload = build_radio_config_frame(wire);
     let mut framed = Vec::new();
     frame(&payload, &mut framed);
 
@@ -1618,14 +1716,8 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
     {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[silence] T114 {usb_serial} at {port_path}: open failed: {e}");
-            tracing::debug!(
-                event = "SILENCE_LNODE_EXIT",
-                usb_serial = usb_serial,
-                port_path = port_path,
-                result = "open_failed",
-            );
-            return;
+            eprintln!("[{log_prefix}] T114 {usb_serial} at {port_path}: open failed: {e}");
+            return "open_failed";
         }
     };
     // CDC-ACM only transmits after DTR is asserted (matches debug-capture path).
@@ -1634,7 +1726,7 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
     let mut any_write_ok = false;
     for attempt in 1..=3u8 {
         if let Err(e) = port.write_all(&framed) {
-            eprintln!("[silence] T114 {usb_serial}: write (attempt {attempt}) failed: {e}");
+            eprintln!("[{log_prefix}] T114 {usb_serial}: write (attempt {attempt}) failed: {e}");
             continue;
         }
         any_write_ok = true;
@@ -1649,16 +1741,7 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
                     for r in deframer.process(&buf[..n]) {
                         if let DeframeResult::Frame(data) = r {
                             if data.as_slice() == RADIO_CONFIG_ACK {
-                                eprintln!(
-                                    "[silence] T114 {usb_serial} at {port_path}: csma=on acked"
-                                );
-                                tracing::debug!(
-                                    event = "SILENCE_LNODE_EXIT",
-                                    usb_serial = usb_serial,
-                                    port_path = port_path,
-                                    result = "acked",
-                                );
-                                return;
+                                return "acked";
                             }
                         }
                     }
@@ -1666,27 +1749,18 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
                 Ok(_) => {}
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => continue,
                 Err(e) => {
-                    eprintln!("[silence] T114 {usb_serial}: read error: {e}");
+                    eprintln!("[{log_prefix}] T114 {usb_serial}: read error: {e}");
                     break;
                 }
             }
         }
-        eprintln!("[silence] T114 {usb_serial}: attempt {attempt}/3 no ack, retrying");
+        eprintln!("[{log_prefix}] T114 {usb_serial}: attempt {attempt}/3 no ack, retrying");
     }
-    eprintln!(
-        "[silence] T114 {usb_serial} at {port_path}: NO ACK after 3 attempts — idle T114 may still disturb channel"
-    );
-    let result = if any_write_ok {
+    if any_write_ok {
         "no_ack_after_3"
     } else {
         "write_error"
-    };
-    tracing::debug!(
-        event = "SILENCE_LNODE_EXIT",
-        usb_serial = usb_serial,
-        port_path = port_path,
-        result = result,
-    );
+    }
 }
 
 /// Spawn lora-proxy processes for all nodes with `rnode_proxy = true`.
