@@ -1,0 +1,64 @@
+# Sequential control for lora_lnode_rncp_bidir_simul (Codeberg #131).
+#
+# Same Python stack (rnsd daemons, rncp transfer clients), same LNodes,
+# same radio config (SF10 / BW125000 / CR8 / CSMA on) and same 2KB
+# payload as the simultaneous twin, but the two directions run one after
+# the other (direction = "both") instead of overlapping. If this passes
+# while the simultaneous twin fails at link establishment, the cause is
+# the simultaneity (channel contention), not the boards or the scaffold.
+# The existing Python LoRa scenarios use rnode_pair at SF7, so only this
+# file controls for the same hardware at the same PHY.
+#
+# rnsd's SerialInterface never pushes radio parameters to the LNode
+# firmware (it is a plain HDLC serial pipe); the integ runner detects the
+# python + serial combination and pushes this [radio] config to the bound
+# boards itself before the containers start (see
+# preconfigure_python_lnode in runner.rs).
+
+profile = "lnode_pair"
+
+[test]
+name = "lora_lnode_rncp_bidir_seq"
+description = "Python rnsd+rncp sequential bidirectional 2KB between two LNodes over direct LoRa at SF10"
+timeout_secs = 1080
+
+[radio]
+# Identical to lora_lnode_lncp_bidir_simul: slow spreading factor, CSMA/CA on.
+frequency = 869525000
+bandwidth = 125000
+sf = 10
+cr = 8
+txpower = 17
+csma_enabled = true
+
+[nodes.alpha]
+type = "python"
+respond_to_probes = true
+serial = true
+
+[nodes.beta]
+type = "python"
+respond_to_probes = true
+serial = true
+
+# Warm up: wait for announces to propagate
+[[steps]]
+action = "sleep"
+duration_secs = 25
+
+[[steps]]
+action = "wait_for_path"
+on = "alpha"
+destination = "beta.probe"
+timeout_secs = 300
+
+[[steps]]
+action = "file_transfer"
+sender = "alpha"
+receiver = "beta"
+sender_tool = "rncp"
+receiver_tool = "rncp"
+file_sizes = [2048]
+direction = "both"
+repeats = 1
+timeout_secs = 600

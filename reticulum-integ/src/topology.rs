@@ -1474,6 +1474,136 @@ destination = "beta.probe"
     }
 
     #[test]
+    fn parse_lora_lnode_rncp_bidir_seq_scenario() {
+        // The sequential control for the #131 rncp simul scenario must stay
+        // an exact twin: identical radio, nodes, warmup and transfer, with
+        // direction as the ONLY differing transfer field ("both" runs the
+        // two directions one after the other). Asserted against the simul
+        // twin's parsed scenario so the control cannot silently drift and
+        // stop isolating simultaneity as the variable.
+        let seq_toml = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lora_lnode_rncp_bidir_seq.toml"
+        ))
+        .expect("lora_lnode_rncp_bidir_seq.toml not found");
+        let seq = parse_scenario(&seq_toml).expect("parse failed");
+
+        let simul_toml = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lora_lnode_rncp_bidir_simul.toml"
+        ))
+        .expect("lora_lnode_rncp_bidir_simul.toml not found");
+        let simul = parse_scenario(&simul_toml).expect("parse failed");
+
+        assert_eq!(seq.test.name, "lora_lnode_rncp_bidir_seq");
+        assert_eq!(seq.test.timeout_secs, simul.test.timeout_secs);
+
+        assert_eq!(seq.nodes.len(), simul.nodes.len());
+        for (name, simul_node) in &simul.nodes {
+            let seq_node = seq.nodes.get(name).expect("node missing in seq twin");
+            assert_eq!(seq_node.node_type, simul_node.node_type);
+            assert_eq!(seq_node.serial, simul_node.serial);
+            assert_eq!(seq_node.respond_to_probes, simul_node.respond_to_probes);
+        }
+
+        let radio = seq.radio.as_ref().expect("radio block required");
+        let simul_radio = simul.radio.as_ref().expect("radio block required");
+        assert_eq!(radio.frequency, simul_radio.frequency);
+        assert_eq!(radio.bandwidth, simul_radio.bandwidth);
+        assert_eq!(radio.spreading_factor, simul_radio.spreading_factor);
+        assert_eq!(radio.coding_rate, simul_radio.coding_rate);
+        assert_eq!(radio.tx_power, simul_radio.tx_power);
+        assert_eq!(radio.csma_enabled, simul_radio.csma_enabled);
+
+        assert_eq!(seq.steps.len(), simul.steps.len());
+        match (&seq.steps[0], &simul.steps[0]) {
+            (
+                Step::Sleep { duration_secs },
+                Step::Sleep {
+                    duration_secs: simul_secs,
+                },
+            ) => assert_eq!(duration_secs, simul_secs),
+            other => panic!("expected Sleep pair, got: {other:?}"),
+        }
+        match (&seq.steps[1], &simul.steps[1]) {
+            (
+                Step::WaitForPath {
+                    on,
+                    destination,
+                    timeout_secs,
+                    expect_result,
+                },
+                Step::WaitForPath {
+                    on: simul_on,
+                    destination: simul_destination,
+                    timeout_secs: simul_timeout,
+                    expect_result: simul_expect,
+                },
+            ) => {
+                assert_eq!(on, simul_on);
+                assert_eq!(destination, simul_destination);
+                assert_eq!(timeout_secs, simul_timeout);
+                assert_eq!(expect_result, simul_expect);
+            }
+            other => panic!("expected WaitForPath pair, got: {other:?}"),
+        }
+        match (&seq.steps[2], &simul.steps[2]) {
+            (
+                Step::FileTransfer {
+                    sender,
+                    receiver,
+                    sender_tool,
+                    receiver_tool,
+                    file_sizes,
+                    direction,
+                    repeats,
+                    timeout_secs,
+                    mode,
+                    receiver_flags,
+                    sender_flags,
+                    auth_from,
+                    expect_result,
+                    fetch_path,
+                },
+                Step::FileTransfer {
+                    sender: simul_sender,
+                    receiver: simul_receiver,
+                    sender_tool: simul_sender_tool,
+                    receiver_tool: simul_receiver_tool,
+                    file_sizes: simul_file_sizes,
+                    direction: simul_direction,
+                    repeats: simul_repeats,
+                    timeout_secs: simul_timeout,
+                    mode: simul_mode,
+                    receiver_flags: simul_receiver_flags,
+                    sender_flags: simul_sender_flags,
+                    auth_from: simul_auth_from,
+                    expect_result: simul_expect,
+                    fetch_path: simul_fetch_path,
+                },
+            ) => {
+                assert_eq!(sender, simul_sender);
+                assert_eq!(receiver, simul_receiver);
+                assert_eq!(sender_tool, simul_sender_tool);
+                assert_eq!(receiver_tool, simul_receiver_tool);
+                assert_eq!(file_sizes, simul_file_sizes);
+                assert_eq!(repeats, simul_repeats);
+                assert_eq!(timeout_secs, simul_timeout);
+                assert_eq!(mode, simul_mode);
+                assert_eq!(receiver_flags, simul_receiver_flags);
+                assert_eq!(sender_flags, simul_sender_flags);
+                assert_eq!(auth_from, simul_auth_from);
+                assert_eq!(expect_result, simul_expect);
+                assert_eq!(fetch_path, simul_fetch_path);
+                // The single intended difference between control and test.
+                assert_eq!(direction, "both");
+                assert_eq!(simul_direction, "simultaneous");
+            }
+            other => panic!("expected FileTransfer pair, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_radio_config() {
         let toml_str = r#"
 [test]

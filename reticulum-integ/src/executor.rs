@@ -5360,6 +5360,30 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     #[test]
     #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
     #[serial(lora)]
+    fn lora_lnode_rncp_bidir_seq() {
+        // Sequential control for lora_lnode_rncp_bidir_simul (Codeberg
+        // #131): the identical Python scenario but with the two transfer
+        // directions run one after the other instead of overlapping. If
+        // this passes while the simultaneous twin fails at link
+        // establishment, the cause is the simultaneity (contention), not
+        // the boards or the scaffold. Same 1080 s budget as the twin.
+        crate::timeout::run_with_timeout("lora_lnode_rncp_bidir_seq", 1080, || {
+            let toml_str = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/lora_lnode_rncp_bidir_seq.toml"
+            ))
+            .expect("lora_lnode_rncp_bidir_seq.toml not found");
+            let scenario = crate::topology::parse_scenario(&toml_str).expect("parse failed");
+
+            let mut runner = require_runner!(scenario);
+
+            run_test(&mut runner).expect("test failed");
+        });
+    }
+
+    #[test]
+    #[ignore] // Requires two LNode-firmware boards (T114 + RAK4631 or similar)
+    #[serial(lora)]
     fn lora_lnode_path_soak() {
         // Reviewer-run #117 diagnostic, NOT part of any unattended tier:
         // 100 fresh path discoveries take up to ~1 h, which would silently
