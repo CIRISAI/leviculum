@@ -13,6 +13,14 @@
 # stack is held identical; only the timeouts carry extra margin for Python
 # interpreter cold-start and rncp's slower pacing.
 #
+# Measured answer: Python fails too (rncp 0/2 runs vs our lncp 1/2) — the
+# losing direction stalls at link establishment on the shared half-duplex
+# channel. Hence the reframed success bar (Codeberg #131): BOTH directions
+# must ultimately complete (md5-verified); serialized completion via retry
+# on the freed channel counts, true-concurrent completion is best-effort
+# only. A direction that never completes even after the serialized
+# retries is a genuine wedge and fails the test.
+#
 # rnsd's SerialInterface never pushes radio parameters to the LNode
 # firmware (it is a plain HDLC serial pipe); the integ runner detects the
 # python + serial combination and pushes this [radio] config to the bound

@@ -10,6 +10,15 @@
 # opposing transfer to make progress, or one direction starves and its
 # send times out.
 #
+# Success bar (Codeberg #131, reference-first): BOTH directions must
+# ultimately complete (md5-verified); serialized completion via retry on
+# the freed channel counts. True-concurrent completion of both directions
+# is best-effort only: measured on these same LNodes at SF10, it is not
+# reliably achievable by ANY stack (Python rncp 0/2 runs, our lncp 1/2 —
+# the losing direction stalls at link establishment on the shared
+# half-duplex channel). A direction that never completes even after the
+# serialized retries is a genuine wedge and fails the test.
+#
 # 2KB each way (the channel is shared, so effective per-direction
 # throughput roughly halves versus the sequential 4KB test). Radio config
 # matches lora_lnode_lncp_bidir_slow: SF10 / BW125000 / CR8 / CSMA on.

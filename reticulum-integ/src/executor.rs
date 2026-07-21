@@ -2831,11 +2831,39 @@ fn simultaneous_pair_passes(a_success: bool, b_success: bool, expect_failure: bo
     }
 }
 
+/// Serialized retries per direction after the concurrent send phase
+/// (Codeberg #131 / #15). Reference-first measurement on the same LNodes
+/// at SF10 showed the losing direction stalls at link establishment on the
+/// shared half-duplex channel for BOTH stacks (Python rncp 0/2 runs, our
+/// lncp 1/2), so one direction routinely needs a retry once the channel is
+/// free; a direction that still fails after this many serialized retries
+/// is a genuine wedge, not the expected contention loss.
+const SIMUL_RETRY_LIMIT: u32 = 2;
+
+/// Reframed simultaneous verdict (Codeberg #131 / #15): a direction counts
+/// as complete when it succeeded in the concurrent phase OR via a later
+/// serialized retry, and the pair passes only when BOTH directions
+/// ultimately complete. True-concurrent completion is best-effort (the
+/// reference stack cannot achieve it reliably on half-duplex either); a
+/// direction that never completes fails the step.
+fn simultaneous_outcome(concurrent_ok: [bool; 2], retry_ok: [bool; 2]) -> bool {
+    concurrent_ok
+        .iter()
+        .zip(retry_ok.iter())
+        .all(|(&c, &r)| c || r)
+}
+
 /// True simultaneous bidirectional transfer (Codeberg #15): both directions'
 /// SENDS overlap in time over the one shared half-duplex channel, so each
 /// node transmits and receives concurrently — the hardest contention case,
 /// and the only shape that exercises the LNode burst-pacing bounds against
 /// real reverse traffic. `direction = "both"` (sequential) is untouched.
+///
+/// Success bar (Codeberg #131, reframed): BOTH directions must ultimately
+/// md5-verify, but serialized completion counts — a direction that loses
+/// the concurrent contention is re-sent alone on the freed channel, up to
+/// [`SIMUL_RETRY_LIMIT`] retries. Only a direction that never completes
+/// fails the step (see [`simultaneous_outcome`]).
 ///
 /// Setup (dest hashes, listeners, path resolution) runs sequentially for
 /// both directions; only the blocking sends run concurrently, one scoped
@@ -3130,25 +3158,121 @@ fn execute_simultaneous_transfer(
                 start.elapsed().as_secs_f64()
             );
 
-            let ok = [
+            let exit_ok = [
                 outcomes[0].0.status.success(),
                 outcomes[1].0.status.success(),
             ];
-            if !simultaneous_pair_passes(ok[0], ok[1], expect_failure) {
+
+            // Failure-expecting scenarios keep the strict concurrent bar:
+            // both sends must fail, no retry.
+            if expect_failure {
+                if !simultaneous_pair_passes(exit_ok[0], exit_ok[1], expect_failure) {
+                    for d in &dirs {
+                        dump_recv_log(d.recv_node, d.recv_tool, "on simultaneous send failure");
+                    }
+                    let detail = dirs
+                        .iter()
+                        .zip(outcomes.iter())
+                        .map(|(d, (out, _))| {
+                            format!(
+                                "{}: exit {}\nstdout: {}\nstderr: {}",
+                                d.label,
+                                out.status.code().unwrap_or(-1),
+                                String::from_utf8_lossy(&out.stdout),
+                                String::from_utf8_lossy(&out.stderr)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Err(StepError::StepFailed {
+                        step_index,
+                        action: "file_transfer".into(),
+                        detail: format!(
+                            "simultaneous transfer ({size_label} run {repeat}) failed \
+                             (expect_result={expect_result})\n{detail}"
+                        ),
+                    });
+                }
+                println!("    {size_label} run {repeat}: both sends correctly failed");
+                continue;
+            }
+
+            // Checks a direction's received file against its expected md5
+            // without deleting it; cleanup waits for the final verdict.
+            let md5_matches = |i: usize| -> Result<bool, StepError> {
+                let out = runner.docker_exec(
+                    dirs[i].recv_node,
+                    &["md5sum", "/tmp/received/test_transfer.bin"],
+                )?;
+                let actual = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                Ok(actual == expected_md5[i])
+            };
+
+            // Concurrent-phase verdict per direction: send exited 0 AND the
+            // file md5-verifies on its receiver.
+            let mut concurrent_ok = [false, false];
+            for i in 0..2 {
+                concurrent_ok[i] = exit_ok[i] && md5_matches(i)?;
+            }
+
+            // Serialized-retry fallback (Codeberg #131): each direction that
+            // lost the concurrent contention is re-sent alone on the now-
+            // freer channel, one direction at a time, reusing the listeners
+            // started above.
+            let mut retry_ok = [false, false];
+            let mut retries_used = [0u32; 2];
+            let mut durations = [outcomes[0].1, outcomes[1].1];
+            let mut last_fail: [Option<std::process::Output>; 2] = [None, None];
+            for (i, d) in dirs.iter().enumerate() {
+                if concurrent_ok[i] {
+                    continue;
+                }
+                for attempt in 1..=SIMUL_RETRY_LIMIT {
+                    println!(
+                        "    {} lost the concurrent contention, serialized retry \
+                         {attempt}/{SIMUL_RETRY_LIMIT}...",
+                        d.label
+                    );
+                    let args = build_args(d);
+                    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                    let retry_start = Instant::now();
+                    let out = runner.docker_exec_with_env(d.send_node, &args_ref, &sender_env)?;
+                    retries_used[i] = attempt;
+                    if out.status.success() && md5_matches(i)? {
+                        retry_ok[i] = true;
+                        durations[i] = retry_start.elapsed();
+                        break;
+                    }
+                    last_fail[i] = Some(out);
+                }
+            }
+
+            if !simultaneous_outcome(concurrent_ok, retry_ok) {
                 for d in &dirs {
-                    dump_recv_log(d.recv_node, d.recv_tool, "on simultaneous send failure");
+                    dump_recv_log(d.recv_node, d.recv_tool, "after serialized retries failed");
                 }
                 let detail = dirs
                     .iter()
-                    .zip(outcomes.iter())
-                    .map(|(d, (out, _))| {
-                        format!(
-                            "{}: exit {}\nstdout: {}\nstderr: {}",
-                            d.label,
-                            out.status.code().unwrap_or(-1),
-                            String::from_utf8_lossy(&out.stdout),
-                            String::from_utf8_lossy(&out.stderr)
-                        )
+                    .enumerate()
+                    .map(|(i, d)| {
+                        if concurrent_ok[i] || retry_ok[i] {
+                            format!("{}: ok", d.label)
+                        } else {
+                            let out = last_fail[i].as_ref().unwrap_or(&outcomes[i].0);
+                            format!(
+                                "{}: still failing after {} serialized retries, \
+                                 last exit {}\nstdout: {}\nstderr: {}",
+                                d.label,
+                                retries_used[i],
+                                out.status.code().unwrap_or(-1),
+                                String::from_utf8_lossy(&out.stdout),
+                                String::from_utf8_lossy(&out.stderr)
+                            )
+                        }
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -3156,48 +3280,43 @@ fn execute_simultaneous_transfer(
                     step_index,
                     action: "file_transfer".into(),
                     detail: format!(
-                        "simultaneous transfer ({size_label} run {repeat}) failed \
-                         (expect_result={expect_result})\n{detail}"
+                        "simultaneous transfer ({size_label} run {repeat}): a direction \
+                         never completed even serialized (wedge, not contention)\n{detail}"
                     ),
                 });
             }
-            if expect_failure {
-                println!("    {size_label} run {repeat}: both sends correctly failed");
-                continue;
-            }
 
-            // Verify each direction's file on its receiver, then clean up.
+            // Contention visibility: which directions completed concurrently
+            // vs needed the serialized fallback.
+            let summary = dirs
+                .iter()
+                .enumerate()
+                .map(|(i, d)| {
+                    if concurrent_ok[i] {
+                        format!("{}: concurrent", d.label)
+                    } else {
+                        let n = retries_used[i];
+                        let noun = if n == 1 { "retry" } else { "retries" };
+                        format!("{}: after {n} serialized {noun}", d.label)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            println!("    {size_label} run {repeat} summary: {summary}");
+
+            // Clean up each direction's verified file and record results.
             for (i, d) in dirs.iter().enumerate() {
-                let verify_output = runner
-                    .docker_exec(d.recv_node, &["md5sum", "/tmp/received/test_transfer.bin"])?;
-                let actual_md5 = String::from_utf8_lossy(&verify_output.stdout)
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                if actual_md5 != expected_md5[i] {
-                    return Err(StepError::StepFailed {
-                        step_index,
-                        action: "file_transfer".into(),
-                        detail: format!(
-                            "md5 mismatch ({}, {size_label} run {repeat}): expected {}, got {actual_md5}",
-                            d.label, expected_md5[i]
-                        ),
-                    });
-                }
                 runner.docker_exec(d.recv_node, &["rm", "/tmp/received/test_transfer.bin"])?;
-
-                let elapsed = outcomes[i].1;
                 println!(
                     "    {size_label} run {repeat} {}: {:.2}s (md5 ok)",
                     d.label,
-                    elapsed.as_secs_f64()
+                    durations[i].as_secs_f64()
                 );
                 results.push(TransferResult {
                     direction: d.label.clone(),
                     size,
                     repeat,
-                    duration: elapsed,
+                    duration: durations[i],
                     sender_tool: d.send_tool.to_string(),
                     receiver_tool: d.recv_tool.to_string(),
                 });
@@ -3506,6 +3625,31 @@ mod tests {
         assert!(!simultaneous_pair_passes(true, false, true));
         assert!(!simultaneous_pair_passes(false, true, true));
         assert!(!simultaneous_pair_passes(true, true, true));
+    }
+
+    /// Reframed simultaneous bar (Codeberg #131): both directions must
+    /// ultimately complete, concurrently or via serialized retry; a
+    /// direction that never completes fails regardless of the other.
+    #[test]
+    fn simultaneous_outcome_truth_table() {
+        // Both concurrent: the bonus path.
+        assert!(simultaneous_outcome([true, true], [false, false]));
+        // One concurrent, the other via serialized retry (either order).
+        assert!(simultaneous_outcome([true, false], [false, true]));
+        assert!(simultaneous_outcome([false, true], [true, false]));
+        // Both only via serialized retry (fully serialized) still passes.
+        assert!(simultaneous_outcome([false, false], [true, true]));
+        // Concurrent AND retry success in the same direction is not double
+        // counted for the other one.
+        assert!(simultaneous_outcome([true, true], [true, true]));
+        assert!(!simultaneous_outcome([true, false], [true, false]));
+        assert!(!simultaneous_outcome([false, true], [false, true]));
+        // A direction that never completes fails the pair.
+        assert!(!simultaneous_outcome([false, false], [false, false]));
+        assert!(!simultaneous_outcome([true, false], [false, false]));
+        assert!(!simultaneous_outcome([false, true], [false, false]));
+        assert!(!simultaneous_outcome([false, false], [true, false]));
+        assert!(!simultaneous_outcome([false, false], [false, true]));
     }
 
     #[test]
