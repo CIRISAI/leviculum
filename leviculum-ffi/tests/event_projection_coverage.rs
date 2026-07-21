@@ -22,6 +22,8 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     "PathRequestReceived",
     // Channel retransmit is internal reliability observability.
     "ChannelRetransmit",
+    // Interface-death frame loss is internal reliability observability.
+    "FramesDropped",
 ];
 
 fn read(rel: &str) -> String {
