@@ -161,6 +161,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
         NodeEvent::LinkEstablished {
             link_id,
             is_initiator,
+            destination_hash,
         } => {
             // Auto-accept model (Python-RNS parity): inbound links are accepted
             // and proved by the core, so there is no separate LinkRequest event.
@@ -172,6 +173,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
             let mut e = lev_event_t::bare(LEV_EVENT_LINK_ESTABLISHED, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.is_sender = is_initiator;
+            e.dest_hash = Some(*destination_hash.as_bytes());
             e
         }
         NodeEvent::LinkClosed { link_id, .. } => {

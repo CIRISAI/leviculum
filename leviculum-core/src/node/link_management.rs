@@ -922,6 +922,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.events.push(NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: true,
+                    destination_hash: *link.destination_hash(),
                 });
                 self.route_link_packet(&link_id, &rtt_packet);
             }
@@ -936,6 +937,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.events.push(NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: true,
+                    destination_hash: *link.destination_hash(),
                 });
             }
         }
@@ -1140,6 +1142,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.events.push(NodeEvent::LinkEstablished {
                 link_id,
                 is_initiator: false,
+                destination_hash: *link.destination_hash(),
             });
         }
     }

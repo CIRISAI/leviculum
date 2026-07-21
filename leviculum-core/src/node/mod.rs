@@ -3544,11 +3544,11 @@ mod tests {
         // 7. Responder receives RTT → LinkEstablished
         let output = responder.handle_packet(InterfaceId(0), &rtt_data);
         assert!(
-            output
-                .events
-                .iter()
-                .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })),
-            "responder should get LinkEstablished"
+            output.events.iter().any(|e| matches!(
+                e,
+                NodeEvent::LinkEstablished { destination_hash, .. } if *destination_hash == dest_hash
+            )),
+            "responder should get LinkEstablished for its destination"
         );
 
         // Mark RTT confirmed on the initiator, the RTT was delivered (step 7
@@ -3615,11 +3615,11 @@ mod tests {
         // 7. Responder receives RTT → LinkEstablished
         let output = responder.handle_packet(InterfaceId(0), &rtt_data);
         assert!(
-            output
-                .events
-                .iter()
-                .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })),
-            "responder should get LinkEstablished"
+            output.events.iter().any(|e| matches!(
+                e,
+                NodeEvent::LinkEstablished { destination_hash, .. } if *destination_hash == dest_hash
+            )),
+            "responder should get LinkEstablished for its destination"
         );
 
         // Mark RTT confirmed, same as the _with_strategy variant above.

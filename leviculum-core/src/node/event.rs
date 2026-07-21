@@ -86,6 +86,10 @@ pub enum NodeEvent {
         link_id: LinkId,
         /// Whether we initiated this link
         is_initiator: bool,
+        /// The local destination this link was established for. Lets apps that
+        /// register several destinations route an inbound link to the right one
+        /// (mirrors the `destination_hash` on `LinkClosed`).
+        destination_hash: DestinationHash,
     },
 
     /// Message received on a link via the Channel multiplexer
