@@ -34,7 +34,6 @@
 extern crate std;
 
 use std::string::String;
-use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 use rand_core::OsRng;
@@ -53,30 +52,11 @@ use crate::transport::{Action, InterfaceId, TickOutput};
 // Tracing capture (prove the EXACT death reason, not just "no link").
 // ----------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-// Unfiltered DEBUG capture routes through the shared global-subscriber helper
-// so a callsite registered by an earlier parallel test cannot hide events. The
-// `with_field_filtered_logs` helper below keeps its own scoped `EnvFilter`
-// subscriber: it deliberately reproduces the field `RUST_LOG` shape.
+// All capture routes through the shared global-subscriber helper so a callsite
+// registered by an earlier parallel test cannot hide events. The field
+// `RUST_LOG` shape is reproduced by filtering the CAPTURED lines afterwards,
+// never by installing a per-test scoped `EnvFilter` subscriber (which would
+// leave callsite Interest poisoned for later captures, see `test_log_capture`).
 use crate::test_log_capture::with_captured_logs;
 
 /// The EXACT `RUST_LOG` filter the cold-8node integ run uses
@@ -89,26 +69,60 @@ use crate::test_log_capture::with_captured_logs;
 const FIELD_RUST_LOG: &str = "leviculum_core::link::channel=debug,leviculum_core::link=debug,\
      leviculum_core::transport=debug,leviculum_std::interfaces=debug,info";
 
-/// Run `body` with tracing captured through the SAME `EnvFilter` the field run
-/// applied. Used to reproduce the field log shape (death with zero *visible*
-/// retransmits) verbatim, proving it is an observability artifact of the filter
-/// rather than a zero-retransmit code path.
-fn with_field_filtered_logs<R>(body: impl FnOnce() -> R) -> (R, String) {
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::EnvFilter;
+/// Would the field `RUST_LOG` ([`FIELD_RUST_LOG`]) have emitted this captured
+/// line? Parses the shared capture's fmt layout (`<timestamp> LEVEL target:
+/// message`; the capture never enters spans) and applies `EnvFilter`'s
+/// target semantics: the most specific matching `target=level` directive wins,
+/// the bare level directive is the default for everything else.
+fn field_rust_log_enables(line: &str) -> bool {
+    let mut tokens = line.split_whitespace();
+    let _timestamp = tokens.next();
+    let Some(level) = tokens.next().and_then(|t| t.parse::<tracing::Level>().ok()) else {
+        return false;
+    };
+    let Some(target) = tokens.next().and_then(|t| t.strip_suffix(':')) else {
+        return false;
+    };
 
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(CaptureWriter(buf.clone()))
-        .with_env_filter(EnvFilter::new(FIELD_RUST_LOG))
-        .with_ansi(false)
-        .with_target(true)
-        .finish();
-    let guard = subscriber.set_default();
-    let out = body();
-    drop(guard);
-    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    (out, logs)
+    let mut max_level = tracing::Level::ERROR;
+    let mut best_prefix_len = None;
+    for directive in FIELD_RUST_LOG.split(',') {
+        let directive = directive.trim();
+        let (prefix, level_name) = match directive.split_once('=') {
+            Some((prefix, level_name)) => (Some(prefix), level_name),
+            None => (None, directive),
+        };
+        if let Some(prefix) = prefix {
+            let matches = target == prefix
+                || (target.starts_with(prefix) && target[prefix.len()..].starts_with("::"));
+            if !matches || best_prefix_len.is_some_and(|best| prefix.len() <= best) {
+                continue;
+            }
+            best_prefix_len = Some(prefix.len());
+        } else if best_prefix_len.is_some() {
+            continue;
+        }
+        max_level = level_name.parse().expect("FIELD_RUST_LOG level must parse");
+    }
+    level <= max_level
+}
+
+/// Run `body` with tracing captured through the shared global subscriber, then
+/// reduce the captured lines to the SAME set the field `RUST_LOG` emitted. Used
+/// to reproduce the field log shape (death with zero *visible* retransmits)
+/// verbatim, proving it is an observability artifact of the filter rather than
+/// a zero-retransmit code path. Filtering the captured text keeps the
+/// process-global callsite Interest cache untouched; a scoped `EnvFilter`
+/// subscriber here would re-introduce the parallel-scheduling flake that
+/// `test_log_capture` exists to prevent.
+fn with_field_filtered_logs<R>(body: impl FnOnce() -> R) -> (R, String) {
+    let (out, logs) = with_captured_logs(body);
+    let mut filtered = String::new();
+    for line in logs.lines().filter(|line| field_rust_log_enables(line)) {
+        filtered.push_str(line);
+        filtered.push('\n');
+    }
+    (out, filtered)
 }
 
 // ----------------------------------------------------------------------------
