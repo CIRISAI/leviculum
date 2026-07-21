@@ -5362,4 +5362,130 @@ mod tests {
             "SF10 jitter ({sf10_jitter}) must exceed SF7 ({sf7_jitter}) after reconfig"
         );
     }
+
+    /// #126: `link_is_established` / `link_destination` across the link
+    /// lifecycle, sans-I/O (never started, packets shuttled by hand):
+    /// unknown id → false / None; PENDING link → false (while the raw
+    /// presence probe `link_negotiated_mtu(..).is_some()` is already true —
+    /// the distinction the accessor exists for) but destination already
+    /// known; ACTIVE link → true / Some(dialed dest). The re-key alias leg
+    /// (original id after a #66 establishment retry) is pinned by
+    /// `rekey_alias_resolved_for_establishment_and_destination_reads` in
+    /// leviculum-core, whose rig owns a warpable clock; the driver's
+    /// `StdNodeCore` runs on the real-time `SystemClock`, which cannot reach
+    /// the ≥12 s establishment timeout in a unit test.
+    #[test]
+    fn link_accessors_gate_on_established_and_expose_destination() {
+        use leviculum_core::transport::{Action, InterfaceId, TickOutput};
+        use leviculum_core::{
+            Destination, DestinationType, Direction, Identity, LinkId, NoStorage, NodeCoreBuilder,
+            ProofStrategy,
+        };
+
+        /// Single outbound packet of a tick; panics if not exactly one.
+        fn one_packet(output: &TickOutput) -> Vec<u8> {
+            let data: Vec<Vec<u8>> = output
+                .actions
+                .iter()
+                .map(|a| match a {
+                    Action::Broadcast { data, .. } | Action::SendPacket { data, .. } => {
+                        data.clone()
+                    }
+                })
+                .collect();
+            assert_eq!(
+                data.len(),
+                1,
+                "expected exactly one outbound packet, got {}",
+                data.len()
+            );
+            data.into_iter().next().unwrap()
+        }
+
+        // Responder: bare sans-I/O core owning a link-accepting destination.
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let mut responder =
+            NodeCoreBuilder::new().build(rand_core::OsRng, SystemClock::new(), NoStorage);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "driverapp",
+            &["accessors"],
+        )
+        .unwrap();
+        dest.set_accepts_links(true);
+        dest.set_proof_strategy(ProofStrategy::All);
+        let dest_hash = *dest.hash();
+        responder.register_destination(dest);
+
+        // The driver under test: daemon-mode ReticulumNode, never started.
+        let tmp = std::env::temp_dir().join(format!("link-accessors-126-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let core = NodeCoreBuilder::new().build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let node = ReticulumNode::new(core, Vec::new(), None, false, 60, 4, 4);
+
+        // 1. Unknown id: gate closed, no destination.
+        let unknown = LinkId::new([0xEE; 16]);
+        assert!(
+            !node.link_is_established(&unknown),
+            "unknown id must not read as established"
+        );
+        assert!(
+            node.link_destination(&unknown).is_none(),
+            "unknown id must have no destination"
+        );
+
+        // 2. PENDING link (request not yet answered): the presence probe is
+        //    already true and the destination is already known, but the
+        //    establishment gate must stay closed.
+        let (link_id, _routed, out) = node
+            .inner()
+            .lock()
+            .unwrap()
+            .connect(dest_hash, &signing_key);
+        assert!(
+            node.link_negotiated_mtu(&link_id).is_some(),
+            "presence probe must already be true for a pending link"
+        );
+        assert_eq!(
+            node.link_destination(&link_id),
+            Some(dest_hash),
+            "pending link must already expose the dialed destination"
+        );
+        assert!(
+            !node.link_is_established(&link_id),
+            "pending link must not read as established"
+        );
+
+        // 3. Establish: request over, proof back.
+        let request = one_packet(&out);
+        let out = responder.handle_packet(InterfaceId(0), &request);
+        let proof = one_packet(&out);
+        let out = node
+            .inner()
+            .lock()
+            .unwrap()
+            .handle_packet(InterfaceId(0), &proof);
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, leviculum_core::NodeEvent::LinkEstablished { .. })),
+            "proof must establish the link"
+        );
+        assert!(
+            node.link_is_established(&link_id),
+            "active link must read as established"
+        );
+        assert_eq!(
+            node.link_destination(&link_id),
+            Some(dest_hash),
+            "active link must expose the dialed destination"
+        );
+    }
 }

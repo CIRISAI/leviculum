@@ -101,8 +101,14 @@ fn make_initiator() -> EndpointNode {
 /// Drive an initiator-side link to Active THROUGH a forced establishment-timeout
 /// retry, so the link is re-keyed (Codeberg #66) and is reachable from the
 /// original caller-visible id only via `link_id_aliases`. Returns
-/// `(initiator, responder, caller_link_id, wire_link_id)`.
-fn establish_link_via_rekey() -> (EndpointNode, EndpointNode, LinkId, LinkId) {
+/// `(initiator, responder, caller_link_id, wire_link_id, dest_hash)`.
+fn establish_link_via_rekey() -> (
+    EndpointNode,
+    EndpointNode,
+    LinkId,
+    LinkId,
+    crate::DestinationHash,
+) {
     let (mut responder, dest_hash, signing_key) = make_responder();
     let mut initiator = make_initiator();
 
@@ -142,7 +148,13 @@ fn establish_link_via_rekey() -> (EndpointNode, EndpointNode, LinkId, LinkId) {
         "link must be re-keyed (wire id != caller id) for this mvr to exercise the alias path"
     );
 
-    (initiator, responder, caller_link_id, wire_link_id)
+    (
+        initiator,
+        responder,
+        caller_link_id,
+        wire_link_id,
+        dest_hash,
+    )
 }
 
 /// `identify_link` with the original caller-visible id must succeed after a
@@ -150,7 +162,7 @@ fn establish_link_via_rekey() -> (EndpointNode, EndpointNode, LinkId, LinkId) {
 /// field failure "identify failed: link error: link not found").
 #[test]
 fn rekey_alias_resolved_for_identify_link() {
-    let (mut initiator, _responder, caller_link_id, _wire) = establish_link_via_rekey();
+    let (mut initiator, _responder, caller_link_id, _wire, _dest) = establish_link_via_rekey();
     let identity = Identity::generate(&mut OsRng);
 
     let result = initiator.identify_link(&caller_link_id, &identity);
@@ -166,7 +178,7 @@ fn rekey_alias_resolved_for_identify_link() {
 /// re-key. Before the fix it returned `RequestError::LinkNotFound`.
 #[test]
 fn rekey_alias_resolved_for_send_request() {
-    let (mut initiator, _responder, caller_link_id, _wire) = establish_link_via_rekey();
+    let (mut initiator, _responder, caller_link_id, _wire, _dest) = establish_link_via_rekey();
 
     let result = initiator.send_request(&caller_link_id, "time", None, None);
     assert!(
@@ -177,12 +189,42 @@ fn rekey_alias_resolved_for_send_request() {
     );
 }
 
+/// The read pair the driver's #126 accessors (`link_is_established` /
+/// `link_destination`) delegate to — `link()` → `is_active` /
+/// `destination_hash` — must resolve the re-key alias: queried with the
+/// ORIGINAL caller-visible id, the re-keyed link reads as established and
+/// names the dialed destination, in parity with the live wire id. The
+/// driver-side test (`link_accessors_gate_on_established_and_expose_destination`,
+/// leviculum-std) covers the unknown/pending/active gating; the re-key leg
+/// lives here because only the core test rig owns a warpable clock.
+#[test]
+fn rekey_alias_resolved_for_establishment_and_destination_reads() {
+    let (initiator, _responder, caller_link_id, wire, dest_hash) = establish_link_via_rekey();
+
+    let via_original = initiator
+        .link(&caller_link_id)
+        .expect("original id must resolve via the alias");
+    assert!(
+        via_original.is_active(),
+        "re-keyed link must read as established via the original id"
+    );
+    assert_eq!(
+        *via_original.destination_hash(),
+        dest_hash,
+        "original id must resolve to the dialed destination"
+    );
+
+    let via_wire = initiator.link(&wire).expect("wire id must resolve");
+    assert!(via_wire.is_active());
+    assert_eq!(*via_wire.destination_hash(), dest_hash);
+}
+
 /// `get_remote_identity` must also resolve the alias (returns `None` here only
 /// because the peer has not identified, never panics / mis-resolves). Guards
 /// the accessor parity for the read path.
 #[test]
 fn rekey_alias_resolved_for_remote_identity() {
-    let (initiator, _responder, caller_link_id, wire) = establish_link_via_rekey();
+    let (initiator, _responder, caller_link_id, wire, _dest) = establish_link_via_rekey();
     // Both ids must agree (neither peer identified yet -> both None).
     assert_eq!(
         initiator.get_remote_identity(&caller_link_id).is_some(),
