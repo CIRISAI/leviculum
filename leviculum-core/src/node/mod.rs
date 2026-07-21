@@ -553,6 +553,32 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         dest_hash: &DestinationHash,
         app_data: Option<&[u8]>,
     ) -> Result<crate::transport::TickOutput, AnnounceError> {
+        self.announce_destination_impl(dest_hash, app_data, None)
+    }
+
+    /// Announce a registered destination on a single interface (Codeberg
+    /// #132, Python `attached_interface` parity).
+    ///
+    /// Same packet build, announce cache and ratchet handling as
+    /// [`Self::announce_destination`], but the announce is emitted as a
+    /// `SendPacket` targeting only `interface_index` instead of a broadcast.
+    /// The originated packet hash is still recorded for echo dedup, exactly
+    /// as the broadcast path does inside `send_on_all_interfaces`.
+    pub fn announce_destination_on_interface(
+        &mut self,
+        dest_hash: &DestinationHash,
+        app_data: Option<&[u8]>,
+        interface_index: usize,
+    ) -> Result<crate::transport::TickOutput, AnnounceError> {
+        self.announce_destination_impl(dest_hash, app_data, Some(interface_index))
+    }
+
+    fn announce_destination_impl(
+        &mut self,
+        dest_hash: &DestinationHash,
+        app_data: Option<&[u8]>,
+        interface_index: Option<usize>,
+    ) -> Result<crate::transport::TickOutput, AnnounceError> {
         let now_ms = self.transport.clock().now_ms();
 
         let dest = self
@@ -572,7 +598,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport
             .storage_mut()
             .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
-        self.transport.send_on_all_interfaces(&buf[..len]);
+        match interface_index {
+            Some(idx) => {
+                // send_on_interface does not cache the originated packet
+                // hash the way send_on_all_interfaces does, so record it
+                // here to keep echo dedup intact.
+                self.transport
+                    .storage_mut()
+                    .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
+                let _ = self.transport.send_on_interface(idx, &buf[..len]);
+            }
+            None => self.transport.send_on_all_interfaces(&buf[..len]),
+        }
 
         // Sender self-remember: store own ratchet in known_ratchets so that
         // encrypt-to-self works (Python Destination.announce -> _remember_ratchet).
@@ -1747,12 +1784,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Notify core that a non-local interface has come online (sans-I/O).
     ///
     /// Generates fresh announces for all daemon-owned destinations and
-    /// rebroadcasts cached announce bytes for local-client destinations.
-    /// Fresh announces ensure peers accept the path update even if they
-    /// already have a stale entry. Cached bytes are sufficient for client
+    /// re-sends cached announce bytes for local-client destinations, both
+    /// targeting only the interface that came up (Codeberg #132; Python
+    /// announces on the reconnected interface, not all of them). Fresh
+    /// announces ensure peers accept the path update even if they already
+    /// have a stale entry. Cached bytes are sufficient for client
     /// destinations because the peer on the recovered interface has never
     /// seen them (Block D).
-    pub fn handle_interface_up(&mut self, _interface_index: usize) -> crate::transport::TickOutput {
+    pub fn handle_interface_up(&mut self, interface_index: usize) -> crate::transport::TickOutput {
         let now_ms = self.transport.clock().now_ms();
 
         // Collect destination hashes first to avoid borrow conflict
@@ -1778,7 +1817,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.transport
                                 .storage_mut()
                                 .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
-                            self.transport.send_on_all_interfaces(&buf[..len]);
+                            // Target only the interface that came up; cache
+                            // the originated packet hash for echo dedup,
+                            // which send_on_interface (unlike
+                            // send_on_all_interfaces) does not do itself.
+                            self.transport
+                                .storage_mut()
+                                .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
+                            let _ = self
+                                .transport
+                                .send_on_interface(interface_index, &buf[..len]);
                         }
                     }
                     Err(e) => {
@@ -1810,7 +1858,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         "Re-announcing cached local-client dest <{}> on interface recovery",
                         HexShort(hash),
                     );
-                    self.transport.send_on_all_interfaces(&cached_raw);
+                    self.transport
+                        .storage_mut()
+                        .add_packet_hash(crate::packet::packet_hash(&cached_raw));
+                    let _ = self
+                        .transport
+                        .send_on_interface(interface_index, &cached_raw);
                 }
             }
         }
@@ -6654,17 +6707,18 @@ mod tests {
 
         let output = node.handle_interface_up(1);
 
-        // Should produce Broadcast actions (fresh announces sent on all interfaces)
+        // Should produce a fresh announce sent on the interface that came up
+        // (Codeberg #132: no longer a Broadcast on all interfaces).
         assert!(
             !output.actions.is_empty(),
             "handle_interface_up should produce actions"
         );
         assert!(
-            output
-                .actions
-                .iter()
-                .any(|a| matches!(a, Action::Broadcast { .. })),
-            "handle_interface_up should broadcast fresh announces"
+            output.actions.iter().any(|a| matches!(
+                a,
+                Action::SendPacket { iface, .. } if *iface == crate::transport::InterfaceId(1)
+            )),
+            "handle_interface_up should send fresh announces on the new interface"
         );
     }
 
@@ -6687,6 +6741,161 @@ mod tests {
         assert!(
             output.actions.is_empty(),
             "no destinations registered, should have no actions"
+        );
+    }
+
+    #[test]
+    fn test_handle_interface_up_announces_only_on_recovered_interface() {
+        // Codeberg #132: an interface coming (back) up must re-announce local
+        // destinations only on THAT interface, not broadcast on all. A TCP
+        // reconnect must not burn LoRa airtime on unrelated interfaces
+        // (Python announces on the reconnected interface only).
+        use crate::transport::{Action, InterfaceId};
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().enable_transport(true).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+
+        node.transport
+            .register_interface(Box::new(MockInterface::new("if0", 1)));
+        node.transport
+            .register_interface(Box::new(MockInterface::new("if1", 1)));
+
+        let identity = Identity::generate(&mut OsRng);
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["ifaceup132"],
+        )
+        .unwrap();
+        let dest_hash = *dest.hash();
+        node.register_destination(dest);
+
+        let output = node.handle_interface_up(0);
+
+        assert!(
+            !output.actions.is_empty(),
+            "handle_interface_up should produce actions"
+        );
+        for action in &output.actions {
+            match action {
+                Action::SendPacket { iface, .. } => assert_eq!(
+                    *iface,
+                    InterfaceId(0),
+                    "re-announce must target only the recovered interface"
+                ),
+                Action::Broadcast { .. } => {
+                    panic!("handle_interface_up must not broadcast on all interfaces")
+                }
+            }
+        }
+        let announced_on_if0 = output.actions.iter().any(|a| {
+            matches!(a, Action::SendPacket { iface, data }
+                if *iface == InterfaceId(0)
+                    && crate::packet::Packet::unpack(data)
+                        .map(|p| p.destination_hash == dest_hash.into_bytes())
+                        .unwrap_or(false))
+        });
+        assert!(
+            announced_on_if0,
+            "local destination should be announced on the recovered interface"
+        );
+    }
+
+    #[test]
+    fn test_announce_destination_on_interface_targets_single_interface() {
+        // Codeberg #132: per-interface announce (Python attached_interface
+        // parity). The announce must go out as a SendPacket on exactly the
+        // requested interface, never as a Broadcast, and the originated
+        // packet hash must still land in the dedup cache exactly as
+        // send_on_all_interfaces would record it. The dedup assertion checks
+        // storage directly because Single announces are exempt from the
+        // receive-side hash dedup (transport.rs process_incoming), so an
+        // echo-based check would pass vacuously.
+        use crate::traits::Storage;
+        use crate::transport::{Action, InterfaceId};
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().enable_transport(true).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+
+        node.transport
+            .register_interface(Box::new(MockInterface::new("if0", 1)));
+        node.transport
+            .register_interface(Box::new(MockInterface::new("if1", 1)));
+
+        let identity = Identity::generate(&mut OsRng);
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["perif132"],
+        )
+        .unwrap();
+        let dest_hash = *dest.hash();
+        node.register_destination(dest);
+
+        let output = node
+            .announce_destination_on_interface(&dest_hash, None, 1)
+            .unwrap();
+
+        let mut sent_data: Option<Vec<u8>> = None;
+        for action in &output.actions {
+            match action {
+                Action::SendPacket { iface, data } => {
+                    assert_eq!(
+                        *iface,
+                        InterfaceId(1),
+                        "per-interface announce must target only the requested interface"
+                    );
+                    sent_data = Some(data.clone());
+                }
+                Action::Broadcast { .. } => {
+                    panic!("per-interface announce must not broadcast")
+                }
+            }
+        }
+        let announce_raw = sent_data.expect("announce should produce a SendPacket action");
+        let pkt = crate::packet::Packet::unpack(&announce_raw).unwrap();
+        assert_eq!(pkt.destination_hash, dest_hash.into_bytes());
+
+        // Dedup preserved: the originated packet hash is cached, same as the
+        // all-interfaces path does inside send_on_all_interfaces. This is the
+        // exact lookup process_incoming uses to drop returning echoes.
+        assert!(
+            node.transport
+                .storage()
+                .has_packet_hash(&crate::packet::packet_hash(&announce_raw)),
+            "per-interface announce must cache the originated packet hash for dedup"
+        );
+
+        // The announce cache must be populated just like the broadcast path.
+        assert!(
+            node.transport
+                .storage()
+                .get_announce_cache(dest_hash.as_bytes())
+                .is_some(),
+            "announce cache should be populated"
+        );
+
+        // The all-interfaces path is unchanged: a plain announce_destination
+        // still broadcasts.
+        let output = node.announce_destination(&dest_hash, None).unwrap();
+        assert!(
+            output
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::Broadcast { .. })),
+            "announce_destination without a target interface must still broadcast"
         );
     }
 
@@ -6906,45 +7115,50 @@ mod tests {
         // Now simulate interface recovery: call handle_interface_up
         let output = node.handle_interface_up(0);
 
-        // We expect two broadcasts: one fresh announce for daemon_dest,
-        // and one cached rebroadcast for client_dest.
-        let broadcast_actions: Vec<&Vec<u8>> = output
+        // We expect two sends targeting the recovered interface (Codeberg
+        // #132: no longer broadcasts): one fresh announce for daemon_dest,
+        // and one cached re-send for client_dest.
+        let sent_on_recovered: Vec<&Vec<u8>> = output
             .actions
             .iter()
             .filter_map(|a| match a {
-                Action::Broadcast { data, .. } => Some(data),
+                Action::SendPacket { iface, data }
+                    if *iface == crate::transport::InterfaceId(0) =>
+                {
+                    Some(data)
+                }
                 _ => None,
             })
             .collect();
 
         assert!(
-            broadcast_actions.len() >= 2,
-            "Expected at least 2 broadcasts (daemon fresh + client cached), got {}",
-            broadcast_actions.len()
+            sent_on_recovered.len() >= 2,
+            "Expected at least 2 sends on the recovered interface (daemon fresh + client cached), got {}",
+            sent_on_recovered.len()
         );
 
         // Verify daemon dest got a fresh announce (different from anything cached before)
-        let has_daemon_broadcast = broadcast_actions.iter().any(|data| {
+        let has_daemon_send = sent_on_recovered.iter().any(|data| {
             crate::packet::Packet::unpack(data)
                 .ok()
                 .map(|pkt| pkt.destination_hash == daemon_hash)
                 .unwrap_or(false)
         });
         assert!(
-            has_daemon_broadcast,
-            "Should broadcast fresh announce for daemon-owned dest"
+            has_daemon_send,
+            "Should send fresh announce for daemon-owned dest on the recovered interface"
         );
 
-        // Verify client dest got its cached bytes rebroadcast
-        let has_client_broadcast = broadcast_actions.iter().any(|data| {
+        // Verify client dest got its cached bytes re-sent
+        let has_client_send = sent_on_recovered.iter().any(|data| {
             crate::packet::Packet::unpack(data)
                 .ok()
                 .map(|pkt| pkt.destination_hash == client_hash)
                 .unwrap_or(false)
         });
         assert!(
-            has_client_broadcast,
-            "Should rebroadcast cached announce for local-client dest"
+            has_client_send,
+            "Should re-send cached announce for local-client dest on the recovered interface"
         );
     }
 
