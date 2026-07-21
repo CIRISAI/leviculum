@@ -116,7 +116,7 @@ fn has_link_established(events: &[NodeEvent], link_id: &LinkId, expected_initiat
     events.iter().any(|e| {
         matches!(
             e,
-            NodeEvent::LinkEstablished { link_id: id, is_initiator }
+            NodeEvent::LinkEstablished { link_id: id, is_initiator, .. }
                 if *id == *link_id && *is_initiator == expected_initiator
         )
     })

@@ -93,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator,
+                    ..
                 } => {
                     println!();
                     println!(

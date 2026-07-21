@@ -1013,6 +1013,7 @@ pub async fn wait_for_responder_established_link(
         NodeEvent::LinkEstablished {
             link_id,
             is_initiator: false,
+            ..
         } => Some(link_id),
         _ => None,
     })

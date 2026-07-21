@@ -496,6 +496,7 @@ impl Session {
                 NodeEvent::LinkEstablished {
                     link_id: id,
                     is_initiator,
+                    ..
                 } if id == link_id && is_initiator => return Ok(()),
                 NodeEvent::LinkClosed { link_id: id, .. } if id == link_id => {
                     return Err(FetchError::LinkFailed)

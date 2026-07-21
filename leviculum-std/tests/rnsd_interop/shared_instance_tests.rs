@@ -285,6 +285,7 @@ async fn test_shared_instance_link_through_daemon() {
             NodeEvent::LinkEstablished {
                 link_id: id,
                 is_initiator,
+                ..
             } if id == link_id && is_initiator => Some(()),
             _ => None,
         },
@@ -819,6 +820,7 @@ async fn test_local_client_builder_link_through_daemon() {
                 NodeEvent::LinkEstablished {
                     link_id: id,
                     is_initiator,
+                    ..
                 } if id == link_id && is_initiator => Some(()),
                 _ => None,
             },

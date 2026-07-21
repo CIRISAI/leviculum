@@ -109,6 +109,7 @@ async fn run_once_mode(iter: usize, teardown: TeardownMode) -> RunOutcome {
                 NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: false,
+                    ..
                 } => {
                     let _ = a_link_tx.send(link_id);
                 }
@@ -131,6 +132,7 @@ async fn run_once_mode(iter: usize, teardown: TeardownMode) -> RunOutcome {
                 NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: true,
+                    ..
                 } => {
                     let _ = b_est_tx.send(link_id);
                 }

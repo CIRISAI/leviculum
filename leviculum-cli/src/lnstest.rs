@@ -946,6 +946,7 @@ async fn event_loop(mut event_rx: EventReceiver, state: Arc<Mutex<SessionState>>
             NodeEvent::LinkEstablished {
                 link_id,
                 is_initiator,
+                ..
             } => {
                 // Incoming links are auto-accepted and proved by the core (Python
                 // parity), so a responder just observes this event; there is no

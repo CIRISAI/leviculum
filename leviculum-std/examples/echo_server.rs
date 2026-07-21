@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             Some(event) = events.recv() => {
                 match event {
-                    NodeEvent::LinkEstablished { link_id, is_initiator } => {
+                    NodeEvent::LinkEstablished { link_id, is_initiator, .. } => {
                         // Incoming links are accepted and proved automatically by
                         // the core (Python parity). The app just observes this
                         // event; for an incoming link (is_initiator == false) it can
