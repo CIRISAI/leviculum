@@ -14,29 +14,31 @@ Run from the repository root:
 
 Output: ``vectors.json`` next to this script. The file is committed and the
 specification embeds its hex blocks. Re-running MUST reproduce it byte for
-byte; the harness asserts determinism for every frozen vector before writing.
+byte; the harness asserts determinism for every stored field before writing.
 
 Vector kinds
 ------------
 frozen     Deterministic bytes. The hex is the proof. Reproducible across runs.
 roundtrip  Output depends on ephemeral key material (RNS Destination.encrypt
-           uses a fresh ephemeral X25519 key per call), so the ciphertext is
-           NOT reproducible. The proof is a structural + decrypt round trip:
-           the harness shows the cleartext framing and proves that decrypting
-           recovers the original plaintext.
+           uses a fresh ephemeral X25519 key per call). Random ciphertext and
+           ciphertext-derived hashes are deliberately omitted from the JSON;
+           deterministic lengths, structural assertions and decrypt booleans
+           prove the round trip while keeping the fixture reproducible.
 """
 
+import base64
 import json
 import os
 import subprocess
-import sys
 
 import RNS
 from RNS.vendor import umsgpack as msgpack
 
 import LXMF
 from LXMF.LXMessage import LXMessage
+from LXMF.LXMPeer import LXMPeer
 from LXMF import (
+    compression_support_from_app_data,
     display_name_from_app_data,
     stamp_cost_from_app_data,
     pn_announce_data_is_valid,
@@ -46,6 +48,12 @@ from LXMF import (
     PN_META_NAME,
 )
 from LXMF import LXStamper
+
+
+EXPECTED_LXMF_VERSION = "1.0.1"
+EXPECTED_LXMF_COMMIT = "fab12ad9bf9f997797034950f289fe41a79dcf5a"
+EXPECTED_RNS_VERSION = "1.3.5"
+EXPECTED_RNS_COMMIT = "d5e62d4e15c5fe2e170f7bd9e120551671f21a27"
 
 
 # --------------------------------------------------------------------------
@@ -79,6 +87,28 @@ def _submodule_commit(path):
         )
     except Exception:
         return "unknown"
+
+
+def assert_reference_lock():
+    """Refuse to rewrite the canonical fixture from an unexpected reference."""
+    actual_lxmf_commit = _submodule_commit("reference/LXMF")
+    actual_rns_commit = _submodule_commit("reference/Reticulum")
+    expected = {
+        "LXMF version": (LXMF.__version__, EXPECTED_LXMF_VERSION),
+        "LXMF commit": (actual_lxmf_commit, EXPECTED_LXMF_COMMIT),
+        "RNS version": (RNS.__version__, EXPECTED_RNS_VERSION),
+        "RNS commit": (actual_rns_commit, EXPECTED_RNS_COMMIT),
+    }
+    mismatches = [
+        f"{name}: got {actual}, expected {wanted}"
+        for name, (actual, wanted) in expected.items()
+        if actual != wanted
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "reference lock mismatch; review upstream changes before regenerating:\n  "
+            + "\n  ".join(mismatches)
+        )
 
 
 def make_identities():
@@ -165,7 +195,7 @@ def gen_message_vectors():
         "id": "VEC-MSG-1",
         "title": "Minimal opportunistic message (no fields, no stamp)",
         "kind": "frozen",
-        "citation": "LXMessage.py:359-384",
+        "citation": "LXMessage.py:355-388",
         "inputs": {
             "src_identity_prv_hex": SRC_PRV.hex(),
             "dst_identity_prv_hex": DST_PRV.hex(),
@@ -194,7 +224,7 @@ def gen_message_vectors():
         "id": "VEC-MSG-2",
         "title": "Message with a fields dict (integer field key)",
         "kind": "frozen",
-        "citation": "LXMessage.py:359, 212-216",
+        "citation": "LXMessage.py:355-388,215-219",
         "inputs": {
             "timestamp": FIXED_TIMESTAMP, "title": "", "content": "body text",
             "fields": {"0x0F": "0x02"}, "desired_method": "DIRECT",
@@ -208,6 +238,41 @@ def gen_message_vectors():
         "representation": m2.representation,
     })
 
+    # Negative fixints are valid MessagePack integer map keys. This catches a
+    # subtle interop regression where a generic map/string codec rewrites an
+    # unknown LXMF field key or rejects it as an unsigned value.
+    negative_fields = {-1: b"negative field"}
+    m_negative, _, _ = build_message(
+        b"negative key", b"body", negative_fields, LXMessage.DIRECT
+    )
+    negative_payload = msgpack.packb([
+        FIXED_TIMESTAMP,
+        b"negative key",
+        b"body",
+        negative_fields,
+    ])
+    add({
+        "id": "VEC-MSG-NEGATIVE-FIELD",
+        "title": "Message with a negative-fixint field key",
+        "kind": "frozen",
+        "citation": "LXMessage.py:355-387",
+        "inputs": {
+            "timestamp": FIXED_TIMESTAMP,
+            "title": "negative key",
+            "content": "body",
+            "field_key": -1,
+            "field_value_hex": b"negative field".hex(),
+            "desired_method": "DIRECT",
+        },
+        "packed_hex": m_negative.packed.hex(),
+        "packed_len": len(m_negative.packed),
+        "parts": split_packed(m_negative.packed),
+        "payload_msgpack_hex": negative_payload.hex(),
+        "message_id_hex": m_negative.message_id.hex(),
+        "method": m_negative.method,
+        "representation": m_negative.representation,
+    })
+
     # VEC-MSG-3: unpack round trip proves the offsets + verification path.
     # Make the source identity recallable so unpack runs the full signature
     # validation branch (LXMessage.py:765-797). In the live protocol the
@@ -218,7 +283,7 @@ def gen_message_vectors():
         "id": "VEC-MSG-3",
         "title": "Unpack + signature verification round trip of VEC-MSG-1",
         "kind": "frozen",
-        "citation": "LXMessage.py:735-807",
+        "citation": "LXMessage.py:747-822",
         "source_vector": "VEC-MSG-1",
         "recovered_message_id_hex": unpacked.hash.hex(),
         "recovered_title": unpacked.title_as_string(),
@@ -240,7 +305,7 @@ def gen_delivery_vectors():
         "id": "VEC-DLV-OPP",
         "title": "Opportunistic on-air payload (leading destination hash omitted)",
         "kind": "frozen",
-        "citation": "LXMessage.py:623-635",
+        "citation": "LXMessage.py:626-638",
         "full_packed_hex": m.packed.hex(),
         "on_air_hex": m.packed[16:].hex(),
         "note": "Destination is inferred from the RNS packet header.",
@@ -251,7 +316,7 @@ def gen_delivery_vectors():
         "id": "VEC-DLV-DIRECT",
         "title": "Direct delivery sends the full packed message",
         "kind": "frozen",
-        "citation": "LXMessage.py:414-421, 633",
+        "citation": "LXMessage.py:417-424,635-636",
         "on_air_hex": m.packed.hex(),
         "note": "Sent as a single Packet over a Link when content fits "
                 "LINK_PACKET_MAX_CONTENT, else as a Resource.",
@@ -269,31 +334,42 @@ def gen_delivery_vectors():
         "id": "VEC-PROP-ENVELOPE",
         "title": "Propagation transfer envelope (encrypted, round-trip proof)",
         "kind": "roundtrip",
-        "citation": "LXMessage.py:423-433",
+        "citation": "LXMessage.py:426-436",
         "inner_packed_hex": inner.hex(),
         "dest_hash_prefix_hex": inner[:16].hex(),
         "pn_encrypted_len": len(pn_encrypted),
         "lxmf_data_structure": "destination_hash(16) || destination.encrypt(packed[16:])",
-        "transient_id_hex": transient_id.hex(),
-        "transient_id_note": "transient_id = full_hash(lxmf_data); depends on "
-                             "ephemeral ciphertext, not reproducible.",
+        "transient_id_len": len(transient_id),
+        "transient_id_is_full_hash": transient_id
+                                     == RNS.Identity.full_hash(lxmf_data),
+        "transient_id_note": "transient_id = full_hash(lxmf_data); random "
+                             "ciphertext-derived bytes are intentionally omitted.",
         "envelope_structure": "msgpack([wall_clock_timestamp, [lxmf_data, ...]])",
         "decrypt_recovers_inner_tail": recovered == inner[16:],
     })
 
     # Paper: lxm:// URI. Encrypted -> roundtrip + structure.
     mpaper, srcpr, dstpr = build_message(b"Hi", b"Hello", {}, LXMessage.PAPER)
+    inner_paper = mpaper.packed
     uri = mpaper.as_uri()
+    encoded_body = uri.split("://", 1)[1]
+    padded_body = encoded_body + "=" * ((4 - len(encoded_body) % 4) % 4)
+    paper_bytes = base64.urlsafe_b64decode(padded_body)
+    recovered_paper_tail = dstpr.decrypt(paper_bytes[16:])
     add({
         "id": "VEC-PAPER-URI",
         "title": "Paper message lxm:// URI (encrypted, round-trip proof)",
         "kind": "roundtrip",
-        "citation": "LXMessage.py:443-455, 687-702",
+        "citation": "LXMessage.py:446-451,698-713",
         "uri_scheme": LXMessage.URI_SCHEMA,
-        "uri_prefix": uri[:10],
+        "uri_prefix": LXMessage.URI_SCHEMA + "://",
+        "uri_length": len(uri),
+        "padding_stripped": not uri.endswith("="),
+        "destination_hash_matches": paper_bytes[:16] == inner_paper[:16],
+        "decrypt_recovers_inner_tail": recovered_paper_tail == inner_paper[16:],
         "structure": "lxm://base64url(destination_hash(16) || "
                      "destination.encrypt(packed[16:])), '=' padding stripped",
-        "note": "base64url body depends on ephemeral ciphertext; not reproducible.",
+        "note": "The random base64url body is intentionally omitted.",
     })
 
 
@@ -326,7 +402,7 @@ def gen_stamp_vectors():
         "id": "VEC-STAMP-1",
         "title": "Stamp workblock, validity, and value (cost=8, expand_rounds=4)",
         "kind": "frozen",
-        "citation": "LXStamper.py:18-46",
+        "citation": "LXStamper.py:49-77",
         "material_hex": material.hex(),
         "expand_rounds": rounds,
         "target_cost": target_cost,
@@ -341,34 +417,149 @@ def gen_stamp_vectors():
         "stamp_value": value,
     })
 
+    # Pin the separate propagation-node expansion count. A second low-cost
+    # deterministic search keeps the fixture quick while still exercising the
+    # complete 1000-round workblock used for real origin uploads.
+    pn_material = bytes(range(32))
+    pn_rounds = LXStamper.WORKBLOCK_EXPAND_ROUNDS_PN
+    pn_cost = 8
+    pn_workblock = LXStamper.stamp_workblock(
+        pn_material, expand_rounds=pn_rounds
+    )
+    pn_counter = 0
+    while True:
+        pn_stamp = pn_counter.to_bytes(32, "big")
+        if LXStamper.stamp_valid(pn_stamp, pn_cost, pn_workblock):
+            break
+        pn_counter += 1
+    add({
+        "id": "VEC-STAMP-PN",
+        "title": "Propagation-node stamp (cost=8, expand_rounds=1000)",
+        "kind": "frozen",
+        "citation": "LXStamper.py:13,53-63,122-155",
+        "material_hex": pn_material.hex(),
+        "expand_rounds": pn_rounds,
+        "target_cost": pn_cost,
+        "workblock_len": len(pn_workblock),
+        "workblock_sha256_hex": RNS.Identity.full_hash(pn_workblock).hex(),
+        "stamp_search": "stamp = counter_be32, counter++ until valid",
+        "winning_counter": pn_counter,
+        "stamp_hex": pn_stamp.hex(),
+        "digest_hex": RNS.Identity.full_hash(pn_workblock + pn_stamp).hex(),
+        "target_hex": (0b1 << (256 - pn_cost)).to_bytes(32, "big").hex(),
+        "valid": LXStamper.stamp_valid(pn_stamp, pn_cost, pn_workblock),
+        "stamp_value": LXStamper.stamp_value(pn_workblock, pn_stamp),
+    })
+
+
+# --------------------------------------------------------------------------
+# Propagation mailbox client vectors (frozen).
+# --------------------------------------------------------------------------
+
+def _transient_id(start):
+    return bytes((start + offset) & 0xff for offset in range(32))
+
+
+def gen_propagation_client_vectors():
+    """Pin every client-side ``/get`` request and response wire direction."""
+    first_id = _transient_id(0)
+    wanted_id = _transient_id(32)
+    held_id = _transient_id(64)
+
+    list_request = [None, None]
+    add({
+        "id": "VEC-PROP-GET-LIST",
+        "title": "Propagation mailbox list request",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:492-501; LXMPeer.py:15",
+        "path": LXMPeer.MESSAGE_GET_PATH,
+        "value": [None, None],
+        "request_hex": msgpack.packb(list_request).hex(),
+    })
+
+    download_request = [[wanted_id], [held_id], 1000]
+    add({
+        "id": "VEC-PROP-GET-DOWNLOAD",
+        "title": "Propagation mailbox download request",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:1521-1539; LXMPeer.py:15",
+        "path": LXMPeer.MESSAGE_GET_PATH,
+        "wants_hex": [wanted_id.hex()],
+        "haves_hex": [held_id.hex()],
+        "transfer_limit_kb": 1000,
+        "request_hex": msgpack.packb(download_request).hex(),
+    })
+
+    acknowledge_request = [None, [first_id]]
+    add({
+        "id": "VEC-PROP-GET-ACK",
+        "title": "Propagation mailbox acknowledgement and purge request",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:1569-1581; LXMPeer.py:15",
+        "path": LXMPeer.MESSAGE_GET_PATH,
+        "haves_hex": [first_id.hex()],
+        "request_hex": msgpack.packb(acknowledge_request).hex(),
+    })
+
+    list_response = [wanted_id, held_id]
+    add({
+        "id": "VEC-PROP-LIST-RESPONSE",
+        "title": "Propagation mailbox transient-ID list response",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:1426-1448,1506-1549",
+        "transient_ids_hex": [wanted_id.hex(), held_id.hex()],
+        "response_hex": msgpack.packb(list_response).hex(),
+    })
+
+    get_response = [b"one", b"two"]
+    add({
+        "id": "VEC-PROP-GET-RESPONSE",
+        "title": "Propagation mailbox downloaded-message response",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:1450-1500,1551-1588",
+        "messages_hex": [value.hex() for value in get_response],
+        "response_hex": msgpack.packb(get_response).hex(),
+        "no_identity_error_hex": msgpack.packb(LXMPeer.ERROR_NO_IDENTITY).hex(),
+        "no_access_error_hex": msgpack.packb(LXMPeer.ERROR_NO_ACCESS).hex(),
+    })
+
 
 # --------------------------------------------------------------------------
 # Announce application-data vectors (frozen), proven via genuine decoders.
 # --------------------------------------------------------------------------
 
 def gen_announce_vectors():
-    # Delivery announce app_data = msgpack([display_name|None, stamp_cost|None])
-    # (LXMRouter.get_announce_app_data, LXMRouter.py:990-1002).
+    # Current delivery announce app_data includes the supported-functionality
+    # list added by LXMF 1.0.1 (LXMRouter.get_announce_app_data).
     display_name = "Alice".encode("utf-8")
     stamp_cost = 8
-    app_data = msgpack.packb([display_name, stamp_cost])
+    supported_functionality = [SF_COMPRESSION]
+    app_data = msgpack.packb([
+        display_name,
+        stamp_cost,
+        supported_functionality,
+    ])
     add({
         "id": "VEC-ANN-DELIVERY",
         "title": "Delivery announce app_data",
         "kind": "frozen",
-        "citation": "LXMRouter.py:990-1002; LXMF.py:117-152",
-        "structure": "msgpack([display_name_utf8_or_None, stamp_cost_or_None])",
+        "citation": "LXMRouter.py:985-1001; LXMF.py:151-200",
+        "structure": "msgpack([display_name_utf8_or_None, stamp_cost_or_None, "
+                     "supported_functionality])",
         "app_data_hex": app_data.hex(),
         "first_byte_hex": "%02x" % app_data[0],
-        "first_byte_note": "0x92 = msgpack fixarray(2); decoders sniff 0x90-0x9f or 0xdc.",
+        "first_byte_note": "0x93 = msgpack fixarray(3); decoders sniff 0x90-0x9f or 0xdc.",
         "decoded_display_name": display_name_from_app_data(app_data),
         "decoded_stamp_cost": stamp_cost_from_app_data(app_data),
+        "decoded_compression_supported": bool(
+            compression_support_from_app_data(app_data)
+        ),
     })
 
     # Propagation announce app_data (7-element list) per
-    # LXMRouter.get_propagation_node_app_data (LXMRouter.py:307-319).
+    # LXMRouter.get_propagation_node_app_data (LXMRouter.py:306-318).
     FIXED_TIMEBASE = 1700000000  # int(time.time()) in the real protocol.
-    metadata = {PN_META_NAME: "NodeA".encode("utf-8")}
+    metadata = {PN_META_NAME: "Node".encode("utf-8")}
     stamp_costs = [16, 3, 18]  # [prop_cost, prop_flex, peering_cost]
     announce_data = [
         False,            # 0: legacy flag
@@ -384,7 +575,7 @@ def gen_announce_vectors():
         "id": "VEC-ANN-PROPAGATION",
         "title": "Propagation node announce app_data (7-element list)",
         "kind": "frozen",
-        "citation": "LXMRouter.py:307-319; LXMF.py:191-211",
+        "citation": "LXMRouter.py:306-318; LXMF.py:202-250",
         "structure": "msgpack([legacy, timebase, enabled, xfer_limit_kb, "
                      "sync_limit_kb, [prop_cost, prop_flex, peering_cost], metadata])",
         "fixed_timebase": FIXED_TIMEBASE,
@@ -401,34 +592,35 @@ def gen_announce_vectors():
 # --------------------------------------------------------------------------
 
 def assert_determinism():
-    """Rebuild every frozen vector once more and assert the bytes match."""
+    """Rebuild every vector once more and assert the fixture is byte-stable."""
     snapshot = {v["id"]: json.dumps(v, sort_keys=True) for v in VECTORS}
     VECTORS.clear()
     gen_message_vectors()
     gen_delivery_vectors()
     gen_stamp_vectors()
+    gen_propagation_client_vectors()
     gen_announce_vectors()
     for v in VECTORS:
-        if v["kind"] != "frozen":
-            continue
         again = json.dumps(v, sort_keys=True)
         if snapshot[v["id"]] != again:
             raise AssertionError(
-                f"Non-deterministic frozen vector {v['id']}: output changed "
+                f"Non-deterministic vector {v['id']}: output changed "
                 f"between runs."
             )
 
 
 def main():
+    assert_reference_lock()
     constants, stamper = collect_constants()
     gen_message_vectors()
     gen_delivery_vectors()
     gen_stamp_vectors()
+    gen_propagation_client_vectors()
     gen_announce_vectors()
     assert_determinism()
 
     doc = {
-        "_comment": "Golden vectors for the LXMF protocol specification. "
+        "_comment": "Canonical golden vectors for the LXMF protocol specification. "
                     "Generated by gen_vectors.py from the vendored reference. "
                     "Do not edit by hand; re-run the harness.",
         "meta": {

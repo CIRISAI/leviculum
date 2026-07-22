@@ -1644,6 +1644,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-lxmf"
+version = "0.7.1"
+dependencies = [
+ "futures",
+ "hex",
+ "leviculum-core",
+ "rand_core 0.6.4",
+ "rmp",
+ "sha2",
+]
+
+[[package]]
 name = "leviculum-micron"
 version = "0.7.1"
 
