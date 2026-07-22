@@ -2,17 +2,22 @@
 
 ## Reference
 
-This specification describes LXMF as implemented by the pinned reference:
+The active wire fixture and Rust compatibility tests use these pinned
+references:
 
 | Component | Version | Commit |
 |-----------|---------|--------|
-| LXMF | 0.9.6 (`_version.py:1`) | `8499729024a4cddfceb47ca07188bb5b1d11d179` |
+| LXMF | 1.0.1 (`_version.py:1`) | `fab12ad9bf9f997797034950f289fe41a79dcf5a` |
 | Reticulum (RNS) | 1.3.5 | `d5e62d4e15c5fe2e170f7bd9e120551671f21a27` |
 
 `APP_NAME` is `"lxmf"` (`LXMF.py:1`). Where the reference defers to a Reticulum
 primitive (hashing, signing, encryption, MDU sizes), this document cites
 `reference/Reticulum` and does not re-specify the primitive; its behaviour-as-used
 is pinned by test vectors instead.
+
+The frozen symbol inventory and original source-line audit were captured from
+LXMF 0.9.6 (`8499729`). The canonical fixture is now generated from 1.0.1, and
+sections changed since the audit carry current citations and vectors.
 
 ## Scope
 
@@ -26,8 +31,9 @@ is pinned by test vectors instead.
   paper);
 - stamp construction, validity, value, and the ticket shortcut;
 - announce application-data formats (delivery and propagation);
-- the client-facing propagation wire surfaces (`/offer`, `/get`, transient
-  ingest, error codes).
+- the recipient-facing propagation `/get` exchange and its error codes;
+- the Python reference's `/offer` and propagation-ingest wire shapes, for
+  protocol documentation only.
 
 **Informative** (described, not byte-proven; an implementation MAY diverge):
 
@@ -38,8 +44,20 @@ is pinned by test vectors instead.
 
 **Out of scope**: the `lxmd` daemon and CLI (`Utilities/lxmd.py`).
 
-The full enumeration of reference symbols and their normative / informative /
-out-of-scope classification is the frozen [Symbol inventory](_inventory.md). The
+## Rust implementation scope
+
+`leviculum-lxmf` implements propagation only as a client: discovery, outgoing
+link establishment, origin uploads as raw Link Packets or Resources, `/get`
+list/download requests, and acknowledgement/purge. It does not implement
+propagation-node hosting, transit storage, `/offer`, propagation peers, peer
+rotation, or peer synchronisation. `/get` requests and responses are currently
+bounded to one Reticulum Resource segment; Python-compatible splitting above
+that boundary is deferred. References to the unimplemented mechanisms below
+describe the Python protocol and do not imply a Rust server surface.
+
+The historical enumeration of reference symbols and their normative /
+informative / out-of-scope classification is the frozen
+[Symbol inventory](_inventory.md). The
 [Coverage ledger](13-coverage-ledger.md) maps every normative symbol to a
 section and a proof; a normative symbol with no mapping is a coverage gap.
 

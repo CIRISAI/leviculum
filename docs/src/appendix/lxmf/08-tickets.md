@@ -38,6 +38,14 @@ it as an outbound ticket (`remember_ticket`, `LXMRouter.py:1054-1057`) and uses 
 for subsequent stamps until it expires (`get_outbound_ticket`,
 `LXMRouter.py:1059-1065`).
 
+The Rust router follows the same default: `enqueue()` automatically derives and
+attaches the 16-byte delivery stamp whenever `TicketStore` holds a valid
+outbound ticket for the destination. This happens before propagated recipient
+encryption, but the ticket stamp remains distinct from the required 32-byte
+outer propagation-node stamp. To grant a reply ticket,
+`issue_ticket_field()` returns the bounded/persisted `FIELD_TICKET` value that
+must be passed to `Message::create()` so it is covered by the signature.
+
 ## Timing constants
 
 | Constant | Value | Seconds | Citation |
@@ -47,6 +55,7 @@ for subsequent stamps until it expires (`get_outbound_ticket`,
 | `TICKET_RENEW` | 14 days | 1 209 600 | `LXMessage.py:50` |
 | `TICKET_INTERVAL` | 1 day | 86 400 | `LXMessage.py:51` |
 
-The validity windows are part of the interoperable behaviour (a peer expects a
-ticket to remain valid for `TICKET_EXPIRY` plus `TICKET_GRACE`); the exact reuse
-and reissue scheduling around them is informative.
+The validity windows are part of the interoperable behaviour: a ticket can
+stamp messages until its encoded expiry, while the issuer retains its record
+for the additional `TICKET_GRACE` cleanup window. The exact reuse and reissue
+scheduling around them is informative.

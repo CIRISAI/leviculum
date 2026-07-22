@@ -1,10 +1,11 @@
 # LXMF Protocol Specification
 
-This appendix is an exact, English specification of the LXMF messaging protocol,
-derived from and proven against the vendored Python reference
-(`reference/LXMF`, v0.9.6, commit `8499729`) running on Reticulum
-(`reference/Reticulum`, RNS 1.3.5, commit `d5e62d4`). It is the contract the
-libreticulum `lxmf` crate is built and tested against.
+This appendix specifies the LXMF messaging protocol. Its canonical wire fixture
+is generated from the Python LXMF 1.0.1 reference (`reference/LXMF`, commit `fab12ad`)
+running on Reticulum 1.3.5 (commit `d5e62d4`), and is the compatibility contract
+for `leviculum-lxmf`. The original symbol inventory and much of the source-line
+audit were captured against LXMF 0.9.6 (`8499729`); changed wire surfaces are
+called out and tested against the active 1.0.1 lock.
 
 LXMF (Lightweight Extensible Message Format) is the store-and-forward messaging
 layer of Reticulum. It defines how a message is structured, signed, encrypted,
@@ -12,6 +13,17 @@ sized, and delivered (opportunistically as a single packet, directly over a
 link, via a propagation node, or on paper), plus the anti-spam stamp and ticket
 mechanisms. It moves opaque bytes over Reticulum primitives; it carries no media
 processing of its own.
+
+The Rust implementation is intentionally client-only for propagation: it can
+discover a propagation node, upload a recipient-encrypted message as a raw Link
+Packet or Resource, and perform the `/get` list, download, and acknowledgement
+exchange. Propagation-node hosting, transit storage, `/offer`, and peer
+synchronisation are documented only as Python-reference context and are not
+implemented by `leviculum-lxmf`. The current `/get` path supports canonical
+single-segment Link request and response Resources. Packed request or response
+values above Reticulum's 1,048,575-byte efficient Resource limit, and incoming
+split request/response advertisements, are rejected until semantic segment
+reassembly is implemented.
 
 ## How to read this specification
 

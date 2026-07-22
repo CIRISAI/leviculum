@@ -1,6 +1,22 @@
 # LXMF and LXST on libreticulum: Feasibility Study and Crate Design Proposal
 
-Status: investigation only, no implementation. Date: 2026-06-22.
+Status: historical feasibility study. Original date: 2026-06-22.
+
+> **Implementation update (2026-07-16):** `leviculum-lxmf` now implements the
+> LXMF portions of this design as `no_std + alloc`. The §6.3 decisions are
+> reflected in the code: MessagePack uses `rmp` without default features and
+> is locked to Python golden vectors; ratchet-aware destination encryption is
+> exposed through `NodeCore`; Resource compression is enabled; PoW is
+> feature-gated with cooperative/custom executors; and the vendored Python
+> reference is hash-locked at LXMF 1.0.1 (`fab12ad`) in tests. Propagation
+> support is intentionally client-only: origin uploads use the reference raw
+> Link Packet/Resource envelope, while recipients use the `/get` list,
+> download, and acknowledgement exchange. Propagation-node
+> serving, transit storage, `/offer`, and peer synchronisation remain deferred
+> as proposed in §3.5 and Stage 5. Link request and response Resources are
+> currently limited to one Reticulum Resource segment (at most 1,048,575
+> packed bytes); Python's split request/response Resource reassembly remains
+> deferred with the propagation-server work.
 
 This report assesses building two new crates on top of `leviculum-core`:
 an LXMF crate (messaging) and an LXST crate (real-time media / telephony),
@@ -9,7 +25,8 @@ and similar) as well as on hosts.
 
 It is grounded in four codebases:
 
-- `reference/LXMF` (markqvist, v0.9.6) — the authoritative Python reference.
+- `reference/LXMF` (markqvist, audited at v0.9.6; active lock v1.0.1) — the
+  authoritative Python reference.
 - `reference/LXST` (markqvist, v0.4.4) — the authoritative Python reference.
 - `/home/lew/coding/rsLXMF` — a third-party Rust LXMF implementation.
 - `/home/lew/coding/rsLXST` — a third-party Rust LXST implementation.
@@ -131,7 +148,7 @@ None of these is a structural blocker. (3) and (5) are the two that touch
 
 ---
 
-## 3. LXMF protocol (from `reference/LXMF`, v0.9.6)
+## 3. LXMF protocol (from `reference/LXMF`, audited at v0.9.6)
 
 `APP_NAME = "lxmf"` (`LXMF.py:1`). All of LXMF is opaque-byte movement over RNS;
 nothing in it is hostile to `no_std + alloc` except resource sizing, persistence,
@@ -527,6 +544,3 @@ the loop; on nRF52 the existing embassy executor drives it.
   the current embedded firmware path without a runtime. The only changes that
   reach into `leviculum-core` are small and known: ratchet-crypto exposure and
   the compression feature.
-
-No code has been written. The submodules are in place; the next concrete step is
-settling the five §6.3 decisions and standing up the golden-vector harness.

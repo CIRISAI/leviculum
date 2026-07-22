@@ -1,13 +1,19 @@
 # LXMF reference symbol inventory (frozen)
 
-This file is the frozen ground-truth enumeration of every symbol and wire
-surface in the vendored Python LXMF reference. The specification is written
-against it; the coverage ledger ([Coverage ledger](13-coverage-ledger.md))
-maps every entry here to a specification section and a proof.
+This file is the historical, frozen enumeration of every symbol and wire
+surface in the Python LXMF 0.9.6 audit baseline. The coverage ledger
+([Coverage ledger](13-coverage-ledger.md)) maps every entry here to a
+specification section and a proof. The active implementation and canonical
+fixture are pinned separately to LXMF 1.0.1 (`fab12ad`).
 
 Do not edit by hand to reflect wishful coverage. To refresh, re-enumerate the
 source at the pinned commit and diff. A new symbol that appears unclassified is
 a coverage gap.
+
+The inventory is broader than the Rust implementation. In particular,
+`/offer`, propagation-node hosting/storage, and `LXMPeer` synchronisation are
+reference-only; `leviculum-lxmf` implements origin uploads and the recipient
+`/get` client.
 
 ## Pin
 
