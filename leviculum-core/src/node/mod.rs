@@ -634,6 +634,31 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok(self.process_events_and_actions())
     }
 
+    /// Encrypt plaintext for a known Single destination.
+    ///
+    /// The destination identity must already be remembered (normally through
+    /// announce processing). If the announce also supplied a ratchet public
+    /// key, this method uses it automatically. Exposing the exact encryption
+    /// path used by [`send_single_packet`](Self::send_single_packet) lets
+    /// higher-level protocols such as LXMF prepare paper and propagation
+    /// payloads without duplicating identity/ratchet lookup or RNG handling.
+    pub fn encrypt_for_destination(
+        &mut self,
+        dest_hash: &DestinationHash,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, send::SendError> {
+        let ratchet_key = self.transport.get_ratchet(dest_hash);
+        let identity = self
+            .transport
+            .storage()
+            .get_identity(dest_hash.as_bytes())
+            .ok_or(send::SendError::EncryptionFailed)?;
+
+        identity
+            .encrypt_for_destination(plaintext, ratchet_key.as_ref(), &mut self.rng)
+            .map_err(|_| send::SendError::EncryptionFailed)
+    }
+
     /// Send unreliable data via single packet
     ///
     /// This builds and sends a single data packet to the destination.
@@ -660,19 +685,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             HeaderType, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
         };
 
-        // Look up ratchet key for forward-secure encryption (Python Identity.encrypt).
-        let ratchet_key = self.transport.get_ratchet(dest_hash);
-
-        // Encrypt payload using remote identity from storage.
-        // Access transport.storage() directly to allow disjoint borrow of self.rng.
-        let payload =
-            if let Some(identity) = self.transport.storage().get_identity(dest_hash.as_bytes()) {
-                identity
-                    .encrypt_for_destination(data, ratchet_key.as_ref(), &mut self.rng)
-                    .map_err(|_| send::SendError::EncryptionFailed)?
-            } else {
-                return Err(send::SendError::EncryptionFailed);
-            };
+        let payload = self.encrypt_for_destination(dest_hash, data)?;
 
         let packet = crate::packet::Packet {
             flags: PacketFlags {
@@ -6133,6 +6146,50 @@ mod tests {
             received_data, payload,
             "decrypted data should match original plaintext"
         );
+    }
+
+    #[test]
+    fn test_encrypt_for_destination_uses_known_ratchet() {
+        let receiver_identity = Identity::generate(&mut OsRng);
+        let receiver_public = receiver_identity.public_key_bytes();
+        let mut destination = Destination::new(
+            Some(receiver_identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["paper"],
+        )
+        .unwrap();
+        destination
+            .enable_ratchets(&mut OsRng, TEST_TIME_MS)
+            .unwrap();
+        destination.set_enforce_ratchets(true);
+
+        let destination_hash = *destination.hash();
+        let ratchet_public = destination.current_ratchet_public().unwrap();
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut sender = NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+        sender.remember_identity(
+            destination_hash,
+            Identity::from_public_key_bytes(&receiver_public).unwrap(),
+        );
+        sender.storage_mut().remember_known_ratchet(
+            destination_hash.into_bytes(),
+            ratchet_public,
+            TEST_TIME_MS,
+        );
+
+        let plaintext = b"paper message payload";
+        let ciphertext = sender
+            .encrypt_for_destination(&destination_hash, plaintext)
+            .unwrap();
+        assert_eq!(destination.decrypt(&ciphertext).unwrap(), plaintext);
+
+        let unknown_hash = DestinationHash::new([0x55; TRUNCATED_HASHBYTES]);
+        assert!(matches!(
+            sender.encrypt_for_destination(&unknown_hash, plaintext),
+            Err(send::SendError::EncryptionFailed)
+        ));
     }
 
     #[test]
