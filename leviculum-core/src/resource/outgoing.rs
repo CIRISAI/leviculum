@@ -414,7 +414,9 @@ impl OutgoingResource {
             encrypted: true,
             compressed,
             split: seg.total_segments > 1,
-            is_request: false,
+            // Python marks a Resource carrying a request_id as a request unless
+            // it was explicitly constructed as a response.
+            is_request: request_id.is_some() && !is_response,
             is_response,
             has_metadata,
         };
