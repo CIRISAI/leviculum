@@ -92,7 +92,7 @@ use crate::interfaces::i2p::{
     I2P_DEFAULT_RECONNECT_WAIT,
 };
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig,
+    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpClientHandle,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::udp::spawn_udp_interface;
@@ -1389,6 +1389,8 @@ impl ReticulumNode {
                             // (Codeberg #64). The core-side interface hash is
                             // registered below in the per-interface config loop.
                             tunnel_notify: Some(tunnel_notify_tx.clone()),
+                            socks_target: None,
+                            shutdown: None,
                         });
                         tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
                         registry.register(handle);
@@ -2310,6 +2312,85 @@ impl ReticulumNode {
             id,
             shutdown_tx,
         ))
+    }
+
+    /// Attach a TCP client interface to the running node, optionally egressing
+    /// through a SOCKS5 proxy.
+    ///
+    /// The node dials `host:port`; when `socks_proxy` is `Some((proxy_host,
+    /// proxy_port))` it instead dials the proxy and issues a SOCKS5 CONNECT to
+    /// `host:port`. The target host is sent to the proxy as a domain name, so a
+    /// name only the proxy can resolve works without local DNS. The interface
+    /// reconnects with backoff exactly like a file-configured client.
+    ///
+    /// **Hold the returned [`TcpClientHandle`] to keep the interface attached;
+    /// drop it (or call [`detach`](TcpClientHandle::detach)) to detach** — the
+    /// interface stops, its channel closes, and the event loop removes it from
+    /// routing, cleanly, without rebuilding the node.
+    ///
+    /// The node assigns the [`InterfaceId`]. Returns [`Error::NotRunning`] if
+    /// called before [`start`](Self::start), or [`Error::Config`] if the dialed
+    /// address (the proxy address when `socks_proxy` is set) does not resolve.
+    pub fn spawn_tcp_client(
+        &self,
+        name: &str,
+        host: &str,
+        port: u16,
+        socks_proxy: Option<(String, u16)>,
+    ) -> Result<TcpClientHandle, Error> {
+        use std::sync::atomic::Ordering;
+
+        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+
+        // With a proxy, the dialed endpoint is the proxy (its CONNECT reaches the
+        // peer) and only it is resolved locally; the target host travels to the
+        // proxy verbatim. Without one, the peer is dialed directly.
+        let (dial_host, dial_port, socks_target) = match socks_proxy {
+            Some((proxy_host, proxy_port)) => {
+                (proxy_host, proxy_port, Some((host.to_string(), port)))
+            }
+            None => (host.to_string(), port, None),
+        };
+        let addr: SocketAddr = match format!("{dial_host}:{dial_port}").parse() {
+            Ok(a) => a,
+            Err(_) => (dial_host.as_str(), dial_port)
+                .to_socket_addrs()
+                .map_err(|e| Error::Config(format!("{dial_host}:{dial_port}: {e}")))?
+                .next()
+                .ok_or_else(|| {
+                    Error::Config(format!("no addresses for {dial_host}:{dial_port}"))
+                })?,
+        };
+
+        let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let handle = {
+            let _enter = runtime.enter();
+            spawn_tcp_client_with_reconnect(TcpClientConfig {
+                id,
+                name: name.to_string(),
+                addr,
+                buffer_size: TCP_DEFAULT_BUFFER_SIZE,
+                corrupt_every: self.corrupt_every,
+                reconnect_interval: Duration::from_secs(5),
+                max_reconnect_tries: None,
+                reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
+                connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
+                reconnect_notify: self.reconnect_tx.clone(),
+                tunnel_notify: None,
+                socks_target,
+                shutdown: Some(shutdown_rx),
+            })
+        };
+
+        new_iface_tx
+            .try_send(handle)
+            .map_err(|_| Error::NotRunning)?;
+
+        Ok(TcpClientHandle::new(id, shutdown_tx))
     }
 
     /// Connect to a remote destination
@@ -3788,6 +3869,8 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             // registered on this dynamic path (Codeberg #64 covers static TCP
             // clients). They still respond to peer-initiated tunnels.
             tunnel_notify: None,
+            socks_target: None,
+            shutdown: None,
         });
         // Register with the running loop; the `new_interface_rx` branch does
         // the map/announce bookkeeping on the next iteration.

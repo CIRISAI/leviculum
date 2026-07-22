@@ -24,7 +24,7 @@ pub use rnode::{
 };
 pub(crate) mod serial;
 pub(crate) mod tcp;
-pub use tcp::{disable_fault_injection, enable_fault_injection};
+pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
 pub(crate) mod udp;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

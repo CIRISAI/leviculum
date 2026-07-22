@@ -20,7 +20,7 @@ use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::transport::InterfaceId;
 use rand_core::RngCore;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::InterfaceHandle;
 
@@ -133,6 +133,16 @@ pub(crate) struct TcpClientConfig {
     /// presence of the channel is the `wants_tunnel` flag; interface isolation
     /// keeps the medium-specific "when to want a tunnel" decision here.
     pub tunnel_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// When set, the freshly-connected stream reaches a SOCKS5 proxy rather than
+    /// the peer; the interface performs a SOCKS5 CONNECT to this `(host, port)`
+    /// before framing starts. The host is sent as a domain name (ATYP=domain),
+    /// so the proxy resolves it — an onion or any hostname works without local
+    /// DNS. `None` is a direct connection.
+    pub socks_target: Option<(String, u16)>,
+    /// Detach signal. When it resolves (a value is sent, or the sender is
+    /// dropped) the reconnect loop stops and the interface is removed. `None`
+    /// for file-config interfaces, which live for the node's lifetime.
+    pub shutdown: Option<oneshot::Receiver<()>>,
 }
 
 /// Default per-attempt connect timeout for reconnecting TCP clients.
@@ -379,6 +389,8 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             config.reconnect_notify,
             config.tunnel_notify,
             task_ready,
+            config.socks_target,
+            config.shutdown,
         )
         .await;
     });
@@ -399,6 +411,39 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
         credit: None,
         ready,
     }
+}
+
+/// Control handle for a TCP client interface added at runtime via
+/// [`ReticulumNode::spawn_tcp_client`](crate::driver::ReticulumNode::spawn_tcp_client).
+///
+/// Hold it to keep the interface attached; drop it (or call [`detach`]) to
+/// detach — the reconnect loop stops, its channel closes, and the event loop
+/// removes the interface from routing, cleanly, without rebuilding the node.
+///
+/// [`detach`]: TcpClientHandle::detach
+pub struct TcpClientHandle {
+    id: InterfaceId,
+    // Dropping this sender resolves the task's shutdown receiver, which stops
+    // the reconnect loop -> closes the incoming channel -> event loop detaches.
+    _shutdown: oneshot::Sender<()>,
+}
+
+impl TcpClientHandle {
+    pub(crate) fn new(id: InterfaceId, shutdown: oneshot::Sender<()>) -> Self {
+        Self {
+            id,
+            _shutdown: shutdown,
+        }
+    }
+
+    /// The id the node assigned to this interface.
+    pub fn id(&self) -> InterfaceId {
+        self.id
+    }
+
+    /// Detach the interface now. Equivalent to dropping the handle; provided as
+    /// an explicit, self-documenting call for host bindings.
+    pub fn detach(self) {}
 }
 
 /// Bounded exponential backoff between reconnect attempts (no jitter).
@@ -488,6 +533,58 @@ async fn tcp_client_reconnect_task(
     addr: SocketAddr,
     name: String,
     incoming_tx: mpsc::Sender<IncomingPacket>,
+    outgoing_rx: mpsc::Receiver<OutgoingPacket>,
+    corrupt_every: Option<u64>,
+    reconnect_interval: Duration,
+    max_reconnect_tries: Option<u64>,
+    reconnect_max_interval: Duration,
+    connect_timeout: Duration,
+    counters: Arc<InterfaceCounters>,
+    reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    tunnel_notify: Option<mpsc::Sender<InterfaceId>>,
+    ready: Arc<ReadySignal>,
+    socks_target: Option<(String, u16)>,
+    shutdown: Option<oneshot::Receiver<()>>,
+) {
+    // A runtime-added interface carries a detach signal; racing the reconnect
+    // loop against it stops the loop at whatever await it is parked on (connect,
+    // serve, or backoff). Dropping the handle resolves the receiver, so detach
+    // needs no explicit message. File-config interfaces pass `None` and just run
+    // the loop directly.
+    let loop_fut = tcp_client_reconnect_loop(
+        id,
+        addr,
+        name.clone(),
+        incoming_tx,
+        outgoing_rx,
+        corrupt_every,
+        reconnect_interval,
+        max_reconnect_tries,
+        reconnect_max_interval,
+        connect_timeout,
+        counters,
+        reconnect_notify,
+        tunnel_notify,
+        ready,
+        socks_target,
+    );
+    match shutdown {
+        Some(sd) => {
+            tokio::select! {
+                _ = loop_fut => {}
+                _ = sd => tracing::info!("{}: detached", name),
+            }
+        }
+        None => loop_fut.await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn tcp_client_reconnect_loop(
+    id: InterfaceId,
+    addr: SocketAddr,
+    name: String,
+    incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     corrupt_every: Option<u64>,
     reconnect_interval: Duration,
@@ -498,6 +595,7 @@ async fn tcp_client_reconnect_task(
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     tunnel_notify: Option<mpsc::Sender<InterfaceId>>,
     ready: Arc<ReadySignal>,
+    socks_target: Option<(String, u16)>,
 ) {
     // Backoff DELIBERATELY DEVIATES from Python `RNS/Interfaces/TCPInterface.py`,
     // which uses `RECONNECT_WAIT = 5` and `RECONNECT_MAX_TRIES = None`: a fixed
@@ -531,10 +629,35 @@ async fn tcp_client_reconnect_task(
                     "connect attempt timed out",
                 )),
             };
-        match connect_result {
-            Ok(stream) => {
+        // A SOCKS proxy target folds into the connect result: `addr` reached the
+        // proxy, and the CONNECT handshake must succeed before the stream is
+        // usable. A handshake failure is just a failed attempt, so backoff and
+        // give-up accounting stay identical to a direct dial.
+        let connect_result = match connect_result {
+            Ok(mut stream) => {
                 stream.set_nodelay(true).ok();
                 apply_liveness_options(&stream).ok();
+                match &socks_target {
+                    Some((host, port)) => match tokio::time::timeout(
+                        connect_timeout,
+                        socks5_connect(&mut stream, host, *port),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => Ok(stream),
+                        Ok(Err(e)) => Err(e),
+                        Err(_elapsed) => Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "SOCKS5 handshake timed out",
+                        )),
+                    },
+                    None => Ok(stream),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        match connect_result {
+            Ok(stream) => {
                 let is_reconnect = has_connected_before;
                 let failed_attempts = attempt;
                 let outage = outage_start.take();
@@ -627,6 +750,69 @@ async fn tcp_client_reconnect_task(
         );
         tokio::time::sleep(delay).await;
     }
+}
+
+/// Perform a SOCKS5 CONNECT handshake to `host:port` over an established stream.
+///
+/// No authentication, address type domain — the proxy resolves the host, so an
+/// onion or any name works without local DNS. Returns once the proxy confirms
+/// the tunnel; framing then proceeds on the same stream transparently.
+async fn socks5_connect(
+    stream: &mut tokio::net::TcpStream,
+    host: &str,
+    port: u16,
+) -> io::Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    let host_bytes = host.as_bytes();
+    let host_len = u8::try_from(host_bytes.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SOCKS5 host too long"))?;
+
+    // Greeting: VER=5, one method offered, NO-AUTH (0x00).
+    stream.write_all(&[0x05, 0x01, 0x00]).await?;
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method).await?;
+    if method != [0x05, 0x00] {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "SOCKS5 proxy rejected no-auth",
+        ));
+    }
+
+    // Request: VER=5, CMD=CONNECT, RSV=0, ATYP=domain, len, host, port.
+    let mut req = Vec::with_capacity(7 + host_bytes.len());
+    req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_len]);
+    req.extend_from_slice(host_bytes);
+    req.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&req).await?;
+
+    // Reply: VER, REP, RSV, ATYP, then a bound address we discard.
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head).await?;
+    if head[1] != 0x00 {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("SOCKS5 CONNECT failed (reply {:#04x})", head[1]),
+        ));
+    }
+    let bnd_len = match head[3] {
+        0x01 => 4,
+        0x04 => 16,
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            len[0] as usize
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SOCKS5 reply has unknown ATYP {other:#04x}"),
+            ))
+        }
+    };
+    let mut discard = vec![0u8; bnd_len + 2];
+    stream.read_exact(&mut discard).await?;
+    Ok(())
 }
 
 /// Interface task owning the TCP stream
@@ -1068,6 +1254,8 @@ mod tests {
             connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
             reconnect_notify: None,
             tunnel_notify: None,
+            socks_target: None,
+            shutdown: None,
         });
 
         // 3. Accept first connection, send an HDLC-framed packet
@@ -1141,6 +1329,8 @@ mod tests {
             connect_timeout: Duration::from_millis(300),
             reconnect_notify: None,
             tunnel_notify: None,
+            socks_target: None,
+            shutdown: None,
         });
 
         // Wait for the reconnect task to give up (2 attempts * 100ms + overhead)
@@ -1153,5 +1343,91 @@ mod tests {
             Ok(Some(_)) => panic!("should not receive a packet"),
             Err(_) => panic!("timeout — reconnect task did not give up in time"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_connects_through_socks5_proxy() {
+        use leviculum_core::framing::hdlc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A minimal no-auth SOCKS5 proxy: it validates the handshake bytes, then
+        // becomes the peer and frames one packet on the same stream.
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut conn, _) = proxy.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            conn.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x01, 0x00]);
+            conn.write_all(&[0x05, 0x00]).await.unwrap();
+
+            let mut head = [0u8; 5];
+            conn.read_exact(&mut head).await.unwrap();
+            assert_eq!(&head[..4], &[0x05, 0x01, 0x00, 0x03]); // CONNECT, domain
+            let host_len = head[4] as usize;
+            let mut rest = vec![0u8; host_len + 2];
+            conn.read_exact(&mut rest).await.unwrap();
+            assert_eq!(&rest[..host_len], b"peer.example");
+            assert_eq!(&rest[host_len..], &4242u16.to_be_bytes());
+            // Success, bound 0.0.0.0:0 (ATYP=IPv4).
+            conn.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut framed = Vec::new();
+            hdlc::frame(b"through-socks", &mut framed);
+            conn.write_all(&framed).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
+            id: InterfaceId(0),
+            name: "test_socks".to_string(),
+            addr: proxy_addr,
+            buffer_size: 32,
+            corrupt_every: None,
+            reconnect_interval: Duration::from_millis(200),
+            max_reconnect_tries: Some(1),
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
+            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
+            reconnect_notify: None,
+            tunnel_notify: None,
+            socks_target: Some(("peer.example".to_string(), 4242)),
+            shutdown: None,
+        });
+
+        let pkt = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv())
+            .await
+            .expect("timeout waiting for packet through proxy")
+            .expect("channel closed");
+        assert_eq!(pkt.data, b"through-socks");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_detaches_on_shutdown() {
+        // No give-up bound: only the detach signal can stop this loop, so a
+        // closed incoming channel proves the shutdown path fired.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
+            id: InterfaceId(0),
+            name: "test_detach".to_string(),
+            addr,
+            buffer_size: 16,
+            corrupt_every: None,
+            reconnect_interval: Duration::from_millis(100),
+            max_reconnect_tries: None,
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
+            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
+            reconnect_notify: None,
+            tunnel_notify: None,
+            socks_target: None,
+            shutdown: Some(shutdown_rx),
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
+        drop(shutdown_tx); // resolves the receiver -> loop stops -> incoming closes
+        let closed = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv()).await;
+        assert!(matches!(closed, Ok(None)), "incoming closes after detach");
     }
 }

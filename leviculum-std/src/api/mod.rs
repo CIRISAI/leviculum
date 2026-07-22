@@ -236,6 +236,19 @@ impl Node {
         self.inner.take_event_receiver()
     }
 
+    /// Attach a TCP client interface to the running node, optionally egressing
+    /// through a SOCKS5 proxy. See
+    /// [`ReticulumNode::spawn_tcp_client`](crate::driver::ReticulumNode::spawn_tcp_client).
+    pub fn spawn_tcp_client(
+        &self,
+        name: &str,
+        host: &str,
+        port: u16,
+        socks_proxy: Option<(String, u16)>,
+    ) -> Result<crate::interfaces::TcpClientHandle> {
+        self.inner.spawn_tcp_client(name, host, port, socks_proxy)
+    }
+
     /// Register a local destination so the node can announce it and accept
     /// links or packets for it.
     ///
