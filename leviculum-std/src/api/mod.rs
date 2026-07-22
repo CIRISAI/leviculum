@@ -323,6 +323,16 @@ impl Node {
         self.inner.interface_stats()
     }
 
+    /// Change the announce bandwidth cap on a registered interface at runtime.
+    /// See [`crate::driver::ReticulumNode::set_interface_announce_cap`].
+    pub fn set_interface_announce_cap(
+        &self,
+        iface_id: leviculum_core::transport::InterfaceId,
+        cap_percent: u32,
+    ) -> bool {
+        self.inner.set_interface_announce_cap(iface_id, cap_percent)
+    }
+
     /// The cached identity for a destination, learned from an announce.
     pub fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity> {
         self.inner.get_identity(dest_hash)

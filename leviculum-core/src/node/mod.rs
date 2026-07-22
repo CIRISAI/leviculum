@@ -1682,6 +1682,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.register_interface_bitrate(id, bitrate_bps);
     }
 
+    /// Change the per-interface announce cap at runtime. See
+    /// [`crate::transport::Transport::set_interface_announce_cap`].
+    pub fn set_interface_announce_cap(&mut self, id: usize, cap_percent: u32) -> bool {
+        self.transport.set_interface_announce_cap(id, cap_percent)
+    }
+
     /// Mark an interface as tunnel-capable (Codeberg #64 initiator side).
     ///
     /// The driver calls this when it brings up a tunnel-capable TCP client,

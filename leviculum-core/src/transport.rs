@@ -5230,6 +5230,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_announce_caps.remove(&iface_index);
     }
 
+    /// Change the announce cap percentage on an already-registered interface.
+    ///
+    /// The value is the share (in per cent, 1..=100) of interface bandwidth the
+    /// throttler is allowed to spend on announces; the existing `allowed_at_ms`
+    /// and queue carry over, so the change takes effect on the next announce
+    /// scheduling. Returns `false` if the interface has no cap entry or the
+    /// percentage is out of range.
+    pub fn set_interface_announce_cap(&mut self, iface_index: usize, cap_percent: u32) -> bool {
+        if !(1..=100).contains(&cap_percent) {
+            return false;
+        }
+        match self.interface_announce_caps.get_mut(&iface_index) {
+            Some(cap) => {
+                cap.announce_cap_percent = cap_percent;
+                true
+            }
+            None => false,
+        }
+    }
+
     // Public: Interface Name API
     /// Register a human-readable name for an interface (called by driver at registration).
     pub fn set_interface_name(&mut self, id: usize, name: String) {
@@ -11340,6 +11360,30 @@ mod tests {
                 send_count2, 0,
                 "second announce should be queued on capped interface"
             );
+        }
+
+        #[test]
+        fn test_set_interface_announce_cap_runtime_update() {
+            let mut transport = make_transport_enabled();
+            let _idx = transport.register_interface(Box::new(MockInterface::new("if0", 0)));
+            transport.register_interface_bitrate(0, 1000);
+
+            assert!(transport.set_interface_announce_cap(0, 50));
+            assert_eq!(
+                transport.interface_announce_caps[&0].announce_cap_percent,
+                50
+            );
+
+            // Out-of-range values leave the previous value intact.
+            assert!(!transport.set_interface_announce_cap(0, 0));
+            assert!(!transport.set_interface_announce_cap(0, 101));
+            assert_eq!(
+                transport.interface_announce_caps[&0].announce_cap_percent,
+                50
+            );
+
+            // Unknown interface id is a no-op.
+            assert!(!transport.set_interface_announce_cap(99, 50));
         }
 
         #[test]

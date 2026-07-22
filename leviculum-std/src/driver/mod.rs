@@ -525,6 +525,10 @@ pub enum ReadyState {
 /// and online status with the byte counters from the I/O tasks.
 #[derive(Debug, Clone)]
 pub struct InterfaceStatusSnapshot {
+    /// The interface id assigned by the node — matches the id in every runtime
+    /// handle (e.g. `TcpClientHandle`) so a caller can pair its own handle up
+    /// with the snapshot.
+    pub interface_id: leviculum_core::transport::InterfaceId,
     /// Human-readable interface name.
     pub name: String,
     /// Whether this is a local IPC client interface (shared-instance client).
@@ -2801,6 +2805,7 @@ impl ReticulumNode {
                     })
                     .unwrap_or((0, 0));
                 InterfaceStatusSnapshot {
+                    interface_id: leviculum_core::transport::InterfaceId(e.id),
                     name: e.name,
                     is_local_client: e.is_local_client,
                     online: online.get(&e.id).copied().unwrap_or(true),
@@ -2813,6 +2818,23 @@ impl ReticulumNode {
                 }
             })
             .collect()
+    }
+
+    /// Change the announce bandwidth cap on a registered interface at runtime.
+    ///
+    /// `cap_percent` is the share (1..=100) of the interface's bandwidth the
+    /// throttler is allowed to spend on announces. Returns `false` if the
+    /// interface has no cap entry (unlimited bitrate, or unknown id) or the
+    /// percentage is out of range; the existing queue and next-allowed-at
+    /// timestamp carry over so the change takes effect on the next scheduling.
+    pub fn set_interface_announce_cap(
+        &self,
+        iface_id: leviculum_core::transport::InterfaceId,
+        cap_percent: u32,
+    ) -> bool {
+        self.inner
+            .lock_recover()
+            .set_interface_announce_cap(iface_id.0, cap_percent)
     }
 
     /// Get link statistics for a link
