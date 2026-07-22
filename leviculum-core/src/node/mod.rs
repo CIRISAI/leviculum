@@ -2356,7 +2356,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Expire all receipts as of `now_ms` without triggering retransmit (test-only)
     #[cfg(test)]
     pub(crate) fn expire_receipts(&mut self, now_ms: u64) {
-        self.receipt_tracker.expire(now_ms);
+        let _ = self.receipt_tracker.expire(now_ms);
     }
 
     // Internal: Event Handling
@@ -4062,6 +4062,129 @@ mod tests {
             0,
             "raw receipt should be removed after its proof"
         );
+    }
+
+    #[test]
+    fn raw_link_receipt_deadline_is_derived_from_rtt() {
+        use crate::constants::TRAFFIC_TIMEOUT_FACTOR;
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+        let rtt_ms = 2_000;
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .set_rtt_ms(rtt_ms);
+
+        let (packet_hash, _) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"rtt deadline")
+            .unwrap();
+        let deadline = TEST_TIME_MS + rtt_ms * TRAFFIC_TIMEOUT_FACTOR;
+
+        assert_eq!(
+            pair.initiator.receipt_tracker.earliest_expiry(),
+            Some(deadline),
+            "raw Link receipts must use Python's RTT-derived timeout"
+        );
+
+        pair.initiator.transport().clock().set(deadline - 1);
+        let waiting = pair.initiator.handle_timeout();
+        assert_eq!(pair.initiator.receipt_count(), 1);
+        assert!(!waiting.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+
+        pair.initiator.transport().clock().set(deadline);
+        let timed_out = pair.initiator.handle_timeout();
+        assert_eq!(pair.initiator.receipt_count(), 0);
+        assert!(timed_out.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed {
+                link_id,
+                packet_hash: hash,
+            } if *link_id == pair.initiator_link_id && *hash == packet_hash
+        )));
+
+        let repeated = pair.initiator.handle_timeout();
+        assert!(!repeated.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+    }
+
+    #[test]
+    fn raw_link_receipt_can_outlive_the_old_fixed_timeout() {
+        use crate::constants::{DATA_RECEIPT_TIMEOUT_MS, TRAFFIC_TIMEOUT_FACTOR};
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+        let rtt_ms = 6_000;
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .set_rtt_ms(rtt_ms);
+
+        let (packet_hash, _) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"slow link")
+            .unwrap();
+        let deadline = TEST_TIME_MS + rtt_ms * TRAFFIC_TIMEOUT_FACTOR;
+        assert!(deadline > TEST_TIME_MS + DATA_RECEIPT_TIMEOUT_MS);
+
+        pair.initiator
+            .transport()
+            .clock()
+            .set(TEST_TIME_MS + DATA_RECEIPT_TIMEOUT_MS);
+        let old_deadline = pair.initiator.handle_timeout();
+        assert_eq!(pair.initiator.receipt_count(), 1);
+        assert!(!old_deadline.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+
+        pair.initiator.transport().clock().set(deadline);
+        let timed_out = pair.initiator.handle_timeout();
+        assert!(timed_out.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+    }
+
+    #[test]
+    fn late_raw_link_proof_is_ignored_after_rtt_deadline() {
+        use crate::constants::TRAFFIC_TIMEOUT_FACTOR;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+        let rtt_ms = 2_000;
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .set_rtt_ms(rtt_ms);
+
+        let (packet_hash, sent) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"late proof")
+            .unwrap();
+        let data = extract_broadcast_data(&sent);
+        let proved = pair.responder.handle_packet(InterfaceId(0), &data);
+        let proof = extract_broadcast_data(&proved);
+
+        pair.initiator
+            .transport()
+            .clock()
+            .set(TEST_TIME_MS + rtt_ms * TRAFFIC_TIMEOUT_FACTOR);
+        let timeout = pair.initiator.handle_timeout();
+        assert!(timeout.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+
+        let late = pair.initiator.handle_packet(InterfaceId(0), &proof);
+        assert!(!late.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryConfirmed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
     }
 
     // The responder can originate a channel message (the initiator need not

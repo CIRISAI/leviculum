@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 
 use crate::constants::{
     CHANNEL_DEFAULT_RTT_MS, DATA_RECEIPT_TIMEOUT_MS, LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC,
-    MS_PER_SECOND, PROOF_DATA_SIZE, RTT_RETRY_MAX_ATTEMPTS, TRUNCATED_HASHBYTES,
+    MS_PER_SECOND, PROOF_DATA_SIZE, RTT_RETRY_MAX_ATTEMPTS, TRAFFIC_TIMEOUT_FACTOR,
+    TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofStrategy};
 use crate::hex_fmt::{HexFmt, HexShort};
@@ -61,8 +62,9 @@ impl Message for RawBytesMessage<'_> {
 
 /// Tracks channel message receipts awaiting delivery proofs.
 ///
-/// Each entry records a sent channel message: its packet hashes, link, sequence
-/// number, and timestamp. A single `Vec<ReceiptEntry>` replaces the three
+/// Each entry records a sent link packet: its packet hashes, link, optional
+/// channel sequence number, and absolute proof deadline. A single
+/// `Vec<ReceiptEntry>` replaces the three
 /// separate maps that previously encoded this relationship in different
 /// directions (`data_receipts`, `channel_receipt_keys`, `channel_hash_to_seq`).
 ///
@@ -78,7 +80,7 @@ pub(super) struct ReceiptEntry {
     pub(super) link_id: LinkId,
     /// Channel sequence, or `None` for a raw link packet such as LXMF.
     pub(super) sequence: Option<u16>,
-    pub(super) sent_at_ms: u64,
+    pub(super) deadline_ms: u64,
 }
 
 impl ReceiptTracker {
@@ -116,7 +118,7 @@ impl ReceiptTracker {
             full_hash,
             link_id,
             sequence: Some(sequence),
-            sent_at_ms: now_ms,
+            deadline_ms: now_ms.saturating_add(DATA_RECEIPT_TIMEOUT_MS),
         });
     }
 
@@ -125,7 +127,7 @@ impl ReceiptTracker {
         &mut self,
         packet_data: &[u8],
         link_id: LinkId,
-        now_ms: u64,
+        deadline_ms: u64,
     ) -> [u8; 32] {
         let full_hash = packet_hash(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
@@ -136,7 +138,7 @@ impl ReceiptTracker {
             full_hash,
             link_id,
             sequence: None,
-            sent_at_ms: now_ms,
+            deadline_ms,
         });
         full_hash
     }
@@ -170,10 +172,18 @@ impl ReceiptTracker {
         self.entries.retain(|e| e.link_id != *link_id);
     }
 
-    /// Remove entries older than `DATA_RECEIPT_TIMEOUT_MS`.
-    pub(super) fn expire(&mut self, now_ms: u64) {
-        self.entries
-            .retain(|e| now_ms.saturating_sub(e.sent_at_ms) <= DATA_RECEIPT_TIMEOUT_MS);
+    /// Remove and return entries whose proof deadline has elapsed.
+    pub(super) fn expire(&mut self, now_ms: u64) -> Vec<ReceiptEntry> {
+        let mut expired = Vec::new();
+        let mut index = 0;
+        while index < self.entries.len() {
+            if now_ms >= self.entries[index].deadline_ms {
+                expired.push(self.entries.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        expired
     }
 
     /// Number of tracked receipts.
@@ -183,10 +193,7 @@ impl ReceiptTracker {
 
     /// Earliest expiry deadline across all entries, if any.
     pub(super) fn earliest_expiry(&self) -> Option<u64> {
-        self.entries
-            .iter()
-            .map(|e| e.sent_at_ms.saturating_add(DATA_RECEIPT_TIMEOUT_MS))
-            .min()
+        self.entries.iter().map(|e| e.deadline_ms).min()
     }
 
     #[cfg(test)]
@@ -660,9 +667,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             })?;
 
         let now_ms = self.transport.clock().now_ms();
+        // Python PacketReceipt derives Link packet timeouts from the measured
+        // RTT (Packet.py:430-431). Raw packets have no Channel retransmission
+        // state, so this is their actual proof-acceptance deadline.
+        let receipt_timeout_ms = link
+            .rtt_ms()
+            .saturating_mul(TRAFFIC_TIMEOUT_FACTOR)
+            .max(TRAFFIC_TIMEOUT_MIN_MS);
+        let deadline_ms = now_ms.saturating_add(receipt_timeout_ms);
         let packet_hash = self
             .receipt_tracker
-            .register_raw(&packet_bytes, *link_id, now_ms);
+            .register_raw(&packet_bytes, *link_id, deadline_ms);
         self.route_link_packet(link_id, &packet_bytes);
 
         Ok((packet_hash, self.process_events_and_actions()))
@@ -3048,8 +3063,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
         }
 
-        // Clean up expired receipts
-        self.receipt_tracker.expire(now_ms);
+        // Raw Link packets mirror Python PacketReceipt timeout callbacks.
+        // Channel receipt expiry remains silent because Channel owns retries
+        // and terminal failure independently.
+        for expired in self.receipt_tracker.expire(now_ms) {
+            if expired.sequence.is_none() {
+                self.events.push(NodeEvent::LinkDeliveryFailed {
+                    link_id: expired.link_id,
+                    packet_hash: expired.full_hash,
+                });
+            }
+        }
     }
 
     /// Confirm RTT delivery on an initiator link if not yet confirmed.
