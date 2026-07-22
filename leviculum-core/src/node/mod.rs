@@ -732,7 +732,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ///
     /// Call this after receiving `NodeEvent::PacketProofRequested` if the
     /// application decides to prove delivery. Uses path-table routing
-    /// to reach the original sender.
+    /// to reach the original sender when no receiving interface is available.
     ///
     /// # Arguments
     /// * `packet_hash` - The full SHA256 hash from `NodeEvent::PacketProofRequested`
@@ -741,6 +741,28 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         packet_hash: &[u8; 32],
         destination_hash: &DestinationHash,
+    ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
+        self.send_proof_inner(packet_hash, destination_hash, None)
+    }
+
+    /// Send a proof for a received single packet on the interface it arrived on.
+    ///
+    /// This mirrors Python's `packet.prove()` behaviour for application-level
+    /// proofs, where the packet context carries the return interface.
+    pub fn send_proof_on_interface(
+        &mut self,
+        packet_hash: &[u8; 32],
+        destination_hash: &DestinationHash,
+        interface_index: usize,
+    ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
+        self.send_proof_inner(packet_hash, destination_hash, Some(interface_index))
+    }
+
+    fn send_proof_inner(
+        &mut self,
+        packet_hash: &[u8; 32],
+        destination_hash: &DestinationHash,
+        receiving_interface: Option<usize>,
     ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
         let identity = self
             .destinations
@@ -752,7 +774,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             packet_hash,
             destination_hash.as_bytes(),
             identity,
-            None, // path-based routing for App strategy
+            receiving_interface,
         )?;
 
         Ok(self.process_events_and_actions())
@@ -2347,6 +2369,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         self.events.push(NodeEvent::PacketProofRequested {
                             packet_hash,
                             destination_hash: dest_hash,
+                            interface_index,
                         });
                     }
                     ProofStrategy::None => {}
@@ -5920,7 +5943,7 @@ mod tests {
     #[test]
     fn test_single_packet_prove_app_emits_event_and_send_proof_works() {
         // Bug 2 fix: ProofStrategy::App emits NodeEvent::PacketProofRequested
-        // and the app can call NodeCore::send_proof() to respond.
+        // and the app can call NodeCore::send_proof_on_interface() to respond.
         use crate::transport::{InterfaceId, PathEntry};
 
         let recv_identity = Identity::generate(&mut OsRng);
@@ -5940,8 +5963,9 @@ mod tests {
         let dest_hash = *dest.hash();
         receiver.register_destination(dest);
 
-        // Receiver needs an interface and a path back to sender for send_proof()
-        let recv_iface = receiver
+        // Receiver needs an interface so the proof can be emitted back on the
+        // same inbound interface, mirroring Python packet.prove().
+        let _recv_iface = receiver
             .transport
             .register_interface(alloc::boxed::Box::new(MockInterface::new("recv_if", 1)));
 
@@ -5998,11 +6022,12 @@ mod tests {
                 NodeEvent::PacketProofRequested {
                     packet_hash,
                     destination_hash,
-                } => Some((*packet_hash, *destination_hash)),
+                    interface_index,
+                } => Some((*packet_hash, *destination_hash, *interface_index)),
                 _ => None,
             })
             .expect("ProofStrategy::App should emit NodeEvent::PacketProofRequested");
-        let (packet_hash, req_dest_hash) = proof_req;
+        let (packet_hash, req_dest_hash, req_iface) = proof_req;
 
         // Must NOT have any auto-generated proof action
         let has_send_action = recv_output
@@ -6014,22 +6039,10 @@ mod tests {
             "ProofStrategy::App must NOT auto-generate a proof"
         );
 
-        // Now the app decides to prove: set up a path on receiver for send_proof()
-        // (In real usage the path would exist from the announce; here we add it manually)
-        receiver.transport.insert_path(
-            dest_hash.into_bytes(),
-            PathEntry {
-                hops: 1,
-                expires_ms: u64::MAX,
-                interface_index: recv_iface,
-                random_blobs: Vec::new(),
-                next_hop: None,
-            },
-        );
-
-        // Call send_proof(). Bug 2 fix: this method now exists
+        // Call send_proof_on_interface(). This mirrors Python packet.prove()
+        // and does not require a path-table entry for the receiving destination.
         let proof_output = receiver
-            .send_proof(&packet_hash, &req_dest_hash)
+            .send_proof_on_interface(&packet_hash, &req_dest_hash, req_iface)
             .expect("send_proof should succeed");
 
         // Should have a SendPacket action containing the proof

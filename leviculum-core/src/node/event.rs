@@ -194,6 +194,8 @@ pub enum NodeEvent {
         packet_hash: [u8; 32],
         /// Destination that received the packet
         destination_hash: DestinationHash,
+        /// Interface the packet was received on
+        interface_index: usize,
     },
 
     /// Application should decide whether to prove this link data packet

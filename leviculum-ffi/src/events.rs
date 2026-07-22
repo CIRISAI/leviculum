@@ -212,6 +212,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
         NodeEvent::PacketProofRequested {
             packet_hash,
             destination_hash,
+            interface_index: _,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_PACKET_PROOF_REQUESTED, is_control);
             e.dest_hash = Some(*destination_hash.as_bytes());
