@@ -30,9 +30,15 @@ n3-n4 = "tcp"
 n4-n5 = "tcp"
 n1-n5 = "tcp"
 
+# expect_hops: in the ring the first announce to arrive may install the
+# long-way-around route; poll until the 2-hop route has won. n1 is a
+# rust node, where a fewer-hop announce always overrides.
 [[steps]]
-action = "sleep"
-duration_secs = 25
+action = "wait_for_path"
+on = "n1"
+destination = "n3.probe"
+timeout_secs = 45
+expect_hops = 2
 
 [[steps]]
 action = "rnprobe"
@@ -42,11 +48,27 @@ expect_hops = 2
 expect_result = "success"
 
 [[steps]]
+action = "wait_for_path"
+on = "n1"
+destination = "n4.probe"
+timeout_secs = 45
+expect_hops = 2
+
+[[steps]]
 action = "rnprobe"
 from = "n1"
 to = "n4.probe"
 expect_hops = 2
 expect_result = "success"
+
+# No expect_hops here: n2 is a python rnsd whose settled hop count is
+# legitimately 2 OR 3 (random_blob race, see below), so only wait for
+# the path to exist; the probe asserts the tolerant expect_hops_max.
+[[steps]]
+action = "wait_for_path"
+on = "n2"
+destination = "n5.probe"
+timeout_secs = 45
 
 # Tolerated: hops ∈ {2, 3}.
 #

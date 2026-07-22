@@ -23,16 +23,15 @@ alice-bob = "tcp"
 alice-relay = "tcp"
 bob-relay = "tcp"
 
-# 1. Establish direct path
+# 1. Establish direct path. expect_hops: the first announce to arrive
+# may install the 2-hop relay path; poll until the direct 1-hop
+# announce has overridden it.
 [[steps]]
 action = "wait_for_path"
 on = "alice"
 destination = "bob.probe"
 timeout_secs = 30
-
-[[steps]]
-action = "sleep"
-duration_secs = 5
+expect_hops = 1
 
 # 2. Verify direct 1-hop path works
 [[steps]]
@@ -54,10 +53,15 @@ action = "block_link"
 from = "bob"
 to = "alice"
 
-# 4. Wait for path expiry / re-discovery via relay
+# 4. Wait for path expiry / re-discovery via relay: poll until the
+# 2-hop relay route is installed. Link death is detected via TCP
+# keepalive (tens of seconds), so the timeout is generous.
 [[steps]]
-action = "sleep"
-duration_secs = 30
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 60
+expect_hops = 2
 
 # 5. Probe should now route via relay (2 hops)
 [[steps]]
@@ -80,10 +84,14 @@ action = "restore_link"
 from = "bob"
 to = "alice"
 
-# 7. Wait for re-announce / path healing
+# 7. Wait for re-announce / path healing: poll until the restored
+# direct 1-hop announce has overridden the 2-hop relay route.
 [[steps]]
-action = "sleep"
-duration_secs = 20
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 60
+expect_hops = 1
 
 # 8. Probe should return to 1-hop direct path
 [[steps]]

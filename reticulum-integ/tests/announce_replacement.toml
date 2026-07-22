@@ -20,9 +20,15 @@ alice-bob = "tcp"
 alice-charlie = "tcp"
 bob-charlie = "tcp"
 
+# expect_hops: in the triangle the first announce to arrive may install
+# a 2-hop path via the third node; poll until each direct 1-hop route
+# has won. All probing nodes are rust, where fewer hops always override.
 [[steps]]
-action = "sleep"
-duration_secs = 25
+action = "wait_for_path"
+on = "alice"
+destination = "bob.probe"
+timeout_secs = 30
+expect_hops = 1
 
 [[steps]]
 action = "rnprobe"
@@ -32,11 +38,25 @@ expect_hops = 1
 expect_result = "success"
 
 [[steps]]
+action = "wait_for_path"
+on = "alice"
+destination = "charlie.probe"
+timeout_secs = 30
+expect_hops = 1
+
+[[steps]]
 action = "rnprobe"
 from = "alice"
 to = "charlie.probe"
 expect_hops = 1
 expect_result = "success"
+
+[[steps]]
+action = "wait_for_path"
+on = "bob"
+destination = "charlie.probe"
+timeout_secs = 30
+expect_hops = 1
 
 [[steps]]
 action = "rnprobe"
