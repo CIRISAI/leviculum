@@ -17,6 +17,7 @@ pub(crate) mod kiss;
 pub(crate) mod local;
 pub(crate) mod netdevice;
 pub(crate) mod pipe;
+pub use pipe::PipeClientHandle;
 pub(crate) mod rnode;
 pub use rnode::{
     RNodeChannelConfig, RNodeChannelFactory, RNodeChannelHalves, RNodeChannelHandle,

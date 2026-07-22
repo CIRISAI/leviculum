@@ -249,6 +249,17 @@ impl Node {
         self.inner.spawn_tcp_client(name, host, port, socks_proxy)
     }
 
+    /// Attach a PipeInterface subprocess to the running node. See
+    /// [`ReticulumNode::spawn_pipe_client`](crate::driver::ReticulumNode::spawn_pipe_client).
+    pub fn spawn_pipe_client(
+        &self,
+        name: &str,
+        command: &str,
+        respawn_delay: Option<std::time::Duration>,
+    ) -> Result<crate::interfaces::PipeClientHandle> {
+        self.inner.spawn_pipe_client(name, command, respawn_delay)
+    }
+
     /// Register a local destination so the node can announce it and accept
     /// links or packets for it.
     ///

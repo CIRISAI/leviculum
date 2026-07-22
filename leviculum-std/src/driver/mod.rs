@@ -1843,6 +1843,7 @@ impl ReticulumNode {
                                 respawn_delay,
                                 buffer_size,
                                 reconnect_notify: Some(reconnect_tx.clone()),
+                                shutdown: None,
                             },
                         );
 
@@ -2391,6 +2392,60 @@ impl ReticulumNode {
             .map_err(|_| Error::NotRunning)?;
 
         Ok(TcpClientHandle::new(id, shutdown_tx))
+    }
+
+    /// Attach a PipeInterface subprocess to the running node.
+    ///
+    /// The node spawns `command` as a child process, HDLC-frames outgoing
+    /// packets into its stdin, and HDLC-deframes incoming packets from its
+    /// stdout — the same wire contract as a file-configured PipeInterface. On
+    /// child exit the supervisor respawns it after `respawn_delay` (or the
+    /// default when `None`), matching the file-config lifecycle.
+    ///
+    /// **Hold the returned [`PipeClientHandle`] to keep the interface attached;
+    /// drop it (or call [`detach`](crate::interfaces::PipeClientHandle::detach))
+    /// to detach** — the supervisor stops, any live child is killed, the
+    /// channel closes, and the event loop removes the interface from routing.
+    /// Detach preempts the respawn backoff so a stuck child cannot delay it.
+    ///
+    /// The node assigns the [`InterfaceId`]. Returns [`Error::NotRunning`] if
+    /// called before [`start`](Self::start).
+    pub fn spawn_pipe_client(
+        &self,
+        name: &str,
+        command: &str,
+        respawn_delay: Option<Duration>,
+    ) -> Result<crate::interfaces::PipeClientHandle, Error> {
+        use std::sync::atomic::Ordering;
+
+        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+
+        let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let handle = {
+            let _enter = runtime.enter();
+            crate::interfaces::pipe::spawn_pipe_interface(
+                crate::interfaces::pipe::PipeInterfaceConfig {
+                    id,
+                    name: name.to_string(),
+                    command: command.to_string(),
+                    respawn_delay: respawn_delay
+                        .unwrap_or(crate::interfaces::pipe::PIPE_DEFAULT_RESPAWN_DELAY),
+                    buffer_size: crate::interfaces::pipe::PIPE_DEFAULT_BUFFER_SIZE,
+                    reconnect_notify: self.reconnect_tx.clone(),
+                    shutdown: Some(shutdown_rx),
+                },
+            )
+        };
+
+        new_iface_tx
+            .try_send(handle)
+            .map_err(|_| Error::NotRunning)?;
+
+        Ok(crate::interfaces::PipeClientHandle::new(id, shutdown_tx))
     }
 
     /// Connect to a remote destination
