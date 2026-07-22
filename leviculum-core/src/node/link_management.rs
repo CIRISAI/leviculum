@@ -2252,6 +2252,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
 
+        // Python can split large request and response Resources, but the
+        // request-correlation path here currently represents one transfer.
+        // Reject non-canonical multi-segment forms explicitly instead of
+        // accepting bytes that cannot be reassembled with Python semantics.
+        if (adv.flags.is_request || adv.flags.is_response)
+            && (adv.flags.split || adv.segment_index != 1 || adv.total_segments != 1)
+        {
+            crate::tracing::debug!(
+                segment = adv.segment_index,
+                total = adv.total_segments,
+                "Split request/response Resources are unsupported"
+            );
+            return;
+        }
+
         // Request and response Resources are Link protocol internals, not
         // application Resources. Python accepts request Resources regardless
         // of `resource_strategy`, and accepts response Resources only when

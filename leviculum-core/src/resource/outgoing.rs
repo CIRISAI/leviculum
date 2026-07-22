@@ -1220,6 +1220,31 @@ mod tests {
     }
 
     #[test]
+    fn test_response_resource_uses_python_flags() {
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+        let request_id = [0x52; crate::constants::TRUNCATED_HASHBYTES];
+        let res = OutgoingResource::new_response(
+            b"response body",
+            None,
+            Some(&request_id),
+            &link,
+            true,
+            &mut rng,
+            1_000,
+        )
+        .unwrap();
+
+        let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
+        assert!(!adv.flags.is_request);
+        assert!(adv.flags.is_response);
+        assert!(!adv.flags.split);
+        assert_eq!(adv.segment_index, 1);
+        assert_eq!(adv.total_segments, 1);
+        assert_eq!(adv.request_id.as_deref(), Some(request_id.as_slice()));
+    }
+
+    #[test]
     fn test_outgoing_resource_with_metadata() {
         let (link, _) = make_test_link();
         let mut rng = rand_core::OsRng;

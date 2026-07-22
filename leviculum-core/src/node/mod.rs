@@ -110,6 +110,19 @@ use crate::constants::MGMT_ANNOUNCE_INTERVAL_MS;
 /// Python defers by `mgmt_announce_interval - 15` so first fires at ~15s.
 const MGMT_ANNOUNCE_INITIAL_DELAY_MS: u64 = 15 * 1000;
 
+/// Request and response Resources are currently correlated as one transfer.
+/// Python splits payloads above this limit, but accepting or emitting those
+/// advertisements without semantic reassembly would not be wire-compatible.
+fn ensure_single_segment_internal_resource_size(
+    size: usize,
+) -> Result<(), crate::resource::ResourceError> {
+    if size > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
+        Err(crate::resource::ResourceError::ResourceTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
 /// Link statistics for observability
 #[derive(Debug, Clone)]
 pub struct LinkStats {
@@ -1050,6 +1063,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             write_nil(&mut packed);
         }
 
+        ensure_single_segment_internal_resource_size(packed.len())?;
+
         let request_id = crate::crypto::truncated_hash(&packed);
         let rtt_ms = link.rtt_ms();
         let timeout = timeout_ms.unwrap_or_else(|| {
@@ -1326,6 +1341,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         write_fixarray_header(&mut wrapped, 2);
         write_bin(&mut wrapped, request_id);
         wrapped.extend_from_slice(response_data);
+        ensure_single_segment_internal_resource_size(wrapped.len())?;
 
         let link = self
             .links
@@ -1402,6 +1418,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::resource::ResourceError;
 
         let now_ms = self.transport.clock().now_ms();
+
+        let combined_size = data
+            .len()
+            .checked_add(metadata.len())
+            .and_then(|size| size.checked_add(3))
+            .ok_or(ResourceError::ResourceTooLarge)?;
+        ensure_single_segment_internal_resource_size(combined_size)?;
 
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
         // link) so every links.get/get_mut and the route use the wire id.
@@ -2630,6 +2653,16 @@ mod tests {
         assert_eq!(node.active_link_count(), 0);
         assert_eq!(node.pending_link_count(), 0);
         assert_eq!(node.default_proof_strategy(), ProofStrategy::None);
+    }
+
+    #[test]
+    fn test_internal_resource_single_segment_size_boundary() {
+        let max = crate::resource::RESOURCE_MAX_EFFICIENT_SIZE;
+        assert!(ensure_single_segment_internal_resource_size(max).is_ok());
+        assert!(matches!(
+            ensure_single_segment_internal_resource_size(max + 1),
+            Err(crate::resource::ResourceError::ResourceTooLarge)
+        ));
     }
 
     #[test]
@@ -8281,6 +8314,151 @@ mod tests {
         policy: request::RequestPolicy,
     ) {
         responder.register_request_handler(dest_hash, "/echo", policy);
+    }
+
+    #[test]
+    fn test_internal_resource_senders_reject_split_sized_payloads() {
+        use crate::resource::{ResourceError, RESOURCE_MAX_EFFICIENT_SIZE};
+
+        let mut pair = establish_nodecore_link_pair();
+        let raw = alloc::vec![0x5a; RESOURCE_MAX_EFFICIENT_SIZE];
+        let mut encoded = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded, &raw);
+
+        assert!(matches!(
+            pair.initiator.send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded),
+                Some(60_000),
+            ),
+            Err(ResourceError::ResourceTooLarge)
+        ));
+
+        let request_id = [0x61; TRUNCATED_HASHBYTES];
+        assert!(matches!(
+            pair.responder
+                .send_response_resource(&pair.responder_link_id, &request_id, &encoded,),
+            Err(ResourceError::ResourceTooLarge)
+        ));
+
+        assert!(matches!(
+            pair.responder
+                .send_file_response(&pair.responder_link_id, &request_id, &raw, &[],),
+            Err(ResourceError::ResourceTooLarge)
+        ));
+    }
+
+    #[test]
+    fn test_split_request_resource_advertisement_is_rejected() {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceAdvertisement;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let mut encoded = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded, &alloc::vec![0x33; 1_400]);
+        let _ = pair
+            .initiator
+            .send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded),
+                Some(60_000),
+            )
+            .unwrap();
+
+        let mut advertisement = ResourceAdvertisement::unpack(
+            pair.initiator
+                .link(&pair.initiator_link_id)
+                .unwrap()
+                .outgoing_resource()
+                .unwrap()
+                .adv_packet(),
+        )
+        .unwrap();
+        advertisement.flags.split = true;
+        advertisement.total_segments = 2;
+        let packet = pair
+            .initiator
+            .link(&pair.initiator_link_id)
+            .unwrap()
+            .build_data_packet_with_context(
+                &advertisement.pack(),
+                PacketContext::ResourceAdv,
+                &mut OsRng,
+            )
+            .unwrap();
+
+        let output = pair.responder.handle_packet(InterfaceId(0), &packet);
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::ResourceTransferStarted {
+                is_sender: false,
+                ..
+            }
+        )));
+        assert!(!pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .has_incoming_resource());
+    }
+
+    #[test]
+    fn test_split_response_resource_advertisement_is_rejected() {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceAdvertisement;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let (request_id, _) = pair
+            .initiator
+            .send_request(&pair.initiator_link_id, "/echo", None, Some(60_000))
+            .unwrap();
+        let mut response = Vec::new();
+        crate::resource::msgpack::write_bin(&mut response, &alloc::vec![0x44; 1_400]);
+        let _ = pair
+            .responder
+            .send_response_resource(&pair.responder_link_id, &request_id, &response)
+            .unwrap();
+
+        let mut advertisement = ResourceAdvertisement::unpack(
+            pair.responder
+                .link(&pair.responder_link_id)
+                .unwrap()
+                .outgoing_resource()
+                .unwrap()
+                .adv_packet(),
+        )
+        .unwrap();
+        advertisement.flags.split = true;
+        advertisement.total_segments = 2;
+        let packet = pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .build_data_packet_with_context(
+                &advertisement.pack(),
+                PacketContext::ResourceAdv,
+                &mut OsRng,
+            )
+            .unwrap();
+
+        let output = pair.initiator.handle_packet(InterfaceId(0), &packet);
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::ResourceTransferStarted {
+                is_sender: false,
+                ..
+            }
+        )));
+        assert!(!pair
+            .initiator
+            .link(&pair.initiator_link_id)
+            .unwrap()
+            .has_incoming_resource());
+        assert!(pair.initiator.pending_requests.contains_key(&request_id));
     }
 
     #[test]
