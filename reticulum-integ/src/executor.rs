@@ -485,6 +485,7 @@ fn execute_step(
             destination,
             timeout_secs,
             expect_result,
+            expect_hops,
         } => {
             println!("[{step_num}/{total}] wait_for_path on {on} for {destination}...");
             execute_wait_for_path(
@@ -494,6 +495,7 @@ fn execute_step(
                 destination,
                 scale_timeout(*timeout_secs),
                 expect_result,
+                *expect_hops,
                 cache,
             )
         }
@@ -1513,6 +1515,7 @@ fn execute_lxmf_stop(runner: &TestRunner, _index: usize, on: &str) -> Result<(),
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_wait_for_path(
     runner: &TestRunner,
     index: usize,
@@ -1520,9 +1523,21 @@ fn execute_wait_for_path(
     destination: &str,
     timeout_secs: u64,
     expect_result: &str,
+    expect_hops: Option<u32>,
     cache: &mut BTreeMap<String, String>,
 ) -> Result<(), StepError> {
     let hash = resolve_destination(runner, destination, cache)?;
+    // Shared budget for both phases: resolving any path, then (with
+    // expect_hops) waiting for the hop count to settle.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+
+    if expect_hops.is_some() && expect_result != "success" {
+        return Err(StepError::StepFailed {
+            step_index: index,
+            action: "wait_for_path".into(),
+            detail: "expect_hops requires expect_result = \"success\"".into(),
+        });
+    }
 
     // For success we retry up to 3 times. rnpath sends ONE path request and
     // then polls has_path() until its `-w` timeout. If the path response is
@@ -1567,7 +1582,12 @@ fn execute_wait_for_path(
                 } else {
                     println!("  path resolved: {hash}");
                 }
-                return Ok(());
+                return match expect_hops {
+                    Some(expected) => {
+                        wait_for_expected_hops(runner, index, on, &hash, expected, deadline)
+                    }
+                    None => Ok(()),
+                };
             }
             ("no_path", false) => {
                 println!("  no path (expected): {hash}");
@@ -1616,7 +1636,12 @@ fn execute_wait_for_path(
         let combined = alloc_combined_logs(&out.stdout, &out.stderr);
         if has_known_path_line(&combined, &hash) {
             println!("  path resolved (daemon log): {hash}");
-            return Ok(());
+            return match expect_hops {
+                Some(expected) => {
+                    wait_for_expected_hops(runner, index, on, &hash, expected, deadline)
+                }
+                None => Ok(()),
+            };
         }
     }
 
@@ -1627,6 +1652,52 @@ fn execute_wait_for_path(
             "rnpath exited {last_status} after {attempts} attempts: {last_stdout} {last_stderr}"
         ),
     })
+}
+
+/// Poll the node's path table until the path to `hash` reports `expected`
+/// hops, or `deadline` elapses. Used by `wait_for_path` with `expect_hops`:
+/// in a topology with multiple routes, the first announce to arrive may
+/// install a suboptimal path that a later fewer-hop announce overrides, so
+/// resolving "any path" is not enough to assert on hop counts. rnpath only
+/// sends a path request when NO path is known, so once a path exists this
+/// poll is a pure read of the current path table.
+fn wait_for_expected_hops(
+    runner: &TestRunner,
+    index: usize,
+    on: &str,
+    hash: &str,
+    expected: u32,
+    deadline: Instant,
+) -> Result<(), StepError> {
+    let mut last_seen: Option<u32> = None;
+    loop {
+        let output = runner.docker_exec(
+            on,
+            &["rnpath", hash, "--config", "/root/.reticulum", "-w", "2"],
+        )?;
+        let stdout = sanitize_rnpath_output(&String::from_utf8_lossy(&output.stdout));
+        if let Some(hops) = parse_rnpath_hops(&stdout) {
+            if hops == expected {
+                println!("  path settled at {hops} hop(s): {hash}");
+                return Ok(());
+            }
+            last_seen = Some(hops);
+        }
+        if Instant::now() >= deadline {
+            let seen = match last_seen {
+                Some(hops) => format!("{hops} hop(s)"),
+                None => "no parsable path".into(),
+            };
+            return Err(StepError::StepFailed {
+                step_index: index,
+                action: "wait_for_path".into(),
+                detail: format!(
+                    "path to {hash} did not settle at {expected} hop(s) before timeout, last seen: {seen}"
+                ),
+            });
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
 }
 
 /// Path-discovery soak (Codeberg #117): `repeat` FRESH rnpath discoveries
@@ -3601,6 +3672,17 @@ fn parse_hops_from_output(output: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Parse hop count from rnpath output. Looks for `is N hop(s) away`.
+fn parse_rnpath_hops(output: &str) -> Option<u32> {
+    // rnpath output: "Path found, destination <hash> is 1 hop away via ..."
+    // (plural "hops" for counts other than 1)
+    let tail = output
+        .find(" hop away")
+        .or_else(|| output.find(" hops away"))?;
+    let head = &output[..tail];
+    head.rsplit(' ').next()?.parse().ok()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -4055,6 +4137,31 @@ plain mention of a1b2c3d4e5f6 with no marker keyword\n";
     #[test]
     fn parse_hops_none() {
         assert_eq!(parse_hops_from_output("Probe timed out"), None);
+    }
+
+    #[test]
+    fn parse_rnpath_hops_singular() {
+        assert_eq!(
+            parse_rnpath_hops(
+                "Path found, destination <aa> is 1 hop away via <bb> on TCPInterface[relay]"
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn parse_rnpath_hops_plural() {
+        assert_eq!(
+            parse_rnpath_hops(
+                "Path found, destination <aa> is 2 hops away via <bb> on TCPInterface[relay]"
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn parse_rnpath_hops_not_found() {
+        assert_eq!(parse_rnpath_hops("Path not found"), None);
     }
 
     #[test]

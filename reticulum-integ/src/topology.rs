@@ -203,6 +203,14 @@ pub enum Step {
         timeout_secs: u64,
         #[serde(default = "default_expect_success")]
         expect_result: String,
+        /// When set, keep polling after a path resolves until its hop count
+        /// equals this value, within the same `timeout_secs` budget. Use in
+        /// scenarios with multiple routes to the destination, where the
+        /// assertion needs the optimal path and not merely the first
+        /// announce that happened to arrive. Only valid with
+        /// `expect_result = "success"`.
+        #[serde(default)]
+        expect_hops: Option<u32>,
     },
     /// Path-discovery soak: `repeat` FRESH rnpath discoveries against one
     /// destination in a single run. Each iteration drops the cached path
@@ -1016,11 +1024,13 @@ mod tests {
                 destination,
                 timeout_secs,
                 expect_result,
+                expect_hops,
             } => {
                 assert_eq!(on, "alice");
                 assert_eq!(destination, "bob.probe");
                 assert_eq!(*timeout_secs, 30);
                 assert_eq!(expect_result, "success");
+                assert_eq!(*expect_hops, None);
             }
             other => panic!("expected WaitForPath, got: {other:?}"),
         }
@@ -1532,12 +1542,14 @@ destination = "beta.probe"
                     destination,
                     timeout_secs,
                     expect_result,
+                    ..
                 },
                 Step::WaitForPath {
                     on: simul_on,
                     destination: simul_destination,
                     timeout_secs: simul_timeout,
                     expect_result: simul_expect,
+                    ..
                 },
             ) => {
                 assert_eq!(on, simul_on);
