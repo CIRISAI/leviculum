@@ -76,7 +76,8 @@ pub(super) struct ReceiptEntry {
     pub(super) truncated_hash: [u8; TRUNCATED_HASHBYTES],
     pub(super) full_hash: [u8; 32],
     pub(super) link_id: LinkId,
-    pub(super) sequence: u16,
+    /// Channel sequence, or `None` for a raw link packet such as LXMF.
+    pub(super) sequence: Option<u16>,
     pub(super) sent_at_ms: u64,
 }
 
@@ -97,7 +98,7 @@ impl ReceiptTracker {
         now_ms: u64,
     ) {
         self.entries
-            .retain(|e| !(e.link_id == link_id && e.sequence == sequence));
+            .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)));
 
         let full_hash = packet_hash(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
@@ -114,9 +115,30 @@ impl ReceiptTracker {
             truncated_hash,
             full_hash,
             link_id,
-            sequence,
+            sequence: Some(sequence),
             sent_at_ms: now_ms,
         });
+    }
+
+    /// Register a proof receipt for a plain (non-Channel) link packet.
+    pub(super) fn register_raw(
+        &mut self,
+        packet_data: &[u8],
+        link_id: LinkId,
+        now_ms: u64,
+    ) -> [u8; 32] {
+        let full_hash = packet_hash(packet_data);
+        let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
+        truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
+        self.entries.retain(|entry| entry.full_hash != full_hash);
+        self.entries.push(ReceiptEntry {
+            truncated_hash,
+            full_hash,
+            link_id,
+            sequence: None,
+            sent_at_ms: now_ms,
+        });
+        full_hash
     }
 
     /// Look up a receipt by truncated hash. Returns `(link_id, full_hash)`.
@@ -134,7 +156,7 @@ impl ReceiptTracker {
     pub(super) fn confirm_delivery(
         &mut self,
         truncated: &[u8; TRUNCATED_HASHBYTES],
-    ) -> Option<u16> {
+    ) -> Option<Option<u16>> {
         let idx = self
             .entries
             .iter()
@@ -609,6 +631,63 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok(self.process_events_and_actions())
     }
 
+    /// Send a plain data packet on an existing link.
+    ///
+    /// This mirrors Python `RNS.Packet(link, data)`: the payload is encrypted
+    /// for the link and sent with `PacketContext::None`, without Channel
+    /// framing. A raw receipt is retained so a PROVE_ALL response emits
+    /// `LinkDeliveryConfirmed`, matching Python's packet receipt callback.
+    pub fn send_packet_on_link(
+        &mut self,
+        link_id: &LinkId,
+        data: &[u8],
+    ) -> Result<([u8; 32], crate::transport::TickOutput), send::SendError> {
+        let link_id = &self.resolve_link_id(link_id);
+        let link = self.links.get(link_id).ok_or(send::SendError::NoLink)?;
+
+        if link.state() != LinkState::Active {
+            return Err(send::SendError::LinkFailed);
+        }
+        if data.len() > link.mdu() {
+            return Err(send::SendError::TooLarge);
+        }
+
+        let packet_bytes = link
+            .build_data_packet(data, &mut self.rng)
+            .map_err(|e| match e {
+                LinkError::InvalidState => send::SendError::LinkFailed,
+                _ => send::SendError::LinkFailed,
+            })?;
+
+        let now_ms = self.transport.clock().now_ms();
+        let packet_hash = self
+            .receipt_tracker
+            .register_raw(&packet_bytes, *link_id, now_ms);
+        self.route_link_packet(link_id, &packet_bytes);
+
+        Ok((packet_hash, self.process_events_and_actions()))
+    }
+
+    /// Send a proof for an application-accepted plain link data packet.
+    pub fn send_data_proof(
+        &mut self,
+        link_id: &LinkId,
+        packet_hash: &[u8; 32],
+    ) -> Result<crate::transport::TickOutput, LinkError> {
+        let link_id = self.resolve_link_id(link_id);
+        let link = self.links.get(&link_id).ok_or(LinkError::NotFound)?;
+        let signing_key = link
+            .proof_signing_key()
+            .ok_or(LinkError::NoIdentity)?
+            .clone();
+        let proof_packet =
+            link.build_data_proof_packet_with_signing_key(packet_hash, &signing_key)?;
+
+        self.route_link_packet(&link_id, &proof_packet);
+
+        Ok(self.process_events_and_actions())
+    }
+
     /// Find an existing active link to a destination
     #[cfg(test)]
     pub(crate) fn find_link_to(&self, dest_hash: &DestinationHash) -> Option<LinkId> {
@@ -1017,9 +1096,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                 let now_ms = self.transport.clock().now_ms();
                 let rtt_ms = self.links.get(link_id).map(|l| l.rtt_ms()).unwrap_or(500);
-                if let Some(link) = self.links.get_mut(link_id) {
-                    if let Some(ch) = link.channel_mut() {
-                        ch.mark_delivered(sequence, now_ms, rtt_ms);
+                if let Some(sequence) = sequence {
+                    if let Some(link) = self.links.get_mut(link_id) {
+                        if let Some(ch) = link.channel_mut() {
+                            ch.mark_delivered(sequence, now_ms, rtt_ms);
+                        }
                     }
                 }
 
@@ -3497,7 +3578,7 @@ mod receipt_tracker_tests {
         trunc1.copy_from_slice(&hash1[..TRUNCATED_HASHBYTES]);
 
         let seq = tracker.confirm_delivery(&trunc1);
-        assert_eq!(seq, Some(1));
+        assert_eq!(seq, Some(Some(1)));
         assert_eq!(tracker.len(), 0);
 
         // Re-register same sequence (after wraparound or new message)

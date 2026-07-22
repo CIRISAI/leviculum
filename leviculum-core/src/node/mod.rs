@@ -3842,6 +3842,64 @@ mod tests {
         assert!(has_msg, "responder should get MessageReceived event");
     }
 
+    #[test]
+    fn test_send_packet_on_link_plain_data() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+
+        let (packet_hash, output) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"plain link data")
+            .unwrap();
+
+        assert_eq!(
+            pair.initiator
+                .receipt_count_for_link(&pair.initiator_link_id),
+            1,
+            "plain link packet should retain a proof receipt"
+        );
+
+        assert!(
+            !output.actions.is_empty(),
+            "send_packet_on_link should produce actions"
+        );
+
+        let data = extract_broadcast_data(&output);
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+
+        assert!(
+            output.events.iter().any(|event| matches!(
+                event,
+                NodeEvent::LinkDataReceived { data, .. } if data == b"plain link data"
+            )),
+            "responder should get plain LinkDataReceived event"
+        );
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|event| matches!(event, NodeEvent::MessageReceived { .. })),
+            "plain link packets should not be delivered through Channel"
+        );
+
+        let proof = extract_broadcast_data(&output);
+        let confirmed = pair.initiator.handle_packet(InterfaceId(0), &proof);
+        assert!(confirmed.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryConfirmed {
+                link_id,
+                packet_hash: confirmed_hash,
+            } if *link_id == pair.initiator_link_id && *confirmed_hash == packet_hash
+        )));
+        assert_eq!(
+            pair.initiator
+                .receipt_count_for_link(&pair.initiator_link_id),
+            0,
+            "raw receipt should be removed after its proof"
+        );
+    }
+
     // The responder can originate a channel message (the initiator need not
     // send first); with full packet routing the initiator receives it.
     #[test]
