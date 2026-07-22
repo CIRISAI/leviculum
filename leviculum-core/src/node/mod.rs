@@ -1059,12 +1059,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .saturating_add(1250)
         });
 
-        let outgoing = OutgoingResource::new(
+        let outgoing = OutgoingResource::new_request(
             &packed,
-            None,
-            Some(&request_id),
+            &request_id,
             link,
             true,
+            timeout,
             &mut self.rng,
             now_ms,
         )?;
