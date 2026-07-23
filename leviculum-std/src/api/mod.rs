@@ -433,8 +433,8 @@ impl Node {
     }
 
     /// Remove the handler for `path`, returning whether one was registered.
-    pub fn deregister_request_handler(&self, path: &str) -> bool {
-        self.inner.deregister_request_handler(path)
+    pub fn deregister_request_handler(&self, dest_hash: DestinationHash, path: &str) -> bool {
+        self.inner.deregister_request_handler(dest_hash, path)
     }
 
     /// Send a request on an established link, returning the request id. The

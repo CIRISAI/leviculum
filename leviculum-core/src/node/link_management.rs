@@ -1685,25 +1685,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             data_raw.to_vec()
         };
 
-        // Look up handler
-        let Some(handler) = self.request_handlers.get(&path_hash) else {
+        // Look up handler keyed by (destination, path).
+        let link = self.links.get(&link_id).expect("link checked above");
+        let destination_hash = *link.destination_hash();
+        let Some(handler) = self.request_handlers.get(&(destination_hash, path_hash)) else {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 path_hash = %HexShort(&path_hash),
-                "Request: no handler for path_hash, dropping"
+                "Request: no handler for (destination, path_hash), dropping"
             );
             return;
         };
-
-        // Verify destination matches
-        let link = self.links.get(&link_id).expect("link checked above");
-        if handler.destination_hash != *link.destination_hash() {
-            crate::tracing::debug!(
-                link = %HexShort(link_id.as_bytes()),
-                "Request: destination mismatch, dropping"
-            );
-            return;
-        }
 
         // Authorization check
         let path = handler.path.clone();
@@ -1747,6 +1739,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         self.events.push(NodeEvent::RequestReceived {
             link_id,
+            destination_hash,
             request_id,
             path,
             path_hash,

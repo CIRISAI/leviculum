@@ -7,7 +7,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::constants::TRUNCATED_HASHBYTES;
-use crate::destination::DestinationHash;
 use crate::link::LinkId;
 
 /// Policy controlling which identities may send requests to a handler.
@@ -21,12 +20,12 @@ pub enum RequestPolicy {
     AllowList(Vec<[u8; TRUNCATED_HASHBYTES]>),
 }
 
-/// A registered request handler entry.
+/// A registered request handler entry. Keyed by (destination_hash,
+/// path_hash) in the storage map, so those live in the key, not here.
 ///
 /// Cleanup: entries removed via `deregister_request_handler()`.
 pub(super) struct RequestHandlerEntry {
     pub(super) path: String,
-    pub(super) destination_hash: DestinationHash,
     pub(super) policy: RequestPolicy,
 }
 

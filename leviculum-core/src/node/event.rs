@@ -302,6 +302,10 @@ pub enum NodeEvent {
     RequestReceived {
         /// The link that received the request
         link_id: LinkId,
+        /// The destination this request was addressed to. Two destinations
+        /// may share the same request path (see `register_request_handler`);
+        /// this field tells the responder which one to serve.
+        destination_hash: DestinationHash,
         /// Unique request identifier (truncated packet hash)
         request_id: [u8; TRUNCATED_HASHBYTES],
         /// The request path string

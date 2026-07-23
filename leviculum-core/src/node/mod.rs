@@ -200,9 +200,12 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     mgmt_destinations: Vec<DestinationHash>,
     /// Next time (ms) to send management announces. None if no mgmt destinations.
     next_mgmt_announce_ms: Option<u64>,
-    /// Request handler registry, keyed by path_hash.
+    /// Request handler registry, keyed by (destination_hash, path_hash) so
+    /// two destinations may share a path (e.g. a common `/status` responder
+    /// on multiple aspect trees).
     /// Cleanup: entries removed via `deregister_request_handler()`.
-    request_handlers: BTreeMap<[u8; TRUNCATED_HASHBYTES], request::RequestHandlerEntry>,
+    request_handlers:
+        BTreeMap<(DestinationHash, [u8; TRUNCATED_HASHBYTES]), request::RequestHandlerEntry>,
     /// Pending outgoing requests, keyed by request_id.
     /// Cleanup: removed on (a) response, (b) timeout, (c) link close.
     pending_requests: BTreeMap<[u8; TRUNCATED_HASHBYTES], request::PendingRequest>,
@@ -821,21 +824,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) {
         let path_hash = crate::crypto::truncated_hash(path.as_bytes());
         self.request_handlers.insert(
-            path_hash,
+            (destination_hash, path_hash),
             request::RequestHandlerEntry {
                 path: String::from(path),
-                destination_hash,
                 policy,
             },
         );
     }
 
-    /// Deregister a request handler for a given path.
+    /// Deregister a request handler on a given destination.
     ///
     /// Returns `true` if a handler was removed.
-    pub fn deregister_request_handler(&mut self, path: &str) -> bool {
+    pub fn deregister_request_handler(
+        &mut self,
+        destination_hash: &DestinationHash,
+        path: &str,
+    ) -> bool {
         let path_hash = crate::crypto::truncated_hash(path.as_bytes());
-        self.request_handlers.remove(&path_hash).is_some()
+        self.request_handlers
+            .remove(&(*destination_hash, path_hash))
+            .is_some()
     }
 
     /// Send a request on an established link.
@@ -8041,6 +8049,90 @@ mod tests {
         });
         let recv_data = received.expect("responder should get RequestReceived");
         assert!(recv_data.is_empty(), "nil data should produce empty vec");
+    }
+
+    /// Two destinations may register a handler on the same path: neither
+    /// entry overwrites the other, and deregistering one leaves the other in
+    /// place. Guards the (destination, path) storage key against a regression
+    /// back to path-only keying.
+    #[test]
+    fn same_path_on_two_destinations_stores_both_handlers() {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+
+        let dest_a = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["aspect-a"],
+        )
+        .expect("destination a");
+        let dest_b = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["aspect-b"],
+        )
+        .expect("destination b");
+        let (hash_a, hash_b) = (*dest_a.hash(), *dest_b.hash());
+        assert_ne!(hash_a, hash_b, "distinct destinations must hash apart");
+        node.register_destination(dest_a);
+        node.register_destination(dest_b);
+
+        node.register_request_handler(hash_a, "/status", request::RequestPolicy::AllowAll);
+        node.register_request_handler(hash_b, "/status", request::RequestPolicy::AllowAll);
+        assert_eq!(
+            node.request_handlers.len(),
+            2,
+            "both handlers must coexist under the shared path"
+        );
+
+        assert!(node.deregister_request_handler(&hash_a, "/status"));
+        assert_eq!(node.request_handlers.len(), 1, "only dest_a's entry gone");
+        assert!(!node.deregister_request_handler(&hash_a, "/status"));
+        assert!(node.deregister_request_handler(&hash_b, "/status"));
+        assert!(node.request_handlers.is_empty());
+    }
+
+    /// The `RequestReceived` event surfaces the destination the request
+    /// landed on, so a responder hosting several destinations knows which
+    /// endpoint to serve.
+    #[test]
+    fn request_received_carries_destination_hash() {
+        let mut pair = establish_nodecore_link_pair();
+        let dest_hash = *pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .destination_hash();
+        register_echo_handler(
+            &mut pair.responder,
+            dest_hash,
+            request::RequestPolicy::AllowAll,
+        );
+
+        let (_, output) = pair
+            .initiator
+            .send_request(&pair.initiator_link_id, "/echo", None, None)
+            .unwrap();
+        let req_data = extract_broadcast_data(&output);
+        let output = pair
+            .responder
+            .handle_packet(crate::transport::InterfaceId(0), &req_data);
+
+        let received = output.events.iter().find_map(|e| match e {
+            NodeEvent::RequestReceived {
+                destination_hash, ..
+            } => Some(*destination_hash),
+            _ => None,
+        });
+        assert_eq!(
+            received.expect("RequestReceived on the responder"),
+            dest_hash,
+            "event must name the destination the request was addressed to"
+        );
     }
 
     #[test]
