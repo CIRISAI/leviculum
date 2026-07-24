@@ -99,16 +99,50 @@ build-integ-bins:
     find leviculum-cli/src leviculum-proxy/src -name '*.rs' -exec touch {} +
     cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
 
-# Default cargo test runs non-ignored tests and skips ignored ones.
-# Docker tests (#[serial(docker)]) run; LoRa tests (#[ignore] #[serial(lora)])
-# skip automatically. --test-threads=1 is required even though serial_test
-# enforces per-group serialization, because the embedded #[serial(docker)]
-# groups can still overlap resource usage with unit tests in the same
-# binary on a multi-CPU harness.
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
-# leviculum-ci-tier2.service`): Tier 1 + Docker integ suite.
+# leviculum-ci-tier2.service`): Tier 1 + the Docker scenario suite.
+#
+# The docker scenarios run through the periculum binary (sibling checkout;
+# override the checkout via PERICULUM_ROOT or the binary via PERICULUM_BIN);
+# cargo keeps running the remaining reticulum-integ tests. The per-scenario
+# #[test] wrappers live in the LIB target (src/executor.rs, #[serial(docker)]),
+# so `--lib` scoping cannot exclude them; instead the recipe extracts their
+# names from the #[serial(docker)] markers and skips them with --exact,
+# cross-checking every extracted name against `--list` so a renamed module
+# path or attribute-format drift fails loudly instead of silently running
+# the scenarios twice. The LoRa wrappers stay #[ignore]d and skip as before;
+# the tier-3 `nightly` cargo path below is untouched. --test-threads=1 for
+# the same resource-contention reason as before.
 extensive: standard build-integ-bins build-c-lnsd
-    cargo test -p reticulum-integ -- --test-threads=1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mapfile -t wrappers < <(awk '/#\[serial\(docker\)\]/ {f=1; next} f && /fn / {n=$2; sub(/\(.*/, "", n); print n; f=0}' reticulum-integ/src/executor.rs)
+    markers=$(grep -c '#\[serial(docker)\]' reticulum-integ/src/executor.rs)
+    if [ "${#wrappers[@]}" -ne "$markers" ]; then
+        echo "[extensive] wrapper extraction mismatch: ${#wrappers[@]} names vs $markers #[serial(docker)] markers" >&2
+        exit 1
+    fi
+    listed=$(cargo test -p reticulum-integ --lib -- --list)
+    skip_args=()
+    for w in "${wrappers[@]}"; do
+        if ! grep -q "^executor::tests::${w}: test$" <<<"$listed"; then
+            echo "[extensive] wrapper executor::tests::${w} missing from --list output; extraction is stale" >&2
+            exit 1
+        fi
+        skip_args+=(--skip "executor::tests::${w}")
+    done
+    echo "[extensive] cargo runs reticulum-integ with ${#wrappers[@]} docker scenario wrappers skipped"
+    cargo test -p reticulum-integ -- --test-threads=1 --exact "${skip_args[@]}"
+    PERICULUM_ROOT="${PERICULUM_ROOT:-../periculum}"
+    PERICULUM_BIN="${PERICULUM_BIN:-$PERICULUM_ROOT/target/release/periculum}"
+    if [ ! -x "$PERICULUM_BIN" ]; then
+        echo "[extensive] periculum binary missing - building in $PERICULUM_ROOT"
+        # Pin the target dir so the binary lands where the PERICULUM_BIN
+        # default expects it, even when the CI runner exports a global
+        # CARGO_TARGET_DIR (run-tier2.sh does).
+        (cd "$PERICULUM_ROOT" && CARGO_TARGET_DIR=target cargo build --release)
+    fi
+    "$PERICULUM_BIN" run reticulum-integ/tests
 
 # --include-ignored adds the LoRa hardware tests on top of Tier 2.
 # Tier 3 (~2-6h, 02:00 nightly): Tier 2 + LoRa hardware tests.
