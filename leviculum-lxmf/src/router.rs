@@ -38,7 +38,6 @@ pub use propagation_runtime::{
 };
 
 pub const MAX_DELIVERY_ATTEMPTS: u8 = 5;
-pub const MAX_DIRECT_DELIVERY_ATTEMPTS: u8 = 3;
 pub const PROCESSING_INTERVAL_MS: u64 = 4_000;
 pub const DELIVERY_RETRY_WAIT_MS: u64 = 10_000;
 pub const PATH_REQUEST_WAIT_MS: u64 = 7_000;
@@ -1041,12 +1040,11 @@ impl LxmfRouter {
                 continue;
             };
             self.persistence_dirty = true;
-            let max_attempts = if entry.message.method == DeliveryMethod::Direct {
-                MAX_DIRECT_DELIVERY_ATTEMPTS
-            } else {
-                MAX_DELIVERY_ATTEMPTS
-            };
-
+            let representation = LxmfNode::representation(&entry.message);
+            let uses_direct_transport = matches!(
+                representation,
+                Ok(DeliveryRepresentation::DirectPacket | DeliveryRepresentation::DirectResource)
+            );
             // A direct packet or Resource that has already been handed to
             // NodeCore owns its current attempt until NodeCore reports either
             // delivery or failure. Retrying an entry that is still Sending
@@ -1054,15 +1052,13 @@ impl LxmfRouter {
             // mark a large Resource failed while bytes are still in flight.
             // Python LXMRouter likewise waits while a direct message remains
             // in the SENDING state.
-            if entry.message.method == DeliveryMethod::Direct
-                && entry.state == MessageState::Sending
-            {
+            if uses_direct_transport && entry.state == MessageState::Sending {
                 entry.next_attempt_ms = now_ms.saturating_add(PROCESSING_INTERVAL_MS);
                 self.outbound.insert(id, entry);
                 continue;
             }
 
-            if entry.attempts >= max_attempts {
+            if entry.attempts >= MAX_DELIVERY_ATTEMPTS {
                 self.preemptive_path_requests.remove(&id);
                 entry.state = MessageState::Failed;
                 output.events.push(RouterEvent::MessageState {
@@ -1090,7 +1086,6 @@ impl LxmfRouter {
                 continue;
             }
 
-            let representation = LxmfNode::representation(&entry.message);
             if representation == Ok(DeliveryRepresentation::OpportunisticPacket) {
                 let destination = DestinationHash::new(entry.message.destination_hash);
                 let has_path = node.has_path(&destination);
@@ -1916,6 +1911,26 @@ mod persistence_tests {
         .expect("message")
     }
 
+    fn oversized_opportunistic_message(seed: u8) -> Message {
+        let source = identity_from(seed);
+        let message = Message::create(
+            [seed.wrapping_add(1); 16],
+            [seed.wrapping_add(2); 16],
+            &source,
+            1_700_000_000.25,
+            b"oversized opportunistic".to_vec(),
+            vec![seed; 1_024],
+            Vec::new(),
+            DeliveryMethod::Opportunistic,
+        )
+        .expect("message");
+        assert_eq!(
+            LxmfNode::representation(&message),
+            Ok(DeliveryRepresentation::DirectResource)
+        );
+        message
+    }
+
     fn announced_peer(router: &mut LxmfRouter, node: &mut TestNode, seed: u8) -> DestinationHash {
         let identity = identity_from(seed);
         let mut destination =
@@ -2196,13 +2211,13 @@ mod persistence_tests {
     }
 
     #[test]
-    fn direct_delivery_fails_after_three_attempts() {
+    fn direct_delivery_uses_shared_attempt_limit() {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = message(72);
         let id = queued.message_id;
         let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
         let entry = router.outbound.get_mut(&id).expect("queued direct message");
-        entry.attempts = MAX_DIRECT_DELIVERY_ATTEMPTS;
+        entry.attempts = MAX_DELIVERY_ATTEMPTS;
         entry.next_attempt_ms = 1_000;
 
         let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
@@ -2222,7 +2237,7 @@ mod persistence_tests {
         let id = queued.message_id;
         let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
         let entry = router.outbound.get_mut(&id).expect("queued direct message");
-        entry.attempts = MAX_DIRECT_DELIVERY_ATTEMPTS;
+        entry.attempts = MAX_DELIVERY_ATTEMPTS;
         entry.state = MessageState::Sending;
         entry.next_attempt_ms = 1_000;
 
@@ -2232,7 +2247,67 @@ mod persistence_tests {
             .get(&id)
             .expect("active direct delivery remains tracked");
 
-        assert_eq!(entry.attempts, MAX_DIRECT_DELIVERY_ATTEMPTS);
+        assert_eq!(entry.attempts, MAX_DELIVERY_ATTEMPTS);
+        assert_eq!(entry.state, MessageState::Sending);
+        assert_eq!(
+            entry.next_attempt_ms,
+            1_000_u64.saturating_add(PROCESSING_INTERVAL_MS)
+        );
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            RouterEvent::MessageState {
+                message_id,
+                state: MessageState::Failed
+            } if *message_id == id
+        )));
+    }
+
+    #[test]
+    fn oversized_opportunistic_fallback_uses_shared_attempt_limit() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let queued = oversized_opportunistic_message(84);
+        let id = queued.message_id;
+        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let entry = router
+            .outbound
+            .get_mut(&id)
+            .expect("queued direct fallback");
+        entry.attempts = MAX_DELIVERY_ATTEMPTS;
+        entry.next_attempt_ms = 1_000;
+
+        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+
+        assert!(!router.outbound.contains_key(&id));
+        assert!(output.events.iter().any(|event| matches!(
+            event,
+            RouterEvent::MessageState {
+                message_id,
+                state: MessageState::Failed
+            } if *message_id == id
+        )));
+    }
+
+    #[test]
+    fn active_oversized_opportunistic_fallback_is_not_resubmitted() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let queued = oversized_opportunistic_message(85);
+        let id = queued.message_id;
+        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let entry = router
+            .outbound
+            .get_mut(&id)
+            .expect("queued direct fallback");
+        entry.attempts = MAX_DELIVERY_ATTEMPTS;
+        entry.state = MessageState::Sending;
+        entry.next_attempt_ms = 1_000;
+
+        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let entry = router
+            .outbound
+            .get(&id)
+            .expect("active direct fallback remains tracked");
+
+        assert_eq!(entry.attempts, MAX_DELIVERY_ATTEMPTS);
         assert_eq!(entry.state, MessageState::Sending);
         assert_eq!(
             entry.next_attempt_ms,
