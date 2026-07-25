@@ -151,6 +151,52 @@ impl core::fmt::Display for InterfaceMode {
     }
 }
 
+/// The concrete transport medium an interface runs over.
+///
+/// Unlike [`InterfaceMode`] (a Reticulum propagation property), this is the
+/// carrier the driver actually built: TCP, UDP, I2P, LoRa, etc. It lets a status
+/// consumer group interfaces by transport rather than by name — the name is only
+/// a peer label, so an autoconnected TCP client to a peer discovered over I2P is
+/// still `Tcp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InterfaceKind {
+    Tcp,
+    Udp,
+    I2p,
+    Serial,
+    Rnode,
+    Kiss,
+    Local,
+    Pipe,
+    Auto,
+    #[default]
+    Unknown,
+}
+
+impl InterfaceKind {
+    /// Stable lowercase token for status/IPC reporting.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InterfaceKind::Tcp => "tcp",
+            InterfaceKind::Udp => "udp",
+            InterfaceKind::I2p => "i2p",
+            InterfaceKind::Serial => "serial",
+            InterfaceKind::Rnode => "rnode",
+            InterfaceKind::Kiss => "kiss",
+            InterfaceKind::Local => "local",
+            InterfaceKind::Pipe => "pipe",
+            InterfaceKind::Auto => "auto",
+            InterfaceKind::Unknown => "unknown",
+        }
+    }
+}
+
+impl core::fmt::Display for InterfaceKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// A network interface that can send packets (sync, non-blocking)
 ///
 /// This trait defines the **send side** of the interface contract. The driver
@@ -187,6 +233,15 @@ pub trait Interface {
     /// media-agnostic and need not override this.
     fn mode(&self) -> InterfaceMode {
         InterfaceMode::default()
+    }
+
+    /// The transport medium this interface runs over (TCP, UDP, I2P, …).
+    ///
+    /// Reported in interface status so consumers group by transport rather than
+    /// by name. Defaults to `Unknown`; the std driver overrides it from the
+    /// interface it built.
+    fn kind(&self) -> InterfaceKind {
+        InterfaceKind::default()
     }
 
     /// Check if interface is online/connected

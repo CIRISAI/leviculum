@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::sync_ext::MutexRecover;
 use std::time::{Duration, Instant};
 
-use leviculum_core::traits::{InterfaceError, InterfaceMode};
+use leviculum_core::traits::{InterfaceError, InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
 use tokio::sync::{mpsc, Notify};
 
@@ -397,6 +397,11 @@ pub(crate) struct InterfaceInfo {
     /// hands this value to `Transport::set_interface_mode` when the interface is
     /// registered.
     pub mode: InterfaceMode,
+    /// Transport medium this interface runs over (TCP, UDP, I2P, LoRa, …). Set by
+    /// the builder from the interface it constructs; the driver hands it to
+    /// `Transport::set_interface_kind` at registration so status can group by
+    /// transport rather than by the peer-label name.
+    pub kind: InterfaceKind,
 }
 
 /// Event loop's handle to a spawned interface task
@@ -432,6 +437,9 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
     }
     fn mode(&self) -> InterfaceMode {
         self.info.mode
+    }
+    fn kind(&self) -> InterfaceKind {
+        self.info.kind
     }
     fn is_online(&self) -> bool {
         !self.outgoing.is_closed()
@@ -583,6 +591,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: inc_rx,
             outgoing: out_tx,

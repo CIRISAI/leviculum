@@ -1627,6 +1627,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_mode(id)
     }
 
+    /// Set the transport medium for an interface. The driver calls this at
+    /// registration from the interface it built, so status can group by
+    /// transport rather than by the peer-label name.
+    pub fn set_interface_kind(&mut self, id: usize, kind: crate::traits::InterfaceKind) {
+        self.transport.set_interface_kind(id, kind);
+    }
+
+    /// Transport medium for an interface (`Unknown` when unset).
+    pub fn interface_kind(&self, id: usize) -> crate::traits::InterfaceKind {
+        self.transport.interface_kind(id)
+    }
+
     /// Set whether the ingress burst limiter runs for an interface (Codeberg
     /// #8). The media-aware driver resolves the flag (point-to-point off,
     /// shared/broadcast on, config-overridable) and calls this at registration.

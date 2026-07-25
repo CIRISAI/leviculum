@@ -545,6 +545,9 @@ pub struct InterfaceStatusSnapshot {
     /// when the interface has no configured bitrate and reporting falls back to
     /// the medium default guess.
     pub configured_bitrate: Option<u32>,
+    /// Transport medium the interface runs over (TCP, UDP, I2P, LoRa, …), so a
+    /// status consumer can group by transport rather than by the peer-label name.
+    pub kind: leviculum_core::traits::InterfaceKind,
 }
 
 /// Aggregated AutoInterface peer count across every configured section.
@@ -1139,6 +1142,9 @@ impl ReticulumNode {
                     core.register_interface_bitrate(idx, bps);
                     tracing::info!("Interface {} configured bitrate: {} bps", idx, bps);
                 }
+                // Transport medium, resolved from the configured interface type so
+                // status can group by transport rather than by the peer-label name.
+                core.set_interface_kind(idx, kind_from_interface_type(&iface_config.interface_type));
                 // Interface propagation mode (Codeberg #91). Resolve the config
                 // string to an InterfaceMode and hand it to transport, which
                 // owns the per-interface mode map and applies the propagation
@@ -2800,6 +2806,7 @@ impl ReticulumNode {
                     held_announces: e.held_announces,
                     burst_active: e.burst_active,
                     configured_bitrate: e.configured_bitrate,
+                    kind: e.kind,
                 }
             })
             .collect()
@@ -3507,6 +3514,7 @@ async fn run_event_loop(
                 let iface_idx = handle.info.id.0;
                 let inherited_ifac = handle.info.ifac.clone();
                 let inherited_mode = handle.info.mode;
+                let inherited_kind = handle.info.kind;
                 {
                     let mut core = inner.lock_recover();
                     core.set_interface_name(iface_idx, handle.info.name.clone());
@@ -3521,6 +3529,7 @@ async fn run_event_loop(
                     // spawned-per-connection interface carries the server's mode
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
+                    core.set_interface_kind(iface_idx, inherited_kind);
                     // Ingress control (Codeberg #8): dynamically-spawned
                     // interfaces here are TCP-server-accepted connections or
                     // local IPC clients, both point-to-point, so ingress control
@@ -4601,6 +4610,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -5073,6 +5083,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -5121,6 +5132,7 @@ mod tests {
                     bitrate: None,
                     ifac: None,
                     mode: leviculum_core::traits::InterfaceMode::default(),
+                    kind: leviculum_core::traits::InterfaceKind::Unknown,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -5186,6 +5198,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: l_inc_rx,
             outgoing: l_out_tx,
@@ -5206,6 +5219,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -5255,6 +5269,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -5323,6 +5338,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: lora_inc_rx,
             outgoing: lora_out_tx,
@@ -5342,6 +5358,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: plain_inc_rx,
             outgoing: plain_out_tx,
@@ -5405,6 +5422,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -5456,6 +5474,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -5507,6 +5526,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -5653,5 +5673,23 @@ mod tests {
             Some(dest_hash),
             "active link must expose the dialed destination"
         );
+    }
+}
+
+/// Map a configured interface type (Python-style class name) to its transport
+/// medium, for status reporting.
+fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::InterfaceKind {
+    use leviculum_core::traits::InterfaceKind;
+    match interface_type {
+        "TCPClientInterface" | "TCPServerInterface" => InterfaceKind::Tcp,
+        "UDPInterface" => InterfaceKind::Udp,
+        "I2PInterface" => InterfaceKind::I2p,
+        "SerialInterface" => InterfaceKind::Serial,
+        "RNodeInterface" | "RNodeMultiInterface" => InterfaceKind::Rnode,
+        "KISSInterface" | "AX25KISSInterface" => InterfaceKind::Kiss,
+        "PipeInterface" => InterfaceKind::Pipe,
+        "AutoInterface" => InterfaceKind::Auto,
+        "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
+        _ => InterfaceKind::Unknown,
     }
 }

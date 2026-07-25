@@ -648,6 +648,7 @@ fn handle_discovery_packet(
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Auto,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

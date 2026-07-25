@@ -67,7 +67,7 @@ pub use crate::storage_types::PathEntry;
 use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathState, ReverseEntry,
 };
-use crate::traits::{Clock, InterfaceMode, Storage};
+use crate::traits::{Clock, InterfaceKind, InterfaceMode, Storage};
 use crate::tunnel::{
     build_synthesize_payload, compute_tunnel_id, SynthesizePayload, TunnelEntry, TunnelPathEntry,
     SYNTH_IFHASH_LEN, SYNTH_RANDHASH_LEN, TUNNEL_ID_LEN, TUNNEL_PATH_TIMEOUT_MS, TUNNEL_TIMEOUT_MS,
@@ -587,6 +587,10 @@ pub struct InterfaceStatEntry {
     /// Reticulum propagation mode (Python `Interface.mode`, Codeberg #91).
     /// Reported over the shared-instance IPC so `rnstatus`/`lnstatus` show it.
     pub mode: InterfaceMode,
+    /// Transport medium the interface runs over (TCP, UDP, I2P, LoRa, …), read
+    /// from the interface itself. Lets status consumers group by transport
+    /// rather than by the peer-label name.
+    pub kind: InterfaceKind,
     /// Effective configured bitrate in bits per second (Codeberg #93), or `None`
     /// when the interface has no configured bitrate. When set, this is the value
     /// that drives the announce bandwidth cap / timing and is reported by
@@ -1188,6 +1192,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// by the driver at registration; drives the per-mode announce-propagation
     /// and path-expiry rules (Python Transport.py:1193-1245, 773-778, 1875-1880).
     interface_modes: BTreeMap<usize, InterfaceMode>,
+    interface_kinds: BTreeMap<usize, InterfaceKind>,
 
     /// Per-interface ingress-control enable flag (Codeberg #8; Python
     /// `Interface.ingress_control`, Reticulum.py:768-769, Interface.py:112).
@@ -1368,6 +1373,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_announce_caps: BTreeMap::new(),
             interface_names: BTreeMap::new(),
             interface_modes: BTreeMap::new(),
+            interface_kinds: BTreeMap::new(),
             interface_ingress_control: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
@@ -5259,6 +5265,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_modes.remove(&id);
     }
 
+    /// Set the transport medium for an interface (called by the driver at
+    /// registration from the interface it built). `Unknown` is the default, so
+    /// it is stored as an explicit removal to keep the map sparse.
+    pub fn set_interface_kind(&mut self, id: usize, kind: InterfaceKind) {
+        if kind == InterfaceKind::Unknown {
+            self.interface_kinds.remove(&id);
+        } else {
+            self.interface_kinds.insert(id, kind);
+        }
+    }
+
+    /// Remove interface kind (called during handle_interface_down cleanup).
+    pub fn remove_interface_kind(&mut self, id: usize) {
+        self.interface_kinds.remove(&id);
+    }
+
+    /// Transport medium for an interface (`Unknown` when unset).
+    pub fn interface_kind(&self, id: usize) -> InterfaceKind {
+        self.interface_kinds.get(&id).copied().unwrap_or_default()
+    }
+
     // Public: Interface Ingress-Control API (Codeberg #8)
     /// Set whether the announce/path-request ingress burst limiter runs for an
     /// interface (called by the media-aware driver at registration). The medium
@@ -6220,6 +6247,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     name: name.clone(),
                     is_local_client: self.local_client_interfaces.contains(&id),
                     mode: self.interface_mode(id),
+                    kind: self.interface_kind(id),
                     configured_bitrate,
                     incoming_announce_frequency: ia_freq,
                     outgoing_announce_frequency: oa_freq,

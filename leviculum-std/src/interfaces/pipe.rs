@@ -87,6 +87,7 @@ pub(crate) fn spawn_pipe_interface(config: PipeInterfaceConfig) -> InterfaceHand
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Pipe,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
