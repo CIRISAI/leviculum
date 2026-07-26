@@ -11,6 +11,37 @@ description = "Terminal browser and ANSI renderer for NomadNet micron pages"
 [lints.rust]
 unsafe_code = "forbid"
 
+# `cargo deb -p lnomad --target x86_64-unknown-linux-musl` builds a
+# musl-static .deb. Deliberately a separate package from `leviculum`:
+# that package auto-enables and starts the lnsd systemd service, which
+# a browser-only user must not get pulled in.
+[package.metadata.deb]
+name = "lnomad"
+maintainer = "Lew Palm <lp@lew-palm.de>"
+copyright = "2025, Lew Palm"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+Nomadnet terminal browser for the Reticulum network. Connects to a
+local shared RNS instance — leviculum's lnsd or the Python rnsd —
+fetches micron pages, and renders them in the terminal.
+"""
+section = "net"
+priority = "optional"
+# The binary is musl-static, so cargo-deb's `$auto` would find no
+# shared-library deps and only emit a warning. There is no hard runtime
+# dependency either: any RNS instance satisfies the need, so leviculum
+# is a Recommends, not a Depends.
+depends = ""
+recommends = "leviculum"
+assets = [
+    # cargo-deb only recognises "target/release/..." exactly as a Cargo
+    # target path and auto-substitutes the --target triple into it. Any
+    # prefix disables the rewrite and silently picks up stale non-musl
+    # builds — see leviculum-cli/Cargo.toml.
+    ["target/release/lnomad", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/lnomad/README.md", "644"],
+]
+
 [dependencies]
 leviculum-micron = { path = "../leviculum-micron" }
 leviculum-std = { path = "../leviculum-std" }

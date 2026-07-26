@@ -54,6 +54,17 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-arm6
 
 \`tar xzf leviculum-nightly-amd64.tar.gz && ./leviculum-nightly-amd64/bin/lnsd --version\` runs without installing anything system-wide.
 
+**lnomad — Nomadnet terminal browser** (separate package, does not install or start the lnsd service):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-amd64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-arm64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-arm64.tar.gz
+\`\`\`
+
+\`sudo apt install ./lnomad-nightly-amd64.deb\` — the browser needs a running RNS instance (leviculum's \`lnsd\` or Python \`rnsd\`).
+
 **Source tarball** (tracked files at the same commit as the .debs above, no submodules):
 
 \`\`\`

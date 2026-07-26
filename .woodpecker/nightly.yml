@@ -7,6 +7,13 @@
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-amd64.deb
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-nightly-arm64.deb
 #
+# The lnomad terminal browser ships as its own .deb + tarball (it must
+# not pull in the auto-started lnsd service that the leviculum package
+# sets up):
+#
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-amd64.deb
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-arm64.deb
+#
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
 # file only reacts to the `event: cron` trigger. Suggested schedule:
@@ -55,13 +62,14 @@ steps:
       # relinking some binaries, leaving them with a stale version
       # string. Fresh containers rarely hit this, but the clean is
       # cheap insurance.
-      - cargo clean -p leviculum-cli
-      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus
+      - cargo clean -p leviculum-cli -p lnomad
+      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad
       # --no-strip: rust strips debuginfo at link time (see workspace
       # Cargo.toml [profile.release] strip = "debuginfo"). cargo-deb's
       # default strip --strip-all corrupted x86_64 musl-static binaries
       # (SIGSEGV at startup), so we skip it entirely.
       - cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+      - cargo deb -p lnomad --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
 
   build-arm64:
     image: rust:bookworm
@@ -75,9 +83,10 @@ steps:
       - cargo install --locked cargo-deb
       - rustup target add aarch64-unknown-linux-musl
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      - cargo clean -p leviculum-cli
-      - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus
+      - cargo clean -p leviculum-cli -p lnomad
+      - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad
       - cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+      - cargo deb -p lnomad --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
 
   package:
     image: debian:bookworm-slim
