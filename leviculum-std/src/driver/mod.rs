@@ -47,6 +47,7 @@
 //! ```
 
 mod builder;
+mod interface_build;
 mod remote_mgmt;
 mod sender;
 mod stream;
@@ -85,17 +86,10 @@ use leviculum_core::{AnnounceControl, Destination, DestinationHash};
 use crate::clock::SystemClock;
 use crate::config::InterfaceConfig;
 use crate::error::Error;
-use crate::interfaces::auto_interface::orchestrator::spawn_auto_interface;
-use crate::interfaces::auto_interface::AutoInterfaceConfig;
-use crate::interfaces::i2p::{
-    spawn_i2p_client, spawn_i2p_server, I2pClientConfig, I2pServerConfig, I2P_DEFAULT_BUFFER_SIZE,
-    I2P_DEFAULT_RECONNECT_WAIT,
-};
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpClientHandle,
+    spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
-use crate::interfaces::udp::spawn_udp_interface;
 use crate::interfaces::{
     InterfaceHandle, InterfaceOnlineMap, InterfaceRegistry, InterfaceStatsMap,
 };
@@ -426,6 +420,9 @@ struct EventLoopChannels {
     /// client fires its id here on every connect; the loop initiates the
     /// synthesize handshake toward the peer.
     tunnel_notify_rx: mpsc::Receiver<InterfaceId>,
+    /// Runtime interface-removal requests. An id fired here is torn down through
+    /// the same path as a channel-close disconnect (see [`recv_any`]).
+    remove_iface_rx: mpsc::Receiver<InterfaceId>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -553,21 +550,27 @@ pub struct InterfaceStatusSnapshot {
 /// `group_id`, multicast address and ports), and each publishes its live peer
 /// count over a `watch` channel. This holds one receiver per section and sums
 /// them on demand, so `peers` in `rnstatus` reflects all discovery domains
-/// rather than only the last section to be initialised.
+/// rather than only the last section to be initialised. The receiver list is
+/// shared behind an `Arc<Mutex>` so a clone handed to the RPC server also sees
+/// sections added at runtime.
 #[derive(Clone, Default)]
 pub(crate) struct AutoPeerCount {
-    receivers: Vec<watch::Receiver<usize>>,
+    receivers: Arc<Mutex<Vec<watch::Receiver<usize>>>>,
 }
 
 impl AutoPeerCount {
     /// Register another section's peer-count receiver.
-    fn push(&mut self, rx: watch::Receiver<usize>) {
-        self.receivers.push(rx);
+    fn push(&self, rx: watch::Receiver<usize>) {
+        self.receivers.lock_recover().push(rx);
     }
 
     /// Sum the current peer count across all AutoInterface sections.
     pub(crate) fn total(&self) -> usize {
-        self.receivers.iter().map(|rx| *rx.borrow()).sum()
+        self.receivers
+            .lock_recover()
+            .iter()
+            .map(|rx| *rx.borrow())
+            .sum()
     }
 }
 
@@ -703,6 +706,14 @@ pub struct ReticulumNode {
     /// re-announce-on-recovery works like config interfaces. `Some` after
     /// `start()`.
     reconnect_tx: Option<mpsc::Sender<InterfaceId>>,
+    /// Tunnel-synthesize notify sender handed to runtime-attached TCP clients so
+    /// they initiate the synthesize handshake like config interfaces (Codeberg
+    /// #64). `Some` after `start()`.
+    tunnel_notify_tx: Option<mpsc::Sender<InterfaceId>>,
+    /// Runtime interface-removal sender. [`remove_interface`](Self::remove_interface)
+    /// fires an id here; the event loop tears the interface down through the
+    /// same path as a channel-close disconnect. `Some` after `start()`.
+    remove_iface_tx: Option<mpsc::Sender<InterfaceId>>,
     /// Storage directory, needed by interface types that persist per-interface
     /// state (currently only `I2PInterface`, which stores its SAM destination
     /// private key so its `.b32.i2p` address survives restarts). Set by the
@@ -820,6 +831,8 @@ impl ReticulumNode {
             new_iface_tx: None,
             iface_id_counter: None,
             reconnect_tx: None,
+            tunnel_notify_tx: None,
+            remove_iface_tx: None,
             storage_path: None,
             autoconnect_max: 0,
             discovery_network_identity: None,
@@ -1039,11 +1052,18 @@ impl ReticulumNode {
         // core.send_tunnel_synthesize() to initiate the handshake toward the peer.
         let (tunnel_notify_tx, tunnel_notify_rx) = mpsc::channel::<InterfaceId>(16);
 
-        // Retain clones so the node can attach interfaces at runtime (hot-plug),
-        // not just at construction. Used by `spawn_rnode_channel_interface`.
+        // Runtime interface removal: `remove_interface` fires an id here and the
+        // event loop tears it down through the shared disconnect path.
+        let (remove_iface_tx, remove_iface_rx) = mpsc::channel::<InterfaceId>(16);
+
+        // Retain clones so the node can attach and detach interfaces at runtime
+        // (hot-plug), not just at construction. Used by `spawn_interface` /
+        // `remove_interface` and `spawn_rnode_channel_interface`.
         self.new_iface_tx = Some(new_iface_tx.clone());
         self.iface_id_counter = Some(Arc::clone(&next_id));
         self.reconnect_tx = Some(reconnect_tx.clone());
+        self.tunnel_notify_tx = Some(tunnel_notify_tx.clone());
+        self.remove_iface_tx = Some(remove_iface_tx);
 
         // Initialize interfaces, the driver owns them, NOT NodeCore.
         // Interface init is the one fallible step after the runtime exists
@@ -1272,6 +1292,7 @@ impl ReticulumNode {
                     new_interface_rx: new_iface_rx,
                     reconnect_rx,
                     tunnel_notify_rx,
+                    remove_iface_rx,
                     shutdown: shutdown_rx,
                 },
                 iface_stats_map,
@@ -1337,705 +1358,30 @@ impl ReticulumNode {
             // orchestrators, mis-delivering traffic.
             validate_auto_interface_ports(&self.interfaces)?;
 
+            let build_ctx = interface_build::InterfaceBuildCtx {
+                next_id,
+                new_iface_tx,
+                reconnect_tx,
+                tunnel_notify_tx,
+                corrupt_every: self.corrupt_every,
+                storage_path: self.storage_path.clone(),
+            };
             for (idx, config) in self.interfaces.iter().enumerate() {
                 if !config.enabled {
                     continue;
                 }
-
-                match config.interface_type.as_str() {
-                    "TCPClientInterface" => {
-                        let target_host = config.target_host.as_ref().ok_or_else(|| {
-                            Error::Config("TCPClientInterface requires target_host".to_string())
-                        })?;
-                        let target_port = config.target_port.ok_or_else(|| {
-                            Error::Config("TCPClientInterface requires target_port".to_string())
-                        })?;
-
-                        let addr_str = format!("{}:{}", target_host, target_port);
-                        let addr: SocketAddr = addr_str
-                            .as_str()
-                            .to_socket_addrs()
-                            .map_err(|e| {
-                                Error::Config(format!("cannot resolve {}: {}", addr_str, e))
-                            })?
-                            .next()
-                            .ok_or_else(|| {
-                                Error::Config(format!("no addresses for {}", addr_str))
-                            })?;
-
-                        let iface_name = format!("tcp_client_{}", idx);
-                        let id = InterfaceId(idx);
-                        let buffer_size = config.buffer_size.unwrap_or(TCP_DEFAULT_BUFFER_SIZE);
-                        let reconnect_interval =
-                            Duration::from_secs(config.reconnect_interval_secs.unwrap_or(5));
-
-                        // TCP interfaces don't register a bitrate cap
-                        // (bitrate=0 means unlimited). Future LoRa/serial interfaces
-                        // should call transport.register_interface_bitrate(id, bitrate)
-                        // after registration to enable per-interface announce caps.
-                        let handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
-                            id,
-                            name: iface_name,
-                            addr,
-                            buffer_size,
-                            corrupt_every: self.corrupt_every,
-                            reconnect_interval,
-                            max_reconnect_tries: config.max_reconnect_tries,
-                            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
-                            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
-                            reconnect_notify: Some(reconnect_tx.clone()),
-                            // Tunnel-capable: a non-KISS TCP client initiates the
-                            // synthesize handshake on connect + reconnect
-                            // (Codeberg #64). The core-side interface hash is
-                            // registered below in the per-interface config loop.
-                            tunnel_notify: Some(tunnel_notify_tx.clone()),
-                            socks_target: None,
-                            shutdown: None,
-                        });
-                        tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
-                        registry.register(handle);
-                    }
-                    "TCPServerInterface" => {
-                        let listen_port = config.listen_port.ok_or_else(|| {
-                            Error::Config("TCPServerInterface requires listen_port".to_string())
-                        })?;
-
-                        // A configured `device` binds to that kernel NIC's own
-                        // address (Codeberg #94, BackboneInterface.py:138-139);
-                        // otherwise fall back to the wildcard/`listen_ip` bind.
-                        let addr: SocketAddr = if let Some(device) = config.device.as_deref() {
-                            crate::interfaces::netdevice::resolve_if_bind_address(
-                                device,
-                                listen_port,
-                                config.prefer_ipv6.unwrap_or(false),
-                            )
-                            .map_err(|e| {
-                                Error::Config(format!(
-                                    "TCPServerInterface device \"{}\": {}",
-                                    device, e
-                                ))
-                            })?
-                        } else {
-                            let listen_ip = config.listen_ip.as_deref().unwrap_or("0.0.0.0");
-                            format!("{}:{}", listen_ip, listen_port)
-                                .parse()
-                                .map_err(|e| {
-                                    Error::Config(format!("invalid listen address: {}", e))
-                                })?
-                        };
-
-                        let buffer_size = config.buffer_size.unwrap_or(TCP_DEFAULT_BUFFER_SIZE);
-                        let ifac = build_ifac_config(config);
-                        // Codeberg #104: resolve the listener's configured mode so
-                        // each accepted child inherits it (the listener itself does
-                        // not register as an interface; only spawned children do).
-                        // An unknown mode string keeps the Full default, matching
-                        // Python.
-                        let mode = config
-                            .mode
-                            .as_deref()
-                            .and_then(leviculum_core::traits::InterfaceMode::from_config_str)
-                            .unwrap_or_default();
-                        spawn_tcp_server(
-                            addr,
-                            next_id.clone(),
-                            new_iface_tx.clone(),
-                            buffer_size,
-                            self.corrupt_every,
-                            ifac,
-                            mode,
-                        )?;
-                    }
-                    "UDPInterface" => {
-                        // A configured `device` supplies the NIC's IPv4
-                        // broadcast address for whichever of listen_ip /
-                        // forward_ip is left unset (Codeberg #3,
-                        // UDPInterface.py:82-86). Explicit keys win over it.
-                        let device_broadcast = match config.device.as_deref() {
-                            Some(device) => Some(
-                                crate::interfaces::netdevice::resolve_if_broadcast(device)
-                                    .map_err(|e| {
-                                        Error::Config(format!(
-                                            "UDPInterface device \"{}\": {}",
-                                            device, e
-                                        ))
-                                    })?
-                                    .to_string(),
-                            ),
-                            None => None,
-                        };
-
-                        let listen_ip = config
-                            .listen_ip
-                            .as_deref()
-                            .or(device_broadcast.as_deref())
-                            .unwrap_or("0.0.0.0");
-                        let listen_port = config.listen_port.ok_or_else(|| {
-                            Error::Config("UDPInterface requires listen_port".to_string())
-                        })?;
-                        let forward_ip = config
-                            .forward_ip
-                            .as_deref()
-                            .or(device_broadcast.as_deref())
-                            .ok_or_else(|| {
-                                Error::Config("UDPInterface requires forward_ip".to_string())
-                            })?;
-
-                        let listen_addr: SocketAddr = format!("{}:{}", listen_ip, listen_port)
-                            .parse()
-                            .map_err(|e| {
-                                Error::Config(format!("UDPInterface invalid listen address: {}", e))
-                            })?;
-                        // `forward_ip` may hold several comma-separated
-                        // addresses (Rust-only extension); each outgoing
-                        // datagram goes to every one of them.
-                        let forward_addrs = crate::interfaces::udp::parse_forward_addrs(
-                            forward_ip,
-                            config.forward_port,
-                        )
-                        .map_err(|e| match e {
-                            crate::interfaces::udp::ForwardAddrError::MissingPort => {
-                                Error::Config("UDPInterface requires forward_port".to_string())
-                            }
-                            crate::interfaces::udp::ForwardAddrError::Invalid(msg) => {
-                                Error::Config(format!(
-                                    "UDPInterface invalid forward address: {}",
-                                    msg
-                                ))
-                            }
-                        })?;
-
-                        let iface_name = format!("udp_{}", idx);
-                        let id = InterfaceId(idx);
-                        let forward_desc = forward_addrs
-                            .iter()
-                            .map(|a| a.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let handle =
-                            spawn_udp_interface(id, iface_name, listen_addr, forward_addrs)?;
-                        tracing::info!(
-                            "UDP interface listening on {}, forwarding to {}",
-                            listen_addr,
-                            forward_desc
-                        );
-                        registry.register(handle);
-                    }
-                    "AutoInterface" => {
-                        let discovery_port = config
-                            .discovery_port
-                            .unwrap_or(crate::interfaces::auto_interface::DEFAULT_DISCOVERY_PORT);
-                        let data_port = config
-                            .data_port
-                            .unwrap_or(crate::interfaces::auto_interface::DEFAULT_DATA_PORT);
-
-                        let auto_config = AutoInterfaceConfig {
-                            group_id: config
-                                .group_id
-                                .as_deref()
-                                .map(|s| s.as_bytes().to_vec())
-                                .unwrap_or_else(|| {
-                                    crate::interfaces::auto_interface::DEFAULT_GROUP_ID.to_vec()
-                                }),
-                            discovery_port,
-                            data_port,
-                            discovery_scope: config
-                                .discovery_scope
-                                .clone()
-                                .unwrap_or_else(|| "link".to_string()),
-                            allowed_devices: config.devices.clone(),
-                            ignored_devices: config.ignored_devices.clone(),
-                            multicast_loopback: config.multicast_loopback.unwrap_or(true),
-                        };
-                        let peer_count_rx = spawn_auto_interface(
-                            next_id.clone(),
-                            new_iface_tx.clone(),
-                            auto_config,
-                        );
-                        self.auto_peer_count.push(peer_count_rx);
-                        tracing::info!(
-                            "AutoInterface: starting orchestrator (discovery_port={}, data_port={})",
-                            discovery_port,
-                            data_port
-                        );
-                    }
-                    "RNodeInterface" => {
-                        let port_path = config
-                            .port
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Error::Config("RNodeInterface requires port".to_string())
-                            })?
-                            .clone();
-                        let frequency: u32 = config
-                            .frequency
-                            .ok_or_else(|| {
-                                Error::Config("RNodeInterface requires frequency".to_string())
-                            })
-                            .and_then(|f| {
-                                u32::try_from(f).map_err(|_| {
-                                    Error::Config(format!("frequency {} exceeds u32 range", f))
-                                })
-                            })?;
-                        let bandwidth = config.bandwidth.ok_or_else(|| {
-                            Error::Config("RNodeInterface requires bandwidth".to_string())
-                        })?;
-                        let sf = config.spreading_factor.ok_or_else(|| {
-                            Error::Config("RNodeInterface requires spreading_factor".to_string())
-                        })?;
-                        let cr = config.coding_rate.ok_or_else(|| {
-                            Error::Config("RNodeInterface requires coding_rate".to_string())
-                        })?;
-                        let tx_power: u8 =
-                            config.tx_power.unwrap_or(0).try_into().map_err(|_| {
-                                Error::Config(format!(
-                                    "tx_power {} out of range (0-37)",
-                                    config.tx_power.unwrap_or(0)
-                                ))
-                            })?;
-
-                        leviculum_core::rnode::validate_config(
-                            frequency, bandwidth, tx_power, sf, cr,
-                        )
-                        .map_err(|e| Error::Config(format!("RNodeInterface: {}", e)))?;
-
-                        let st_alock = config.airtime_limit_short.map(|p| (p * 100.0) as u16);
-                        let lt_alock = resolve_lt_alock(config.airtime_limit_long, frequency);
-                        let flow_control = config.flow_control.unwrap_or(false);
-                        let buffer_size = config
-                            .buffer_size
-                            .unwrap_or(crate::interfaces::rnode::RNODE_DEFAULT_BUFFER_SIZE);
-
-                        let iface_name = format!("rnode_{}", idx);
-                        let id = InterfaceId(idx);
-
-                        let handle = crate::interfaces::rnode::spawn_rnode_interface(
-                            crate::interfaces::rnode::RNodeInterfaceConfig {
-                                id,
-                                name: iface_name,
-                                port_path: port_path.clone(),
-                                frequency,
-                                bandwidth,
-                                tx_power,
-                                sf,
-                                cr,
-                                st_alock,
-                                lt_alock,
-                                flow_control,
-                                buffer_size,
-                                reconnect_notify: Some(reconnect_tx.clone()),
-                            },
-                        );
-
-                        tracing::info!(
-                        "RNode interface on {} (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm)",
-                        port_path,
-                        frequency,
-                        sf,
-                        bandwidth,
-                        cr,
-                        tx_power,
-                    );
-                        registry.register(handle);
-                    }
-                    "RNodeMultiInterface" => {
-                        // One serial port carries several LoRa transceivers as
-                        // virtual ports; each enabled [[[subinterface]]] becomes
-                        // its own logical interface with a fresh InterfaceId.
-                        let port_path = config
-                            .port
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Error::Config("RNodeMultiInterface requires port".to_string())
-                            })?
-                            .clone();
-
-                        let parent_name = format!("rnode_multi_{}", idx);
-                        let flow_control = config.flow_control.unwrap_or(false);
-                        let buffer_size = config
-                            .buffer_size
-                            .unwrap_or(crate::interfaces::rnode::RNODE_DEFAULT_BUFFER_SIZE);
-
-                        let mut subs = Vec::new();
-                        let mut first_id = Some(InterfaceId(idx));
-                        for sub in config.subinterfaces.iter().filter(|s| s.enabled) {
-                            let vport = sub.vport.ok_or_else(|| {
-                                Error::Config(format!(
-                                    "RNodeMultiInterface subinterface '{}' requires vport",
-                                    sub.name
-                                ))
-                            })?;
-                            if vport as u16 >= leviculum_core::rnode::MAX_SUBINTERFACES as u16 {
-                                return Err(Error::Config(format!(
-                                    "RNodeMultiInterface subinterface '{}' vport {} out of range (0-{})",
-                                    sub.name,
-                                    vport,
-                                    leviculum_core::rnode::MAX_SUBINTERFACES - 1
-                                )));
-                            }
-                            let frequency: u32 = sub
-                                .frequency
-                                .ok_or_else(|| {
-                                    Error::Config(format!(
-                                        "RNodeMultiInterface subinterface '{}' requires frequency",
-                                        sub.name
-                                    ))
-                                })
-                                .and_then(|f| {
-                                    u32::try_from(f).map_err(|_| {
-                                        Error::Config(format!("frequency {} exceeds u32 range", f))
-                                    })
-                                })?;
-                            let bandwidth = sub.bandwidth.ok_or_else(|| {
-                                Error::Config(format!(
-                                    "RNodeMultiInterface subinterface '{}' requires bandwidth",
-                                    sub.name
-                                ))
-                            })?;
-                            let sf = sub.spreading_factor.ok_or_else(|| {
-                                Error::Config(format!(
-                                    "RNodeMultiInterface subinterface '{}' requires spreadingfactor",
-                                    sub.name
-                                ))
-                            })?;
-                            let cr = sub.coding_rate.ok_or_else(|| {
-                                Error::Config(format!(
-                                    "RNodeMultiInterface subinterface '{}' requires codingrate",
-                                    sub.name
-                                ))
-                            })?;
-                            let tx_power: u8 =
-                                sub.tx_power.unwrap_or(0).try_into().map_err(|_| {
-                                    Error::Config(format!(
-                                        "tx_power {} out of range (0-37)",
-                                        sub.tx_power.unwrap_or(0)
-                                    ))
-                                })?;
-
-                            leviculum_core::rnode::validate_config(
-                                frequency, bandwidth, tx_power, sf, cr,
-                            )
-                            .map_err(|e| {
-                                Error::Config(format!(
-                                    "RNodeMultiInterface subinterface '{}': {}",
-                                    sub.name, e
-                                ))
-                            })?;
-
-                            let id = first_id.take().unwrap_or_else(|| {
-                                InterfaceId(
-                                    next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                )
-                            });
-                            subs.push(crate::interfaces::rnode::RNodeSubinterfaceParams {
-                                id,
-                                name: format!("{}[{}]", parent_name, sub.name),
-                                vport,
-                                frequency,
-                                bandwidth,
-                                tx_power,
-                                sf,
-                                cr,
-                                st_alock: sub.airtime_limit_short.map(|p| (p * 100.0) as u16),
-                                lt_alock: resolve_lt_alock(sub.airtime_limit_long, frequency),
-                                outgoing: sub.outgoing,
-                            });
-                        }
-
-                        if subs.is_empty() {
-                            return Err(Error::Config(format!(
-                                "RNodeMultiInterface '{}' has no enabled subinterfaces",
-                                parent_name
-                            )));
-                        }
-
-                        let vport_count = subs.len();
-                        let handles = crate::interfaces::rnode::spawn_rnode_multi_interface(
-                            crate::interfaces::rnode::RNodeMultiInterfaceConfig {
-                                name: parent_name.clone(),
-                                port_path: port_path.clone(),
-                                subinterfaces: subs,
-                                flow_control,
-                                buffer_size,
-                                reconnect_notify: Some(reconnect_tx.clone()),
-                            },
-                        );
+                match interface_build::build_interface(
+                    idx,
+                    config,
+                    &build_ctx,
+                    &self.auto_peer_count,
+                )? {
+                    interface_build::Built::Handles(handles) => {
                         for handle in handles {
                             registry.register(handle);
                         }
-                        tracing::info!(
-                            "RNodeMulti interface on {} ({} vport subinterfaces)",
-                            port_path,
-                            vport_count
-                        );
                     }
-                    "SerialInterface" => {
-                        let port_path = config
-                            .port
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Error::Config("SerialInterface requires port".to_string())
-                            })?
-                            .clone();
-                        let speed = config.speed.unwrap_or(9600);
-                        let data_bits = crate::interfaces::serial::parse_data_bits(
-                            config.databits.unwrap_or(8),
-                        );
-                        let parity = crate::interfaces::serial::parse_parity(
-                            config.parity.as_deref().unwrap_or("N"),
-                        );
-                        let stop_bits = crate::interfaces::serial::parse_stop_bits(
-                            config.stopbits.unwrap_or(1),
-                        );
-                        let buffer_size = config
-                            .buffer_size
-                            .unwrap_or(crate::interfaces::serial::SERIAL_DEFAULT_BUFFER_SIZE);
-
-                        let iface_name = format!("serial_{}", idx);
-                        let id = InterfaceId(idx);
-
-                        let radio_config = crate::interfaces::serial::serial_radio_config(config);
-
-                        let mut handle = crate::interfaces::serial::spawn_serial_interface(
-                            crate::interfaces::serial::SerialInterfaceConfig {
-                                id,
-                                name: iface_name.clone(),
-                                port: port_path.clone(),
-                                speed,
-                                data_bits,
-                                parity,
-                                stop_bits,
-                                buffer_size,
-                                reconnect_notify: Some(reconnect_tx.clone()),
-                                radio_config,
-                            },
-                        );
-                        handle.info.bitrate = Some(speed);
-
-                        tracing::info!("Serial interface on {} (speed={} baud)", port_path, speed,);
-                        registry.register(handle);
-                    }
-                    "PipeInterface" => {
-                        let command = config
-                            .command
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Error::Config("PipeInterface requires command".to_string())
-                            })?
-                            .clone();
-                        let respawn_delay = config
-                            .respawn_delay
-                            .filter(|d| d.is_finite() && *d >= 0.0)
-                            .map(Duration::from_secs_f64)
-                            .unwrap_or(crate::interfaces::pipe::PIPE_DEFAULT_RESPAWN_DELAY);
-                        let buffer_size = config
-                            .buffer_size
-                            .unwrap_or(crate::interfaces::pipe::PIPE_DEFAULT_BUFFER_SIZE);
-
-                        let iface_name = format!("pipe_{}", idx);
-                        let id = InterfaceId(idx);
-
-                        let handle = crate::interfaces::pipe::spawn_pipe_interface(
-                            crate::interfaces::pipe::PipeInterfaceConfig {
-                                id,
-                                name: iface_name,
-                                command: command.clone(),
-                                respawn_delay,
-                                buffer_size,
-                                reconnect_notify: Some(reconnect_tx.clone()),
-                                shutdown: None,
-                            },
-                        );
-
-                        tracing::info!("Pipe interface (command: {})", command);
-                        registry.register(handle);
-                    }
-                    "KISSInterface" | "AX25KISSInterface" => {
-                        let is_ax25 = config.interface_type == "AX25KISSInterface";
-                        let port_path = config
-                            .port
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Error::Config(format!("{} requires port", config.interface_type))
-                            })?
-                            .clone();
-
-                        // AX25KISSInterface adds an AX.25 UI-frame header keyed
-                        // on a source callsign/SSID (Python __init__ validates
-                        // callsign length 3-6 and ssid 0-15). Build + validate it
-                        // here; a plain KISSInterface has none.
-                        let ax25 = if is_ax25 {
-                            let callsign = config
-                                .callsign
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    Error::Config("AX25KISSInterface requires callsign".to_string())
-                                })?
-                                .to_uppercase();
-                            let ssid = config.ssid.ok_or_else(|| {
-                                Error::Config("AX25KISSInterface requires ssid".to_string())
-                            })?;
-                            let addressing = leviculum_core::framing::ax25::Ax25Addressing::new(
-                                callsign.as_bytes(),
-                                ssid,
-                            )
-                            .map_err(|e| {
-                                Error::Config(format!(
-                                    "AX25KISSInterface invalid AX.25 addressing \
-                                         (callsign '{}', ssid {}): {:?}",
-                                    callsign, ssid, e
-                                ))
-                            })?;
-                            Some(addressing)
-                        } else {
-                            None
-                        };
-                        // Python KISSInterface defaults: speed 9600, 8-N-1.
-                        let speed = config.speed.unwrap_or(9600);
-                        let data_bits = crate::interfaces::serial::parse_data_bits(
-                            config.databits.unwrap_or(8),
-                        );
-                        let parity = crate::interfaces::serial::parse_parity(
-                            config.parity.as_deref().unwrap_or("N"),
-                        );
-                        let stop_bits = crate::interfaces::serial::parse_stop_bits(
-                            config.stopbits.unwrap_or(1),
-                        );
-                        let buffer_size = config
-                            .buffer_size
-                            .unwrap_or(crate::interfaces::kiss::KISS_DEFAULT_BUFFER_SIZE);
-
-                        let iface_name = if is_ax25 {
-                            format!("ax25kiss_{}", idx)
-                        } else {
-                            format!("kiss_{}", idx)
-                        };
-                        let id = InterfaceId(idx);
-
-                        let mut handle = crate::interfaces::kiss::spawn_kiss_interface(
-                            crate::interfaces::kiss::KissInterfaceConfig {
-                                id,
-                                name: iface_name.clone(),
-                                port: port_path.clone(),
-                                speed,
-                                data_bits,
-                                parity,
-                                stop_bits,
-                                preamble_ms: config
-                                    .preamble
-                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_PREAMBLE_MS),
-                                txtail_ms: config
-                                    .txtail
-                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_TXTAIL_MS),
-                                persistence: config
-                                    .persistence
-                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_PERSISTENCE),
-                                slottime_ms: config
-                                    .slottime
-                                    .unwrap_or(crate::interfaces::kiss::DEFAULT_SLOTTIME_MS),
-                                flow_control: config.flow_control.unwrap_or(false),
-                                ax25,
-                                buffer_size,
-                                reconnect_notify: Some(reconnect_tx.clone()),
-                            },
-                        );
-                        handle.info.bitrate = Some(speed);
-
-                        tracing::info!(
-                            "{} interface on {} (speed={} baud)",
-                            config.interface_type,
-                            port_path,
-                            speed
-                        );
-                        if config.id_interval.is_some() || config.id_callsign.is_some() {
-                            tracing::warn!(
-                                "KISS interface {}: beacon identification \
-                                 (id_interval/id_callsign) is configured but not yet transmitted \
-                                 (Codeberg #96 gap)",
-                                iface_name
-                            );
-                        }
-                        registry.register(handle);
-                    }
-                    "I2PInterface" => {
-                        // SAM bridge address: honour the I2P_SAM_ADDRESS env var
-                        // (i2plib `get_sam_address`), else the default 7656.
-                        let sam_address = std::env::var("I2P_SAM_ADDRESS").unwrap_or_else(|_| {
-                            crate::interfaces::i2p::sam::DEFAULT_SAM_ADDRESS.to_string()
-                        });
-                        let buffer_size = config.buffer_size.unwrap_or(I2P_DEFAULT_BUFFER_SIZE);
-                        let reconnect_wait = config
-                            .reconnect_interval_secs
-                            .map(Duration::from_secs)
-                            .unwrap_or(I2P_DEFAULT_RECONNECT_WAIT);
-                        let ifac = build_ifac_config(config);
-                        let storage_root = self.storage_path.clone().unwrap_or_else(|| {
-                            crate::config::Config::default_config_dir().join("storage")
-                        });
-
-                        // Server endpoint (accepts inbound I2P connections),
-                        // spawning one sub-interface per peer via new_iface_tx.
-                        if config.connectable.unwrap_or(false) {
-                            let keyfile = storage_root
-                                .join("i2p")
-                                .join(format!("i2p_iface_{}.i2p", idx));
-                            spawn_i2p_server(I2pServerConfig {
-                                sam_address: sam_address.clone(),
-                                keyfile,
-                                buffer_size,
-                                name_prefix: format!("i2p_{}", idx),
-                                reconnect_wait,
-                                next_id: next_id.clone(),
-                                new_interface_tx: new_iface_tx.clone(),
-                                ifac: ifac.clone(),
-                            });
-                            tracing::info!("I2P connectable endpoint (interface {})", idx);
-                        }
-
-                        // Outbound client sub-interface per configured peer.
-                        // Routed through new_iface_tx (like server-accepted
-                        // connections) so each gets a unique id with IFAC and
-                        // hw_mtu applied uniformly by the registration branch.
-                        // The event loop is not consuming yet, so handles buffer
-                        // in the channel until it starts.
-                        if let Some(peers) = &config.peers {
-                            for peer in peers {
-                                let id = InterfaceId(
-                                    next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                );
-                                let name = format!("i2p_{}_to_{}", idx, peer);
-                                let handle = spawn_i2p_client(I2pClientConfig {
-                                    id,
-                                    name: name.clone(),
-                                    sam_address: sam_address.clone(),
-                                    peer: peer.clone(),
-                                    buffer_size,
-                                    reconnect_wait,
-                                    ifac: ifac.clone(),
-                                    reconnect_notify: Some(reconnect_tx.clone()),
-                                });
-                                if new_iface_tx.try_send(handle).is_err() {
-                                    tracing::error!(
-                                        "could not register I2P peer interface {}: \
-                                         new-interface channel full",
-                                        name
-                                    );
-                                }
-                                tracing::info!("I2P client peer {} -> {}", idx, peer);
-                            }
-                        }
-
-                        if !config.connectable.unwrap_or(false) && config.peers.is_none() {
-                            tracing::warn!(
-                                "I2PInterface {} has neither `connectable = yes` nor `peers`; \
-                                 nothing to do",
-                                idx
-                            );
-                        }
-                    }
-                    other => {
-                        tracing::warn!("Unknown interface type: {}", other);
-                    }
+                    interface_build::Built::SelfManaged => {}
                 }
             }
 
@@ -2446,6 +1792,72 @@ impl ReticulumNode {
             .map_err(|_| Error::NotRunning)?;
 
         Ok(crate::interfaces::PipeClientHandle::new(id, shutdown_tx))
+    }
+
+    /// Attach any configured interface type to the running node, through the
+    /// same constructor the startup path uses.
+    ///
+    /// Returns the assigned [`InterfaceId`]s to pass to
+    /// [`remove_interface`](Self::remove_interface): one for a leaf interface,
+    /// several for a fan-out type (RNodeMulti, I2P peers), and empty for a
+    /// self-registering listener (TCP server, AutoInterface) whose children
+    /// surface as [`NodeEvent`]s. [`Error::NotRunning`] before
+    /// [`start`](Self::start); [`Error::Config`] on an invalid config.
+    #[must_use = "the returned ids are the only handle for removing the interface"]
+    pub fn spawn_interface(&self, config: InterfaceConfig) -> Result<Vec<InterfaceId>, Error> {
+        use std::sync::atomic::Ordering;
+
+        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let reconnect_tx = self.reconnect_tx.as_ref().ok_or(Error::NotRunning)?;
+        let tunnel_notify_tx = self.tunnel_notify_tx.as_ref().ok_or(Error::NotRunning)?;
+
+        // A runtime interface draws a fresh base id so it never collides with a
+        // config-index id; fan-out children draw more.
+        let base = next_id.fetch_add(1, Ordering::Relaxed);
+
+        let ctx = interface_build::InterfaceBuildCtx {
+            next_id,
+            new_iface_tx,
+            reconnect_tx,
+            tunnel_notify_tx,
+            corrupt_every: self.corrupt_every,
+            storage_path: self.storage_path.clone(),
+        };
+
+        let built = {
+            let _enter = runtime.enter();
+            interface_build::build_interface(base, &config, &ctx, &self.auto_peer_count)?
+        };
+
+        match built {
+            interface_build::Built::Handles(handles) => {
+                let ids: Vec<InterfaceId> = handles.iter().map(|h| h.info.id).collect();
+                for handle in handles {
+                    new_iface_tx
+                        .try_send(handle)
+                        .map_err(|_| Error::NotRunning)?;
+                }
+                Ok(ids)
+            }
+            interface_build::Built::SelfManaged => Ok(Vec::new()),
+        }
+    }
+
+    /// Detach an interface by id, config-loaded or runtime-attached.
+    ///
+    /// Fires the id to the event loop, which removes it from routing and drops
+    /// its task through the same path as a channel-close disconnect. Idempotent:
+    /// removing an unknown id is a no-op. Returns [`Error::NotRunning`] if called
+    /// before [`start`](Self::start).
+    pub fn remove_interface(&self, id: InterfaceId) -> Result<(), Error> {
+        self.remove_iface_tx
+            .as_ref()
+            .ok_or(Error::NotRunning)?
+            .try_send(id)
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
     }
 
     /// Connect to a remote destination
@@ -3306,12 +2718,20 @@ impl ReticulumNode {
 /// Returns `RecvEvent::Packet` when a complete packet is available, or
 /// `RecvEvent::Disconnected` when an interface's incoming channel closes.
 /// Returns `Poll::Pending` when no interface has data ready.
-async fn recv_any(registry: &mut InterfaceRegistry) -> RecvEvent {
-    if registry.is_empty() {
-        // No interfaces, pend forever (timer branch will still fire)
-        std::future::pending().await
-    } else {
-        std::future::poll_fn(|cx| {
+///
+/// A removal request on `remove_rx` is surfaced as `RecvEvent::Disconnected` so
+/// detach and channel-close share one teardown path; it is polled even with an
+/// empty registry so removal never wedges behind the pend-forever.
+async fn recv_any(
+    registry: &mut InterfaceRegistry,
+    remove_rx: &mut mpsc::Receiver<InterfaceId>,
+) -> RecvEvent {
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(Some(id)) = remove_rx.poll_recv(cx) {
+            return Poll::Ready(RecvEvent::Disconnected(id));
+        }
+
+        if !registry.is_empty() {
             let (handles, poll_start) = registry.handles_mut();
             let len = handles.len();
 
@@ -3332,10 +2752,10 @@ async fn recv_any(registry: &mut InterfaceRegistry) -> RecvEvent {
                     Poll::Pending => {}
                 }
             }
-            Poll::Pending
-        })
-        .await
-    }
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// Run the internal event loop (sans-I/O architecture)
@@ -3362,6 +2782,7 @@ async fn run_event_loop(
     let mut new_interface_rx = channels.new_interface_rx;
     let mut reconnect_rx = channels.reconnect_rx;
     let mut tunnel_notify_rx = channels.tunnel_notify_rx;
+    let mut remove_iface_rx = channels.remove_iface_rx;
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
@@ -3441,7 +2862,7 @@ async fn run_event_loop(
             }
 
             // Branch 1: Packet from any interface
-            event = recv_any(&mut registry) => {
+            event = recv_any(&mut registry, &mut remove_iface_rx) => {
                 match event {
                     RecvEvent::Packet(iface_id, pkt) => {
                         tracing::debug!(
@@ -5078,6 +4499,57 @@ mod tests {
             // runtime's async context. Pre-fix the blocking Runtime drop panicked;
             // post-fix `Drop`'s shutdown_background() returns without blocking.
             drop(node);
+        });
+    }
+
+    /// Runtime attach/detach through the shared builder: `spawn_interface`
+    /// brings up a UDP interface on a running node and `remove_interface` tears
+    /// it back down, both reflected in `interface_stats`. Guards the universal
+    /// build path and the remove-by-id teardown.
+    #[test]
+    fn spawn_and_remove_interface_round_trip() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(true)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync");
+
+        let host = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("host runtime");
+        host.block_on(async {
+            node.start().await.expect("start");
+
+            let cfg = crate::config::InterfaceConfig {
+                interface_type: "UDPInterface".to_string(),
+                enabled: true,
+                listen_ip: Some("127.0.0.1".to_string()),
+                listen_port: Some(0),
+                forward_ip: Some("127.0.0.1".to_string()),
+                forward_port: Some(37000),
+                ..Default::default()
+            };
+            let ids = node.spawn_interface(cfg).expect("spawn_interface");
+            assert_eq!(ids.len(), 1, "UDP is a single-handle interface");
+            let name = format!("udp_{}", ids[0].0);
+
+            // The node's own runtime drives registration; block the host thread.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert!(
+                node.interface_stats().iter().any(|s| s.name == name),
+                "attached interface must appear in interface_stats"
+            );
+
+            node.remove_interface(ids[0]).expect("remove_interface");
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert!(
+                node.interface_stats().iter().all(|s| s.name != name),
+                "removed interface must be gone from interface_stats"
+            );
+
+            node.stop().await.expect("stop");
         });
     }
 

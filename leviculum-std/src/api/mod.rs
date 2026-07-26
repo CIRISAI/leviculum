@@ -19,9 +19,11 @@ use std::path::PathBuf;
 
 use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
 
+pub use crate::config::InterfaceConfig;
 pub use crate::error::{Error as ApiError, Result};
 pub use crate::{Destination, DestinationHash, DestinationType, Direction, LinkHandle, LinkId};
 pub use leviculum_core::resource::ResourceStrategy;
+pub use leviculum_core::transport::InterfaceId;
 pub use leviculum_core::{Identity, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
@@ -258,6 +260,19 @@ impl Node {
         respawn_delay: Option<std::time::Duration>,
     ) -> Result<crate::interfaces::PipeClientHandle> {
         self.inner.spawn_pipe_client(name, command, respawn_delay)
+    }
+
+    /// Attach any configured interface type to the running node. See
+    /// [`ReticulumNode::spawn_interface`](crate::driver::ReticulumNode::spawn_interface).
+    #[must_use = "the returned ids are the only handle for removing the interface"]
+    pub fn spawn_interface(&self, config: InterfaceConfig) -> Result<Vec<InterfaceId>> {
+        self.inner.spawn_interface(config)
+    }
+
+    /// Detach an interface by id. See
+    /// [`ReticulumNode::remove_interface`](crate::driver::ReticulumNode::remove_interface).
+    pub fn remove_interface(&self, id: InterfaceId) -> Result<()> {
+        self.inner.remove_interface(id)
     }
 
     /// Register a local destination so the node can announce it and accept
