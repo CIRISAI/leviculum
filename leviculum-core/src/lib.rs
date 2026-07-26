@@ -77,17 +77,26 @@ extern crate alloc;
 /// crate builds on atomic-less MCUs without touching any call site.
 #[cfg(feature = "tracing")]
 pub(crate) mod tracing {
-    pub(crate) use ::tracing::{debug, info, trace, warn};
+    pub(crate) use ::tracing::{debug, enabled, info, trace, warn, Level};
 }
 #[cfg(not(feature = "tracing"))]
 pub(crate) mod tracing {
     macro_rules! noop {
         ($($tt:tt)*) => {{}};
     }
+    // `enabled!` must yield a bool so guard blocks like
+    // `if crate::tracing::enabled!(...) { hash; emit }` compile (to dead
+    // code) on atomic-less MCUs where the real tracing crate is absent.
+    macro_rules! noop_enabled {
+        ($($tt:tt)*) => {
+            false
+        };
+    }
     pub(crate) use noop as debug;
     pub(crate) use noop as info;
     pub(crate) use noop as trace;
     pub(crate) use noop as warn;
+    pub(crate) use noop_enabled as enabled;
 }
 
 pub(crate) mod announce;

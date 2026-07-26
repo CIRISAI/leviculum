@@ -114,8 +114,8 @@ fn make_overheard_packet() -> Vec<u8> {
 }
 
 /// A PLAIN/GROUP packet that the early filters drop (rare anomaly -> per-packet
-/// PKT_DROP). `Announce` -> invalid_announce; `Data` with hops>1 ->
-/// plain_group_multihop.
+/// PKT_DROP). `Announce` -> invalid-announce; `Data` with hops>1 ->
+/// plain-group-multihop (kebab DropReason on the journey contract).
 fn make_plain_group_packet(dest_type: DestinationType, ptype: PacketType, hops: u8) -> Vec<u8> {
     let packet = Packet {
         flags: PacketFlags {
@@ -236,22 +236,27 @@ fn obs_events_are_well_formed_under_event_log_layer() {
         );
     }
 
-    // Per-packet PKT_DROP for the rare anomalies, well-formed, with reason set.
+    // Per-packet PKT_DROP for the rare anomalies, well-formed, with the kebab
+    // reason and the journey ph correlator (16 hex chars).
     let pkt_drop = lines_for(&dump, "PKT_DROP");
     assert!(
         pkt_drop
             .iter()
-            .any(|l| l.contains("reason=invalid_announce")),
-        "expected per-packet PKT_DROP reason=invalid_announce; dump:\n{dump:#?}"
+            .any(|l| l.contains("reason=invalid-announce")),
+        "expected per-packet PKT_DROP reason=invalid-announce; dump:\n{dump:#?}"
     );
     assert!(
         pkt_drop
             .iter()
-            .any(|l| l.contains("reason=plain_group_multihop")),
-        "expected per-packet PKT_DROP reason=plain_group_multihop; dump:\n{dump:#?}"
+            .any(|l| l.contains("reason=plain-group-multihop")),
+        "expected per-packet PKT_DROP reason=plain-group-multihop; dump:\n{dump:#?}"
     );
     for l in &pkt_drop {
         assert_well_formed(l);
+        assert!(
+            l.contains("ph="),
+            "journey contract: PKT_DROP must carry ph; line: {l}"
+        );
     }
     // The high-volume overheard path must NOT emit a per-packet event: no
     // PKT_DROP line carries its destination hash (0x11..) and there is no
