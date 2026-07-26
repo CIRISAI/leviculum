@@ -61,6 +61,7 @@ fn test_jl_filter_event_against_real_subscriber_output() {
 
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc1",
@@ -92,6 +93,7 @@ fn test_jl_filter_event_against_real_subscriber_output() {
     );
     tracing::debug!(
         event = "PKT_DROP",
+        ph = "00112233aabbccdd",
         dst = "abc1",
         hops = 1_u64,
         iface_in = "lora0",
@@ -327,6 +329,7 @@ fn test_jldiff_left_only_with_real_subscriber_logs() {
     let evlog = init_event_log();
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc1",
@@ -335,6 +338,7 @@ fn test_jldiff_left_only_with_real_subscriber_logs() {
     );
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc2",
@@ -343,6 +347,7 @@ fn test_jldiff_left_only_with_real_subscriber_logs() {
     );
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc3",
@@ -351,6 +356,7 @@ fn test_jldiff_left_only_with_real_subscriber_logs() {
     );
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc4",
@@ -363,6 +369,7 @@ fn test_jldiff_left_only_with_real_subscriber_logs() {
     let evlog2 = init_event_log();
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc1",
@@ -371,6 +378,7 @@ fn test_jldiff_left_only_with_real_subscriber_logs() {
     );
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc2",
@@ -379,6 +387,7 @@ fn test_jldiff_left_only_with_real_subscriber_logs() {
     );
     tracing::debug!(
         event = "PKT_RX",
+        ph = "00112233aabbccdd",
         iface = "lora0",
         r#type = "Data",
         dst = "abc4",

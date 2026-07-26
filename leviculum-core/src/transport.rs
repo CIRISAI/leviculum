@@ -177,6 +177,26 @@ impl core::fmt::Display for IfaceName<'_> {
     }
 }
 
+/// [`IfaceName`] for an optional interface index: renders the literal
+/// `None` when absent (same convention as PATH_TABLE_ENTRY's next_hop).
+pub(crate) struct IfaceNameOpt<'a> {
+    names: &'a BTreeMap<usize, String>,
+    id: Option<usize>,
+}
+
+impl core::fmt::Display for IfaceNameOpt<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.id {
+            Some(id) => IfaceName {
+                names: self.names,
+                id,
+            }
+            .fmt(f),
+            None => write!(f, "None"),
+        }
+    }
+}
+
 /// I/O action for the driver to execute
 ///
 /// Core never performs I/O directly, instead it returns `Action` values that
@@ -732,7 +752,47 @@ pub enum DropReason {
     BlackholedAnnounce,
 }
 
+/// Dedicated tracing target for the per-packet journey contract
+/// (PKT_TX / PKT_RX / PKT_FORWARD / PKT_DROP / DEDUP_DROP with `ph`).
+/// One target so an external collector can enable exactly these events
+/// (`leviculum_core::pkt=debug`) without the rest of the transport noise.
+pub(crate) const PKT_EVENT_TARGET: &str = "leviculum_core::pkt";
+
+/// Truncation for the `ph` journey correlator: 8 bytes = 16 hex chars of
+/// the dedup packet hash. Both the full 32-byte hash and the 16-byte
+/// truncated routing hash share this prefix, so either source yields the
+/// same correlator.
+pub(crate) const PKT_PH_BYTES: usize = 8;
+
+/// Take the `ph` correlator prefix from a full (32-byte) or truncated
+/// (16-byte) packet hash.
+fn ph8(hash: &[u8]) -> [u8; PKT_PH_BYTES] {
+    let mut ph = [0u8; PKT_PH_BYTES];
+    ph.copy_from_slice(&hash[..PKT_PH_BYTES]);
+    ph
+}
+
 impl DropReason {
+    /// Stable kebab-case rendering for the `reason` field of the
+    /// per-packet PKT_DROP journey event.
+    pub fn kebab(self) -> &'static str {
+        match self {
+            DropReason::OverheardTransportId => "overheard-transport-id",
+            DropReason::InvalidAnnounce => "invalid-announce",
+            DropReason::PlainGroupMultihop => "plain-group-multihop",
+            DropReason::NoPath => "no-path",
+            DropReason::Ifac => "ifac",
+            DropReason::Duplicate => "duplicate",
+            DropReason::AnnounceOverMaxHops => "announce-over-max-hops",
+            DropReason::AnnounceReplay => "announce-replay",
+            DropReason::AnnounceRateLimited => "announce-rate-limited",
+            DropReason::IngressBurstAnnounce => "ingress-burst-announce",
+            DropReason::LrproofInvalid => "lrproof-invalid",
+            DropReason::ForwardMaxHops => "forward-max-hops",
+            DropReason::BlackholedAnnounce => "blackholed-announce",
+        }
+    }
+
     /// All variants, for taxonomy completeness checks and summary emission.
     pub const ALL: [DropReason; 13] = [
         DropReason::OverheardTransportId,
@@ -1582,7 +1642,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             iface = %self.iface_name(interface_index),
         );
 
-        self.send_packet_on_interface(interface_index, &packet)
+        // ph=None: the proof packet's own bytes are hashed nowhere else on
+        // this node, so the journey helper hashing them (only when the pkt
+        // target is enabled) is the single hashing for this packet.
+        self.send_packet_on_interface(interface_index, &packet, None)
     }
 
     // Packet I/O
@@ -1636,14 +1699,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.iface_name(interface_index),
             packet.hops
         );
-        crate::tracing::debug!(
-            event = "PKT_RX",
-            iface = %self.iface_name(interface_index),
-            r#type = ?packet.flags.packet_type,
-            dst = %HexShort(&packet.destination_hash),
-            hops = packet.hops,
-            len = raw.len(),
-        );
+        // Packet-journey correlator (Periculum per-packet event contract).
+        // `ph` on PKT_RX/PKT_DROP must be the SAME hash the dedup path
+        // computes, but PKT_RX fires before the dedup site. Compute the hash
+        // early ONLY when the journey target is enabled and reuse it at the
+        // dedup site below — one hashing per packet either way, and the
+        // disabled path is unchanged (the high-volume overheard fast path
+        // stays hash-free).
+        let journey_hash: Option<[u8; 32]> = if self.pkt_journey_enabled() {
+            Some(packet_hash(&raw))
+        } else {
+            None
+        };
+        if let Some(h) = &journey_hash {
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_RX",
+                ph = %HexShort(&h[..PKT_PH_BYTES]),
+                iface = %self.iface_name(interface_index),
+                r#type = ?packet.flags.packet_type,
+                dst = %HexShort(&packet.destination_hash),
+                hops = packet.hops,
+                len = raw.len(),
+            );
+        }
 
         // Filter HEADER_2 packets not addressed to this transport instance
         // (Python Transport.py:1193-1196). Announces are exempt.
@@ -1679,14 +1758,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
                 // Rare anomaly (PLAIN/GROUP destinations never announce):
                 // per-packet PKT_DROP for immediate visibility, plus a counter.
-                crate::tracing::debug!(
-                    event = "PKT_DROP",
-                    dst = %HexShort(&packet.destination_hash),
-                    r#type = ?packet.flags.packet_type,
-                    hops = packet.hops,
-                    iface_in = %self.iface_name(interface_index),
-                    reason = "invalid_announce",
-                );
+                if let Some(h) = &journey_hash {
+                    crate::tracing::debug!(
+                        target: PKT_EVENT_TARGET,
+                        event = "PKT_DROP",
+                        ph = %HexShort(&h[..PKT_PH_BYTES]),
+                        dst = %HexShort(&packet.destination_hash),
+                        r#type = ?packet.flags.packet_type,
+                        hops = packet.hops,
+                        iface_in = %self.iface_name(interface_index),
+                        reason = DropReason::InvalidAnnounce.kebab(),
+                    );
+                }
                 self.stats.record_drop(DropReason::InvalidAnnounce);
                 return Ok(());
             }
@@ -1702,14 +1785,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
                 // Rare anomaly (PLAIN/GROUP are direct-neighbour only):
                 // per-packet PKT_DROP for immediate visibility, plus a counter.
-                crate::tracing::debug!(
-                    event = "PKT_DROP",
-                    dst = %HexShort(&packet.destination_hash),
-                    r#type = ?packet.flags.packet_type,
-                    hops = packet.hops,
-                    iface_in = %self.iface_name(interface_index),
-                    reason = "plain_group_multihop",
-                );
+                if let Some(h) = &journey_hash {
+                    crate::tracing::debug!(
+                        target: PKT_EVENT_TARGET,
+                        event = "PKT_DROP",
+                        ph = %HexShort(&h[..PKT_PH_BYTES]),
+                        dst = %HexShort(&packet.destination_hash),
+                        r#type = ?packet.flags.packet_type,
+                        hops = packet.hops,
+                        iface_in = %self.iface_name(interface_index),
+                        reason = DropReason::PlainGroupMultihop.kebab(),
+                    );
+                }
                 self.stats.record_drop(DropReason::PlainGroupMultihop);
                 return Ok(());
             }
@@ -1718,7 +1805,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Compute full packet hash (for deduplication and proofs) and truncated hash
         // (for reverse_table routing). Dedup uses full 32-byte SHA-256, matching
         // Python Transport.py:1227 which checks `packet.packet_hash` (full hash).
-        let full_packet_hash = packet_hash(&raw);
+        // When the journey target already hashed above, reuse that value —
+        // never hash the same packet twice.
+        let full_packet_hash = journey_hash.unwrap_or_else(|| packet_hash(&raw));
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_packet_hash[..TRUNCATED_HASHBYTES]);
 
@@ -1791,8 +1880,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // signal — identical link-request retries dying here was
             // invisible at scenario verbosity for the whole #66 analysis
             // (the old trace! line). Covers the LRPROOF case too.
+            // Keeps its own event name (NOT PKT_DROP reason=duplicate, see
+            // the #66 note in leviculum-std event_log.rs), but lives on the
+            // journey target and carries `ph` so a collector stitching
+            // per-packet journeys sees where a duplicate copy died.
             crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
                 event = "DEDUP_DROP",
+                ph = %HexShort(&full_packet_hash[..PKT_PH_BYTES]),
                 dst = %HexShort(&packet.destination_hash),
                 iface = %self.iface_name(interface_index),
                 r#type = ?packet.flags.packet_type,
@@ -1832,16 +1927,119 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// True when the per-packet journey target is enabled at DEBUG (an
+    /// external collector is listening). Guards every hash computation done
+    /// solely for journey events, so the disabled path stays zero-cost.
+    fn pkt_journey_enabled(&self) -> bool {
+        crate::tracing::enabled!(target: PKT_EVENT_TARGET, crate::tracing::Level::DEBUG)
+    }
+
+    /// The journey correlator for raw bytes, computed only when the journey
+    /// target is enabled (`None` otherwise). For call sites that emit PKT_TX
+    /// inline inside borrow-constrained loops instead of via
+    /// [`Self::push_packet`], so the hash is computed once per packet, not
+    /// once per interface.
+    fn pkt_ph_lazy(&self, data: &[u8]) -> Option<[u8; PKT_PH_BYTES]> {
+        if self.pkt_journey_enabled() {
+            Some(ph8(&packet_hash(data)))
+        } else {
+            None
+        }
+    }
+
+    /// Journey PKT_DROP for a packet dropped inside a handler that already
+    /// holds the packet hash (full or truncated — same `ph` prefix). Pair
+    /// with `stats.record_drop(reason)` at the call site.
+    fn pkt_drop_event(&self, hash: &[u8], packet: &Packet, iface_in: usize, reason: DropReason) {
+        crate::tracing::debug!(
+            target: PKT_EVENT_TARGET,
+            event = "PKT_DROP",
+            ph = %HexShort(&hash[..PKT_PH_BYTES]),
+            dst = %HexShort(&packet.destination_hash),
+            r#type = ?packet.flags.packet_type,
+            hops = packet.hops,
+            iface_in = %self.iface_name(iface_in),
+            reason = reason.kebab(),
+        );
+    }
+
+    /// Push a SendPacket action and emit the PKT_TX journey event for it.
+    ///
+    /// `ph` is the journey correlator when the caller already holds the
+    /// packet hash (dedup/cache/truncated — same prefix). `None` computes it
+    /// here, but only when the journey target is enabled; for such packets
+    /// this is the only hashing on this node.
+    fn push_packet(
+        &mut self,
+        interface_index: usize,
+        data: Vec<u8>,
+        ph: Option<[u8; PKT_PH_BYTES]>,
+    ) {
+        if self.pkt_journey_enabled() {
+            let ph = ph.unwrap_or_else(|| ph8(&packet_hash(&data)));
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_TX",
+                ph = %HexShort(&ph),
+                iface = %self.iface_name(interface_index),
+                len = data.len(),
+            );
+        }
+        self.pending_actions.push(Action::SendPacket {
+            iface: InterfaceId(interface_index),
+            data,
+        });
+    }
+
+    /// Push a Broadcast action and emit the PKT_TX journey event for it.
+    ///
+    /// The driver expands a Broadcast to the concrete interface set, which
+    /// this sans-I/O core does not know, so the single PKT_TX carries
+    /// `iface=bcast` — the journey stitches by `ph`, and the receiving
+    /// nodes' PKT_RX events name the real interfaces.
+    fn push_broadcast(
+        &mut self,
+        data: Vec<u8>,
+        exclude_iface: Option<InterfaceId>,
+        exclude_ifaces: Vec<InterfaceId>,
+        ph: Option<[u8; PKT_PH_BYTES]>,
+    ) {
+        if self.pkt_journey_enabled() {
+            let ph = ph.unwrap_or_else(|| ph8(&packet_hash(&data)));
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_TX",
+                ph = %HexShort(&ph),
+                iface = "bcast",
+                len = data.len(),
+            );
+        }
+        self.pending_actions.push(Action::Broadcast {
+            data,
+            exclude_iface,
+            exclude_ifaces,
+        });
+    }
+
     /// Send raw data on a specific interface
     pub fn send_on_interface(
         &mut self,
         interface_index: usize,
         data: &[u8],
     ) -> Result<(), TransportError> {
-        self.pending_actions.push(Action::SendPacket {
-            iface: InterfaceId(interface_index),
-            data: data.to_vec(),
-        });
+        self.send_on_interface_ph(interface_index, data, None)
+    }
+
+    /// [`Self::send_on_interface`] with the packet hash threaded through for
+    /// the PKT_TX journey event, so callers that already hashed the packet
+    /// (dedup cache, forward path) never trigger a second hashing.
+    fn send_on_interface_ph(
+        &mut self,
+        interface_index: usize,
+        data: &[u8],
+        ph: Option<[u8; PKT_PH_BYTES]>,
+    ) -> Result<(), TransportError> {
+        self.push_packet(interface_index, data.to_vec(), ph);
         self.stats.packets_sent += 1;
         Ok(())
     }
@@ -1882,11 +2080,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         };
 
-        self.pending_actions.push(Action::Broadcast {
-            data: data.to_vec(),
-            exclude_iface: None,
-            exclude_ifaces,
-        });
+        self.push_broadcast(data.to_vec(), None, exclude_ifaces, Some(ph8(&cache_hash)));
     }
 
     /// Send a packet to a destination via its known path
@@ -1968,10 +2162,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Copy the rest: dest_hash + context + payload
             buf[2 + TRUNCATED_HASHBYTES..].copy_from_slice(&data[2..]);
 
-            self.send_on_interface(interface_index, &buf)
+            // Journey correlator: the transport header inserted above is
+            // stripped by get_hashable_part, so cache_hash matches the bytes
+            // actually sent.
+            self.send_on_interface_ph(interface_index, &buf, Some(ph8(&cache_hash)))
         } else {
             // Direct neighbor or already Type2: send as-is
-            self.send_on_interface(interface_index, data)
+            self.send_on_interface_ph(interface_index, data, Some(ph8(&cache_hash)))
         }
     }
 
@@ -3405,8 +3602,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     let size = local_announce.packed_size();
                     let mut buf = alloc::vec![0u8; size];
                     if let Ok(len) = local_announce.pack(&mut buf) {
+                        let ph = self.pkt_ph_lazy(&buf[..len]);
                         for &client_iface in &self.local_client_interfaces {
                             if client_iface != interface_index {
+                                if let Some(ph) = &ph {
+                                    crate::tracing::debug!(
+                                        target: PKT_EVENT_TARGET,
+                                        event = "PKT_TX",
+                                        ph = %HexShort(ph),
+                                        iface = %self.iface_name(client_iface),
+                                        len = len,
+                                    );
+                                }
                                 self.pending_actions.push(Action::SendPacket {
                                     iface: InterfaceId(client_iface),
                                     data: buf[..len].to_vec(),
@@ -3505,6 +3712,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         "Link request for <{}> on {}, no path known, dropping",
                         HexShort(&dest_hash),
                         self.iface_name(interface_index)
+                    );
+                    self.pkt_drop_event(
+                        &truncated_hash,
+                        &packet,
+                        interface_index,
+                        DropReason::NoPath,
                     );
                     self.stats.record_drop(DropReason::NoPath);
                     return Ok(());
@@ -3643,6 +3856,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 target_iface,
                 Some(interface_index),
                 &mut forwarded,
+                ph8(&truncated_hash),
             );
         }
 
@@ -3863,6 +4077,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 path_iface = %path_iface,
                                 "LRPROOF hop asymmetry: dropping proof, hops match neither frozen count (remaining_hops)"
                             );
+                            self.pkt_drop_event(
+                                &cache_hash,
+                                &packet,
+                                interface_index,
+                                DropReason::LrproofInvalid,
+                            );
                             self.stats.record_drop(DropReason::LrproofInvalid);
                             return Ok(());
                         }
@@ -3920,6 +4140,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 path_iface = %path_iface,
                                 "LRPROOF hop asymmetry: dropping proof, hops match neither frozen count (taken hops)"
                             );
+                            self.pkt_drop_event(
+                                &cache_hash,
+                                &packet,
+                                interface_index,
+                                DropReason::LrproofInvalid,
+                            );
                             self.stats.record_drop(DropReason::LrproofInvalid);
                             return Ok(());
                         }
@@ -3955,6 +4181,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             dest = %HexShort(&dest_hash),
                             len = proof_data.len(),
                             "Dropped LRPROOF, malformed proof size"
+                        );
+                        self.pkt_drop_event(
+                            &cache_hash,
+                            &packet,
+                            interface_index,
+                            DropReason::LrproofInvalid,
                         );
                         self.stats.record_drop(DropReason::LrproofInvalid);
                         return Ok(());
@@ -3996,6 +4228,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                             dest = %HexShort(&dest_hash),
                                             "Dropped LRPROOF, signature verification failed"
                                         );
+                                        self.pkt_drop_event(
+                                            &cache_hash,
+                                            &packet,
+                                            interface_index,
+                                            DropReason::LrproofInvalid,
+                                        );
                                         self.stats.record_drop(DropReason::LrproofInvalid);
                                         return Ok(());
                                     }
@@ -4007,6 +4245,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                     "Dropped LRPROOF, malformed Ed25519 key"
                                 );
                                 // Malformed key bytes, drop
+                                self.pkt_drop_event(
+                                    &cache_hash,
+                                    &packet,
+                                    interface_index,
+                                    DropReason::LrproofInvalid,
+                                );
                                 self.stats.record_drop(DropReason::LrproofInvalid);
                                 return Ok(());
                             }
@@ -4053,6 +4297,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     target_iface,
                     Some(interface_index),
                     &mut forwarded,
+                    ph8(&cache_hash),
                 );
             } else if packet.context == PacketContext::Lrproof {
                 crate::tracing::debug!(
@@ -4096,6 +4341,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             reverse_entry.receiving_interface_index,
                             Some(interface_index),
                             &mut forwarded,
+                            ph8(&cache_hash),
                         );
                     }
                 }
@@ -4190,7 +4436,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     "Plain broadcast from local client on {}, forwarding to all interfaces",
                     self.iface_name(interface_index)
                 );
-                self.forward_on_all_except(interface_index, &mut packet);
+                self.forward_on_all_except(interface_index, &mut packet, full_packet_hash);
             } else if self.has_local_clients() {
                 // Network → forward only to local client interfaces
                 crate::tracing::debug!(
@@ -4203,6 +4449,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 if let Ok(len) = packet.pack(&mut buf) {
                     for &client_iface in &self.local_client_interfaces {
                         if client_iface != interface_index {
+                            crate::tracing::debug!(
+                                target: PKT_EVENT_TARGET,
+                                event = "PKT_TX",
+                                ph = %HexShort(&full_packet_hash[..PKT_PH_BYTES]),
+                                iface = %self.iface_name(client_iface),
+                                len = len,
+                            );
                             self.pending_actions.push(Action::SendPacket {
                                 iface: InterfaceId(client_iface),
                                 data: buf[..len].to_vec(),
@@ -4369,6 +4622,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         target_iface,
                         Some(interface_index),
                         &mut forwarded,
+                        ph8(&full_packet_hash),
                     );
                 }
             }
@@ -4444,12 +4698,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     found = false,
                 );
                 crate::tracing::debug!(
+                    target: PKT_EVENT_TARGET,
                     event = "PKT_DROP",
+                    ph = %HexShort(&truncated_hash[..PKT_PH_BYTES]),
                     dst = %HexShort(&packet.destination_hash),
                     r#type = ?packet.flags.packet_type,
                     hops = packet.hops,
                     iface_in = %self.iface_name(source_interface_index),
-                    reason = "no_path",
+                    reason = DropReason::NoPath.kebab(),
                 );
                 self.stats.record_drop(DropReason::NoPath);
                 return Ok(());
@@ -4462,15 +4718,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.iface_name(target_iface),
             packet.hops
         );
-        crate::tracing::debug!(
-            event = "PKT_FORWARD",
-            dst = %HexShort(&packet.destination_hash),
-            r#type = ?packet.flags.packet_type,
-            hops = packet.hops,
-            iface_in = %self.iface_name(source_interface_index),
-            iface_out = %self.iface_name(target_iface),
-            next_hop = ?next_hop.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
-        );
+        // PKT_FORWARD itself is emitted centrally by forward_on_interface_from
+        // AFTER its max-hops and same-interface checks, so the event only
+        // fires for packets that are actually handed to an interface.
 
         let now = self.clock.now_ms();
 
@@ -4510,7 +4760,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             packet.transport_id = None;
         }
 
-        self.forward_on_interface_from(target_iface, Some(source_interface_index), &mut packet)
+        self.forward_on_interface_from(
+            target_iface,
+            Some(source_interface_index),
+            &mut packet,
+            ph8(&truncated_hash),
+        )
     }
 
     /// Clamp MTU signaling bytes in a link request payload.
@@ -4608,6 +4863,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         target_iface: usize,
         receiving_iface: Option<usize>,
         packet: &mut Packet,
+        ph: [u8; PKT_PH_BYTES],
     ) -> Result<(), TransportError> {
         if packet.hops > self.config.max_hops {
             crate::tracing::debug!(
@@ -4615,6 +4871,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.iface_name(target_iface),
                 packet.hops,
                 self.config.max_hops
+            );
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_DROP",
+                ph = %HexShort(&ph),
+                dst = %HexShort(&packet.destination_hash),
+                r#type = ?packet.flags.packet_type,
+                hops = packet.hops,
+                iface_in = %self.iface_name_opt(receiving_iface),
+                reason = DropReason::ForwardMaxHops.kebab(),
             );
             self.stats.record_drop(DropReason::ForwardMaxHops);
             return Ok(());
@@ -4629,8 +4895,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             return Ok(());
         }
 
+        // Central relay journey event: every single-interface relay
+        // (path-table, link-table, LRPROOF, link-request forward) passes
+        // through here, after the checks, so PKT_FORWARD only claims
+        // forwards that are actually handed to an interface.
+        crate::tracing::debug!(
+            target: PKT_EVENT_TARGET,
+            event = "PKT_FORWARD",
+            ph = %HexShort(&ph),
+            dst = %HexShort(&packet.destination_hash),
+            r#type = ?packet.flags.packet_type,
+            hops = packet.hops,
+            iface_in = %self.iface_name_opt(receiving_iface),
+            iface_out = %self.iface_name(target_iface),
+            next_hop = ?packet.transport_id.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
+        );
+
         self.stats.packets_forwarded += 1;
-        self.send_packet_on_interface(target_iface, packet)
+        self.send_packet_on_interface(target_iface, packet, Some(ph))
     }
 
     /// Forward a packet on all interfaces except one.
@@ -4639,12 +4921,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// the one it arrived on. Matches Python Transport.outbound() behaviour
     /// for packets of transport_type BROADCAST (Transport.py:1388-1392),
     /// which explicitly skips the receiving interface.
-    fn forward_on_all_except(&mut self, except_index: usize, packet: &mut Packet) {
+    fn forward_on_all_except(
+        &mut self,
+        except_index: usize,
+        packet: &mut Packet,
+        full_hash: [u8; 32],
+    ) {
         if packet.hops > self.config.max_hops {
             crate::tracing::debug!(
                 hops = packet.hops,
                 max_hops = self.config.max_hops,
                 "Dropped broadcast packet, max hops exceeded"
+            );
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_DROP",
+                ph = %HexShort(&full_hash[..PKT_PH_BYTES]),
+                dst = %HexShort(&packet.destination_hash),
+                r#type = ?packet.flags.packet_type,
+                hops = packet.hops,
+                iface_in = %self.iface_name(except_index),
+                reason = DropReason::ForwardMaxHops.kebab(),
             );
             self.stats.record_drop(DropReason::ForwardMaxHops);
             return;
@@ -4652,7 +4949,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let size = packet.packed_size();
         let mut buf = alloc::vec![0u8; size];
         if let Ok(len) = packet.pack(&mut buf) {
-            self.send_on_all_interfaces_except(except_index, &buf[..len]);
+            // Broadcast relay journey event. iface_out=bcast: the driver
+            // expands the Broadcast action, the core does not know the
+            // concrete interface set (see push_broadcast).
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_FORWARD",
+                ph = %HexShort(&full_hash[..PKT_PH_BYTES]),
+                dst = %HexShort(&packet.destination_hash),
+                r#type = ?packet.flags.packet_type,
+                hops = packet.hops,
+                iface_in = %self.iface_name(except_index),
+                iface_out = "bcast",
+                next_hop = ?packet.transport_id.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
+            );
+            self.send_on_all_interfaces_except(except_index, &buf[..len], Some(full_hash));
             self.stats.packets_forwarded += 1;
         }
     }
@@ -4680,7 +4991,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // back on a shared medium (e.g., both nodes heard by the same
             // LoRa antenna). Matches the add_packet_hash path already used
             // by send_on_all_interfaces / send_on_all_interfaces_except.
-            self.storage.add_packet_hash(packet_hash(&buf[..len]));
+            // The same hash doubles as the PKT_TX journey correlator below.
+            let seed_hash = packet_hash(&buf[..len]);
+            self.storage.add_packet_hash(seed_hash);
 
             // Per-mode announce-propagation gate (Codeberg #91). This path
             // carries relayed/local announces; access-point interfaces never
@@ -4698,11 +5011,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 Vec::new()
             };
 
-            self.pending_actions.push(Action::Broadcast {
-                data: buf[..len].to_vec(),
-                exclude_iface: None,
+            self.push_broadcast(
+                buf[..len].to_vec(),
+                None,
                 exclude_ifaces,
-            });
+                Some(ph8(&seed_hash)),
+            );
             self.stats.packets_forwarded += 1;
         }
     }
@@ -4711,6 +5025,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         &mut self,
         interface_index: usize,
         packet: &Packet,
+        ph: Option<[u8; PKT_PH_BYTES]>,
     ) -> Result<(), TransportError> {
         // Use a dynamically-sized buffer so forwarded packets with a
         // negotiated link MTU larger than the base MTU can be serialized.
@@ -4718,7 +5033,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut buf = alloc::vec![0u8; size];
         let len = packet.pack(&mut buf)?;
 
-        self.send_on_interface(interface_index, &buf[..len])
+        self.send_on_interface_ph(interface_index, &buf[..len], ph)
     }
 
     // Public: Path Request API
@@ -5040,6 +5355,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Returns a displayable interface name for logging.
     pub(crate) fn iface_name(&self, id: usize) -> IfaceName<'_> {
         IfaceName {
+            names: &self.interface_names,
+            id,
+        }
+    }
+
+    pub(crate) fn iface_name_opt(&self, id: Option<usize>) -> IfaceNameOpt<'_> {
+        IfaceNameOpt {
             names: &self.interface_names,
             id,
         }
@@ -5872,18 +6194,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Send data on all online interfaces except the one at `except_index` (emits Broadcast action)
-    fn send_on_all_interfaces_except(&mut self, except_index: usize, data: &[u8]) {
+    ///
+    /// `known_hash` skips recomputing the dedup packet hash when the caller
+    /// already holds it (the relay path hashed the packet on receipt; the
+    /// hashable part is hop-stable, so the values are identical).
+    fn send_on_all_interfaces_except(
+        &mut self,
+        except_index: usize,
+        data: &[u8],
+        known_hash: Option<[u8; 32]>,
+    ) {
         // Cache outbound packet hash so echoes returning via shared-medium
         // relay are dropped by the dedup check in process_incoming().
         // Matches Python Transport.py:1168-1169 and send_on_all_interfaces().
-        let cache_hash = packet_hash(data);
+        let cache_hash = known_hash.unwrap_or_else(|| packet_hash(data));
         self.storage.add_packet_hash(cache_hash);
 
-        self.pending_actions.push(Action::Broadcast {
-            data: data.to_vec(),
-            exclude_iface: Some(InterfaceId(except_index)),
-            exclude_ifaces: Vec::new(),
-        });
+        self.push_broadcast(
+            data.to_vec(),
+            Some(InterfaceId(except_index)),
+            Vec::new(),
+            Some(ph8(&cache_hash)),
+        );
     }
 
     /// Compute deterministic jitter from a hash seed
@@ -6025,10 +6357,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             "Answering path request for <{}> from local client, path is known",
                             HexShort(&requested_hash),
                         );
-                        self.pending_actions.push(Action::SendPacket {
-                            iface: InterfaceId(interface_index),
-                            data: buf[..len].to_vec(),
-                        });
+                        self.push_packet(interface_index, buf[..len].to_vec(), None);
                         // Transmit-time recording, as above (Python routes this
                         // answer through outbound() -> sent_announce() too).
                         self.record_outgoing_announce(interface_index);
@@ -6246,7 +6575,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     let len = fresh_packet.pack(&mut buf)?;
 
                     if active_discovery {
-                        self.send_on_all_interfaces_except(interface_index, &buf[..len]);
+                        self.send_on_all_interfaces_except(interface_index, &buf[..len], None);
                         // Outgoing path-request frequency for the re-originated
                         // request (Codeberg #67 Stage 2a). The broadcast plus the
                         // local-client forward below cover every registered
@@ -6492,10 +6821,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             target_iface,
                             len
                         );
-                        self.pending_actions.push(Action::SendPacket {
-                            iface: InterfaceId(target_iface),
-                            data: buf[..len].to_vec(),
-                        });
+                        self.push_packet(target_iface, buf[..len].to_vec(), None);
                         // Python records sent_announce() at transmit time for
                         // every announce, including targeted path responses
                         // (Transport.py:1323), so they count toward
@@ -6673,9 +6999,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // OBS-1: one ANN_TX per interface the announce actually went out on,
         // one ANN_TX_SUPPRESSED per interface where the cap held it back.
+        // The journey PKT_TX rides the same deferred list (the send loops
+        // above hold a mutable borrow of the cap map); its hash is computed
+        // once per announce, not per interface.
         let dst = packet.destination_hash;
         let hops = packet.hops;
+        let ph = self.pkt_ph_lazy(&raw);
         for iface_idx in ann_tx_ifaces {
+            if let Some(ph) = &ph {
+                crate::tracing::debug!(
+                    target: PKT_EVENT_TARGET,
+                    event = "PKT_TX",
+                    ph = %HexShort(ph),
+                    iface = %self.iface_name(iface_idx),
+                    len = raw.len(),
+                );
+            }
             crate::tracing::debug!(
                 event = "ANN_TX",
                 dst = %HexShort(&dst),
@@ -6735,10 +7074,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         for (iface_idx, raw, dst, hops) in sends {
-            self.pending_actions.push(Action::SendPacket {
-                iface: InterfaceId(iface_idx),
-                data: raw,
-            });
+            self.push_packet(iface_idx, raw, None);
             self.record_outgoing_announce(iface_idx);
             // OBS-1: a previously cap-suppressed announce is now actually sent.
             crate::tracing::debug!(
@@ -6923,7 +7259,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     "Retrying discovery path request for <{}>",
                     HexShort(&dest_hash)
                 );
-                self.send_on_all_interfaces_except(requesting_iface, &buf[..len]);
+                self.send_on_all_interfaces_except(requesting_iface, &buf[..len], None);
                 // Outgoing path-request frequency for the discovery retry
                 // (Codeberg #67 Stage 2a).
                 self.record_outgoing_path_request_broadcast(Some(requesting_iface));
@@ -8697,7 +9033,7 @@ mod tests {
                 assert_eq!(transport.stats().drops_invalid_announce, 1);
                 assert_eq!(transport.stats().packets_dropped, 1);
                 assert!(
-                    logs.contains("PKT_DROP") && logs.contains("invalid_announce"),
+                    logs.contains("PKT_DROP") && logs.contains("invalid-announce"),
                     "invalid announce must emit per-packet PKT_DROP; logs:\n{logs}"
                 );
             }
@@ -8717,8 +9053,247 @@ mod tests {
                 assert_eq!(transport.stats().drops_plain_group_multihop, 1);
                 assert_eq!(transport.stats().packets_dropped, 1);
                 assert!(
-                    logs.contains("PKT_DROP") && logs.contains("plain_group_multihop"),
+                    logs.contains("PKT_DROP") && logs.contains("plain-group-multihop"),
                     "plain/group multihop must emit per-packet PKT_DROP; logs:\n{logs}"
+                );
+            }
+
+            // ── Per-packet journey contract (Periculum phase 6) ──────────────
+            //
+            // Every PKT_TX / PKT_RX / PKT_FORWARD / PKT_DROP on the dedicated
+            // `leviculum_core::pkt` target carries `ph`, the first 8 bytes
+            // (16 hex chars) of the dedup packet hash, so an external
+            // collector can stitch one packet's journey across nodes. The
+            // hashable part strips hops and transport_id, so `ph` is stable
+            // across Type1→Type2 conversion and per-hop mutation.
+
+            /// The 16-hex `ph` value of the first `event="<event>"` line.
+            fn extract_ph(logs: &str, event: &str) -> Option<std::string::String> {
+                logs.lines()
+                    .find(|l| l.contains(&std::format!("event=\"{event}\"")))
+                    .and_then(|l| l.split("ph=").nth(1))
+                    .map(|rest| rest.chars().take(16).collect())
+            }
+
+            // Contract: a two-node exchange. Node A originates a data packet
+            // through a 2-hop path (Type1→Type2 conversion changes the wire
+            // bytes!), node B receives it. PKT_TX on A, PKT_RX on B and the
+            // no-path PKT_DROP on B must all carry the SAME ph, equal to the
+            // dedup hash of the original packet.
+            #[test]
+            fn test_pkt_journey_tx_rx_matching_ph_across_nodes() {
+                use crate::destination::DestinationType;
+                use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+
+                let mut node_a = make_transport_enabled();
+                let mut node_b = make_transport_enabled();
+                node_a.register_interface(Box::new(MockInterface::new("a-if0", 1)));
+                node_b.register_interface(Box::new(MockInterface::new("b-if0", 1)));
+
+                // A's path to dest: 2 hops via next_hop B → send_to_destination
+                // wraps the packet in a Type2 transport header for B.
+                let dest_hash = [0xAA; TRUNCATED_HASHBYTES];
+                let now = node_a.clock.now_ms();
+                node_a.insert_path(
+                    dest_hash,
+                    PathEntry {
+                        hops: 2,
+                        expires_ms: now + 100_000,
+                        interface_index: 0,
+                        random_blobs: Vec::new(),
+                        next_hop: Some(*node_b.identity.hash()),
+                    },
+                );
+
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 0,
+                    transport_id: None,
+                    destination_hash: dest_hash,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(b"journey payload".to_vec()),
+                };
+                let mut buf = [0u8; crate::constants::MTU];
+                let len = packet.pack(&mut buf).unwrap();
+                let expected_ph =
+                    std::format!("{}", HexShort(&packet_hash(&buf[..len])[..PKT_PH_BYTES]));
+
+                let ((), tx_logs) = capture_core_logs(|| {
+                    node_a.send_to_destination(&dest_hash, &buf[..len]).unwrap();
+                });
+                let tx_ph = extract_ph(&tx_logs, "PKT_TX")
+                    .unwrap_or_else(|| panic!("no PKT_TX on node A; logs:\n{tx_logs}"));
+                assert_eq!(
+                    tx_ph, expected_ph,
+                    "PKT_TX ph must equal the dedup hash of the ORIGINAL packet \
+                     (hashable part strips the inserted transport header); logs:\n{tx_logs}"
+                );
+
+                // Hand the wire bytes (now Type2, different from the original
+                // raw!) to node B.
+                let wire = node_a
+                    .drain_actions()
+                    .into_iter()
+                    .find_map(|a| match a {
+                        Action::SendPacket { data, .. } => Some(data),
+                        _ => None,
+                    })
+                    .expect("node A must emit a SendPacket action");
+                assert_ne!(
+                    wire.as_slice(),
+                    &buf[..len],
+                    "precondition: Type2 conversion must change the wire bytes, \
+                     otherwise this test does not exercise ph stability"
+                );
+
+                let ((), rx_logs) = capture_core_logs(|| {
+                    node_b.process_incoming(0, &wire).unwrap();
+                });
+                let rx_ph = extract_ph(&rx_logs, "PKT_RX")
+                    .unwrap_or_else(|| panic!("no PKT_RX on node B; logs:\n{rx_logs}"));
+                assert_eq!(
+                    rx_ph, expected_ph,
+                    "PKT_RX ph on the receiver must match PKT_TX ph on the sender; \
+                     logs:\n{rx_logs}"
+                );
+                // B has no path for the destination: the journey ends in a
+                // no-path PKT_DROP carrying the same correlator.
+                let drop_ph = extract_ph(&rx_logs, "PKT_DROP")
+                    .unwrap_or_else(|| panic!("no PKT_DROP on node B; logs:\n{rx_logs}"));
+                assert_eq!(drop_ph, expected_ph);
+                assert!(
+                    rx_logs.contains("reason=\"no-path\""),
+                    "kebab reason on the contract PKT_DROP; logs:\n{rx_logs}"
+                );
+
+                // Verbatim samples (run with --nocapture to inspect).
+                for logs in [&tx_logs, &rx_logs] {
+                    for l in logs.lines().filter(|l| l.contains("leviculum_core::pkt")) {
+                        std::println!("SAMPLE {l}");
+                    }
+                }
+            }
+
+            // Contract: a transport relay emits PKT_FORWARD with from/to
+            // (iface_in/iface_out) plus a PKT_TX for the outbound bytes, both
+            // carrying the receiving-side ph.
+            #[test]
+            fn test_pkt_journey_forward_on_relay() {
+                use crate::destination::DestinationType;
+                use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+
+                let mut relay = make_transport_enabled();
+                relay.register_interface(Box::new(MockInterface::new("if0", 1)));
+                relay.register_interface(Box::new(MockInterface::new("if1", 2)));
+                relay.set_interface_name(0, "if0".into());
+                relay.set_interface_name(1, "if1".into());
+
+                let dest_hash = [0xBB; TRUNCATED_HASHBYTES];
+                let now = relay.clock.now_ms();
+                relay.insert_path(
+                    dest_hash,
+                    PathEntry {
+                        hops: 1,
+                        expires_ms: now + 100_000,
+                        interface_index: 1,
+                        random_blobs: Vec::new(),
+                        next_hop: None,
+                    },
+                );
+
+                // Type2 data packet addressed via this relay's transport id,
+                // arriving on if0; the path points out of if1.
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type2,
+                        context_flag: false,
+                        transport_type: TransportType::Transport,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 1,
+                    transport_id: Some(*relay.identity.hash()),
+                    destination_hash: dest_hash,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(b"relay me".to_vec()),
+                };
+                let mut buf = [0u8; crate::constants::MTU];
+                let len = packet.pack(&mut buf).unwrap();
+                let expected_ph =
+                    std::format!("{}", HexShort(&packet_hash(&buf[..len])[..PKT_PH_BYTES]));
+
+                let ((), logs) = capture_core_logs(|| {
+                    relay.process_incoming(0, &buf[..len]).unwrap();
+                });
+
+                assert_eq!(relay.stats().packets_forwarded, 1);
+                let fwd_line = logs
+                    .lines()
+                    .find(|l| l.contains("event=\"PKT_FORWARD\""))
+                    .unwrap_or_else(|| panic!("no PKT_FORWARD on relay; logs:\n{logs}"));
+                assert!(
+                    fwd_line.contains(&std::format!("ph={expected_ph}")),
+                    "PKT_FORWARD ph correlator; line: {fwd_line}"
+                );
+                assert!(
+                    fwd_line.contains("iface_in=if0") && fwd_line.contains("iface_out=if1"),
+                    "PKT_FORWARD must carry from/to interfaces; line: {fwd_line}"
+                );
+                // The outbound bytes also produce PKT_TX with the same ph.
+                assert_eq!(
+                    extract_ph(&logs, "PKT_TX").as_deref(),
+                    Some(expected_ph.as_str()),
+                    "relay PKT_TX must reuse the receive-side hash; logs:\n{logs}"
+                );
+                // And the receive side of the same packet carries it too.
+                assert_eq!(
+                    extract_ph(&logs, "PKT_RX").as_deref(),
+                    Some(expected_ph.as_str())
+                );
+
+                // Verbatim samples (run with --nocapture to inspect).
+                for l in logs.lines().filter(|l| l.contains("leviculum_core::pkt")) {
+                    std::println!("SAMPLE {l}");
+                }
+            }
+
+            // Contract: an existing drop path (PLAIN/GROUP multihop) carries
+            // the ph correlator and the kebab DropReason.
+            #[test]
+            fn test_pkt_journey_drop_carries_ph_and_kebab_reason() {
+                use crate::destination::DestinationType;
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let raw = make_plain_group_packet(DestinationType::Group, PacketType::Data, 1);
+                let expected_ph = std::format!("{}", HexShort(&packet_hash(&raw)[..PKT_PH_BYTES]));
+                let ((), logs) = capture_core_logs(|| {
+                    transport.process_incoming(0, &raw).unwrap();
+                });
+
+                let drop_line = logs
+                    .lines()
+                    .find(|l| l.contains("event=\"PKT_DROP\""))
+                    .unwrap_or_else(|| panic!("no PKT_DROP; logs:\n{logs}"));
+                assert!(
+                    drop_line.contains(&std::format!("ph={expected_ph}")),
+                    "PKT_DROP ph must be the dedup hash of the dropped packet; line: {drop_line}"
+                );
+                assert!(
+                    drop_line.contains("reason=\"plain-group-multihop\""),
+                    "kebab DropReason; line: {drop_line}"
+                );
+                assert!(
+                    drop_line.contains("leviculum_core::pkt"),
+                    "contract events live on the dedicated target; line: {drop_line}"
                 );
             }
 
@@ -9687,7 +10262,7 @@ mod tests {
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
             let _idx2 = transport.register_interface(Box::new(MockInterface::new("if2", 3)));
 
-            transport.send_on_all_interfaces_except(1, b"test data");
+            transport.send_on_all_interfaces_except(1, b"test data", None);
 
             // We can't easily inspect MockInterface sent data through the trait,
             // but we can verify no panic and basic operation works
@@ -12302,7 +12877,7 @@ mod tests {
             let _idx2 = transport.register_interface(Box::new(MockInterface::new("if2", 3)));
 
             let data = b"selective broadcast";
-            transport.send_on_all_interfaces_except(1, data);
+            transport.send_on_all_interfaces_except(1, data, None);
 
             let actions = transport.drain_actions();
             assert_eq!(actions.len(), 1);
@@ -12548,7 +13123,7 @@ mod tests {
             transport.send_on_interface(idx0, b"unicast").unwrap();
             transport.send_on_all_interfaces(b"broadcast");
             transport.send_on_interface(idx1, b"unicast2").unwrap();
-            transport.send_on_all_interfaces_except(0, b"selective");
+            transport.send_on_all_interfaces_except(0, b"selective", None);
 
             let actions = transport.drain_actions();
             assert_eq!(actions.len(), 4);

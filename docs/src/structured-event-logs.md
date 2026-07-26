@@ -27,6 +27,39 @@ Records that don't carry an `event = "..."` field are silently
 dropped, so the legacy printf-style `tracing::debug!("[FOO] ...")`
 sites stay valid alongside the converted ones.
 
+## Per-packet journey contract
+
+The packet-level events `PKT_TX`, `PKT_RX`, `PKT_FORWARD`, `PKT_DROP`
+and `DEDUP_DROP` form the journey contract an external collector uses
+to stitch one packet's path across nodes:
+
+- They are emitted on the dedicated tracing target
+  `leviculum_core::pkt` (DEBUG), so a collector can enable exactly this
+  stream via `RUST_LOG=leviculum_core::pkt=debug` without the rest of
+  the transport noise.  The event-log layer sees every record
+  regardless of target.
+- Each carries `ph`, the first 16 hex chars of the dedup packet hash
+  (SHA-256 over the hashable part, which strips `hops` and
+  `transport_id`).  `ph` is therefore stable across hops and across
+  Type1/Type2 header conversion: the same value appears in the
+  sender's `PKT_TX`, every relay's `PKT_RX`/`PKT_FORWARD` and the
+  receiver's `PKT_RX`, or in the `PKT_DROP`/`DEDUP_DROP` where the
+  packet died.
+- `PKT_DROP` renders its `reason` as the kebab-case `DropReason`
+  (`no-path`, `plain-group-multihop`, `forward-max-hops`, ...).
+- `PKT_TX` on a `Broadcast` action reports `iface=bcast`: the sans-I/O
+  core does not know the concrete interface set the driver expands the
+  broadcast to; journeys stitch by `ph`.
+- The hash is never computed twice for one packet: emission sites
+  reuse the dedup/cache hash where it exists and otherwise hash only
+  while the `leviculum_core::pkt` target is enabled.  With the target
+  disabled the whole contract is zero-cost.
+- Deliberate exclusions: the high-volume overheard drop
+  (`overheard-transport-id`) and IFAC drops stay counter-only
+  (`PKT_DROP_SUMMARY`); announce-pipeline drops (replay, rate-limit,
+  ingress-burst, over-max-hops, blackhole) are covered by the
+  announce event family and the summary counters.
+
 ## Architecture
 
 **All test threads, including tokio multi-thread workers, route

@@ -27,7 +27,7 @@ const FALLBACK_WIDTH: usize = 80;
 #[derive(Parser, Debug)]
 #[command(
     name = "lnomad",
-    version = env!("CARGO_PKG_VERSION"),
+    version = env!("LEVICULUM_VERSION"),
     about = "Terminal browser for NomadNet micron pages"
 )]
 struct Args {
