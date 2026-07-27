@@ -328,6 +328,20 @@ impl Node {
         self.inner.get_identity(dest_hash)
     }
 
+    /// Attach a byte-channel interface over a caller-supplied duplex stream. See
+    /// [`ReticulumNode::spawn_byte_channel`](crate::driver::ReticulumNode::spawn_byte_channel).
+    #[must_use = "dropping the handle immediately detaches the interface"]
+    pub fn spawn_byte_channel<S>(
+        &self,
+        name: &str,
+        stream: S,
+    ) -> Result<crate::interfaces::ByteChannelHandle>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        self.inner.spawn_byte_channel(name, stream)
+    }
+
     /// Request a path to a destination. The result arrives as a path-found event.
     pub async fn request_path(&self, dest_hash: &DestinationHash) -> Result<()> {
         self.inner.request_path(dest_hash).await

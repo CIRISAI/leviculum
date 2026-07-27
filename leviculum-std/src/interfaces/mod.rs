@@ -11,6 +11,8 @@
 
 pub(crate) mod airtime;
 pub mod auto_interface;
+pub(crate) mod byte_channel;
+pub use byte_channel::ByteChannelHandle;
 pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod kiss;
