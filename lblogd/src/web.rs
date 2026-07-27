@@ -7,8 +7,14 @@
 //! exists at the HTTP layer. Certificates and the account key are cached in a
 //! persistent directory so restarts and renewals do not re-register.
 //!
-//! The plain-HTTP listener does exactly one thing: 301-redirect every request
-//! to the `https://` equivalent.
+//! In that deployment mode the plain-HTTP listener does exactly one thing:
+//! 301-redirect every request to the `https://` equivalent.
+//!
+//! Setting [`WebConfig::acme`] to `None` selects the plaintext development
+//! mode instead: no HTTPS listener and no ACME traffic at all, and the HTTP
+//! listener serves the blog directly. Certificate acquisition needs a
+//! publicly reachable domain, so without this mode the server cannot be run
+//! at all on a developer machine.
 //!
 //! Posts are loaded once at startup and rendered per request from the cached
 //! [`Post`]s; a reload-on-change mechanism is deliberately out of scope here
@@ -61,27 +67,39 @@ pub enum WebError {
     AcmeEnded,
 }
 
-/// Configuration for [`run_web`].
+/// Let's Encrypt settings, present exactly when HTTPS is wanted.
 #[derive(Clone, Debug)]
-pub struct WebConfig {
+pub struct AcmeSettings {
     /// Domains the certificate covers; the first one doubles as the redirect
     /// target when a request carries no Host header.
     pub domains: Vec<String>,
     /// Persistent directory caching the ACME account key and certificates.
     /// Losing it forces re-issuance on every start, which burns Let's
     /// Encrypt rate limits.
-    pub acme_cache_dir: PathBuf,
+    pub cache_dir: PathBuf,
     /// Contact email for the ACME account (expiry warnings and the like).
-    pub acme_contact_email: String,
+    pub contact_email: String,
     /// Use the Let's Encrypt STAGING directory instead of production.
     /// Staging issues untrusted certificates but has generous rate limits;
     /// production is a deliberate config choice for real deployments.
-    pub acme_staging: bool,
-    /// Plain-HTTP listen address (normally port 80), redirect-only.
+    pub staging: bool,
+}
+
+/// Configuration for [`run_web`].
+#[derive(Clone, Debug)]
+pub struct WebConfig {
+    /// `Some`: obtain HTTPS certificates from Let's Encrypt and make the
+    /// plain-HTTP listener redirect-only. `None`: plaintext development
+    /// mode, where [`http_bind`](Self::http_bind) serves the blog itself and
+    /// no HTTPS listener is opened.
+    pub acme: Option<AcmeSettings>,
+    /// Plain-HTTP listen address (normally port 80). Redirect-only with ACME
+    /// enabled, the blog itself without it.
     pub http_bind: SocketAddr,
     /// HTTPS listen address (normally port 443). TLS-ALPN-01 validation
     /// requires the ACME server to reach the certificate domains on port
-    /// 443, so in real deployments this must be reachable there.
+    /// 443, so in real deployments this must be reachable there. Unused, and
+    /// never bound, when [`acme`](Self::acme) is `None`.
     pub https_bind: SocketAddr,
     /// Directory of Markdown posts to serve.
     pub posts_dir: PathBuf,
@@ -122,24 +140,53 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Html(BODY)).into_response()
 }
 
-/// Serve the blog over HTTPS with automatic Let's Encrypt certificates, plus
-/// a plain-HTTP listener that 301-redirects to HTTPS. Runs until one of the
-/// servers fails.
+/// Serve the blog and run until a server fails.
+///
+/// With [`WebConfig::acme`] set, that means HTTPS with automatic Let's
+/// Encrypt certificates plus a plain-HTTP listener that 301-redirects to it;
+/// without it, a single plain-HTTP listener serving the blog directly.
+pub async fn run_web(config: WebConfig) -> Result<(), WebError> {
+    let posts = Arc::new(load_posts_dir(&config.posts_dir)?);
+    let router = build_router(posts);
+    match config.acme {
+        Some(acme) => serve_https(router, acme, config.http_bind, config.https_bind).await,
+        None => serve_plain(router, config.http_bind).await,
+    }
+}
+
+/// Plaintext development mode: one listener, no TLS, no ACME.
+async fn serve_plain(router: Router, http_bind: SocketAddr) -> Result<(), WebError> {
+    let listener = tokio::net::TcpListener::bind(http_bind)
+        .await
+        .map_err(|source| WebError::Bind {
+            addr: http_bind,
+            source,
+        })?;
+    axum::serve(listener, router.into_make_service())
+        .await
+        .map_err(WebError::Http)
+}
+
+/// Deployment mode: HTTPS with Let's Encrypt certificates, plain HTTP
+/// redirecting to it.
 ///
 /// The certificate acquisition path (rustls-acme against Let's Encrypt) is
 /// compile-verified only: it needs a publicly reachable domain, so it is
 /// exercised in real deployment, not in CI.
-pub async fn run_web(config: WebConfig) -> Result<(), WebError> {
-    if config.domains.is_empty() {
+async fn serve_https(
+    router: Router,
+    acme: AcmeSettings,
+    http_bind: SocketAddr,
+    https_bind: SocketAddr,
+) -> Result<(), WebError> {
+    if acme.domains.is_empty() {
         return Err(WebError::NoDomains);
     }
-    let posts = Arc::new(load_posts_dir(&config.posts_dir)?);
-    let router = build_router(posts);
 
-    let mut acme_state = AcmeConfig::new(&config.domains)
-        .contact_push(format!("mailto:{}", config.acme_contact_email))
-        .cache(DirCache::new(config.acme_cache_dir.clone()))
-        .directory_lets_encrypt(!config.acme_staging)
+    let mut acme_state = AcmeConfig::new(&acme.domains)
+        .contact_push(format!("mailto:{}", acme.contact_email))
+        .cache(DirCache::new(acme.cache_dir.clone()))
+        .directory_lets_encrypt(!acme.staging)
         .state();
     let acceptor = acme_state.axum_acceptor(acme_state.default_rustls_config());
     // The state stream drives ACME ordering and renewal; it must be polled
@@ -153,15 +200,15 @@ pub async fn run_web(config: WebConfig) -> Result<(), WebError> {
         }
     };
 
-    let https_server = axum_server::bind(config.https_bind)
+    let https_server = axum_server::bind(https_bind)
         .acceptor(acceptor)
         .serve(router.into_make_service());
 
-    let redirect = redirect_router(config.https_bind.port(), config.domains[0].clone());
-    let http_listener = tokio::net::TcpListener::bind(config.http_bind)
+    let redirect = redirect_router(https_bind.port(), acme.domains[0].clone());
+    let http_listener = tokio::net::TcpListener::bind(http_bind)
         .await
         .map_err(|source| WebError::Bind {
-            addr: config.http_bind,
+            addr: http_bind,
             source,
         })?;
     let http_server = axum::serve(http_listener, redirect.into_make_service());

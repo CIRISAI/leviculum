@@ -44,12 +44,17 @@ display_name           = "leviculum.network dev blog"
 announce_interval_secs = 21600         # optional, default 21600 (6 hours)
 
 [web]
+acme               = true              # optional, default true; false = plain HTTP
 domains            = ["leviculum.network"]
 acme_contact_email = "you@example.org"
 acme_staging       = true              # true: LE staging (test), false: production
 http_bind          = "0.0.0.0:80"      # optional, this is the default
 https_bind         = "0.0.0.0:443"     # optional, this is the default
 ```
+
+With `acme = true` (the default) `domains`, `acme_contact_email` and
+`acme_staging` are all required; leaving one out is a config error naming the
+field. With `acme = false` they are ignored and may be omitted.
 
 The node's persistent identity lives at `data_dir/identities/lblogd`, node
 storage at `data_dir/storage`, the ACME account and certificates at
@@ -66,6 +71,55 @@ lblogd --config /etc/lblogd.toml
 identity locally (no running lnsd needed, the identity is generated on first
 use), prints the destination hash on the first line and the served page paths
 after it, and exits without starting any server.
+
+## Local development run
+
+Certificate acquisition needs a publicly reachable domain, so a developer
+machine cannot run the deployment config at all. `acme = false` selects
+plaintext mode: no HTTPS listener, no ACME traffic, and the HTTP listener
+serves the blog itself instead of redirecting.
+
+Point it at an `lnsd` of its own so it neither collides with nor disturbs a
+running production daemon — the shared instance is keyed by `instance_name`,
+and `default` is usually taken. A config directory holding just
+
+```
+[reticulum]
+enable_transport = No
+share_instance   = Yes
+instance_name    = lblogd-dev
+```
+
+with no interface sections gives an isolated, network-free daemon that only
+carries the local IPC. Then:
+
+```
+lnsd --config /tmp/lblogd-dev/reticulum &
+lblogd --config /tmp/lblogd-dev/lblogd.toml &
+```
+
+with `/tmp/lblogd-dev/lblogd.toml`:
+
+```toml
+data_dir  = "/tmp/lblogd-dev/data"
+posts_dir = "/tmp/lblogd-dev/posts"
+
+[node]
+instance_name = "lblogd-dev"
+display_name  = "local dev blog"
+
+[web]
+acme      = false
+http_bind = "127.0.0.1:8080"
+```
+
+The web side is then `curl http://127.0.0.1:8080/`, the NomadNet side
+
+```
+lblogd --config /tmp/lblogd-dev/lblogd.toml --print-hash   # the hash to dial
+lnomad --instance lblogd-dev --print <hash>:/page/index.mu
+lnomad --instance lblogd-dev --discover 20                 # see the announce
+```
 
 ## Deployment
 
