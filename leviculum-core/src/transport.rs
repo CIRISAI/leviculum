@@ -2301,6 +2301,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 ingress_burst_announce = self.stats.drops_ingress_burst_announce,
                 lrproof_invalid = self.stats.drops_lrproof_invalid,
                 forward_max_hops = self.stats.drops_forward_max_hops,
+                blackholed_announce = self.stats.drops_blackholed_announce,
                 same_interface_relay = self.stats.drops_same_interface_relay,
                 total = self.stats.packets_dropped,
             );
@@ -9545,17 +9546,90 @@ mod tests {
                     "summary must carry per-reason counts; logs:\n{logs}"
                 );
                 // OBS-2b: every taxonomy reason is present in the summary line.
+                // Enumerated mechanically from `DropReason::ALL`; see
+                // `test_pkt_drop_summary_covers_every_drop_reason` for why.
+                assert_missing_summary_fields(&logs);
+            }
+
+            /// The summary's field list is written out by hand inside a
+            /// `tracing` macro, so nothing forces a newly counted
+            /// `DropReason` to appear there. That is exactly how
+            /// `blackholed-announce` stayed missing: it incremented `total`
+            /// while no per-reason field accounted for it, so a reader summing
+            /// the fields got a number that did not match `total`.
+            ///
+            /// The macro's field list is not introspectable at compile time,
+            /// but its RENDERED output is. Walk `DropReason::ALL` and require
+            /// every variant's kebab name -- snake-cased, which is how the
+            /// summary spells its fields -- to appear as a field of the line.
+            /// Matching on a leading space and a trailing `=` keeps a name
+            /// that is a suffix of another (`announce_replay` inside a
+            /// hypothetical `late_announce_replay`) from passing by accident.
+            ///
+            /// Returns the names that are missing, empty when complete.
+            fn missing_summary_fields(summary_line: &str) -> Vec<String> {
+                DropReason::ALL
+                    .iter()
+                    .map(|r| r.kebab().replace('-', "_"))
+                    .filter(|snake| !summary_line.contains(&std::format!(" {snake}=")))
+                    .collect()
+            }
+
+            /// Assert the PKT_DROP_SUMMARY line in `logs` carries a field for
+            /// every `DropReason`.
+            fn assert_missing_summary_fields(logs: &str) {
+                let line = logs
+                    .lines()
+                    .find(|l| l.contains("PKT_DROP_SUMMARY"))
+                    .unwrap_or_else(|| panic!("no PKT_DROP_SUMMARY line; logs:\n{logs}"));
+                let missing = missing_summary_fields(line);
                 assert!(
-                    logs.contains("ifac=")
-                        && logs.contains("duplicate=")
-                        && logs.contains("announce_over_max_hops=")
-                        && logs.contains("announce_replay=")
-                        && logs.contains("announce_rate_limited=")
-                        && logs.contains("ingress_burst_announce=")
-                        && logs.contains("lrproof_invalid=")
-                        && logs.contains("forward_max_hops=")
-                        && logs.contains("same_interface_relay="),
-                    "summary must emit ALL taxonomy reasons; logs:\n{logs}"
+                    missing.is_empty(),
+                    "PKT_DROP_SUMMARY is missing a field for {missing:?} -- every \
+                     DropReason needs its own field, or the fields no longer sum \
+                     to `total`; line: {line}"
+                );
+            }
+
+            // OBS-2b: the mechanical guard. A new DropReason that is counted
+            // but never emitted fails HERE, without anyone remembering to
+            // extend a hand-written list.
+            #[test]
+            fn test_pkt_drop_summary_covers_every_drop_reason() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                // No drops needed: the summary emits every counter each time,
+                // zero or not, so an empty transport is the strictest case.
+                transport.clock.advance(10_001);
+                let ((), logs) = capture_core_logs(|| transport.poll());
+
+                assert_missing_summary_fields(&logs);
+            }
+
+            // The guard has to be able to FAIL: a line missing one reason must
+            // be reported, and the reason must be named.
+            #[test]
+            fn test_summary_completeness_guard_detects_a_missing_reason() {
+                let complete = std::format!(
+                    " {}",
+                    DropReason::ALL
+                        .iter()
+                        .map(|r| std::format!("{}=0", r.kebab().replace('-', "_")))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                assert!(
+                    missing_summary_fields(&complete).is_empty(),
+                    "a line with every field must pass"
+                );
+
+                let dropped = DropReason::BlackholedAnnounce.kebab().replace('-', "_");
+                let incomplete = complete.replace(&std::format!(" {dropped}=0"), "");
+                assert_eq!(
+                    missing_summary_fields(&incomplete),
+                    std::vec![dropped],
+                    "removing one field must name exactly that reason"
                 );
             }
 
@@ -9592,6 +9666,7 @@ mod tests {
                 assert_eq!(s.drops_ingress_burst_announce, 1);
                 assert_eq!(s.drops_lrproof_invalid, 1);
                 assert_eq!(s.drops_forward_max_hops, 1);
+                assert_eq!(s.drops_blackholed_announce, 1);
                 assert_eq!(s.drops_same_interface_relay, 1);
             }
 

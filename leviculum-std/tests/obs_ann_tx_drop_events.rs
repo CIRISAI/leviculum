@@ -14,8 +14,9 @@ use leviculum_core::constants::{MTU, RANDOM_HASHBYTES, TRUNCATED_HASHBYTES};
 use leviculum_core::packet::{
     HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
 };
-use leviculum_core::transport::{Transport, TransportConfig};
+use leviculum_core::transport::{DropReason, Transport, TransportConfig};
 use leviculum_core::{Clock, Destination, DestinationType, Direction, Identity, MemoryStorage};
+use leviculum_std::event_log::EVENT_CATALOG;
 use leviculum_std::test_support::event_log::init_event_log;
 
 use rand_core::OsRng;
@@ -157,6 +158,47 @@ fn assert_well_formed(line: &str) {
     }
 }
 
+/// The field names PKT_DROP_SUMMARY must carry, one per drop reason,
+/// derived mechanically from the taxonomy: the summary spells its fields
+/// as the snake-case form of `DropReason::kebab()`.
+///
+/// Enumerating here rather than by hand is the point. `blackholed-announce`
+/// was counted for months without a field of its own, so the fields silently
+/// stopped summing to `total` -- exactly the arithmetic the summary exists to
+/// support. A new reason now fails this test and the catalog test below
+/// instead of going unnoticed.
+fn summary_reason_fields() -> Vec<String> {
+    DropReason::ALL
+        .iter()
+        .map(|r| r.kebab().replace('-', "_"))
+        .collect()
+}
+
+/// The event catalog's `required_keys` is the other hand-written copy of the
+/// same list: the EventLogLayer validates emitted lines against it, so a
+/// reason missing here is a reason nothing enforces.
+#[test]
+fn pkt_drop_summary_catalog_covers_every_drop_reason() {
+    let schema = EVENT_CATALOG
+        .iter()
+        .find(|s| s.name == "PKT_DROP_SUMMARY")
+        .expect("PKT_DROP_SUMMARY must be catalogued");
+    let missing: Vec<String> = summary_reason_fields()
+        .into_iter()
+        .filter(|f| !schema.required_keys.contains(&f.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "PKT_DROP_SUMMARY schema is missing required_keys {missing:?}; \
+         required_keys: {:?}",
+        schema.required_keys
+    );
+    assert!(
+        schema.required_keys.contains(&"total"),
+        "the grand total is what the per-reason fields have to sum to"
+    );
+}
+
 fn lines_for<'a>(dump: &'a [String], event: &str) -> Vec<&'a String> {
     dump.iter()
         .filter(|l| l.starts_with(&format!("{event} ")))
@@ -226,13 +268,21 @@ fn obs_events_are_well_formed_under_event_log_layer() {
     );
     for l in &summary {
         assert_well_formed(l);
+        // Every taxonomy reason, enumerated from DropReason::ALL rather than
+        // by hand -- a counted-but-unemitted reason (as blackholed-announce
+        // was) makes the fields stop summing to `total`.
+        let keys: Vec<&str> = l
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|tok| tok.split_once('=').map(|(k, _)| k))
+            .collect();
+        let missing: Vec<String> = summary_reason_fields()
+            .into_iter()
+            .filter(|f| !keys.contains(&f.as_str()))
+            .collect();
         assert!(
-            l.contains("overheard_transport_id=")
-                && l.contains("invalid_announce=")
-                && l.contains("plain_group_multihop=")
-                && l.contains("no_path=")
-                && l.contains("total="),
-            "summary missing a reason field: {l}"
+            missing.is_empty() && keys.contains(&"total"),
+            "summary missing reason fields {missing:?}: {l}"
         );
     }
 

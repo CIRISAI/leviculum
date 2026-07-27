@@ -43,6 +43,17 @@ transport differs, and `spawn_rnode_interface` (serial) is unchanged.
 Groundwork for the BLE client role (#45) and generic byte-channel TNCs
 (#26).
 
+### Fixed
+
+`PKT_DROP_SUMMARY` now carries a `blackholed_announce` field. The counter
+existed and was incremented, but the summary never emitted it, so a
+blackholed announce raised `total` while no per-reason field accounted
+for it and the fields no longer summed to the total — the one arithmetic
+the summary exists to support. Two mechanical guards now walk
+`DropReason::ALL` and require every variant to appear both in the emitted
+line and in the event catalog's `required_keys`, so the next drop reason
+cannot be forgotten the same way.
+
 ## [0.7.0] - 2026-06-22
 
 ### Added
