@@ -51,7 +51,12 @@ async fn run(args: Args) -> Result<(), MainError> {
 fn print_hash(config: &Config) -> Result<(), MainError> {
     let hash = node::resolve_destination_hash(&config.data_dir)?;
     let meta = config.blog_meta(Some(hash.to_string()));
-    let snapshot = load_snapshot(&meta, &config.posts_dir, config.blog.css.as_deref())?;
+    let snapshot = load_snapshot(
+        &meta,
+        &config.posts_dir,
+        config.blog.css.as_deref(),
+        config.blog.about.as_deref(),
+    )?;
     println!("{hash}");
     for path in snapshot.served_paths() {
         println!("{path}");
@@ -70,7 +75,12 @@ async fn serve(config: &Config) -> Result<(), MainError> {
 
     // A failure here is fatal: at startup there is no previous good state to
     // fall back on. Once running, a failed reload is not (see reload_task).
-    let (reloader, content) = Reloader::new(meta, &config.posts_dir, config.blog.css.as_deref())?;
+    let (reloader, content) = Reloader::new(
+        meta,
+        &config.posts_dir,
+        config.blog.css.as_deref(),
+        config.blog.about.as_deref(),
+    )?;
     let reloader = Arc::new(reloader);
 
     // Established before anything else starts, and synchronously: a broken
@@ -83,10 +93,12 @@ async fn serve(config: &Config) -> Result<(), MainError> {
                 "lblogd: watching {} for changes",
                 config.posts_dir.display()
             );
-            Some(watcher::PostsWatcher::start(
-                &config.posts_dir,
-                config.blog.css.as_deref(),
-            )?)
+            let extra: Vec<&std::path::Path> =
+                [config.blog.css.as_deref(), config.blog.about.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+            Some(watcher::PostsWatcher::start(&config.posts_dir, &extra)?)
         }
         false => None,
     };

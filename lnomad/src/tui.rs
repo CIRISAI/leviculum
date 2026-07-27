@@ -2509,6 +2509,16 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
             model.set_toast(ToastKind::Error, format!("won't open {scheme}: link"));
             Vec::new()
         }
+        // NomadNet opens a conversation here. We are a page browser with no
+        // composer, so the useful thing is to hand the address over: show it
+        // and put it on the clipboard, ready to paste into a client that can
+        // send. Anything is better than the "malformed URL" this used to
+        // produce, which read as a broken page rather than an unsupported
+        // action.
+        LinkKind::Lxmf(hash) => {
+            model.set_toast(ToastKind::Info, format!("LXMF address copied: {hash}"));
+            vec![Effect::Copy(hash)]
+        }
         LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
             Ok((mut target, anchor)) => {
                 // A submit link (one that references form fields, or `*` for all)
@@ -7235,6 +7245,33 @@ mod tests {
         assert!(
             toast.text.contains("file"),
             "toast names the refused scheme: {}",
+            toast.text
+        );
+    }
+
+    #[test]
+    fn following_lxmf_link_copies_the_address_instead_of_failing() {
+        // Before this was handled, the target reached parse_url and produced
+        // "bad link: ... (malformed URL)", which reads as a broken page
+        // rather than an action this browser does not perform.
+        let hash = "0ec84236630cea839d80a71c39fb41ce";
+        let mut m = Model {
+            links: vec![RenderedLink {
+                index: 1,
+                label: "Lew Palm".to_string(),
+                target: format!("lxmf@{hash}"),
+                ..RenderedLink::default()
+            }],
+            ..Model::default()
+        };
+        let effects = follow_link(&mut m, 1);
+        assert_eq!(effects, vec![Effect::Copy(hash.to_string())]);
+        assert!(m.pending.is_none(), "an address must not start a fetch");
+        let toast = m.toast.as_ref().expect("a toast reports what happened");
+        assert_eq!(toast.kind, ToastKind::Info, "this is not an error");
+        assert!(
+            toast.text.contains(hash),
+            "the address is shown, not just copied: {}",
             toast.text
         );
     }

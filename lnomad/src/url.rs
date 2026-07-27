@@ -116,6 +116,14 @@ pub enum LinkKind {
     /// An RNS/NomadNet destination (`<hash>:/page/...`, `<hash>`, or the
     /// same-destination `:/...` form). Followed by fetching it in-mesh.
     Rns,
+    /// A NomadNet `lxmf@<hash>` target: an address to send a message to,
+    /// not a page to fetch. Carries the 32-hex destination hash.
+    ///
+    /// NomadNet opens a conversation with it. We have no message composer,
+    /// so the address is shown and copied instead; either way it must not be
+    /// mistaken for a page, which is what produced a spurious "malformed URL"
+    /// before this variant existed.
+    Lxmf(String),
     /// An external URL with a safe scheme (`http`/`https`/`mailto`), openable in
     /// the user's default handler. Carries the original URL verbatim.
     External(String),
@@ -138,6 +146,9 @@ pub fn classify_link(target: &str) -> LinkKind {
     if target.starts_with(':') {
         return LinkKind::Rns;
     }
+    if let Some(hash) = lxmf_target(target) {
+        return LinkKind::Lxmf(hash);
+    }
     match uri_scheme(target) {
         Some(scheme) => {
             // A full-length hex destination prefix is an RNS hash, not a scheme.
@@ -154,6 +165,28 @@ pub fn classify_link(target: &str) -> LinkKind {
         // No scheme and no leading colon: a bare hash or relative page path.
         None => LinkKind::Rns,
     }
+}
+
+/// The destination hash of an `lxmf@<hash>` target, lowercased.
+///
+/// NomadNet's link grammar is `<destination-type>@<target>`, with `lxmf` a
+/// shorthand for the `lxmf.delivery` aspect (NomadNet `Browser.py`,
+/// `expand_shorthands` and `handle_link`). It accepts the target only as
+/// exactly [`TRUNCATED_HASH_HEX_LEN`] hex characters, so anything else is not
+/// an LXMF link and is left to the other rules.
+///
+/// Matching on the prefix rather than merely on the presence of `@` keeps a
+/// page path that happens to contain one (`<hash>:/page/a@b.mu`) a page path.
+fn lxmf_target(target: &str) -> Option<String> {
+    let (kind, hash) = target.split_once('@')?;
+    let kind = kind.to_ascii_lowercase();
+    if kind != "lxmf" && kind != "lxmf.delivery" {
+        return None;
+    }
+    if hash.len() != TRUNCATED_HASH_HEX_LEN || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hash.to_ascii_lowercase())
 }
 
 /// The URI scheme of `s` (the run before the first `:`), if it is a well-formed
@@ -402,5 +435,50 @@ mod tests {
         let hash = "abcdef0123456789abcdef0123456789";
         assert_eq!(hash.len(), TRUNCATED_HASH_HEX_LEN);
         assert_eq!(classify_link(&format!("{hash}:/page/x.mu")), LinkKind::Rns);
+    }
+
+    #[test]
+    fn classify_lxmf_target_is_an_address_not_a_page() {
+        // NomadNet's shorthand and the aspect it expands to, both accepted.
+        assert_eq!(
+            classify_link(&format!("lxmf@{HASH_HEX}")),
+            LinkKind::Lxmf(HASH_HEX.to_string())
+        );
+        assert_eq!(
+            classify_link(&format!("lxmf.delivery@{HASH_HEX}")),
+            LinkKind::Lxmf(HASH_HEX.to_string())
+        );
+        // The prefix and the hash are both case-insensitive; the hash is
+        // normalised so the toast and the clipboard agree with the wire form.
+        assert_eq!(
+            classify_link(&format!("LXMF@{}", HASH_HEX.to_uppercase())),
+            LinkKind::Lxmf(HASH_HEX.to_string())
+        );
+    }
+
+    #[test]
+    fn classify_lxmf_rejects_anything_not_a_destination_hash() {
+        // NomadNet accepts the target only at exactly the hash length, so a
+        // shorter, longer or non-hex one is not an LXMF link at all.
+        for bad in ["deadbeef", &format!("{HASH_HEX}00"), &"z".repeat(32)] {
+            assert_ne!(
+                classify_link(&format!("lxmf@{bad}")),
+                LinkKind::Lxmf(bad.to_string()),
+                "lxmf@{bad} must not pass as an address"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_an_at_sign_elsewhere_stays_a_page_path() {
+        // Matching on the prefix rather than on the presence of `@` keeps a
+        // page whose name contains one reachable.
+        assert_eq!(
+            classify_link(&format!("{HASH_HEX}:/page/a@b.mu")),
+            LinkKind::Rns
+        );
+        assert_eq!(classify_link(":/page/a@b.mu"), LinkKind::Rns);
+        // An unknown destination type is not ours to interpret.
+        assert_eq!(classify_link(&format!("nnn@{HASH_HEX}")), LinkKind::Rns);
     }
 }

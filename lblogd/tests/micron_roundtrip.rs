@@ -331,5 +331,8 @@ fn fixture_meta() -> BlogMeta {
         language: "en".to_string(),
         web_url: None,
         nomadnet_address: None,
+        email: None,
+        lxmf: None,
+        has_about: false,
     }
 }

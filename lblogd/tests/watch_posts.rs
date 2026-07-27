@@ -27,8 +27,9 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// afterwards is queued rather than lost to the runtime not having polled the
 /// task yet.
 fn spawn_watcher(posts_dir: &Path) -> SnapshotRx {
-    let (reloader, content) = Reloader::new(fixture_meta(), posts_dir, None).expect("initial load");
-    let watcher = PostsWatcher::start(posts_dir, None).expect("establish watch");
+    let (reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir, None, None).expect("initial load");
+    let watcher = PostsWatcher::start(posts_dir, &[]).expect("establish watch");
     tokio::spawn(watcher.run(Arc::new(reloader)));
     content
 }

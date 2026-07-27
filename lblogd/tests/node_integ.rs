@@ -82,7 +82,7 @@ async fn blog_node_serves_pages_end_to_end() {
     write_fixture_posts(posts_dir.path());
     let data_dir = tempfile::tempdir().expect("data dir");
     let (reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial content load");
+        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial content load");
     let blog = BlogNode::start(
         BlogNodeConfig {
             instance_name: instance_name.clone(),

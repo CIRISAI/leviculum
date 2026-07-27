@@ -70,13 +70,16 @@ impl PostsWatcher {
     /// Establish the watch on `posts_dir` and, if configured, on the
     /// stylesheet. Changes are recorded from here on.
     ///
-    /// The stylesheet is watched through its parent directory rather than
-    /// directly: an inotify watch follows the inode, and editors that save by
-    /// writing a temporary file and renaming it over the target would leave a
-    /// direct watch pointing at the replaced file. Watching the directory and
-    /// filtering by path survives that. It does mean events for the
-    /// stylesheet's neighbours arrive too, which [`is_relevant`] discards.
-    pub fn start(posts_dir: &Path, css: Option<&Path>) -> Result<PostsWatcher, WatchError> {
+    /// `extra` names individual files outside the posts directory that also
+    /// belong to the content: the stylesheet and the about text.
+    ///
+    /// They are watched through their parent directory rather than directly:
+    /// an inotify watch follows the inode, and editors that save by writing a
+    /// temporary file and renaming it over the target would leave a direct
+    /// watch pointing at the replaced file. Watching the directory and
+    /// filtering by path survives that. It does mean events for their
+    /// neighbours arrive too, which [`Targets::is_relevant`] discards.
+    pub fn start(posts_dir: &Path, extra: &[&Path]) -> Result<PostsWatcher, WatchError> {
         let (tx, rx) = mpsc::channel(EVENT_QUEUE);
         let watch_err = |path: &Path| {
             let path = path.display().to_string();
@@ -88,7 +91,7 @@ impl PostsWatcher {
 
         let targets = Targets {
             posts_dir: posts_dir.to_path_buf(),
-            css: css.map(Path::to_path_buf),
+            files: extra.iter().map(|p| p.to_path_buf()).collect(),
         };
         let mut watcher: RecommendedWatcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -108,10 +111,17 @@ impl PostsWatcher {
         watcher
             .watch(posts_dir, RecursiveMode::NonRecursive)
             .map_err(watch_err(posts_dir))?;
-        if let Some(dir) = css.and_then(Path::parent).filter(|d| d != &posts_dir) {
+        // One watch per distinct parent directory; watching the same
+        // directory twice is at best redundant and at worst an error.
+        let mut watched: Vec<&Path> = vec![posts_dir];
+        for dir in extra.iter().filter_map(|f| f.parent()) {
+            if watched.contains(&dir) {
+                continue;
+            }
             watcher
                 .watch(dir, RecursiveMode::NonRecursive)
                 .map_err(watch_err(dir))?;
+            watched.push(dir);
         }
 
         Ok(PostsWatcher {
@@ -139,7 +149,9 @@ impl PostsWatcher {
 /// neighbours of the stylesheet.
 struct Targets {
     posts_dir: PathBuf,
-    css: Option<PathBuf>,
+    /// Individual files outside the posts directory: the stylesheet and the
+    /// about text.
+    files: Vec<PathBuf>,
 }
 
 impl Targets {
@@ -154,8 +166,7 @@ impl Targets {
         // it could lose a change; reloading spuriously only costs a read.
         paths.is_empty()
             || paths.iter().any(|path| {
-                path.parent() == Some(self.posts_dir.as_path())
-                    || self.css.as_deref() == Some(path.as_path())
+                path.parent() == Some(self.posts_dir.as_path()) || self.files.contains(path)
             })
     }
 }

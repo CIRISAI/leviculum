@@ -22,6 +22,9 @@ fn meta() -> BlogMeta {
         language: "en".to_string(),
         web_url: Some("https://leviculum.network".to_string()),
         nomadnet_address: Some("0ec84236630cea839d80a71c39fb41ce".to_string()),
+        email: None,
+        lxmf: None,
+        has_about: false,
     }
 }
 

@@ -19,11 +19,17 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
 
-use crate::post::{load_posts_dir, Post, PostError};
-use crate::render::{render_index_micron, render_post_micron, BlogMeta, DEFAULT_STYLE};
+use crate::post::{load_posts_dir, parse_post, Post, PostDefaults, PostError};
+use crate::render::{
+    default_about_title, render_about_micron, render_index_micron, render_post_micron, BlogMeta,
+    DEFAULT_STYLE,
+};
 
 /// The request path of the blog's index page.
 pub const INDEX_PATH: &str = "/page/index.mu";
+
+/// The request path of the blog's about page.
+pub const ABOUT_PATH: &str = "/page/about.mu";
 
 /// Errors from building a snapshot.
 #[derive(Debug, Error)]
@@ -66,6 +72,9 @@ pub struct Snapshot {
     /// the built-in default. Part of the snapshot so it reloads with the
     /// posts.
     pub css: String,
+    /// The about page's text, when a file is configured. Parsed exactly like
+    /// a post, but never listed, never dated and never in the feed.
+    pub about: Option<Post>,
 }
 
 impl Snapshot {
@@ -82,9 +91,11 @@ pub fn load_snapshot(
     meta: &BlogMeta,
     posts_dir: &Path,
     css_path: Option<&Path>,
+    about_path: Option<&Path>,
 ) -> Result<Snapshot, ContentError> {
     let posts = load_posts_dir(posts_dir)?;
-    let pages = build_pages(meta, &posts)?;
+    let about = about_path.map(|path| load_about(meta, path)).transpose()?;
+    let pages = build_pages(meta, &posts, about.as_ref())?;
     let css = match css_path {
         Some(path) => std::fs::read_to_string(path).map_err(|source| ContentError::Css {
             path: path.display().to_string(),
@@ -97,7 +108,30 @@ pub fn load_snapshot(
         posts,
         pages,
         css,
+        about,
     })
+}
+
+/// Read the about text, which is a post file in every respect except that
+/// nothing dates or lists it.
+///
+/// Its title defaults to the author's name rather than to the file name: an
+/// about page headed "about" would tell a reader nothing they did not already
+/// know from clicking a name.
+fn load_about(meta: &BlogMeta, path: &Path) -> Result<Post, ContentError> {
+    let source = std::fs::read_to_string(path).map_err(|source| PostError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let defaults = PostDefaults {
+        title: default_about_title(meta.author.as_deref()),
+        date: PostDefaults::for_file(path)?.date,
+    };
+    let post = parse_post(&source, &defaults).map_err(|e| PostError::File {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
+    Ok(post)
 }
 
 /// The receiving end of the content channel, held by the node and the web
@@ -114,6 +148,7 @@ pub struct Reloader {
     meta: BlogMeta,
     posts_dir: PathBuf,
     css_path: Option<PathBuf>,
+    about_path: Option<PathBuf>,
 }
 
 impl Reloader {
@@ -123,8 +158,9 @@ impl Reloader {
         meta: BlogMeta,
         posts_dir: &Path,
         css_path: Option<&Path>,
+        about_path: Option<&Path>,
     ) -> Result<(Reloader, SnapshotRx), ContentError> {
-        let snapshot = Arc::new(load_snapshot(&meta, posts_dir, css_path)?);
+        let snapshot = Arc::new(load_snapshot(&meta, posts_dir, css_path, about_path)?);
         let (tx, rx) = watch::channel(snapshot);
         Ok((
             Reloader {
@@ -132,6 +168,7 @@ impl Reloader {
                 meta,
                 posts_dir: posts_dir.to_path_buf(),
                 css_path: css_path.map(Path::to_path_buf),
+                about_path: about_path.map(Path::to_path_buf),
             },
             rx,
         ))
@@ -143,7 +180,12 @@ impl Reloader {
     /// a typo in a post cannot take the server offline. The error names the
     /// offending file and is the caller's to log.
     pub fn reload(&self) -> Result<usize, ContentError> {
-        let snapshot = load_snapshot(&self.meta, &self.posts_dir, self.css_path.as_deref())?;
+        let snapshot = load_snapshot(
+            &self.meta,
+            &self.posts_dir,
+            self.css_path.as_deref(),
+            self.about_path.as_deref(),
+        )?;
         let count = snapshot.posts.len();
         // send() only fails when every receiver is gone, which means both
         // servers have stopped; there is nothing useful to do about it here.
@@ -155,12 +197,24 @@ impl Reloader {
 /// Render every page and encode each as the single msgpack bin value the
 /// response APIs expect (the `[request_id, response]` wrapper is added by
 /// `send_response`/`send_response_resource` internally).
-fn build_pages(meta: &BlogMeta, posts: &[Post]) -> Result<HashMap<String, Vec<u8>>, ContentError> {
+fn build_pages(
+    meta: &BlogMeta,
+    posts: &[Post],
+    about: Option<&Post>,
+) -> Result<HashMap<String, Vec<u8>>, ContentError> {
     let mut pages = HashMap::new();
     pages.insert(
         INDEX_PATH.to_string(),
         msgpack_bin(render_index_micron(meta, posts).as_bytes())?,
     );
+    // The about page exists whenever there is anything to put on it, which
+    // may be contact details alone with no text file.
+    if meta.has_about {
+        pages.insert(
+            ABOUT_PATH.to_string(),
+            msgpack_bin(render_about_micron(meta, about).as_bytes())?,
+        );
+    }
     for post in posts {
         pages.insert(
             post_page_path(post),
@@ -211,7 +265,7 @@ mod tests {
         write_post(dir.path(), "a.md", "First", "2026-07-01");
         write_post(dir.path(), "b.md", "Second", "2026-07-02");
 
-        let snapshot = load_snapshot(&meta(), dir.path(), None).unwrap();
+        let snapshot = load_snapshot(&meta(), dir.path(), None, None).unwrap();
         assert_eq!(snapshot.posts.len(), 2);
         assert_eq!(
             snapshot.served_paths(),
@@ -223,7 +277,7 @@ mod tests {
     fn reload_publishes_the_new_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         write_post(dir.path(), "a.md", "First", "2026-07-01");
-        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None).unwrap();
+        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None, None).unwrap();
         assert_eq!(rx.borrow_and_update().posts.len(), 1);
 
         write_post(dir.path(), "b.md", "Second", "2026-07-02");
@@ -241,7 +295,7 @@ mod tests {
         // not take the running server down.
         let dir = tempfile::tempdir().unwrap();
         write_post(dir.path(), "a.md", "First", "2026-07-01");
-        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None).unwrap();
+        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None, None).unwrap();
         rx.borrow_and_update();
 
         std::fs::write(
@@ -266,7 +320,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_post(dir.path(), "a.md", "First", "2026-07-01");
         write_post(dir.path(), "b.md", "Second", "2026-07-02");
-        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None).unwrap();
+        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None, None).unwrap();
         rx.borrow_and_update();
 
         std::fs::remove_file(dir.path().join("b.md")).unwrap();

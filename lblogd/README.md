@@ -65,6 +65,9 @@ title       = "leviculum.network"      # the heading of every page
 author      = "Lew Palm"               # optional
 description = "Notes on Reticulum"     # optional, one sentence
 language    = "en"                     # optional, BCP 47, default "en"
+email       = "you@example.org"        # optional, shown on the about page
+lxmf        = "0ec8...41ce"            # optional, 32 hex, shown on the about page
+about       = "/etc/lblogd/about.md"   # optional, free text for the about page
 css         = "/etc/lblogd/style.css"  # optional, replaces the built-in one
 
 [node]
@@ -111,6 +114,33 @@ give out.
 `acme_contact_email` is **not** used for any of this. It is the operator's
 contact for Let's Encrypt, and publishing it on the blog would expose an
 address that was given for certificate warnings.
+
+### About page
+
+Setting any of `email`, `lxmf` or `about` creates an about page at `/about`
+and `:/page/about.mu`, and turns the author's name into a link to it
+everywhere it appears.
+
+`email` is rendered as a `mailto:` link. `lxmf` is a 32-character
+destination hash; on the NomadNet side it becomes a `lxmf@<hash>` link,
+which opens a conversation with that address. On the web it is shown as text,
+since a browser has nothing to do with it. A hash of the wrong length is a
+config error at startup, because NomadNet would refuse the link.
+
+`about` points at a Markdown file in exactly the post format. It is
+deliberately not a file in `posts_dir`: a post that is silently kept out of
+the index and the feed would be a hidden special case. The file's title, if
+it sets one, heads the page; otherwise the author's name does. Its date and
+slug are ignored, because an about page is not a dated entry — it carries no
+publication date and no byline, and never appears in the index or the feed.
+
+Only the blog's own author is linked. A guest author named in a post's
+frontmatter stays plain text, since the about page is not theirs.
+
+The address published here is separate from `web.acme_contact_email` on
+purpose: that one is an operator contact for certificate warnings and does
+not belong on a public page. Note that any address on a public page will be
+harvested.
 
 ### Feed
 

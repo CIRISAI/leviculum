@@ -42,7 +42,7 @@
 
 use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::post::{Date, Post};
+use crate::post::{slugify, Date, Post};
 
 /// Micron heading depth is meaningful for 1-3 `>`; deeper Markdown headings
 /// clamp here.
@@ -70,6 +70,17 @@ pub struct BlogMeta {
     /// The blog's NomadNet destination hash, shown on the web side so
     /// clearnet readers can find the mesh version.
     pub nomadnet_address: Option<String>,
+    /// Contact address for the about page.
+    pub email: Option<String>,
+    /// LXMF destination hash for the about page, 32 hex characters.
+    pub lxmf: Option<String>,
+    /// Whether an about page exists, and therefore whether the author's name
+    /// is a link.
+    ///
+    /// It exists as soon as there is anything to put on it: an address, a
+    /// hash, or a text file. Without any of those a link would lead to an
+    /// empty page, so the name stays plain text.
+    pub has_about: bool,
 }
 
 impl BlogMeta {
@@ -77,7 +88,35 @@ impl BlogMeta {
     fn author_of<'a>(&'a self, post: &'a Post) -> Option<&'a str> {
         post.author.as_deref().or(self.author.as_deref())
     }
+
+    /// The blog author's name as HTML, linked to the about page when there is
+    /// one.
+    ///
+    /// Only the blog's own author is linked. A guest author's name pointing
+    /// at the blog author's about page would simply be wrong, and a page per
+    /// author is more machinery than a blog with one writer needs.
+    fn author_html(&self, name: &str) -> String {
+        let escaped = escape_html(name);
+        match self.has_about && Some(name) == self.author.as_deref() {
+            true => format!("<a href=\"{ABOUT_HTML_PATH}\">{escaped}</a>"),
+            false => escaped,
+        }
+    }
+
+    /// The same for micron, linking to the local about page.
+    fn author_micron(&self, name: &str) -> String {
+        match self.has_about && Some(name) == self.author.as_deref() {
+            true => format!("`[{}`{ABOUT_MICRON_PATH}]", sanitize_link_part(name)),
+            false => escape_micron_text(name),
+        }
+    }
 }
+
+/// The HTTP path of the about page.
+pub const ABOUT_HTML_PATH: &str = "/about";
+
+/// The micron request path of the about page.
+pub const ABOUT_MICRON_PATH: &str = ":/page/about.mu";
 
 /// The micron background colour used to set off inline code (12-bit form).
 const INLINE_CODE_BG: &str = "333";
@@ -307,7 +346,7 @@ pub fn render_index_html(meta: &BlogMeta, css: &str, posts: &[Post]) -> String {
     if let Some(author) = &meta.author {
         body.push_str(&format!(
             "<p class=\"byline\">by {}</p>\n",
-            escape_html(author)
+            meta.author_html(author)
         ));
     }
     if let Some(description) = &meta.description {
@@ -323,7 +362,10 @@ pub fn render_index_html(meta: &BlogMeta, css: &str, posts: &[Post]) -> String {
         // name on every line is noise, a guest post is information.
         let byline = match &post.author {
             Some(author) if Some(author.as_str()) != meta.author.as_deref() => {
-                format!(" <span class=\"byline\">by {}</span>", escape_html(author))
+                format!(
+                    " <span class=\"byline\">by {}</span>",
+                    meta.author_html(author)
+                )
             }
             _ => String::new(),
         };
@@ -343,7 +385,7 @@ pub fn render_index_html(meta: &BlogMeta, css: &str, posts: &[Post]) -> String {
 /// Render one post as a complete HTML document, with a way back to the index.
 pub fn render_post_html(meta: &BlogMeta, css: &str, post: &Post) -> String {
     let byline = match meta.author_of(post) {
-        Some(author) => format!(" &middot; {}", escape_html(author)),
+        Some(author) => format!(" &middot; {}", meta.author_html(author)),
         None => String::new(),
     };
     let body = format!(
@@ -357,6 +399,102 @@ pub fn render_post_html(meta: &BlogMeta, css: &str, post: &Post) -> String {
         html_footer(meta)
     );
     html_document(meta, css, &post.title, &body)
+}
+
+/// Render the about page as a complete HTML document.
+///
+/// `text` is the optional Markdown file, parsed exactly like a post. Its
+/// date, slug and author are ignored: an about page is not a dated entry, so
+/// showing a publication date and a byline on it would be misleading.
+pub fn render_about_html(meta: &BlogMeta, css: &str, text: Option<&Post>) -> String {
+    let heading = about_heading(meta, text);
+    let mut body = format!("<h1>{}</h1>\n", escape_html(&heading));
+
+    if let Some(email) = &meta.email {
+        body.push_str(&format!(
+            "<p class=\"contact\">Email: <a href=\"mailto:{0}\">{0}</a></p>\n",
+            escape_html(email)
+        ));
+    }
+    if let Some(lxmf) = &meta.lxmf {
+        // No link: a browser has nothing to do with an LXMF address. The hash
+        // is what a reader copies into their own client.
+        body.push_str(&format!(
+            "<p class=\"contact\">LXMF: <code>{}</code></p>\n",
+            escape_html(lxmf)
+        ));
+    }
+    if let Some(text) = text {
+        body.push_str(&markdown_to_html(&text.body_md));
+    }
+
+    body.push_str(&format!(
+        "<p><a href=\"/\">&larr; {}</a></p>",
+        escape_html(&meta.title)
+    ));
+    body.push_str(&html_footer(meta));
+    html_document(meta, css, &heading, &body)
+}
+
+/// Render the about page as a micron page.
+///
+/// The LXMF address becomes a `lxmf@<hash>` link, which NomadNet opens as a
+/// conversation with that address.
+pub fn render_about_micron(meta: &BlogMeta, text: Option<&Post>) -> String {
+    let heading = about_heading(meta, text);
+    let mut out = format!(">{}\n\n", escape_micron_text(&heading));
+
+    if let Some(email) = &meta.email {
+        out.push_str(&format!("Email: {}\n", escape_micron_text(email)));
+    }
+    if let Some(lxmf) = &meta.lxmf {
+        out.push_str(&format!(
+            "LXMF: `[{0}`lxmf@{0}]\n",
+            sanitize_link_part(lxmf)
+        ));
+    }
+    if meta.email.is_some() || meta.lxmf.is_some() {
+        out.push_str("\n-\n\n");
+    }
+    if let Some(text) = text {
+        out.push_str(&markdown_to_micron(&text.body_md));
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "\n`[\u{2190} {}`{ABOUT_BACK_PATH}]\n",
+        sanitize_link_part(&meta.title)
+    ));
+    out.push_str(&micron_footer(meta));
+    out
+}
+
+/// The micron request path of the index, used by the about page's back link.
+const ABOUT_BACK_PATH: &str = ":/page/index.mu";
+
+/// The about page's heading.
+///
+/// The text file's title when there is one, which the loader already defaults
+/// to [`default_about_title`], so a file without frontmatter still lands on
+/// the author's name rather than on its own file name.
+fn about_heading(meta: &BlogMeta, text: Option<&Post>) -> String {
+    match text {
+        Some(text) => text.title.clone(),
+        None => default_about_title(meta.author.as_deref()),
+    }
+}
+
+/// The title an about page carries when nothing names one: the author, or a
+/// plain "About".
+///
+/// A name that slugifies to nothing is skipped, because the post parser
+/// requires a usable slug and would otherwise reject the file over a title it
+/// never asked for.
+pub fn default_about_title(author: Option<&str>) -> String {
+    author
+        .filter(|a| !slugify(a).is_empty())
+        .unwrap_or("About")
+        .to_string()
 }
 
 /// The path the Atom feed is served under.
@@ -479,7 +617,7 @@ pub fn markdown_to_micron(md: &str) -> String {
 pub fn render_index_micron(meta: &BlogMeta, posts: &[Post]) -> String {
     let mut out = format!(">{}\n\n", escape_micron_text(&meta.title));
     if let Some(author) = &meta.author {
-        out.push_str(&format!("by {}\n", escape_micron_text(author)));
+        out.push_str(&format!("by {}\n", meta.author_micron(author)));
     }
     if let Some(description) = &meta.description {
         out.push_str(&format!("{}\n", escape_micron_text(description)));
@@ -510,7 +648,7 @@ pub fn render_index_micron(meta: &BlogMeta, posts: &[Post]) -> String {
 /// divider, body, and a link back to the index.
 pub fn render_post_micron(meta: &BlogMeta, post: &Post) -> String {
     let byline = match meta.author_of(post) {
-        Some(author) => format!(" \u{b7} {}", escape_micron_text(author)),
+        Some(author) => format!(" \u{b7} {}", meta.author_micron(author)),
         None => String::new(),
     };
     format!(

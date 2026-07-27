@@ -83,7 +83,7 @@ async fn plain_http_serves_the_blog_without_acme() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let (_reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
+        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
     let bind = serve_plain(content).await;
 
     let index = http_get(bind, "/").await;
@@ -109,7 +109,7 @@ async fn a_reload_reaches_the_running_listener() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let (reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
+        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
     let bind = serve_plain(content).await;
 
     assert!(
@@ -150,7 +150,7 @@ async fn a_failed_reload_keeps_the_server_serving() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let (reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
+        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
     let bind = serve_plain(content).await;
 
     std::fs::write(
@@ -177,7 +177,7 @@ async fn the_feed_route_answers_or_404s_by_configuration() {
 
     // A plaintext development run has no public URL, so no feed.
     let (_reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
+        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
     let bind = serve_plain(content).await;
     assert!(
         http_get(bind, "/feed.xml")
@@ -191,7 +191,8 @@ async fn the_feed_route_answers_or_404s_by_configuration() {
         web_url: Some("https://example.test".to_string()),
         ..fixture_meta()
     };
-    let (_reloader, content) = Reloader::new(meta, posts_dir.path(), None).expect("initial load");
+    let (_reloader, content) =
+        Reloader::new(meta, posts_dir.path(), None, None).expect("initial load");
     let bind = serve_plain(content).await;
     let response = http_get(bind, "/feed.xml").await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
@@ -207,12 +208,45 @@ async fn the_feed_route_answers_or_404s_by_configuration() {
 }
 
 #[tokio::test]
+async fn the_about_route_answers_or_404s_by_configuration() {
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    write_fixture_posts(posts_dir.path());
+
+    // Nothing configured for it: the route must not offer an empty page.
+    let (_reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
+    let bind = serve_plain(content).await;
+    assert!(
+        http_get(bind, "/about").await.starts_with("HTTP/1.1 404"),
+        "no about page configured, so no about route"
+    );
+
+    let meta = BlogMeta {
+        author: Some("Lew Palm".to_string()),
+        email: Some("lp@lew-palm.de".to_string()),
+        has_about: true,
+        ..fixture_meta()
+    };
+    let (_reloader, content) =
+        Reloader::new(meta, posts_dir.path(), None, None).expect("initial load");
+    let bind = serve_plain(content).await;
+
+    let about = http_get(bind, "/about").await;
+    assert!(about.starts_with("HTTP/1.1 200"), "{about}");
+    assert!(about.contains("mailto:lp@lew-palm.de"), "{about}");
+
+    // And the name on the index is now a link to it.
+    let index = http_get(bind, "/").await;
+    assert!(index.contains("<a href=\"/about\">Lew Palm</a>"), "{index}");
+}
+
+#[tokio::test]
 async fn acme_mode_still_requires_domains() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let cache_dir = tempfile::tempdir().expect("acme cache dir");
     let (_reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
+        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
 
     let err = run_web(
         WebConfig {

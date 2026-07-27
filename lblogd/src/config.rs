@@ -126,10 +126,34 @@ pub struct BlogSection {
     /// to English only because something has to be emitted.
     #[serde(default = "default_language")]
     pub language: String,
+    /// Contact address for the about page, rendered as a `mailto:` link.
+    ///
+    /// A public address gets harvested; setting this is a deliberate choice.
+    /// It is deliberately separate from `web.acme_contact_email`, which is an
+    /// operator contact for certificate warnings and has no business on a
+    /// public page.
+    pub email: Option<String>,
+    /// LXMF destination hash for the about page, 32 hex characters.
+    ///
+    /// On the NomadNet side it becomes a `lxmf@<hash>` link, which opens a
+    /// conversation with that address.
+    pub lxmf: Option<String>,
+    /// A Markdown file in the same format as a post, shown on the about page.
+    ///
+    /// Deliberately not a file in `posts_dir`: a post that is silently kept
+    /// out of the index and the feed would be a hidden special case, and it
+    /// would collide with a real post that happened to be named `about.md`.
+    pub about: Option<PathBuf>,
     /// A stylesheet to use instead of the built-in one. Read at startup and
     /// on every reload, and inlined into each page.
     pub css: Option<PathBuf>,
 }
+
+/// How many hex characters an LXMF destination hash has.
+///
+/// A Reticulum destination hash is `TRUNCATED_HASHLENGTH` (128) bits, and
+/// NomadNet rejects a link whose target is any other length.
+const LXMF_HASH_HEX_LEN: usize = leviculum_core::constants::TRUNCATED_HASHBYTES * 2;
 
 fn default_language() -> String {
     "en".to_string()
@@ -145,6 +169,9 @@ impl Default for BlogSection {
             author: None,
             description: None,
             language: default_language(),
+            email: None,
+            lxmf: None,
+            about: None,
             css: None,
         }
     }
@@ -241,6 +268,17 @@ impl Config {
                 "set blog.title (or node.display_name): the blog needs a name",
             ));
         }
+        // A malformed hash would produce a link NomadNet refuses with
+        // "Invalid length for LXMF link"; better to say so at startup.
+        if let Some(lxmf) = &self.blog.lxmf {
+            if lxmf.len() != LXMF_HASH_HEX_LEN || !lxmf.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(invalid(&format!(
+                    "blog.lxmf must be {LXMF_HASH_HEX_LEN} hex characters, \
+                     got {:?}",
+                    lxmf
+                )));
+            }
+        }
         if !self.web.acme {
             return Ok(());
         }
@@ -295,7 +333,19 @@ impl Config {
             // links; one that does not gets none, and no feed.
             web_url: self.web.domains.first().map(|d| format!("https://{d}")),
             nomadnet_address,
+            email: self.blog.email.clone(),
+            lxmf: self.blog.lxmf.clone(),
+            has_about: self.has_about_page(),
         }
+    }
+
+    /// Whether there is an about page to link to.
+    ///
+    /// It exists as soon as there is anything to show: a contact address, an
+    /// LXMF hash, or a text file. Linking the author's name to a page with
+    /// nothing on it would be worse than not linking it.
+    pub fn has_about_page(&self) -> bool {
+        self.blog.email.is_some() || self.blog.lxmf.is_some() || self.blog.about.is_some()
     }
 
     /// The NomadNet node config this file describes.
@@ -491,6 +541,43 @@ mod tests {
         );
         let meta = load_from_str(&sample).unwrap().blog_meta(None);
         assert_eq!(meta.web_url.as_deref(), Some("https://leviculum.network"));
+    }
+
+    #[test]
+    fn an_about_page_exists_as_soon_as_there_is_anything_on_it() {
+        let config = load_from_str(SAMPLE).unwrap();
+        assert!(!config.has_about_page(), "nothing configured, no page");
+        assert!(!config.blog_meta(None).has_about);
+
+        for field in [
+            "email = \"a@b.example\"",
+            "lxmf  = \"0ec84236630cea839d80a71c39fb41ce\"",
+            "about = \"/etc/lblogd/about.md\"",
+        ] {
+            let sample = format!("{SAMPLE}\n[blog]\n{field}\n");
+            let config = load_from_str(&sample).unwrap();
+            assert!(config.has_about_page(), "{field} should create the page");
+            assert!(config.blog_meta(None).has_about, "{field}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_lxmf_hash_is_rejected_at_startup() {
+        // NomadNet refuses a link whose target is not exactly the hash
+        // length, so emitting one would produce a link that silently fails
+        // for every reader. Better to refuse the config.
+        for bad in ["deadbeef", "0ec84236630cea839d80a71c39fb41ce00", "zz"] {
+            let sample = format!("{SAMPLE}\n[blog]\nlxmf = \"{bad}\"\n");
+            let err = load_from_str(&sample).unwrap_err();
+            assert!(matches!(err, ConfigError::Invalid { .. }), "{bad}: {err}");
+            assert!(err.to_string().contains("blog.lxmf"), "{err}");
+        }
+
+        let sample = format!("{SAMPLE}\n[blog]\nlxmf = \"0EC84236630CEA839D80A71C39FB41CE\"\n");
+        assert!(
+            load_from_str(&sample).is_ok(),
+            "upper-case hex is still a hash"
+        );
     }
 
     #[test]

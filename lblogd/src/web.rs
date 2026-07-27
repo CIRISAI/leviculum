@@ -35,7 +35,10 @@ use rustls_acme::AcmeConfig;
 use thiserror::Error;
 
 use crate::content::SnapshotRx;
-use crate::render::{render_feed_atom, render_index_html, render_post_html, FEED_PATH};
+use crate::render::{
+    render_about_html, render_feed_atom, render_index_html, render_post_html, ABOUT_HTML_PATH,
+    FEED_PATH,
+};
 
 /// Errors from starting or running the web server.
 #[derive(Debug, Error)]
@@ -108,6 +111,7 @@ pub fn build_router(content: SnapshotRx) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/posts/{slug}", get(post_page))
+        .route(ABOUT_HTML_PATH, get(about_page))
         .route(FEED_PATH, get(feed))
         .fallback(fallback_page)
         .with_state(content)
@@ -124,6 +128,20 @@ async fn feed(State(content): State<SnapshotRx>) -> Response {
         )
             .into_response(),
         None => not_found(),
+    }
+}
+
+/// The about page, or a 404 when nothing is configured for it.
+async fn about_page(State(content): State<SnapshotRx>) -> Response {
+    let snapshot = content.borrow().clone();
+    match snapshot.meta.has_about {
+        true => Html(render_about_html(
+            &snapshot.meta,
+            &snapshot.css,
+            snapshot.about.as_ref(),
+        ))
+        .into_response(),
+        false => not_found(),
     }
 }
 
@@ -324,6 +342,7 @@ mod tests {
             posts,
             pages: Default::default(),
             css: String::new(),
+            about: None,
         });
         let (tx, rx) = watch::channel(snapshot);
         (build_router(rx), tx)
@@ -393,6 +412,7 @@ mod tests {
             posts,
             pages: Default::default(),
             css: String::new(),
+            about: None,
         }))
         .unwrap();
 
