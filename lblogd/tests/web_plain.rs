@@ -171,6 +171,42 @@ async fn a_failed_reload_keeps_the_server_serving() {
 }
 
 #[tokio::test]
+async fn the_feed_route_answers_or_404s_by_configuration() {
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    write_fixture_posts(posts_dir.path());
+
+    // A plaintext development run has no public URL, so no feed.
+    let (_reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
+    let bind = serve_plain(content).await;
+    assert!(
+        http_get(bind, "/feed.xml")
+            .await
+            .starts_with("HTTP/1.1 404"),
+        "without a web url the route must 404 rather than serve broken links"
+    );
+
+    // With one, the same route serves the feed.
+    let meta = BlogMeta {
+        web_url: Some("https://example.test".to_string()),
+        ..fixture_meta()
+    };
+    let (_reloader, content) = Reloader::new(meta, posts_dir.path(), None).expect("initial load");
+    let bind = serve_plain(content).await;
+    let response = http_get(bind, "/feed.xml").await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.contains("content-type: application/atom+xml; charset=utf-8"),
+        "readers dispatch on the content type: {response}"
+    );
+    assert!(response.contains("<feed xmlns="), "{response}");
+    assert!(
+        response.contains("https://example.test/posts/hello-mesh"),
+        "{response}"
+    );
+}
+
+#[tokio::test]
 async fn acme_mode_still_requires_domains() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());

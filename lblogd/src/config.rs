@@ -286,12 +286,14 @@ impl Config {
             author: self.blog.author.clone(),
             description: self.blog.description.clone(),
             language: self.blog.language.clone(),
-            // The first certificate domain is the blog's canonical name, and
-            // in a plaintext development run there is no public URL to give.
-            web_url: match self.web.acme {
-                true => self.web.domains.first().map(|d| format!("https://{d}")),
-                false => None,
-            },
+            // The first configured domain is the blog's canonical name,
+            // whether or not certificates are being fetched for it right now.
+            // Tying this to `acme` would mean the feed and the cross-links
+            // could never be checked before deployment: with ACME off there
+            // would be no URL, and with it on the HTTP listener only
+            // redirects. A development run that sets `domains` gets the real
+            // links; one that does not gets none, and no feed.
+            web_url: self.web.domains.first().map(|d| format!("https://{d}")),
             nomadnet_address,
         }
     }
@@ -474,11 +476,21 @@ mod tests {
     }
 
     #[test]
-    fn a_plaintext_run_advertises_no_web_url() {
-        // Without ACME there is no public name to give out; a link to the
-        // development bind address would be worse than none.
+    fn the_public_url_comes_from_domains_not_from_acme() {
+        // No domains: nothing to build absolute links from, so no feed and no
+        // cross-link. A development bind address would be worse than none.
         let meta = load_from_str(DEV_SAMPLE).unwrap().blog_meta(None);
         assert_eq!(meta.web_url, None);
+
+        // Domains without ACME: the canonical name is known, which is what
+        // makes the feed checkable before deployment.
+        let sample = DEV_SAMPLE.replace(
+            "acme      = false",
+            "acme      = false
+        domains   = [\"leviculum.network\"]",
+        );
+        let meta = load_from_str(&sample).unwrap().blog_meta(None);
+        assert_eq!(meta.web_url.as_deref(), Some("https://leviculum.network"));
     }
 
     #[test]

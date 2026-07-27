@@ -42,7 +42,7 @@
 
 use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::post::Post;
+use crate::post::{Date, Post};
 
 /// Micron heading depth is meaningful for 1-3 `>`; deeper Markdown headings
 /// clamp here.
@@ -124,6 +124,87 @@ fn demote_heading(event: Event<'_>) -> Event<'_> {
     }
 }
 
+/// Render a post body to HTML with every link and image made absolute.
+///
+/// A feed entry is read somewhere else entirely, so a relative link in it
+/// resolves against the reader's own address and lands nowhere. `base` is the
+/// blog's root and `page` the post's own URL, which is what a document-
+/// relative reference resolves against.
+fn markdown_to_html_absolute(md: &str, base: &str, page: &str) -> String {
+    let parser = Parser::new_ext(md, markdown_options())
+        .map(demote_heading)
+        .map(|event| absolutize(event, base, page));
+    let mut out = String::new();
+    html::push_html(&mut out, parser);
+    out
+}
+
+/// Rewrite the destination of a link or image event to an absolute URL.
+fn absolutize<'a>(event: Event<'a>, base: &str, page: &str) -> Event<'a> {
+    match event {
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: absolute_url(&dest_url, base, page).into(),
+            title,
+            id,
+        }),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: absolute_url(&dest_url, base, page).into(),
+            title,
+            id,
+        }),
+        other => other,
+    }
+}
+
+/// Resolve one reference against the blog root and the containing page.
+///
+/// Only the forms that occur in a post are handled, deliberately rather than
+/// implementing RFC 3986: anything already carrying a scheme (`https:`,
+/// `mailto:`) or a network path (`//host/x`) is left alone, a root-relative
+/// path resolves against the blog root, a fragment against the page it sits
+/// in, and anything else against the page's directory.
+fn absolute_url(url: &str, base: &str, page: &str) -> String {
+    if url.is_empty() || has_scheme(url) || url.starts_with("//") {
+        return url.to_string();
+    }
+    if let Some(fragment) = url.strip_prefix('#') {
+        // An in-page anchor would otherwise jump inside the reader's own page.
+        return format!("{page}#{fragment}");
+    }
+    if let Some(path) = url.strip_prefix('/') {
+        return format!("{base}/{path}");
+    }
+    // Document-relative: resolve against the directory the page sits in.
+    let dir = page.rsplit_once('/').map(|(d, _)| d).unwrap_or(page);
+    format!("{dir}/{url}")
+}
+
+/// Whether a reference starts with a URL scheme, e.g. `https:` or `mailto:`.
+///
+/// A scheme is a letter followed by letters, digits, `+`, `-` or `.`, then a
+/// colon. Checking the shape rather than a list of known schemes avoids
+/// mangling anything exotic an author writes on purpose.
+fn has_scheme(url: &str) -> bool {
+    let Some((prefix, _)) = url.split_once(':') else {
+        return false;
+    };
+    let mut chars = prefix.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// The next heading level down; `h6` has nowhere to go and stays put.
 fn one_level_down(level: pulldown_cmark::HeadingLevel) -> pulldown_cmark::HeadingLevel {
     use pulldown_cmark::HeadingLevel::*;
@@ -182,12 +263,23 @@ fn html_document(meta: &BlogMeta, css: &str, title: &str, body: &str) -> String 
         ),
         None => String::new(),
     };
+    // Feed autodiscovery, so a reader finds the feed from any page. Only
+    // emitted when there is a feed to find, which mirrors the route.
+    let feed = match meta.web_url {
+        Some(_) => format!(
+            "<link rel=\"alternate\" type=\"application/atom+xml\" \
+             title=\"{}\" href=\"{FEED_PATH}\">\n",
+            escape_html(&meta.title)
+        ),
+        None => String::new(),
+    };
     format!(
         "<!doctype html>\n<html lang=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         {}<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
+         {}{}<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
         escape_html(&meta.language),
         description,
+        feed,
         escape_html(title),
         css,
         body
@@ -265,6 +357,109 @@ pub fn render_post_html(meta: &BlogMeta, css: &str, post: &Post) -> String {
         html_footer(meta)
     );
     html_document(meta, css, &post.title, &body)
+}
+
+/// The path the Atom feed is served under.
+pub const FEED_PATH: &str = "/feed.xml";
+
+/// Render the Atom feed, or `None` when the blog has no public URL.
+///
+/// A feed is only meaningful with absolute links, and those need a domain.
+/// A plaintext development run has none, so it serves no feed rather than a
+/// feed full of links that resolve against whatever the reader happens to be
+/// looking at.
+///
+/// Atom rather than RSS 2.0: entry identity is explicit rather than
+/// conventional, and timestamps are RFC 3339 rather than RFC 822. Every
+/// reader handles both.
+pub fn render_feed_atom(meta: &BlogMeta, posts: &[Post]) -> Option<String> {
+    let base = meta.web_url.as_deref()?;
+
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    out.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
+    out.push_str(&format!("<title>{}</title>\n", escape_html(&meta.title)));
+    if let Some(description) = &meta.description {
+        out.push_str(&format!(
+            "<subtitle>{}</subtitle>\n",
+            escape_html(description)
+        ));
+    }
+    out.push_str(&format!("<id>{}/</id>\n", escape_html(base)));
+    out.push_str(&format!(
+        "<link rel=\"alternate\" type=\"text/html\" href=\"{}/\"/>\n",
+        escape_html(base)
+    ));
+    out.push_str(&format!(
+        "<link rel=\"self\" type=\"application/atom+xml\" href=\"{}{}\"/>\n",
+        escape_html(base),
+        FEED_PATH
+    ));
+    // Posts are newest first, so the first one dates the feed. With no posts
+    // there is no date to give and the epoch stands in; `updated` is
+    // mandatory, and an empty feed is not worth a special case.
+    let updated = posts
+        .first()
+        .map(|p| rfc3339(&p.date))
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+    out.push_str(&format!("<updated>{updated}</updated>\n"));
+    if let Some(author) = &meta.author {
+        out.push_str(&format!(
+            "<author><name>{}</name></author>\n",
+            escape_html(author)
+        ));
+    }
+
+    for post in posts {
+        out.push_str(&feed_entry(meta, base, post));
+    }
+    out.push_str("</feed>\n");
+    Some(out)
+}
+
+/// One `<entry>`, carrying the post's full text.
+///
+/// Full text rather than a teaser: this is a text blog, and a feed a reader
+/// can actually read in their reader is the point of having one.
+fn feed_entry(meta: &BlogMeta, base: &str, post: &Post) -> String {
+    let url = format!("{base}/posts/{}", post.slug);
+    let mut entry = String::from("<entry>\n");
+    entry.push_str(&format!("<title>{}</title>\n", escape_html(&post.title)));
+    // The entry id has to stay stable, or readers show the post again as new.
+    // It is the post URL, which means it moves when an untitled-slug post is
+    // retitled; see the README note on pinning `slug` once published.
+    entry.push_str(&format!("<id>{}</id>\n", escape_html(&url)));
+    entry.push_str(&format!(
+        "<link rel=\"alternate\" type=\"text/html\" href=\"{}\"/>\n",
+        escape_html(&url)
+    ));
+    let stamp = rfc3339(&post.date);
+    entry.push_str(&format!("<published>{stamp}</published>\n"));
+    entry.push_str(&format!("<updated>{stamp}</updated>\n"));
+    // Atom lets entries inherit the feed's author, so only a differing one
+    // needs saying. With no feed author, the post's own is all there is.
+    if let Some(author) = meta.author_of(post) {
+        if Some(author) != meta.author.as_deref() {
+            entry.push_str(&format!(
+                "<author><name>{}</name></author>\n",
+                escape_html(author)
+            ));
+        }
+    }
+    entry.push_str(&format!(
+        "<content type=\"html\">{}</content>\n",
+        escape_html(&markdown_to_html_absolute(&post.body_md, base, &url))
+    ));
+    entry.push_str("</entry>\n");
+    entry
+}
+
+/// A post's date as an RFC 3339 timestamp.
+///
+/// Posts are dated to the day, so the time is always midnight UTC. Two posts
+/// on one day therefore carry identical timestamps and a reader may order
+/// them either way; our own index breaks that tie by title, a reader cannot.
+fn rfc3339(date: &Date) -> String {
+    format!("{date}T00:00:00Z")
 }
 
 /// Convert a Markdown fragment to valid micron markup. See the module docs

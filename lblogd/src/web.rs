@@ -35,7 +35,7 @@ use rustls_acme::AcmeConfig;
 use thiserror::Error;
 
 use crate::content::SnapshotRx;
-use crate::render::{render_index_html, render_post_html};
+use crate::render::{render_feed_atom, render_index_html, render_post_html, FEED_PATH};
 
 /// Errors from starting or running the web server.
 #[derive(Debug, Error)]
@@ -108,8 +108,23 @@ pub fn build_router(content: SnapshotRx) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/posts/{slug}", get(post_page))
+        .route(FEED_PATH, get(feed))
         .fallback(fallback_page)
         .with_state(content)
+}
+
+/// The Atom feed, or a 404 when the blog has no public URL to build absolute
+/// links from (a plaintext development run).
+async fn feed(State(content): State<SnapshotRx>) -> Response {
+    let snapshot = content.borrow().clone();
+    match render_feed_atom(&snapshot.meta, &snapshot.posts) {
+        Some(xml) => (
+            [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")],
+            xml,
+        )
+            .into_response(),
+        None => not_found(),
+    }
 }
 
 async fn index_page(State(content): State<SnapshotRx>) -> Html<String> {

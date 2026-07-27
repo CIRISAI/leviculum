@@ -112,6 +112,27 @@ give out.
 contact for Let's Encrypt, and publishing it on the blog would expose an
 address that was given for certificate warnings.
 
+### Feed
+
+An Atom feed is served at `/feed.xml`, with a `<link rel="alternate">` in
+every page so readers find it on their own. Entries carry the post's full
+text, with relative links and images resolved against the blog's URL so they
+still work when read elsewhere.
+
+There is no feed without `web.domains`: absolute links need a domain, and a
+plaintext development run has none. The route answers 404 there, and the
+pages advertise no feed.
+
+Two things worth knowing:
+
+Posts are dated to the day, so entry timestamps are midnight UTC. Two posts
+published on the same day carry identical timestamps and a reader may order
+them either way; the index breaks that tie by title, a reader cannot.
+
+An entry is identified by its URL, so a post that changes slug appears in
+readers as a new entry. Pin `slug` in the frontmatter for anything already
+published, and retitling is then free.
+
 ### Styling
 
 Without `blog.css` the pages use a small built-in stylesheet. With it, that
