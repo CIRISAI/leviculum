@@ -717,7 +717,15 @@ pub struct TransportStats {
 /// holds by construction. Group by CAUSE: sites with the same underlying cause
 /// share a reason (e.g. all three LRPROOF validation failures are
 /// [`DropReason::LrproofInvalid`]).
+/// `#[non_exhaustive]`: this taxonomy grows whenever a new drop site is
+/// classified (two variants were added in this release alone), and every
+/// addition would otherwise be a breaking change for a downstream exhaustive
+/// match. Matches inside this crate are unaffected and stay exhaustive, so
+/// `kebab`/`record_drop` still fail to compile on a forgotten variant.
+/// Mirrors [`crate::node::FrameDropReason`], which is already
+/// non-exhaustive for the same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DropReason {
     /// HEADER_2 non-announce packet whose transport id is not ours (correct
     /// overhearing on a shared medium, not loss). High volume.

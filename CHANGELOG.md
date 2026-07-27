@@ -17,6 +17,14 @@ placeholder subcommands are removed; use `lnstest diag` or the Python
 instead. The `cp` subcommand is also removed; use the standalone `lncp`
 tool for file transfer.
 
+`transport::DropReason` is now `#[non_exhaustive]`, matching
+`node::FrameDropReason`. The taxonomy grows whenever a new drop site is
+classified — two variants this release — and each addition was a breaking
+change for downstream exhaustive matches. A downstream match now needs a
+wildcard arm once, and further reasons are additive. Matches inside the
+crate are unaffected and stay exhaustive, so `kebab` and `record_drop`
+still fail to compile on a forgotten variant.
+
 ### Added
 
 A `same-interface-relay` drop reason. On a shared medium a relay's only
