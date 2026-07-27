@@ -143,6 +143,9 @@ pub(crate) struct TcpClientConfig {
     /// dropped) the reconnect loop stops and the interface is removed. `None`
     /// for file-config interfaces, which live for the node's lifetime.
     pub shutdown: Option<oneshot::Receiver<()>>,
+    /// Run against each freshly created connect socket before it dials. `None`
+    /// skips the hook. See [`crate::socket_hook::OutboundSocketHook`].
+    pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 }
 
 /// Default per-attempt connect timeout for reconnecting TCP clients.
@@ -391,6 +394,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             task_ready,
             config.socks_target,
             config.shutdown,
+            config.outbound_socket_hook,
         )
         .await;
     });
@@ -545,6 +549,7 @@ async fn tcp_client_reconnect_task(
     ready: Arc<ReadySignal>,
     socks_target: Option<(String, u16)>,
     shutdown: Option<oneshot::Receiver<()>>,
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 ) {
     // A runtime-added interface carries a detach signal; racing the reconnect
     // loop against it stops the loop at whatever await it is parked on (connect,
@@ -567,6 +572,7 @@ async fn tcp_client_reconnect_task(
         tunnel_notify,
         ready,
         socks_target,
+        outbound_socket_hook,
     );
     match shutdown {
         Some(sd) => {
@@ -577,6 +583,20 @@ async fn tcp_client_reconnect_task(
         }
         None => loop_fut.await,
     }
+}
+
+/// Create an outbound TCP socket, run the hook against it, then dial — so the
+/// hook sees the fd before connect.
+async fn connect_hooked(
+    addr: SocketAddr,
+    hook: &Option<crate::socket_hook::OutboundSocketHook>,
+) -> io::Result<tokio::net::TcpStream> {
+    let socket = match addr {
+        SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+    };
+    crate::socket_hook::apply(hook.as_ref(), &socket);
+    socket.connect(addr).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -596,6 +616,7 @@ async fn tcp_client_reconnect_loop(
     tunnel_notify: Option<mpsc::Sender<InterfaceId>>,
     ready: Arc<ReadySignal>,
     socks_target: Option<(String, u16)>,
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 ) {
     // Backoff DELIBERATELY DEVIATES from Python `RNS/Interfaces/TCPInterface.py`,
     // which uses `RECONNECT_WAIT = 5` and `RECONNECT_MAX_TRIES = None`: a fixed
@@ -620,15 +641,18 @@ async fn tcp_client_reconnect_loop(
         // `connect_timeout` (Windows SYN-retransmit to a closed loopback port,
         // a black-holed peer that never sends RST) is abandoned and counted,
         // keeping give-up deterministic across platforms.
-        let connect_result =
-            match tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect(addr)).await
-            {
-                Ok(res) => res,
-                Err(_elapsed) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "connect attempt timed out",
-                )),
-            };
+        let connect_result = match tokio::time::timeout(
+            connect_timeout,
+            connect_hooked(addr, &outbound_socket_hook),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_elapsed) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connect attempt timed out",
+            )),
+        };
         // A SOCKS proxy target folds into the connect result: `addr` reached the
         // proxy, and the CONNECT handshake must succeed before the stream is
         // usable. A handshake failure is just a failed attempt, so backoff and
@@ -918,6 +942,26 @@ async fn tcp_interface_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hook fires once, with a real fd, before the connect socket dials.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_hook_sees_the_socket_before_dial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<std::os::fd::RawFd>::new()));
+        let recorded = Arc::clone(&seen);
+        let hook: crate::socket_hook::OutboundSocketHook =
+            Arc::new(move |fd| recorded.lock().unwrap().push(fd));
+
+        let stream = connect_hooked(addr, &Some(hook)).await.expect("connect");
+        assert_eq!(stream.peer_addr().unwrap(), addr);
+
+        let fds = seen.lock().unwrap();
+        assert_eq!(fds.len(), 1, "hook invoked exactly once");
+        assert!(fds[0] >= 0, "hook received a real fd");
+    }
 
     #[test]
     fn test_backoff_delay_schedule() {
@@ -1256,6 +1300,7 @@ mod tests {
             tunnel_notify: None,
             socks_target: None,
             shutdown: None,
+            outbound_socket_hook: None,
         });
 
         // 3. Accept first connection, send an HDLC-framed packet
@@ -1331,6 +1376,7 @@ mod tests {
             tunnel_notify: None,
             socks_target: None,
             shutdown: None,
+            outbound_socket_hook: None,
         });
 
         // Wait for the reconnect task to give up (2 attempts * 100ms + overhead)
@@ -1393,6 +1439,7 @@ mod tests {
             tunnel_notify: None,
             socks_target: Some(("peer.example".to_string(), 4242)),
             shutdown: None,
+            outbound_socket_hook: None,
         });
 
         let pkt = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv())
@@ -1424,6 +1471,7 @@ mod tests {
             tunnel_notify: None,
             socks_target: None,
             shutdown: Some(shutdown_rx),
+            outbound_socket_hook: None,
         });
         let _ = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
         drop(shutdown_tx); // resolves the receiver -> loop stops -> incoming closes

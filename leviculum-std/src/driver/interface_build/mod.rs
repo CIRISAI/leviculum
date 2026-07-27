@@ -40,6 +40,8 @@ pub(super) struct InterfaceBuildCtx<'a> {
     pub corrupt_every: Option<u64>,
     /// Storage root; I2P persists its per-interface keyfile under it.
     pub storage_path: Option<PathBuf>,
+    /// Applied to each TCP client's connect socket before it dials.
+    pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 }
 
 /// Outcome of building one configured interface section.

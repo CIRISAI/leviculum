@@ -36,6 +36,7 @@ pub mod remote_status;
 pub mod resource_policy;
 pub mod reticulum;
 pub(crate) mod rpc;
+pub mod socket_hook;
 pub(crate) mod storage;
 pub(crate) mod sync_ext;
 pub mod test_support;

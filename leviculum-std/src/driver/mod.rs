@@ -440,6 +440,7 @@ struct AutoConnectWiring {
     reconnect_tx: mpsc::Sender<InterfaceId>,
     next_id: Arc<AtomicUsize>,
     corrupt_every: Option<u64>,
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 }
 
 /// One periodic self-advertise job (Codeberg #107): a discoverable interface's
@@ -657,6 +658,8 @@ pub struct ReticulumNode {
     action_dispatch_tx: mpsc::Sender<TickOutput>,
     /// Fault injection: corrupt ~1 byte per N bytes on TCP write
     corrupt_every: Option<u64>,
+    /// Outbound-socket hook applied to each TCP client's connect socket.
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     /// Interval between periodic storage flushes (seconds).
     /// Crash protection only, normal shutdown calls flush() via signal handler.
     /// Lost data from a crash is recovered via fresh announces.
@@ -819,6 +822,7 @@ impl ReticulumNode {
             runner_handle: None,
             action_dispatch_tx,
             corrupt_every,
+            outbound_socket_hook: None,
             flush_interval_secs,
             auto_peer_count: AutoPeerCount::default(),
             share_instance_name: None,
@@ -1280,6 +1284,7 @@ impl ReticulumNode {
         let autoconnect_reconnect_tx = reconnect_tx.clone();
         let autoconnect_next_id = Arc::clone(&next_id);
         let autoconnect_corrupt_every = self.corrupt_every;
+        let autoconnect_socket_hook = self.outbound_socket_hook.clone();
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -1307,6 +1312,7 @@ impl ReticulumNode {
                     reconnect_tx: autoconnect_reconnect_tx,
                     next_id: autoconnect_next_id,
                     corrupt_every: autoconnect_corrupt_every,
+                    outbound_socket_hook: autoconnect_socket_hook,
                 },
                 discovery_announce,
             )
@@ -1365,6 +1371,7 @@ impl ReticulumNode {
                 tunnel_notify_tx,
                 corrupt_every: self.corrupt_every,
                 storage_path: self.storage_path.clone(),
+                outbound_socket_hook: self.outbound_socket_hook.clone(),
             };
             for (idx, config) in self.interfaces.iter().enumerate() {
                 if !config.enabled {
@@ -1730,6 +1737,7 @@ impl ReticulumNode {
                 tunnel_notify: None,
                 socks_target,
                 shutdown: Some(shutdown_rx),
+                outbound_socket_hook: self.outbound_socket_hook.clone(),
             })
         };
 
@@ -1748,7 +1756,8 @@ impl ReticulumNode {
     /// child exit the supervisor respawns it after `respawn_delay` (or the
     /// default when `None`), matching the file-config lifecycle.
     ///
-    /// **Hold the returned [`PipeClientHandle`] to keep the interface attached;
+    /// **Hold the returned [`PipeClientHandle`](crate::interfaces::PipeClientHandle)
+    /// to keep the interface attached;
     /// drop it (or call [`detach`](crate::interfaces::PipeClientHandle::detach))
     /// to detach** — the supervisor stops, any live child is killed, the
     /// channel closes, and the event loop removes the interface from routing.
@@ -1824,6 +1833,7 @@ impl ReticulumNode {
             tunnel_notify_tx,
             corrupt_every: self.corrupt_every,
             storage_path: self.storage_path.clone(),
+            outbound_socket_hook: self.outbound_socket_hook.clone(),
         };
 
         let built = {
@@ -3193,6 +3203,7 @@ async fn run_event_loop(
                         new_iface_tx: &autoconnect_wiring.new_iface_tx,
                         reconnect_tx: &autoconnect_wiring.reconnect_tx,
                         corrupt_every: autoconnect_wiring.corrupt_every,
+                        outbound_socket_hook: autoconnect_wiring.outbound_socket_hook.clone(),
                         online: &iface_online_map,
                         teardown_ids: Vec::new(),
                     };
@@ -3321,6 +3332,7 @@ struct AutoConnectLiveSpawner<'a> {
     new_iface_tx: &'a mpsc::Sender<InterfaceHandle>,
     reconnect_tx: &'a mpsc::Sender<InterfaceId>,
     corrupt_every: Option<u64>,
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     online: &'a InterfaceOnlineMap,
     teardown_ids: Vec<InterfaceId>,
 }
@@ -3355,6 +3367,7 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             tunnel_notify: None,
             socks_target: None,
             shutdown: None,
+            outbound_socket_hook: self.outbound_socket_hook.clone(),
         });
         // Register with the running loop; the `new_interface_rx` branch does
         // the map/announce bookkeeping on the next iteration.

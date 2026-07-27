@@ -60,6 +60,7 @@ pub(super) fn build_client(
         tunnel_notify: Some(ctx.tunnel_notify_tx.clone()),
         socks_target: None,
         shutdown: None,
+        outbound_socket_hook: ctx.outbound_socket_hook.clone(),
     });
     tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
     Ok(Built::Handles(vec![handle]))

@@ -154,6 +154,13 @@ impl NodeBuilder {
         self
     }
 
+    /// Register an outbound-socket hook. See
+    /// [`ReticulumNodeBuilder::outbound_socket_hook`](crate::driver::ReticulumNodeBuilder::outbound_socket_hook).
+    pub fn outbound_socket_hook(mut self, hook: crate::socket_hook::OutboundSocketHook) -> Self {
+        self.inner = self.inner.outbound_socket_hook(hook);
+        self
+    }
+
     /// Override the link keepalive interval (seconds) for every link. Shrinks
     /// the stale-link timeout proportionally; useful for slow links and for
     /// making stale/recovery observable quickly.
