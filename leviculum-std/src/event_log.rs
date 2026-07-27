@@ -119,7 +119,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     },
     EventSchema {
         name: "PKT_TX",
-        required_keys: &["iface", "len", "ph"],
+        required_keys: &["iface", "hops", "len", "ph"],
     },
     EventSchema {
         name: "ANN_RX",

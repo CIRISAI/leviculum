@@ -764,6 +764,24 @@ pub(crate) const PKT_EVENT_TARGET: &str = "leviculum_core::pkt";
 /// same correlator.
 pub(crate) const PKT_PH_BYTES: usize = 8;
 
+/// The hop count a packet carries ON THE WIRE, read from the bytes that
+/// are about to be handed to the driver.
+///
+/// `Packet::pack` writes flags at offset 0 and `hops` at offset 1, and
+/// `Packet::unpack` reads it back from there, so this is by construction
+/// the value the receiver will parse — which is what `PKT_TX hops` has
+/// to mean for a receiver's `hops = tx hops + 1` to hold (the receiver
+/// adds one in [`Transport::incoming_hop_count`]). Reading the buffer
+/// rather than a `Packet` field also keeps the two identical at sites
+/// that only hold the packed bytes.
+///
+/// A buffer shorter than the two header bytes is not a packet; every
+/// caller here passes a packed packet (HEADER_MINSIZE is 19 bytes), so
+/// the fallback is unreachable and only exists to keep this total.
+fn wire_hops(data: &[u8]) -> u8 {
+    data.get(1).copied().unwrap_or(0)
+}
+
 /// Take the `ph` correlator prefix from a full (32-byte) or truncated
 /// (16-byte) packet hash.
 fn ph8(hash: &[u8]) -> [u8; PKT_PH_BYTES] {
@@ -1982,6 +2000,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 event = "PKT_TX",
                 ph = %HexShort(&ph),
                 iface = %self.iface_name(interface_index),
+                hops = wire_hops(&data),
                 len = data.len(),
             );
         }
@@ -2011,6 +2030,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 event = "PKT_TX",
                 ph = %HexShort(&ph),
                 iface = "bcast",
+                hops = wire_hops(&data),
                 len = data.len(),
             );
         }
@@ -3611,6 +3631,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                         event = "PKT_TX",
                                         ph = %HexShort(ph),
                                         iface = %self.iface_name(client_iface),
+                                        hops = wire_hops(&buf[..len]),
                                         len = len,
                                     );
                                 }
@@ -4454,6 +4475,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 event = "PKT_TX",
                                 ph = %HexShort(&full_packet_hash[..PKT_PH_BYTES]),
                                 iface = %self.iface_name(client_iface),
+                                hops = wire_hops(&buf[..len]),
                                 len = len,
                             );
                             self.pending_actions.push(Action::SendPacket {
@@ -7012,6 +7034,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     event = "PKT_TX",
                     ph = %HexShort(ph),
                     iface = %self.iface_name(iface_idx),
+                    hops = wire_hops(&raw),
                     len = raw.len(),
                 );
             }
@@ -9075,6 +9098,19 @@ mod tests {
                     .map(|rest| rest.chars().take(16).collect())
             }
 
+            /// The `hops=` value of the first `event="<event>"` line.
+            fn extract_hops(logs: &str, event: &str) -> Option<u32> {
+                logs.lines()
+                    .find(|l| l.contains(&std::format!("event=\"{event}\"")))
+                    .and_then(|l| l.split("hops=").nth(1))
+                    .and_then(|rest| {
+                        rest.split(|c: char| !c.is_ascii_digit())
+                            .next()
+                            .filter(|d| !d.is_empty())
+                            .and_then(|d| d.parse().ok())
+                    })
+            }
+
             // Contract: a two-node exchange. Node A originates a data packet
             // through a 2-hop path (Type1→Type2 conversion changes the wire
             // bytes!), node B receives it. PKT_TX on A, PKT_RX on B and the
@@ -9171,6 +9207,28 @@ mod tests {
                 assert!(
                     rx_logs.contains("reason=\"no-path\""),
                     "kebab reason on the contract PKT_DROP; logs:\n{rx_logs}"
+                );
+
+                // The direction contract a collector reads journeys from:
+                // PKT_TX carries the hop count AS TRANSMITTED, PKT_RX the
+                // count after the receiver's increment, so across one
+                // medium crossing rx = tx + 1 exactly. A originates this
+                // packet, so its only hop-bearing record for this ph is the
+                // PKT_TX itself — without `hops` there the transmitter
+                // could not be placed on the path at all.
+                let tx_hops = extract_hops(&tx_logs, "PKT_TX")
+                    .unwrap_or_else(|| panic!("no hops on PKT_TX; logs:\n{tx_logs}"));
+                let rx_hops = extract_hops(&rx_logs, "PKT_RX")
+                    .unwrap_or_else(|| panic!("no hops on PKT_RX; logs:\n{rx_logs}"));
+                assert_eq!(
+                    tx_hops, 0,
+                    "an originated packet goes on the wire at hop 0; logs:\n{tx_logs}"
+                );
+                assert_eq!(
+                    rx_hops,
+                    tx_hops + 1,
+                    "receiver's hops must be the sender's transmitted hops plus \
+                     one across a medium crossing;\ntx logs:\n{tx_logs}\nrx logs:\n{rx_logs}"
                 );
 
                 // Verbatim samples (run with --nocapture to inspect).
