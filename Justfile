@@ -71,8 +71,17 @@ fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
 # after every commit via the post-commit hook.
 # Tier 1 (~15 min): Tier 0 + core/tests + ffi (incl. C-program + Python interop)
 # + proxy + rnsd_interop + the TCP-hub endurance smoke soak.
+#
+# Note on `--tests` targets: Tier 0 runs `--lib` only, so a crate's
+# tests/ directory is covered here or nowhere. lblogd was in the "nowhere"
+# bucket until 2026-07-27 (its node_integ end-to-end test never ran in CI).
+# lnomad/tests/ and leviculum-micron/tests/ are still uncovered, as are
+# several leviculum-std suites beyond the three named below.
 standard: fast test-ffi verify-packaging
     cargo test -p leviculum-core --tests
+    # ~4 s: node_integ builds an in-process daemon + IPC + blog node, which
+    # is too slow for the Tier 0 push gate but trivial here.
+    cargo test -p lblogd --tests
     cargo test -p leviculum-proxy
     cargo test -p leviculum-std --test rnsd_interop
     cargo test -p leviculum-std --test event_log_subscriber -- --test-threads=1
