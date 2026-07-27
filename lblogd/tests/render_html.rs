@@ -1,13 +1,29 @@
 //! Tests for the Markdown-to-HTML renderer and the HTML page templates.
 
 use lblogd::post::{parse_post, PostDefaults};
-use lblogd::render::{markdown_to_html, render_index_html, render_post_html};
+use lblogd::render::{
+    markdown_to_html, render_index_html, render_post_html, BlogMeta, DEFAULT_STYLE,
+};
 
 #[test]
-fn headings() {
-    assert!(markdown_to_html("# One").contains("<h1>One</h1>"));
-    assert!(markdown_to_html("## Two").contains("<h2>Two</h2>"));
-    assert!(markdown_to_html("### Three").contains("<h3>Three</h3>"));
+fn headings_are_demoted_one_level() {
+    // The page template owns <h1> for the post title, so a body heading
+    // starts at <h2>; otherwise a post would have two top-level headings.
+    assert!(markdown_to_html("# One").contains("<h2>One</h2>"));
+    assert!(markdown_to_html("## Two").contains("<h3>Two</h3>"));
+    assert!(markdown_to_html("### Three").contains("<h4>Three</h4>"));
+    // h6 has nowhere left to go.
+    assert!(markdown_to_html("###### Six").contains("<h6>Six</h6>"));
+}
+
+#[test]
+fn a_post_has_exactly_one_h1() {
+    let mut post = sample_post("The Title");
+    post.body_md = "# Section\n\nText.\n".to_string();
+    let html = render_post_html(&fixture_meta(), DEFAULT_STYLE, &post);
+    assert_eq!(html.matches("<h1>").count(), 1, "{html}");
+    assert!(html.contains("<h1>The Title</h1>"), "{html}");
+    assert!(html.contains("<h2>Section</h2>"), "{html}");
 }
 
 #[test]
@@ -53,7 +69,7 @@ fn sample_post(title: &str) -> lblogd::post::Post {
 
 #[test]
 fn post_html_is_a_complete_document() {
-    let html = render_post_html(&sample_post("A Post"));
+    let html = render_post_html(&fixture_meta(), DEFAULT_STYLE, &sample_post("A Post"));
     assert!(html.starts_with("<!doctype html>"));
     assert!(html.contains("<title>A Post</title>"));
     assert!(html.contains("<style>"));
@@ -65,7 +81,11 @@ fn post_html_is_a_complete_document() {
 
 #[test]
 fn post_html_escapes_the_title() {
-    let html = render_post_html(&sample_post("Tags <b> and &"));
+    let html = render_post_html(
+        &fixture_meta(),
+        DEFAULT_STYLE,
+        &sample_post("Tags <b> and &"),
+    );
     assert!(html.contains("Tags &lt;b&gt; and &amp;"));
     assert!(!html.contains("<title>Tags <b>"));
 }
@@ -73,9 +93,10 @@ fn post_html_escapes_the_title() {
 #[test]
 fn index_html_lists_posts_with_links() {
     let posts = vec![sample_post("First Post"), sample_post("Second Post")];
-    let html = render_index_html(&posts);
+    let html = render_index_html(&fixture_meta(), DEFAULT_STYLE, &posts);
     assert!(html.starts_with("<!doctype html>"));
-    assert!(html.contains("<h1>Posts</h1>"));
+    // Headed by the blog, not by the word "Posts".
+    assert!(html.contains("<h1>Test Blog</h1>"), "{html}");
     assert!(html.contains("<a href=\"/posts/first-post\">First Post</a>"));
     assert!(html.contains("<a href=\"/posts/second-post\">Second Post</a>"));
     assert!(html.contains("2026-07-12"));
@@ -86,5 +107,17 @@ fn fixture_defaults() -> PostDefaults {
     PostDefaults {
         title: "fixture".to_string(),
         date: "2000-01-01".parse().unwrap(),
+    }
+}
+
+/// Blog metadata for fixtures that are about rendering, not about identity.
+fn fixture_meta() -> BlogMeta {
+    BlogMeta {
+        title: "Test Blog".to_string(),
+        author: None,
+        description: None,
+        language: "en".to_string(),
+        web_url: None,
+        nomadnet_address: None,
     }
 }

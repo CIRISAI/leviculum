@@ -60,9 +60,16 @@ data_dir    = "/var/lib/lblogd"        # identity, node storage, ACME cache
 posts_dir   = "/var/lib/lblogd/posts"  # the *.md blog posts
 watch_posts = false                    # optional, default false; see below
 
+[blog]                                 # optional, but see below
+title       = "leviculum.network"      # the heading of every page
+author      = "Lew Palm"               # optional
+description = "Notes on Reticulum"     # optional, one sentence
+language    = "en"                     # optional, BCP 47, default "en"
+css         = "/etc/lblogd/style.css"  # optional, replaces the built-in one
+
 [node]
 instance_name          = "leviculum"   # must match the running lnsd's instance_name
-display_name           = "leviculum.network dev blog"
+display_name           = "leviculum.network dev blog"  # optional, defaults to blog.title
 announce_interval_secs = 21600         # optional, default 21600 (6 hours)
 
 [web]
@@ -77,6 +84,43 @@ https_bind         = "0.0.0.0:443"     # optional, this is the default
 With `acme = true` (the default) `domains`, `acme_contact_email` and
 `acme_staging` are all required; leaving one out is a config error naming the
 field. With `acme = false` they are ignored and may be omitted.
+
+### What the pages say
+
+`[blog]` is what a reader sees; `[node]` and `[web]` are the machinery.
+
+The blog needs a name, so either `blog.title` or `node.display_name` must be
+set; each defaults to the other. Set both only when the name on the page and
+the name in the announce stream should differ.
+
+`author` is shown under the title and on every post. A post can override it in
+its frontmatter, which is what a guest post wants; the index only names an
+author where it differs from the blog's, so the usual case stays quiet.
+
+`description` appears under the title and as the HTML meta description, which
+is what a search result or a link preview shows.
+
+`language` sets the HTML `lang` attribute. It matters for screen readers,
+hyphenation and translation offers, so set it if the blog is not in English.
+
+Each side names the other: HTML pages carry the NomadNet destination hash,
+Micron pages the clearnet URL, taken from the first entry in `web.domains`. A
+plaintext development run advertises no URL, since there is no public name to
+give out.
+
+`acme_contact_email` is **not** used for any of this. It is the operator's
+contact for Let's Encrypt, and publishing it on the blog would expose an
+address that was given for certificate warnings.
+
+### Styling
+
+Without `blog.css` the pages use a small built-in stylesheet. With it, that
+file's contents are inlined into every page instead. It is read at startup and
+on every reload, so editing it takes effect the same way editing a post does;
+with `watch_posts` on it is watched too.
+
+A stylesheet is inlined rather than linked, so there is no second request and
+no way for a page and its stylesheet to disagree.
 
 The node's persistent identity lives at `data_dir/identities/lblogd`, node
 storage at `data_dir/storage`, the ACME account and certificates at

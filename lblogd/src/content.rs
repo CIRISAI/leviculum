@@ -20,7 +20,7 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 use crate::post::{load_posts_dir, Post, PostError};
-use crate::render::{render_index_micron, render_post_micron};
+use crate::render::{render_index_micron, render_post_micron, BlogMeta, DEFAULT_STYLE};
 
 /// The request path of the blog's index page.
 pub const INDEX_PATH: &str = "/page/index.mu";
@@ -34,6 +34,14 @@ pub enum ContentError {
     /// Encoding a page as msgpack failed.
     #[error("page encoding: {0}")]
     Encode(String),
+    /// The configured stylesheet could not be read.
+    #[error("reading stylesheet {path}: {source}")]
+    Css {
+        /// The configured stylesheet path.
+        path: String,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
 }
 
 /// One consistent view of the blog: the parsed posts and the Micron pages
@@ -45,11 +53,19 @@ pub enum ContentError {
 /// of a second cache to invalidate.
 #[derive(Debug, Default)]
 pub struct Snapshot {
+    /// The blog's identity, rendered into every page. Constant across
+    /// reloads, but carried here so a page can be rendered from a snapshot
+    /// alone.
+    pub meta: BlogMeta,
     /// Parsed posts, newest first.
     pub posts: Vec<Post>,
     /// Rendered pages by request path, each already encoded as the single
     /// msgpack bin value the response APIs expect.
     pub pages: HashMap<String, Vec<u8>>,
+    /// The stylesheet inlined into every HTML page: the operator's file, or
+    /// the built-in default. Part of the snapshot so it reloads with the
+    /// posts.
+    pub css: String,
 }
 
 impl Snapshot {
@@ -61,11 +77,27 @@ impl Snapshot {
     }
 }
 
-/// Read `posts_dir` and render every page from it.
-pub fn load_snapshot(posts_dir: &Path) -> Result<Snapshot, ContentError> {
+/// Read the posts and the stylesheet, and render every page.
+pub fn load_snapshot(
+    meta: &BlogMeta,
+    posts_dir: &Path,
+    css_path: Option<&Path>,
+) -> Result<Snapshot, ContentError> {
     let posts = load_posts_dir(posts_dir)?;
-    let pages = build_pages(&posts)?;
-    Ok(Snapshot { posts, pages })
+    let pages = build_pages(meta, &posts)?;
+    let css = match css_path {
+        Some(path) => std::fs::read_to_string(path).map_err(|source| ContentError::Css {
+            path: path.display().to_string(),
+            source,
+        })?,
+        None => DEFAULT_STYLE.to_string(),
+    };
+    Ok(Snapshot {
+        meta: meta.clone(),
+        posts,
+        pages,
+        css,
+    })
 }
 
 /// The receiving end of the content channel, held by the node and the web
@@ -79,19 +111,27 @@ pub type SnapshotRx = watch::Receiver<Arc<Snapshot>>;
 /// consumers treat as "no more reloads", not as an error.
 pub struct Reloader {
     tx: watch::Sender<Arc<Snapshot>>,
+    meta: BlogMeta,
     posts_dir: PathBuf,
+    css_path: Option<PathBuf>,
 }
 
 impl Reloader {
     /// Load `posts_dir` once and open the channel with the result. A failure
     /// here is fatal to startup by design; see the module docs.
-    pub fn new(posts_dir: &Path) -> Result<(Reloader, SnapshotRx), ContentError> {
-        let snapshot = Arc::new(load_snapshot(posts_dir)?);
+    pub fn new(
+        meta: BlogMeta,
+        posts_dir: &Path,
+        css_path: Option<&Path>,
+    ) -> Result<(Reloader, SnapshotRx), ContentError> {
+        let snapshot = Arc::new(load_snapshot(&meta, posts_dir, css_path)?);
         let (tx, rx) = watch::channel(snapshot);
         Ok((
             Reloader {
                 tx,
+                meta,
                 posts_dir: posts_dir.to_path_buf(),
+                css_path: css_path.map(Path::to_path_buf),
             },
             rx,
         ))
@@ -103,7 +143,7 @@ impl Reloader {
     /// a typo in a post cannot take the server offline. The error names the
     /// offending file and is the caller's to log.
     pub fn reload(&self) -> Result<usize, ContentError> {
-        let snapshot = load_snapshot(&self.posts_dir)?;
+        let snapshot = load_snapshot(&self.meta, &self.posts_dir, self.css_path.as_deref())?;
         let count = snapshot.posts.len();
         // send() only fails when every receiver is gone, which means both
         // servers have stopped; there is nothing useful to do about it here.
@@ -115,16 +155,16 @@ impl Reloader {
 /// Render every page and encode each as the single msgpack bin value the
 /// response APIs expect (the `[request_id, response]` wrapper is added by
 /// `send_response`/`send_response_resource` internally).
-fn build_pages(posts: &[Post]) -> Result<HashMap<String, Vec<u8>>, ContentError> {
+fn build_pages(meta: &BlogMeta, posts: &[Post]) -> Result<HashMap<String, Vec<u8>>, ContentError> {
     let mut pages = HashMap::new();
     pages.insert(
         INDEX_PATH.to_string(),
-        msgpack_bin(render_index_micron(posts).as_bytes())?,
+        msgpack_bin(render_index_micron(meta, posts).as_bytes())?,
     );
     for post in posts {
         pages.insert(
             post_page_path(post),
-            msgpack_bin(render_post_micron(post).as_bytes())?,
+            msgpack_bin(render_post_micron(meta, post).as_bytes())?,
         );
     }
     Ok(pages)
@@ -148,6 +188,15 @@ fn msgpack_bin(data: &[u8]) -> Result<Vec<u8>, ContentError> {
 mod tests {
     use super::*;
 
+    /// Minimal metadata: these tests are about loading, not rendering.
+    fn meta() -> BlogMeta {
+        BlogMeta {
+            title: "Test Blog".to_string(),
+            language: "en".to_string(),
+            ..BlogMeta::default()
+        }
+    }
+
     fn write_post(dir: &Path, name: &str, title: &str, date: &str) {
         std::fs::write(
             dir.join(name),
@@ -162,7 +211,7 @@ mod tests {
         write_post(dir.path(), "a.md", "First", "2026-07-01");
         write_post(dir.path(), "b.md", "Second", "2026-07-02");
 
-        let snapshot = load_snapshot(dir.path()).unwrap();
+        let snapshot = load_snapshot(&meta(), dir.path(), None).unwrap();
         assert_eq!(snapshot.posts.len(), 2);
         assert_eq!(
             snapshot.served_paths(),
@@ -174,7 +223,7 @@ mod tests {
     fn reload_publishes_the_new_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         write_post(dir.path(), "a.md", "First", "2026-07-01");
-        let (reloader, mut rx) = Reloader::new(dir.path()).unwrap();
+        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None).unwrap();
         assert_eq!(rx.borrow_and_update().posts.len(), 1);
 
         write_post(dir.path(), "b.md", "Second", "2026-07-02");
@@ -192,7 +241,7 @@ mod tests {
         // not take the running server down.
         let dir = tempfile::tempdir().unwrap();
         write_post(dir.path(), "a.md", "First", "2026-07-01");
-        let (reloader, mut rx) = Reloader::new(dir.path()).unwrap();
+        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None).unwrap();
         rx.borrow_and_update();
 
         std::fs::write(
@@ -217,7 +266,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_post(dir.path(), "a.md", "First", "2026-07-01");
         write_post(dir.path(), "b.md", "Second", "2026-07-02");
-        let (reloader, mut rx) = Reloader::new(dir.path()).unwrap();
+        let (reloader, mut rx) = Reloader::new(meta(), dir.path(), None).unwrap();
         rx.borrow_and_update();
 
         std::fs::remove_file(dir.path().join("b.md")).unwrap();

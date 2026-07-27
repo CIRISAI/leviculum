@@ -5,7 +5,7 @@
 //! and hence lnomad and NomadNet, accept.
 
 use lblogd::post::{parse_post, PostDefaults};
-use lblogd::render::{markdown_to_micron, render_index_micron, render_post_micron};
+use lblogd::render::{markdown_to_micron, render_index_micron, render_post_micron, BlogMeta};
 use leviculum_micron::{parse, Block, Color, Line, MicronDocument};
 
 /// Render Markdown to micron and parse it back.
@@ -28,6 +28,9 @@ fn content_blocks(doc: &MicronDocument) -> Vec<&Block> {
 
 #[test]
 fn headings_map_to_micron_depths_and_clamp() {
+    // Body headings are demoted one level: the page template already spent
+    // depth 1 on the post title, so `#` in the body is a section under it,
+    // not a second title. Micron has three levels, so the clamp bites sooner.
     let doc = roundtrip("# One\n\n## Two\n\n### Three\n\n#### Four\n");
     let blocks = content_blocks(&doc);
     let heads: Vec<(u8, String)> = blocks
@@ -40,10 +43,10 @@ fn headings_map_to_micron_depths_and_clamp() {
     assert_eq!(
         heads,
         [
-            (1, "One".to_string()),
-            (2, "Two".to_string()),
-            (3, "Three".to_string()),
-            (3, "Four".to_string()), // clamped
+            (2, "One".to_string()),
+            (3, "Two".to_string()),
+            (3, "Three".to_string()), // clamped
+            (3, "Four".to_string()),  // clamped
         ]
     );
 }
@@ -265,11 +268,13 @@ fn index_micron_lists_posts_as_local_page_links() {
         sample_post("First Post", "2026-07-12"),
         sample_post("Second Post", "2026-07-01"),
     ];
-    let doc = parse(&render_index_micron(&posts));
+    let doc = parse(&render_index_micron(&fixture_meta(), &posts));
     let Block::Heading { depth: 1, line } = &doc.blocks[0] else {
         panic!("expected index heading, got {:?}", doc.blocks[0]);
     };
-    assert_eq!(line_text(line), "Posts");
+    // The index is headed by the blog, not by the word "Posts": a reader
+    // arriving here should learn whose blog this is.
+    assert_eq!(line_text(line), "Test Blog");
 
     let links: Vec<_> = doc
         .blocks
@@ -288,7 +293,7 @@ fn index_micron_lists_posts_as_local_page_links() {
 #[test]
 fn post_micron_has_title_heading_and_date() {
     let post = sample_post("A Field Report", "2026-07-12");
-    let doc = parse(&render_post_micron(&post));
+    let doc = parse(&render_post_micron(&fixture_meta(), &post));
     let Block::Heading { depth: 1, line } = &doc.blocks[0] else {
         panic!("expected title heading, got {:?}", doc.blocks[0]);
     };
@@ -314,5 +319,17 @@ fn fixture_defaults() -> PostDefaults {
     PostDefaults {
         title: "fixture".to_string(),
         date: "2000-01-01".parse().unwrap(),
+    }
+}
+
+/// Blog metadata for fixtures that are about rendering, not about identity.
+fn fixture_meta() -> BlogMeta {
+    BlogMeta {
+        title: "Test Blog".to_string(),
+        author: None,
+        description: None,
+        language: "en".to_string(),
+        web_url: None,
+        nomadnet_address: None,
     }
 }

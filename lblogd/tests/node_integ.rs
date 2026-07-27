@@ -23,7 +23,7 @@ use leviculum_std::driver::ReticulumNodeBuilder;
 use lblogd::content::Reloader;
 use lblogd::node::{BlogNode, BlogNodeConfig};
 use lblogd::post::load_posts_dir;
-use lblogd::render::{render_index_micron, render_post_micron};
+use lblogd::render::{render_index_micron, render_post_micron, BlogMeta};
 use lnomad::fetch::{FetchError, Session};
 use lnomad::url::parse_url;
 
@@ -81,7 +81,8 @@ async fn blog_node_serves_pages_end_to_end() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let data_dir = tempfile::tempdir().expect("data dir");
-    let (reloader, content) = Reloader::new(posts_dir.path()).expect("initial content load");
+    let (reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial content load");
     let blog = BlogNode::start(
         BlogNodeConfig {
             instance_name: instance_name.clone(),
@@ -101,17 +102,17 @@ async fn blog_node_serves_pages_end_to_end() {
     // What the node must serve: exactly the renderer output over the same
     // fixture directory.
     let posts = load_posts_dir(posts_dir.path()).expect("load fixture posts");
-    let expected_index = render_index_micron(&posts).into_bytes();
+    let expected_index = render_index_micron(&fixture_meta(), &posts).into_bytes();
     let small = posts
         .iter()
         .find(|p| p.slug == "second")
         .expect("second fixture post");
-    let expected_small = render_post_micron(small).into_bytes();
+    let expected_small = render_post_micron(&fixture_meta(), small).into_bytes();
     let large = posts
         .iter()
         .find(|p| p.slug == "large")
         .expect("large fixture post");
-    let expected_large = render_post_micron(large).into_bytes();
+    let expected_large = render_post_micron(&fixture_meta(), large).into_bytes();
     assert!(
         expected_large.len() > 262_144,
         "large post must exceed the max link MDU to force the resource path (got {})",
@@ -196,7 +197,7 @@ async fn blog_node_serves_pages_end_to_end() {
         .expect("fetch post added by reload");
     assert_eq!(
         page,
-        render_post_micron(third).into_bytes(),
+        render_post_micron(&fixture_meta(), third).into_bytes(),
         "a post added by reload must be served byte-exactly"
     );
 
@@ -207,7 +208,7 @@ async fn blog_node_serves_pages_end_to_end() {
         .expect("fetch reloaded index");
     assert_eq!(
         page,
-        render_index_micron(&reloaded).into_bytes(),
+        render_index_micron(&fixture_meta(), &reloaded).into_bytes(),
         "the index must reflect the reloaded post set"
     );
 
@@ -223,4 +224,13 @@ async fn blog_node_serves_pages_end_to_end() {
     session.close().await.expect("close session");
     blog_task.abort();
     daemon.stop().await.expect("stop daemon");
+}
+
+/// Blog metadata for this fixture: identity is not what the test is about.
+fn fixture_meta() -> BlogMeta {
+    BlogMeta {
+        title: "lblogd test blog".to_string(),
+        language: "en".to_string(),
+        ..BlogMeta::default()
+    }
 }

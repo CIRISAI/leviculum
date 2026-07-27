@@ -48,6 +48,37 @@ use crate::post::Post;
 /// clamp here.
 const MAX_MICRON_HEADING_DEPTH: usize = 3;
 
+/// What a reader learns about the blog itself, independent of any one post.
+///
+/// Assembled once from the config and the resolved destination, then rendered
+/// into every page on both sides. Optional fields are simply omitted when
+/// absent rather than rendered empty, so a minimal configuration produces a
+/// clean page rather than a page with blanks in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlogMeta {
+    /// The blog's name; the heading of every page.
+    pub title: String,
+    /// Who writes it, shown unless a post names its own author.
+    pub author: Option<String>,
+    /// One sentence on what this is.
+    pub description: Option<String>,
+    /// BCP 47 language tag for the HTML `lang` attribute.
+    pub language: String,
+    /// The blog's clearnet URL, shown on the NomadNet side so mesh readers
+    /// can find the web version.
+    pub web_url: Option<String>,
+    /// The blog's NomadNet destination hash, shown on the web side so
+    /// clearnet readers can find the mesh version.
+    pub nomadnet_address: Option<String>,
+}
+
+impl BlogMeta {
+    /// The author to credit for `post`: its own, else the blog's.
+    fn author_of<'a>(&'a self, post: &'a Post) -> Option<&'a str> {
+        post.author.as_deref().or(self.author.as_deref())
+    }
+}
+
 /// The micron background colour used to set off inline code (12-bit form).
 const INLINE_CODE_BG: &str = "333";
 
@@ -59,10 +90,50 @@ fn markdown_options() -> Options {
 
 /// Render a Markdown fragment to an HTML fragment (no surrounding document).
 pub fn markdown_to_html(md: &str) -> String {
-    let parser = Parser::new_ext(md, markdown_options());
+    let parser = Parser::new_ext(md, markdown_options()).map(demote_heading);
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
+}
+
+/// Push a Markdown heading down one level.
+///
+/// The page template already gives the post its `<h1>`, so a `# Heading` in
+/// the body would produce a second one and leave the document with two
+/// competing top-level headings. Demoting means an author can write `#` for
+/// their first section, as Markdown habit dictates, and still get a correctly
+/// nested document.
+///
+/// Both the start and the end event carry the level, and moving only one of
+/// them emits mismatched tags like `<h2>Text</h1>`.
+fn demote_heading(event: Event<'_>) -> Event<'_> {
+    match event {
+        Event::Start(Tag::Heading {
+            level,
+            id,
+            classes,
+            attrs,
+        }) => Event::Start(Tag::Heading {
+            level: one_level_down(level),
+            id,
+            classes,
+            attrs,
+        }),
+        Event::End(TagEnd::Heading(level)) => Event::End(TagEnd::Heading(one_level_down(level))),
+        other => other,
+    }
+}
+
+/// The next heading level down; `h6` has nowhere to go and stays put.
+fn one_level_down(level: pulldown_cmark::HeadingLevel) -> pulldown_cmark::HeadingLevel {
+    use pulldown_cmark::HeadingLevel::*;
+    match level {
+        H1 => H2,
+        H2 => H3,
+        H3 => H4,
+        H4 => H5,
+        H5 | H6 => H6,
+    }
 }
 
 /// Escape text for inclusion in HTML element content or attribute values.
@@ -81,55 +152,119 @@ fn escape_html(s: &str) -> String {
     out
 }
 
-/// The shared minimal inline stylesheet. Theme-neutral and readable.
-const STYLE: &str = "\
+/// The built-in stylesheet, used when the operator configures none. Minimal,
+/// theme-neutral and readable.
+pub const DEFAULT_STYLE: &str = "\
 body{margin:0 auto;max-width:42rem;padding:1rem;font-family:system-ui,sans-serif;\
 line-height:1.6;color:#222;background:#fdfdfd}\
 h1,h2,h3{line-height:1.25}\
 code,pre{font-family:ui-monospace,monospace;background:#eee}\
 pre{padding:.75rem;overflow-x:auto}\
 a{color:#1a5fb4}\
-.date{color:#666;font-size:.9rem}\
+.tagline{color:#444}\
+.byline,.date{color:#666;font-size:.9rem}\
 ul.posts{list-style:none;padding:0}\
-ul.posts li{margin:.5rem 0}";
+ul.posts li{margin:.5rem 0}\
+footer{margin-top:3rem;border-top:1px solid #ddd;padding-top:1rem;\
+color:#666;font-size:.9rem}\
+footer code{background:none}";
 
-/// Wrap `body` in a complete minimal HTML document titled `title`.
-fn html_document(title: &str, body: &str) -> String {
+/// Wrap `body` in a complete HTML document.
+///
+/// `title` is the browser-tab title, which is the post title on a post page
+/// and the blog title on the index; `css` is inlined rather than linked so a
+/// page is always styled by the stylesheet it was rendered with.
+fn html_document(meta: &BlogMeta, css: &str, title: &str, body: &str) -> String {
+    let description = match &meta.description {
+        Some(d) => format!(
+            "<meta name=\"description\" content=\"{}\">\n",
+            escape_html(d)
+        ),
+        None => String::new(),
+    };
     format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+        "<!doctype html>\n<html lang=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
+         {}<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
+        escape_html(&meta.language),
+        description,
         escape_html(title),
-        STYLE,
+        css,
         body
     )
 }
 
-/// Render the post index as a complete HTML document. Posts link to
-/// `/posts/<slug>` (the HTTP route shape; wired up in a later batch).
-pub fn render_index_html(posts: &[Post]) -> String {
-    let mut body = String::from("<h1>Posts</h1>\n<ul class=\"posts\">\n");
-    for post in posts {
+/// The footer shown on every HTML page: where to find the blog on the mesh.
+///
+/// A reader on the clearnet side has no way to discover the NomadNet
+/// destination otherwise, and it is the more interesting half of this blog.
+fn html_footer(meta: &BlogMeta) -> String {
+    match &meta.nomadnet_address {
+        Some(address) => format!(
+            "\n<footer>\nAlso on NomadNet over Reticulum: <code>{}</code>\n</footer>",
+            escape_html(address)
+        ),
+        None => String::new(),
+    }
+}
+
+/// Render the post index as a complete HTML document: who this is, what it
+/// is about, and the posts. Posts link to `/posts/<slug>`.
+pub fn render_index_html(meta: &BlogMeta, css: &str, posts: &[Post]) -> String {
+    let mut body = format!("<h1>{}</h1>\n", escape_html(&meta.title));
+    if let Some(author) = &meta.author {
         body.push_str(&format!(
-            "<li><span class=\"date\">{}</span> <a href=\"/posts/{}\">{}</a></li>\n",
+            "<p class=\"byline\">by {}</p>\n",
+            escape_html(author)
+        ));
+    }
+    if let Some(description) = &meta.description {
+        body.push_str(&format!(
+            "<p class=\"tagline\">{}</p>\n",
+            escape_html(description)
+        ));
+    }
+
+    body.push_str("<ul class=\"posts\">\n");
+    for post in posts {
+        // Only name an author who differs from the blog's: repeating the same
+        // name on every line is noise, a guest post is information.
+        let byline = match &post.author {
+            Some(author) if Some(author.as_str()) != meta.author.as_deref() => {
+                format!(" <span class=\"byline\">by {}</span>", escape_html(author))
+            }
+            _ => String::new(),
+        };
+        body.push_str(&format!(
+            "<li><span class=\"date\">{}</span> <a href=\"/posts/{}\">{}</a>{}</li>\n",
             post.date,
             escape_html(&post.slug),
-            escape_html(&post.title)
+            escape_html(&post.title),
+            byline
         ));
     }
     body.push_str("</ul>");
-    html_document("Posts", &body)
+    body.push_str(&html_footer(meta));
+    html_document(meta, css, &meta.title, &body)
 }
 
-/// Render one post as a complete HTML document.
-pub fn render_post_html(post: &Post) -> String {
+/// Render one post as a complete HTML document, with a way back to the index.
+pub fn render_post_html(meta: &BlogMeta, css: &str, post: &Post) -> String {
+    let byline = match meta.author_of(post) {
+        Some(author) => format!(" &middot; {}", escape_html(author)),
+        None => String::new(),
+    };
     let body = format!(
-        "<article>\n<h1>{}</h1>\n<p class=\"date\">{}</p>\n{}</article>",
+        "<article>\n<h1>{}</h1>\n<p class=\"date\">{}{}</p>\n{}</article>\n\
+         <p><a href=\"/\">&larr; {}</a></p>{}",
         escape_html(&post.title),
         post.date,
-        markdown_to_html(&post.body_md)
+        byline,
+        markdown_to_html(&post.body_md),
+        escape_html(&meta.title),
+        html_footer(meta)
     );
-    html_document(&post.title, &body)
+    html_document(meta, css, &post.title, &body)
 }
 
 /// Convert a Markdown fragment to valid micron markup. See the module docs
@@ -143,29 +278,66 @@ pub fn markdown_to_micron(md: &str) -> String {
     writer.finish()
 }
 
-/// Render the post index as a micron page: a heading plus one link per post
-/// targeting the local page `:/page/<slug>.mu` (NomadNet's same-node link
-/// form, as resolved by lnomad and NomadNet).
-pub fn render_index_micron(posts: &[Post]) -> String {
-    let mut out = String::from(">Posts\n\n");
+/// Render the post index as a micron page: the blog's identity, then one link
+/// per post targeting the local page `:/page/<slug>.mu` (NomadNet's same-node
+/// link form, as resolved by lnomad and NomadNet).
+pub fn render_index_micron(meta: &BlogMeta, posts: &[Post]) -> String {
+    let mut out = format!(">{}\n\n", escape_micron_text(&meta.title));
+    if let Some(author) = &meta.author {
+        out.push_str(&format!("by {}\n", escape_micron_text(author)));
+    }
+    if let Some(description) = &meta.description {
+        out.push_str(&format!("{}\n", escape_micron_text(description)));
+    }
+    if meta.author.is_some() || meta.description.is_some() {
+        out.push('\n');
+    }
+
     for post in posts {
+        // Same rule as HTML: name an author only where it differs.
+        let byline = match &post.author {
+            Some(author) if Some(author.as_str()) != meta.author.as_deref() => {
+                format!(" by {author}")
+            }
+            _ => String::new(),
+        };
         out.push_str(&format!(
             "`[{}`:/page/{}.mu]\n",
-            sanitize_link_part(&format!("{} {}", post.date, post.title)),
+            sanitize_link_part(&format!("{} {}{}", post.date, post.title, byline)),
             sanitize_link_part(&post.slug)
         ));
     }
+    out.push_str(&micron_footer(meta));
     out
 }
 
-/// Render one post as a micron page: title heading, date line, divider, body.
-pub fn render_post_micron(post: &Post) -> String {
+/// Render one post as a micron page: title heading, date and author line,
+/// divider, body, and a link back to the index.
+pub fn render_post_micron(meta: &BlogMeta, post: &Post) -> String {
+    let byline = match meta.author_of(post) {
+        Some(author) => format!(" \u{b7} {}", escape_micron_text(author)),
+        None => String::new(),
+    };
     format!(
-        ">{}\n\n{}\n-\n\n{}",
+        ">{}\n\n{}{}\n-\n\n{}\n\n`[\u{2190} {}`:/page/index.mu]\n{}",
         escape_micron_text(&post.title),
         post.date,
-        markdown_to_micron(&post.body_md)
+        byline,
+        markdown_to_micron(&post.body_md),
+        sanitize_link_part(&meta.title),
+        micron_footer(meta)
     )
+}
+
+/// The footer shown on every micron page: where to find the blog on the web.
+///
+/// The mirror of [`html_footer`]; a mesh reader who wants to share the blog
+/// with someone off-mesh needs the clearnet URL.
+fn micron_footer(meta: &BlogMeta) -> String {
+    match &meta.web_url {
+        Some(url) => format!("\n-\n\nAlso on the web: {}\n", escape_micron_text(url)),
+        None => String::new(),
+    }
 }
 
 /// Escape plain text so micron's inline parser reads it verbatim: `\` and
@@ -252,7 +424,11 @@ impl MicronWriter {
             Tag::Paragraph => {}
             Tag::Heading { level, .. } => {
                 self.block_sep();
-                let depth = (level as usize).min(MAX_MICRON_HEADING_DEPTH);
+                // Demoted for the same reason as on the HTML side: the page
+                // template already used `>` for the post title, so a body
+                // heading starts one level in. Micron has only three levels,
+                // so this also means `>` is reserved for the title alone.
+                let depth = (level as usize + 1).min(MAX_MICRON_HEADING_DEPTH);
                 self.push_raw(&">".repeat(depth));
             }
             Tag::BlockQuote(_) => {

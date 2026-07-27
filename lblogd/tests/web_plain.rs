@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use lblogd::content::{Reloader, SnapshotRx};
+use lblogd::render::BlogMeta;
 use lblogd::web::{run_web, AcmeSettings, WebConfig, WebError};
 
 /// Grab a currently-free localhost TCP port by binding and immediately dropping.
@@ -81,7 +82,8 @@ async fn serve_plain(content: SnapshotRx) -> SocketAddr {
 async fn plain_http_serves_the_blog_without_acme() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
-    let (_reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
+    let (_reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
     let bind = serve_plain(content).await;
 
     let index = http_get(bind, "/").await;
@@ -106,7 +108,8 @@ async fn a_reload_reaches_the_running_listener() {
     // needs no restart: same socket, new content.
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
-    let (reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
+    let (reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
     let bind = serve_plain(content).await;
 
     assert!(
@@ -146,7 +149,8 @@ async fn a_failed_reload_keeps_the_server_serving() {
     // A typo in a post must not take a running blog offline.
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
-    let (reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
+    let (reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
     let bind = serve_plain(content).await;
 
     std::fs::write(
@@ -171,7 +175,8 @@ async fn acme_mode_still_requires_domains() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let cache_dir = tempfile::tempdir().expect("acme cache dir");
-    let (_reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
+    let (_reloader, content) =
+        Reloader::new(fixture_meta(), posts_dir.path(), None).expect("initial load");
 
     let err = run_web(
         WebConfig {
@@ -189,4 +194,13 @@ async fn acme_mode_still_requires_domains() {
     .await
     .expect_err("empty domains must be rejected");
     assert!(matches!(err, WebError::NoDomains), "{err}");
+}
+
+/// Blog metadata for these fixtures.
+fn fixture_meta() -> BlogMeta {
+    BlogMeta {
+        title: "Test Blog".to_string(),
+        language: "en".to_string(),
+        ..BlogMeta::default()
+    }
 }

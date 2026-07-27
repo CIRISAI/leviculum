@@ -50,7 +50,8 @@ async fn run(args: Args) -> Result<(), MainError> {
 /// is restarted.
 fn print_hash(config: &Config) -> Result<(), MainError> {
     let hash = node::resolve_destination_hash(&config.data_dir)?;
-    let snapshot = load_snapshot(&config.posts_dir)?;
+    let meta = config.blog_meta(Some(hash.to_string()));
+    let snapshot = load_snapshot(&meta, &config.posts_dir, config.blog.css.as_deref())?;
     println!("{hash}");
     for path in snapshot.served_paths() {
         println!("{path}");
@@ -61,9 +62,15 @@ fn print_hash(config: &Config) -> Result<(), MainError> {
 /// Start the NomadNet node, then run it and the web server concurrently over
 /// one shared content snapshot, with SIGHUP reloading it.
 async fn serve(config: &Config) -> Result<(), MainError> {
+    // Resolved before the node starts, so the web pages can name the address
+    // the blog answers on. It comes from the persistent identity, so it is
+    // the same hash the node goes on to announce.
+    let address = node::resolve_destination_hash(&config.data_dir)?.to_string();
+    let meta = config.blog_meta(Some(address));
+
     // A failure here is fatal: at startup there is no previous good state to
     // fall back on. Once running, a failed reload is not (see reload_task).
-    let (reloader, content) = Reloader::new(&config.posts_dir)?;
+    let (reloader, content) = Reloader::new(meta, &config.posts_dir, config.blog.css.as_deref())?;
     let reloader = Arc::new(reloader);
 
     // Established before anything else starts, and synchronously: a broken
@@ -76,7 +83,10 @@ async fn serve(config: &Config) -> Result<(), MainError> {
                 "lblogd: watching {} for changes",
                 config.posts_dir.display()
             );
-            Some(watcher::PostsWatcher::start(&config.posts_dir)?)
+            Some(watcher::PostsWatcher::start(
+                &config.posts_dir,
+                config.blog.css.as_deref(),
+            )?)
         }
         false => None,
     };

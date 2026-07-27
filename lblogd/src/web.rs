@@ -116,13 +116,17 @@ async fn index_page(State(content): State<SnapshotRx>) -> Html<String> {
     // Clone the Arc out of the watch borrow immediately: the borrow holds a
     // read lock, and holding one across rendering would block reloads.
     let snapshot = content.borrow().clone();
-    Html(render_index_html(&snapshot.posts))
+    Html(render_index_html(
+        &snapshot.meta,
+        &snapshot.css,
+        &snapshot.posts,
+    ))
 }
 
 async fn post_page(State(content): State<SnapshotRx>, UrlPath(slug): UrlPath<String>) -> Response {
     let snapshot = content.borrow().clone();
     match snapshot.posts.iter().find(|p| p.slug == slug) {
-        Some(post) => Html(render_post_html(post)).into_response(),
+        Some(post) => Html(render_post_html(&snapshot.meta, &snapshot.css, post)).into_response(),
         None => not_found(),
     }
 }
@@ -269,18 +273,29 @@ mod tests {
 
     use crate::content::Snapshot;
     use crate::post::Post;
+    use crate::render::BlogMeta;
+
+    fn test_meta() -> BlogMeta {
+        BlogMeta {
+            title: "Test Blog".to_string(),
+            language: "en".to_string(),
+            ..BlogMeta::default()
+        }
+    }
 
     fn sample_posts() -> Vec<Post> {
         vec![
             Post {
                 title: "Hello World".to_string(),
                 date: "2026-07-02".parse().unwrap(),
+                author: None,
                 slug: "hello-world".to_string(),
                 body_md: "First **post** body.".to_string(),
             },
             Post {
                 title: "Older Post".to_string(),
                 date: "2026-06-30".parse().unwrap(),
+                author: None,
                 slug: "older-post".to_string(),
                 body_md: "Nothing to see.".to_string(),
             },
@@ -290,8 +305,10 @@ mod tests {
     /// A router over a fixed snapshot, plus the sender that can replace it.
     fn router_over(posts: Vec<Post>) -> (Router, watch::Sender<Arc<Snapshot>>) {
         let snapshot = Arc::new(Snapshot {
+            meta: test_meta(),
             posts,
             pages: Default::default(),
+            css: String::new(),
         });
         let (tx, rx) = watch::channel(snapshot);
         (build_router(rx), tx)
@@ -352,12 +369,15 @@ mod tests {
         posts.push(Post {
             title: "Fresh Post".to_string(),
             date: "2026-07-27".parse().unwrap(),
+            author: None,
             slug: "fresh-post".to_string(),
             body_md: "Brand new.".to_string(),
         });
         tx.send(Arc::new(Snapshot {
+            meta: test_meta(),
             posts,
             pages: Default::default(),
+            css: String::new(),
         }))
         .unwrap();
 

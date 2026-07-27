@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lblogd::content::{Reloader, SnapshotRx};
+use lblogd::render::BlogMeta;
 use lblogd::watcher::PostsWatcher;
 
 /// Generous upper bound: the watcher must settle for QUIET_PERIOD (500 ms)
@@ -26,8 +27,8 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// afterwards is queued rather than lost to the runtime not having polled the
 /// task yet.
 fn spawn_watcher(posts_dir: &Path) -> SnapshotRx {
-    let (reloader, content) = Reloader::new(posts_dir).expect("initial load");
-    let watcher = PostsWatcher::start(posts_dir).expect("establish watch");
+    let (reloader, content) = Reloader::new(fixture_meta(), posts_dir, None).expect("initial load");
+    let watcher = PostsWatcher::start(posts_dir, None).expect("establish watch");
     tokio::spawn(watcher.run(Arc::new(reloader)));
     content
 }
@@ -153,4 +154,13 @@ async fn an_edit_is_picked_up_and_a_broken_edit_is_not_fatal() {
         paths.iter().any(|p| p == "/page/wieder-gut.mu")
     })
     .await;
+}
+
+/// Blog metadata for these fixtures.
+fn fixture_meta() -> BlogMeta {
+    BlogMeta {
+        title: "Test Blog".to_string(),
+        language: "en".to_string(),
+        ..BlogMeta::default()
+    }
 }

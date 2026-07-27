@@ -41,6 +41,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::node::BlogNodeConfig;
+use crate::render::BlogMeta;
 use crate::web::{AcmeSettings, WebConfig};
 
 /// Errors from loading the config file.
@@ -92,10 +93,61 @@ pub struct Config {
     /// is what a development config wants.
     #[serde(default)]
     pub watch_posts: bool,
+    /// Blog identity: what a reader sees on every page, on both sides.
+    #[serde(default)]
+    pub blog: BlogSection,
     /// NomadNet node settings.
     pub node: NodeSection,
     /// Web server settings.
     pub web: WebSection,
+}
+
+/// The `[blog]` section: the things a reader needs to know about the blog
+/// itself, as opposed to the machinery serving it.
+///
+/// Every field is optional and the whole section may be left out, in which
+/// case the title falls back to `[node] display_name` and the rest is simply
+/// not rendered. That keeps configurations written before this section
+/// existed working unchanged.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BlogSection {
+    /// The blog's name, shown as the heading of every page. Defaults to
+    /// `[node] display_name`.
+    pub title: Option<String>,
+    /// Who writes it. Shown under the title and on each post, unless a post
+    /// names its own author.
+    pub author: Option<String>,
+    /// One sentence on what the blog is about, shown under the title and used
+    /// as the HTML meta description.
+    pub description: Option<String>,
+    /// BCP 47 language tag for the HTML `lang` attribute, e.g. `de`. Wrong
+    /// values mislead screen readers and translation offers, so this defaults
+    /// to English only because something has to be emitted.
+    #[serde(default = "default_language")]
+    pub language: String,
+    /// A stylesheet to use instead of the built-in one. Read at startup and
+    /// on every reload, and inlined into each page.
+    pub css: Option<PathBuf>,
+}
+
+fn default_language() -> String {
+    "en".to_string()
+}
+
+/// Hand-written rather than derived so that an omitted `[blog]` section gets
+/// the same language default as an empty one; `#[derive(Default)]` would
+/// leave the tag blank and emit `lang=""`.
+impl Default for BlogSection {
+    fn default() -> BlogSection {
+        BlogSection {
+            title: None,
+            author: None,
+            description: None,
+            language: default_language(),
+            css: None,
+        }
+    }
 }
 
 /// The `[node]` section.
@@ -105,8 +157,10 @@ pub struct NodeSection {
     /// Shared instance name of the running `lnsd` daemon; must match the
     /// daemon's `instance_name`.
     pub instance_name: String,
-    /// Display name announced over Reticulum.
-    pub display_name: String,
+    /// Display name announced over Reticulum. Defaults to `[blog] title`,
+    /// since the name a reader sees and the name the mesh sees are normally
+    /// the same; set it only when they should differ.
+    pub display_name: Option<String>,
     /// Re-announce cadence in seconds; defaults to
     /// [`BlogNodeConfig::default_announce_interval`].
     pub announce_interval_secs: Option<u64>,
@@ -176,13 +230,20 @@ impl Config {
     /// three certificate fields are mandatory. Without it they are ignored,
     /// so their absence is not an error.
     fn validate(&self, path: &Path) -> Result<(), ConfigError> {
-        if !self.web.acme {
-            return Ok(());
-        }
         let invalid = |message: &str| ConfigError::Invalid {
             path: path.display().to_string(),
             message: message.to_string(),
         };
+        // The two names default to each other, so at least one has to exist:
+        // the blog needs a heading and the announce needs an app_data.
+        if self.blog.title.is_none() && self.node.display_name.is_none() {
+            return Err(invalid(
+                "set blog.title (or node.display_name): the blog needs a name",
+            ));
+        }
+        if !self.web.acme {
+            return Ok(());
+        }
         if self.web.domains.is_empty() {
             return Err(invalid(
                 "web.domains must list at least one domain when web.acme is true",
@@ -202,12 +263,49 @@ impl Config {
         Ok(())
     }
 
+    /// The blog's name: `[blog] title`, else `[node] display_name`.
+    ///
+    /// `validate` guarantees one of them is set, so the fallback is never the
+    /// empty string for a config that came through [`Config::load`].
+    pub fn blog_title(&self) -> String {
+        self.blog
+            .title
+            .clone()
+            .or_else(|| self.node.display_name.clone())
+            .unwrap_or_default()
+    }
+
+    /// What every page says about the blog.
+    ///
+    /// `nomadnet_address` is the destination hash, which the caller resolves
+    /// from the persistent identity; passing it in rather than deriving it
+    /// here keeps this free of filesystem access.
+    pub fn blog_meta(&self, nomadnet_address: Option<String>) -> BlogMeta {
+        BlogMeta {
+            title: self.blog_title(),
+            author: self.blog.author.clone(),
+            description: self.blog.description.clone(),
+            language: self.blog.language.clone(),
+            // The first certificate domain is the blog's canonical name, and
+            // in a plaintext development run there is no public URL to give.
+            web_url: match self.web.acme {
+                true => self.web.domains.first().map(|d| format!("https://{d}")),
+                false => None,
+            },
+            nomadnet_address,
+        }
+    }
+
     /// The NomadNet node config this file describes.
     pub fn blog_node_config(&self) -> BlogNodeConfig {
         BlogNodeConfig {
             instance_name: self.node.instance_name.clone(),
             data_dir: self.data_dir.clone(),
-            display_name: self.node.display_name.clone(),
+            display_name: self
+                .node
+                .display_name
+                .clone()
+                .unwrap_or_else(|| self.blog_title()),
             announce_interval: self
                 .node
                 .announce_interval_secs
@@ -286,7 +384,10 @@ mod tests {
         assert_eq!(config.data_dir, PathBuf::from("/var/lib/lblogd"));
         assert_eq!(config.posts_dir, PathBuf::from("/var/lib/lblogd/posts"));
         assert_eq!(config.node.instance_name, "leviculum");
-        assert_eq!(config.node.display_name, "leviculum.network dev blog");
+        assert_eq!(
+            config.node.display_name.as_deref(),
+            Some("leviculum.network dev blog")
+        );
         assert_eq!(config.node.announce_interval_secs, Some(3600));
         assert_eq!(
             config.web.domains,
@@ -299,6 +400,85 @@ mod tests {
         assert_eq!(config.web.acme_staging, Some(true));
         assert_eq!(config.web.http_bind, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.web.https_bind, "127.0.0.1:8443".parse().unwrap());
+    }
+
+    #[test]
+    fn the_blog_section_may_be_omitted_entirely() {
+        // SAMPLE predates the section, which is exactly the case that has to
+        // keep working.
+        assert!(!SAMPLE.contains("[blog]"));
+        let config = load_from_str(SAMPLE).unwrap();
+        assert_eq!(config.blog_title(), "leviculum.network dev blog");
+        assert_eq!(config.blog.language, "en", "a blank lang= would be wrong");
+        let meta = config.blog_meta(None);
+        assert_eq!(meta.author, None);
+        assert_eq!(meta.description, None);
+    }
+
+    #[test]
+    fn the_two_names_default_to_each_other() {
+        // Only a blog title: the announce uses it too.
+        let sample = SAMPLE.replace(
+            "display_name           = \"leviculum.network dev blog\"",
+            "",
+        ) + "\n[blog]\ntitle = \"Just the Blog\"\n";
+        let config = load_from_str(&sample).unwrap();
+        assert_eq!(config.blog_title(), "Just the Blog");
+        assert_eq!(config.blog_node_config().display_name, "Just the Blog");
+
+        // Only a display name: the pages use it as the heading.
+        let config = load_from_str(SAMPLE).unwrap();
+        assert_eq!(config.blog_title(), "leviculum.network dev blog");
+
+        // Both: each keeps its own, which is the point of allowing both.
+        let sample = format!("{SAMPLE}\n[blog]\ntitle = \"Reader Facing\"\n");
+        let config = load_from_str(&sample).unwrap();
+        assert_eq!(config.blog_title(), "Reader Facing");
+        assert_eq!(
+            config.blog_node_config().display_name,
+            "leviculum.network dev blog"
+        );
+    }
+
+    #[test]
+    fn a_blog_with_no_name_at_all_is_invalid() {
+        let sample = SAMPLE.replace(
+            "display_name           = \"leviculum.network dev blog\"",
+            "",
+        );
+        let err = load_from_str(&sample).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }), "{err}");
+        assert!(err.to_string().contains("blog.title"), "{err}");
+    }
+
+    #[test]
+    fn blog_meta_carries_the_reader_facing_fields() {
+        let sample = format!(
+            "{SAMPLE}\n[blog]\ntitle = \"Reader Facing\"\nauthor = \"Someone\"\n\
+             description = \"About things\"\nlanguage = \"de\"\n"
+        );
+        let meta = load_from_str(&sample)
+            .unwrap()
+            .blog_meta(Some("abc123".to_string()));
+        assert_eq!(meta.title, "Reader Facing");
+        assert_eq!(meta.author.as_deref(), Some("Someone"));
+        assert_eq!(meta.description.as_deref(), Some("About things"));
+        assert_eq!(meta.language, "de");
+        assert_eq!(meta.nomadnet_address.as_deref(), Some("abc123"));
+        // The first certificate domain is the canonical public URL.
+        assert_eq!(
+            meta.web_url.as_deref(),
+            Some("https://leviculum.network"),
+            "the micron side needs somewhere to point"
+        );
+    }
+
+    #[test]
+    fn a_plaintext_run_advertises_no_web_url() {
+        // Without ACME there is no public name to give out; a link to the
+        // development bind address would be worse than none.
+        let meta = load_from_str(DEV_SAMPLE).unwrap().blog_meta(None);
+        assert_eq!(meta.web_url, None);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! +++
 //! title = "Hello"       # optional, defaults to the file name without .md
 //! date = "2026-07-12"   # optional, defaults to the file's mtime (UTC)
+//! author = "Someone"    # optional, defaults to the blog's author
 //! slug = "hello"        # optional, defaults to slugify(title)
 //! +++
 //!
@@ -168,6 +169,9 @@ pub struct Post {
     pub title: String,
     /// The publication date from the frontmatter.
     pub date: Date,
+    /// Who wrote this one, when it is not the blog's author. `None` means
+    /// the blog's author is credited.
+    pub author: Option<String>,
     /// The URL slug: the explicit frontmatter `slug`, else `slugify(title)`.
     pub slug: String,
     /// The Markdown body (everything after the closing `+++` line).
@@ -181,6 +185,7 @@ pub struct Post {
 struct RawFrontmatter {
     title: Option<String>,
     date: Option<String>,
+    author: Option<String>,
     slug: Option<String>,
 }
 
@@ -259,6 +264,7 @@ pub fn parse_post(source: &str, defaults: &PostDefaults) -> Result<Post, PostErr
     Ok(Post {
         title,
         date,
+        author: raw.author.filter(|a| !a.trim().is_empty()),
         slug,
         body_md,
     })

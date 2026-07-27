@@ -13,7 +13,7 @@
 //! for the directory to go quiet for [`QUIET_PERIOD`] and then reloads once,
 //! however many events the burst contained.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,30 +67,52 @@ pub struct PostsWatcher {
 }
 
 impl PostsWatcher {
-    /// Establish the watch on `posts_dir`. Changes are recorded from here on.
-    pub fn start(posts_dir: &Path) -> Result<PostsWatcher, WatchError> {
+    /// Establish the watch on `posts_dir` and, if configured, on the
+    /// stylesheet. Changes are recorded from here on.
+    ///
+    /// The stylesheet is watched through its parent directory rather than
+    /// directly: an inotify watch follows the inode, and editors that save by
+    /// writing a temporary file and renaming it over the target would leave a
+    /// direct watch pointing at the replaced file. Watching the directory and
+    /// filtering by path survives that. It does mean events for the
+    /// stylesheet's neighbours arrive too, which [`is_relevant`] discards.
+    pub fn start(posts_dir: &Path, css: Option<&Path>) -> Result<PostsWatcher, WatchError> {
         let (tx, rx) = mpsc::channel(EVENT_QUEUE);
-        let watch_err = |source| WatchError::Watch {
-            path: posts_dir.display().to_string(),
-            source,
+        let watch_err = |path: &Path| {
+            let path = path.display().to_string();
+            move |source| WatchError::Watch {
+                path: path.clone(),
+                source,
+            }
         };
 
+        let targets = Targets {
+            posts_dir: posts_dir.to_path_buf(),
+            css: css.map(Path::to_path_buf),
+        };
         let mut watcher: RecommendedWatcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                // Which file changed is irrelevant, because the reload
-                // re-reads the whole directory; only whether it was a change
-                // at all matters. try_send drops when the queue is full,
-                // which is correct: a reload is already pending.
-                if event.is_ok_and(|e| is_content_change(&e.kind)) {
+                // Which file changed matters only insofar as it has to be one
+                // of ours; the reload re-reads everything either way.
+                // try_send drops when the queue is full, which is correct: a
+                // reload is already pending.
+                if event.is_ok_and(|e| is_content_change(&e.kind) && targets.is_relevant(&e.paths))
+                {
                     let _ = tx.try_send(());
                 }
             })
-            .map_err(watch_err)?;
+            .map_err(watch_err(posts_dir))?;
+
         // The posts directory is flat (load_posts_dir reads its top level
         // only), so there is nothing below it worth watching.
         watcher
             .watch(posts_dir, RecursiveMode::NonRecursive)
-            .map_err(watch_err)?;
+            .map_err(watch_err(posts_dir))?;
+        if let Some(dir) = css.and_then(Path::parent).filter(|d| d != &posts_dir) {
+            watcher
+                .watch(dir, RecursiveMode::NonRecursive)
+                .map_err(watch_err(dir))?;
+        }
 
         Ok(PostsWatcher {
             events: rx,
@@ -110,6 +132,31 @@ impl PostsWatcher {
             }
         })
         .await;
+    }
+}
+
+/// What this watcher considers its own, used to discard events for unrelated
+/// neighbours of the stylesheet.
+struct Targets {
+    posts_dir: PathBuf,
+    css: Option<PathBuf>,
+}
+
+impl Targets {
+    /// Whether any of an event's paths is content we serve.
+    ///
+    /// A path counts when it sits directly in the posts directory or is the
+    /// stylesheet itself. Watching the stylesheet's directory means events
+    /// arrive for every file beside it, and a config file being edited next
+    /// to it is no reason to re-render the blog.
+    fn is_relevant(&self, paths: &[PathBuf]) -> bool {
+        // An event with no paths carries no way to rule it out, and dropping
+        // it could lose a change; reloading spuriously only costs a read.
+        paths.is_empty()
+            || paths.iter().any(|path| {
+                path.parent() == Some(self.posts_dir.as_path())
+                    || self.css.as_deref() == Some(path.as_path())
+            })
     }
 }
 
@@ -264,7 +311,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn no_events_never_reloads() {
-        let fired = fire_count(|tx| drop(tx)).await;
+        let fired = fire_count(drop).await;
         assert_eq!(fired, 0, "an idle directory must not reload");
     }
 }
