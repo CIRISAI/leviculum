@@ -707,6 +707,7 @@ pub struct TransportStats {
     pub(crate) drops_lrproof_invalid: u64,
     pub(crate) drops_forward_max_hops: u64,
     pub(crate) drops_blackholed_announce: u64,
+    pub(crate) drops_same_interface_relay: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -750,6 +751,12 @@ pub enum DropReason {
     /// truncated_hash(public_key)` is matched directly against the blackhole set;
     /// mirrors Python's drop in `Identity.validate_announce` (Identity.py:574-577).
     BlackholedAnnounce,
+    /// Relay suppressed because the packet's only outbound interface is the one
+    /// it arrived on — a shared medium, where forwarding would put the packet
+    /// back on the air the sender is already using. Deliberate and correct (see
+    /// `Transport::forward_on_interface_from`), but it is still where the packet
+    /// dies, so the journey contract has to say so.
+    SameInterfaceRelay,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -808,11 +815,12 @@ impl DropReason {
             DropReason::LrproofInvalid => "lrproof-invalid",
             DropReason::ForwardMaxHops => "forward-max-hops",
             DropReason::BlackholedAnnounce => "blackholed-announce",
+            DropReason::SameInterfaceRelay => "same-interface-relay",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 13] = [
+    pub const ALL: [DropReason; 14] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -826,6 +834,7 @@ impl DropReason {
         DropReason::LrproofInvalid,
         DropReason::ForwardMaxHops,
         DropReason::BlackholedAnnounce,
+        DropReason::SameInterfaceRelay,
     ];
 }
 
@@ -926,6 +935,12 @@ impl TransportStats {
         self.drops_blackholed_announce
     }
 
+    /// Relays suppressed because the only outbound interface was the receiving
+    /// one (shared medium).
+    pub fn drops_same_interface_relay(&self) -> u64 {
+        self.drops_same_interface_relay
+    }
+
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
     /// by construction (see `record_drop`).
     pub fn drops_reason_sum(&self) -> u64 {
@@ -942,6 +957,7 @@ impl TransportStats {
             + self.drops_lrproof_invalid
             + self.drops_forward_max_hops
             + self.drops_blackholed_announce
+            + self.drops_same_interface_relay
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -966,6 +982,7 @@ impl TransportStats {
             DropReason::LrproofInvalid => self.drops_lrproof_invalid += 1,
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
+            DropReason::SameInterfaceRelay => self.drops_same_interface_relay += 1,
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -2284,6 +2301,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 ingress_burst_announce = self.stats.drops_ingress_burst_announce,
                 lrproof_invalid = self.stats.drops_lrproof_invalid,
                 forward_max_hops = self.stats.drops_forward_max_hops,
+                same_interface_relay = self.stats.drops_same_interface_relay,
                 total = self.stats.packets_dropped,
             );
         }
@@ -4909,11 +4927,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Suppress same-interface relay on shared media.
+        //
+        // Deliberate and correct, but it IS where the packet dies: the relay
+        // had a path, took the decision, and forwarded nothing. Without the
+        // PKT_DROP below the journey simply stops at the relay's PKT_RX, which
+        // a collector cannot tell apart from a lost log line — the one death
+        // the journey contract could not report.
         if receiving_iface == Some(target_iface) {
             crate::tracing::trace!(
                 "Suppressed same-interface relay on {}",
                 self.iface_name(target_iface)
             );
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_DROP",
+                ph = %HexShort(&ph),
+                dst = %HexShort(&packet.destination_hash),
+                r#type = ?packet.flags.packet_type,
+                hops = packet.hops,
+                iface_in = %self.iface_name_opt(receiving_iface),
+                reason = DropReason::SameInterfaceRelay.kebab(),
+            );
+            self.stats.record_drop(DropReason::SameInterfaceRelay);
             return Ok(());
         }
 
@@ -9323,6 +9358,119 @@ mod tests {
                 }
             }
 
+            // Contract: the ONE death the journey could not report. On a
+            // shared medium the relay's path to the destination points out of
+            // the very interface the packet arrived on, so the relay declines
+            // to forward it (`forward_on_interface_from`, "Suppress
+            // same-interface relay"). That is deliberate and correct — and it
+            // is still where the packet dies, so it must show up as a
+            // PKT_DROP with the receive-side ph, not as a journey that simply
+            // stops after PKT_RX.
+            //
+            // Same rig as `test_pkt_journey_forward_on_relay` with ONE
+            // interface instead of two: that is the whole difference between
+            // a relay hop and this drop.
+            #[test]
+            fn test_pkt_journey_same_interface_relay_drop() {
+                use crate::destination::DestinationType;
+                use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+
+                let mut relay = make_transport_enabled();
+                relay.register_interface(Box::new(MockInterface::new("radio0", 1)));
+                relay.set_interface_name(0, "radio0".into());
+
+                // The path to the destination goes out of interface 0 — the
+                // shared medium every node here is on.
+                let dest_hash = [0xCC; TRUNCATED_HASHBYTES];
+                let now = relay.clock.now_ms();
+                relay.insert_path(
+                    dest_hash,
+                    PathEntry {
+                        hops: 1,
+                        expires_ms: now + 100_000,
+                        interface_index: 0,
+                        random_blobs: Vec::new(),
+                        next_hop: None,
+                    },
+                );
+
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type2,
+                        context_flag: false,
+                        transport_type: TransportType::Transport,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 1,
+                    transport_id: Some(*relay.identity.hash()),
+                    destination_hash: dest_hash,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(b"relay me on the same air".to_vec()),
+                };
+                let mut buf = [0u8; crate::constants::MTU];
+                let len = packet.pack(&mut buf).unwrap();
+                let expected_ph =
+                    std::format!("{}", HexShort(&packet_hash(&buf[..len])[..PKT_PH_BYTES]));
+
+                let before = relay.stats().drops_same_interface_relay();
+                let ((), logs) = capture_core_logs(|| {
+                    relay.process_incoming(0, &buf[..len]).unwrap();
+                });
+
+                // The suppression itself is unchanged: nothing was forwarded.
+                assert_eq!(
+                    relay.stats().packets_forwarded,
+                    0,
+                    "the suppression must still suppress; logs:\n{logs}"
+                );
+                assert!(
+                    !logs.contains("event=\"PKT_FORWARD\""),
+                    "a suppressed relay must not claim a forward; logs:\n{logs}"
+                );
+
+                let drop_line = logs
+                    .lines()
+                    .find(|l| l.contains("event=\"PKT_DROP\""))
+                    .unwrap_or_else(|| panic!("no PKT_DROP on the relay; logs:\n{logs}"));
+                assert!(
+                    drop_line.contains(&std::format!("ph={expected_ph}")),
+                    "the drop must carry the SAME correlator as the receive side, \
+                     so the journey shows the death where it happens; line: {drop_line}"
+                );
+                assert_eq!(
+                    extract_ph(&logs, "PKT_RX").as_deref(),
+                    Some(expected_ph.as_str()),
+                    "precondition: the relay did receive this packet; logs:\n{logs}"
+                );
+                assert!(
+                    drop_line.contains("reason=\"same-interface-relay\""),
+                    "kebab DropReason; line: {drop_line}"
+                );
+                assert!(
+                    drop_line.contains("iface_in=radio0"),
+                    "iface_in is the arrival interface, which here is also the \
+                     one the forward would have used; line: {drop_line}"
+                );
+                assert!(
+                    drop_line.contains("leviculum_core::pkt"),
+                    "contract events live on the dedicated target; line: {drop_line}"
+                );
+
+                // And it reaches PKT_DROP_SUMMARY through the usual counter.
+                assert_eq!(
+                    relay.stats().drops_same_interface_relay(),
+                    before + 1,
+                    "the drop must be counted, not just logged"
+                );
+
+                // Verbatim samples (run with --nocapture to inspect).
+                for l in logs.lines().filter(|l| l.contains("leviculum_core::pkt")) {
+                    std::println!("SAMPLE {l}");
+                }
+            }
+
             // Contract: an existing drop path (PLAIN/GROUP multihop) carries
             // the ph correlator and the kebab DropReason.
             #[test]
@@ -9405,7 +9553,8 @@ mod tests {
                         && logs.contains("announce_rate_limited=")
                         && logs.contains("ingress_burst_announce=")
                         && logs.contains("lrproof_invalid=")
-                        && logs.contains("forward_max_hops="),
+                        && logs.contains("forward_max_hops=")
+                        && logs.contains("same_interface_relay="),
                     "summary must emit ALL taxonomy reasons; logs:\n{logs}"
                 );
             }
@@ -9443,6 +9592,7 @@ mod tests {
                 assert_eq!(s.drops_ingress_burst_announce, 1);
                 assert_eq!(s.drops_lrproof_invalid, 1);
                 assert_eq!(s.drops_forward_max_hops, 1);
+                assert_eq!(s.drops_same_interface_relay, 1);
             }
 
             // OBS-2b: the invariant also holds end-to-end across genuinely

@@ -19,6 +19,16 @@ tool for file transfer.
 
 ### Added
 
+A `same-interface-relay` drop reason. On a shared medium a relay's only
+outbound interface can be the one a packet arrived on, and relaying it
+back onto that air is suppressed on purpose; until now that happened
+after a bare `trace!`, so a packet a relay declined to forward left no
+trace of its death anywhere. It now emits a `PKT_DROP` with the same `ph`
+as the receive side and increments `drops_same_interface_relay`, so it
+shows up in the journey and in `PKT_DROP_SUMMARY`. The suppression itself
+is unchanged. `DropReason` gains a variant, which is a breaking change
+for downstream exhaustive matches.
+
 `RNodeInterface` can be driven over a host-supplied duplex byte channel
 instead of a serial-port path, for platforms where the process never sees
 `/dev/ttyACM*` (Android USB host / BLE GATT, iOS BLE). A new
