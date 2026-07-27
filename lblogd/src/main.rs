@@ -10,6 +10,7 @@
 //! main only wires them.
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 
@@ -17,7 +18,7 @@ use lblogd::cli::Args;
 use lblogd::config::Config;
 use lblogd::content::{load_snapshot, Reloader};
 use lblogd::node::{self, BlogNode};
-use lblogd::web;
+use lblogd::{watcher, web};
 
 type MainError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -63,6 +64,22 @@ async fn serve(config: &Config) -> Result<(), MainError> {
     // A failure here is fatal: at startup there is no previous good state to
     // fall back on. Once running, a failed reload is not (see reload_task).
     let (reloader, content) = Reloader::new(&config.posts_dir)?;
+    let reloader = Arc::new(reloader);
+
+    // Established before anything else starts, and synchronously: a broken
+    // watch (an exhausted inotify limit, say) must fail the run rather than
+    // leave the process quietly without the feature that was asked for, and
+    // the watch has to be recording before the servers can invite changes.
+    let posts_watcher = match config.watch_posts {
+        true => {
+            eprintln!(
+                "lblogd: watching {} for changes",
+                config.posts_dir.display()
+            );
+            Some(watcher::PostsWatcher::start(&config.posts_dir)?)
+        }
+        false => None,
+    };
 
     let blog = BlogNode::start(config.blog_node_config(), content.clone()).await?;
     eprintln!("lblogd: node destination {}", blog.destination_hash());
@@ -84,7 +101,24 @@ async fn serve(config: &Config) -> Result<(), MainError> {
             .map_err(|e| MainError::from(format!("web: {e}")))?;
         Err(MainError::from("web: server exited unexpectedly"))
     };
-    tokio::try_join!(node_task, web_task, reload_task(reloader)).map(|_: ((), (), ())| ())
+    let watch_task = async {
+        let Some(watcher) = posts_watcher else {
+            // Not enabled: idle forever rather than resolving, which would
+            // end try_join and take the servers down with it.
+            std::future::pending::<()>().await;
+            unreachable!("pending never resolves");
+        };
+        watcher.run(Arc::clone(&reloader)).await;
+        Err(MainError::from("watch: watcher stopped unexpectedly"))
+    };
+
+    tokio::try_join!(
+        node_task,
+        web_task,
+        reload_task(Arc::clone(&reloader)),
+        watch_task
+    )
+    .map(|_: ((), (), (), ())| ())
 }
 
 /// Reload the posts on every SIGHUP, for as long as the servers run.
@@ -92,7 +126,10 @@ async fn serve(config: &Config) -> Result<(), MainError> {
 /// A failed reload is logged and dropped: the previous snapshot stays live, so
 /// a malformed post cannot take a running blog offline. That is the whole
 /// point of reloading instead of restarting.
-async fn reload_task(reloader: Reloader) -> Result<(), MainError> {
+///
+/// SIGHUP stays available with `watch_posts` on, so a reload can always be
+/// forced regardless of what the filesystem did or did not report.
+async fn reload_task(reloader: Arc<Reloader>) -> Result<(), MainError> {
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut sighup = signal(SignalKind::hangup()).map_err(|e| format!("SIGHUP handler: {e}"))?;

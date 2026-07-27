@@ -19,4 +19,5 @@ pub mod content;
 pub mod node;
 pub mod post;
 pub mod render;
+pub mod watcher;
 pub mod web;

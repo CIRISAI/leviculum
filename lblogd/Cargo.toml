@@ -18,6 +18,7 @@ axum.workspace = true
 axum-server.workspace = true
 clap = { version = "4", features = ["derive"] }
 futures.workspace = true
+notify.workspace = true
 pulldown-cmark.workspace = true
 rmpv.workspace = true
 rustls-acme.workspace = true
@@ -31,6 +32,9 @@ leviculum-micron = { path = "../leviculum-micron" }
 lnomad = { path = "../lnomad" }
 hex = "0.4"
 tempfile = "3"
+# test-util is not part of tokio's "full"; the debounce tests need paused
+# time so they assert the collapsing rule without wall-clock waits.
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [lib]

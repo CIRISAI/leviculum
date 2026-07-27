@@ -56,8 +56,9 @@ rows, blockquotes to indented text); see the mapping table in
 One TOML file drives everything:
 
 ```toml
-data_dir  = "/var/lib/lblogd"          # identity, node storage, ACME cache
-posts_dir = "/var/lib/lblogd/posts"    # the *.md blog posts
+data_dir    = "/var/lib/lblogd"        # identity, node storage, ACME cache
+posts_dir   = "/var/lib/lblogd/posts"  # the *.md blog posts
+watch_posts = false                    # optional, default false; see below
 
 [node]
 instance_name          = "leviculum"   # must match the running lnsd's instance_name
@@ -122,8 +123,9 @@ lblogd --config /tmp/lblogd-dev/lblogd.toml &
 with `/tmp/lblogd-dev/lblogd.toml`:
 
 ```toml
-data_dir  = "/tmp/lblogd-dev/data"
-posts_dir = "/tmp/lblogd-dev/posts"
+data_dir    = "/tmp/lblogd-dev/data"
+posts_dir   = "/tmp/lblogd-dev/posts"
+watch_posts = true
 
 [node]
 instance_name = "lblogd-dev"
@@ -251,6 +253,26 @@ For the systemd unit to accept `systemctl reload`, add:
 ```ini
 ExecReload=/bin/kill -HUP $MAINPID
 ```
+
+### Reloading automatically
+
+`watch_posts = true` reloads whenever `posts_dir` changes, with no signal at
+all: create a file, and it is live about a second later.
+
+It is a second trigger for the same reload, not a second mechanism, so the
+guarantee is unchanged — a failed load leaves the previous content serving.
+SIGHUP keeps working alongside it, which is the way out if the filesystem
+ever fails to report something.
+
+Off by default. A deployment publishes deliberately, and watching means
+reacting to every write, including the half-finished ones an editor produces
+on the way to a saved file. The watcher waits for the directory to be quiet
+for 500 ms and then reloads once, so a burst of writes collapses into a
+single reload of the final state; still, on a server the explicit signal is
+the better default. While writing, it is the setting you want.
+
+Changes are only picked up while the process runs — a file added while
+`lblogd` is stopped is loaded at the next start like any other.
 
 ### Publishing the NomadNet address
 

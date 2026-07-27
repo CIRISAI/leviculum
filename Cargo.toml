@@ -92,6 +92,9 @@ axum-server = "0.8"
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
+# Filesystem watching for lblogd's optional posts auto-reload. Version 8 is
+# the stable line; 9 is still a release candidate.
+notify = "8"
 
 # FFI
 libc = "0.2"

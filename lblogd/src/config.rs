@@ -83,6 +83,15 @@ pub struct Config {
     /// Directory of Markdown posts, served by both the node and the web
     /// server.
     pub posts_dir: PathBuf,
+    /// Reload the posts automatically whenever `posts_dir` changes, instead
+    /// of only on SIGHUP.
+    ///
+    /// Off by default: a deployment publishes deliberately, and reacting to
+    /// every write means reacting to half-finished ones too (the watcher
+    /// debounces, but the exposure is real). Convenient while writing, which
+    /// is what a development config wants.
+    #[serde(default)]
+    pub watch_posts: bool,
     /// NomadNet node settings.
     pub node: NodeSection,
     /// Web server settings.
