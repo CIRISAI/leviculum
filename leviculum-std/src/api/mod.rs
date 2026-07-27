@@ -422,6 +422,11 @@ impl Node {
         self.inner.register_request_handler(dest_hash, path, policy);
     }
 
+    /// Remove the handler for `path`, returning whether one was registered.
+    pub fn deregister_request_handler(&self, path: &str) -> bool {
+        self.inner.deregister_request_handler(path)
+    }
+
     /// Send a request on an established link, returning the request id. The
     /// response or a timeout arrives as an event.
     pub async fn send_request(

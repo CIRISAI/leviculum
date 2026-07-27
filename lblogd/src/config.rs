@@ -198,7 +198,6 @@ impl Config {
         BlogNodeConfig {
             instance_name: self.node.instance_name.clone(),
             data_dir: self.data_dir.clone(),
-            posts_dir: self.posts_dir.clone(),
             display_name: self.node.display_name.clone(),
             announce_interval: self
                 .node
@@ -224,7 +223,6 @@ impl Config {
             }),
             http_bind: self.web.http_bind,
             https_bind: self.web.https_bind,
-            posts_dir: self.posts_dir.clone(),
         }
     }
 }
@@ -310,7 +308,6 @@ mod tests {
         let node = config.blog_node_config();
         assert_eq!(node.instance_name, "leviculum");
         assert_eq!(node.data_dir, PathBuf::from("/var/lib/lblogd"));
-        assert_eq!(node.posts_dir, PathBuf::from("/var/lib/lblogd/posts"));
         assert_eq!(node.display_name, "leviculum.network dev blog");
         assert_eq!(node.announce_interval, Duration::from_secs(3600));
     }
@@ -340,7 +337,6 @@ mod tests {
         assert!(acme.staging);
         assert_eq!(web.http_bind, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(web.https_bind, "127.0.0.1:8443".parse().unwrap());
-        assert_eq!(web.posts_dir, PathBuf::from("/var/lib/lblogd/posts"));
     }
 
     #[test]
@@ -358,7 +354,6 @@ mod tests {
         let web = load_from_str(DEV_SAMPLE).unwrap().web_config();
         assert!(web.acme.is_none());
         assert_eq!(web.http_bind, "127.0.0.1:8080".parse().unwrap());
-        assert_eq!(web.posts_dir, PathBuf::from("/tmp/lblogd-dev/posts"));
     }
 
     #[test]

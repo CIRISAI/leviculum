@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use leviculum_std::driver::ReticulumNodeBuilder;
 
+use lblogd::content::Reloader;
 use lblogd::node::{BlogNode, BlogNodeConfig};
 use lblogd::post::load_posts_dir;
 use lblogd::render::{render_index_micron, render_post_micron};
@@ -80,13 +81,16 @@ async fn blog_node_serves_pages_end_to_end() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let data_dir = tempfile::tempdir().expect("data dir");
-    let blog = BlogNode::start(BlogNodeConfig {
-        instance_name: instance_name.clone(),
-        data_dir: data_dir.path().to_path_buf(),
-        posts_dir: posts_dir.path().to_path_buf(),
-        display_name: "lblogd test blog".to_string(),
-        announce_interval: Duration::from_secs(3600),
-    })
+    let (reloader, content) = Reloader::new(posts_dir.path()).expect("initial content load");
+    let blog = BlogNode::start(
+        BlogNodeConfig {
+            instance_name: instance_name.clone(),
+            data_dir: data_dir.path().to_path_buf(),
+            display_name: "lblogd test blog".to_string(),
+            announce_interval: Duration::from_secs(3600),
+        },
+        content,
+    )
     .await
     .expect("start blog node");
     let dest_hex = hex::encode(blog.destination_hash().as_bytes());
@@ -166,6 +170,54 @@ async fn blog_node_serves_pages_end_to_end() {
     assert!(
         matches!(result, Err(FetchError::Timeout)),
         "unknown path must surface a clean Timeout, got {result:?}"
+    );
+
+    // A reload registers handlers for new pages and deregisters vanished
+    // ones, both visible over the same live link without restarting anything.
+    std::fs::write(
+        posts_dir.path().join("third.md"),
+        "+++\ntitle = \"Third Post\"\ndate = \"2026-07-20\"\nslug = \"third\"\n+++\n\nAdded at runtime.\n",
+    )
+    .expect("write third.md");
+    std::fs::remove_file(posts_dir.path().join("second.md")).expect("remove second.md");
+    reloader.reload().expect("reload");
+    // The node applies the swap on its select! loop; give it a turn.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let reloaded = load_posts_dir(posts_dir.path()).expect("load reloaded posts");
+    let third = reloaded
+        .iter()
+        .find(|p| p.slug == "third")
+        .expect("third fixture post");
+    let target = parse_url(&format!("{dest_hex}:/page/third.mu"), None).expect("parse third url");
+    let page = session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch post added by reload");
+    assert_eq!(
+        page,
+        render_post_micron(third).into_bytes(),
+        "a post added by reload must be served byte-exactly"
+    );
+
+    let target = parse_url(&format!("{dest_hex}:/page/index.mu"), None).expect("parse index url");
+    let page = session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch reloaded index");
+    assert_eq!(
+        page,
+        render_index_micron(&reloaded).into_bytes(),
+        "the index must reflect the reloaded post set"
+    );
+
+    // The removed post's handler is gone, so its path drops like any unknown
+    // one: a clean timeout rather than stale content.
+    let target = parse_url(&format!("{dest_hex}:/page/second.mu"), None).expect("parse second url");
+    let result = session.fetch(&target, Duration::from_secs(2)).await;
+    assert!(
+        matches!(result, Err(FetchError::Timeout)),
+        "a post removed by reload must stop being served, got {result:?}"
     );
 
     session.close().await.expect("close session");

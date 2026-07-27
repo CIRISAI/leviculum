@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use lblogd::content::{Reloader, SnapshotRx};
 use lblogd::web::{run_web, AcmeSettings, WebConfig, WebError};
 
 /// Grab a currently-free localhost TCP port by binding and immediately dropping.
@@ -57,22 +58,31 @@ async fn http_get(addr: SocketAddr, path: &str) -> String {
     String::from_utf8_lossy(&raw).into_owned()
 }
 
+/// Start a plaintext server over `content` on a free port and wait until it
+/// accepts connections.
+async fn serve_plain(content: SnapshotRx) -> SocketAddr {
+    let bind: SocketAddr = format!("127.0.0.1:{}", free_port())
+        .parse()
+        .expect("parse bind addr");
+    tokio::spawn(run_web(
+        WebConfig {
+            acme: None,
+            http_bind: bind,
+            // Unused in plaintext mode; a bogus value must not be bound.
+            https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
+        },
+        content,
+    ));
+    wait_for_listener(bind).await;
+    bind
+}
+
 #[tokio::test]
 async fn plain_http_serves_the_blog_without_acme() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
-
-    let bind: SocketAddr = format!("127.0.0.1:{}", free_port())
-        .parse()
-        .expect("parse bind addr");
-    let server = tokio::spawn(run_web(WebConfig {
-        acme: None,
-        http_bind: bind,
-        // Unused in plaintext mode; a bogus value must not be bound.
-        https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
-        posts_dir: posts_dir.path().to_path_buf(),
-    }));
-    wait_for_listener(bind).await;
+    let (_reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
+    let bind = serve_plain(content).await;
 
     let index = http_get(bind, "/").await;
     assert!(
@@ -88,9 +98,72 @@ async fn plain_http_serves_the_blog_without_acme() {
 
     let missing = http_get(bind, "/nicht-da").await;
     assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
+}
 
-    assert!(!server.is_finished(), "server must still be running");
-    server.abort();
+#[tokio::test]
+async fn a_reload_reaches_the_running_listener() {
+    // The listener is bound once and never rebound, so this proves publishing
+    // needs no restart: same socket, new content.
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    write_fixture_posts(posts_dir.path());
+    let (reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
+    let bind = serve_plain(content).await;
+
+    assert!(
+        http_get(bind, "/posts/zweiter-post")
+            .await
+            .starts_with("HTTP/1.1 404"),
+        "the post does not exist yet"
+    );
+
+    std::fs::write(
+        posts_dir.path().join("zweiter.md"),
+        "+++\ntitle = \"Zweiter Post\"\ndate = \"2026-07-27\"\n+++\n\nFrisch dazugekommen.\n",
+    )
+    .expect("write second post");
+    reloader.reload().expect("reload");
+
+    let page = http_get(bind, "/posts/zweiter-post").await;
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    assert!(page.contains("Zweiter Post"), "{page}");
+
+    let index = http_get(bind, "/").await;
+    assert!(index.contains("/posts/zweiter-post"), "{index}");
+
+    // And removing it again takes it back out, on the same listener.
+    std::fs::remove_file(posts_dir.path().join("zweiter.md")).expect("remove second post");
+    reloader.reload().expect("reload after removal");
+    assert!(
+        http_get(bind, "/posts/zweiter-post")
+            .await
+            .starts_with("HTTP/1.1 404"),
+        "a removed post must stop being served"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_reload_keeps_the_server_serving() {
+    // A typo in a post must not take a running blog offline.
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    write_fixture_posts(posts_dir.path());
+    let (reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
+    let bind = serve_plain(content).await;
+
+    std::fs::write(
+        posts_dir.path().join("kaputt.md"),
+        "+++\ntitle = \"Kaputt\"\ndate = \"2026-13-45\"\n+++\n\nText.\n",
+    )
+    .expect("write broken post");
+    let err = reloader
+        .reload()
+        .expect_err("a bad date must fail the load");
+    assert!(err.to_string().contains("kaputt.md"), "{err}");
+
+    let page = http_get(bind, "/posts/hello-mesh").await;
+    assert!(
+        page.starts_with("HTTP/1.1 200"),
+        "the previous content must still be served: {page}"
+    );
 }
 
 #[tokio::test]
@@ -98,18 +171,21 @@ async fn acme_mode_still_requires_domains() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let cache_dir = tempfile::tempdir().expect("acme cache dir");
+    let (_reloader, content) = Reloader::new(posts_dir.path()).expect("initial load");
 
-    let err = run_web(WebConfig {
-        acme: Some(AcmeSettings {
-            domains: Vec::new(),
-            cache_dir: cache_dir.path().to_path_buf(),
-            contact_email: "ops@example.org".to_string(),
-            staging: true,
-        }),
-        http_bind: "127.0.0.1:1".parse().expect("parse http bind"),
-        https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
-        posts_dir: posts_dir.path().to_path_buf(),
-    })
+    let err = run_web(
+        WebConfig {
+            acme: Some(AcmeSettings {
+                domains: Vec::new(),
+                cache_dir: cache_dir.path().to_path_buf(),
+                contact_email: "ops@example.org".to_string(),
+                staging: true,
+            }),
+            http_bind: "127.0.0.1:1".parse().expect("parse http bind"),
+            https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
+        },
+        content,
+    )
     .await
     .expect_err("empty domains must be rejected");
     assert!(matches!(err, WebError::NoDomains), "{err}");

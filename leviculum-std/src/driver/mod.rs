@@ -2892,6 +2892,17 @@ impl ReticulumNode {
         inner.register_request_handler(destination_hash, path, policy);
     }
 
+    /// Remove the request handler for `path`, returning whether one was
+    /// registered.
+    ///
+    /// Requests to a path with no handler are dropped silently, which is what
+    /// a served page disappearing has to look like: the protocol has no 404,
+    /// so the client sees a clean timeout.
+    pub fn deregister_request_handler(&self, path: &str) -> bool {
+        let mut inner = self.inner.lock_recover();
+        inner.deregister_request_handler(path)
+    }
+
     /// Send a request on an established link.
     ///
     /// Returns the request_id identifying this request.

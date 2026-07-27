@@ -16,14 +16,13 @@
 //! publicly reachable domain, so without this mode the server cannot be run
 //! at all on a developer machine.
 //!
-//! Posts are loaded once at startup and rendered per request from the cached
-//! [`Post`]s; a reload-on-change mechanism is deliberately out of scope here
-//! (batch D wires the daemon and can add it).
+//! Posts come from the shared [`SnapshotRx`] channel and are rendered per
+//! request from whatever snapshot is current, so a reload is picked up by the
+//! next request without restarting the listener.
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
@@ -35,15 +34,12 @@ use rustls_acme::caches::DirCache;
 use rustls_acme::AcmeConfig;
 use thiserror::Error;
 
-use crate::post::{load_posts_dir, Post, PostError};
+use crate::content::SnapshotRx;
 use crate::render::{render_index_html, render_post_html};
 
 /// Errors from starting or running the web server.
 #[derive(Debug, Error)]
 pub enum WebError {
-    /// Loading the posts directory failed.
-    #[error("loading posts: {0}")]
-    Posts(#[from] PostError),
     /// The config lists no domains to obtain a certificate for.
     #[error("no domains configured")]
     NoDomains,
@@ -101,29 +97,31 @@ pub struct WebConfig {
     /// 443, so in real deployments this must be reachable there. Unused, and
     /// never bound, when [`acme`](Self::acme) is `None`.
     pub https_bind: SocketAddr,
-    /// Directory of Markdown posts to serve.
-    pub posts_dir: PathBuf,
 }
 
 /// Build the blog router: `/` is the post index, `/posts/{slug}` one post,
 /// everything else a small HTML 404.
-pub fn build_router(posts: Arc<Vec<Post>>) -> Router {
+///
+/// The handlers read the snapshot per request, so a reload takes effect on
+/// the next request without touching the listener.
+pub fn build_router(content: SnapshotRx) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/posts/{slug}", get(post_page))
         .fallback(fallback_page)
-        .with_state(posts)
+        .with_state(content)
 }
 
-async fn index_page(State(posts): State<Arc<Vec<Post>>>) -> Html<String> {
-    Html(render_index_html(&posts))
+async fn index_page(State(content): State<SnapshotRx>) -> Html<String> {
+    // Clone the Arc out of the watch borrow immediately: the borrow holds a
+    // read lock, and holding one across rendering would block reloads.
+    let snapshot = content.borrow().clone();
+    Html(render_index_html(&snapshot.posts))
 }
 
-async fn post_page(
-    State(posts): State<Arc<Vec<Post>>>,
-    UrlPath(slug): UrlPath<String>,
-) -> Response {
-    match posts.iter().find(|p| p.slug == slug) {
+async fn post_page(State(content): State<SnapshotRx>, UrlPath(slug): UrlPath<String>) -> Response {
+    let snapshot = content.borrow().clone();
+    match snapshot.posts.iter().find(|p| p.slug == slug) {
         Some(post) => Html(render_post_html(post)).into_response(),
         None => not_found(),
     }
@@ -145,9 +143,8 @@ fn not_found() -> Response {
 /// With [`WebConfig::acme`] set, that means HTTPS with automatic Let's
 /// Encrypt certificates plus a plain-HTTP listener that 301-redirects to it;
 /// without it, a single plain-HTTP listener serving the blog directly.
-pub async fn run_web(config: WebConfig) -> Result<(), WebError> {
-    let posts = Arc::new(load_posts_dir(&config.posts_dir)?);
-    let router = build_router(posts);
+pub async fn run_web(config: WebConfig, content: SnapshotRx) -> Result<(), WebError> {
+    let router = build_router(content);
     match config.acme {
         Some(acme) => serve_https(router, acme, config.http_bind, config.https_bind).await,
         None => serve_plain(router, config.http_bind).await,
@@ -263,12 +260,18 @@ fn host_without_port(host: &str) -> &str {
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use tokio::sync::watch;
     use tower::ServiceExt;
 
-    fn sample_posts() -> Arc<Vec<Post>> {
-        Arc::new(vec![
+    use crate::content::Snapshot;
+    use crate::post::Post;
+
+    fn sample_posts() -> Vec<Post> {
+        vec![
             Post {
                 title: "Hello World".to_string(),
                 date: "2026-07-02".parse().unwrap(),
@@ -281,7 +284,21 @@ mod tests {
                 slug: "older-post".to_string(),
                 body_md: "Nothing to see.".to_string(),
             },
-        ])
+        ]
+    }
+
+    /// A router over a fixed snapshot, plus the sender that can replace it.
+    fn router_over(posts: Vec<Post>) -> (Router, watch::Sender<Arc<Snapshot>>) {
+        let snapshot = Arc::new(Snapshot {
+            posts,
+            pages: Default::default(),
+        });
+        let (tx, rx) = watch::channel(snapshot);
+        (build_router(rx), tx)
+    }
+
+    fn sample_router() -> Router {
+        router_over(sample_posts()).0
     }
 
     async fn get(router: Router, path: &str) -> (StatusCode, HeaderMap, String) {
@@ -297,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn index_lists_posts_with_links() {
-        let (status, headers, body) = get(build_router(sample_posts()), "/").await;
+        let (status, headers, body) = get(sample_router(), "/").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
         assert!(body.contains("Hello World"));
@@ -307,7 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_page_renders_body() {
-        let (status, headers, body) = get(build_router(sample_posts()), "/posts/hello-world").await;
+        let (status, headers, body) = get(sample_router(), "/posts/hello-world").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
         assert!(body.contains("Hello World"));
@@ -316,14 +333,49 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_slug_is_404() {
-        let (status, _, body) = get(build_router(sample_posts()), "/posts/does-not-exist").await;
+        let (status, _, body) = get(sample_router(), "/posts/does-not-exist").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("404"));
     }
 
     #[tokio::test]
+    async fn a_reload_is_visible_to_the_next_request() {
+        // The router is built once and never rebuilt, so this is the property
+        // that makes reloading possible without restarting the listener.
+        let (router, tx) = router_over(sample_posts());
+
+        let (status, _, _) = get(router.clone(), "/posts/hello-world").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut posts = sample_posts();
+        posts.retain(|p| p.slug != "hello-world");
+        posts.push(Post {
+            title: "Fresh Post".to_string(),
+            date: "2026-07-27".parse().unwrap(),
+            slug: "fresh-post".to_string(),
+            body_md: "Brand new.".to_string(),
+        });
+        tx.send(Arc::new(Snapshot {
+            posts,
+            pages: Default::default(),
+        }))
+        .unwrap();
+
+        let (status, _, body) = get(router.clone(), "/posts/fresh-post").await;
+        assert_eq!(status, StatusCode::OK, "the new post must be served");
+        assert!(body.contains("Fresh Post"), "{body}");
+
+        let (status, _, _) = get(router, "/posts/hello-world").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a removed post must stop being served"
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_route_is_404() {
-        let (status, _, body) = get(build_router(sample_posts()), "/random").await;
+        let (status, _, body) = get(sample_router(), "/random").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("404"));
     }
