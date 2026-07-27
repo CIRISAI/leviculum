@@ -1,6 +1,6 @@
 //! Tests for the Markdown-to-HTML renderer and the HTML page templates.
 
-use lblogd::post::parse_post;
+use lblogd::post::{parse_post, PostDefaults};
 use lblogd::render::{markdown_to_html, render_index_html, render_post_html};
 
 #[test]
@@ -48,7 +48,7 @@ fn numbered_list() {
 
 fn sample_post(title: &str) -> lblogd::post::Post {
     let src = format!("+++\ntitle = \"{title}\"\ndate = \"2026-07-12\"\n+++\n\nSome **body**.\n");
-    parse_post(&src).unwrap()
+    parse_post(&src, &fixture_defaults()).unwrap()
 }
 
 #[test]
@@ -79,4 +79,12 @@ fn index_html_lists_posts_with_links() {
     assert!(html.contains("<a href=\"/posts/first-post\">First Post</a>"));
     assert!(html.contains("<a href=\"/posts/second-post\">Second Post</a>"));
     assert!(html.contains("2026-07-12"));
+}
+
+/// Defaults for fixtures that always set title and date themselves.
+fn fixture_defaults() -> PostDefaults {
+    PostDefaults {
+        title: "fixture".to_string(),
+        date: "2000-01-01".parse().unwrap(),
+    }
 }

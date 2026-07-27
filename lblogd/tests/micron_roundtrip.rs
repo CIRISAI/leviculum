@@ -4,7 +4,7 @@
 //! document structure proves the generator emits micron that our own parser,
 //! and hence lnomad and NomadNet, accept.
 
-use lblogd::post::parse_post;
+use lblogd::post::{parse_post, PostDefaults};
 use lblogd::render::{markdown_to_micron, render_index_micron, render_post_micron};
 use leviculum_micron::{parse, Block, Color, Line, MicronDocument};
 
@@ -256,7 +256,7 @@ fn empty_input_renders_and_parses_cleanly() {
 
 fn sample_post(title: &str, date: &str) -> lblogd::post::Post {
     let src = format!("+++\ntitle = \"{title}\"\ndate = \"{date}\"\n+++\n\nBody of {title}.\n");
-    parse_post(&src).unwrap()
+    parse_post(&src, &fixture_defaults()).unwrap()
 }
 
 #[test]
@@ -307,4 +307,12 @@ fn post_micron_has_title_heading_and_date() {
         .blocks
         .iter()
         .any(|b| matches!(b, Block::Divider { .. })));
+}
+
+/// Defaults for fixtures that always set title and date themselves.
+fn fixture_defaults() -> PostDefaults {
+    PostDefaults {
+        title: "fixture".to_string(),
+        date: "2000-01-01".parse().unwrap(),
+    }
 }

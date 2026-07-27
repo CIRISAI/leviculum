@@ -3,13 +3,22 @@
 
 use std::fs;
 
-use lblogd::post::{load_posts_dir, parse_post, slugify, Date, PostError};
+use lblogd::post::{load_posts_dir, parse_post, slugify, Date, PostDefaults, PostError};
+
+/// Defaults a file would supply, for the cases that exercise the
+/// frontmatter rather than the fallbacks.
+fn defaults() -> PostDefaults {
+    PostDefaults {
+        title: "from-file-name".to_string(),
+        date: "2000-01-01".parse().unwrap(),
+    }
+}
 
 const VALID: &str = "+++\ntitle = \"Hello World\"\ndate = \"2026-07-12\"\n+++\n\nBody text.\n";
 
 #[test]
 fn valid_frontmatter_parses() {
-    let post = parse_post(VALID).unwrap();
+    let post = parse_post(VALID, &defaults()).unwrap();
     assert_eq!(post.title, "Hello World");
     assert_eq!(post.date.to_string(), "2026-07-12");
     assert_eq!(post.slug, "hello-world");
@@ -17,21 +26,33 @@ fn valid_frontmatter_parses() {
 }
 
 #[test]
-fn missing_title_is_an_error() {
+fn missing_title_falls_back_to_the_file_default() {
     let src = "+++\ndate = \"2026-07-12\"\n+++\nBody";
-    assert!(matches!(parse_post(src), Err(PostError::MissingTitle)));
+    let post = parse_post(src, &defaults()).unwrap();
+    assert_eq!(post.title, "from-file-name");
+    assert_eq!(post.slug, "from-file-name");
+    assert_eq!(
+        post.date.to_string(),
+        "2026-07-12",
+        "the set date still wins"
+    );
 }
 
 #[test]
-fn empty_title_is_an_error() {
+fn blank_title_falls_back_to_the_file_default() {
     let src = "+++\ntitle = \"  \"\ndate = \"2026-07-12\"\n+++\nBody";
-    assert!(matches!(parse_post(src), Err(PostError::MissingTitle)));
+    assert_eq!(
+        parse_post(src, &defaults()).unwrap().title,
+        "from-file-name"
+    );
 }
 
 #[test]
-fn missing_date_is_an_error() {
+fn missing_date_falls_back_to_the_file_default() {
     let src = "+++\ntitle = \"T\"\n+++\nBody";
-    assert!(matches!(parse_post(src), Err(PostError::MissingDate)));
+    let post = parse_post(src, &defaults()).unwrap();
+    assert_eq!(post.date.to_string(), "2000-01-01");
+    assert_eq!(post.title, "T", "the set title still wins");
 }
 
 #[test]
@@ -45,7 +66,10 @@ fn invalid_date_is_an_error() {
     ] {
         let src = format!("+++\ntitle = \"T\"\ndate = \"{bad}\"\n+++\nBody");
         assert!(
-            matches!(parse_post(&src), Err(PostError::InvalidDate(_))),
+            matches!(
+                parse_post(&src, &defaults()),
+                Err(PostError::InvalidDate(_))
+            ),
             "date {bad:?} should be rejected"
         );
     }
@@ -54,7 +78,37 @@ fn invalid_date_is_an_error() {
 #[test]
 fn leap_day_is_accepted() {
     let src = "+++\ntitle = \"T\"\ndate = \"2024-02-29\"\n+++\nBody";
-    assert_eq!(parse_post(src).unwrap().date.to_string(), "2024-02-29");
+    assert_eq!(
+        parse_post(src, &defaults()).unwrap().date.to_string(),
+        "2024-02-29"
+    );
+}
+
+#[test]
+fn system_time_maps_to_the_utc_calendar_day() {
+    // Reference values from `date -u -d @<secs>`.
+    for (secs, expected) in [
+        (0_i64, "1970-01-01"),
+        (86_399, "1970-01-01"),      // last second of the day
+        (86_400, "1970-01-02"),      // first of the next
+        (951_782_400, "2000-02-29"), // leap day of a century leap year
+        (1_078_012_800, "2004-02-29"),
+        (1_735_689_600, "2025-01-01"),
+        (4_102_444_800, "2100-01-01"), // 2100 is not a leap year
+    ] {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
+        assert_eq!(
+            Date::from_system_time(t).to_string(),
+            expected,
+            "epoch second {secs}"
+        );
+    }
+}
+
+#[test]
+fn system_time_before_the_epoch_still_yields_a_date() {
+    let t = std::time::UNIX_EPOCH - std::time::Duration::from_secs(86_400);
+    assert_eq!(Date::from_system_time(t).to_string(), "1969-12-31");
 }
 
 #[test]
@@ -68,28 +122,42 @@ fn dates_order_chronologically() {
 #[test]
 fn explicit_slug_is_honored() {
     let src = "+++\ntitle = \"Hello World\"\ndate = \"2026-07-12\"\nslug = \"custom\"\n+++\nBody";
-    assert_eq!(parse_post(src).unwrap().slug, "custom");
+    assert_eq!(parse_post(src, &defaults()).unwrap().slug, "custom");
 }
 
 #[test]
 fn slug_defaults_from_title() {
     let src = "+++\ntitle = \"A Post, With Punctuation!\"\ndate = \"2026-07-12\"\n+++\nBody";
-    assert_eq!(parse_post(src).unwrap().slug, "a-post-with-punctuation");
+    assert_eq!(
+        parse_post(src, &defaults()).unwrap().slug,
+        "a-post-with-punctuation"
+    );
 }
 
 #[test]
-fn missing_frontmatter_is_an_error() {
-    assert!(matches!(
-        parse_post("# Just Markdown\n"),
-        Err(PostError::MissingFrontmatter)
-    ));
+fn a_file_without_frontmatter_is_all_body() {
+    // The cheapest way to publish: drop a plain .md file and write.
+    let post = parse_post("# Just Markdown\n\nSome prose.\n", &defaults()).unwrap();
+    assert_eq!(post.title, "from-file-name");
+    assert_eq!(post.slug, "from-file-name");
+    assert_eq!(post.date.to_string(), "2000-01-01");
+    assert_eq!(
+        post.body_md, "# Just Markdown\n\nSome prose.\n",
+        "nothing may be swallowed as frontmatter"
+    );
+}
+
+#[test]
+fn a_leading_plus_line_that_is_not_a_delimiter_stays_body() {
+    let post = parse_post("++++\nstill body\n", &defaults()).unwrap();
+    assert_eq!(post.body_md, "++++\nstill body\n");
 }
 
 #[test]
 fn unterminated_frontmatter_is_an_error() {
     let src = "+++\ntitle = \"T\"\ndate = \"2026-07-12\"\nBody without closing";
     assert!(matches!(
-        parse_post(src),
+        parse_post(src, &defaults()),
         Err(PostError::UnterminatedFrontmatter)
     ));
 }
@@ -97,7 +165,10 @@ fn unterminated_frontmatter_is_an_error() {
 #[test]
 fn invalid_toml_is_an_error() {
     let src = "+++\ntitle = unquoted\n+++\nBody";
-    assert!(matches!(parse_post(src), Err(PostError::Toml(_))));
+    assert!(matches!(
+        parse_post(src, &defaults()),
+        Err(PostError::Toml(_))
+    ));
 }
 
 #[test]
@@ -116,7 +187,10 @@ fn slugify_cases() {
 #[test]
 fn all_punctuation_title_without_slug_is_an_error() {
     let src = "+++\ntitle = \"!!!\"\ndate = \"2026-07-12\"\n+++\nBody";
-    assert!(matches!(parse_post(src), Err(PostError::EmptySlug(_))));
+    assert!(matches!(
+        parse_post(src, &defaults()),
+        Err(PostError::EmptySlug(_))
+    ));
 }
 
 fn write_post(dir: &std::path::Path, name: &str, title: &str, date: &str) {
@@ -144,7 +218,7 @@ fn load_posts_dir_surfaces_malformed_file_with_path() {
     write_post(dir.path(), "good.md", "Good", "2026-01-01");
     fs::write(
         dir.path().join("broken.md"),
-        "+++\ntitle = \"X\"\n+++\nBody",
+        "+++\ntitle = \"X\"\ndate = \"2026-13-45\"\n+++\nBody",
     )
     .unwrap();
 
@@ -153,7 +227,39 @@ fn load_posts_dir_surfaces_malformed_file_with_path() {
         panic!("expected PostError::File, got {err:?}");
     };
     assert!(path.ends_with("broken.md"));
-    assert!(matches!(*source, PostError::MissingDate));
+    assert!(matches!(*source, PostError::InvalidDate(_)));
+}
+
+#[test]
+fn load_posts_dir_titles_a_bare_file_after_its_name_and_dates_it_by_mtime() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("ein-nackter-post.md"), "Nur Prosa.\n").unwrap();
+
+    let posts = load_posts_dir(dir.path()).unwrap();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].title, "ein-nackter-post");
+    assert_eq!(posts[0].slug, "ein-nackter-post");
+    assert_eq!(posts[0].body_md, "Nur Prosa.\n");
+    // The mtime is "just now", so the date must be today's UTC day.
+    let today = Date::from_system_time(std::time::SystemTime::now());
+    assert_eq!(posts[0].date, today);
+}
+
+#[test]
+fn load_posts_dir_uses_the_real_mtime_not_the_current_time() {
+    // Backdate the file and check the date follows it, so the fallback is
+    // genuinely the mtime rather than "whenever the server started".
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alt.md");
+    fs::write(&path, "Alter Text.\n").unwrap();
+    let backdated = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::open(&path)
+        .unwrap()
+        .set_modified(backdated)
+        .unwrap();
+
+    let posts = load_posts_dir(dir.path()).unwrap();
+    assert_eq!(posts[0].date.to_string(), "2001-09-09");
 }
 
 #[test]

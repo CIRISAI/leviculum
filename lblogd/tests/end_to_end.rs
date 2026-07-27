@@ -1,7 +1,7 @@
 //! End-to-end: parse a full sample post (frontmatter plus mixed Markdown) and
 //! render it through both pipelines without error.
 
-use lblogd::post::parse_post;
+use lblogd::post::{parse_post, PostDefaults};
 use lblogd::render::{
     render_index_html, render_index_micron, render_post_html, render_post_micron,
 };
@@ -39,7 +39,7 @@ See [the docs](https://example.com/rig) for details.
 
 #[test]
 fn sample_post_renders_to_both_formats() {
-    let post = parse_post(SAMPLE).unwrap();
+    let post = parse_post(SAMPLE, &fixture_defaults()).unwrap();
     assert_eq!(post.title, "Bringing Up the LoRa Rig");
     assert_eq!(post.slug, "bringing-up-the-lora-rig");
     assert_eq!(post.date.to_string(), "2026-07-12");
@@ -69,4 +69,12 @@ fn sample_post_renders_to_both_formats() {
     let index_micron = render_index_micron(std::slice::from_ref(&post));
     assert!(index_micron.contains(":/page/bringing-up-the-lora-rig.mu"));
     assert!(index_micron.contains("2026-07-12"));
+}
+
+/// Defaults for fixtures that always set title and date themselves.
+fn fixture_defaults() -> PostDefaults {
+    PostDefaults {
+        title: "fixture".to_string(),
+        date: "2000-01-01".parse().unwrap(),
+    }
 }

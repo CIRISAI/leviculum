@@ -1,25 +1,32 @@
 //! The post/content model: frontmatter parsing, slugs, and directory loading.
 //!
-//! A post is a Markdown file with a leading TOML frontmatter block delimited
-//! by `+++` lines:
+//! A post is a Markdown file, optionally opening with a TOML frontmatter
+//! block delimited by `+++` lines:
 //!
 //! ```text
 //! +++
-//! title = "Hello"
-//! date = "2026-07-12"
+//! title = "Hello"       # optional, defaults to the file name without .md
+//! date = "2026-07-12"   # optional, defaults to the file's mtime (UTC)
 //! slug = "hello"        # optional, defaults to slugify(title)
 //! +++
 //!
 //! Markdown body...
 //! ```
 //!
-//! `title` and `date` are required; a missing or invalid field is a clear
-//! [`PostError`]. Dates are plain `YYYY-MM-DD` values ordered by
-//! (year, month, day); no calendar library is involved.
+//! Every field is optional, and so is the block itself: a plain `.md` file
+//! with nothing but prose is a complete post, titled after its file name and
+//! dated by its mtime (see [`PostDefaults`]). Frontmatter is therefore a way
+//! to override what the file already says, not a precondition. What remains
+//! an error is a frontmatter block that opens and never closes, an invalid
+//! date, and a title that slugifies to nothing.
+//!
+//! Dates are plain `YYYY-MM-DD` values ordered by (year, month, day); no
+//! calendar library is involved.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -27,21 +34,12 @@ use thiserror::Error;
 /// Errors from parsing a post or loading a posts directory.
 #[derive(Debug, Error)]
 pub enum PostError {
-    /// The source does not start with a `+++` frontmatter delimiter line.
-    #[error("missing frontmatter: post must start with a +++ line")]
-    MissingFrontmatter,
     /// The opening `+++` has no matching closing `+++` line.
     #[error("unterminated frontmatter: no closing +++ line")]
     UnterminatedFrontmatter,
     /// The frontmatter block is not valid TOML.
     #[error("invalid frontmatter TOML: {0}")]
     Toml(#[from] toml::de::Error),
-    /// The required `title` field is missing or empty.
-    #[error("frontmatter is missing required field: title")]
-    MissingTitle,
-    /// The required `date` field is missing.
-    #[error("frontmatter is missing required field: date")]
-    MissingDate,
     /// The `date` field is not a valid `YYYY-MM-DD` calendar date.
     #[error("invalid date {0:?}: expected YYYY-MM-DD")]
     InvalidDate(String),
@@ -108,6 +106,44 @@ impl FromStr for Date {
     }
 }
 
+impl Date {
+    /// The UTC calendar day of a [`SystemTime`], used for the mtime fallback.
+    ///
+    /// Times before the epoch are ordinary negative day counts, not an error:
+    /// `civil_from_days` is defined over the whole range, so a file with a
+    /// backdated mtime still yields the date it claims.
+    pub fn from_system_time(time: SystemTime) -> Date {
+        let secs = match time.duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs() as i64,
+            Err(e) => -(e.duration().as_secs() as i64),
+        };
+        civil_from_days(secs.div_euclid(86_400))
+    }
+}
+
+/// Convert a day count relative to 1970-01-01 into a Gregorian date.
+///
+/// Howard Hinnant's `civil_from_days`, the standard shift-the-epoch-to-March
+/// method: with March as month 0 the leap day lands at the end of the year,
+/// which makes the day-of-year arithmetic branch-free.
+fn civil_from_days(days: i64) -> Date {
+    // Shift the epoch from 1970-01-01 to 0000-03-01.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // day of era, [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of (March-based) year
+    let mp = (5 * doy + 2) / 153; // March-based month, [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = yoe as i64 + era * 400 + i64::from(month <= 2);
+    Date {
+        year: year as i32,
+        month,
+        day,
+    }
+}
+
 /// The number of days in `month` of `year` (Gregorian, leap-year aware).
 fn days_in_month(year: i32, month: u8) -> u8 {
     match month {
@@ -138,45 +174,77 @@ pub struct Post {
     pub body_md: String,
 }
 
-/// The raw TOML frontmatter shape. All fields optional so that missing
-/// required fields surface as specific [`PostError`]s instead of a generic
-/// TOML message; unknown fields are tolerated.
-#[derive(Deserialize)]
+/// The raw TOML frontmatter shape. Every field is optional; unknown fields
+/// are tolerated. The default value stands in for a file with no frontmatter
+/// block at all.
+#[derive(Default, Deserialize)]
 struct RawFrontmatter {
     title: Option<String>,
     date: Option<String>,
     slug: Option<String>,
 }
 
-/// Parse a post source (frontmatter plus Markdown body) into a [`Post`].
-pub fn parse_post(source: &str) -> Result<Post, PostError> {
-    let mut lines = source.split('\n');
-    let first = lines.next().unwrap_or("");
-    if first.trim_end_matches('\r') != "+++" {
-        return Err(PostError::MissingFrontmatter);
-    }
+/// What a post inherits from its file when the frontmatter stays silent.
+///
+/// Every field of the frontmatter is optional, and so is the frontmatter
+/// block itself: the cheapest way to publish is to drop a plain `.md` file
+/// into the posts directory and write. [`PostDefaults::for_file`] derives
+/// both values from the file itself, so that file is already a complete post.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostDefaults {
+    /// Title to use when the frontmatter sets none: the file name without its
+    /// extension, verbatim.
+    pub title: String,
+    /// Date to use when the frontmatter sets none: the file's modification
+    /// time.
+    pub date: Date,
+}
 
-    let mut frontmatter = String::new();
-    let mut closed = false;
-    for line in lines.by_ref() {
-        if line.trim_end_matches('\r') == "+++" {
-            closed = true;
-            break;
-        }
-        frontmatter.push_str(line);
-        frontmatter.push('\n');
+impl PostDefaults {
+    /// Derive the defaults from a file: its stem as the title, its
+    /// modification time as the date.
+    ///
+    /// The date is the mtime's **UTC** calendar day. Without a timezone
+    /// database there is no honest way to render a local one, and guessing an
+    /// offset would silently shift dates. A file saved shortly after local
+    /// midnight therefore dates to the previous day; setting `date` in the
+    /// frontmatter is the fix, and is what any post that cares about its date
+    /// should do anyway.
+    pub fn for_file(path: &Path) -> Result<PostDefaults, PostError> {
+        let title = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let modified = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map_err(|source| PostError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Ok(PostDefaults {
+            title,
+            date: Date::from_system_time(modified),
+        })
     }
-    if !closed {
-        return Err(PostError::UnterminatedFrontmatter);
-    }
-    let body_md: String = lines.collect::<Vec<&str>>().join("\n");
+}
 
-    let raw: RawFrontmatter = toml::from_str(&frontmatter)?;
+/// Parse a post source (optional frontmatter plus Markdown body) into a
+/// [`Post`], filling anything the frontmatter omits from `defaults`.
+///
+/// A source that does not open with `+++` is taken as body only. That makes
+/// the frontmatter a way to override the file-derived title, date and slug
+/// rather than a precondition for being a post at all.
+pub fn parse_post(source: &str, defaults: &PostDefaults) -> Result<Post, PostError> {
+    let (raw, body_md) = split_frontmatter(source)?;
+
     let title = match raw.title {
         Some(t) if !t.trim().is_empty() => t,
-        _ => return Err(PostError::MissingTitle),
+        _ => defaults.title.clone(),
     };
-    let date: Date = raw.date.ok_or(PostError::MissingDate)?.parse()?;
+    let date = match raw.date {
+        Some(d) => d.parse()?,
+        None => defaults.date,
+    };
     let slug = match raw.slug {
         Some(s) if !s.is_empty() => s,
         _ => {
@@ -194,6 +262,36 @@ pub fn parse_post(source: &str) -> Result<Post, PostError> {
         slug,
         body_md,
     })
+}
+
+/// Split a source into its frontmatter fields and its body.
+///
+/// A source not opening with `+++` has no frontmatter and is all body. One
+/// that opens with `+++` and never closes it is an error rather than body:
+/// the author clearly meant to write frontmatter, and silently serving the
+/// TOML as prose would hide the typo.
+fn split_frontmatter(source: &str) -> Result<(RawFrontmatter, String), PostError> {
+    let mut lines = source.split('\n');
+    let first = lines.next().unwrap_or("");
+    if first.trim_end_matches('\r') != "+++" {
+        return Ok((RawFrontmatter::default(), source.to_string()));
+    }
+
+    let mut frontmatter = String::new();
+    let mut closed = false;
+    for line in lines.by_ref() {
+        if line.trim_end_matches('\r') == "+++" {
+            closed = true;
+            break;
+        }
+        frontmatter.push_str(line);
+        frontmatter.push('\n');
+    }
+    if !closed {
+        return Err(PostError::UnterminatedFrontmatter);
+    }
+    let body_md: String = lines.collect::<Vec<&str>>().join("\n");
+    Ok((toml::from_str(&frontmatter)?, body_md))
 }
 
 /// Slugify a string for use in URLs and page paths.
@@ -238,7 +336,8 @@ pub fn load_posts_dir(dir: &Path) -> Result<Vec<Post>, PostError> {
             path: path.clone(),
             source,
         })?;
-        let post = parse_post(&source).map_err(|e| PostError::File {
+        let defaults = PostDefaults::for_file(&path)?;
+        let post = parse_post(&source, &defaults).map_err(|e| PostError::File {
             path: path.clone(),
             source: Box::new(e),
         })?;

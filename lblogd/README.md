@@ -8,18 +8,39 @@ server with automatic HTTPS (Let's Encrypt via rustls-acme).
 
 ## Post format
 
+A post is a Markdown file. Nothing else is required:
+
+```
+Just write. This whole file is one post.
+```
+
+It is titled after its file name without the extension, and dated by its
+modification time. To override either, open the file with a TOML frontmatter
+block:
+
 ```
 +++
-title = "Hello"
-date = "2026-07-12"
+title = "Hello"       # optional, defaults to the file name without .md
+date = "2026-07-12"   # optional, defaults to the file's mtime
 slug = "hello"        # optional, defaults to slugify(title)
 +++
 
 Markdown body...
 ```
 
+The mtime fallback is the **UTC** calendar day. Without a timezone database
+there is no honest way to render a local one, so a file saved shortly after
+local midnight dates to the previous day; set `date` explicitly when the date
+matters.
+
 Slugs are plain lowercase ASCII: alphanumerics kept, everything else collapsed
-to single hyphens (matching micron heading-anchor slugs).
+to single hyphens (matching micron heading-anchor slugs). Non-ASCII characters
+count as separators, so `Größe` slugifies to `gr-e`. Set `slug` explicitly for
+titles that are not plain ASCII.
+
+What is still an error: a frontmatter block that opens with `+++` and never
+closes, a `date` that is not a valid `YYYY-MM-DD` calendar day, and a title
+that slugifies to nothing.
 
 ## Renderers
 
@@ -180,6 +201,7 @@ Wants=lnsd.service
 [Service]
 User=lblogd
 ExecStart=/usr/local/bin/lblogd --config /etc/lblogd.toml
+ExecReload=/bin/kill -HUP $MAINPID
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 
@@ -200,22 +222,35 @@ you out for days.
 
 ### Adding a post
 
-Drop a Markdown file into `posts_dir` and restart the service:
+Drop a Markdown file into `posts_dir` and send SIGHUP:
 
 ```
-cat > /var/lib/lblogd/posts/hello.md <<'EOF'
-+++
-title = "Hello"
-date = "2026-07-12"
-+++
-
-First post.
-EOF
-systemctl restart lblogd
+echo "First post." > /var/lib/lblogd/posts/hello.md
+systemctl reload lblogd
 ```
 
-Posts are loaded once at startup by both the node and the web server; live
-reload (SIGHUP or file watching) is a possible future enhancement.
+The reload swaps the served content in place: the HTTP listener keeps its
+socket and the NomadNet node keeps its links and its destination hash. New
+pages get a request handler, removed ones lose theirs, and the destination is
+deliberately not re-announced, since it has not changed.
+
+A reload that fails changes nothing. If a post has a malformed date, the
+error is logged with its file name and the previous content keeps being
+served, so a typo cannot take the blog offline. Startup is the exception:
+there the same error is fatal, because there is no previous good state.
+
+To check a post before publishing it, use the dry run — it performs the same
+parse without touching the running server:
+
+```
+lblogd --config /etc/lblogd.toml --print-hash
+```
+
+For the systemd unit to accept `systemctl reload`, add:
+
+```ini
+ExecReload=/bin/kill -HUP $MAINPID
+```
 
 ### Publishing the NomadNet address
 
