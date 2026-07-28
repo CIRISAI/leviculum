@@ -34,7 +34,7 @@ Posts are plain Markdown files with an optional TOML frontmatter block.
 Adding a file and reloading the service publishes it to both sides.
 
 The package installs lblogd as a systemd service under a dedicated
-'lblogd' user. As shipped it serves on 127.0.0.1:8080 without a
+'lblogd' user. As shipped it serves on 127.0.0.1:8180 without a
 certificate; see /etc/lblogd/config.toml to put it on a public domain.
 The NomadNet side needs a running Reticulum shared instance — lnsd from
 the 'leviculum' package, or the Python rnsd.
@@ -75,6 +75,10 @@ assets = [
     # the two can never drift. cargo-deb gzips anything under
     # usr/share/man/ by itself.
     ["../target/man/lblogd.1", "usr/share/man/man1/lblogd.1", "644"],
+    # Documented overrides for the two lintian tags that a
+    # musl-static binary always trips; the file explains why each
+    # is a deliberate deviation rather than a defect.
+    ["../packaging/lintian/lblogd", "usr/share/lintian/overrides/lblogd", "644"],
 ]
 # Generated per build by scripts/deb-stamp.sh, because Debian wants the
 # top entry to carry this build's version and the version is stamped.

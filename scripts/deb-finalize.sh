@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 #
-# Repair the two things cargo-deb cannot produce, in one unpack/repack
-# pass over a finished .deb.
+# Repair the three things cargo-deb gets wrong or cannot produce, in one
+# unpack/repack pass over a finished .deb.
 #
-# 1. md5sums. cargo-deb 3.6.3 writes control, conffiles, config, preinst,
+# 1. Changelog name. cargo-deb always installs changelog.Debian.gz, but a
+#    version without a Debian revision describes a native package, whose
+#    changelog is plain changelog.gz. lintian:
+#    wrong-name-for-changelog-of-native-package.
+#
+# 2. md5sums. cargo-deb 3.6.3 writes control, conffiles, config, preinst,
 #    prerm and postrm, and has no md5sums support at all — a gap in the
 #    tool, not a misconfiguration. Debian expects the file: `dpkg -V` and
 #    `debsums` verify installed files against it, and without it every
@@ -13,7 +18,7 @@
 #    that the admin edits them, so a mismatch there is expected rather
 #    than a finding.
 #
-# 2. Empty control fields. A package with no dependencies should omit
+# 3. Empty control fields. A package with no dependencies should omit
 #    Depends entirely, but cargo-deb emits `Depends:` with an empty value
 #    whether the manifest sets `depends = ""` or leaves it out. An empty
 #    field is malformed, so it is dropped here.
@@ -46,7 +51,23 @@ for deb in "$@"; do
 
     dpkg-deb -R "$deb" "$tmp/pkg"
 
-    # --- 1. md5sums -----------------------------------------------------
+    # --- 1. changelog name ----------------------------------------------
+    # A Debian version without a revision (no hyphen) describes a *native*
+    # package, and a native package's changelog is changelog.gz — only a
+    # non-native one adds the .Debian infix. cargo-deb always writes the
+    # .Debian form, which lintian flags as
+    # wrong-name-for-changelog-of-native-package. These versions are
+    # native (0.1.0~nightly.<date>.<sha>), so rename. Done before the
+    # sums below, or md5sums would name a file that no longer exists.
+    pkgname="$(awk '/^Package:/ {print $2; exit}' "$tmp/pkg/DEBIAN/control")"
+    pkgversion="$(awk '/^Version:/ {print $2; exit}' "$tmp/pkg/DEBIAN/control")"
+    docdir="$tmp/pkg/usr/share/doc/${pkgname}"
+    if [ -f "$docdir/changelog.Debian.gz" ] && [ "${pkgversion##*-}" = "$pkgversion" ]; then
+        mv "$docdir/changelog.Debian.gz" "$docdir/changelog.gz"
+        echo "[deb-finalize] $(basename "$deb"): native package, changelog.Debian.gz -> changelog.gz"
+    fi
+
+    # --- 2. md5sums -----------------------------------------------------
     conffiles="$tmp/conffiles"
     if [ -f "$tmp/pkg/DEBIAN/conffiles" ]; then
         # Stored with a leading slash; strip it to match the relative
@@ -73,7 +94,7 @@ for deb in "$@"; do
     ) >"$tmp/pkg/DEBIAN/md5sums"
     chmod 0644 "$tmp/pkg/DEBIAN/md5sums"
 
-    # --- 2. empty control fields ---------------------------------------
+    # --- 3. empty control fields ---------------------------------------
     # A field line is `Name:` optionally followed by a value; continuation
     # lines start with whitespace. A field is dropped only when its value
     # is empty *and* no continuation line follows.

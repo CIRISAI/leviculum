@@ -50,6 +50,10 @@ assets = [
     # Rendered from docs/src/man/ by scripts/md2man.py; see lblogd's
     # manifest for why the Markdown under docs/ is the single source.
     ["../target/man/lnomad.1", "usr/share/man/man1/lnomad.1", "644"],
+    # Documented overrides for the two lintian tags that a
+    # musl-static binary always trips; the file explains why each
+    # is a deliberate deviation rather than a defect.
+    ["../packaging/lintian/lnomad", "usr/share/lintian/overrides/lnomad", "644"],
 ]
 changelog = "../target/deb-changelog/lnomad"
 

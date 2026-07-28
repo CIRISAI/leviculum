@@ -113,9 +113,22 @@ check_package() {
     done
     contains "$contents" "/usr/share/doc/${pkg}/README.md" "ships its README"
 
-    # Policy 12.7: every package installs a Debian changelog, compressed.
-    contains "$contents" "/usr/share/doc/${pkg}/changelog.Debian.gz" \
-        "ships a Debian changelog"
+    # Policy 12.7: every package installs a changelog, compressed. These
+    # versions carry no Debian revision, which makes the packages native,
+    # and a native package's changelog is changelog.gz — the .Debian
+    # infix belongs to non-native ones only. deb-finalize.sh renames what
+    # cargo-deb wrote; assert the result, not the intermediate.
+    contains "$contents" "/usr/share/doc/${pkg}/changelog.gz" \
+        "ships a changelog under its native name"
+    if echo "$contents" | grep -q "/usr/share/doc/${pkg}/changelog.Debian.gz"; then
+        fail "changelog still carries the non-native .Debian infix"
+    fi
+
+    # Documented lintian overrides for the tags a musl-static binary
+    # always trips. Without them a lintian run reports errors that are
+    # deliberate build choices, and real findings drown in the noise.
+    contains "$contents" "/usr/share/lintian/overrides/${pkg}" \
+        "ships its lintian overrides"
 
     # Policy 12.1: every program gets a manual page, and man pages are
     # installed compressed. cargo-deb does the gzipping, so a plain .1
@@ -228,6 +241,30 @@ check_package() {
     else
         pass "control has no empty fields"
     fi
+    # --- lintian ---
+    # The authority on Debian policy, so let it speak rather than
+    # re-implementing its checks here. Errors fail; warnings are printed
+    # but do not, because some are judgement calls the maintainer has
+    # taken deliberately. Tags the build knowingly triggers belong in
+    # packaging/lintian/<pkg> instead of being filtered here.
+    if command -v lintian >/dev/null 2>&1; then
+        local lint_out
+        lint_out="$(lintian --tag-display-limit 0 "$deb" 2>/dev/null | grep -v '^N:' || true)"
+        local lint_errors
+        lint_errors="$(echo "$lint_out" | grep -c '^E:' || true)"
+        if [ "$lint_errors" -gt 0 ]; then
+            echo "$lint_out" | grep '^E:' | sed 's/^/      /'
+            fail "lintian reports ${lint_errors} error(s)"
+        else
+            pass "lintian reports no errors"
+        fi
+        if echo "$lint_out" | grep -q '^W:'; then
+            echo "$lint_out" | grep '^W:' | sed 's/^/      note: /'
+        fi
+    else
+        skip "lintian not installed; policy checks not run"
+    fi
+
     if [ -f "$ctrl/conffiles" ]; then
         echo "  conffiles: $(tr '\n' ' ' <"$ctrl/conffiles")"
     fi

@@ -100,6 +100,10 @@ assets = [
     ["../target/man/lnstest.1", "usr/share/man/man1/lnstest.1", "644"],
     ["../target/man/lncp.1", "usr/share/man/man1/lncp.1", "644"],
     ["../target/man/lnstatus.1", "usr/share/man/man1/lnstatus.1", "644"],
+    # Documented overrides for the two lintian tags that a
+    # musl-static binary always trips; the file explains why each
+    # is a deliberate deviation rather than a defect.
+    ["../packaging/lintian/leviculum", "usr/share/lintian/overrides/leviculum", "644"],
 ]
 # Note: this is the *Debian* changelog, generated per build by
 # scripts/deb-stamp.sh. The project's own CHANGELOG.md ships separately
