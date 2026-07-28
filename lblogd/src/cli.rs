@@ -14,7 +14,10 @@ use clap::Parser;
 #[derive(Parser, Debug, PartialEq, Eq)]
 #[command(
     name = "lblogd",
-    version = env!("CARGO_PKG_VERSION"),
+    // build.rs, not CARGO_PKG_VERSION: the shipped string carries the
+    // nightly build id and the git hash, so a bug report names the exact
+    // commit that produced the binary.
+    version = env!("LEVICULUM_VERSION"),
     about = "Dev blog server: Markdown posts over HTTP/HTTPS and NomadNet"
 )]
 pub struct Args {

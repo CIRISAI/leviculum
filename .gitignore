@@ -2,9 +2,12 @@
 /target/
 /dist/
 *.deb
-# Version stamp files written by the build-deb* just recipes (and CI nightly).
+# Version stamp files written by scripts/deb-stamp.sh (build-deb* just
+# recipes and CI nightly). One build id per run, one Debian version per
+# package, since the packages are versioned independently.
 /.build-id
 /.deb-version
+/.deb-version-*
 leviculum-nrf/target/
 leviculum-nrf/Cargo.lock
 **/*.rs.bk

@@ -14,6 +14,16 @@
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-amd64.deb
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-arm64.deb
 #
+# So does the lblogd dev-blog server, which installs a systemd service of
+# its own:
+#
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-amd64.deb
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-arm64.deb
+#
+# lnomad and lblogd carry their own version numbers, independent of the
+# leviculum stack's; scripts/deb-stamp.sh derives one Debian version per
+# package.
+#
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
 # file only reacts to the `event: cron` trigger. Suggested schedule:
@@ -44,32 +54,34 @@ steps:
       - apt-get update && apt-get install -y musl-tools
       - cargo install --locked cargo-deb
       - rustup target add x86_64-unknown-linux-musl
-      # Pin the build ID + DEB version once and persist them, so all
-      # subsequent steps see exactly the same values (no midnight-UTC
-      # drift between build-amd64 and build-arm64). Use $(...)
-      # subshells for shell-local values: Woodpecker pre-substitutes
-      # brace-style references (CI_COMMIT_SHA etc.) before the shell
-      # ever sees the line, and unknown brace-style names expand to
-      # empty without warning. Reserve brace form for true Woodpecker
-      # variables only — and never write a literal example of brace
-      # form in a comment, since the pre-substitutor scans the raw
-      # YAML text and chokes on dot-ellipsis placeholders.
-      - echo "nightly.$(date -u +%Y%m%d)-${CI_COMMIT_SHA:0:7}" >.build-id
-      - echo "$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)~nightly.$(date -u +%Y%m%d).${CI_COMMIT_SHA:0:7}" >.deb-version
+      # Pin the build ID + per-package DEB versions once and persist
+      # them, so all subsequent steps see exactly the same values (no
+      # midnight-UTC drift between build-amd64 and build-arm64). The
+      # logic lives in a script shared with the Justfile's build-deb*
+      # recipes; it takes the commit from CI_COMMIT_SHA when set and
+      # from git otherwise. Keeping it out of this file also keeps it
+      # clear of Woodpecker's pre-substitutor, which rewrites
+      # brace-style references in the raw YAML before any shell sees
+      # them and expands unknown names to empty without warning.
+      - bash scripts/deb-stamp.sh
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      # `cargo clean -p leviculum-cli` avoids a Cargo incremental quirk
+      # `cargo clean` on the bin crates avoids a Cargo incremental quirk
       # where repeated builds with the same LEVICULUM_BUILD_ID skip
       # relinking some binaries, leaving them with a stale version
       # string. Fresh containers rarely hit this, but the clean is
       # cheap insurance.
-      - cargo clean -p leviculum-cli -p lnomad
-      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad
+      - cargo clean -p leviculum-cli -p lnomad -p lblogd
+      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
+      # One --deb-version per package: the three are versioned
+      # independently, so a single shared version string would be wrong
+      # for at least two of them.
       # --no-strip: rust strips debuginfo at link time (see workspace
       # Cargo.toml [profile.release] strip = "debuginfo"). cargo-deb's
       # default strip --strip-all corrupted x86_64 musl-static binaries
       # (SIGSEGV at startup), so we skip it entirely.
-      - cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
-      - cargo deb -p lnomad --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+      - cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
+      - cargo deb -p lnomad --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
+      - cargo deb -p lblogd --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
 
   build-arm64:
     image: rust:bookworm
@@ -82,11 +94,15 @@ steps:
       - export PATH="/opt/zigvenv/bin:$PATH"
       - cargo install --locked cargo-deb
       - rustup target add aarch64-unknown-linux-musl
+      # No re-stamp here: build-amd64 already wrote .build-id and the
+      # .deb-version-* files, and this step must reuse them verbatim so
+      # the two architectures ship identical version strings.
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      - cargo clean -p leviculum-cli -p lnomad
-      - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad
-      - cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
-      - cargo deb -p lnomad --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
+      - cargo clean -p leviculum-cli -p lnomad -p lblogd
+      - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
+      - cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
+      - cargo deb -p lnomad --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
+      - cargo deb -p lblogd --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
 
   package:
     image: debian:bookworm-slim

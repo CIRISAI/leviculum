@@ -241,6 +241,36 @@ lnomad --instance lblogd-dev --discover 20                 # see the announce
 
 ## Deployment
 
+### Debian package
+
+On Debian or Ubuntu, install the nightly package instead of doing any of the
+manual setup below. It is statically linked against musl, so it installs on
+Debian 9 and later regardless of host glibc:
+
+```
+wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-amd64.deb
+sudo apt install ./lblogd-nightly-amd64.deb
+```
+
+Replace `amd64` with `arm64` on aarch64. The package creates the `lblogd`
+system user, sets up `/var/lib/lblogd/posts`, installs the unit, and starts
+the service. As shipped it serves on `http://127.0.0.1:8180/` in plaintext
+with one placeholder post, so nothing is exposed until you decide it should
+be. `/etc/lblogd/config.toml` is a conffile — dpkg preserves your edits
+across upgrades — and its "Going public" section covers the switch to a
+public domain with automatic HTTPS.
+
+The NomadNet side still needs a Reticulum shared instance. Install the
+`leviculum` package for `lnsd`, or run the Python `rnsd`; either way its
+`instance_name` must match the config's `[node] instance_name`, which the
+shipped config sets to `default`.
+
+`lblogd` is versioned independently of the `leviculum` stack: its version
+number tracks this program, not the protocol core it is built from.
+
+The rest of this section describes the manual setup, for systems without the
+package.
+
 ### Prerequisites
 
 A running `lnsd` shared instance on the same machine. Give it at least one

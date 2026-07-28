@@ -5,25 +5,22 @@
 # filenames so the rolling release URLs stay valid across nightly
 # runs.
 #
-# Expects:
-#   target/x86_64-unknown-linux-musl/release/{lnsd,lnstest,lncp,lnstatus,lnomad}
-#   target/aarch64-unknown-linux-musl/release/{lnsd,lnstest,lncp,lnstatus,lnomad}
-#   target/debian/leviculum_*_amd64.deb
-#   target/debian/leviculum_*_arm64.deb
-#   target/debian/lnomad_*_amd64.deb
-#   target/debian/lnomad_*_arm64.deb
+# Expects, for both musl triples under target/<triple>/release/:
+#   lnsd, lnstest, lncp, lnstatus, lnomad, lblogd
+# and one .deb per package and arch under target/debian/:
+#   leviculum_*_{amd64,arm64}.deb
+#   lnomad_*_{amd64,arm64}.deb
+#   lblogd_*_{amd64,arm64}.deb
+# plus:
 #   git available on PATH
 #   LEVICULUM_BUILD_ID env var (embedded in the per-arch VERSION file)
+#   .deb-version-<crate> files from scripts/deb-stamp.sh (ditto)
 #
-# Produces:
-#   dist/leviculum-nightly-amd64.deb       + .sha256
-#   dist/leviculum-nightly-arm64.deb       + .sha256
-#   dist/leviculum-nightly-amd64.tar.gz    + .sha256   (just the binaries)
-#   dist/leviculum-nightly-arm64.tar.gz    + .sha256   (just the binaries)
-#   dist/lnomad-nightly-amd64.deb          + .sha256
-#   dist/lnomad-nightly-arm64.deb          + .sha256
-#   dist/lnomad-nightly-amd64.tar.gz       + .sha256   (just the binary)
-#   dist/lnomad-nightly-arm64.tar.gz       + .sha256   (just the binary)
+# Produces, for each of leviculum, lnomad and lblogd, and each of amd64
+# and arm64:
+#   dist/<pkg>-nightly-<arch>.deb          + .sha256
+#   dist/<pkg>-nightly-<arch>.tar.gz       + .sha256   (just the binaries)
+# plus one source tarball:
 #   dist/leviculum-nightly-source.tar.gz   + .sha256
 # The .deb version lives in the control metadata and the embedded
 # --version string, not in the filename. Binaries are pre-stripped
@@ -63,12 +60,14 @@ collect_deb leviculum amd64
 collect_deb leviculum arm64
 collect_deb lnomad amd64
 collect_deb lnomad arm64
+collect_deb lblogd amd64
+collect_deb lblogd arm64
 
 # Per-arch userspace binary tarball: the package's binaries plus
-# README/LICENSE/CHANGELOG and a VERSION pointer. Drop-in for users
-# who want the tools without root, system service, or .deb tooling.
+# README/LICENSE and a VERSION pointer. Drop-in for users who want the
+# tools without root, system service, or .deb tooling.
 pack_bin_tarball() {
-    local pkg="$1"          # leviculum | lnomad
+    local pkg="$1"          # leviculum | lnomad | lblogd
     local arch_dash="$2"    # amd64 | arm64
     local rust_triple="$3"  # x86_64-unknown-linux-musl | aarch64-unknown-linux-musl
     local readme_src="$4"   # per-package README, path relative to repo root
@@ -83,9 +82,26 @@ pack_bin_tarball() {
         cp "$src/$bin" "$stage/bin/$bin"
     done
     cp "$readme_src" "$stage/doc/README.md"
-    cp LICENSE CHANGELOG.md "$stage/doc/"
+    cp LICENSE "$stage/doc/"
+    # CHANGELOG.md documents the leviculum stack. Shipping it inside the
+    # lnomad and lblogd tarballs would attach a changelog to a version it
+    # does not describe, now that those two are versioned independently.
+    if [ "$pkg" = leviculum ]; then
+        cp CHANGELOG.md "$stage/doc/"
+    fi
+    # The package version comes from the stamp file the build wrote, so
+    # the tarball names the same version as the .deb beside it. Stripping
+    # the ~nightly suffix leaves the plain package version; the build id
+    # on the next line carries the date and commit.
+    local crate="$pkg"
+    [ "$pkg" = leviculum ] && crate=leviculum-cli
+    local version="unknown"
+    if [ -r ".deb-version-${crate}" ]; then
+        version="$(sed 's/~.*//' ".deb-version-${crate}")"
+    fi
     cat >"$stage/VERSION" <<EOF
 ${pkg} nightly build
+version: ${version}
 build-id: ${LEVICULUM_BUILD_ID:-unknown}
 arch: linux-${arch_dash}
 EOF
@@ -99,6 +115,8 @@ pack_bin_tarball leviculum amd64 x86_64-unknown-linux-musl README.md lnsd lnstes
 pack_bin_tarball leviculum arm64 aarch64-unknown-linux-musl README.md lnsd lnstest lncp lnstatus
 pack_bin_tarball lnomad amd64 x86_64-unknown-linux-musl lnomad/README.md lnomad
 pack_bin_tarball lnomad arm64 aarch64-unknown-linux-musl lnomad/README.md lnomad
+pack_bin_tarball lblogd amd64 x86_64-unknown-linux-musl lblogd/README.md lblogd
+pack_bin_tarball lblogd arm64 aarch64-unknown-linux-musl lblogd/README.md lblogd
 
 # Source tarball at the same commit as the binaries. git archive
 # emits only tracked files, so vendor/ submodules and target/ never

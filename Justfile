@@ -236,55 +236,69 @@ build-c-lnsd: build-ffi
 # x86_64/aarch64-unknown-linux-musl, cargo-deb, and for arm64
 # cargo-zigbuild + ziglang. Run `just _deb-prereqs` to install them.
 
-# Pin the build ID + DEB version once and persist them, so an amd64 +
-# arm64 pair from a single `just build-deb` run carries identical
-# version strings (no midnight-UTC drift between the two builds), exactly
-# as nightly.yml pins them in its build-amd64 step. Formats match
-# nightly: build-id  nightly.<UTCdate>-<sha7> ; deb-version
-# <cargo version>~nightly.<UTCdate>.<sha7>. The short sha is the first 7
-# chars of git HEAD; a dirty tree still builds, the version just reflects
-# HEAD. No CI env vars are assumed; everything is computed from git+date.
+# Pin the build ID + per-package DEB versions once and persist them, so
+# an amd64 + arm64 pair from a single `just build-deb` run carries
+# identical version strings (no midnight-UTC drift between the two
+# builds). Shared with nightly.yml, which calls the same script: this
+# used to be duplicated shell in both places and the two drifted.
 _deb-stamp:
-    @SHA="$(git rev-parse HEAD | cut -c1-7)"; \
-    DATE="$(date -u +%Y%m%d)"; \
-    VERSION="$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)"; \
-    echo "nightly.${DATE}-${SHA}" >.build-id; \
-    echo "${VERSION}~nightly.${DATE}.${SHA}" >.deb-version; \
-    echo "[deb-stamp] build-id=$(cat .build-id) deb-version=$(cat .deb-version)"
+    @bash scripts/deb-stamp.sh
 
-# amd64 musl-static .deb. Binaries come from the workspace musl target,
-# so the .deb is fully static and runs on Debian >= 9 / Ubuntu >= 16.04
-# regardless of host glibc. `cargo clean -p leviculum-cli` is the same
-# incremental-relink insurance nightly uses (a repeated build with an
-# unchanged LEVICULUM_BUILD_ID can skip relinking and ship a stale
-# version string). --no-strip: rust already strips debuginfo at link
-# time; cargo-deb's default strip --strip-all corrupts musl-static
-# binaries (SIGSEGV at startup). Output: target/debian/leviculum_*_amd64.deb
-# (cargo-deb also hardlinks it under target/<triple>/debian/).
+# amd64 musl-static .debs for all three packages: leviculum (the daemon
+# and its clients), lnomad (the browser), lblogd (the blog server).
+# Binaries come from the workspace musl target, so they are fully static
+# and run on Debian >= 9 / Ubuntu >= 16.04 regardless of host glibc.
+# `cargo clean` on the bin crates is the same incremental-relink
+# insurance nightly uses (a repeated build with an unchanged
+# LEVICULUM_BUILD_ID can skip relinking and ship a stale version
+# string). --no-strip: rust already strips debuginfo at link time;
+# cargo-deb's default strip --strip-all corrupts musl-static binaries
+# (SIGSEGV at startup). Output: target/debian/*_amd64.deb (cargo-deb
+# also hardlinks each under target/<triple>/debian/).
 build-deb-amd64: (_require-cargo-deb) _deb-stamp
-    cargo clean -p leviculum-cli
-    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus
-    cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
-    @echo "[build-deb-amd64] produced: $(ls -1t target/debian/leviculum_*_amd64.deb | head -1)"
+    cargo clean -p leviculum-cli -p lnomad -p lblogd
+    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
+    cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
+    cargo deb -p lnomad --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
+    cargo deb -p lblogd --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
+    @ls -1t target/debian/*_amd64.deb | head -3 | sed 's/^/[build-deb-amd64] produced: /'
 
-# arm64 musl-static .deb via cargo-zigbuild (Zig as the cross
+# arm64 musl-static .debs via cargo-zigbuild (Zig as the cross
 # compiler/linker — the only way to reach aarch64-musl from an amd64 host
 # without docker-in-docker or an arm64 runner). Requires cargo-zigbuild +
 # ziglang on PATH; `pip install ziglang` provides a self-contained Zig
 # the zigbuild wrapper finds, or install a full Zig distribution (the
 # bare zig binary without its sibling lib/ fails at `zig cc` with "unable
 # to find zig installation directory"). Same clean/--no-strip/version
-# handling as build-deb-amd64. Output: target/debian/leviculum_*_arm64.deb
-# (cargo-deb also hardlinks it under target/<triple>/debian/).
+# handling as build-deb-amd64. Output: target/debian/*_arm64.deb
+# (cargo-deb also hardlinks each under target/<triple>/debian/).
 build-deb-arm64: (_require-cargo-deb) _deb-stamp
-    cargo clean -p leviculum-cli
-    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus
-    cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version)"
-    @echo "[build-deb-arm64] produced: $(ls -1t target/debian/leviculum_*_arm64.deb | head -1)"
+    cargo clean -p leviculum-cli -p lnomad -p lblogd
+    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
+    cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
+    cargo deb -p lnomad --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
+    cargo deb -p lblogd --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
+    @ls -1t target/debian/*_arm64.deb | head -3 | sed 's/^/[build-deb-arm64] produced: /'
 
-# Build both .debs in one go. _deb-stamp runs first (a dependency of each
-# child), so both packages share one build-id/version pair.
+# Build every .deb in one go. _deb-stamp runs first (a dependency of each
+# child), so all six packages share one build-id and a consistent set of
+# per-package versions.
 build-deb: build-deb-amd64 build-deb-arm64
+
+# Structural check on the built .debs: metadata, per-package versions,
+# file layout, conffiles, unit validity, maintainer-script syntax. Needs
+# `just build-deb` (or at least build-deb-amd64) to have run. Root not
+# required — nothing is installed.
+#
+# Deliberately not part of any test tier: it presupposes a build-deb run,
+# which does a `cargo clean` on three crates and cross-builds for two
+# targets. That is minutes of rebuild plus a zig toolchain, which does
+# not belong in the 15-minute Tier 1 budget. Run it by hand whenever
+# packaging changes, together with a real install test in a systemd
+# container — the structural checks here cannot see a service that
+# installs cleanly and then fails to start.
+verify-deb:
+    @bash scripts/verify-deb-packaging.sh
 
 _require-cargo-deb:
     @cargo deb --version >/dev/null 2>&1 || (echo "cargo-deb not found — run: just _deb-prereqs (or cargo install cargo-deb)" && exit 1)
