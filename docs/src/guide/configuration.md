@@ -198,6 +198,7 @@ RNode radio parameters the interface configures (`config.rs:231-249`):
 | `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`ini_config.rs:240`; `config.rs:244-245`) |
 | `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`ini_config.rs:241`; `config.rs:246-247`) |
 | `csma_enabled` | bool | unset | Enable CSMA/CA on the T114 LoRa interface (needs CAD-capable firmware). (`ini_config.rs:242`; `config.rs:248-249`) |
+| `preamble_symbols` | u16 (symbols) | unset (firmware default 24) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`ini_config.rs:465`; `config.rs:439`) |
 
 ### IFAC (Interface Access Codes)
 

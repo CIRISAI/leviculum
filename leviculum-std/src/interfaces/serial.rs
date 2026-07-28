@@ -50,6 +50,28 @@ pub(crate) struct SerialRadioConfig {
     pub csma_enabled: bool,
 }
 
+/// Build the LNode radio config a `SerialInterface` block asks for, or
+/// `None` when the block names no `frequency` and is therefore a plain
+/// (non-LoRa) serial pipe.
+///
+/// Every default here is the firmware's own compiled default
+/// (`leviculum_nrf::lora::RadioConfig::eu_medium`), so a block that omits a
+/// key pushes the frame this code pushed before that key existed.
+pub(crate) fn serial_radio_config(
+    cfg: &crate::config::InterfaceConfig,
+) -> Option<SerialRadioConfig> {
+    let frequency = cfg.frequency?;
+    Some(SerialRadioConfig {
+        frequency,
+        bandwidth: cfg.bandwidth.unwrap_or(125_000),
+        spreading_factor: cfg.spreading_factor.unwrap_or(7),
+        coding_rate: cfg.coding_rate.unwrap_or(5),
+        tx_power: cfg.tx_power.unwrap_or(17),
+        preamble_len: cfg.preamble_symbols.unwrap_or(24),
+        csma_enabled: cfg.csma_enabled.unwrap_or(true),
+    })
+}
+
 /// Configuration for a serial interface.
 pub(crate) struct SerialInterfaceConfig {
     pub id: InterfaceId,
@@ -448,6 +470,76 @@ pub(crate) fn parse_stop_bits(n: u8) -> tokio_serial::StopBits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the key: a `preamble_symbols` written in a config
+    /// file has to survive as far as the bytes on the wire. This drives the
+    /// same `serial_radio_config` the driver calls and then the same
+    /// `build_radio_config_frame` `send_radio_config` calls, and reads the
+    /// preamble back out of the frame — so it fails if any link of the
+    /// chain drops the value, not merely if the struct field is unset.
+    #[test]
+    fn preamble_symbols_travels_from_config_to_wire_frame() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(869_525_000),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(10),
+            coding_rate: Some(8),
+            tx_power: Some(17),
+            preamble_symbols: Some(18),
+            ..Default::default()
+        };
+        let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.preamble_len, 18);
+
+        let payload = leviculum_core::rnode::build_radio_config_frame(
+            &leviculum_core::rnode::RadioConfigWire {
+                frequency_hz: radio.frequency as u32,
+                bandwidth_hz: radio.bandwidth,
+                sf: radio.spreading_factor,
+                cr: radio.coding_rate,
+                tx_power_dbm: radio.tx_power,
+                preamble_len: radio.preamble_len,
+                csma_enabled: radio.csma_enabled,
+                radio_silent: false,
+                st_alock: 0,
+                lt_alock: 0,
+                lt_alock_present: true,
+            },
+        );
+        // Strip the 2-byte magic the parser expects to be gone.
+        let parsed =
+            leviculum_core::rnode::parse_radio_config(&payload[2..]).expect("frame parses back");
+        assert_eq!(parsed.preamble_len, 18);
+    }
+
+    /// A block that omits the key pushes the firmware's own default, so no
+    /// config file written before the key existed changes meaning.
+    #[test]
+    fn absent_preamble_symbols_keeps_the_firmware_default() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(869_525_000),
+            ..Default::default()
+        };
+        let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.preamble_len, 24);
+    }
+
+    /// No `frequency` means a plain serial pipe, not a LoRa modem: no radio
+    /// config is pushed at all, whatever the other keys say.
+    #[test]
+    fn no_frequency_means_no_radio_config() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            preamble_symbols: Some(18),
+            ..Default::default()
+        };
+        assert!(serial_radio_config(&cfg).is_none());
+    }
 
     fn base_config(port: &str, radio: Option<SerialRadioConfig>) -> SerialInterfaceConfig {
         SerialInterfaceConfig {

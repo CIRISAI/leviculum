@@ -458,6 +458,11 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "spreadingfactor" | "spreading_factor" => iface.spreading_factor = value.parse().ok(),
         "codingrate" | "coding_rate" => iface.coding_rate = value.parse().ok(),
         "txpower" | "tx_power" => iface.tx_power = value.parse().ok(),
+        // LoRa preamble in symbols, for the LNode radio-config frame. Spelled
+        // apart from the KISS `preamble` key above (CMD_TXDELAY, milliseconds)
+        // because the two travel to different hardware and would otherwise be
+        // one typo apart.
+        "preamble_symbols" => iface.preamble_symbols = value.parse().ok(),
         // AutoInterface specific
         "group_id" => iface.group_id = Some(value.to_string()),
         "discovery_scope" => iface.discovery_scope = Some(value.to_string()),
@@ -1038,6 +1043,78 @@ mod tests {
         assert_eq!(iface.flow_control, Some(true));
         assert_eq!(iface.id_interval, Some(600));
         assert_eq!(iface.id_callsign.as_deref(), Some("MYCALL-1"));
+    }
+
+    /// A `SerialInterface` block carrying the LoRa PHY keys (the LNode
+    /// radio-config frame the driver pushes at startup) parses every one of
+    /// them, `preamble_symbols` included.
+    #[test]
+    fn test_parse_serial_lnode_lora_keys() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Serial LNode]]
+    type = SerialInterface
+    port = /dev/ttyACM0
+    speed = 115200
+    frequency = 869525000
+    bandwidth = 125000
+    spreadingfactor = 10
+    codingrate = 8
+    txpower = 17
+    preamble_symbols = 18
+    csma_enabled = yes
+"#,
+        )
+        .unwrap();
+
+        let iface = config.interfaces.get("Serial LNode").expect("serial iface");
+        assert_eq!(iface.interface_type, "SerialInterface");
+        assert_eq!(iface.frequency, Some(869_525_000));
+        assert_eq!(iface.bandwidth, Some(125_000));
+        assert_eq!(iface.spreading_factor, Some(10));
+        assert_eq!(iface.coding_rate, Some(8));
+        assert_eq!(iface.tx_power, Some(17));
+        assert_eq!(iface.preamble_symbols, Some(18));
+        assert_eq!(iface.csma_enabled, Some(true));
+    }
+
+    /// Two guarantees the new key has to keep. Omitting `preamble_symbols`
+    /// leaves it unset, which is what makes the driver fall back to the
+    /// firmware's own 24 and every pre-existing config file mean what it
+    /// meant before. And the KISS `preamble` key (CMD_TXDELAY, milliseconds)
+    /// still lands on its own field — the two names are one typo apart and
+    /// must not alias.
+    #[test]
+    fn test_serial_preamble_symbols_absent_and_kiss_preamble_distinct() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Serial No Preamble]]
+    type = SerialInterface
+    port = /dev/ttyACM0
+    frequency = 869525000
+  [[Serial Kiss Preamble]]
+    type = SerialInterface
+    port = /dev/ttyACM1
+    frequency = 869525000
+    preamble = 150
+"#,
+        )
+        .unwrap();
+
+        let plain = config
+            .interfaces
+            .get("Serial No Preamble")
+            .expect("serial iface");
+        assert_eq!(plain.preamble_symbols, None);
+
+        let kiss_spelled = config
+            .interfaces
+            .get("Serial Kiss Preamble")
+            .expect("serial iface");
+        assert_eq!(kiss_spelled.preamble, Some(150));
+        assert_eq!(kiss_spelled.preamble_symbols, None);
     }
 
     #[test]

@@ -428,6 +428,15 @@ pub struct InterfaceConfig {
     pub coding_rate: Option<u8>,
     /// TX power in dBm
     pub tx_power: Option<i8>,
+    /// LoRa preamble length in symbols, pushed to LNode firmware in the
+    /// radio-config frame (`SerialInterface` with a `[radio]`-derived PHY).
+    /// Unset keeps the compiled firmware default of 24 symbols, so an
+    /// existing config file means exactly what it meant before.
+    ///
+    /// Distinct from [`preamble`](Self::preamble), which is the KISS TNC
+    /// TX delay in milliseconds (`CMD_TXDELAY`) and does not reach a LoRa
+    /// modem.
+    pub preamble_symbols: Option<u16>,
     /// Hardware flow control (RNode waits for CMD_READY before next TX)
     pub flow_control: Option<bool>,
     /// Short-term airtime limit as percent (0.0-100.0)
@@ -563,6 +572,7 @@ impl Default for InterfaceConfig {
             spreading_factor: None,
             coding_rate: None,
             tx_power: None,
+            preamble_symbols: None,
             flow_control: None,
             airtime_limit_short: None,
             airtime_limit_long: None,
