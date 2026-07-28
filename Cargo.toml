@@ -8,7 +8,6 @@ members = [
     "leviculum-std",
     "leviculum-ffi",
     "leviculum-cli",
-    "reticulum-integ",
     "leviculum-proxy",
 ]
 
@@ -24,7 +23,6 @@ default-members = [
     "lblogd",
     "leviculum-std",
     "leviculum-cli",
-    "reticulum-integ",
     "leviculum-proxy",
 ]
 

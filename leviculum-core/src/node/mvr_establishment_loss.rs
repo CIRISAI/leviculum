@@ -60,7 +60,7 @@ use crate::transport::{Action, InterfaceId, TickOutput};
 use crate::test_log_capture::with_captured_logs;
 
 /// The EXACT `RUST_LOG` filter the cold-8node integ run uses
-/// (`reticulum-integ/tests/lora_late_announce_8node.toml`). It enables
+/// (periculum `hardware/lora_late_announce_8node.toml`). It enables
 /// `leviculum_core::link=debug` (so `LINK_DIED` and the TX/RX handshake events
 /// are visible) but does NOT enable `leviculum_core::node::link_management`,
 /// where the retry / timeout diagnostics ("retrying with fresh keys",

@@ -1,6 +1,7 @@
-# Exclude reticulum-integ: its lib tests are Docker-based and require
-# --test-threads=1 (run in Tier 2). Including them here would race-fail
-# and blow the 3 min budget.
+# The scenario suites live in the sibling `periculum` checkout, not in this
+# workspace: `just extensive` and `just nightly` drive the `periculum` binary
+# over its three corpora. Override the checkout with PERICULUM_ROOT or the
+# binary with PERICULUM_BIN.
 
 # Minimum-viable-reproduction tier — discipline tier, not size tier.
 # Each test < 5 s, deterministic, single named failure mode.  See
@@ -65,7 +66,7 @@ m0-build-gate:
 fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
-    cargo test --workspace --lib --exclude reticulum-integ
+    cargo test --workspace --lib
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Runs in background
 # after every commit via the post-commit hook.
@@ -86,12 +87,15 @@ standard: fast test-ffi verify-packaging
     cargo test -p leviculum-std --test rnsd_interop
     cargo test -p leviculum-std --test event_log_subscriber -- --test-threads=1
     cargo test -p leviculum-std --test event_log_multiprocess
+    # The LNode debug-log format contract (Codeberg #65): pins the [HEAP] and
+    # [PANIC_COUNT] line shapes that catch-reboot.sh and the by-hand heap
+    # analysis grep, against the firmware source that emits them.
+    cargo test -p leviculum-std --test lnode_debug_log_format
     # Endurance gate (#101): builds lnsd, boots it as a hub, asserts 100%
     # delivery + RSS plateau + no fd leak. ~15 s smoke; `--full` is on demand.
     bash scripts/run-soak.sh
 
-# Build the production binaries the integ runner mounts into Docker
-# containers. Explicit per-bin list avoids `--workspace --bins` which
+# Build the production binaries periculum mounts into its node containers. Explicit per-bin list avoids `--workspace --bins` which
 # would also try to build leviculum-nrf firmware on the host. Runs on
 # the same CARGO_TARGET_DIR as the enclosing `cargo test`, so the
 # runner's CARGO_TARGET_DIR-aware path resolver finds them.
@@ -109,39 +113,23 @@ build-integ-bins:
     cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
 
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
-# leviculum-ci-tier2.service`): Tier 1 + the Docker scenario suite.
+# leviculum-ci-tier2.service`): Tier 1 + the docker scenario suites.
 #
-# The docker scenarios run through the periculum binary (sibling checkout;
-# override the checkout via PERICULUM_ROOT or the binary via PERICULUM_BIN);
-# cargo keeps running the remaining reticulum-integ tests. The per-scenario
-# #[test] wrappers live in the LIB target (src/executor.rs, #[serial(docker)]),
-# so `--lib` scoping cannot exclude them; instead the recipe extracts their
-# names from the #[serial(docker)] markers and skips them with --exact,
-# cross-checking every extracted name against `--list` so a renamed module
-# path or attribute-format drift fails loudly instead of silently running
-# the scenarios twice. The LoRa wrappers stay #[ignore]d and skip as before;
-# the tier-3 `nightly` cargo path below is untouched. --test-threads=1 for
-# the same resource-contention reason as before.
+# Runs periculum over its two tier-2 corpora: `conformance/` (portable
+# shared-property scenarios that must be all green against any pair of
+# implementations) and `regression/` (leviculum-specific product scenarios,
+# IP-based, excluded from conformance by its admission rules). Both bind no
+# physical device, so this tier needs docker and nothing else. `hardware/` is
+# tier 3 and is not run here — periculum would report every one of its
+# scenarios SKIPPED_INFRA, which is honest but says nothing.
+#
+# Exit-code contract: 0 = something ran and nothing was RED, 1 = at least one
+# RED, 2 = usage/malformed/internal, 3 = nothing ran at all. The bare
+# invocation therefore fails the recipe on 1, 2 and 3, which is what a tier
+# gate wants.
 extensive: standard build-integ-bins build-c-lnsd
     #!/usr/bin/env bash
     set -euo pipefail
-    mapfile -t wrappers < <(awk '/#\[serial\(docker\)\]/ {f=1; next} f && /fn / {n=$2; sub(/\(.*/, "", n); print n; f=0}' reticulum-integ/src/executor.rs)
-    markers=$(grep -c '#\[serial(docker)\]' reticulum-integ/src/executor.rs)
-    if [ "${#wrappers[@]}" -ne "$markers" ]; then
-        echo "[extensive] wrapper extraction mismatch: ${#wrappers[@]} names vs $markers #[serial(docker)] markers" >&2
-        exit 1
-    fi
-    listed=$(cargo test -p reticulum-integ --lib -- --list)
-    skip_args=()
-    for w in "${wrappers[@]}"; do
-        if ! grep -q "^executor::tests::${w}: test$" <<<"$listed"; then
-            echo "[extensive] wrapper executor::tests::${w} missing from --list output; extraction is stale" >&2
-            exit 1
-        fi
-        skip_args+=(--skip "executor::tests::${w}")
-    done
-    echo "[extensive] cargo runs reticulum-integ with ${#wrappers[@]} docker scenario wrappers skipped"
-    cargo test -p reticulum-integ -- --test-threads=1 --exact "${skip_args[@]}"
     PERICULUM_ROOT="${PERICULUM_ROOT:-../periculum}"
     PERICULUM_BIN="${PERICULUM_BIN:-$PERICULUM_ROOT/target/release/periculum}"
     if [ ! -x "$PERICULUM_BIN" ]; then
@@ -151,12 +139,35 @@ extensive: standard build-integ-bins build-c-lnsd
         # CARGO_TARGET_DIR (run-tier2.sh does).
         (cd "$PERICULUM_ROOT" && CARGO_TARGET_DIR=target cargo build --release)
     fi
-    "$PERICULUM_BIN" run reticulum-integ/tests
+    "$PERICULUM_BIN" run "$PERICULUM_ROOT/conformance" "$PERICULUM_ROOT/regression"
 
-# --include-ignored adds the LoRa hardware tests on top of Tier 2.
-# Tier 3 (~2-6h, 02:00 nightly): Tier 2 + LoRa hardware tests.
+# Tier 3 (~2-6h, 02:00 nightly): Tier 2 + the LoRa hardware corpus.
+#
+# Two steps periculum does not do itself. First the LNodes are flashed from
+# HEAD and their [FW_BUILD] banner is read back, because periculum tests
+# whatever firmware it finds and leaves board preparation out of scope on
+# purpose; a run against stale firmware is meaningless, so an unverifiable
+# board fails the tier while still letting the rest of the corpus run. Then
+# periculum runs `hardware/`, whose scenarios bind a modem or a firmware node
+# and report SKIPPED_INFRA — never RED — for any board this bench does not
+# hold.
+#
+# The scheduled nightly goes through scripts/run-tier3-hw.sh instead, which
+# adds the CI ledger, the repo sync and the USB device-vanish watchdog.
 nightly: extensive
-    cargo test -p reticulum-integ -- --include-ignored --test-threads=1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PERICULUM_ROOT="${PERICULUM_ROOT:-../periculum}"
+    PERICULUM_BIN="${PERICULUM_BIN:-$PERICULUM_ROOT/target/release/periculum}"
+    unverified=$(bash scripts/flash-lnodes-from-head.sh | awk '$1 == "FW_UNVERIFIED" { print $2 }' | paste -sd, -)
+    rc=0
+    "$PERICULUM_BIN" run "$PERICULUM_ROOT/hardware" || rc=$?
+    if [ -n "$unverified" ]; then
+        echo "[nightly] FIRMWARE UNVERIFIED: LNode(s) $unverified could not be confirmed to run HEAD" >&2
+        echo "[nightly] the run tested UNKNOWN firmware on those boards" >&2
+        rc=1
+    fi
+    exit "$rc"
 
 # Build leviculum-ffi as a real glibc-dynamic cdylib + staticlib for
 # C-API consumers ("apt install libreticulum-dev" ergonomics). This
@@ -217,8 +228,8 @@ build-ffi-arm64:
 
 # Build the C daemon (examples/c/lnsd.c) as a self-contained binary, linking
 # libleviculum.a statically (glibc stays dynamic, matching the debian-slim
-# integ container). Output: target/release/c-lnsd, the binary the
-# reticulum-integ runner mounts for a `c-api` node.
+# node container). Output: target/release/c-lnsd, the binary periculum mounts
+# for a node whose adapter is `c-lnsd`.
 build-c-lnsd: build-ffi
     T="${CARGO_TARGET_DIR:-target}"; \
     mkdir -p "$T/release"; \

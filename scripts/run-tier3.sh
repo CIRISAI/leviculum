@@ -20,9 +20,9 @@ if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 just nightl
     notify-send -u normal "Leviculum CI" "Nightly: GREEN (passed: ${PASSED:-?}, skipped: ${SKIPPED:-?})"
     echo "$(date -Iseconds) tier3 GREEN passed=${PASSED:-?} skipped=${SKIPPED:-?} $LOG" >> "$RESULTS"
 elif [ -f "$MARKER" ]; then
-    # Another cargo-test invocation held the integ lock when nightly
-    # tried to start — e.g. a manual LoRa bench was running past 02:00.
-    # Not a failure; deferred. See reticulum-integ/src/lock.rs.
+    # Another run held the scenario-runner lock when nightly tried to
+    # start — e.g. a manual LoRa bench was running past 02:00.
+    # Not a failure; deferred. See periculum/src/lock.rs.
     rm -f "$MARKER"
     notify-send -u normal "Leviculum CI" "Nightly: SKIPPED — another test held the lock"
     echo "$(date -Iseconds) tier3 SKIPPED lock-held $LOG" >> "$RESULTS"

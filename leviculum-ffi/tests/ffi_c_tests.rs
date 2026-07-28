@@ -156,7 +156,7 @@ fn c_stats_acceptance() {
 /// The `lnsd.c` example is a real daemon, not a self-terminating acceptance
 /// program: it loads a config, comes up, and runs until signalled. Spawn it,
 /// confirm it stays up, then SIGTERM it and require a clean exit. This is the
-/// same binary used as the `c-api` node in the reticulum-integ mesh.
+/// same binary periculum mounts for a node whose adapter is `c-lnsd`.
 #[test]
 fn c_lnsd_runs_as_daemon() {
     let Some(bin) = compile("examples/c/lnsd.c", "c_lnsd_test") else {

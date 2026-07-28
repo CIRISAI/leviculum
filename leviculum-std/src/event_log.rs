@@ -167,7 +167,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["dst", "iface", "ph", "type", "context"],
     },
     // Codeberg #50 Bug-A forensic instrumentation.  Emitted by
-    // `reticulum-integ/src/runner.rs::silence_unused_lnode` at function
+    // periculum's `src/runner.rs::silence_unused_lnode` at function
     // entry and at every exit branch; lets jl/jldiff diff between
     // RNode-only and T114-involved scenarios for any future hang.
     EventSchema {

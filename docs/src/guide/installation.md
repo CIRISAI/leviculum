@@ -60,7 +60,6 @@ Common workflows are available as cargo aliases (defined in `.cargo/config.toml`
 | `cargo test-core` | Run all leviculum-core unit tests |
 | `cargo test-std` | Run all leviculum-std unit tests |
 | `cargo test-interop` | Run interop tests against Python Reticulum |
-| `cargo test-integ` | Run Docker-based integration tests |
 | `cargo lint` | Run clippy on all crates |
 | `cargo fmt --all -- --check` | Check formatting |
 
@@ -82,25 +81,25 @@ git submodule update --init reference/Reticulum
 cargo test-interop
 ```
 
-**Integration tests** -- require Docker and pre-built release binaries:
+**Scenario tests** -- multi-node scenarios live in the sibling
+[periculum](https://codeberg.org/Lew_Palm/periculum) checkout, expected at
+`../periculum`. They require Docker and pre-built release binaries:
 
 ```sh
-cargo build --release --bin lnsd --bin lnstest --bin lncp
-cargo test-integ
+cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
+periculum run ../periculum/conformance ../periculum/regression
 ```
 
 **LoRa integration tests** -- require physical RNode modems connected via USB:
 
-LoRa tests are `#[ignore]`d by default and must be run explicitly. They
-exercise real over-the-air transfers between RNode radios running Reticulum
-firmware. Tests are skipped automatically if the required devices are not
-connected.
-
-| Devices needed | Test count | Examples |
-|----------------|-----------|----------|
-| 2 RNodes | 40 | `lora_link_rust`, `lora_lncp_push`, `lora_ratchet_basic` |
-| 3 RNodes | 3 | `lora_3node_transfer`, `lora_3node_contention` |
-| 4 RNodes | 7 | `lora_4node_contention_rust`, `lora_multihop_transfer` |
+LoRa scenarios live in periculum's `hardware/` corpus. They exercise real
+over-the-air transfers between RNode radios running Reticulum firmware, and
+between those and LNodes running leviculum's own firmware. A scenario names
+the set of boards it needs (`profile = "rnode_pair"`, `"rnode_quad"`,
+`"rnode_lnode_pair"`, ...), which is resolved against the bench description
+in periculum's `rig.toml`. A scenario the bench cannot serve reports
+`SKIPPED_INFRA` naming what was missing — never a failure. The per-profile
+scenario counts are in periculum's `hardware/README.md`.
 
 Hardware setup:
 
@@ -112,14 +111,18 @@ Hardware setup:
 Running LoRa tests:
 
 ```sh
-# Single test
-cargo test -p reticulum-integ -- --exact executor::tests::lora_link_rust --ignored --nocapture
+# See what the corpus holds, and what this bench can serve
+periculum list ../periculum/hardware
+periculum devices --probe
 
-# All 2-device tests
-cargo test -p reticulum-integ -- lora_ --ignored --nocapture --test-threads=1
+# Single scenario
+periculum run ../periculum/hardware/lora_link_rust.toml
+
+# The whole hardware corpus
+periculum run ../periculum/hardware
 
 # Override radio parameters (bandwidth in Hz)
-LORA_BANDWIDTH=125000 cargo test -p reticulum-integ -- --exact executor::tests::lora_lncp_push --ignored --nocapture
+LORA_BANDWIDTH=125000 periculum run ../periculum/hardware/lora_lncp_push.toml
 ```
 
 Each LoRa test must pass on all three bandwidth profiles (62.5 kHz, 125 kHz,
