@@ -729,15 +729,21 @@ pub const LORA_FAST_THRESHOLD_BPS: u32 = 30_000;
 /// The reference evaluates the last three lines in floating point;
 /// this evaluates the exact rational `ceil(target_ms * bw / (2^sf * 1000))`
 /// in integers. The two agree whenever the exact quotient is not within
-/// float rounding error of an integer. Over the domain the reference itself
-/// admits — its ten bandwidths, SF5..=SF12, CR4/5..4/8 — the quotient's
-/// distance to the nearest integer is never below 0.1875 while the float
-/// error is below 1e-4, so the results are identical; `derive_preamble_matches_reference_float`
-/// asserts that by brute force rather than by this paragraph. Outside that
-/// domain (an arbitrary bandwidth from a config file) a quotient can land
-/// exactly on an integer, and there this returns that integer where the
-/// reference could return one more. That is a deliberate difference and the
-/// only one.
+/// float rounding error of an integer — and the quotient only has to be
+/// rounded at all where it reaches 18, since below that both forms take the
+/// floor and the rounding is never consulted.
+///
+/// Over the domain the reference itself admits — its ten bandwidths,
+/// SF5..=SF12, CR4/5..4/8, 320 points — 64 reach the ceiling, the smallest
+/// distance from one of those quotients to an integer is 0.125, the largest
+/// quotient is 187.5 and its f32 ulp is 2.2e-5. Four orders of margin, so
+/// the results are identical; `derive_preamble_matches_reference_float`
+/// asserts that by brute force rather than by this paragraph.
+///
+/// Outside that domain (an arbitrary bandwidth from a config file) a
+/// quotient can land exactly on an integer, and there this returns that
+/// integer where the reference could return one more. That is a deliberate
+/// difference and the only one.
 ///
 /// Returns [`LORA_PREAMBLE_SYMBOLS_MIN`] for degenerate inputs (sf or
 /// bandwidth zero, sf out of the range the modems accept), since the floor is

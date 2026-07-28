@@ -1616,7 +1616,15 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
         sf: radio.spreading_factor,
         cr: radio.coding_rate,
         tx_power_dbm: radio.tx_power as i8,
-        preamble_len: 24,
+        // Same PHY as the bound boards, preamble included: an unbound board
+        // is tuned to the test channel so its CAD sees the benchmark
+        // traffic. Derived exactly as the daemon derives it, so the whole
+        // channel runs one preamble. A silenced board transmits nothing, so
+        // this reaches the air on no frame, but the SX1262 programs the same
+        // SetPacketParams field for RX, and a board left at 24 while the
+        // pair runs 18 would be miscoded the same way round as the defect
+        // this derivation closes.
+        preamble_len: radio.resolved_preamble_symbols(),
         csma_enabled: true,
         // Drop every outgoing LoRa frame at the driver level. CSMA alone
         // still allows the idle T114 to announce between probe bursts,
@@ -1647,9 +1655,9 @@ fn silence_unused_lnode(port_path: &str, usb_serial: &str, radio: &crate::topolo
 }
 
 /// Push the scenario radio config to an LNode bound to a Python (rnsd)
-/// node, mirroring the exact frame lnsd's SerialInterface sends at
-/// startup (preamble 24, airtime locks 0, radio_silent off, csma from the
-/// scenario [radio] section). rnsd's SerialInterface is a plain HDLC data
+/// node, mirroring the exact frame lnsd's SerialInterface sends at startup
+/// (preamble resolved as lnsd resolves it, airtime locks 0, radio_silent
+/// off, csma from the scenario [radio] section). rnsd's SerialInterface is a plain HDLC data
 /// pipe and never configures the radio itself, so this push is what puts
 /// the board on the scenario PHY. A missing ACK aborts the scenario as an
 /// infra skip: running at the firmware-default PHY (eu_medium, SF7/CR5)
@@ -1668,7 +1676,11 @@ fn preconfigure_python_lnode(
         sf: radio.spreading_factor,
         cr: radio.coding_rate,
         tx_power_dbm: radio.tx_power as i8,
-        preamble_len: 24,
+        // Mirrors what lnsd's SerialInterface sends, this field included, so
+        // a Python-bound LNode lands on the same PHY as a Rust-bound one and
+        // the A/B stays an A/B. That mirroring is why this derives rather
+        // than carrying its own constant.
+        preamble_len: radio.resolved_preamble_symbols(),
         csma_enabled: radio.csma_enabled,
         radio_silent: false,
         st_alock: 0,

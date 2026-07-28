@@ -185,6 +185,28 @@ pub struct RadioConfig {
     pub airtime_limit_long: Option<f64>,
 }
 
+impl RadioConfig {
+    /// The preamble the harness pushes to an LNode it configures directly.
+    ///
+    /// The harness and the daemon must answer this the same way, or a
+    /// scenario runs two PHYs on one channel. The daemon derives it in
+    /// `serial_radio_config` (`leviculum-std/src/interfaces/serial.rs`) and
+    /// this derives it identically. The constant both call sites carried
+    /// before (24) was right at SF7/BW125 and wrong from SF8 down, which is
+    /// the interop defect `derive_preamble_symbols` exists to close.
+    ///
+    /// Unlike periculum's copy of this type there is no `preamble_symbols`
+    /// override here: no scenario in this corpus names one, and a harness
+    /// that cannot spell the key cannot disagree with the daemon about it.
+    pub fn resolved_preamble_symbols(&self) -> u16 {
+        leviculum_core::rnode::derive_preamble_symbols(
+            self.spreading_factor,
+            self.coding_rate,
+            self.bandwidth,
+        )
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -986,6 +1008,32 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// The harness pushes radio-config frames to two boards the daemon never
+    /// configures — an LNode bound to a Python node, and an unbound LNode
+    /// being silenced — and both must reach the preamble the daemon's own
+    /// `serial_radio_config` would have chosen, or a scenario runs two PHYs
+    /// on one channel. The values are the RNode firmware's: 24 at SF7/BW125,
+    /// the 18-symbol floor from SF8 down, and 47 at SF7/BW250, which is the
+    /// one that shows this scales with symbol time rather than switching on
+    /// the spreading factor.
+    #[test]
+    fn resolved_preamble_symbols_matches_the_daemon() {
+        let radio = |sf: u8, bw: u32| RadioConfig {
+            frequency: 869_525_000,
+            bandwidth: bw,
+            spreading_factor: sf,
+            coding_rate: 8,
+            tx_power: 17,
+            csma_enabled: true,
+            airtime_limit_long: None,
+        };
+        assert_eq!(radio(7, 125_000).resolved_preamble_symbols(), 24);
+        assert_eq!(radio(8, 125_000).resolved_preamble_symbols(), 18);
+        assert_eq!(radio(10, 125_000).resolved_preamble_symbols(), 18);
+        assert_eq!(radio(12, 125_000).resolved_preamble_symbols(), 18);
+        assert_eq!(radio(7, 250_000).resolved_preamble_symbols(), 47);
+    }
 
     fn load_basic_probe() -> TestScenario {
         let toml_str = fs::read_to_string(concat!(
