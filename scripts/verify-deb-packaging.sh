@@ -157,6 +157,27 @@ check_package() {
             pass "${script} has no unsubstituted debhelper marker"
         fi
     done
+    # Nothing beyond this set belongs in a control archive. cargo-deb sweeps
+    # the `maintainer-scripts` directory for every name Debian reserves, so a
+    # data file sharing one of those names ships twice: once at its intended
+    # install path, and once as an executable control script. `config` is the
+    # trap in practice — dpkg-preconfigure runs it as /bin/sh. The syntax
+    # loop above cannot catch that, because a TOML config parses as valid
+    # shell and merely exits non-zero at the first line it tries to run.
+    local member stray=0
+    for member in "$ctrl"/*; do
+        [ -e "$member" ] || continue
+        case "$(basename "$member")" in
+        control | conffiles | md5sums | preinst | postinst | prerm | postrm | triggers | shlibs) ;;
+        *)
+            fail "unexpected control archive member: $(basename "$member")"
+            stray=1
+            ;;
+        esac
+    done
+    if [ "$stray" -eq 0 ]; then
+        pass "control archive has no unexpected members"
+    fi
     if [ -f "$ctrl/conffiles" ]; then
         echo "  conffiles: $(tr '\n' ' ' <"$ctrl/conffiles")"
     fi

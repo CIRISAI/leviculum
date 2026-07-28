@@ -61,7 +61,13 @@ assets = [
     # prefix disables the rewrite and silently picks up stale non-musl
     # builds — see leviculum-cli/Cargo.toml.
     ["target/release/lblogd", "usr/bin/", "755"],
-    ["../packaging/lblogd/config", "etc/lblogd/config.toml", "644"],
+    # Must NOT be named `config`: `maintainer-scripts` below points at the
+    # same directory, and cargo-deb sweeps up every file there whose name
+    # is a maintainer-script name — `config` among them, as the debconf
+    # pre-configuration script. A file named `config` therefore ships
+    # twice: correctly as this asset, and wrongly as an executable control
+    # script that dpkg-preconfigure runs as /bin/sh.
+    ["../packaging/lblogd/config.toml", "etc/lblogd/config.toml", "644"],
     ["README.md", "usr/share/doc/lblogd/README.md", "644"],
 ]
 maintainer-scripts = "../packaging/lblogd/"

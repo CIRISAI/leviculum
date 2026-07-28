@@ -86,7 +86,12 @@ assets = [
     ["target/release/lnstest", "usr/bin/", "755"],
     ["target/release/lncp", "usr/bin/", "755"],
     ["target/release/lnstatus", "usr/bin/", "755"],
-    ["../packaging/debian/config", "etc/reticulum/config", "644"],
+    # Source must NOT be named `config`, even though the destination is:
+    # `maintainer-scripts` below points at the same directory, and
+    # cargo-deb picks up a file named `config` there as the debconf
+    # pre-configuration script, shipping this TOML-ish file a second time
+    # as an executable control script.
+    ["../packaging/debian/reticulum-config", "etc/reticulum/config", "644"],
     ["../README.md", "usr/share/doc/leviculum/README.md", "644"],
     ["../CHANGELOG.md", "usr/share/doc/leviculum/CHANGELOG.md", "644"],
 ]
