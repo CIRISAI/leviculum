@@ -78,7 +78,8 @@ impl PostsWatcher {
     /// temporary file and renaming it over the target would leave a direct
     /// watch pointing at the replaced file. Watching the directory and
     /// filtering by path survives that. It does mean events for their
-    /// neighbours arrive too, which [`Targets::is_relevant`] discards.
+    /// neighbours arrive too; the watcher discards those by path before
+    /// recording a change.
     pub fn start(posts_dir: &Path, extra: &[&Path]) -> Result<PostsWatcher, WatchError> {
         let (tx, rx) = mpsc::channel(EVENT_QUEUE);
         let watch_err = |path: &Path| {

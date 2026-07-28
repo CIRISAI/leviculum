@@ -196,9 +196,10 @@ pub struct NodeSection {
 /// The `[web]` section.
 ///
 /// The three ACME fields are optional at the TOML level but required once
-/// [`acme`](Self::acme) is on; [`Config::validate`] enforces that. Keeping
-/// them out of serde's required set is what lets a development config omit
-/// them entirely instead of filling in meaningless placeholders.
+/// [`acme`](Self::acme) is on; [`Config::load`] rejects a config that turns
+/// ACME on without them. Keeping them out of serde's required set is what
+/// lets a development config omit them entirely instead of filling in
+/// meaningless placeholders.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WebSection {
