@@ -430,8 +430,12 @@ pub struct InterfaceConfig {
     pub tx_power: Option<i8>,
     /// LoRa preamble length in symbols, pushed to LNode firmware in the
     /// radio-config frame (`SerialInterface` with a `[radio]`-derived PHY).
-    /// Unset keeps the compiled firmware default of 24 symbols, so an
-    /// existing config file means exactly what it meant before.
+    /// Unset derives the value the RNode firmware programs for the same PHY
+    /// (`leviculum_core::rnode::derive_preamble_symbols`), which is what an
+    /// RNode peer expects to hear: 24 symbols at SF7/BW125, the 18-symbol
+    /// floor from SF8 down. Setting it pins a value instead, which is how
+    /// the corner gets re-measured and how a node with a non-conforming peer
+    /// copes.
     ///
     /// Distinct from [`preamble`](Self::preamble), which is the KISS TNC
     /// TX delay in milliseconds (`CMD_TXDELAY`) and does not reach a LoRa

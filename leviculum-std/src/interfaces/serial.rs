@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use leviculum_core::constants::MTU;
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+use leviculum_core::rnode::derive_preamble_symbols;
 use leviculum_core::transport::InterfaceId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -54,20 +55,33 @@ pub(crate) struct SerialRadioConfig {
 /// `None` when the block names no `frequency` and is therefore a plain
 /// (non-LoRa) serial pipe.
 ///
-/// Every default here is the firmware's own compiled default
-/// (`leviculum_nrf::lora::RadioConfig::eu_medium`), so a block that omits a
-/// key pushes the frame this code pushed before that key existed.
+/// Every PHY default here is the firmware's own compiled default
+/// (`leviculum_nrf::lora::RadioConfig::eu_medium`), with one exception the
+/// preamble makes necessary. The firmware's compiled 24 is a constant for
+/// every spreading factor, while the RNode firmware — our reference for LoRa
+/// PHY behaviour — scales the preamble to a target duration and floors it at
+/// 18 symbols. The two agree at SF7/BW125 and disagree from SF8 down, so a
+/// constant here is a wire-level deviation that costs interop with every
+/// RNode peer in the long-range regime. The default is therefore
+/// [`derive_preamble_symbols`], and `preamble_symbols` in the config file
+/// still overrides it — which is how the corner gets re-measured, and how a
+/// node with a non-conforming peer copes.
 pub(crate) fn serial_radio_config(
     cfg: &crate::config::InterfaceConfig,
 ) -> Option<SerialRadioConfig> {
     let frequency = cfg.frequency?;
+    let bandwidth = cfg.bandwidth.unwrap_or(125_000);
+    let spreading_factor = cfg.spreading_factor.unwrap_or(7);
+    let coding_rate = cfg.coding_rate.unwrap_or(5);
     Some(SerialRadioConfig {
         frequency,
-        bandwidth: cfg.bandwidth.unwrap_or(125_000),
-        spreading_factor: cfg.spreading_factor.unwrap_or(7),
-        coding_rate: cfg.coding_rate.unwrap_or(5),
+        bandwidth,
+        spreading_factor,
+        coding_rate,
         tx_power: cfg.tx_power.unwrap_or(17),
-        preamble_len: cfg.preamble_symbols.unwrap_or(24),
+        preamble_len: cfg
+            .preamble_symbols
+            .unwrap_or_else(|| derive_preamble_symbols(spreading_factor, coding_rate, bandwidth)),
         csma_enabled: cfg.csma_enabled.unwrap_or(true),
     })
 }
@@ -514,10 +528,13 @@ mod tests {
         assert_eq!(parsed.preamble_len, 18);
     }
 
-    /// A block that omits the key pushes the firmware's own default, so no
-    /// config file written before the key existed changes meaning.
+    /// A block that omits the key gets the preamble the RNode firmware would
+    /// program for the same PHY, not a constant. At the block's own defaults
+    /// (SF7/BW125) that derives 24 — the value this code pushed before the
+    /// derivation existed — so every config file that named no spreading
+    /// factor still means exactly what it meant.
     #[test]
-    fn absent_preamble_symbols_keeps_the_firmware_default() {
+    fn absent_preamble_symbols_derives_the_reference_value() {
         let cfg = crate::config::InterfaceConfig {
             interface_type: "SerialInterface".to_string(),
             port: Some("/dev/ttyACM0".to_string()),
@@ -525,7 +542,66 @@ mod tests {
             ..Default::default()
         };
         let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.spreading_factor, 7);
         assert_eq!(radio.preamble_len, 24);
+    }
+
+    /// The defect this closes, at the interface boundary. The same block at
+    /// SF10 used to push 24 while the RNode on the far end programmed 18,
+    /// and a mixed pair resolved 4 of 20 path requests. Deriving gives 18 on
+    /// both sides. Written out per spreading factor rather than looped, so a
+    /// regression names the SF it broke.
+    #[test]
+    fn absent_preamble_symbols_scales_with_the_spreading_factor() {
+        let derived_at = |sf: u8| {
+            let cfg = crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(869_525_000),
+                bandwidth: Some(125_000),
+                spreading_factor: Some(sf),
+                coding_rate: Some(8),
+                ..Default::default()
+            };
+            serial_radio_config(&cfg)
+                .expect("frequency present → radio config")
+                .preamble_len
+        };
+        assert_eq!(derived_at(7), 24);
+        assert_eq!(derived_at(8), 18);
+        assert_eq!(derived_at(9), 18);
+        assert_eq!(derived_at(10), 18);
+        assert_eq!(derived_at(11), 18);
+        assert_eq!(derived_at(12), 18);
+    }
+
+    /// The override still wins over the derivation, including when it names
+    /// the value the derivation would have rejected. That is what makes the
+    /// corner re-measurable — an A/B over the preamble needs a way to pin the
+    /// old 24 on the fixed build — and what lets a node with a
+    /// non-conforming peer cope.
+    #[test]
+    fn explicit_preamble_symbols_overrides_the_derivation() {
+        let pinned = |sf: u8, preamble: u16| {
+            let cfg = crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(869_525_000),
+                bandwidth: Some(125_000),
+                spreading_factor: Some(sf),
+                coding_rate: Some(8),
+                preamble_symbols: Some(preamble),
+                ..Default::default()
+            };
+            serial_radio_config(&cfg)
+                .expect("frequency present → radio config")
+                .preamble_len
+        };
+        // The pre-fix constant, pinned back on at the SF where it is wrong.
+        assert_eq!(pinned(10, 24), 24);
+        // And a value below the reference's own floor, which the derivation
+        // would never produce.
+        assert_eq!(pinned(10, 8), 8);
     }
 
     /// No `frequency` means a plain serial pipe, not a LoRa modem: no radio

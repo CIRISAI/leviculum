@@ -141,6 +141,13 @@ impl RadioConfig {
             bw: 0x04,
             cr: 0x01,
             tx_power_dbm: 17,
+            // 24 is not an SF-independent constant, it is what the RNode
+            // firmware's own derivation yields at this profile's SF7/BW125
+            // (`leviculum_core::rnode::derive_preamble_symbols`). The host
+            // sends the derived value for whatever PHY it configures; this
+            // compiled default only ever applies at SF7, where the two agree.
+            // A firmware that ever changes SF without a host frame would have
+            // to derive it here too.
             preamble_len: 24,
             bw_hz: 125_000,
             cr_denom: 5,
