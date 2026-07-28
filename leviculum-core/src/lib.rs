@@ -128,6 +128,7 @@ pub(crate) mod receipt;
 pub mod resource;
 pub mod rnode;
 pub mod storage_types;
+pub mod sx126x;
 #[cfg(all(test, feature = "tracing"))]
 pub(crate) mod test_log_capture;
 #[cfg(test)]

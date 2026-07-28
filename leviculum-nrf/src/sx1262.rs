@@ -48,22 +48,12 @@ mod reg {
     pub const EVENT_MASK: u16 = 0x0944;
 }
 
-/// IRQ bitmasks (datasheet §8.5, Table 8-4)
-mod irq {
-    pub const TX_DONE: u16 = 0x0001;
-    pub const RX_DONE: u16 = 0x0002;
-    pub const PREAMBLE_DETECTED: u16 = 0x0004; // bit 2
-    pub const HEADER_VALID: u16 = 0x0010; // bit 4
-    pub const CRC_ERR: u16 = 0x0040;
-    pub const TIMEOUT: u16 = 0x0200;
-
-    pub const CAD_DONE: u16 = 0x0080; // bit 7
-    pub const CAD_DETECTED: u16 = 0x0100; // bit 8
-
-    pub const TX_ALL: u16 = TX_DONE | TIMEOUT;
-    pub const RX_ALL: u16 = RX_DONE | CRC_ERR | TIMEOUT;
-    pub const CAD_ALL: u16 = CAD_DONE | CAD_DETECTED;
-}
+// IRQ bitmasks and the `SetDioIrqParams` argument builders (datasheet §8.5,
+// Table 8-4). The masks and the RX-extend decision live in
+// `leviculum_core::sx126x`, which is host-testable; this crate is not, and the
+// RX-extend guard in `receive()` was dead for its whole life because nothing
+// here could be run against a test.
+use leviculum_core::sx126x as irq;
 
 /// Received packet status (RSSI and SNR).
 pub struct RxStatus {
@@ -455,11 +445,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// Call configure_lora() first to set frequency/modulation/power.
     pub async fn transmit(&mut self, data: &[u8], timeout_ms: u32) -> Result<(), Error> {
         self.set_packet_params(data.len() as u8).await?;
-        self.write_command(opcode::SET_DIO_IRQ_PARAMS, &{
-            let m = irq::TX_ALL;
-            [(m >> 8) as u8, m as u8, (m >> 8) as u8, m as u8, 0, 0, 0, 0]
-        })
-        .await?;
+        self.write_command(opcode::SET_DIO_IRQ_PARAMS, &irq::tx_irq_params())
+            .await?;
         self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
             .await?;
 
@@ -486,7 +473,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
                 let flags = self.get_irq_status().await?;
                 self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
                     .await?;
-                if flags & irq::TX_DONE != 0 {
+                if flags & irq::IRQ_TX_DONE != 0 {
                     return Ok(());
                 }
                 let _ = self.set_standby_rc().await;
@@ -552,11 +539,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         buf: &mut [u8],
         timeout_ms: u32,
     ) -> Result<(u8, RxStatus), Error> {
-        self.write_command(opcode::SET_DIO_IRQ_PARAMS, &{
-            let m = irq::RX_ALL;
-            [(m >> 8) as u8, m as u8, (m >> 8) as u8, m as u8, 0, 0, 0, 0]
-        })
-        .await?;
+        self.write_command(opcode::SET_DIO_IRQ_PARAMS, &irq::rx_irq_params())
+            .await?;
         self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
             .await?;
 
@@ -584,26 +568,16 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         let mut flags = self.get_irq_status().await?;
 
         // The software wait (timeout_ms + 500) can expire while a slow-SF frame
-        // is still on the air: StopRxTimerOnPreambleDetect halts the HW RX timer
-        // once a preamble is detected, so a long frame (up to ~7s airtime) keeps
-        // being received past the sw deadline. If the IRQ register shows a
-        // preamble/header was detected (these bits latch even though they are
-        // not routed to DIO1) but neither RxDone nor Timeout has fired, the
-        // reception is still in progress; extend the wait by one max
-        // single-frame airtime rather than aborting it with set_standby_rc.
-        // Bounded to a single extension so a dead channel still times out.
-        // The IRQ status is deliberately NOT cleared before the extension so a
-        // pending RxDone survives into the extended wait.
-        if self.rx_ext_bw_hz != 0
-            && flags & (irq::RX_DONE | irq::TIMEOUT) == 0
-            && flags & (irq::PREAMBLE_DETECTED | irq::HEADER_VALID) != 0
-        {
-            let extend_ms = leviculum_core::rnode::airtime_ms(
-                (leviculum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32,
-                self.rx_ext_bw_hz,
-                self.rx_ext_sf,
-                self.rx_ext_cr_denom,
-            );
+        // is still on the air; see `sx126x::rx_extend_ms` for the mechanism and
+        // for why the decision is not written here. The IRQ status is
+        // deliberately NOT cleared before the extension so a pending RxDone
+        // survives into the extended wait.
+        if let Some(extend_ms) = irq::rx_extend_ms(
+            flags,
+            self.rx_ext_bw_hz,
+            self.rx_ext_sf,
+            self.rx_ext_cr_denom,
+        ) {
             crate::log::log_fmt(
                 "[SX_RX_EXTEND] ",
                 format_args!(
@@ -611,11 +585,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
                     flags, extend_ms, self.rx_ext_sf, self.rx_ext_bw_hz
                 ),
             );
-            let _ = with_timeout(
-                Duration::from_millis(extend_ms.max(1)),
-                self.dio1.wait_for_high(),
-            )
-            .await;
+            let _ = with_timeout(Duration::from_millis(extend_ms), self.dio1.wait_for_high()).await;
             flags = self.get_irq_status().await?;
         }
 
@@ -627,8 +597,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             let _ = self.apply_rx_timeout_workaround().await;
         }
 
-        if flags & irq::RX_DONE != 0 {
-            if flags & irq::CRC_ERR != 0 {
+        if flags & irq::IRQ_RX_DONE != 0 {
+            if flags & irq::IRQ_CRC_ERR != 0 {
                 return Err(Error::Crc);
             }
             let (len, ptr) = self.get_rx_buffer_status().await?;
@@ -636,7 +606,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             self.read_buffer(ptr, &mut buf[..read_len]).await?;
             let status = self.get_packet_status().await?;
             Ok((read_len as u8, status))
-        } else if flags & irq::TIMEOUT != 0 {
+        } else if flags & irq::IRQ_TIMEOUT != 0 {
             Err(Error::Timeout)
         } else {
             let _ = self.set_standby_rc().await;
@@ -681,11 +651,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         )
         .await?;
 
-        self.write_command(opcode::SET_DIO_IRQ_PARAMS, &{
-            let m = irq::CAD_ALL;
-            [(m >> 8) as u8, m as u8, (m >> 8) as u8, m as u8, 0, 0, 0, 0]
-        })
-        .await?;
+        self.write_command(opcode::SET_DIO_IRQ_PARAMS, &irq::cad_irq_params())
+            .await?;
         self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
             .await?;
 
@@ -705,7 +672,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
                 let flags = self.get_irq_status().await?;
                 self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
                     .await?;
-                Ok((flags & irq::CAD_DETECTED) != 0)
+                Ok((flags & irq::IRQ_CAD_DETECTED) != 0)
             }
             Err(_) => {
                 let _ = self.set_standby_rc().await;
