@@ -2103,7 +2103,20 @@ impl ReticulumNode {
                 next_id.clone(),
                 new_iface_tx.clone(),
                 crate::interfaces::local::LOCAL_DEFAULT_BUFFER_SIZE,
-            )?;
+            )
+            .map_err(|e| match e.kind() {
+                // A name collision is the one bind failure with a remedy
+                // the operator can act on, and the only one a packaged
+                // daemon hits routinely: installing on a host that
+                // already runs a daemon under the same name. Left as a
+                // bare io::Error it surfaces from lnsd's main as
+                // `Io(Os { code: 98, kind: AddrInUse, .. })`, which names
+                // neither the instance nor what to do about it.
+                std::io::ErrorKind::AddrInUse => Error::SharedInstanceNameInUse {
+                    name: instance_name.clone(),
+                },
+                _ => Error::Io(e),
+            })?;
 
             // Start RPC server for Python CLI tool compatibility (rnstatus, rnpath, rnprobe)
             let authkey = {

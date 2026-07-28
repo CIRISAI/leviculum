@@ -51,7 +51,21 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // Display, not Debug. Returning `Err` from `main` prints the
+            // Debug form, which turned the shared-instance name clash into
+            // `Error: Io(Os { code: 98, kind: AddrInUse, .. })` in the
+            // journal — a struct dump where the operator needed a sentence.
+            eprintln!("lnsd: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // --exampleconfig prints a config template and exits, before any logging

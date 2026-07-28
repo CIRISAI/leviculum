@@ -16,6 +16,28 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// The shared-instance name is already served by another daemon.
+    ///
+    /// Distinguished from a bare [`Error::Io`] because the remedy is
+    /// specific and the raw `AddrInUse` hides it. The instance name *is*
+    /// the identity of a shared instance, so this is not a transient
+    /// bind failure to retry: either the other daemon is the one that
+    /// should be running, or this one needs a different name.
+    ///
+    /// Note that a program wanting to *use* the running daemon does not
+    /// belong here at all — that is
+    /// [`connect_to_shared_instance`](crate::driver::ReticulumNodeBuilder::connect_to_shared_instance),
+    /// the client path.
+    #[error(
+        "shared-instance name {name:?} is already served by another Reticulum \
+         daemon on this host (lnsd or rnsd). Stop that daemon, or give this one \
+         a different instance_name in its config."
+    )]
+    SharedInstanceNameInUse {
+        /// The instance name that could not be bound.
+        name: String,
+    },
+
     /// Storage error
     #[error("storage error: {0}")]
     Storage(String),

@@ -226,7 +226,11 @@ void lev_free(struct leviculum_t *node);
   still call `lev_builder_free` on the empty handle. `NULL` on failure.
 - `lev_start` spawns the event loop and brings up interfaces; `lev_stop`
   persists state and tears it down; a stopped node can be started again.
-  `lev_start` on a running node returns `LEV_ERR_CONFIG`.
+  `lev_start` on a running node returns `LEV_ERR_CONFIG`, as does starting a
+  node configured to *serve* a shared instance whose name another daemon on
+  the host already serves — `lev_last_error` then carries the instance name.
+  A node meant to *use* the running daemon should connect as a client
+  instead, not serve.
 - `lev_is_running` returns 1 while the loop runs (0 on `NULL`).
 - `lev_identity_hash_self` writes the node's own 16-byte identity hash.
 - `lev_free` stops a running node and releases it (`lev_free(NULL)` is a
