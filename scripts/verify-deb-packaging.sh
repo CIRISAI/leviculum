@@ -113,6 +113,18 @@ check_package() {
     done
     contains "$contents" "/usr/share/doc/${pkg}/README.md" "ships its README"
 
+    # Policy 12.7: every package installs a Debian changelog, compressed.
+    contains "$contents" "/usr/share/doc/${pkg}/changelog.Debian.gz" \
+        "ships a Debian changelog"
+
+    # Policy 12.1: every program gets a manual page, and man pages are
+    # installed compressed. cargo-deb does the gzipping, so a plain .1
+    # here means the asset landed outside usr/share/man/.
+    for bin in "${binaries[@]}"; do
+        contains "$contents" "/usr/share/man/man1/${bin}.1.gz" \
+            "ships a manual page for ${bin}"
+    done
+
     # --- static linkage ---
     # A musl-static binary must have no interpreter. A dynamically linked
     # one would still install but fail on hosts with an older glibc, which
@@ -177,6 +189,44 @@ check_package() {
     done
     if [ "$stray" -eq 0 ]; then
         pass "control archive has no unexpected members"
+    fi
+
+    # md5sums is what `dpkg -V` and `debsums` verify installed files
+    # against. cargo-deb cannot write it; scripts/deb-finalize.sh adds it
+    # after the build, so its absence means that step was skipped.
+    if [ -f "$ctrl/md5sums" ]; then
+        local missing_sums=0
+        for bin in "${binaries[@]}"; do
+            if ! grep -q " usr/bin/${bin}\$" "$ctrl/md5sums"; then
+                fail "md5sums has no entry for usr/bin/${bin}"
+                missing_sums=1
+            fi
+        done
+        if [ "$missing_sums" -eq 0 ]; then
+            pass "md5sums covers every shipped binary"
+        fi
+        # Conffiles are excluded by convention, since the admin is
+        # expected to edit them and a mismatch there is not a finding.
+        local conf
+        if [ -f "$ctrl/conffiles" ]; then
+            while read -r conf; do
+                [ -n "$conf" ] || continue
+                if grep -q " ${conf#/}\$" "$ctrl/md5sums"; then
+                    fail "md5sums lists conffile ${conf}"
+                fi
+            done <"$ctrl/conffiles"
+        fi
+    else
+        fail "no md5sums control file (did scripts/deb-finalize.sh run?)"
+    fi
+
+    # An empty field is malformed: a package with no dependencies omits
+    # Depends rather than shipping it blank. cargo-deb emits it either
+    # way, so deb-finalize.sh strips it.
+    if grep -qE '^[A-Za-z0-9-]+:[[:space:]]*$' "$ctrl/control"; then
+        fail "control has an empty field: $(grep -m1 -E '^[A-Za-z0-9-]+:[[:space:]]*$' "$ctrl/control")"
+    else
+        pass "control has no empty fields"
     fi
     if [ -f "$ctrl/conffiles" ]; then
         echo "  conffiles: $(tr '\n' ' ' <"$ctrl/conffiles")"

@@ -12,6 +12,14 @@
 #   .build-id                    nightly.<UTCdate>-<sha7>
 #   .deb-version-<crate>         <crate version>~nightly.<UTCdate>.<sha7>
 #
+# and, under target/deb-changelog/:
+#   <binary package name>        a Debian-format changelog for that build
+#
+# The changelog is generated rather than committed because Debian policy
+# wants its top entry to carry the package's own version, and these
+# versions are stamped per build. A committed file would go stale on the
+# first nightly and stay wrong.
+#
 # Both are gitignored. The build id is deliberately shared across all
 # packages: it stamps *when and from what commit* a build came, which is
 # one fact per run. The Debian versions are per package, because the
@@ -36,9 +44,28 @@ cd "$ROOT"
 # may be named differently (leviculum-cli ships as "leviculum").
 CRATES=(leviculum-cli lnomad lblogd)
 
+# The .deb is not always named after its crate: leviculum-cli ships as
+# "leviculum". The changelog's first token must be the *binary package*
+# name, so the mapping is spelled out here rather than assumed.
+pkg_name() {
+    case "$1" in
+    leviculum-cli) echo leviculum ;;
+    *) echo "$1" ;;
+    esac
+}
+
 SHA="${CI_COMMIT_SHA:-$(git rev-parse HEAD)}"
 SHA7="$(printf '%.7s' "$SHA")"
 DATE="$(date -u +%Y%m%d)"
+# RFC 5322, which is what a Debian changelog trailer takes. Honour
+# SOURCE_DATE_EPOCH so a reproducible build gets a stable timestamp.
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+    STAMP="$(date -uR -d "@${SOURCE_DATE_EPOCH}")"
+else
+    STAMP="$(date -uR)"
+fi
+MAINTAINER="Lew Palm <lp@lew-palm.de>"
+CHANGELOG_DIR="target/deb-changelog"
 
 echo "nightly.${DATE}-${SHA7}" >.build-id
 
@@ -52,7 +79,18 @@ for crate in "${CRATES[@]}"; do
         echo "error: could not resolve a version for crate ${crate}" >&2
         exit 1
     fi
-    echo "${version}~nightly.${DATE}.${SHA7}" >".deb-version-${crate}"
+    deb_version="${version}~nightly.${DATE}.${SHA7}"
+    echo "$deb_version" >".deb-version-${crate}"
+
+    mkdir -p "$CHANGELOG_DIR"
+    pkg="$(pkg_name "$crate")"
+    cat >"${CHANGELOG_DIR}/${pkg}" <<EOF
+${pkg} (${deb_version}) unstable; urgency=medium
+
+  * Nightly build from commit ${SHA7}.
+
+ -- ${MAINTAINER}  ${STAMP}
+EOF
 done
 
 echo "[deb-stamp] build-id=$(cat .build-id)"

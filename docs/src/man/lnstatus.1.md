@@ -14,7 +14,7 @@ lnstatus -- Reticulum network stack status
 
 Without a *filter*, all up interfaces are shown. Give a *filter* string to only display interfaces whose name contains it.
 
-Only local shared-instance status is supported. Remote management (**-R**/**-i**/**-w**) and discovered interfaces (**-d**/**-D**) are accepted for compatibility but not yet implemented; requesting them prints a notice and exits non-zero.
+With **-R** it queries a remote transport instance over a link, the way `rnstatus -R` does, and feeds the result to the same renderer, so remote and local output match. With **-d**/**-D** it reads the local discovered-interface registry over the RPC and renders the `rnstatus` discovered layout.
 
 ## OPTIONS
 
@@ -23,6 +23,9 @@ Only local shared-instance status is supported. Remote management (**-R**/**-i**
 
 **--config** *dir*
 :   Path to alternative Reticulum configuration directory.
+
+**--instance-name** *name*
+:   Shared-instance name to query. Defaults to the value from the configuration file, otherwise `default`.
 
 **-a**, **--all**
 :   Show all interfaces, including those that are down.
@@ -63,22 +66,20 @@ Only local shared-instance status is supported. Remote management (**-R**/**-i**
 **--version**
 :   Print version and exit.
 
-The following options are accepted for **rnstatus** compatibility but are **not yet supported**; passing them prints a notice and exits non-zero:
-
 **-R** *hash*
-:   Transport identity hash of a remote instance to query (deferred).
+:   Transport identity hash of a remote instance to query instead of the local one.
 
 **-i** *file*
-:   Identity used for remote management (deferred).
+:   Identity used for remote management.
 
 **-w** *seconds*
-:   Timeout before giving up on remote queries (deferred).
+:   Timeout before giving up on remote queries.
 
 **-d**, **--discovered**
-:   List discovered interfaces (deferred).
+:   List interfaces discovered on the network.
 
 **-D**
-:   Show details and config entries for discovered interfaces (deferred).
+:   Show details and config entries for discovered interfaces.
 
 ## EXIT STATUS
 
@@ -89,7 +90,10 @@ The following options are accepted for **rnstatus** compatibility but are **not 
 :   No shared RNS instance available to get status from (could not derive the RPC authkey).
 
 **2**
-:   The status query failed, or an unsupported option (**-R**/**-i**/**-w**/**-d**/**-D**) was requested.
+:   The status query failed.
+
+**20**
+:   Remote management (**-R**) was requested but the management identity is missing or unusable.
 
 ## EXAMPLES
 

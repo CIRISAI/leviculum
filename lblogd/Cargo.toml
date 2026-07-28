@@ -69,7 +69,16 @@ assets = [
     # script that dpkg-preconfigure runs as /bin/sh.
     ["../packaging/lblogd/config.toml", "etc/lblogd/config.toml", "644"],
     ["README.md", "usr/share/doc/lblogd/README.md", "644"],
+    # Rendered from docs/src/man/ by scripts/md2man.py, which the
+    # build-deb recipes run before this. The Markdown under docs/ is the
+    # single source: mdbook publishes it and the package installs it, so
+    # the two can never drift. cargo-deb gzips anything under
+    # usr/share/man/ by itself.
+    ["../target/man/lblogd.1", "usr/share/man/man1/lblogd.1", "644"],
 ]
+# Generated per build by scripts/deb-stamp.sh, because Debian wants the
+# top entry to carry this build's version and the version is stamped.
+changelog = "../target/deb-changelog/lblogd"
 maintainer-scripts = "../packaging/lblogd/"
 conf-files = ["/etc/lblogd/config.toml"]
 

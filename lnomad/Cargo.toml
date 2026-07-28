@@ -34,7 +34,11 @@ priority = "optional"
 # shared-library deps and only emit a warning. There is no hard runtime
 # dependency either: any RNS instance satisfies the need, so leviculum
 # is a Recommends, not a Depends.
-depends = ""
+#
+# `depends` is left unset on purpose. cargo-deb emits `Depends:` with an
+# empty value either way — Debian wants the field omitted entirely when
+# there are no dependencies — so scripts/deb-finalize.sh strips it back
+# out after the build.
 recommends = "leviculum"
 assets = [
     # cargo-deb only recognises "target/release/..." exactly as a Cargo
@@ -43,7 +47,11 @@ assets = [
     # builds — see leviculum-cli/Cargo.toml.
     ["target/release/lnomad", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/lnomad/README.md", "644"],
+    # Rendered from docs/src/man/ by scripts/md2man.py; see lblogd's
+    # manifest for why the Markdown under docs/ is the single source.
+    ["../target/man/lnomad.1", "usr/share/man/man1/lnomad.1", "644"],
 ]
+changelog = "../target/deb-changelog/lnomad"
 
 [dependencies]
 leviculum-micron = { path = "../leviculum-micron" }
