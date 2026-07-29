@@ -75,6 +75,72 @@ fn propagation_announce_round_trips_for_discovery_tests() {
 }
 
 #[test]
+fn propagation_announce_accepts_lxmf_1_1_float_limit() {
+    let bytes = hex::decode(
+        "97c2ce6a693f31c3cb4090000000000000cd2800931003128101c413\
+         50726f7061676174696f6e204e6f6465204e4c"
+            .replace(char::is_whitespace, ""),
+    )
+    .unwrap();
+
+    let announce = PropagationNodeAnnounce::decode(&bytes).unwrap();
+    assert_eq!(announce.transfer_limit_kb, 1_024);
+    assert_eq!(announce.sync_limit_kb, 10_240);
+    assert_eq!(
+        announce.metadata,
+        vec![(
+            1,
+            [&[0xc4, 0x13], b"Propagation Node NL".as_slice(),].concat(),
+        )]
+    );
+}
+
+#[test]
+fn propagation_announce_float_limits_follow_python_int_semantics() {
+    let mut bytes = Vec::new();
+    msgpack::array(&mut bytes, 7);
+    msgpack::bool(&mut bytes, false);
+    msgpack::uint(&mut bytes, 1_700_000_000);
+    msgpack::bool(&mut bytes, true);
+    msgpack::f64(&mut bytes, 0.38);
+    msgpack::f64(&mut bytes, 10_240.9);
+    msgpack::array(&mut bytes, 3);
+    msgpack::uint(&mut bytes, 16);
+    msgpack::uint(&mut bytes, 3);
+    msgpack::uint(&mut bytes, 18);
+    msgpack::map(&mut bytes, 0);
+
+    let announce = PropagationNodeAnnounce::decode(&bytes).unwrap();
+    assert_eq!(announce.transfer_limit_kb, 0);
+    assert_eq!(announce.sync_limit_kb, 10_240);
+}
+
+#[test]
+fn propagation_announce_rejects_invalid_float_limits() {
+    for (value, expected) in [
+        (-0.1, PropagationError::InvalidValue),
+        (f64::NAN, PropagationError::InvalidValue),
+        (f64::INFINITY, PropagationError::InvalidValue),
+        (u64::MAX as f64, PropagationError::Overflow),
+    ] {
+        let mut bytes = Vec::new();
+        msgpack::array(&mut bytes, 7);
+        msgpack::bool(&mut bytes, false);
+        msgpack::uint(&mut bytes, 1_700_000_000);
+        msgpack::bool(&mut bytes, true);
+        msgpack::f64(&mut bytes, value);
+        msgpack::uint(&mut bytes, 10_240);
+        msgpack::array(&mut bytes, 3);
+        msgpack::uint(&mut bytes, 16);
+        msgpack::uint(&mut bytes, 3);
+        msgpack::uint(&mut bytes, 18);
+        msgpack::map(&mut bytes, 0);
+
+        assert_eq!(PropagationNodeAnnounce::decode(&bytes), Err(expected));
+    }
+}
+
+#[test]
 fn malformed_and_trailing_values_are_rejected() {
     assert_eq!(
         MessageGetRequest::decode(&[0x92, 0xc0, 0xc0, 0x00]),

@@ -388,6 +388,11 @@ impl MessageGetResponse {
 }
 
 /// Seven-field app-data payload announced by propagation nodes.
+///
+/// LXMF 1.1.0 can encode the transfer and sync limits as MessagePack floats
+/// when they originate from configured `lxmd` values. Its announce handler
+/// normalizes both fields with Python's `int()`, so decoding accepts integer
+/// and floating-point representations and stores the truncated values here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropagationNodeAnnounce {
     pub legacy_support: bool,
@@ -435,8 +440,8 @@ impl PropagationNodeAnnounce {
         let legacy_support = msgpack::read_bool(bytes, &mut position)?;
         let timebase = msgpack::read_uint(bytes, &mut position)?;
         let enabled = msgpack::read_bool(bytes, &mut position)?;
-        let transfer_limit_kb = msgpack::read_uint(bytes, &mut position)?;
-        let sync_limit_kb = msgpack::read_uint(bytes, &mut position)?;
+        let transfer_limit_kb = decode_announce_limit(bytes, &mut position)?;
+        let sync_limit_kb = decode_announce_limit(bytes, &mut position)?;
         let cost_count = msgpack::array_len(bytes, &mut position)?;
         if cost_count < 3 {
             return Err(PropagationError::InvalidLength);
@@ -470,6 +475,21 @@ impl PropagationNodeAnnounce {
             metadata,
         })
     }
+}
+
+fn decode_announce_limit(bytes: &[u8], position: &mut usize) -> Result<u64, PropagationError> {
+    if msgpack::peek_kind(bytes, *position)? != msgpack::Kind::Float {
+        return Ok(msgpack::read_uint(bytes, position)?);
+    }
+
+    let value = msgpack::read_number_f64(bytes, position)?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(PropagationError::InvalidValue);
+    }
+    if value >= u64::MAX as f64 {
+        return Err(PropagationError::Overflow);
+    }
+    Ok(value as u64)
 }
 
 #[cfg(test)]
