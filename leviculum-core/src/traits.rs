@@ -168,6 +168,7 @@ pub enum InterfaceKind {
     Kiss,
     Local,
     Pipe,
+    Channel,
     Auto,
     #[default]
     Unknown,
@@ -185,6 +186,7 @@ impl InterfaceKind {
             InterfaceKind::Kiss => "kiss",
             InterfaceKind::Local => "local",
             InterfaceKind::Pipe => "pipe",
+            InterfaceKind::Channel => "channel",
             InterfaceKind::Auto => "auto",
             InterfaceKind::Unknown => "unknown",
         }
