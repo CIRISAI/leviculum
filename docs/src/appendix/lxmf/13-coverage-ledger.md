@@ -6,7 +6,7 @@ proof. Every **informative (I)** and **out-of-scope (X)** symbol carries a reaso
 A normative symbol with no section and proof is a coverage gap.
 
 This ledger preserves the original LXMF 0.9.6 source-line audit. Active Rust
-compatibility is locked to the 1.0.1 canonical fixture. Entries for `/offer`,
+compatibility is locked to the 1.1.0 canonical fixture. Entries for `/offer`,
 propagation-node ingest, and `LXMPeer` describe the Python protocol only;
 `leviculum-lxmf` implements origin uploads and `/get` mailbox collection, not
 the server or peer state machine. The `/get` implementation is interoperable

@@ -7,7 +7,7 @@ references:
 
 | Component | Version | Commit |
 |-----------|---------|--------|
-| LXMF | 1.0.1 (`_version.py:1`) | `fab12ad9bf9f997797034950f289fe41a79dcf5a` |
+| LXMF | 1.1.0 (`_version.py:1`) | `795fdaa2b0777c13033787d933d1afc94a2377cb` |
 | Reticulum (RNS) | 1.3.5 | `d5e62d4e15c5fe2e170f7bd9e120551671f21a27` |
 
 `APP_NAME` is `"lxmf"` (`LXMF.py:1`). Where the reference defers to a Reticulum
@@ -16,7 +16,7 @@ primitive (hashing, signing, encryption, MDU sizes), this document cites
 is pinned by test vectors instead.
 
 The frozen symbol inventory and original source-line audit were captured from
-LXMF 0.9.6 (`8499729`). The canonical fixture is now generated from 1.0.1, and
+LXMF 0.9.6 (`8499729`). The canonical fixture is now generated from 1.1.0, and
 sections changed since the audit carry current citations and vectors.
 
 ## Scope

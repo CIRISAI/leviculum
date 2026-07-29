@@ -14,7 +14,7 @@ pub struct DeliveryAnnounce {
 }
 
 impl DeliveryAnnounce {
-    /// Encode the current LXMF 1.0.1 three-element announce format.
+    /// Encode the current three-element delivery announce format.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         msgpack::array(&mut out, 3);

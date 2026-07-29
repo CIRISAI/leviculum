@@ -8,7 +8,7 @@ Status: historical feasibility study. Original date: 2026-06-22.
 > is locked to Python golden vectors; ratchet-aware destination encryption is
 > exposed through `NodeCore`; Resource compression is enabled; PoW is
 > feature-gated with cooperative/custom executors; and the vendored Python
-> reference is hash-locked at LXMF 1.0.1 (`fab12ad`) in tests. Propagation
+> reference is hash-locked at LXMF 1.1.0 (`795fdaa`) in tests. Propagation
 > support is intentionally client-only: origin uploads use the reference raw
 > Link Packet/Resource envelope, while recipients use the `/get` list,
 > download, and acknowledgement exchange. Propagation-node
@@ -25,7 +25,7 @@ and similar) as well as on hosts.
 
 It is grounded in four codebases:
 
-- `reference/LXMF` (markqvist, audited at v0.9.6; active lock v1.0.1) — the
+- `reference/LXMF` (markqvist, audited at v0.9.6; active lock v1.1.0) — the
   authoritative Python reference.
 - `reference/LXST` (markqvist, v0.4.4) — the authoritative Python reference.
 - `/home/lew/coding/rsLXMF` — a third-party Rust LXMF implementation.

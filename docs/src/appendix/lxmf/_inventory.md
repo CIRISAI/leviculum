@@ -4,7 +4,7 @@ This file is the historical, frozen enumeration of every symbol and wire
 surface in the Python LXMF 0.9.6 audit baseline. The coverage ledger
 ([Coverage ledger](13-coverage-ledger.md)) maps every entry here to a
 specification section and a proof. The active implementation and canonical
-fixture are pinned separately to LXMF 1.0.1 (`fab12ad`).
+fixture are pinned separately to LXMF 1.1.0 (`795fdaa`).
 
 Do not edit by hand to reflect wishful coverage. To refresh, re-enumerate the
 source at the pinned commit and diff. A new symbol that appears unclassified is

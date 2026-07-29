@@ -11,10 +11,10 @@ use std::{
     process::Command,
 };
 
-const LXMF_VERSION: &str = "1.0.1";
-const LXMF_HEAD: &str = "fab12ad9bf9f997797034950f289fe41a79dcf5a";
+const LXMF_VERSION: &str = "1.1.0";
+const LXMF_HEAD: &str = "795fdaa2b0777c13033787d933d1afc94a2377cb";
 const VECTOR_FIXTURE_SHA256: &str =
-    "238ff9357b0c0fea13a705e68f280520ad59370b802d93c56257f3492d1eaee7";
+    "e94f4f921a0b8d8acb7d7a852bb1766a17f0374d1a19779b8d85cd3c20e4c11a";
 
 const REFERENCE_FILES: &[(&str, &str)] = &[
     (
@@ -31,11 +31,11 @@ const REFERENCE_FILES: &[(&str, &str)] = &[
     ),
     (
         "LXMF/LXMRouter.py",
-        "2eea8e743a634cbc0fda07a024b0b7e7546cdb19f88cace4f2b3bd62f8f336e8",
+        "9439444641247cd5da8cc4b5c980a40a2584ad82b2cc0666daa5280f1632dacd",
     ),
     (
         "LXMF/LXMPeer.py",
-        "bd9bb05c55553fccd25d681fca99a8d6cbafb27f6be0a7a3c4f8ae845ee4fe1f",
+        "5f9f655227522b0dc9159b58b42d56952a204835c747771582f1e851ffc4a2b1",
     ),
     (
         "LXMF/Handlers.py",

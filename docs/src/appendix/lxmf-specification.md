@@ -1,11 +1,11 @@
 # LXMF Protocol Specification
 
 This appendix specifies the LXMF messaging protocol. Its canonical wire fixture
-is generated from the Python LXMF 1.0.1 reference (`reference/LXMF`, commit `fab12ad`)
+is generated from the Python LXMF 1.1.0 reference (`reference/LXMF`, commit `795fdaa`)
 running on Reticulum 1.3.5 (commit `d5e62d4`), and is the compatibility contract
 for `leviculum-lxmf`. The original symbol inventory and much of the source-line
 audit were captured against LXMF 0.9.6 (`8499729`); changed wire surfaces are
-called out and tested against the active 1.0.1 lock.
+called out and tested against the active 1.1.0 lock.
 
 LXMF (Lightweight Extensible Message Format) is the store-and-forward messaging
 layer of Reticulum. It defines how a message is structured, signed, encrypted,

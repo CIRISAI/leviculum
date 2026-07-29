@@ -12,7 +12,7 @@ PYTHONPATH=reference/Reticulum:reference/LXMF \
     python3 docs/src/appendix/lxmf/vectors/gen_vectors.py
 ```
 
-Pinned to LXMF `fab12ad` (1.0.1) and Reticulum `d5e62d4` (RNS 1.3.5). Fixed
+Pinned to LXMF `795fdaa` (1.1.0) and Reticulum `d5e62d4` (RNS 1.3.5). Fixed
 inputs: source identity private = `00010203…3f`, destination identity private =
 `404142…7f`, message timestamp = `1700000000.0`.
 
