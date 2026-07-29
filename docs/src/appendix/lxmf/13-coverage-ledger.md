@@ -12,6 +12,8 @@ propagation-node ingest, and `LXMPeer` describe the Python protocol only;
 the server or peer state machine. The `/get` implementation is interoperable
 within one request/response Resource segment; Python's larger split form is a
 documented implementation gap rather than claimed coverage.
+Post-audit implementation and API differences introduced through LXMF 1.1.0
+are tracked separately in the [parity status](15-parity-status.md).
 
 Proof column: `vector` (a `[VEC-...]`), `computed` (derivation shown), `quoted`
 (byte/enum value cited verbatim), `n/a` (informative/out-of-scope).

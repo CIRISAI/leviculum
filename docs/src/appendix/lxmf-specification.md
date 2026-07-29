@@ -56,4 +56,5 @@ reassembly is implemented.
 - [Constants reference](lxmf/12-constants.md)
 - [Coverage ledger](lxmf/13-coverage-ledger.md)
 - [Test vectors](lxmf/14-test-vectors.md)
+- [Python 1.1.0 and RNS 1.4.0 parity status](lxmf/15-parity-status.md)
 - [Symbol inventory (frozen)](lxmf/_inventory.md)

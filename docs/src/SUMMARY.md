@@ -90,4 +90,5 @@
   - [Constants reference](appendix/lxmf/12-constants.md)
   - [Coverage ledger](appendix/lxmf/13-coverage-ledger.md)
   - [Test vectors](appendix/lxmf/14-test-vectors.md)
+  - [Python 1.1.0 and RNS 1.4.0 parity status](appendix/lxmf/15-parity-status.md)
   - [Symbol inventory (frozen)](appendix/lxmf/_inventory.md)
