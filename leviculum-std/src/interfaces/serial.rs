@@ -49,6 +49,9 @@ pub(crate) struct SerialRadioConfig {
     pub tx_power: i8,
     pub preamble_len: u16,
     pub csma_enabled: bool,
+    /// Long-term airtime lock in the firmware's `fraction * 10000` encoding;
+    /// `0` is what the firmware reads as unlimited.
+    pub lt_alock: u16,
 }
 
 /// Build the LNode radio config a `SerialInterface` block asks for, or
@@ -66,6 +69,16 @@ pub(crate) struct SerialRadioConfig {
 /// [`derive_preamble_symbols`], and `preamble_symbols` in the config file
 /// still overrides it — which is how the corner gets re-measured, and how a
 /// node with a non-conforming peer copes.
+///
+/// The airtime lock resolves the same way, and for the same reason. An
+/// LNode is configured by this function and by nothing else, so a hardcoded
+/// `lt_alock = 0` here was the host telling the firmware "unlimited" and
+/// overriding the lawful default the firmware would otherwise have derived
+/// from its own frequency ([`firmware_default_lt_alock`]). Sending the
+/// resolution instead of a constant means an LNode ends up under the same
+/// limit as an RNode on the same frequency (`driver::resolve_lt_alock`),
+/// and `airtime_limit_long` in the config file still overrides it — with
+/// `0` still available for a bench that means unlimited and says so.
 pub(crate) fn serial_radio_config(
     cfg: &crate::config::InterfaceConfig,
 ) -> Option<SerialRadioConfig> {
@@ -83,6 +96,10 @@ pub(crate) fn serial_radio_config(
             .preamble_symbols
             .unwrap_or_else(|| derive_preamble_symbols(spreading_factor, coding_rate, bandwidth)),
         csma_enabled: cfg.csma_enabled.unwrap_or(true),
+        lt_alock: leviculum_core::rnode::firmware_default_lt_alock(
+            frequency,
+            cfg.airtime_limit_long.map(|p| (p * 100.0) as u16),
+        ),
     })
 }
 
@@ -184,10 +201,11 @@ async fn send_radio_config(
         csma_enabled: config.csma_enabled,
         radio_silent: false,
         // Airtime limits are enforced by the LNode firmware's airtime lock.
-        // 0 = unlimited; host-config plumbing of a non-zero limit is a
-        // separate follow-on (the firmware honours whatever it receives here).
+        // Short-term stays unset (no config key spells one); long-term is
+        // resolved in `serial_radio_config` — lawful for the frequency
+        // unless `airtime_limit_long` says otherwise.
         st_alock: 0,
-        lt_alock: 0,
+        lt_alock: config.lt_alock,
         // Send-side only; `build_radio_config_frame` always emits the full
         // 21-byte frame, so the receiver parses the lt_alock field as present.
         lt_alock_present: true,
@@ -485,6 +503,35 @@ pub(crate) fn parse_stop_bits(n: u8) -> tokio_serial::StopBits {
 mod tests {
     use super::*;
 
+    /// An LNode is lawful out of the box: with no `airtime_limit_long` in
+    /// the config, the frequency's own ETSI sub-band limit is what gets
+    /// pushed, not the 0 (unlimited) this used to hardcode.
+    #[test]
+    fn absent_airtime_limit_pushes_the_lawful_limit_for_the_frequency() {
+        let at = |frequency, explicit| {
+            serial_radio_config(&crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(frequency),
+                airtime_limit_long: explicit,
+                ..Default::default()
+            })
+            .expect("frequency present → radio config")
+            .lt_alock
+        };
+        // 869.525 MHz is ETSI sub-band P: 10% -> 0.10 * 10000.
+        assert_eq!(at(869_525_000, None), 1000);
+        // 868.1 MHz is sub-band M: 1%. The limit follows the frequency, so a
+        // node that moves band moves limit without touching its config.
+        assert_eq!(at(868_100_000, None), 100);
+        // Outside the band this build can cite, nothing is invented.
+        assert_eq!(at(915_000_000, None), 0);
+        // An explicit value still wins, including an explicit 0: a bench
+        // that means unlimited says so, and the host does not second-guess.
+        assert_eq!(at(869_525_000, Some(5.0)), 500);
+        assert_eq!(at(869_525_000, Some(0.0)), 0);
+    }
+
     /// The whole point of the key: a `preamble_symbols` written in a config
     /// file has to survive as far as the bytes on the wire. This drives the
     /// same `serial_radio_config` the driver calls and then the same
@@ -644,6 +691,7 @@ mod tests {
             tx_power: 17,
             preamble_len: 24,
             csma_enabled: true,
+            lt_alock: 1000,
         };
         let handle = spawn_serial_interface(base_config("/dev/null-test-no-radio-a", Some(radio)));
         assert!(handle.credit.is_some());
@@ -686,6 +734,7 @@ mod tests {
             tx_power: 17,
             preamble_len: 24,
             csma_enabled: true,
+            lt_alock: 1000,
         };
         let handle = spawn_serial_interface(base_config("/dev/null-test-reconfig", Some(radio)));
         let credit_arc = handle
