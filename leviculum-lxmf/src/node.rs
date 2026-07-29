@@ -224,6 +224,16 @@ struct IncomingResourceAssembly {
     data: Vec<u8>,
 }
 
+/// Read-only snapshot of an active incoming LXMF Resource transfer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IncomingResourceTransfer {
+    pub link_id: LinkId,
+    pub resource_hash: [u8; 32],
+    pub transfer_size: u64,
+    pub data_size: u64,
+    pub progress: f32,
+}
+
 /// LXMF delivery state layered directly on a [`NodeCore`].
 pub struct LxmfNode {
     delivery_destination: DestinationHash,
@@ -238,6 +248,7 @@ pub struct LxmfNode {
     link_packet_receipts: BTreeMap<[u8; 32], PendingLinkPacket>,
     resources: BTreeMap<LinkId, PendingResource>,
     incoming_resources: BTreeMap<LinkId, IncomingResourceAssembly>,
+    incoming_resource_transfers: BTreeMap<[u8; 32], IncomingResourceTransfer>,
 }
 
 impl LxmfNode {
@@ -322,6 +333,7 @@ impl LxmfNode {
             link_packet_receipts: BTreeMap::new(),
             resources: BTreeMap::new(),
             incoming_resources: BTreeMap::new(),
+            incoming_resource_transfers: BTreeMap::new(),
         }
     }
 
@@ -341,6 +353,18 @@ impl LxmfNode {
     /// attempt, and becomes `false` again when the Link closes.
     pub fn owns_link(&self, link_id: &LinkId) -> bool {
         self.lxmf_links.contains(link_id)
+    }
+
+    /// Return snapshots of active incoming Resources on LXMF delivery Links.
+    ///
+    /// Cancellation is intentionally not exposed here until `leviculum-core`
+    /// can cancel an already accepted inbound Resource by hash.
+    pub fn incoming_resource_transfers(&self) -> impl Iterator<Item = &IncomingResourceTransfer> {
+        self.incoming_resource_transfers.values()
+    }
+
+    pub fn incoming_resource_count(&self) -> usize {
+        self.incoming_resource_transfers.len()
     }
 
     /// Select the exact Python-compatible delivery representation.
@@ -711,7 +735,10 @@ impl LxmfNode {
                 );
             }
             NodeEvent::ResourceAdvertised {
-                link_id, data_size, ..
+                link_id,
+                resource_hash,
+                transfer_size,
+                data_size,
             } if self.lxmf_links.contains(link_id) => {
                 let accept = self
                     .config
@@ -719,6 +746,16 @@ impl LxmfNode {
                     .is_none_or(|limit| *data_size <= limit);
                 if accept {
                     output.core.merge(node.accept_resource(link_id)?);
+                    self.incoming_resource_transfers.insert(
+                        *resource_hash,
+                        IncomingResourceTransfer {
+                            link_id: *link_id,
+                            resource_hash: *resource_hash,
+                            transfer_size: *transfer_size,
+                            data_size: *data_size,
+                            progress: 0.0,
+                        },
+                    );
                 } else {
                     output.core.merge(node.reject_resource(link_id)?);
                     output.events.push(LxmfNodeEvent::InboundRejected {
@@ -726,6 +763,40 @@ impl LxmfNode {
                         reason: InboundRejection::ResourceTooLarge,
                     });
                 }
+            }
+            NodeEvent::ResourceTransferStarted {
+                link_id,
+                resource_hash,
+                is_sender: false,
+            } if self.lxmf_links.contains(link_id) => {
+                self.incoming_resource_transfers
+                    .entry(*resource_hash)
+                    .or_insert(IncomingResourceTransfer {
+                        link_id: *link_id,
+                        resource_hash: *resource_hash,
+                        transfer_size: 0,
+                        data_size: 0,
+                        progress: 0.0,
+                    });
+            }
+            NodeEvent::ResourceProgress {
+                link_id,
+                resource_hash,
+                progress,
+                transfer_size,
+                data_size,
+                is_sender: false,
+            } if self.lxmf_links.contains(link_id) => {
+                self.incoming_resource_transfers.insert(
+                    *resource_hash,
+                    IncomingResourceTransfer {
+                        link_id: *link_id,
+                        resource_hash: *resource_hash,
+                        transfer_size: *transfer_size,
+                        data_size: *data_size,
+                        progress: *progress,
+                    },
+                );
             }
             NodeEvent::ResourceProgress {
                 link_id,
@@ -769,12 +840,14 @@ impl LxmfNode {
             }
             NodeEvent::ResourceCompleted {
                 link_id,
+                resource_hash,
                 data,
                 is_sender: false,
                 segment_index,
                 total_segments,
                 ..
             } if self.lxmf_links.contains(link_id) => {
+                self.incoming_resource_transfers.remove(resource_hash);
                 self.handle_resource_segment(
                     node.storage(),
                     *link_id,
@@ -786,6 +859,7 @@ impl LxmfNode {
             }
             NodeEvent::ResourceFailed {
                 link_id,
+                resource_hash,
                 error,
                 is_sender,
                 ..
@@ -799,6 +873,7 @@ impl LxmfNode {
                     }
                 } else if self.lxmf_links.contains(link_id) {
                     self.incoming_resources.remove(link_id);
+                    self.incoming_resource_transfers.remove(resource_hash);
                     output.events.push(LxmfNodeEvent::InboundRejected {
                         method: DeliveryMethod::Direct,
                         reason: InboundRejection::Resource(*error),
@@ -964,6 +1039,8 @@ impl LxmfNode {
         self.lxmf_links.remove(&link_id);
         self.identified_links.remove(&link_id);
         self.incoming_resources.remove(&link_id);
+        self.incoming_resource_transfers
+            .retain(|_, transfer| transfer.link_id != link_id);
         self.link_destinations.remove(&link_id);
         self.pending_links.retain(|_, id| *id != link_id);
         self.direct_links.retain(|_, id| *id != link_id);
@@ -1370,6 +1447,65 @@ mod tests {
             [LxmfNodeEvent::Progress { message_id: id, progress }]
                 if *id == message_id && (*progress - 0.6).abs() < 0.0001
         ));
+    }
+
+    #[test]
+    fn incoming_resource_transfers_are_tracked_until_failure() {
+        let (mut node, mut lxmf, _, _) = setup();
+        let link_id = LinkId::new([0x81; 16]);
+        let resource_hash = [0x82; 32];
+        lxmf.lxmf_links.insert(link_id);
+
+        let _ = lxmf
+            .handle_event(
+                &mut node,
+                &NodeEvent::ResourceTransferStarted {
+                    link_id,
+                    resource_hash,
+                    is_sender: false,
+                },
+            )
+            .expect("start incoming resource");
+        assert_eq!(lxmf.incoming_resource_count(), 1);
+
+        let _ = lxmf
+            .handle_event(
+                &mut node,
+                &NodeEvent::ResourceProgress {
+                    link_id,
+                    resource_hash,
+                    progress: 0.25,
+                    transfer_size: 1_024,
+                    data_size: 2_048,
+                    is_sender: false,
+                },
+            )
+            .expect("update incoming resource");
+        assert_eq!(
+            lxmf.incoming_resource_transfers()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![IncomingResourceTransfer {
+                link_id,
+                resource_hash,
+                transfer_size: 1_024,
+                data_size: 2_048,
+                progress: 0.25,
+            }]
+        );
+
+        let _ = lxmf
+            .handle_event(
+                &mut node,
+                &NodeEvent::ResourceFailed {
+                    link_id,
+                    resource_hash,
+                    error: ResourceError::Timeout,
+                    is_sender: false,
+                },
+            )
+            .expect("fail incoming resource");
+        assert_eq!(lxmf.incoming_resource_count(), 0);
     }
 
     struct Peer {

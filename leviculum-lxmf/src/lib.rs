@@ -33,8 +33,9 @@ pub use attachments::{
 };
 pub use message::{DeliveryMethod, Field, Message, MessageError, Verification};
 pub use node::{
-    DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection, LxmfNode,
-    LxmfNodeConfig, LxmfNodeError, LxmfNodeEvent, LxmfNodeOutput, SubmissionId,
+    DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection,
+    IncomingResourceTransfer, LxmfNode, LxmfNodeConfig, LxmfNodeError, LxmfNodeEvent,
+    LxmfNodeOutput, SubmissionId,
 };
 pub use paper::{PaperError, PaperMessage};
 pub use propagation::{
