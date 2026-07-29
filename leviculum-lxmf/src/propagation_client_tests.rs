@@ -200,6 +200,7 @@ fn maps_only_outgoing_client_state() {
         [PropagationTransportEvent::RequestProgress {
             kind: PropagationRequestKind::Get,
             progress,
+            transfer_size: 1_000,
             ..
         }] if *progress == 0.5
     ));

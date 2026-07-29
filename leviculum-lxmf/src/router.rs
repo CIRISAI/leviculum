@@ -34,7 +34,7 @@ mod propagation_runtime;
 mod stamp_runtime;
 use propagation_runtime::PropagationRuntime;
 pub use propagation_runtime::{
-    PropagationClientConfig, PropagationClientState, PropagationSyncResult,
+    PropagationClientConfig, PropagationClientState, PropagationSyncResult, PropagationSyncStatus,
 };
 
 pub const MAX_DELIVERY_ATTEMPTS: u8 = 5;
@@ -172,7 +172,7 @@ pub enum RouterEvent {
     StampPending(DeliveryStampRequest),
     InboundStampPending(InboundStampRequest),
     PropagationStampPending(PropagationStampRequest),
-    PropagationSyncState(PropagationClientState),
+    PropagationSyncState(PropagationSyncStatus),
     PropagationSyncComplete(PropagationSyncResult),
     PersistenceRequested,
 }

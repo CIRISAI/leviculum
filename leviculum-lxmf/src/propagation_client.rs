@@ -79,6 +79,7 @@ pub enum PropagationTransportEvent {
         link_id: LinkId,
         kind: PropagationRequestKind,
         progress: f32,
+        transfer_size: u64,
     },
     UploadSubmitted {
         link_id: LinkId,
@@ -753,6 +754,7 @@ impl PropagationTransport {
             NodeEvent::ResourceProgress {
                 link_id,
                 progress,
+                transfer_size,
                 is_sender: false,
                 ..
             } => {
@@ -766,6 +768,7 @@ impl PropagationTransport {
                             link_id: *link_id,
                             kind: pending.kind,
                             progress: *progress,
+                            transfer_size: *transfer_size,
                         });
                 }
             }

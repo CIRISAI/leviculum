@@ -15,7 +15,10 @@ use rand_core::OsRng;
 use crate::{
     node::{LxmfNodeConfig, APP_NAME, DELIVERY_ASPECT},
     propagation::PropagationNodeAnnounce,
-    propagation_client::{PropagationTransportEvent, PropagationUploadFailure, PROPAGATION_ASPECT},
+    propagation_client::{
+        PropagationRequestKind, PropagationTransportEvent, PropagationUploadFailure,
+        PROPAGATION_ASPECT,
+    },
     router::RouterConfig,
     LxmfNode, Message, Verification, MESSAGE_GET_PATH,
 };
@@ -665,9 +668,64 @@ fn malformed_list_fails_without_a_response_received_transition() {
     assert_eq!(runtime.client.state, PropagationClientState::TransferFailed);
     assert_eq!(
         output.events,
-        vec![RouterEvent::PropagationSyncState(
-            PropagationClientState::TransferFailed
-        )]
+        vec![RouterEvent::PropagationSyncState(PropagationSyncStatus {
+            state: PropagationClientState::TransferFailed,
+            progress: 0.0,
+            transfer_size: None,
+        })]
+    );
+}
+
+#[test]
+fn receiving_progress_emits_updated_sync_status_without_a_state_change() {
+    let client_identity = identity(2);
+    let client_identity_hash = *client_identity.hash();
+    let delivery =
+        LxmfNode::delivery_destination(identity_copy(&client_identity)).expect("delivery");
+    let propagation = PropagationTransport::destination(identity_copy(&client_identity))
+        .expect("propagation client");
+    let mut core = node();
+    let lxmf = LxmfNode::register(&mut core, delivery, LxmfNodeConfig::default())
+        .expect("register delivery");
+    let propagation = PropagationTransport::register(&mut core, propagation)
+        .expect("register propagation client");
+    let mut router = LxmfRouter::new(lxmf, client_identity_hash, RouterConfig::default());
+    let mut runtime = PropagationRuntime::new(propagation, PropagationClientConfig::default());
+    runtime.client.state = PropagationClientState::RequestSent;
+    let link_id = LinkId::new([0x43; 16]);
+    let mut output = RouterOutput::default();
+
+    for progress in [0.25, 0.5] {
+        runtime
+            .handle_transport_event(
+                &mut router,
+                &mut core,
+                PropagationTransportEvent::RequestProgress {
+                    link_id,
+                    kind: PropagationRequestKind::Get,
+                    progress,
+                    transfer_size: 4_096,
+                },
+                NOW_UNIX,
+                &mut output,
+            )
+            .expect("handle mailbox progress");
+    }
+
+    assert_eq!(
+        output.events,
+        vec![
+            RouterEvent::PropagationSyncState(PropagationSyncStatus {
+                state: PropagationClientState::Receiving,
+                progress: 0.25,
+                transfer_size: Some(4_096),
+            }),
+            RouterEvent::PropagationSyncState(PropagationSyncStatus {
+                state: PropagationClientState::Receiving,
+                progress: 0.5,
+                transfer_size: Some(4_096),
+            }),
+        ]
     );
 }
 
@@ -1210,6 +1268,10 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
         client.router.propagation_client_state(),
         Some(PropagationClientState::Complete)
     );
+    assert!(client
+        .router
+        .propagation_client_transfer_size()
+        .is_some_and(|size| size > 0));
     assert!(client
         .router
         .propagation

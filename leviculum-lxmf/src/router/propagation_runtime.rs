@@ -78,11 +78,29 @@ pub struct PropagationSyncResult {
     pub duplicates: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropagationSyncStatus {
+    pub state: PropagationClientState,
+    pub progress: f32,
+    pub transfer_size: Option<u64>,
+}
+
+impl PropagationSyncStatus {
+    const fn idle() -> Self {
+        Self {
+            state: PropagationClientState::Idle,
+            progress: 0.0,
+            transfer_size: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct MailboxSync {
     state: PropagationClientState,
     max_messages: Option<usize>,
     progress: f32,
+    transfer_size: Option<u64>,
     received: usize,
     duplicates: usize,
     path_deadline_ms: Option<u64>,
@@ -94,6 +112,7 @@ impl Default for MailboxSync {
             state: PropagationClientState::Idle,
             max_messages: None,
             progress: 0.0,
+            transfer_size: None,
             received: 0,
             duplicates: 0,
             path_deadline_ms: None,
@@ -316,10 +335,24 @@ impl PropagationRuntime {
                     self.cancel_outbound_link(node, output);
                 }
             }
-            PropagationTransportEvent::RequestProgress { kind, progress, .. } => {
+            PropagationTransportEvent::RequestProgress {
+                kind,
+                progress,
+                transfer_size,
+                ..
+            } => {
                 if kind == PropagationRequestKind::Get {
+                    let changed = self.client.progress.to_bits() != progress.to_bits()
+                        || self.client.transfer_size != Some(transfer_size);
                     self.client.progress = progress;
-                    self.set_state(PropagationClientState::Receiving, output);
+                    self.client.transfer_size = Some(transfer_size);
+                    if self.client.state == PropagationClientState::Receiving {
+                        if changed {
+                            self.emit_sync_status(output);
+                        }
+                    } else {
+                        self.set_state(PropagationClientState::Receiving, output);
+                    }
                 }
             }
             PropagationTransportEvent::UploadSubmitted { message_id, .. } => {
@@ -398,9 +431,8 @@ impl PropagationRuntime {
                         PropagationClientState::Complete => {
                             self.client.state = PropagationClientState::Idle;
                             self.client.progress = 0.0;
-                            output.events.push(RouterEvent::PropagationSyncState(
-                                PropagationClientState::Idle,
-                            ));
+                            self.client.transfer_size = None;
+                            self.emit_sync_status(output);
                         }
                         PropagationClientState::PathRequested
                         | PropagationClientState::LinkEstablishing => {
@@ -658,8 +690,22 @@ impl PropagationRuntime {
         }
         if self.client.state != state {
             self.client.state = state;
-            output.events.push(RouterEvent::PropagationSyncState(state));
+            self.emit_sync_status(output);
         }
+    }
+
+    fn sync_status(&self) -> PropagationSyncStatus {
+        PropagationSyncStatus {
+            state: self.client.state,
+            progress: self.client.progress,
+            transfer_size: self.client.transfer_size,
+        }
+    }
+
+    fn emit_sync_status(&self, output: &mut RouterOutput) {
+        output
+            .events
+            .push(RouterEvent::PropagationSyncState(self.sync_status()));
     }
 
     /// Advances the path wait without blocking an executor or event loop.
@@ -1120,7 +1166,7 @@ impl LxmfRouter {
             }
             self.persistence_dirty |= queue_changed;
             output.events.push(RouterEvent::PropagationSyncState(
-                PropagationClientState::Idle,
+                PropagationSyncStatus::idle(),
             ));
         }
         Ok(self.finish_output(output))
@@ -1142,6 +1188,12 @@ impl LxmfRouter {
         self.propagation
             .as_ref()
             .map(|runtime| runtime.client.progress)
+    }
+
+    pub fn propagation_client_transfer_size(&self) -> Option<u64> {
+        self.propagation
+            .as_ref()
+            .and_then(|runtime| runtime.client.transfer_size)
     }
 
     pub fn propagation_client_last_result(&self) -> Option<PropagationSyncResult> {
@@ -1248,7 +1300,7 @@ impl LxmfRouter {
         propagation.cancel_outbound_link(node, &mut output);
         propagation.client = MailboxSync::default();
         output.events.push(RouterEvent::PropagationSyncState(
-            PropagationClientState::Idle,
+            PropagationSyncStatus::idle(),
         ));
         Ok(self.finish_output(output))
     }
