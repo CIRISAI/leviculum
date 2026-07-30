@@ -8170,6 +8170,99 @@ mod tests {
         assert_eq!(path.as_deref(), Some("/test/path"));
     }
 
+    /// Codeberg #137: a second destination registering the same request path
+    /// must not unregister the first one. The observable is the request the
+    /// first destination is still supposed to serve — with path-only keying the
+    /// later registration replaced the entry, the destination check then
+    /// rejected the request, and the client saw a silent timeout instead of an
+    /// answer. Not hypothetical: the remote-management destination registers
+    /// `/status` (see `enable_remote_management`), so any application serving
+    /// its own `/status` collided with it.
+    ///
+    /// The second handler is `AllowNone`, so the test also fails if a future
+    /// lookup finds the right *path* on the wrong destination: picking B's
+    /// entry drops the request whether or not a destination check follows.
+    #[test]
+    fn second_destination_on_same_path_keeps_serving_the_first() {
+        let mut pair = establish_nodecore_link_pair();
+        let served_dest = *pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .destination_hash();
+        register_echo_handler(
+            &mut pair.responder,
+            served_dest,
+            request::RequestPolicy::AllowAll,
+        );
+
+        // A second destination on the same responder claims the same path.
+        let other_dest = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["echo", "second"],
+        )
+        .expect("second destination");
+        let other_hash = *other_dest.hash();
+        assert_ne!(other_hash, served_dest, "the two destinations must differ");
+        pair.responder.register_destination(other_dest);
+        register_echo_handler(
+            &mut pair.responder,
+            other_hash,
+            request::RequestPolicy::AllowNone,
+        );
+
+        // The request still arrives on the first destination's link.
+        let mut data = Vec::new();
+        crate::resource::msgpack::write_fixstr(&mut data, "hello");
+        let (request_id, output) = pair
+            .initiator
+            .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
+            .unwrap();
+        let req_data = extract_broadcast_data(&output);
+        let output = pair
+            .responder
+            .handle_packet(crate::transport::InterfaceId(0), &req_data);
+
+        let received = output.events.iter().find_map(|e| match e {
+            NodeEvent::RequestReceived {
+                link_id,
+                request_id: rid,
+                path,
+                ..
+            } => Some((*link_id, *rid, path.clone())),
+            _ => None,
+        });
+        let (resp_link, recv_rid, path) = received.expect(
+            "the first destination's handler must still serve its path after a \
+             second destination registered the same path",
+        );
+        assert_eq!(resp_link, pair.responder_link_id);
+        assert_eq!(path, "/echo");
+
+        // ...and the response completes the round trip, so the client gets an
+        // answer rather than the timeout the overwrite produced.
+        let mut response_data = Vec::new();
+        crate::resource::msgpack::write_bool(&mut response_data, true);
+        let output = pair
+            .responder
+            .send_response(&resp_link, &recv_rid, &response_data)
+            .unwrap();
+        let resp_data = extract_broadcast_data(&output);
+        let output = pair
+            .initiator
+            .handle_packet(crate::transport::InterfaceId(0), &resp_data);
+        assert!(
+            output.events.iter().any(|e| matches!(
+                e,
+                NodeEvent::ResponseReceived { request_id: rid, .. } if *rid == request_id
+            )),
+            "the initiator must receive the response"
+        );
+    }
+
     #[test]
     fn test_request_no_handler_silent_drop() {
         let mut pair = establish_nodecore_link_pair();
