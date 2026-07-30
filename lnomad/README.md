@@ -8,24 +8,30 @@ links interactively.
 ## Usage
 
 ```
-lnomad [address] [options]
+lnomad [url] [options]
 ```
 
-The address selects a destination and a page path:
+A URL names the node's destination address and the request path on it:
 
 ```
-<dest_hash>                     open the destination's /page/index.mu
-<dest_hash>:/page/about.mu      open a specific page
-<dest_hash>:/page/x.mu`a=1|b=2  carry preset query fields (var_a, var_b)
-<dest_hash>:/file/manual.pdf    download a file instead of rendering a page
+<address>                     open the node's /page/index.mu
+<address>:/page/about.mu      open a specific page
+<address>:/page/x.mu`a=1|b=2  carry preset query fields (var_a, var_b)
+<address>:/file/manual.pdf    download a file instead of rendering a page
+:/page/about.mu              a local URL: the node of the page in view
 ```
 
-`<dest_hash>` is 32 hex characters (the 16-byte truncated destination hash).
+`<address>` is 32 hex characters (the 16-byte truncated destination hash).
 
-The address is optional. Started without one on a terminal, `lnomad` opens its
+Leaving the address out makes the URL local — local to the page in view — but
+the `:` stays. A bare request path (`/page/about.mu`, no colon) names no node
+and is not a URL at all. It is rejected here exactly as the reference NomadNet
+browser rejects it, and the error names the missing `:`.
+
+The URL is optional. Started without one on a terminal, `lnomad` opens its
 start screen with the places panel showing — your bookmarks, and the nodes
 discovery has turned up. Without a terminal to browse in (piped, redirected, or
-`--print`) an address is required, since there would be nothing to print.
+`--print`) a URL is required, since there would be nothing to print.
 
 ## Discovering nodes
 
@@ -70,7 +76,7 @@ When stdout is not a terminal, `lnomad` prints once and exits even without
 ## Interactive keys
 
 On a terminal, `lnomad` opens a full-screen browser: a one-row top-bar (the page
-title, a `·`, and the address, with a right-aligned status cluster: a bookmark
+title, a `·`, and the URL, with a right-aligned status cluster: a bookmark
 star, an identity key marker while identifying, a cache bolt, and the hop count
 to the node), the scrollable page, and a footer. The footer is a strip of
 clickable button-hints where a keybinding and a button are the same thing: the
@@ -96,9 +102,9 @@ apart by its underline and colour, and is reached by focus, hint or click:
 - `/`         in-page search: type a query, `Enter` highlights every match and
   jumps to the first; `n` / `N` cycle to the next / previous match, `Esc` clears
 - click       follow a link, activate a top-bar control, or press a footer button
-- `:`         enter an address
+- `:`         enter a URL
 - `m`         bookmark the current page (a click on the top-bar star does the same)
-- `y`         copy the focused link's or the current page's address
+- `y`         copy the focused link's or the current page's URL
 - `d`         open the places panel (bookmarks and discovered nodes)
 - `i`         identify to this node, or go back to anonymous
 - `R` / `Ctrl-R` / `F5`  reload the page (always refetches, bypassing the cache)
@@ -114,9 +120,9 @@ apart by its underline and colour, and is reached by focus, hint or click:
 
 The focused or hovered link's target appears in a small floating field at the
 bottom-left of the content, just above the footer, so it never covers the
-clickable button-hints. Same-destination links (`:/page/x.mu`) resolve against
-the page currently in view; a followed link carries its preset (`f=v`) fields as
-`var_*` request variables.
+clickable button-hints. Local URLs (`:/page/x.mu`) resolve against the page
+currently in view; a followed link carries its preset (`f=v`) fields as `var_*`
+request variables.
 
 Recently viewed pages are held in an in-RAM cache (the last 50 distinct pages),
 so revisiting one, including stepping back and forward through history, renders
@@ -190,7 +196,7 @@ can attribute what you submit to you, which is what NomadNet's
 A `/file/` target is downloaded rather than rendered. Following a `/file/` link
 in the browser saves it under `$XDG_DOWNLOAD_DIR` (falling back to
 `$HOME/Downloads`) and reports the name, size and directory in a toast; `Esc`
-cancels a download in flight, just like a page load. Giving a `/file/` address on
+cancels a download in flight, just like a page load. Giving a `/file/` URL on
 the command line downloads it directly, without ever opening the TUI, and prints
 how many bytes were saved and where.
 
@@ -211,6 +217,6 @@ always keeps its clickable button-hints.
 
 ## Anchors
 
-A `#anchor` in a target (a followed link or the initial address) is resolved
+A `#anchor` in a target (a followed link or the initial URL) is resolved
 against the page's anchors and scrolled to on load; an unknown anchor falls back
 to the top of the page with a toast note.

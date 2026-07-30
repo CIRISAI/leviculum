@@ -19,7 +19,7 @@ A `/file/` URL downloads instead of rendering; see **--output** for where the fi
 ## OPTIONS
 
 *url*
-:   Page to open, as `<dest_hash>[:/page/x.mu[`f=v|...]]`. A bare destination hash opens the node's default page. Optional on a terminal, where omitting it opens the start screen.
+:   Page to open, as `<address>[:/page/x.mu[`f=v|...]]`, where *address* is the node's 32-hex-character destination address and everything after the `:` is the request path. A bare address opens the node's default page. Leaving the address out but keeping the `:` (`:/page/x.mu`) makes it a URL to a local page — local to the page in view — so it is only meaningful inside the UI, never on the command line. A bare request path with no `:` names no node and is rejected, as it is by NomadNet. Optional on a terminal, where omitting it opens the start screen.
 
 **--config** *dir*
 :   Reticulum configuration directory. Defaults to the platform default, the same one **lncp**(1) uses.

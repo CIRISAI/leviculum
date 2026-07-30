@@ -157,7 +157,9 @@ async fn main() -> ExitCode {
         Mode::Page { url } => match parse_url(url, None) {
             Ok(target) => Some(target),
             Err(err) => {
-                eprintln!("lnomad: {err}: {url}");
+                // URL first, then the reason: the reasons carry advice of their
+                // own now, so trailing the URL behind one read as part of it.
+                eprintln!("lnomad: {url}: {err}");
                 return ExitCode::from(2);
             }
         },

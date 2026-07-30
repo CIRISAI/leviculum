@@ -1,22 +1,29 @@
 //! NomadNet URL parsing.
 //!
-//! A NomadNet page URL selects a destination and a path on it, optionally
-//! carrying query fields. It mirrors `Browser.retrieve_url` from the reference
-//! NomadNet text UI:
+//! The vocabulary here is the reference's own (NomadNet's built-in guide,
+//! "Links and URLs"): the whole string is a **URL**, its first part is the
+//! node's **destination address**, and everything after the `:` is the
+//! **request path**. Leaving the destination address out makes it a URL to a
+//! **local** page or file — local to the page in view.
 //!
 //! ```text
-//! <dest_hash>                     -> dest + /page/index.mu
-//! <dest_hash>:/page/about.mu      -> dest + /page/about.mu
-//! <dest_hash>:                    -> dest + /page/index.mu   (empty path)
-//! :/page/about.mu                 -> current dest + /page/about.mu
-//! <dest_hash>:/page/x.mu`a=1|b=2  -> dest + path + fields {var_a:1, var_b:2}
+//! <address>                     -> address + /page/index.mu
+//! <address>:/page/about.mu      -> address + /page/about.mu
+//! <address>:                    -> address + /page/index.mu   (empty path)
+//! :/page/about.mu               -> the open page's node + /page/about.mu
+//! <address>:/page/x.mu`a=1|b=2  -> address + path + fields {var_a:1, var_b:2}
 //! ```
 //!
-//! `<dest_hash>` is exactly [`TRUNCATED_HASH_HEX_LEN`] hex characters (the
-//! 16-byte Reticulum truncated destination hash). Query fields follow a single
-//! backtick and are `key=value` pairs joined by `|`; each key is stored with the
-//! NomadNet `var_` prefix, matching how the reference browser passes URL query
-//! variables to a page's request handler.
+//! `<address>` is exactly [`TRUNCATED_HASH_HEX_LEN`] hex characters (the 16-byte
+//! Reticulum truncated destination hash). Query fields follow a single backtick
+//! and are `key=value` pairs joined by `|`; each key is stored with the NomadNet
+//! `var_` prefix, matching how the reference browser passes URL query variables
+//! to a page's request handler.
+//!
+//! Note what is NOT a form: a bare request path (`/page/about.mu`). The `:` is
+//! what marks the destination-address boundary, so a URL that drops it names no
+//! node at all and is rejected — by the reference exactly as here. See
+//! `reference_rejects_the_same_urls_we_do` for the measured comparison.
 
 /// The default path when a URL names only a destination or an empty path,
 /// matching `Browser.DEFAULT_PATH`.
@@ -45,10 +52,24 @@ pub struct Target {
 }
 
 /// Errors from [`parse_url`].
+///
+/// Every variant means the same thing to the parser — the URL is rejected — and
+/// exactly the same set of URLs is rejected as by the reference (see the module
+/// docs). They differ only in what they can tell the reader, so the two mistakes
+/// worth naming get their own message instead of a bare "malformed URL".
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UrlError {
+    /// A request path written without the `:` that a local page or file keeps:
+    /// `/page/about.mu` rather than `:/page/about.mu`. The commonest mistake in
+    /// a hand-written page, and the one with a mechanical fix.
+    #[error("malformed URL: a local page or file keeps the \":\"")]
+    NoDestination,
+    /// A local URL (a leading `:`) with no page open, so there is no
+    /// destination address to take.
+    #[error("a local URL needs an open page to take its destination address from")]
+    NoOpenPage,
     /// The URL did not match any accepted form (bad hash length, non-hex
-    /// destination, empty destination without a current one, or too many `:`).
+    /// destination, or too many `:`).
     #[error("malformed URL")]
     Malformed,
 }
@@ -75,18 +96,24 @@ pub fn parse_url(input: &str, current_dest: Option<[u8; 16]>) -> Result<Target, 
     // Split destination from path on the first `:` boundary.
     let colon_parts: Vec<&str> = url_part.split(':').collect();
     let (dest_hash, path) = match colon_parts.as_slice() {
-        [only] => {
-            // Bare destination hash -> default path.
-            let dest = parse_dest_hash(only)?;
-            (dest, DEFAULT_PATH.to_string())
-        }
+        [only] => match parse_dest_hash(only) {
+            // Bare destination address -> default path.
+            Ok(dest) => (dest, DEFAULT_PATH.to_string()),
+            // A request path that dropped the `:` along with the destination
+            // address. Rejected either way (the reference rejects it too), but
+            // it is worth saying so in the one case where the fix is obvious;
+            // anything that does not even look like a path stays "malformed".
+            Err(_) if only.starts_with('/') => return Err(UrlError::NoDestination),
+            Err(err) => return Err(err),
+        },
         [head, tail] => {
             if head.len() == TRUNCATED_HASH_HEX_LEN {
                 let dest = parse_dest_hash(head)?;
                 (dest, normalize_path(tail))
             } else if head.is_empty() {
-                // Same-destination form: reuse the current destination.
-                let dest = current_dest.ok_or(UrlError::Malformed)?;
+                // Local form: the destination address is left out, so it comes
+                // from the page in view.
+                let dest = current_dest.ok_or(UrlError::NoOpenPage)?;
                 (dest, normalize_path(tail))
             } else {
                 return Err(UrlError::Malformed);
@@ -297,22 +324,45 @@ mod tests {
     }
 
     #[test]
-    fn same_destination_form_reuses_current() {
+    fn local_url_takes_the_open_page_s_node() {
         let t = parse_url(":/page/next.mu", Some(OTHER_HASH)).unwrap();
         assert_eq!(t.dest_hash, OTHER_HASH);
         assert_eq!(t.path, "/page/next.mu");
     }
 
     #[test]
-    fn same_destination_empty_path_uses_default() {
+    fn local_url_with_empty_path_uses_default() {
         let t = parse_url(":", Some(OTHER_HASH)).unwrap();
         assert_eq!(t.dest_hash, OTHER_HASH);
         assert_eq!(t.path, DEFAULT_PATH);
     }
 
     #[test]
-    fn same_destination_without_current_is_malformed() {
-        assert_eq!(parse_url(":/page/x.mu", None), Err(UrlError::Malformed));
+    fn local_url_without_an_open_page_is_rejected() {
+        assert_eq!(parse_url(":/page/x.mu", None), Err(UrlError::NoOpenPage));
+    }
+
+    /// A request path that dropped the `:` is rejected, and says which `:`.
+    /// The rejection itself is the reference's (see
+    /// `reference_rejects_the_same_urls_we_do`); only the wording is ours.
+    #[test]
+    fn a_path_without_the_colon_names_the_missing_colon() {
+        for raw in ["/page/about.mu", "/page/about.md", "/file/doc.pdf", "/"] {
+            assert_eq!(
+                parse_url(raw, Some(OTHER_HASH)),
+                Err(UrlError::NoDestination),
+                "{raw} should report the missing \":\""
+            );
+        }
+        // The advice only fits something shaped like a path: anything else is
+        // just malformed, and telling its author about the `:` would mislead.
+        for raw in ["page/about.mu", "nonsense", "0123456789abcdef"] {
+            assert_eq!(
+                parse_url(raw, Some(OTHER_HASH)),
+                Err(UrlError::Malformed),
+                "{raw} should not be blamed on the \":\""
+            );
+        }
     }
 
     #[test]
@@ -372,6 +422,55 @@ mod tests {
             parse_url(&format!("{HASH_HEX}:/page:/x.mu"), None),
             Err(UrlError::Malformed)
         );
+    }
+
+    /// Accept exactly what the reference accepts, reject exactly what it
+    /// rejects.
+    ///
+    /// This is not read off `Browser.py`, it is measured: NomadNet 1.2.8 was
+    /// installed into a scratch venv and its real `Browser.retrieve_url` driven
+    /// over this table (2026-07-30), with the object built by `__new__` and only
+    /// the attributes that method touches set, so the reference code itself
+    /// decided each row. Every row below is that run's outcome.
+    ///
+    /// The row that prompted the measurement is the first one: a page in the
+    /// wild carried `/page/about.md` as a link to its own node, and the reader
+    /// wanted to know whether rejecting it was our bug. It is not — NomadNet
+    /// raises `ValueError: Malformed URL` on it too. Accepting it here would
+    /// make a page work in lnomad that stays broken in NomadNet, which is
+    /// exactly the divergence this test exists to prevent.
+    #[test]
+    fn reference_rejects_the_same_urls_we_do() {
+        let open_page = Some(OTHER_HASH);
+
+        // Rejected by NomadNet 1.2.8 (ValueError: Malformed URL).
+        for raw in ["/page/about.md", "/page/about.mu", "page/about.md"] {
+            assert!(
+                parse_url(raw, open_page).is_err(),
+                "{raw} is rejected by the reference and must be rejected here"
+            );
+        }
+
+        // Accepted by NomadNet 1.2.8, resolving as asserted.
+        let local = parse_url(":/page/about.md", open_page).expect("local URL");
+        assert_eq!(local.dest_hash, OTHER_HASH);
+        assert_eq!(local.path, "/page/about.md");
+
+        let full = parse_url(&format!("{HASH_HEX}:/page/about.md"), open_page).expect("full URL");
+        assert_eq!(full.dest_hash, HASH_BYTES);
+        assert_eq!(full.path, "/page/about.md");
+
+        let bare = parse_url(HASH_HEX, open_page).expect("bare address");
+        assert_eq!(bare.dest_hash, HASH_BYTES);
+        assert_eq!(bare.path, DEFAULT_PATH);
+
+        // With no page open, NomadNet rejects both forms.
+        for raw in ["/page/about.md", ":/page/about.md"] {
+            assert!(
+                parse_url(raw, None).is_err(),
+                "{raw} with no open page is rejected by the reference"
+            );
+        }
     }
 
     #[test]

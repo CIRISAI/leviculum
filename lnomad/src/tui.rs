@@ -69,7 +69,7 @@ use crate::fetch::Session;
 use crate::page_cache::{CacheEntry, PageCache};
 use crate::render::{layout_blocks, FieldValue, RLine, RStyle, RenderedField, RenderedLink};
 use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
-use crate::url::{classify_link, parse_url, LinkKind, Target, DEFAULT_PATH};
+use crate::url::{classify_link, parse_url, LinkKind, Target, UrlError, DEFAULT_PATH};
 use leviculum_micron::FieldKind;
 
 /// The number of columns reserved on the right for the scrollbar.
@@ -1325,7 +1325,7 @@ Terminal browser for NomadNet pages.
 No page is open. Node discovery runs in the background, so nodes appear in the \
 places panel as their announces arrive.
 
-`!d`! places   `!:`! address   `!?`! help   `!q`! quit";
+`!d`! places   `!:`! URL   `!?`! help   `!q`! quit";
 
 /// The title shown for the start screen, in place of a page's node name.
 const START_TITLE: &str = "lnomad";
@@ -1596,7 +1596,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                     begin_navigation(model, target, HistoryAction::Push, None)
                 }
                 Err(err) => {
-                    model.set_toast(ToastKind::Error, format!("bad address: {raw} ({err})"));
+                    model.set_toast(ToastKind::Error, bad_url_note("bad URL", &raw, err));
                     Vec::new()
                 }
             }
@@ -2143,10 +2143,7 @@ fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         Place::Bookmark { url, .. } => match parse_url(&url, model.current_dest) {
             Ok(target) => target,
             Err(err) => {
-                model.set_toast(
-                    ToastKind::Error,
-                    format!("bad bookmark address: {url} ({err})"),
-                );
+                model.set_toast(ToastKind::Error, bad_url_note("bad bookmark", &url, err));
                 return Vec::new();
             }
         },
@@ -2572,11 +2569,31 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
             Err(err) => {
                 model.set_toast(
                     ToastKind::Error,
-                    format!("bad link: {} ({err})", link.target),
+                    bad_url_note("bad link", &link.target, err),
                 );
                 Vec::new()
             }
         },
+    }
+}
+
+/// The toast for a URL that would not parse: what was wrong and, when the fix
+/// is mechanical, the URL that would have worked.
+///
+/// A page that links to its own node with `/page/about.mu` has dropped the `:`
+/// that a local URL keeps. That is a dead end in the reference browser too, so
+/// the useful thing is not to restate the grammar but to show the reader (and,
+/// through them, the node's author) the exact string that works.
+///
+/// The suggestion leads and the explanation trails, because the toast is one
+/// truncated line: an over-long path eats the parenthetical rather than the fix.
+/// The rejected URL is not repeated — the suggestion already contains it.
+fn bad_url_note(what: &str, raw: &str, err: UrlError) -> String {
+    match err {
+        UrlError::NoDestination if raw.starts_with('/') => {
+            format!("{what} — try :{raw} (a local URL keeps the \":\")")
+        }
+        other => format!("{what}: {raw} — {other}"),
     }
 }
 
@@ -3674,7 +3691,7 @@ fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
 fn breadcrumb(model: &Model) -> String {
     match model.history.current() {
         Some(target) => format!("{}:{}", short_hex(&target.dest_hash), target.path),
-        None => "press : to enter an address".to_string(),
+        None => "press : to enter a URL".to_string(),
     }
 }
 
@@ -4386,7 +4403,7 @@ fn help_groups() -> Vec<HelpGroup> {
                 },
                 HelpEntry {
                     keys: "hover a link",
-                    desc: "show its address",
+                    desc: "show its URL",
                 },
             ],
         },
@@ -4394,8 +4411,8 @@ fn help_groups() -> Vec<HelpGroup> {
             title: "Page",
             entries: vec![
                 HelpEntry {
-                    keys: ": / click address",
-                    desc: "enter an address",
+                    keys: ": / click the URL",
+                    desc: "enter a URL",
                 },
                 HelpEntry {
                     keys: "R / Ctrl-R / F5",
@@ -4411,7 +4428,7 @@ fn help_groups() -> Vec<HelpGroup> {
                 },
                 HelpEntry {
                     keys: "y",
-                    desc: "copy link / page address",
+                    desc: "copy the link's / page's URL",
                 },
                 HelpEntry {
                     keys: "d / click a place",
@@ -7327,6 +7344,71 @@ mod tests {
         );
     }
 
+    /// A page that links to its own node with a bare `/page/x.mu` dropped the
+    /// `:` a local URL keeps. The link is dead here exactly as it is in the
+    /// reference (see `url::tests::reference_rejects_the_same_urls_we_do`), so
+    /// the toast's job is to hand over the string that would have worked rather
+    /// than to restate the grammar.
+    #[test]
+    fn link_missing_the_local_colon_is_told_which_colon() {
+        let mut m = loaded_model((80, 24));
+        m.links = vec![RenderedLink {
+            index: 1,
+            label: "About".to_string(),
+            target: "/page/about.md".to_string(),
+            ..RenderedLink::default()
+        }];
+
+        let effects = follow_link(&mut m, 1);
+        assert!(effects.is_empty(), "a dead link must not navigate");
+        assert!(m.pending.is_none());
+        let toast = m.toast.as_ref().expect("an error toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast.text.contains(":/page/about.md"),
+            "the toast must show the URL that works: {}",
+            toast.text
+        );
+        // The suggestion must survive the single truncated toast line at 80
+        // columns: the whole note fits, and in any case leads with the fix.
+        assert!(
+            UnicodeWidthStr::width(toast.text.as_str()) <= 74,
+            "toast too long to read at 80 columns: {}",
+            toast.text
+        );
+        let suggestion = toast.text.find(":/page/about.md").expect("suggestion");
+        assert!(
+            suggestion < toast.text.find("keeps").expect("explanation"),
+            "the fix must come before the explanation: {}",
+            toast.text
+        );
+    }
+
+    /// A local URL typed with nothing open — reachable from the start screen,
+    /// where the URL editor is one keypress away and no page is loaded.
+    #[test]
+    fn local_url_with_no_open_page_says_so() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+        m.show_places = false;
+
+        press(&mut m, KeyCode::Char(':'), KeyModifiers::NONE);
+        type_str(&mut m, ":/page/x.mu");
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+
+        let toast = m.toast.as_ref().expect("an error toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast.text.contains("open page"),
+            "must say what is missing: {}",
+            toast.text
+        );
+    }
+
     #[test]
     fn following_rns_link_still_navigates() {
         let mut m = loaded_model((80, 24));
@@ -8397,10 +8479,10 @@ mod tests {
         ] {
             assert!(text.contains(s), "help missing binding {s:?}:\n{text}");
         }
-        // The mouse affordances: the clickable address, the star, the footer
+        // The mouse affordances: the clickable URL, the star, the footer
         // buttons, and the side buttons.
         for s in [
-            "click address",
+            "click the URL",
             "click star",
             "footer button",
             "mouse side buttons",
@@ -9044,10 +9126,7 @@ mod tests {
         let text = flat(&render(&m, 80, 24));
         assert!(text.contains("lnomad"), "start screen gone: {text}");
         assert!(text.contains("places"), "no hint at the panel: {text}");
-        assert!(
-            text.contains("address"),
-            "no hint at the address bar: {text}"
-        );
+        assert!(text.contains("URL"), "no hint at the URL entry: {text}");
     }
 
     #[test]
