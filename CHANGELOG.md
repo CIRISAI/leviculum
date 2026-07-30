@@ -17,6 +17,29 @@ placeholder subcommands are removed; use `lnstest diag` or the Python
 instead. The `cp` subcommand is also removed; use the standalone `lncp`
 tool for file transfer.
 
+Request handlers are keyed by (destination, path) instead of by path
+alone. Registering a path on a second destination used to overwrite the
+first handler silently, and the request the first destination was meant
+to serve then died as a client-side timeout. Both entries now coexist and
+route independently. `deregister_request_handler` takes the destination
+as its first argument, which is a breaking change for callers; and
+`NodeEvent::RequestReceived` carries the `destination_hash` the request
+was addressed to, so a responder hosting several destinations under one
+path knows which endpoint to serve. The C API projects it as the event's
+`dest_hash`, as `LEV_EVENT_LINK_CLOSED` now does too.
+
+A per-interface `announce_cap` in the config is applied instead of
+parsed and dropped. The key was read into the interface config and never
+handed to the announce throttler, so every interface ran at the 2%
+default whatever the config said. It now takes effect where a bitrate is
+configured (without one there is no capacity to take a share of, and that
+case warns). The share is held as whole per cent, so a fractional value
+rounds to nearest and anything under half a per cent becomes 1%. The
+cap can also be changed at runtime through
+`Node::set_interface_announce_cap`, and `InterfaceStatusSnapshot` carries
+the `interface_id` so a snapshot can be paired with a runtime interface
+handle without matching on the name.
+
 `transport::DropReason` is now `#[non_exhaustive]`, matching
 `node::FrameDropReason`. The taxonomy grows whenever a new drop site is
 classified — two variants this release — and each addition was a breaking
