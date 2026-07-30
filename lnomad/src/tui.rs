@@ -1309,6 +1309,43 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
     }
 }
 
+/// The places panel's placeholder under "Discovered nodes" while the registry
+/// is empty.
+const NO_NODES_YET: &str = "  (listening for announces…)";
+
+/// The start screen's micron source: what a reader sees when `lnomad` is
+/// started without a URL. A real micron document rather than hand-drawn chrome,
+/// so it goes through the same parse/layout/render path as a fetched page and
+/// re-wraps on a resize or a theme change for free.
+const START_PAGE: &str = "\
+>lnomad
+
+Terminal browser for NomadNet pages.
+
+No page is open. Node discovery runs in the background, so nodes appear in the \
+places panel as their announces arrive.
+
+`!d`! places   `!:`! address   `!?`! help   `!q`! quit";
+
+/// The title shown for the start screen, in place of a page's node name.
+const START_TITLE: &str = "lnomad";
+
+/// Show the start screen and open the places panel over it.
+///
+/// The page is applied through the ordinary load path with no pending
+/// navigation, so nothing is fetched, no history entry is pushed and no current
+/// destination is set: the top bar carries no address, `back` / `forward` /
+/// `reload` stay unavailable, and the first real navigation starts the history
+/// from scratch.
+fn show_start_screen(model: &mut Model) {
+    apply_loaded(
+        model,
+        leviculum_micron::parse(START_PAGE),
+        START_TITLE.to_string(),
+    );
+    model.show_places = true;
+}
+
 /// Split a trailing `#anchor` off a target's path, returning the anchor-free
 /// target and the anchor name (when non-empty). The initial URL keeps its
 /// `#anchor` inside `path` after [`parse_url`](crate::url::parse_url); stripping
@@ -4499,7 +4536,11 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     lines.push(RtLine::from(""));
     lines.push(RtLine::from(RtSpan::styled("Discovered nodes", header)));
     if entries.len() == bm_count {
-        lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
+        // Not "(none)": discovery is always running, so an empty list means
+        // nothing has announced YET. Saying so keeps a first run — where this
+        // panel opens by itself and both sections are empty — from reading as a
+        // broken feature rather than a quiet mesh.
+        lines.push(RtLine::from(RtSpan::styled(NO_NODES_YET, muted)));
     } else {
         for (i, place) in entries.iter().enumerate().skip(bm_count) {
             lines.push(place_line(
@@ -5193,7 +5234,7 @@ fn ansi_index_grey(index: u8) -> (u8, u8, u8) {
 /// cancel drops the in-flight task; a slow or failed fetch never blocks the UI.
 pub async fn run_tui(
     session: Session,
-    initial: Target,
+    initial: Option<Target>,
     opts: BrowserOptions,
     theme_flag: ThemeFlag,
 ) -> io::Result<()> {
@@ -5250,23 +5291,33 @@ pub async fn run_tui(
     // of fetches, feeding `node_rx` (see `spawn_discovery`).
     let discovery = spawn_discovery(&session);
 
-    // Kick off the initial navigation, honouring a `#anchor` on the initial URL
-    // (the parser folds it into the path; split it back off so the fetched path
-    // is clean and the load handler can scroll to it).
-    let (initial, initial_anchor) = split_path_anchor(initial);
-    model.pending = Some(Pending {
-        target: initial.clone(),
-        action: HistoryAction::Push,
-    });
-    model.pending_anchor = initial_anchor;
-    spawn_fetch(
-        &mut inflight,
-        &mut generation,
-        &session,
-        &tx,
-        opts.timeout,
-        initial,
-    );
+    match initial {
+        // Kick off the initial navigation, honouring a `#anchor` on the initial
+        // URL (the parser folds it into the path; split it back off so the
+        // fetched path is clean and the load handler can scroll to it).
+        Some(target) => {
+            let (target, anchor) = split_path_anchor(target);
+            model.pending = Some(Pending {
+                target: target.clone(),
+                action: HistoryAction::Push,
+            });
+            model.pending_anchor = anchor;
+            spawn_fetch(
+                &mut inflight,
+                &mut generation,
+                &session,
+                &tx,
+                opts.timeout,
+                target,
+            );
+        }
+        // No URL to open: show the start screen and put the places panel in
+        // front of it, since that is where a reader without an address finds
+        // one — their bookmarks, and the nodes background discovery turns up.
+        None => {
+            show_start_screen(&mut model);
+        }
+    }
 
     let mut ticker = tokio::time::interval(Duration::from_millis(SPINNER_TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -8950,6 +9001,72 @@ mod tests {
         // Forward to node 2, also cached: anonymous again.
         go_forward(&mut m);
         assert!(!m.identifying, "cached forward restores anonymity");
+    }
+
+    #[test]
+    /// Started without a URL, the browser shows its start screen with the places
+    /// panel already in front of it: nothing is fetched, nothing enters the
+    /// history, and no destination is current, so the top bar carries no address
+    /// and back/forward/reload stay unavailable.
+    fn start_screen_opens_the_places_panel_over_a_local_page() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+
+        assert!(m.show_places, "the places panel must open by itself");
+        assert_eq!(m.title, START_TITLE);
+        assert!(!m.page.is_empty(), "the start page must be laid out");
+        assert!(m.history.current().is_none(), "no history entry");
+        assert!(!m.history.can_back() && !m.history.can_forward());
+        assert_eq!(m.current_dest, None, "no node is current");
+        assert_eq!(current_url(&m), None, "no address to show");
+        assert!(!m.is_loading(), "the start screen must not fetch anything");
+        assert!(m.page_cache.get(&tgt(0xab)).is_none(), "nothing cached");
+    }
+
+    #[test]
+    /// The start screen names the keys that lead somewhere, and closing the
+    /// panel leaves it in view rather than an empty frame.
+    fn start_screen_survives_closing_the_panel() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!m.show_places, "Esc closes the panel");
+
+        let text = flat(&render(&m, 80, 24));
+        assert!(text.contains("lnomad"), "start screen gone: {text}");
+        assert!(text.contains("places"), "no hint at the panel: {text}");
+        assert!(
+            text.contains("address"),
+            "no hint at the address bar: {text}"
+        );
+    }
+
+    #[test]
+    /// An empty discovered-nodes section says announces are still awaited, not
+    /// that there are none: on a first run the panel opens by itself with both
+    /// sections empty, and "(none)" would read as a broken feature.
+    fn empty_places_panel_says_it_is_still_listening() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+
+        let text = flat(&render(&m, 80, 24));
+        assert!(
+            text.contains("listening for announces"),
+            "no listening note: {text}"
+        );
     }
 
     #[test]

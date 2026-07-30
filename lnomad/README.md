@@ -8,7 +8,7 @@ links interactively.
 ## Usage
 
 ```
-lnomad <address> [options]
+lnomad [address] [options]
 ```
 
 The address selects a destination and a page path:
@@ -22,45 +22,25 @@ The address selects a destination and a page path:
 
 `<dest_hash>` is 32 hex characters (the 16-byte truncated destination hash).
 
+The address is optional. Started without one on a terminal, `lnomad` opens its
+start screen with the places panel showing — your bookmarks, and the nodes
+discovery has turned up. Without a terminal to browse in (piped, redirected, or
+`--print`) an address is required, since there would be nothing to print.
+
 ## Discovering nodes
 
-Without a destination hash, `lnomad --discover` finds NomadNet page-hosting
-nodes by listening for their announces. Every NomadNet node announces the
-`nomadnetwork.node` destination, so the announces can be recognised and their
-destination hash and display name collected without knowing anything in advance:
+There is no discovery mode and no flag to turn it on: discovery runs
+continuously from startup, for the whole life of the browser. Every NomadNet
+node announces the `nomadnetwork.node` destination, so its announces can be
+recognised and its destination hash and display name collected without knowing
+anything about it in advance.
 
-```
-lnomad --discover                 listen (default 30s) and list nodes found
-lnomad --discover 60              listen for 60 seconds (bare positional)
-lnomad --discover --duration 60   listen for 60 seconds (explicit flag)
-```
-
-In `--discover` mode the positional argument is the listen duration in seconds,
-not a page address: `lnomad --discover 5` and `lnomad --discover --duration 5` are
-equivalent. A non-numeric positional is rejected, and giving both a positional
-and a `--duration` that disagree is an error.
-
-On a terminal, each node is printed as it is first seen, then a list is shown:
-
-```
-[N] <name>  <dest_hash>  hops=H  last-seen Xs ago
-```
-
-Enter a number to open that node's `/page/index.mu`, or `q` to quit. With
-`--print` or non-tty stdout, the accumulated list is printed after the listen
-window and the command exits.
-
-Picking a node this way opens it in the line-oriented prompt browser, not the
-full-screen one: a page is printed once and commands are typed at a prompt (`N`
-follows link N, `b` back, `r` reload, `u <url>` go, `d` / `nodes` list the
-discovered nodes, `o <N>` open one, `h` help, `q` quit). Starting `lnomad` with
-an address instead opens the full-screen browser described below.
-
-In the full-screen browser, discovery runs continuously in the background from
-startup: node announces are folded into the places panel whether or not a page is
+Announces are folded into the places panel (`d`) whether or not a page is
 loading, so the list keeps filling while you read, scroll, or have a panel open.
-The registry is a bounded FIFO of the 500 most recent nodes (re-announces update
-in place; once full, the oldest-seen node is evicted), and is held in RAM only.
+Until the first one arrives the panel says so rather than claiming there are
+none. The registry is a bounded FIFO of the 500 most recent nodes (re-announces
+update in place; once full, the oldest-seen node is evicted), and is held in RAM
+only — a node you want to keep belongs in the bookmarks.
 
 ### Options
 
@@ -83,12 +63,9 @@ in place; once full, the oldest-seen node is evicted), and is held in RAM only.
   any other path names the exact file to write. Without it the file lands in the
   current working directory
 - `--print`            fetch, render and print once, then exit
-- `--discover`         list NomadNet nodes seen from announces (no address needed)
-- `--duration <s>`     `--discover` listen window in seconds (default 30); may
-  also be given as the bare positional, e.g. `lnomad --discover <s>`
 
 When stdout is not a terminal, `lnomad` prints once and exits even without
-`--print`, so piping and redirection never block on the prompt.
+`--print`, so piping and redirection never block on the browser.
 
 ## Interactive keys
 

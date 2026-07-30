@@ -20,9 +20,9 @@
 //! [`fetch`] connects to a running `lnsd`/`rnsd` shared instance and retrieves a
 //! page's bytes over the RNS request/response path.
 
-//! Phase 4b adds the [`browser`] module: the REPL command grammar, the
-//! navigation state machine, and the fetch/parse/render/print loop that the
-//! `lnomad` binary drives.
+//! Phase 4b adds the [`browser`] module: link resolution, the fetch/parse step
+//! and the one-shot print and download sinks the `lnomad` binary drives when it
+//! is not running the interactive [`tui`].
 
 pub mod bookmarks;
 pub mod browser;
@@ -40,7 +40,7 @@ pub mod tui;
 pub mod url;
 
 pub use bookmarks::{Bookmark, Bookmarks};
-pub use browser::{parse_command, resolve_link, BrowserOptions, Command, Nav};
+pub use browser::{resolve_link, BrowserOptions};
 pub use cli::{resolve_args, Mode};
 pub use color::{resolve_depth, rgb_to_ansi256, ColorDepth, ColorFlag};
 pub use discovery::{
