@@ -63,14 +63,6 @@ const INTENTIONALLY_UNPROJECTED: &[Unprojected] = &[
               same link_id; a second copy at close time adds nothing",
     },
     Unprojected {
-        variant: "DeliveryFailed",
-        field: "error",
-        why: "both variants mean the packet was never confirmed and the only \
-              C-side recovery is to re-send; the discriminant is also \
-              mislabelled today (an invalid proof is reported as LinkFailed), \
-              so projecting it would export a wrong name",
-    },
-    Unprojected {
         variant: "RequestReceived",
         field: "path_hash",
         why: "the truncated hash *of* `path`, which is projected verbatim and \
@@ -90,25 +82,6 @@ const INTENTIONALLY_UNPROJECTED: &[Unprojected] = &[
               false` at both push sites), so projecting it would hand C a \
               constant",
     },
-    Unprojected {
-        variant: "ResourceProgress",
-        field: "transfer_size",
-        why: "a progress indicator needs the fraction, which is projected and \
-              readable with lev_event_progress; the absolute sizes belong to \
-              the advertise event (see PROJECTION_GAPS)",
-    },
-    Unprojected {
-        variant: "ResourceProgress",
-        field: "data_size",
-        why: "see ResourceProgress::transfer_size",
-    },
-    Unprojected {
-        variant: "ResourceFailed",
-        field: "error",
-        why: "every variant means the transfer will not complete, and the only \
-              C-side recovery is to re-request; lev_event_t has no error-detail \
-              field to put it in",
-    },
 ];
 
 /// Fields a C application *would* need but that the ABI cannot express today.
@@ -116,60 +89,28 @@ const INTENTIONALLY_UNPROJECTED: &[Unprojected] = &[
 /// decisions: an entry here is a promise to add the accessor, and deleting the
 /// entry is how that promise is discharged. Do not add one to silence the
 /// guard — if a C app needs the field and the accessor is cheap, project it.
-const PROJECTION_GAPS: &[Unprojected] = &[
-    Unprojected {
-        variant: "AnnounceReceived",
-        field: "interface_index",
-        why: "the C ABI exposes no interface identity: lev_interface_stats_entry \
-              indexes by snapshot position and never surfaces \
-              InterfaceStatusSnapshot::interface_id, so this index would name \
-              nothing a C app could resolve. Needs interface_id on the stats \
-              entry first, then lev_event_interface_id",
-    },
-    Unprojected {
-        variant: "PathFound",
-        field: "interface_index",
-        why: "see AnnounceReceived::interface_index",
-    },
-    Unprojected {
-        variant: "PacketReceived",
-        field: "interface_index",
-        why: "see AnnounceReceived::interface_index",
-    },
-    Unprojected {
-        variant: "LinkClosed",
-        field: "reason",
-        why: "LinkCloseReason distinguishes Normal, PeerClosed, Timeout, Stale, \
-              InvalidProof, ChannelExhausted and Blackholed, and a C app \
-              reconnects differently for each (Blackholed must not be retried \
-              at all). Needs lev_event_close_reason plus LEV_CLOSE_* constants",
-    },
-    Unprojected {
-        variant: "ResourceAdvertised",
-        field: "transfer_size",
-        why: "this event exists so the app can call lev_accept_resource or \
-              lev_reject_resource, and size is what that decision turns on; C \
-              currently decides blind. Needs lev_event_transfer_size",
-    },
-    Unprojected {
-        variant: "ResourceAdvertised",
-        field: "data_size",
-        why: "see ResourceAdvertised::transfer_size; needs lev_event_data_size",
-    },
-    Unprojected {
-        variant: "ResourceCompleted",
-        field: "segment_index",
-        why: "a multi-segment resource fires this event once per segment with \
-              the same resource_hash, so a C receiver cannot order the chunks \
-              or tell which one is the last. Needs lev_event_segment_index",
-    },
-    Unprojected {
-        variant: "ResourceCompleted",
-        field: "total_segments",
-        why: "see ResourceCompleted::segment_index; needs \
-              lev_event_total_segments",
-    },
-];
+///
+/// Empty is the correct steady state. The eight entries this register opened
+/// with are all discharged (`lev_interface_stats_id` + `lev_event_interface_id`,
+/// `lev_event_close_reason`, `lev_event_transfer_size`/`_data_size`,
+/// `lev_event_segment_index`/`_total_segments`). The one entry left arrived from
+/// the other list, where its reason had stopped being true.
+const PROJECTION_GAPS: &[Unprojected] = &[Unprojected {
+    variant: "ResourceFailed",
+    field: "error",
+    why: "moved here from INTENTIONALLY_UNPROJECTED, whose reason no longer \
+          holds: it argued that every variant means re-request and that \
+          lev_event_t has nowhere to put a discriminant. Neither is true. \
+          ResourceError has 17 variants and they do not share a recovery — \
+          Cancelled is deliberate, LinkClosed needs a new link first, \
+          ResourceTooLarge needs a limit raised, CompressionUnsupported needs a \
+          different sender — and lev_event_t now carries two discriminants \
+          (close_reason, delivery_error), so the mechanism exists. Needs \
+          lev_event_resource_error plus LEV_RESOURCE_ERR_* constants; not done \
+          in this batch because naming a recovery for each of 17 variants is a \
+          reference-checked audit, not a mechanical mapping, and a wrong \
+          recovery in a doc comment is worse than no accessor",
+}];
 
 fn read(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -358,22 +299,32 @@ fn projection_arms() -> BTreeMap<String, String> {
 fn projection_arm_patterns() -> BTreeMap<String, (BTreeMap<String, String>, String)> {
     let src = read("src/events.rs");
     let lines: Vec<&str> = src.lines().collect();
-    let catch_all = lines
+    // Anchor on `project()` itself: the file has other matches with wildcard
+    // arms (the LinkCloseReason and DeliveryError mappings), and taking the
+    // file's first `_ =>` would clamp the arm scan before `project()` even
+    // starts, silently reducing this guard to nothing.
+    let project_start = lines
         .iter()
-        .position(|l| l.trim_start().starts_with("_ =>"))
-        .expect("project() must keep its `_ =>` catch-all arm");
+        .position(|l| l.contains("fn project("))
+        .expect("events.rs must define project()");
+    let catch_all = project_start
+        + lines[project_start..]
+            .iter()
+            .position(|l| l.trim_start().starts_with("_ =>"))
+            .expect("project() must keep its `_ =>` catch-all arm");
 
     let heads: Vec<(usize, String)> = lines
         .iter()
         .enumerate()
         .take(catch_all)
+        .skip(project_start)
         .filter_map(|(i, l)| {
             let rest = l.trim_start().strip_prefix("NodeEvent::")?;
             let name: String = rest
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric())
                 .collect();
-            (!name.is_empty()).then(|| (i, name))
+            (!name.is_empty()).then_some((i, name))
         })
         .collect();
 
@@ -596,4 +547,85 @@ fn every_projected_event_with_a_destination_sets_dest_hash() {
         "stale DEST_HASH_NOT_PROJECTED entries (no such destination-carrying \
          variant): {stale:?}"
     );
+}
+
+/// Variant names of a plain (fieldless) `#[non_exhaustive]` core enum: the
+/// 4-space-indented bare `Name,` lines of `pub enum <name> {`.
+fn plain_enum_variants(rel: &str, enum_name: &str) -> BTreeSet<String> {
+    let src = read(rel);
+    let header = format!("pub enum {enum_name} {{");
+    let mut variants = BTreeSet::new();
+    let mut in_enum = false;
+    for line in src.lines() {
+        if line.contains(&header) {
+            in_enum = true;
+            continue;
+        }
+        if in_enum && line == "}" {
+            break;
+        }
+        if !in_enum {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if line.len() - trimmed.len() != 4 {
+            continue;
+        }
+        if let Some(name) = trimmed.strip_suffix(',') {
+            if name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && name.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                variants.insert(name.to_string());
+            }
+        }
+    }
+    variants
+}
+
+/// The two engine discriminants the ABI now exports by name must stay exported
+/// by name.
+///
+/// `LinkCloseReason` and `DeliveryError` are both `#[non_exhaustive]`, so their
+/// mapping functions in `events.rs` need a wildcard arm to compile, and that
+/// wildcard is a bucket a new engine variant would fall into silently — the same
+/// mechanism as `..` in a `project()` pattern, one level down. `LEV_CLOSE_OTHER`
+/// and `LEV_DELIVERY_OTHER` exist for forward compatibility with a *peer* built
+/// against a newer engine, not as a resting place for our own variants, so every
+/// declared variant must have its own arm above the wildcard.
+#[test]
+fn every_close_reason_has_a_c_constant() {
+    let src = read("src/events.rs");
+    for (rel, enum_name, alias, min) in [
+        (
+            "../leviculum-core/src/link/mod.rs",
+            "LinkCloseReason",
+            "R",
+            7,
+        ),
+        (
+            "../leviculum-core/src/node/event.rs",
+            "DeliveryError",
+            "E",
+            3,
+        ),
+    ] {
+        let variants = plain_enum_variants(rel, enum_name);
+        assert!(
+            variants.len() >= min,
+            "parsed only {} {enum_name} variants ({:?}) — the parser likely drifted",
+            variants.len(),
+            variants
+        );
+        let mut missing: Vec<&String> = variants
+            .iter()
+            .filter(|v| !src.contains(&format!("{alias}::{v} =>")))
+            .collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "{enum_name} variants with no arm in the events.rs mapping (they fall \
+             into the wildcard and reach C as LEV_*_OTHER, which is reserved for \
+             a newer peer's variants, not ours): {missing:?}"
+        );
+    }
 }

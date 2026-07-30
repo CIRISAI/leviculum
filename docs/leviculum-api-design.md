@@ -446,14 +446,26 @@ field:
 - `RequestReceived` carries a path string, a request id, and data:
   `lev_event_path`, `lev_event_request_id` (16 bytes), `lev_event_data`.
 - `ResourceProgress` exposes its progress fraction via `lev_event_progress`.
+- `ResourceAdvertised` and `ResourceProgress` carry the two sizes an
+  accept-or-reject decision turns on: `lev_event_transfer_size` and
+  `lev_event_data_size`.
+- `ResourceCompleted` also carries its position in a multi-segment transfer:
+  `lev_event_segment_index` and `lev_event_total_segments`.
+- `LinkClosed` carries a close reason (`lev_event_close_reason`, one of the
+  `LEV_CLOSE_*` constants) and `DeliveryFailed` a failure reason
+  (`lev_event_delivery_error`, `LEV_DELIVERY_*`). Both are behavioural for the
+  caller: `LEV_CLOSE_BLACKHOLED` must not be retried, and
+  `LEV_DELIVERY_INVALID_PROOF` means a re-send cannot succeed.
+- `AnnounceReceived`, `PathFound` and `PacketReceived` carry the interface they
+  arrived on (`lev_event_interface_id`).
 
 Settling these accessors now, before the header for phases d and e calcifies,
 is the point: a one-payload event model would have to be widened later.
 
 An accessor that does not apply to the event's type returns
 `LEV_ERR_INVALID_ARG`. The facade `Event` enum collapses the `NodeEvent`
-variants to the v1-relevant set and drops internal fields (raw
-`interface_index`, observability-only `ChannelRetransmit`); the lossless
+variants to the v1-relevant set and drops internal fields
+(observability-only `ChannelRetransmit`); the lossless
 `ControlPlaneOverflow` is surfaced as `LEV_EVENT_CONTROL_OVERFLOW` so loss
 stays visible. Reaching a peer from an `AnnounceReceived` event needs only
 its destination hash: `lev_connect` takes the hash and resolves the cached

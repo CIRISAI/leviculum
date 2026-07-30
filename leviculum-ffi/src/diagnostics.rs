@@ -246,6 +246,46 @@ pub unsafe extern "C" fn lev_interface_stats_entry(
     })
 }
 
+/// Write the node-assigned id of interface `index` into `*out_id`.
+///
+/// The snapshot is indexed by *position*, which is not an interface's identity:
+/// the node numbers interfaces as they are registered and never renumbers, so a
+/// removed interface leaves a gap and every later position is off by it. This is
+/// the accessor that resolves an id to an entry — the ids the rest of the API
+/// hands out (`interface_index` from `lev_path_table_entry`,
+/// `lev_event_interface_id` on an announce, path or packet event) name *this*
+/// value, not a position. Walk the snapshot comparing it, then read the name
+/// with `lev_interface_stats_name`.
+///
+/// `LEV_ERR_NULL_PTR` if `table` or `out_id` is NULL, `LEV_ERR_INVALID_ARG` if
+/// `index` is out of range.
+#[no_mangle]
+pub unsafe extern "C" fn lev_interface_stats_id(
+    table: *const lev_interface_stats_t,
+    index: usize,
+    out_id: *mut u64,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let t = match table.as_ref() {
+            Some(t) => t,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out_id.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match t.entries.get(index) {
+            Some(e) => {
+                *out_id = e.interface_id.0 as u64;
+                LEV_OK
+            }
+            None => {
+                set_last_error("interface index out of range");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
 /// Release an interface-stats snapshot. `lev_interface_stats_free(NULL)` is a
 /// no-op.
 #[no_mangle]
@@ -255,4 +295,69 @@ pub unsafe extern "C" fn lev_interface_stats_free(table: *mut lev_interface_stat
             drop(Box::from_raw(table));
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A snapshot whose entries carry the given node-assigned ids, in the given
+    /// order. Everything else is filler: the point is the id/position split.
+    fn snapshot(ids: &[usize]) -> lev_interface_stats_t {
+        lev_interface_stats_t {
+            entries: ids
+                .iter()
+                .map(|&id| InterfaceStatusSnapshot {
+                    interface_id: leviculum_std::InterfaceId(id),
+                    name: format!("iface{id}"),
+                    is_local_client: false,
+                    online: true,
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    held_announces: 0,
+                    burst_active: false,
+                    configured_bitrate: None,
+                    kind: Default::default(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Position is not identity. The node numbers interfaces on registration and
+    /// never renumbers, so a snapshot of interfaces 3 and 7 has them at
+    /// positions 0 and 1 — and until this accessor existed the C ABI surfaced
+    /// only the position, leaving the ids it hands out elsewhere
+    /// (`lev_path_table_entry`'s `interface_index`, `lev_event_interface_id`)
+    /// naming nothing a C app could resolve.
+    #[test]
+    fn stats_id_reports_the_node_assigned_id_not_the_position() {
+        let table = snapshot(&[3, 7]);
+        let p = &table as *const lev_interface_stats_t;
+        unsafe {
+            let mut id = u64::MAX;
+            assert_eq!(lev_interface_stats_id(p, 0, &mut id), LEV_OK);
+            assert_eq!(id, 3, "position 0 holds interface id 3, not id 0");
+            assert_eq!(lev_interface_stats_id(p, 1, &mut id), LEV_OK);
+            assert_eq!(id, 7, "position 1 holds interface id 7, not id 1");
+        }
+    }
+
+    /// The guards, in the shape every other snapshot accessor uses.
+    #[test]
+    fn stats_id_rejects_null_and_out_of_range() {
+        let table = snapshot(&[0]);
+        let p = &table as *const lev_interface_stats_t;
+        unsafe {
+            let mut id = 0u64;
+            assert_eq!(
+                lev_interface_stats_id(std::ptr::null(), 0, &mut id),
+                LEV_ERR_NULL_PTR
+            );
+            assert_eq!(
+                lev_interface_stats_id(p, 0, std::ptr::null_mut()),
+                LEV_ERR_NULL_PTR
+            );
+            assert_eq!(lev_interface_stats_id(p, 1, &mut id), LEV_ERR_INVALID_ARG);
+        }
+    }
 }

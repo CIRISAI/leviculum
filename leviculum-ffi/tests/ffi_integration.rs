@@ -1329,3 +1329,123 @@ fn send_on_closed_link_fails() {
     let rc = unsafe { lev_link_send(lb.0, b"x".as_ptr(), 1, 1000) };
     assert_ne!(rc, LEV_OK, "send on a closed link must fail");
 }
+
+/// The whole point of the interface id: an id a C app receives from an event
+/// must resolve to an interface it can look up.
+///
+/// Until `lev_interface_stats_id` existed, the snapshot was addressable only by
+/// position, so an id had nothing to be compared against — which is why the
+/// three `interface_index` fields were not projected at all. This drives the
+/// full chain on a real interface: B receives A's announce, reads the id off the
+/// event, finds the interface with that id in its snapshot, reads its name, and
+/// checks the path B learned from that announce is attributed to the same id.
+///
+/// The id-is-not-a-position half cannot be shown here (a one-interface node has
+/// id 0 at position 0); `stats_id_reports_the_node_assigned_id_not_the_position`
+/// pins that on a snapshot with gaps.
+#[test]
+fn announce_interface_id_resolves_to_an_interface() {
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let id_ptr = ida.0;
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let server_ptr = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+    });
+    let dest = register_single_dest(a.0, id_ptr, "levtest", &["iface"]);
+
+    let mut ann = None;
+    for _ in 0..50 {
+        unsafe { lev_announce(a.0, dest.as_ptr(), ptr::null(), 0, 2000) };
+        if let Some(ev) = wait_event(
+            bnode.0,
+            LEV_EVENT_ANNOUNCE_RECEIVED,
+            Duration::from_millis(400),
+        ) {
+            if support::event_dest_hash(&ev) == dest {
+                ann = Some(ev);
+                break;
+            }
+        }
+    }
+    let ann = ann.expect("B never saw A's announce");
+
+    let mut event_iface = u64::MAX;
+    assert_eq!(
+        unsafe { lev_event_interface_id(ann.0, &mut event_iface) },
+        LEV_OK,
+        "an announce must name the interface it arrived on: {}",
+        last_error()
+    );
+
+    // Resolve the id against the snapshot, the way a C app would.
+    let table = unsafe { lev_interface_stats_snapshot(bnode.0) };
+    assert!(!table.is_null());
+    let count = unsafe { lev_interface_stats_count(table) };
+    assert!(count > 0, "B has at least its TCP client interface");
+    let mut name = None;
+    for i in 0..count as usize {
+        let mut id = u64::MAX;
+        assert_eq!(unsafe { lev_interface_stats_id(table, i, &mut id) }, LEV_OK);
+        if id == event_iface {
+            let mut buf = [0u8; 128];
+            let mut len = 0usize;
+            assert_eq!(
+                unsafe {
+                    lev_interface_stats_name(table, i, buf.as_mut_ptr(), buf.len(), &mut len)
+                },
+                LEV_OK
+            );
+            name = Some(String::from_utf8_lossy(&buf[..len]).into_owned());
+            break;
+        }
+    }
+    unsafe { lev_interface_stats_free(table) };
+    let name = name.unwrap_or_else(|| {
+        panic!("no interface in B's snapshot has id {event_iface} — the id the announce carried names nothing a C app can look up")
+    });
+    assert!(!name.is_empty(), "the resolved interface has a name");
+
+    // The path that announce created is attributed to the same interface, so the
+    // two numbering schemes really are one.
+    let paths = unsafe { lev_path_table_snapshot(bnode.0) };
+    assert!(!paths.is_null());
+    let mut path_iface = None;
+    for i in 0..unsafe { lev_path_table_count(paths) } as usize {
+        let mut hash = [0u8; 16];
+        let mut iface = u64::MAX;
+        assert_eq!(
+            unsafe {
+                lev_path_table_entry(
+                    paths,
+                    i,
+                    hash.as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut iface,
+                    ptr::null_mut(),
+                )
+            },
+            LEV_OK
+        );
+        if hash == dest {
+            path_iface = Some(iface);
+        }
+    }
+    unsafe { lev_path_table_free(paths) };
+    assert_eq!(
+        path_iface,
+        Some(event_iface),
+        "lev_path_table_entry's interface_index and lev_event_interface_id must \
+         be the same numbering, or neither resolves through the snapshot"
+    );
+}

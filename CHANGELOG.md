@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+Eight event fields the Rust engine carried but the C ABI dropped are now
+projected, with the accessors to read them:
+`lev_event_interface_id` (the interface an announce, path or packet event
+arrived on), `lev_event_close_reason` with the `LEV_CLOSE_*` constants,
+`lev_event_transfer_size` / `lev_event_data_size`, and
+`lev_event_segment_index` / `lev_event_total_segments`. The close reason
+is behavioural rather than cosmetic: `LEV_CLOSE_BLACKHOLED` must not be
+retried at all, while `LEV_CLOSE_NORMAL` may be reconnected immediately.
+The two resource sizes are also projected onto
+`LEV_EVENT_RESOURCE_PROGRESS`, because the advertisement event they were
+supposed to arrive on is only emitted under the AcceptApp strategy, so an
+auto-accepting receiver never saw one.
+
+`lev_interface_stats_id` reads the node-assigned id of an interface in a
+stats snapshot. The snapshot was addressable only by position, so the ids
+the API hands out elsewhere (`lev_path_table_entry`'s `interface_index`,
+and now `lev_event_interface_id`) named nothing a C application could
+resolve. Position is not identity: the node never renumbers, so a removed
+interface leaves a gap.
+
+`lev_event_delivery_error` reports why a single-packet delivery failed, as
+one of the `LEV_DELIVERY_*` constants.
+
+### Fixed
+
+A delivery proof that arrived and did not verify was reported as
+`DeliveryError::LinkFailed`. That is the name for a link fault, and it
+asks the caller to re-send — which cannot succeed, because the peer
+answered and will answer the same way again. It is now
+`DeliveryError::InvalidProof` (a new variant on the `#[non_exhaustive]`
+enum), projected to C as `LEV_DELIVERY_INVALID_PROOF`, and the caller is
+told to re-resolve the destination's identity instead.
+
 ### Changed
 
 The client binary `lns` is renamed to `lnstest` to reflect its role as
