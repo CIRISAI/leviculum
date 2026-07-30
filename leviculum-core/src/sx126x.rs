@@ -139,6 +139,62 @@ pub fn rx_extend_ms(flags: u16, bw_hz: u32, sf: u8, cr_denom: u8) -> Option<u64>
     )
 }
 
+/// Slack added on top of a computed on-air time when sizing the software
+/// timeout around a started radio operation (TX completion, CAD completion).
+///
+/// It has to absorb only what is not airtime once the operation has been
+/// keyed: TCXO start (~4 ms, the `SetDIO3AsTcxoCtrl` 0x0000FF timeout), PA
+/// ramp (200 µs), the SPI+BUSY cost of the surrounding commands
+/// (sub-millisecond each), and executor wake latency after the DIO1 edge.
+/// CSMA waiting is out of scope: DIFS and contention backoff complete before
+/// the driver enters `transmit()`. 250 ms is an order of magnitude above the
+/// sum of those latencies while staying small against one slow-SF frame.
+pub const SOFT_TIMEOUT_SLACK_MS: u64 = 250;
+
+/// Bounded software wait when `bw_hz` is 0 (no `configure_lora` yet), the one
+/// state in which no airtime is computable. An unconfigured radio cannot have
+/// a frame on the air, so nothing real is aborted; this only bounds the wait
+/// for a chip that will never raise the IRQ.
+pub const UNCONFIGURED_WAIT_MS: u32 = 1_000;
+
+/// Software timeout for one transmitted frame: its on-air time at the live
+/// modulation plus [`SOFT_TIMEOUT_SLACK_MS`].
+///
+/// Replaces a fixed 5000 ms that predated SF12 support: a 184-byte announce
+/// at SF12/BW125/CR4:8/preamble-18 is 10.69 s of airtime, so the driver's
+/// expired wait put the chip in standby mid-air and no such frame was ever
+/// completed — same family as the fixed 500 ms RX abort (#144).
+pub fn tx_timeout_ms(
+    frame_len: u32,
+    bw_hz: u32,
+    sf: u8,
+    cr_denom: u8,
+    preamble_symbols: u16,
+) -> u32 {
+    if bw_hz == 0 {
+        return UNCONFIGURED_WAIT_MS;
+    }
+    let air =
+        crate::rnode::airtime_ms_with_preamble(frame_len, bw_hz, sf, cr_denom, preamble_symbols);
+    (air + SOFT_TIMEOUT_SLACK_MS).min(u32::MAX as u64) as u32
+}
+
+/// Software timeout for one channel-activity detection: the programmed
+/// listening symbols plus the chip's processing tail (about half a symbol,
+/// rounded up to one), plus [`SOFT_TIMEOUT_SLACK_MS`].
+///
+/// Replaces a per-SF millisecond table that assumed BW125: symbol time
+/// doubles with every halving of bandwidth, so at SF12/BW31.25 an 8-symbol
+/// CAD (1.05 s) overran the table's 800 ms and was aborted on every attempt.
+pub fn cad_timeout_ms(bw_hz: u32, sf: u8, cad_symbols: u8) -> u32 {
+    if bw_hz == 0 {
+        return UNCONFIGURED_WAIT_MS;
+    }
+    let t_sym_us = (1u64 << sf) * 1_000_000 / bw_hz as u64;
+    let cad_us = (cad_symbols as u64 + 1) * t_sym_us;
+    (cad_us.div_ceil(1_000) + SOFT_TIMEOUT_SLACK_MS).min(u32::MAX as u64) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +308,80 @@ mod tests {
     #[test]
     fn an_unconfigured_radio_is_not_extended() {
         assert_eq!(rx_extend_ms(IRQ_PREAMBLE_DETECTED, 0, 10, 5), None);
+    }
+
+    /// The defect instance: a 184-byte announce at SF12/BW125/CR4:8 with the
+    /// rig's programmed 18-symbol preamble is 10.69 s on the air. The fixed
+    /// 5000 ms wait aborted every one of them (six 2026-07-30 captures, 10/10
+    /// `TX err frame 0: Timeout`, zero `TX done`). The timeout must cover the
+    /// frame, with nothing on top but the stated slack.
+    #[test]
+    fn tx_timeout_covers_the_sf12_announce() {
+        let air = crate::rnode::airtime_ms_with_preamble(184, 125_000, 12, 8, 18);
+        assert!(air >= 10_690, "premise drifted: announce airtime {air}ms");
+        assert_eq!(
+            tx_timeout_ms(184, 125_000, 12, 8, 18) as u64,
+            air + SOFT_TIMEOUT_SLACK_MS
+        );
+    }
+
+    /// The other direction: at SF7 the same frame is ~308 ms, and the timeout
+    /// must not smuggle in a multi-second wait that would mask a wedged radio.
+    #[test]
+    fn tx_timeout_stays_sane_at_sf7() {
+        let t = tx_timeout_ms(184, 125_000, 7, 5, 18);
+        assert!(t < 1_000, "wedged-radio detection took {t}ms");
+    }
+
+    /// Why the defect only ever surfaced at SF12: the largest SF10 rig frame
+    /// (131 B) is ~2 s of airtime, comfortably inside the old fixed 5000 ms.
+    #[test]
+    fn sf10_frames_fit_the_old_fixed_timeout() {
+        let air = crate::rnode::airtime_ms_with_preamble(131, 125_000, 10, 8, 18);
+        assert!(
+            air > 1_000 && air < 5_000,
+            "boundary premise drifted: {air}ms"
+        );
+        assert!(tx_timeout_ms(131, 125_000, 10, 8, 18) as u64 >= air + SOFT_TIMEOUT_SLACK_MS);
+    }
+
+    /// The programmed preamble is charged: 10 extra symbols at SF12/BW125 are
+    /// 327 ms, more than the whole slack, so a preamble-blind timeout would
+    /// already have spent its margin before the payload started.
+    #[test]
+    fn tx_timeout_charges_the_programmed_preamble() {
+        let pre18 = tx_timeout_ms(184, 125_000, 12, 8, 18) as u64;
+        let pre8 = tx_timeout_ms(184, 125_000, 12, 8, 8) as u64;
+        assert!(pre18 - pre8 >= 327, "preamble delta {}ms", pre18 - pre8);
+    }
+
+    #[test]
+    fn an_unconfigured_radio_gets_a_bounded_wait() {
+        assert_eq!(tx_timeout_ms(184, 0, 12, 8, 18), UNCONFIGURED_WAIT_MS);
+        assert_eq!(cad_timeout_ms(0, 12, 8), UNCONFIGURED_WAIT_MS);
+    }
+
+    /// CAD listening time is symbols × symbol time, so it scales with SF AND
+    /// bandwidth. The table this replaces assumed BW125: 8 CAD symbols at
+    /// SF12/BW31.25 are 1.05 s against the table's 800 ms.
+    #[test]
+    fn cad_timeout_tracks_symbol_time() {
+        let narrow = cad_timeout_ms(31_250, 12, 8) as u64;
+        assert!(
+            narrow >= 1_049 + SOFT_TIMEOUT_SLACK_MS,
+            "SF12/BW31.25 CAD window {narrow}ms cannot cover 8 symbols"
+        );
+        // At the profile the table was built for, the derived value stays at
+        // or under the old entry (295 ms of symbols + slack vs 800).
+        let sf12_bw125 = cad_timeout_ms(125_000, 12, 8) as u64;
+        assert!(
+            sf12_bw125 <= 800,
+            "SF12/BW125 grew past the old table: {sf12_bw125}ms"
+        );
+        // Fast SF: symbols are ~1 ms each, the slack dominates, and a wedged
+        // radio is still detected in well under a second.
+        let sf7 = cad_timeout_ms(125_000, 7, 4) as u64;
+        assert!(sf7 < 1_000, "SF7 CAD window {sf7}ms");
     }
 
     /// The extension tracks the settings rather than being a constant: the

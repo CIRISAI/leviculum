@@ -797,8 +797,27 @@ pub const PACING_MARGIN_MS: u64 = 100;
 /// - `sf`: spreading factor (6-12)
 /// - `cr`: coding rate denominator (5-8, meaning 4/5 through 4/8)
 ///
+/// Assumes the modem-default programmed preamble of 8 symbols; when the
+/// radio is configured with a longer preamble (the RNode derivation yields
+/// 18 at SF12, 24 at SF7), use [`airtime_ms_with_preamble`] — at SF12/BW125
+/// the 10 extra symbols are 327 ms, more than a whole timeout slack.
+///
 /// Returns airtime in milliseconds, rounded up.
 pub fn airtime_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
+    airtime_ms_with_preamble(payload_bytes, bandwidth_hz, sf, cr, 8)
+}
+
+/// [`airtime_ms`] with an explicit programmed preamble length in symbols.
+///
+/// The on-air preamble is the programmed count plus the fixed 4.25-symbol
+/// tail (sync word + start markers), i.e. `(4*n + 17)/4` symbols.
+pub fn airtime_ms_with_preamble(
+    payload_bytes: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
     // Symbol time: T_sym = 2^SF / BW (in seconds)
     // We compute in microseconds to avoid floating point.
     // T_sym_us = 2^SF * 1_000_000 / BW
@@ -806,9 +825,9 @@ pub fn airtime_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 
     let bw = bandwidth_hz as u64;
     let t_sym_us = (1u64 << sf) * 1_000_000 / bw;
 
-    // Preamble: 8 symbols + 4.25 symbols = 12.25 symbols
-    // In microseconds: 12.25 * T_sym = (49 * T_sym) / 4
-    let t_preamble_us = 49 * t_sym_us / 4;
+    // Preamble: programmed symbols + 4.25 symbols
+    // In microseconds: (n + 4.25) * T_sym = ((4n + 17) * T_sym) / 4
+    let t_preamble_us = (4 * preamble_symbols as u64 + 17) * t_sym_us / 4;
 
     // Payload symbol count (explicit header mode, CRC on):
     //   n_payload = 8 + max(ceil((8*PL - 4*SF + 28 + 16) / (4*(SF-2*DE))) * (CR-4+4), 0)
@@ -2237,6 +2256,18 @@ mod tests {
         // 100 bytes at SF12 125kHz CR8, very slow long range
         let ms = airtime_ms(100, 125_000, 12, 8);
         assert!(ms >= 2000, "airtime={ms}ms, expected >2000ms for SF12");
+    }
+
+    #[test]
+    fn test_airtime_ms_is_the_preamble_8_case() {
+        assert_eq!(
+            airtime_ms(184, 125_000, 12, 8),
+            airtime_ms_with_preamble(184, 125_000, 12, 8, 8)
+        );
+        // The SF12 announce that motivated the parameter: 18 programmed
+        // preamble symbols put a 184-byte frame at 10.69 s on the air, 328 ms
+        // more than the preamble-8 formula reports.
+        assert_eq!(airtime_ms_with_preamble(184, 125_000, 12, 8, 18), 10_691);
     }
 
     #[test]
