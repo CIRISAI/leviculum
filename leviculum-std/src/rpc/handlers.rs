@@ -1055,12 +1055,20 @@ mod tests {
                 "autoconnect/10.0.0.1:4242",
                 "TCPClientInterface",
             ),
-            (InterfaceKind::Tcp, "tcp_server/10.0.0.1", "TCPServerInterface"),
+            (
+                InterfaceKind::Tcp,
+                "tcp_server/10.0.0.1",
+                "TCPServerInterface",
+            ),
             (InterfaceKind::Udp, "udp_0", "UDPInterface"),
             (InterfaceKind::Local, "Local[lnsd]", "LocalInterface"),
             (InterfaceKind::Auto, "auto/eth0/abcd", "AutoInterface"),
         ] {
-            assert_eq!(interface_type(kind, name), expected, "kind={kind} name={name}");
+            assert_eq!(
+                interface_type(kind, name),
+                expected,
+                "kind={kind} name={name}"
+            );
         }
     }
 

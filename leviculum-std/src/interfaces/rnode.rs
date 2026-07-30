@@ -2146,7 +2146,7 @@ pub(crate) fn spawn_rnode_multi_interface(
                 bitrate: Some(bitrate),
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
-            kind: leviculum_core::traits::InterfaceKind::Rnode,
+                kind: leviculum_core::traits::InterfaceKind::Rnode,
             },
             incoming: incoming_rx,
             outgoing: outgoing_tx,

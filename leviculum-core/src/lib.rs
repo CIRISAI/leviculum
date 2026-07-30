@@ -160,5 +160,6 @@ pub use transport::{Action, InterfaceId, TickOutput, TransportStats};
 pub use embedded_storage::EmbeddedStorage;
 pub use memory_storage::MemoryStorage;
 pub use traits::{
-    Clock, Interface, InterfaceError, InterfaceKind, InterfaceMode, NoStorage, Storage, StorageError,
+    Clock, Interface, InterfaceError, InterfaceKind, InterfaceMode, NoStorage, Storage,
+    StorageError,
 };

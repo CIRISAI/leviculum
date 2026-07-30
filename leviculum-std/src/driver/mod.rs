@@ -1144,7 +1144,10 @@ impl ReticulumNode {
                 }
                 // Transport medium, resolved from the configured interface type so
                 // status can group by transport rather than by the peer-label name.
-                core.set_interface_kind(idx, kind_from_interface_type(&iface_config.interface_type));
+                core.set_interface_kind(
+                    idx,
+                    kind_from_interface_type(&iface_config.interface_type),
+                );
                 // Interface propagation mode (Codeberg #91). Resolve the config
                 // string to an InterfaceMode and hand it to transport, which
                 // owns the per-interface mode map and applies the propagation
