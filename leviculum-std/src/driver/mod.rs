@@ -412,6 +412,22 @@ fn build_announce_rate_config(
     })
 }
 
+/// Resolve the configured `announce_cap` percentage to the whole per cent the
+/// transport's announce throttler keeps (Codeberg #92, Reticulum.py:713-716).
+/// Returns `None` when the key was absent.
+///
+/// The ini layer already dropped values outside Python's `0 < v <= 100` window,
+/// so this only bridges the representation: Python holds the share as a float,
+/// the core as whole per cent. A fractional value is rounded to nearest, and a
+/// value that would round down to zero resolves to 1% — the smallest share the
+/// cap can express — because 0 would mean "no announces at all", which is not
+/// what a sub-1% cap asks for.
+fn announce_cap_percent_from_config(config: &InterfaceConfig) -> Option<u32> {
+    config
+        .announce_cap
+        .map(|cap| (cap.round().max(1.0) as u32).min(100))
+}
+
 /// Channels consumed by the event loop.
 struct EventLoopChannels {
     /// Split control/data application event sink. `None` when the node was
@@ -1147,6 +1163,24 @@ impl ReticulumNode {
                     let bps = bitrate.min(u32::MAX as u64) as u32;
                     core.register_interface_bitrate(idx, bps);
                     tracing::info!("Interface {} configured bitrate: {} bps", idx, bps);
+                }
+                // Configured announce cap (Codeberg #92, Reticulum.py:713-716,
+                // 774). Must come after `register_interface_bitrate`, which
+                // (re)creates the cap entry at the registration default and
+                // would otherwise discard this value. The setter reports
+                // `false` when the interface has no cap entry at all — with no
+                // configured bitrate there is nothing to take a share of, so
+                // say that rather than dropping the key silently.
+                if let Some(cap_percent) = announce_cap_percent_from_config(iface_config) {
+                    if core.set_interface_announce_cap(idx, cap_percent) {
+                        tracing::info!("Interface {} announce cap: {}%", idx, cap_percent);
+                    } else {
+                        tracing::warn!(
+                            "Interface {} announce_cap ignored: the key needs a \
+                             configured bitrate to take a share of",
+                            idx
+                        );
+                    }
                 }
                 // Transport medium, resolved from the configured interface type so
                 // status can group by transport rather than by the peer-label name.
@@ -4497,6 +4531,41 @@ mod tests {
         assert_eq!(ar.target, Some(1800));
         assert_eq!(ar.penalty, Some(0));
         assert_eq!(ar.grace, Some(0));
+    }
+
+    /// Codeberg #92: the `announce_cap` key was parsed into `InterfaceConfig`
+    /// but never applied, so every interface ran at the registration default of
+    /// 2% no matter what the config said. It is applied now; this pins the
+    /// float-to-per-cent bridge, including the sub-1% case Python can express
+    /// and the core cannot.
+    #[test]
+    fn announce_cap_percent_from_config_semantics() {
+        let mut cfg = InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            ..Default::default()
+        };
+
+        // Key absent → nothing to apply, the registration default stands.
+        assert_eq!(announce_cap_percent_from_config(&cfg), None);
+
+        // Whole per cent passes through.
+        cfg.announce_cap = Some(5.0);
+        assert_eq!(announce_cap_percent_from_config(&cfg), Some(5));
+
+        // Fractional rounds to nearest.
+        cfg.announce_cap = Some(2.5);
+        assert_eq!(announce_cap_percent_from_config(&cfg), Some(3));
+        cfg.announce_cap = Some(2.4);
+        assert_eq!(announce_cap_percent_from_config(&cfg), Some(2));
+
+        // A share below half a per cent still means "cap announces", not
+        // "silence them": it resolves to the smallest expressible share.
+        cfg.announce_cap = Some(0.4);
+        assert_eq!(announce_cap_percent_from_config(&cfg), Some(1));
+
+        // The ini layer keeps 100 (Python's `<= 100`); it stays in range.
+        cfg.announce_cap = Some(100.0);
+        assert_eq!(announce_cap_percent_from_config(&cfg), Some(100));
     }
 
     /// Default builder leaves the event channel enabled. The first
