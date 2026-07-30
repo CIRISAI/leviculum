@@ -525,9 +525,11 @@ pub enum ReadyState {
 /// and online status with the byte counters from the I/O tasks.
 #[derive(Debug, Clone)]
 pub struct InterfaceStatusSnapshot {
-    /// The interface id assigned by the node — matches the id in every runtime
-    /// handle (e.g. `TcpClientHandle`) so a caller can pair its own handle up
-    /// with the snapshot.
+    /// The interface id assigned by the node — the same id a runtime handle
+    /// reports (see
+    /// [`RNodeChannelHandle::id`](crate::interfaces::rnode::RNodeChannelHandle::id)),
+    /// so a caller can pair its own handle up with the snapshot instead of
+    /// matching on the name.
     pub interface_id: leviculum_core::transport::InterfaceId,
     /// Human-readable interface name.
     pub name: String,
