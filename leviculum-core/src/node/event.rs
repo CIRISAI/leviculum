@@ -566,6 +566,17 @@ pub enum DeliveryError {
     Timeout,
     /// Link failed during delivery
     LinkFailed,
+    /// A proof for the packet arrived but did not verify against the
+    /// destination's identity.
+    ///
+    /// Distinct from [`Timeout`](DeliveryError::Timeout) and
+    /// [`LinkFailed`](DeliveryError::LinkFailed) in what it asks of the sender:
+    /// the peer answered, so the path works and re-sending on it will keep
+    /// producing the same unverifiable proof. Either the recalled identity for
+    /// the destination is stale (re-resolve it) or something on the path is
+    /// forging proofs. Reported as `LinkFailed` until this variant existed,
+    /// which told a caller to retry a send that cannot succeed.
+    InvalidProof,
 }
 
 impl core::fmt::Display for DeliveryError {
@@ -573,6 +584,7 @@ impl core::fmt::Display for DeliveryError {
         match self {
             DeliveryError::Timeout => write!(f, "delivery timed out"),
             DeliveryError::LinkFailed => write!(f, "link failed during delivery"),
+            DeliveryError::InvalidProof => write!(f, "delivery proof did not verify"),
         }
     }
 }

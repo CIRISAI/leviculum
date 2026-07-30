@@ -2400,9 +2400,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     self.events
                         .push(NodeEvent::PacketDeliveryConfirmed { packet_hash });
                 } else {
+                    // The proof arrived and did not verify. Not `LinkFailed`:
+                    // nothing broke on the way, the answer itself is bad, and
+                    // the two ask opposite things of the caller (re-send vs
+                    // re-resolve the identity).
                     self.events.push(NodeEvent::DeliveryFailed {
                         packet_hash,
-                        error: DeliveryError::LinkFailed,
+                        error: DeliveryError::InvalidProof,
                     });
                 }
             }
@@ -8780,6 +8784,90 @@ mod tests {
             fired_late,
             Some(request_id),
             "request timeout must fire once the reset-extended deadline also passes"
+        );
+    }
+
+    /// A proof that arrives but does not verify is a distinct failure from a
+    /// timeout, and it was reported under the wrong name.
+    ///
+    /// `DeliveryError::LinkFailed` tells a caller a link fault broke an
+    /// otherwise-fine delivery, i.e. re-send. An unverifiable proof means the
+    /// opposite: the peer answered, so the path works and every re-send will
+    /// produce the same unverifiable proof. The caller has to re-resolve the
+    /// destination's identity instead (or treat the path as hostile).
+    /// `DeliveryFailed` had no test at all, which is how the wrong name
+    /// survived; both halves of the branch are pinned here.
+    #[test]
+    fn an_unverifiable_proof_is_invalid_proof_not_link_failed() {
+        let identity = Identity::generate(&mut OsRng);
+        let packet_hash = [0x5au8; 32];
+        let signature = identity.sign(&packet_hash).unwrap();
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "app",
+            &["proof"],
+        )
+        .unwrap();
+        let dest_hash = *dest.hash();
+        let mut node = NodeCoreBuilder::new().build(
+            OsRng,
+            MockClock::new(TEST_TIME_MS),
+            MemoryStorage::with_defaults(),
+        );
+        node.register_destination(dest);
+
+        let mut truncated = [0u8; crate::constants::TRUNCATED_HASHBYTES];
+        truncated.copy_from_slice(&packet_hash[..crate::constants::TRUNCATED_HASHBYTES]);
+        let proof_event = |proof_data: alloc::vec::Vec<u8>| TransportEvent::ProofReceived {
+            packet_hash: truncated,
+            destination_hash: *dest_hash.as_bytes(),
+            expected_packet_hash: packet_hash,
+            proof_data,
+        };
+
+        // Right shape, wrong signature: the identity is known, so the failure is
+        // the proof itself and nothing else.
+        let mut forged = alloc::vec::Vec::new();
+        forged.extend_from_slice(&packet_hash);
+        forged.extend_from_slice(&[0u8; 64]);
+        node.handle_transport_event(proof_event(forged));
+
+        let failures: alloc::vec::Vec<DeliveryError> = node
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::DeliveryFailed { error, .. } => Some(*error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failures,
+            alloc::vec![DeliveryError::InvalidProof],
+            "an unverifiable proof must not be reported as a link fault: \
+             LinkFailed asks the caller to re-send, which cannot succeed"
+        );
+        node.events.clear();
+
+        // The same branch's other side: a proof that does verify confirms
+        // delivery and reports no failure at all.
+        let mut valid = alloc::vec::Vec::new();
+        valid.extend_from_slice(&packet_hash);
+        valid.extend_from_slice(&signature);
+        node.handle_transport_event(proof_event(valid));
+        assert!(
+            node.events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::PacketDeliveryConfirmed { .. })),
+            "a proof signed by the destination's identity must confirm delivery"
+        );
+        assert!(
+            !node
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::DeliveryFailed { .. })),
+            "a valid proof must not also report a delivery failure"
         );
     }
 
