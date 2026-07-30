@@ -212,8 +212,13 @@ async fn blog_node_serves_pages_end_to_end() {
         "the index must reflect the reloaded post set"
     );
 
-    // The removed post's handler is gone, so its path drops like any unknown
-    // one: a clean timeout rather than stale content.
+    // A removed post stops being served: a clean timeout rather than stale
+    // content. What this pins is the page lookup in `respond`, not the handler
+    // deregistration — a leaked handler lets the request reach the node, which
+    // then drops it for the missing page, and the client sees the same timeout
+    // either way (verified by deleting the deregistration loop: this test still
+    // passed). The deregistration decision is pinned by
+    // `node::tests::a_vanished_page_is_deregistered_and_a_new_one_registered`.
     let target = parse_url(&format!("{dest_hex}:/page/second.mu"), None).expect("parse second url");
     let result = session.fetch(&target, Duration::from_secs(2)).await;
     assert!(

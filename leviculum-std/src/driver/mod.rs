@@ -428,6 +428,41 @@ fn announce_cap_percent_from_config(config: &InterfaceConfig) -> Option<u32> {
         .map(|cap| (cap.round().max(1.0) as u32).min(100))
 }
 
+/// Hand an interface's configured bitrate and announce cap to the core.
+///
+/// Split out of the interface-registration loop because the ordering is a
+/// contract, not a formatting choice, and a contract with no test is a comment:
+/// `register_interface_bitrate` (re)creates the cap entry at the registration
+/// default, so a cap applied before it is silently discarded — the shape of the
+/// Codeberg #92 bug this fixed.
+///
+/// - `bitrate` (Codeberg #93): a key that cleared `MINIMUM_BITRATE` overrides
+///   the medium default and feeds announce bandwidth capping / timing, where
+///   Python applies `configured_bitrate` (Reticulum.py:887, Transport.py:1257).
+///   Media-agnostic: transport only sees bits per second.
+/// - `announce_cap` (Codeberg #92, Reticulum.py:713-716, 774): the setter
+///   reports `false` when the interface has no cap entry at all — with no
+///   configured bitrate there is nothing to take a share of, so say that rather
+///   than dropping the key silently.
+fn apply_bitrate_and_announce_cap(core: &mut StdNodeCore, idx: usize, config: &InterfaceConfig) {
+    if let Some(bitrate) = config.bitrate {
+        let bps = bitrate.min(u32::MAX as u64) as u32;
+        core.register_interface_bitrate(idx, bps);
+        tracing::info!("Interface {} configured bitrate: {} bps", idx, bps);
+    }
+    if let Some(cap_percent) = announce_cap_percent_from_config(config) {
+        if core.set_interface_announce_cap(idx, cap_percent) {
+            tracing::info!("Interface {} announce cap: {}%", idx, cap_percent);
+        } else {
+            tracing::warn!(
+                "Interface {} announce_cap ignored: the key needs a \
+                 configured bitrate to take a share of",
+                idx
+            );
+        }
+    }
+}
+
 /// Channels consumed by the event loop.
 struct EventLoopChannels {
     /// Split control/data application event sink. `None` when the node was
@@ -1153,35 +1188,7 @@ impl ReticulumNode {
                 if let Some(ar) = build_announce_rate_config(iface_config) {
                     core.set_announce_rate_config(idx, ar);
                 }
-                // Configured interface bitrate (Codeberg #93). A `bitrate` key
-                // that cleared MINIMUM_BITRATE overrides the medium default and
-                // is fed to the announce bandwidth cap / timing, exactly where
-                // Python applies `configured_bitrate` (Reticulum.py:887,
-                // Transport.py:1257). Media-agnostic: transport only sees a
-                // number of bits per second.
-                if let Some(bitrate) = iface_config.bitrate {
-                    let bps = bitrate.min(u32::MAX as u64) as u32;
-                    core.register_interface_bitrate(idx, bps);
-                    tracing::info!("Interface {} configured bitrate: {} bps", idx, bps);
-                }
-                // Configured announce cap (Codeberg #92, Reticulum.py:713-716,
-                // 774). Must come after `register_interface_bitrate`, which
-                // (re)creates the cap entry at the registration default and
-                // would otherwise discard this value. The setter reports
-                // `false` when the interface has no cap entry at all — with no
-                // configured bitrate there is nothing to take a share of, so
-                // say that rather than dropping the key silently.
-                if let Some(cap_percent) = announce_cap_percent_from_config(iface_config) {
-                    if core.set_interface_announce_cap(idx, cap_percent) {
-                        tracing::info!("Interface {} announce cap: {}%", idx, cap_percent);
-                    } else {
-                        tracing::warn!(
-                            "Interface {} announce_cap ignored: the key needs a \
-                             configured bitrate to take a share of",
-                            idx
-                        );
-                    }
-                }
+                apply_bitrate_and_announce_cap(&mut core, idx, iface_config);
                 // Transport medium, resolved from the configured interface type so
                 // status can group by transport rather than by the peer-label name.
                 core.set_interface_kind(
@@ -4570,6 +4577,66 @@ mod tests {
         // The ini layer keeps 100 (Python's `<= 100`); it stays in range.
         cfg.announce_cap = Some(100.0);
         assert_eq!(announce_cap_percent_from_config(&cfg), Some(100));
+    }
+
+    /// A fresh core to apply interface config against.
+    fn test_core(tag: &str) -> StdNodeCore {
+        use leviculum_core::node::NodeCoreBuilder;
+        let tmp = std::env::temp_dir().join(format!("drv-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            crate::clock::SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        )
+    }
+
+    /// The other half of Codeberg #92: `announce_cap_percent_from_config`
+    /// resolving the key is worth nothing if the resolved share never reaches
+    /// the core. This pins the call, and with it the ordering the fix depends
+    /// on — `register_interface_bitrate` recreates the cap entry at the 2%
+    /// registration default, so a cap applied before the bitrate is discarded
+    /// and the interface silently runs at the default the config overrode.
+    #[test]
+    fn configured_announce_cap_reaches_the_core() {
+        let mut core = test_core("cap");
+        let cfg = InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            bitrate: Some(9_600),
+            announce_cap: Some(5.0),
+            ..Default::default()
+        };
+
+        apply_bitrate_and_announce_cap(&mut core, 0, &cfg);
+
+        assert_eq!(
+            core.interface_announce_cap(0),
+            Some(5),
+            "the configured announce_cap must be the share the throttler holds, \
+             not the registration default"
+        );
+    }
+
+    /// `announce_cap` without a `bitrate` has nothing to take a share of: the
+    /// setter reports the miss and the interface keeps no cap entry. Pins the
+    /// branch that logs the warning rather than pretending the key applied.
+    #[test]
+    fn announce_cap_without_a_bitrate_registers_no_cap() {
+        let mut core = test_core("nocap");
+        let cfg = InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            bitrate: None,
+            announce_cap: Some(5.0),
+            ..Default::default()
+        };
+
+        apply_bitrate_and_announce_cap(&mut core, 0, &cfg);
+
+        assert_eq!(
+            core.interface_announce_cap(0),
+            None,
+            "with no bitrate there is no cap entry to hold a share"
+        );
     }
 
     /// Default builder leaves the event channel enabled. The first

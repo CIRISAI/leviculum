@@ -74,6 +74,32 @@ as long as wire and semantic compatibility are preserved.
 - Collision-avoidance bugs are debugged in one place — the interface —
   instead of being smeared across six stack layers.
 
+## The one place the medium is named
+
+`InterfaceKind` (`leviculum-core/src/traits.rs`) names the carrier —
+`Tcp`, `Rnode`, `Serial`, and so on — and that looks like an exception
+to the rule. It is not: the kind is *reported*, never acted on. It
+exists so `rnstatus` can print the Python-RNS interface class name and
+so a status consumer can group interfaces by transport instead of by
+their peer label.
+
+A `match` on it outside `traits.rs` may produce a string, a number or a
+status field, and nothing else. As of 2026-07-30 there are exactly two
+consumers: `transport.rs`'s sparse-map bookkeeping (where `Unknown`
+means "no entry") and `rpc/handlers.rs::interface_type`. A third that
+decides *what the stack does* — a longer timeout for LoRa, a skipped
+step on serial — is the wrong-layer fix this page describes; widen the
+`Interface` trait so the interface answers the question itself.
+
+This rule is deliberately not machine-checked. A guard could only see
+a syntactic comparison against a variant, which is not the shape the
+violation takes: an exhaustive `match kind` returning a timeout reads
+identically to one returning a label. Both existing consumers would
+need an exemption, so on today's three call sites the exemption list
+would be longer than the finding, and it would grow with every
+legitimate status field. The rule is stated here and on the enum
+instead.
+
 See also: [Storage and Embedding](storage-and-embedding.md) for the
 parallel isolation of persistence and time, and the
 [RNode protocol](../rnode-protocol.md) page for the LoRa carrier

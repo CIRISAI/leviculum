@@ -1696,6 +1696,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.set_interface_announce_cap(id, cap_percent)
     }
 
+    /// The announce cap share the throttler holds for an interface. See
+    /// [`crate::transport::Transport::interface_announce_cap`].
+    pub fn interface_announce_cap(&self, id: usize) -> Option<u32> {
+        self.transport.interface_announce_cap(id)
+    }
+
     /// Mark an interface as tunnel-capable (Codeberg #64 initiator side).
     ///
     /// The driver calls this when it brings up a tunnel-capable TCP client,
@@ -8260,6 +8266,106 @@ mod tests {
                 NodeEvent::ResponseReceived { request_id: rid, .. } if *rid == request_id
             )),
             "the initiator must receive the response"
+        );
+    }
+
+    /// The deregistration half of the (destination, path) key, asserted on the
+    /// request path rather than on the map.
+    ///
+    /// `same_path_on_two_destinations_stores_both_handlers` pins the storage:
+    /// removing A's entry leaves B's `request_handlers` entry behind. That is
+    /// the map's view, and it would still pass if dispatch stopped consulting
+    /// the map. This pins what a caller actually depends on:
+    ///
+    /// 1. deregistering *another* destination's handler on the same path leaves
+    ///    this destination serving — under path-only keying the single entry
+    ///    disappears and both destinations go silent;
+    /// 2. deregistering *this* destination's handler really does stop the
+    ///    request from being served, rather than only shrinking the map.
+    ///
+    /// This is the semantic lblogd's `apply_snapshot` call site leans on when a
+    /// deleted post's handler is torn down. lblogd itself serves everything from
+    /// one destination, so its end-to-end test (`lblogd/tests/node_integ.rs`)
+    /// covers (2) but cannot distinguish (1) from path-only keying.
+    #[test]
+    fn deregistering_one_destinations_handler_leaves_the_others_serving() {
+        let mut pair = establish_nodecore_link_pair();
+        let served_dest = *pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .destination_hash();
+        register_echo_handler(
+            &mut pair.responder,
+            served_dest,
+            request::RequestPolicy::AllowAll,
+        );
+
+        let other_dest = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["echo", "second"],
+        )
+        .expect("second destination");
+        let other_hash = *other_dest.hash();
+        assert_ne!(other_hash, served_dest, "the two destinations must differ");
+        pair.responder.register_destination(other_dest);
+        register_echo_handler(
+            &mut pair.responder,
+            other_hash,
+            request::RequestPolicy::AllowAll,
+        );
+
+        // (1) The other destination drops its handler for the shared path.
+        assert!(
+            pair.responder
+                .deregister_request_handler(&other_hash, "/echo"),
+            "the second destination's handler must exist to be removed"
+        );
+
+        let mut data = Vec::new();
+        crate::resource::msgpack::write_fixstr(&mut data, "hello");
+        let (_, output) = pair
+            .initiator
+            .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
+            .unwrap();
+        let req_data = extract_broadcast_data(&output);
+        let output = pair
+            .responder
+            .handle_packet(crate::transport::InterfaceId(0), &req_data);
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::RequestReceived { path, .. } if path == "/echo")),
+            "deregistering another destination's handler on the same path must \
+             not stop this destination serving it"
+        );
+
+        // (2) This destination drops its own handler: the same request is now
+        // dropped, so the removal reaches dispatch and not just the map.
+        assert!(
+            pair.responder
+                .deregister_request_handler(&served_dest, "/echo"),
+            "the served destination's handler must exist to be removed"
+        );
+        let (_, output) = pair
+            .initiator
+            .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
+            .unwrap();
+        let req_data = extract_broadcast_data(&output);
+        let output = pair
+            .responder
+            .handle_packet(crate::transport::InterfaceId(0), &req_data);
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::RequestReceived { .. })),
+            "a deregistered path must stop being served, got {:?}",
+            output.events
         );
     }
 

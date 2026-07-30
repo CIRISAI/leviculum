@@ -158,6 +158,24 @@ impl core::fmt::Display for InterfaceMode {
 /// consumer group interfaces by transport rather than by name — the name is only
 /// a peer label, so an autoconnected TCP client to a peer discovered over I2P is
 /// still `Tcp`.
+///
+/// # This is a label, not a switch
+///
+/// **Nothing outside the interface layer may branch on it.** The kind is
+/// reported; it is never acted on. Only the interface knows the quirks of its
+/// carrier medium — the core, the transport and the daemon are media-agnostic
+/// (`docs/src/concepts/interface-isolation.md`). Timing, framing, duty cycle,
+/// MTU and retry behaviour belong behind the [`Interface`] trait, which is why
+/// [`Interface::kind`] exists to *describe* an interface and nothing more.
+///
+/// So a `match` on this enum outside `traits.rs` should only ever produce a
+/// string, a number or a status field. If you are reaching for one to decide
+/// *what the stack does* — "LoRa needs a longer timeout", "skip this on
+/// serial" — the fix is at the wrong layer: widen the trait so the interface
+/// answers the question itself. As of 2026-07-30 the only two consumers are
+/// `transport.rs`'s sparse-map bookkeeping (`Unknown` means "no entry") and
+/// `rpc/handlers.rs::interface_type`, which renders the Python-RNS class name
+/// for `rnstatus`. Both are reporting; neither changes behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InterfaceKind {
     Tcp,

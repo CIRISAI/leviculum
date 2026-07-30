@@ -297,12 +297,18 @@ fn project(ev: NodeEvent) -> lev_event_t {
             link_id,
             request_id,
             response_data,
-            ..
+            metadata,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESPONSE_RECEIVED, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.request_id = Some(request_id);
             e.data = response_data;
+            // A response that arrived as a resource carries the resource's
+            // metadata blob (the `{"name": ...}` a file response rides with).
+            // Dropping it here left `lev_event_metadata` returning
+            // LEV_ERR_INVALID_ARG for every response, though the accessor is
+            // generic and `ResourceCompleted` has always projected it.
+            e.metadata = metadata;
             e
         }
         NodeEvent::RequestTimedOut {
@@ -914,6 +920,57 @@ mod tests {
         assert_eq!(marker.dropped_count, 2);
         assert!(b.next().is_none());
         assert!(!readable(b.fd()));
+    }
+
+    /// A response that arrived as a resource carries the resource's metadata
+    /// blob, and `lev_event_metadata` is the generic accessor for it. The arm
+    /// bound the variant with `..` and dropped the field, so every C caller saw
+    /// `LEV_ERR_INVALID_ARG` on a response that did have metadata — found by
+    /// `event_projection_coverage`'s field guard, which is why the projection
+    /// is asserted here rather than only through a C round trip (the C API
+    /// sends msgpack-wrapped responses, which never carry metadata).
+    #[test]
+    fn response_metadata_reaches_the_projection() {
+        let ev = leviculum_std::NodeEvent::ResponseReceived {
+            link_id: leviculum_std::LinkId::new([1u8; 16]),
+            request_id: [2u8; 16],
+            response_data: b"page body".to_vec(),
+            metadata: Some(b"\x81\xa4name\xa5a.txt".to_vec()),
+        };
+        let p = project(ev);
+        assert_eq!(p.ty, LEV_EVENT_RESPONSE_RECEIVED);
+        assert_eq!(
+            p.metadata.as_deref(),
+            Some(&b"\x81\xa4name\xa5a.txt"[..]),
+            "a response's resource metadata must reach lev_event_metadata"
+        );
+        assert_eq!(p.data, b"page body");
+    }
+
+    /// Codeberg #137 projected the destination of a link close, but the only
+    /// check on it was `event_projection_coverage`'s source-level guard, which
+    /// sees that `e.dest_hash =` appears in the arm and cannot see *what* it is
+    /// set to — the projection would still pass with the link id copied in by
+    /// mistake. The C-level suite only asserts that a LINK_CLOSED event arrives.
+    /// This pins the value.
+    #[test]
+    fn link_closed_projects_its_own_destination() {
+        let dest = leviculum_std::DestinationHash::new([0xABu8; 16]);
+        let ev = leviculum_std::NodeEvent::LinkClosed {
+            link_id: leviculum_std::LinkId::new([0x11u8; 16]),
+            reason: leviculum_std::LinkCloseReason::PeerClosed,
+            is_initiator: true,
+            destination_hash: dest,
+        };
+        let p = project(ev);
+        assert_eq!(p.ty, LEV_EVENT_LINK_CLOSED);
+        assert_eq!(p.link_id, Some([0x11u8; 16]));
+        assert_eq!(
+            p.dest_hash,
+            Some([0xABu8; 16]),
+            "a link close must name the destination whose link closed, so a \
+             responder hosting several destinations knows which one lost a peer"
+        );
     }
 
     #[test]

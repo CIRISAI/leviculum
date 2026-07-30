@@ -207,16 +207,13 @@ impl BlogNode {
     /// their own copies, so replacing the snapshot cannot tear a transfer that
     /// is already under way.
     fn apply_snapshot(&mut self, snapshot: Arc<Snapshot>) {
-        for path in self.snapshot.pages.keys() {
-            if !snapshot.pages.contains_key(path) {
-                self.node.deregister_request_handler(self.dest_hash, path);
-            }
+        let (gone, added) = reconcile_paths(&self.snapshot, &snapshot);
+        for path in &gone {
+            self.node.deregister_request_handler(self.dest_hash, path);
         }
-        for path in snapshot.pages.keys() {
-            if !self.snapshot.pages.contains_key(path) {
-                self.node
-                    .register_request_handler(self.dest_hash, path, RequestPolicy::AllowAll);
-            }
+        for path in &added {
+            self.node
+                .register_request_handler(self.dest_hash, path, RequestPolicy::AllowAll);
         }
         eprintln!(
             "lblogd: reloaded {} posts, serving {} pages",
@@ -367,5 +364,84 @@ fn load_or_generate_identity(path: &Path) -> Result<Identity, NodeError> {
         })?;
         std::fs::write(path, pk).map_err(io_err)?;
         Ok(id)
+    }
+}
+
+/// Which request handlers a snapshot swap has to add and remove: paths in
+/// `old` that `new` no longer has, and paths `new` has that `old` did not.
+/// Both sorted, so a caller's log and a test read deterministically.
+///
+/// Extracted from [`BlogNode::apply_snapshot`] because the deregistration is
+/// invisible from outside the process: with the handler leaked, a request for
+/// a deleted page still reaches the node and is dropped by the page lookup in
+/// `respond`, so a client sees the same timeout either way. The end-to-end
+/// test in `tests/node_integ.rs` therefore passes with the deregistration loop
+/// deleted (verified 2026-07-30). What leaking costs is a handler map that
+/// grows with every reload and a node that accepts requests for pages it no
+/// longer serves — so the decision is what gets pinned.
+fn reconcile_paths(old: &Snapshot, new: &Snapshot) -> (Vec<String>, Vec<String>) {
+    let mut gone: Vec<String> = old
+        .pages
+        .keys()
+        .filter(|p| !new.pages.contains_key(*p))
+        .cloned()
+        .collect();
+    let mut added: Vec<String> = new
+        .pages
+        .keys()
+        .filter(|p| !old.pages.contains_key(*p))
+        .cloned()
+        .collect();
+    gone.sort();
+    added.sort();
+    (gone, added)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::BlogMeta;
+
+    /// A snapshot that has exactly the given page paths; nothing else in it
+    /// matters to `reconcile_paths`.
+    fn snapshot_with(paths: &[&str]) -> Snapshot {
+        Snapshot {
+            meta: BlogMeta::default(),
+            posts: Vec::new(),
+            pages: paths
+                .iter()
+                .map(|p| ((*p).to_string(), Vec::new()))
+                .collect(),
+            css: String::new(),
+            about: None,
+        }
+    }
+
+    #[test]
+    fn a_vanished_page_is_deregistered_and_a_new_one_registered() {
+        let old = snapshot_with(&["/page/index.mu", "/page/second.mu"]);
+        let new = snapshot_with(&["/page/index.mu", "/page/third.mu"]);
+        let (gone, added) = reconcile_paths(&old, &new);
+        assert_eq!(
+            gone,
+            vec!["/page/second.mu"],
+            "a page that vanished from the snapshot must have its handler removed"
+        );
+        assert_eq!(
+            added,
+            vec!["/page/third.mu"],
+            "a page the reload added must get a handler"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_page_is_left_alone() {
+        let pages = ["/page/index.mu", "/page/hello.mu"];
+        let (gone, added) = reconcile_paths(&snapshot_with(&pages), &snapshot_with(&pages));
+        assert!(
+            gone.is_empty() && added.is_empty(),
+            "an unchanged path must be neither churned nor dropped, got \
+             gone={gone:?} added={added:?}"
+        );
     }
 }

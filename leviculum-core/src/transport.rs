@@ -5250,6 +5250,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// The announce bandwidth cap share in force for an interface, or `None`
+    /// when the interface has no cap entry (nothing registered a bitrate to
+    /// take a share of). Read-only counterpart to
+    /// [`Self::set_interface_announce_cap`], so a caller can assert the share it
+    /// configured is the share the throttler holds.
+    pub fn interface_announce_cap(&self, iface_index: usize) -> Option<u32> {
+        self.interface_announce_caps
+            .get(&iface_index)
+            .map(|cap| cap.announce_cap_percent)
+    }
+
     // Public: Interface Name API
     /// Register a human-readable name for an interface (called by driver at registration).
     pub fn set_interface_name(&mut self, id: usize, name: String) {

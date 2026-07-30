@@ -35,6 +35,142 @@ const DEST_HASH_NOT_PROJECTED: &[&str] = &[
     "PathRequestReceived",
 ];
 
+/// One field of a projected `NodeEvent` variant that `project()` does not carry
+/// into `lev_event_t`, with the reason it does not.
+struct Unprojected {
+    variant: &'static str,
+    field: &'static str,
+    /// Why the field is absent. "not needed" is not a reason; a reason says
+    /// what a C application uses *instead*, or what the field means that makes
+    /// it meaningless outside the engine.
+    why: &'static str,
+}
+
+/// Fields a C application does not need: the information is already reachable,
+/// is derivable from something projected, or is engine-internal.
+const INTENTIONALLY_UNPROJECTED: &[Unprojected] = &[
+    Unprojected {
+        variant: "PathFound",
+        field: "hops",
+        why: "queryable on demand for this destination with lev_hops_to; the \
+              event's job is to say that a path exists",
+    },
+    Unprojected {
+        variant: "LinkClosed",
+        field: "is_initiator",
+        why: "the same bool already reached C on this link's \
+              LEV_EVENT_LINK_ESTABLISHED via lev_event_is_sender, keyed by the \
+              same link_id; a second copy at close time adds nothing",
+    },
+    Unprojected {
+        variant: "DeliveryFailed",
+        field: "error",
+        why: "both variants mean the packet was never confirmed and the only \
+              C-side recovery is to re-send; the discriminant is also \
+              mislabelled today (an invalid proof is reported as LinkFailed), \
+              so projecting it would export a wrong name",
+    },
+    Unprojected {
+        variant: "RequestReceived",
+        field: "path_hash",
+        why: "the truncated hash *of* `path`, which is projected verbatim and \
+              readable with lev_event_path; a C app that wants the hash hashes \
+              the path",
+    },
+    Unprojected {
+        variant: "RequestReceived",
+        field: "requested_at",
+        why: "the core's own arrival clock, used for timeout accounting; it \
+              shares no epoch with a C caller, which timestamps on receipt",
+    },
+    Unprojected {
+        variant: "ResourceTransferStarted",
+        field: "is_sender",
+        why: "the core emits this event on the receiver only (`is_sender: \
+              false` at both push sites), so projecting it would hand C a \
+              constant",
+    },
+    Unprojected {
+        variant: "ResourceProgress",
+        field: "transfer_size",
+        why: "a progress indicator needs the fraction, which is projected and \
+              readable with lev_event_progress; the absolute sizes belong to \
+              the advertise event (see PROJECTION_GAPS)",
+    },
+    Unprojected {
+        variant: "ResourceProgress",
+        field: "data_size",
+        why: "see ResourceProgress::transfer_size",
+    },
+    Unprojected {
+        variant: "ResourceFailed",
+        field: "error",
+        why: "every variant means the transfer will not complete, and the only \
+              C-side recovery is to re-request; lev_event_t has no error-detail \
+              field to put it in",
+    },
+];
+
+/// Fields a C application *would* need but that the ABI cannot express today.
+/// Each entry names what it would take to close the gap. These are defects, not
+/// decisions: an entry here is a promise to add the accessor, and deleting the
+/// entry is how that promise is discharged. Do not add one to silence the
+/// guard — if a C app needs the field and the accessor is cheap, project it.
+const PROJECTION_GAPS: &[Unprojected] = &[
+    Unprojected {
+        variant: "AnnounceReceived",
+        field: "interface_index",
+        why: "the C ABI exposes no interface identity: lev_interface_stats_entry \
+              indexes by snapshot position and never surfaces \
+              InterfaceStatusSnapshot::interface_id, so this index would name \
+              nothing a C app could resolve. Needs interface_id on the stats \
+              entry first, then lev_event_interface_id",
+    },
+    Unprojected {
+        variant: "PathFound",
+        field: "interface_index",
+        why: "see AnnounceReceived::interface_index",
+    },
+    Unprojected {
+        variant: "PacketReceived",
+        field: "interface_index",
+        why: "see AnnounceReceived::interface_index",
+    },
+    Unprojected {
+        variant: "LinkClosed",
+        field: "reason",
+        why: "LinkCloseReason distinguishes Normal, PeerClosed, Timeout, Stale, \
+              InvalidProof, ChannelExhausted and Blackholed, and a C app \
+              reconnects differently for each (Blackholed must not be retried \
+              at all). Needs lev_event_close_reason plus LEV_CLOSE_* constants",
+    },
+    Unprojected {
+        variant: "ResourceAdvertised",
+        field: "transfer_size",
+        why: "this event exists so the app can call lev_accept_resource or \
+              lev_reject_resource, and size is what that decision turns on; C \
+              currently decides blind. Needs lev_event_transfer_size",
+    },
+    Unprojected {
+        variant: "ResourceAdvertised",
+        field: "data_size",
+        why: "see ResourceAdvertised::transfer_size; needs lev_event_data_size",
+    },
+    Unprojected {
+        variant: "ResourceCompleted",
+        field: "segment_index",
+        why: "a multi-segment resource fires this event once per segment with \
+              the same resource_hash, so a C receiver cannot order the chunks \
+              or tell which one is the last. Needs lev_event_segment_index",
+    },
+    Unprojected {
+        variant: "ResourceCompleted",
+        field: "total_segments",
+        why: "see ResourceCompleted::segment_index; needs \
+              lev_event_total_segments",
+    },
+];
+
 fn read(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
@@ -213,14 +349,204 @@ fn projection_arms() -> BTreeMap<String, String> {
     out
 }
 
-/// Field-level counterpart to the variant-level check above. The variant guard
-/// only asks whether a `project()` arm exists, so a *field* added to an
-/// already-projected variant reaches C only if someone remembers to widen that
-/// arm — and every arm that binds with `..` swallows the omission silently.
-/// This pins the one field the pattern keeps recurring on: a `destination_hash`
-/// on an event has to reach `dest_hash`, so a responder hosting several
-/// destinations can tell them apart (Codeberg #134's `LinkEstablished`, #137's
-/// `RequestReceived`).
+/// Each `project()` match arm, keyed by variant name: the fields its pattern
+/// names (field name → the identifier it is bound to, `_` for a discarded
+/// binding) and the arm body.
+///
+/// An arm runs from its `NodeEvent::Name` head to the next head, clamped at the
+/// `_ =>` catch-all so the last arm does not swallow the rest of the file.
+fn projection_arm_patterns() -> BTreeMap<String, (BTreeMap<String, String>, String)> {
+    let src = read("src/events.rs");
+    let lines: Vec<&str> = src.lines().collect();
+    let catch_all = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("_ =>"))
+        .expect("project() must keep its `_ =>` catch-all arm");
+
+    let heads: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .take(catch_all)
+        .filter_map(|(i, l)| {
+            let rest = l.trim_start().strip_prefix("NodeEvent::")?;
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            (!name.is_empty()).then(|| (i, name))
+        })
+        .collect();
+
+    let mut out = BTreeMap::new();
+    for (n, (start, name)) in heads.iter().enumerate() {
+        let end = heads.get(n + 1).map_or(catch_all, |(i, _)| *i);
+        let text = lines[*start..end].join("\n");
+        let Some(arrow) = text.find("=>") else {
+            continue;
+        };
+        let (pattern, body) = text.split_at(arrow);
+        let mut fields = BTreeMap::new();
+        if let (Some(open), Some(close)) = (pattern.find('{'), pattern.rfind('}')) {
+            if close > open {
+                for part in pattern[open + 1..close].split(',') {
+                    let part = part.trim();
+                    if part.is_empty() || part == ".." {
+                        continue;
+                    }
+                    // `field` binds to itself; `field: binding` (including
+                    // `field: _`) renames it.
+                    let (field, binding) = match part.split_once(':') {
+                        Some((f, b)) => (f.trim(), b.trim()),
+                        None => (part, part),
+                    };
+                    if !field.is_empty()
+                        && field
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                    {
+                        fields.insert(field.to_string(), binding.to_string());
+                    }
+                }
+            }
+        }
+        out.insert(name.clone(), (fields, body.to_string()));
+    }
+    out
+}
+
+/// Does `body` mention `ident` as a whole identifier?
+fn mentions(body: &str, ident: &str) -> bool {
+    let boundary = |c: char| !(c.is_ascii_alphanumeric() || c == '_');
+    body.match_indices(ident).any(|(i, _)| {
+        let before = body[..i].chars().next_back().is_none_or(boundary);
+        let after = body[i + ident.len()..].chars().next().is_none_or(boundary);
+        before && after
+    })
+}
+
+/// The general form of the `dest_hash` check below: *every* field of a
+/// projected variant must reach C or be accounted for by name.
+///
+/// `destination_hash` was never special — it is just the field the omission
+/// happened to hit twice (Codeberg #134's `LinkEstablished`, #137's
+/// `RequestReceived`). The mechanism is what generalises: an arm that binds
+/// with `..` compiles clean whatever it leaves behind, and the variant-level
+/// guard above only asks whether an arm exists at all, so a field added to an
+/// already-projected variant reaches C only if someone remembers to widen the
+/// arm.
+///
+/// So every field is either bound and used in its arm, or named in
+/// [`INTENTIONALLY_UNPROJECTED`] (a C app does not need it) or
+/// [`PROJECTION_GAPS`] (it does, and the ABI cannot say it yet). The lists are
+/// data with a reason per entry, like `PKT_DROP_SUMMARY`'s reason catalog,
+/// rather than a comment: a reason in a comment is not read at review time.
+#[test]
+fn every_field_of_a_projected_event_is_projected_or_accounted_for() {
+    let fields = node_event_fields();
+    let arms = projection_arm_patterns();
+    assert!(
+        arms.len() >= 20,
+        "parsed only {} project() arms — the parser likely drifted",
+        arms.len()
+    );
+
+    let mut accounted: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    for e in INTENTIONALLY_UNPROJECTED.iter().chain(PROJECTION_GAPS) {
+        assert!(
+            !e.why.trim().is_empty(),
+            "{}::{} needs a reason, not an empty string",
+            e.variant,
+            e.field
+        );
+        assert!(
+            accounted.insert((e.variant, e.field), e.why).is_none(),
+            "{}::{} is listed twice",
+            e.variant,
+            e.field
+        );
+    }
+
+    let mut unaccounted = Vec::new();
+    let mut bound_but_unused = Vec::new();
+    for (variant, (pattern, body)) in &arms {
+        let declared = fields
+            .get(variant)
+            .unwrap_or_else(|| panic!("project() has an arm for unknown variant {variant}"));
+        // Parser drift: a pattern field that the enum does not declare means
+        // one of the two parsers is reading the wrong thing.
+        for f in pattern.keys() {
+            assert!(
+                declared.contains(f),
+                "project() arm for {variant} binds `{f}`, which NodeEvent::{variant} \
+                 does not declare — one of the two parsers has drifted"
+            );
+        }
+        for field in declared {
+            match pattern.get(field) {
+                Some(binding) if binding != "_" => {
+                    if !mentions(body, binding) {
+                        bound_but_unused.push(format!("{variant}::{field}"));
+                    }
+                }
+                // Absent (swallowed by `..`) or explicitly discarded with `_`.
+                _ => {
+                    if !accounted.contains_key(&(variant.as_str(), field.as_str())) {
+                        unaccounted.push(format!("{variant}::{field}"));
+                    }
+                }
+            }
+        }
+    }
+    unaccounted.sort();
+    bound_but_unused.sort();
+
+    assert!(
+        unaccounted.is_empty(),
+        "fields of projected NodeEvent variants that never reach C and are not \
+         accounted for: {unaccounted:?}. Either widen the project() arm, or add \
+         the field to INTENTIONALLY_UNPROJECTED with the reason a C app does \
+         not need it, or to PROJECTION_GAPS with the accessor it would take."
+    );
+    assert!(
+        bound_but_unused.is_empty(),
+        "fields bound by a project() arm but never used in its body: \
+         {bound_but_unused:?} — they are dropped as surely as if the pattern \
+         had left them to `..`."
+    );
+
+    // Keep both lists honest: an entry must still name a field of a projected
+    // variant that the arm really does leave behind.
+    let mut stale = Vec::new();
+    for e in INTENTIONALLY_UNPROJECTED.iter().chain(PROJECTION_GAPS) {
+        let Some((pattern, _)) = arms.get(e.variant) else {
+            stale.push(format!(
+                "{}::{} (variant is not projected)",
+                e.variant, e.field
+            ));
+            continue;
+        };
+        if !fields.get(e.variant).is_some_and(|f| f.contains(e.field)) {
+            stale.push(format!("{}::{} (no such field)", e.variant, e.field));
+        } else if pattern.get(e.field).is_some_and(|b| b != "_") {
+            stale.push(format!(
+                "{}::{} (the arm does project it)",
+                e.variant, e.field
+            ));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "stale INTENTIONALLY_UNPROJECTED/PROJECTION_GAPS entries: {stale:?}"
+    );
+}
+
+/// The `destination_hash` special case, kept alongside the general check above
+/// because it pins something the general one cannot see: not just that the
+/// field is bound, but that it reaches the *right* target field. A
+/// `destination_hash` on an event has to land in `dest_hash` — binding it and
+/// writing it somewhere else, or nowhere, leaves a responder hosting several
+/// destinations unable to tell them apart (Codeberg #134's `LinkEstablished`,
+/// #137's `RequestReceived`).
 #[test]
 fn every_projected_event_with_a_destination_sets_dest_hash() {
     let fields = node_event_fields();
