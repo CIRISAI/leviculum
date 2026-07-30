@@ -2783,6 +2783,9 @@ async fn run_event_loop(
     let mut reconnect_rx = channels.reconnect_rx;
     let mut tunnel_notify_rx = channels.tunnel_notify_rx;
     let mut remove_iface_rx = channels.remove_iface_rx;
+    // A removal can arrive before the event loop has registered its interface
+    // (a detach racing a just-accepted add); held here, applied on arrival.
+    let mut pending_removals: std::collections::HashSet<InterfaceId> = std::collections::HashSet::new();
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
@@ -2950,7 +2953,9 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        registry.remove(iface_id);
+                        if !registry.remove(iface_id) {
+                            pending_removals.insert(iface_id);
+                        }
                         {
                             let mut stats = iface_stats_map.lock_recover();
                             stats.remove(&iface_id.0);
@@ -3059,6 +3064,9 @@ async fn run_event_loop(
 
             // Branch 5: Dynamic interface registration (TCP server, local server accept loops)
             Some(handle) = new_interface_rx.recv() => {
+                if pending_removals.remove(&handle.info.id) {
+                    continue;
+                }
                 tracing::info!("New connection: {} ({})", handle.info.name, handle.info.id);
                 let is_local = handle.info.is_local_client;
                 let iface_idx = handle.info.id.0;
