@@ -11471,6 +11471,127 @@ mod tests {
             );
         }
 
+        /// Codeberg #136: a runtime announce-cap change has to reach the
+        /// throttler, not just the struct field. The cap percentage is read at
+        /// scheduling time in two places (immediate send and queue drain), so
+        /// after raising the cap the *next* holdoff must be recomputed from the
+        /// new percentage — and an announce offered inside the old, longer
+        /// holdoff must actually go out instead of being queued.
+        #[test]
+        fn set_interface_announce_cap_shortens_the_next_holdoff() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let bitrate: u64 = 1000;
+            transport.register_interface_bitrate(1, bitrate as u32);
+
+            // First announce goes out under the registration default (2%) and
+            // sets the long holdoff that default implies.
+            let (raw1, _dh1) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &raw1).unwrap();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let actions1 = transport.drain_actions();
+            let _ = transport.drain_events();
+            let sent_len = actions1
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.len() as u64),
+                    _ => None,
+                })
+                .expect("first announce should be sent on the capped interface");
+
+            let wait_default =
+                (sent_len * 8 * 1000) / (bitrate * DEFAULT_ANNOUNCE_CAP_PERCENT as u64 / 100);
+            let wait_full = (sent_len * 8 * 1000) / bitrate; // the same formula at 100%
+            let jitter_step = transport.announce_jitter_max_ms() + 100;
+            assert!(
+                wait_full + jitter_step + 1 < wait_default,
+                "test only discriminates if the raised-cap holdoff plus one \
+                 scheduler step still fits inside the default-cap holdoff \
+                 (wait_full={wait_full}, wait_default={wait_default})"
+            );
+
+            // Raise the cap, then wait out the holdoff the default cap left
+            // behind (the setter deliberately does not touch allowed_at_ms).
+            assert!(transport.set_interface_announce_cap(1, 100));
+            transport.clock.advance(wait_default + 1);
+
+            // Second announce: sent, and its holdoff must come from the new cap.
+            let (raw2, _dh2) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &raw2).unwrap();
+            transport.clock.advance(jitter_step);
+            let send_time = transport.clock.now_ms();
+            transport.poll();
+            let actions2 = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(
+                actions2
+                    .iter()
+                    .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
+                    .count(),
+                1,
+                "second announce should be sent once the default holdoff expired"
+            );
+            assert_eq!(
+                transport.interface_announce_caps[&1].allowed_at_ms,
+                send_time + wait_full,
+                "holdoff must be recomputed from the runtime cap, not the \
+                 registration default"
+            );
+
+            // The behavioural consequence: a third announce offered after only
+            // the short holdoff goes out. Under the 2% cap this instant is
+            // still deep inside the holdoff and it would be queued instead.
+            transport.clock.advance(wait_full + 1);
+            let (raw3, _dh3) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &raw3).unwrap();
+            transport.clock.advance(jitter_step);
+            assert!(
+                transport.clock.now_ms() < send_time + wait_default,
+                "third announce must be offered inside the default-cap holdoff"
+            );
+            transport.poll();
+            let actions3 = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(
+                actions3
+                    .iter()
+                    .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
+                    .count(),
+                1,
+                "third announce should be sent under the raised cap"
+            );
+        }
+
+        /// The cap entry is created by `register_interface_bitrate`, which
+        /// always seeds the registration default — so a bitrate registration
+        /// after a runtime cap change silently discards that change. Callers
+        /// applying a configured cap have to do it in that order; pin the
+        /// invariant so the ordering requirement is not folklore.
+        #[test]
+        fn register_interface_bitrate_resets_a_runtime_announce_cap() {
+            let mut transport = make_transport_enabled();
+            let _idx = transport.register_interface(Box::new(MockInterface::new("if0", 0)));
+
+            transport.register_interface_bitrate(0, 1000);
+            assert!(transport.set_interface_announce_cap(0, 50));
+            assert_eq!(
+                transport.interface_announce_caps[&0].announce_cap_percent,
+                50
+            );
+
+            transport.register_interface_bitrate(0, 2000);
+            assert_eq!(
+                transport.interface_announce_caps[&0].announce_cap_percent,
+                DEFAULT_ANNOUNCE_CAP_PERCENT,
+                "re-registering the bitrate resets the cap share to the default"
+            );
+        }
+
         #[test]
         fn test_announce_queue_max_size() {
             extern crate alloc;
