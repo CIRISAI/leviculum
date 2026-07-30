@@ -1782,6 +1782,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.set_local_client(iface_idx, false);
         self.transport.remove_interface_name(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
+        self.transport.remove_interface_kind(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
 
         // Emit the InterfaceDown event
@@ -2815,6 +2816,29 @@ mod tests {
         assert!(
             node.has_path(&dest_iface1),
             "path learned on another interface must survive"
+        );
+    }
+
+    /// Interface-down clears the transport kind along with the name and mode.
+    /// Interface indices are reused, so a kind left behind is inherited by the
+    /// next interface to take the slot and reported as its medium.
+    #[test]
+    fn interface_down_clears_the_transport_kind() {
+        use crate::traits::InterfaceKind;
+        use crate::transport::InterfaceId;
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+
+        node.set_interface_kind(0, InterfaceKind::Rnode);
+        assert_eq!(node.interface_kind(0), InterfaceKind::Rnode);
+
+        let _ = node.handle_interface_down(InterfaceId(0));
+
+        assert_eq!(
+            node.interface_kind(0),
+            InterfaceKind::Unknown,
+            "a downed interface must not leave its medium behind for the next index holder"
         );
     }
 
