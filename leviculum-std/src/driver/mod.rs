@@ -2404,6 +2404,56 @@ impl ReticulumNode {
         ))
     }
 
+    /// Attach a byte-channel interface over a caller-supplied duplex to the
+    /// **running** node, returning a lifecycle handle.
+    ///
+    /// The stream carries HDLC-framed packets — the PipeInterface wire contract,
+    /// but in-process over any duplex the caller provides. Ready immediately; on
+    /// stream EOF/error or handle drop it detaches.
+    ///
+    /// **Hold the returned [`ByteChannelHandle`](crate::interfaces::ByteChannelHandle)
+    /// to keep the interface attached; drop it (or call
+    /// [`detach`](crate::interfaces::ByteChannelHandle::detach)) to detach.**
+    ///
+    /// The node assigns the [`InterfaceId`]. Returns [`Error::NotRunning`] if
+    /// called before [`start`](Self::start).
+    pub fn spawn_byte_channel<S>(
+        &self,
+        name: &str,
+        stream: S,
+    ) -> Result<crate::interfaces::ByteChannelHandle, Error>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        use std::sync::atomic::Ordering;
+
+        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+
+        let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let handle = {
+            let _enter = runtime.enter();
+            crate::interfaces::byte_channel::spawn_byte_channel_interface(
+                crate::interfaces::byte_channel::ByteChannelConfig {
+                    id,
+                    name: name.to_string(),
+                    buffer_size: crate::interfaces::byte_channel::BYTE_CHANNEL_DEFAULT_BUFFER_SIZE,
+                    shutdown: Some(shutdown_rx),
+                },
+                stream,
+            )
+        };
+
+        new_iface_tx
+            .try_send(handle)
+            .map_err(|_| Error::NotRunning)?;
+
+        Ok(crate::interfaces::ByteChannelHandle::new(id, shutdown_tx))
+    }
+
     /// Obtain a writable handle for an already-established inbound link.
     ///
     /// Incoming links are accepted and proved automatically by the core (Python
