@@ -34,7 +34,7 @@ pub const LEV_EVENT_LINK_REQUEST: c_int = 3;
 /// responder; the link is already accepted and proved, mint a handle with
 /// `lev_accept_link`), 1 means a link this node initiated.
 pub const LEV_EVENT_LINK_ESTABLISHED: c_int = 4;
-/// A link closed.
+/// A link closed. `link_id` and `dest_hash` are set.
 pub const LEV_EVENT_LINK_CLOSED: c_int = 5;
 /// Data arrived on a link.
 pub const LEV_EVENT_LINK_DATA: c_int = 6;
@@ -43,7 +43,10 @@ pub const LEV_EVENT_PACKET_RECEIVED: c_int = 7;
 /// Control events were dropped; the count is available via
 /// `lev_event_dropped_count`.
 pub const LEV_EVENT_CONTROL_OVERFLOW: c_int = 8;
-/// A request arrived on a link (respond with `lev_send_response`).
+/// A request arrived on a link (respond with `lev_send_response`). `dest_hash`
+/// is the destination the request was addressed to: several destinations may
+/// register the same request path, so a responder hosting more than one needs
+/// it to know which endpoint to serve.
 pub const LEV_EVENT_REQUEST_RECEIVED: c_int = 9;
 /// A response to a sent request arrived.
 pub const LEV_EVENT_RESPONSE_RECEIVED: c_int = 10;
@@ -176,9 +179,14 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.dest_hash = Some(*destination_hash.as_bytes());
             e
         }
-        NodeEvent::LinkClosed { link_id, .. } => {
+        NodeEvent::LinkClosed {
+            link_id,
+            destination_hash,
+            ..
+        } => {
             let mut e = lev_event_t::bare(LEV_EVENT_LINK_CLOSED, is_control);
             e.link_id = Some(*link_id.as_bytes());
+            e.dest_hash = Some(*destination_hash.as_bytes());
             e
         }
         NodeEvent::LinkIdentified {
@@ -271,6 +279,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
         }
         NodeEvent::RequestReceived {
             link_id,
+            destination_hash,
             request_id,
             path,
             data,
@@ -278,6 +287,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_REQUEST_RECEIVED, is_control);
             e.link_id = Some(*link_id.as_bytes());
+            e.dest_hash = Some(*destination_hash.as_bytes());
             e.request_id = Some(request_id);
             e.path = Some(path);
             e.data = data;

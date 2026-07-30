@@ -552,6 +552,14 @@ fn request_response_echo() {
     let got_path = read2(|b, c, l| unsafe { lev_event_path(rr.0, b, c, l) }).unwrap();
     assert_eq!(got_path, b"/echo");
     assert_eq!(event_data(&rr), req);
+    // The destination the request was addressed to: several destinations may
+    // share a request path, so a C responder hosting more than one needs this
+    // to pick the endpoint.
+    assert_eq!(
+        support::event_dest_hash(&rr),
+        p.dest,
+        "the request event must name its destination"
+    );
     let a_link = event_link_id(&rr);
     let got_id = read2(|b, c, l| unsafe { lev_event_request_id(rr.0, b, c, l) }).unwrap();
     assert_eq!(
