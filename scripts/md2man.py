@@ -87,17 +87,37 @@ def escape(text: str) -> str:
     return text
 
 
+# Stands in for a literal backtick between the double- and single-backtick
+# passes in `inline`. A control character no man page source contains, so it
+# cannot collide with real text.
+LITERAL_BACKTICK = "\x00"
+
+
 def inline(text: str) -> str:
     """Convert **bold**, *italic* and `code` to roff escapes.
 
     Code renders bold, which is what man(7) pages conventionally do for
     literal option and file names.
+
+    Double-backtick spans are handled first, so a code span may contain a
+    literal backtick — as Markdown itself allows, and as a NomadNet URL's
+    field separator needs. Its content is stashed behind
+    `LITERAL_BACKTICK` before the single-backtick pass runs, because a raw
+    backtick left in place is picked up there as an opening fence: it pairs
+    with the next one further along the line and every code span after it
+    shifts by one. That is how the tail of lnomad(1)'s url description came
+    to render with its bold inverted and a stray backtick in the prose.
     """
     text = escape(text)
     text = re.sub(r"\*\*(.+?)\*\*", r"\\fB\1\\fR", text)
+    text = re.sub(
+        r"``(.+?)``",
+        lambda m: "\\fB" + m.group(1).replace("`", LITERAL_BACKTICK) + "\\fR",
+        text,
+    )
     text = re.sub(r"`(.+?)`", r"\\fB\1\\fR", text)
     text = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"\\fI\1\\fR", text)
-    return text
+    return text.replace(LITERAL_BACKTICK, "`")
 
 
 def protect(line: str) -> str:
@@ -232,13 +252,53 @@ def convert(src: Path) -> str:
     return Renderer().render(text, match.group(1), match.group(2))
 
 
+def selftest() -> int:
+    """Check the inline conversions that are easy to get subtly wrong.
+
+    A mangled man page does not fail a build, it just ships: nothing
+    downstream reads roff. These cases are the cheap standing guard, run
+    from the Justfile before every page is rendered.
+    """
+    cases = [
+        # A code span may hold a literal backtick, and must not leave one
+        # behind to be read as an opening fence by the single-backtick pass.
+        # The trailing spans decide it: they are what shifted before.
+        (
+            "as ``a[`f=v]`` where `x` and `y`",
+            "as \\fBa[`f=v]\\fR where \\fBx\\fR and \\fBy\\fR",
+        ),
+        ("plain `code` here", "plain \\fBcode\\fR here"),
+        ("**bold** and *italic*", "\\fBbold\\fR and \\fIitalic\\fR"),
+    ]
+    failed = 0
+    for src, want in cases:
+        got = inline(src)
+        if got != want:
+            print(f"[md2man] selftest FAILED for {src!r}\n  want: {want!r}\n  got:  {got!r}")
+            failed += 1
+    if failed:
+        return 1
+    print(f"[md2man] selftest ok ({len(cases)} cases)")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--outdir", required=True, type=Path, help="directory to write the roff pages into"
+        "--outdir", type=Path, help="directory to write the roff pages into"
     )
-    parser.add_argument("sources", nargs="+", type=Path)
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="check the inline conversions and exit, rendering nothing",
+    )
+    parser.add_argument("sources", nargs="*", type=Path)
     args = parser.parse_args()
+
+    if args.selftest:
+        return selftest()
+    if args.outdir is None or not args.sources:
+        parser.error("--outdir and at least one source are required")
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     for src in args.sources:
