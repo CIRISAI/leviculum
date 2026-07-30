@@ -896,9 +896,11 @@ fn interface_type(kind: InterfaceKind, name: &str) -> String {
         InterfaceKind::Local => "LocalInterface",
         InterfaceKind::Pipe => "PipeInterface",
         InterfaceKind::Auto => "AutoInterface",
-        // No interface registers `Channel` yet, so there is no observed name to
-        // map it from; it falls through to the name heuristic like `Unknown`.
-        InterfaceKind::Channel | InterfaceKind::Unknown => return interface_type_from_name(name),
+        // Not `ChannelInterface`: Python's `RNS.Channel` is an unrelated
+        // link-layer concept, and byte-channel names are caller-supplied, so
+        // the name heuristic must not get a say here.
+        InterfaceKind::Channel => "ByteChannelInterface",
+        InterfaceKind::Unknown => return interface_type_from_name(name),
     }
     .to_string()
 }
@@ -1063,6 +1065,13 @@ mod tests {
             (InterfaceKind::Udp, "udp_0", "UDPInterface"),
             (InterfaceKind::Local, "Local[lnsd]", "LocalInterface"),
             (InterfaceKind::Auto, "auto/eth0/abcd", "AutoInterface"),
+            // Byte-channel names are caller-supplied, so a name the heuristic
+            // would misread must not override the registered kind.
+            (
+                InterfaceKind::Channel,
+                "tcp_client_app",
+                "ByteChannelInterface",
+            ),
         ] {
             assert_eq!(
                 interface_type(kind, name),
