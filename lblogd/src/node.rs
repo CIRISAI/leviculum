@@ -209,7 +209,7 @@ impl BlogNode {
     fn apply_snapshot(&mut self, snapshot: Arc<Snapshot>) {
         for path in self.snapshot.pages.keys() {
             if !snapshot.pages.contains_key(path) {
-                self.node.deregister_request_handler(path);
+                self.node.deregister_request_handler(self.dest_hash, path);
             }
         }
         for path in snapshot.pages.keys() {
