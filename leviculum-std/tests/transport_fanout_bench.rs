@@ -142,6 +142,7 @@ async fn build_serve_node() -> (
                 NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: false,
+                    ..
                 } => {
                     links_sink.lock().unwrap().push(link_id);
                 }
