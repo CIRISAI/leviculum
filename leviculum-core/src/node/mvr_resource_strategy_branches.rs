@@ -128,10 +128,13 @@ fn accept_all_starts_transfer_immediately() {
     let (_receiver, adv_out, _link) = deliver_adv_with_strategy(ResourceStrategy::AcceptAll);
 
     assert!(
-        adv_out
-            .events
-            .iter()
-            .any(|e| matches!(e, NodeEvent::ResourceTransferStarted { is_sender: false, .. })),
+        adv_out.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceTransferStarted {
+                is_sender: false,
+                ..
+            }
+        )),
         "AcceptAll must start the incoming transfer.\nevents: {:?}",
         adv_out.events
     );
@@ -175,10 +178,13 @@ fn accept_app_defers_to_application() {
         .accept_resource(&link)
         .expect("accept_resource consumes the parked ADV");
     assert!(
-        accept_out
-            .events
-            .iter()
-            .any(|e| matches!(e, NodeEvent::ResourceTransferStarted { is_sender: false, .. })),
+        accept_out.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceTransferStarted {
+                is_sender: false,
+                ..
+            }
+        )),
         "accept_resource must start the parked transfer.\nevents: {:?}",
         accept_out.events
     );

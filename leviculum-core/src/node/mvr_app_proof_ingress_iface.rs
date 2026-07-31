@@ -104,7 +104,10 @@ fn app_proof_leaves_on_ingress_interface() {
         .identity()
         .unwrap()
         .public_key_bytes();
-    sender.remember_identity(dest_hash, Identity::from_public_key_bytes(&recv_pub).unwrap());
+    sender.remember_identity(
+        dest_hash,
+        Identity::from_public_key_bytes(&recv_pub).unwrap(),
+    );
     let sender_side_dest = Destination::new(
         Some(Identity::from_public_key_bytes(&recv_pub).unwrap()),
         Direction::Out,
