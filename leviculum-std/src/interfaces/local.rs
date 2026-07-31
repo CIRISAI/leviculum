@@ -504,9 +504,18 @@ mod tests {
             message.contains("lnsd") && message.contains("rnsd"),
             "must say which daemon to start: {message}"
         );
+        // The underlying connect error differs by platform — Linux's abstract
+        // namespace refuses an unbound name (ConnectionRefused), while the
+        // filesystem-socket fallback on other Unixes fails to find the path
+        // (NotFound). The invariant is that whichever kind the platform
+        // produced survives the rewrap, not that every platform is Linux.
+        #[cfg(target_os = "linux")]
+        let expected_kind = io::ErrorKind::ConnectionRefused;
+        #[cfg(not(target_os = "linux"))]
+        let expected_kind = io::ErrorKind::NotFound;
         assert_eq!(
             err.kind(),
-            io::ErrorKind::ConnectionRefused,
+            expected_kind,
             "the error kind must survive the rewrap"
         );
     }
