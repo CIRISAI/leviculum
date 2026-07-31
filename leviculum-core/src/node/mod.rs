@@ -114,6 +114,19 @@ use crate::constants::MGMT_ANNOUNCE_INTERVAL_MS;
 /// Python defers by `mgmt_announce_interval - 15` so first fires at ~15s.
 const MGMT_ANNOUNCE_INITIAL_DELAY_MS: u64 = 15 * 1000;
 
+/// Request and response Resources are currently correlated as one transfer.
+/// Python splits payloads above this limit, but accepting or emitting those
+/// advertisements without semantic reassembly would not be wire-compatible.
+fn ensure_single_segment_internal_resource_size(
+    size: usize,
+) -> Result<(), crate::resource::ResourceError> {
+    if size > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
+        Err(crate::resource::ResourceError::ResourceTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
 /// Link statistics for observability
 #[derive(Debug, Clone)]
 pub struct LinkStats {
@@ -209,8 +222,23 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     request_handlers:
         BTreeMap<(DestinationHash, [u8; TRUNCATED_HASHBYTES]), request::RequestHandlerEntry>,
     /// Pending outgoing requests, keyed by request_id.
-    /// Cleanup: removed on (a) response, (b) timeout, (c) link close.
+    /// Cleanup: removed on (a) response, (b) timeout, (c) correlated Resource
+    /// transfer failure, or (d) link close.
     pending_requests: BTreeMap<[u8; TRUNCATED_HASHBYTES], request::PendingRequest>,
+    /// Request-Resource upload hash to request ID correlation.
+    ///
+    /// Entries exist only while a request body is being uploaded as a
+    /// Resource. Completion arms the response timeout; failure terminates the
+    /// request immediately. Every pending-request terminal path also removes
+    /// its correlation entry.
+    request_resource_uploads: BTreeMap<[u8; 32], [u8; TRUNCATED_HASHBYTES]>,
+    /// Response-Resource download hash to pending request ID correlation.
+    ///
+    /// An accepted response Resource suspends the ordinary request-response
+    /// timeout while the Resource engine owns transfer liveness. Failure
+    /// terminates the request immediately; successful response decoding and
+    /// every other pending-request terminal path remove the correlation.
+    response_resource_downloads: BTreeMap<[u8; 32], [u8; TRUNCATED_HASHBYTES]>,
     /// Link establishment retry state, keyed by link_id.
     /// When a link request times out, the retry state determines whether
     /// to re-attempt with fresh keys or emit LinkClosed::Timeout.
@@ -290,6 +318,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             next_mgmt_announce_ms: None,
             request_handlers: BTreeMap::new(),
             pending_requests: BTreeMap::new(),
+            request_resource_uploads: BTreeMap::new(),
+            response_resource_downloads: BTreeMap::new(),
             link_retry_state: BTreeMap::new(),
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
@@ -641,6 +671,31 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok(self.process_events_and_actions())
     }
 
+    /// Encrypt plaintext for a known Single destination.
+    ///
+    /// The destination identity must already be remembered (normally through
+    /// announce processing). If the announce also supplied a ratchet public
+    /// key, this method uses it automatically. Exposing the exact encryption
+    /// path used by [`send_single_packet`](Self::send_single_packet) lets
+    /// higher-level protocols such as LXMF prepare paper and propagation
+    /// payloads without duplicating identity/ratchet lookup or RNG handling.
+    pub fn encrypt_for_destination(
+        &mut self,
+        dest_hash: &DestinationHash,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, send::SendError> {
+        let ratchet_key = self.transport.get_ratchet(dest_hash);
+        let identity = self
+            .transport
+            .storage()
+            .get_identity(dest_hash.as_bytes())
+            .ok_or(send::SendError::EncryptionFailed)?;
+
+        identity
+            .encrypt_for_destination(plaintext, ratchet_key.as_ref(), &mut self.rng)
+            .map_err(|_| send::SendError::EncryptionFailed)
+    }
+
     /// Send unreliable data via single packet
     ///
     /// This builds and sends a single data packet to the destination.
@@ -667,19 +722,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             HeaderType, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
         };
 
-        // Look up ratchet key for forward-secure encryption (Python Identity.encrypt).
-        let ratchet_key = self.transport.get_ratchet(dest_hash);
-
-        // Encrypt payload using remote identity from storage.
-        // Access transport.storage() directly to allow disjoint borrow of self.rng.
-        let payload =
-            if let Some(identity) = self.transport.storage().get_identity(dest_hash.as_bytes()) {
-                identity
-                    .encrypt_for_destination(data, ratchet_key.as_ref(), &mut self.rng)
-                    .map_err(|_| send::SendError::EncryptionFailed)?
-            } else {
-                return Err(send::SendError::EncryptionFailed);
-            };
+        let payload = self.encrypt_for_destination(dest_hash, data)?;
 
         let packet = crate::packet::Packet {
             flags: PacketFlags {
@@ -726,7 +769,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ///
     /// Call this after receiving `NodeEvent::PacketProofRequested` if the
     /// application decides to prove delivery. Uses path-table routing
-    /// to reach the original sender.
+    /// to reach the original sender when no receiving interface is available.
     ///
     /// # Arguments
     /// * `packet_hash` - The full SHA256 hash from `NodeEvent::PacketProofRequested`
@@ -735,6 +778,28 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         packet_hash: &[u8; 32],
         destination_hash: &DestinationHash,
+    ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
+        self.send_proof_inner(packet_hash, destination_hash, None)
+    }
+
+    /// Send a proof for a received single packet on the interface it arrived on.
+    ///
+    /// This mirrors Python's `packet.prove()` behaviour for application-level
+    /// proofs, where the packet context carries the return interface.
+    pub fn send_proof_on_interface(
+        &mut self,
+        packet_hash: &[u8; 32],
+        destination_hash: &DestinationHash,
+        interface_index: usize,
+    ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
+        self.send_proof_inner(packet_hash, destination_hash, Some(interface_index))
+    }
+
+    fn send_proof_inner(
+        &mut self,
+        packet_hash: &[u8; 32],
+        destination_hash: &DestinationHash,
+        receiving_interface: Option<usize>,
     ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
         let identity = self
             .destinations
@@ -746,7 +811,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             packet_hash,
             destination_hash.as_bytes(),
             identity,
-            None, // path-based routing for App strategy
+            receiving_interface,
         )?;
 
         Ok(self.process_events_and_actions())
@@ -936,7 +1001,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             request::PendingRequest {
                 link_id: *link_id,
                 request_id,
-                sent_at_ms: now_ms,
+                response_started_at_ms: Some(now_ms),
                 timeout_ms: timeout,
             },
         );
@@ -945,6 +1010,126 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.route_link_packet(link_id, &raw_packet);
 
         Ok((request_id, self.process_events_and_actions()))
+    }
+
+    /// Send a request whose encoded payload exceeds the Link MDU as a Resource.
+    ///
+    /// This is the Resource counterpart to [`send_request`](Self::send_request).
+    /// It uses the same msgpack `[timestamp, path_hash, data]` payload, computes
+    /// `request_id = truncated_hash(packed_request)`, and marks the Resource
+    /// advertisement as a request so the peer accepts and dispatches it through
+    /// its registered request handler automatically. This mirrors Python
+    /// `Link.request()`'s large-payload fallback.
+    pub fn send_request_resource(
+        &mut self,
+        link_id: &LinkId,
+        path: &str,
+        data: Option<&[u8]>,
+        timeout_ms: Option<u64>,
+    ) -> Result<
+        (
+            [u8; TRUNCATED_HASHBYTES],
+            [u8; 32],
+            crate::transport::TickOutput,
+        ),
+        crate::resource::ResourceError,
+    > {
+        use crate::packet::PacketContext;
+        use crate::resource::msgpack::{
+            write_bin, write_fixarray_header, write_float64, write_nil,
+        };
+        use crate::resource::outgoing::OutgoingResource;
+        use crate::resource::ResourceError;
+
+        let link_id = &self.resolve_link_id(link_id);
+        let now_ms = self.transport.clock().now_ms();
+
+        let link = self
+            .links
+            .get(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        if !link.is_active() {
+            return Err(ResourceError::LinkNotActive);
+        }
+        if link.has_outgoing_resource() {
+            return Err(ResourceError::TransferInProgress);
+        }
+
+        let path_hash = crate::crypto::truncated_hash(path.as_bytes());
+        let timestamp = now_ms as f64 / 1000.0;
+        let mut packed = Vec::new();
+        write_fixarray_header(&mut packed, 3);
+        write_float64(&mut packed, timestamp);
+        write_bin(&mut packed, &path_hash);
+        if let Some(data) = data {
+            debug_assert!(
+                {
+                    let mut position = 0;
+                    crate::resource::msgpack::skip_msgpack_value(data, &mut position).is_some()
+                        && position == data.len()
+                },
+                "data must be exactly one valid msgpack value"
+            );
+            packed.extend_from_slice(data);
+        } else {
+            write_nil(&mut packed);
+        }
+
+        ensure_single_segment_internal_resource_size(packed.len())?;
+
+        let request_id = crate::crypto::truncated_hash(&packed);
+        let rtt_ms = link.rtt_ms();
+        let timeout = timeout_ms.unwrap_or_else(|| {
+            rtt_ms
+                .saturating_mul(crate::constants::TRAFFIC_TIMEOUT_FACTOR)
+                .saturating_add(crate::constants::RESPONSE_MAX_GRACE_TIME_MS)
+                .saturating_add(1250)
+        });
+
+        let outgoing = OutgoingResource::new_request(
+            &packed,
+            &request_id,
+            link,
+            true,
+            timeout,
+            &mut self.rng,
+            now_ms,
+        )?;
+        let resource_hash = *outgoing.resource_hash();
+        let advertisement = outgoing.adv_packet().to_vec();
+
+        let link = self
+            .links
+            .get_mut(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.set_outgoing_resource(outgoing);
+        let packet = match link.build_data_packet_with_context(
+            &advertisement,
+            PacketContext::ResourceAdv,
+            &mut self.rng,
+        ) {
+            Ok(packet) => packet,
+            Err(error) => {
+                link.clear_outgoing_resource();
+                crate::tracing::debug!("Failed to build request Resource ADV packet: {error}");
+                return Err(ResourceError::InvalidRequest);
+            }
+        };
+
+        self.pending_requests.insert(
+            request_id,
+            request::PendingRequest {
+                link_id: *link_id,
+                request_id,
+                response_started_at_ms: None,
+                timeout_ms: timeout,
+            },
+        );
+        self.request_resource_uploads
+            .insert(resource_hash, request_id);
+        self.route_link_packet(link_id, &packet);
+
+        Ok((request_id, resource_hash, self.process_events_and_actions()))
     }
 
     /// Send a response to a received request.
@@ -1168,6 +1353,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         write_fixarray_header(&mut wrapped, 2);
         write_bin(&mut wrapped, request_id);
         wrapped.extend_from_slice(response_data);
+        ensure_single_segment_internal_resource_size(wrapped.len())?;
 
         let link = self
             .links
@@ -1244,6 +1430,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::resource::ResourceError;
 
         let now_ms = self.transport.clock().now_ms();
+
+        let combined_size = data
+            .len()
+            .checked_add(metadata.len())
+            .and_then(|size| size.checked_add(3))
+            .ok_or(ResourceError::ResourceTooLarge)?;
+        ensure_single_segment_internal_resource_size(combined_size)?;
 
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
         // link) so every links.get/get_mut and the route use the wire id.
@@ -1918,6 +2111,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.handle_transport_event(event);
         }
 
+        // Resource-backed request phases use the Resource watchdog instead of
+        // the ordinary response timeout. Reconcile sender and receiver
+        // outcomes before publishing events and computing the next deadline so
+        // callers observe semantic request failure in the same tick.
+        self.reconcile_request_resource_outcomes();
+
         // Collect all actions, events, and next deadline
         let actions = self.transport.drain_actions();
         let mut events = core::mem::take(&mut self.events);
@@ -2217,7 +2416,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Expire all receipts as of `now_ms` without triggering retransmit (test-only)
     #[cfg(test)]
     pub(crate) fn expire_receipts(&mut self, now_ms: u64) {
-        self.receipt_tracker.expire(now_ms);
+        let _ = self.receipt_tracker.expire(now_ms);
     }
 
     // Internal: Event Handling
@@ -2371,6 +2570,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         self.events.push(NodeEvent::PacketProofRequested {
                             packet_hash,
                             destination_hash: dest_hash,
+                            interface_index,
                         });
                     }
                     ProofStrategy::None => {}
@@ -2494,6 +2694,16 @@ mod tests {
         assert_eq!(node.active_link_count(), 0);
         assert_eq!(node.pending_link_count(), 0);
         assert_eq!(node.default_proof_strategy(), ProofStrategy::None);
+    }
+
+    #[test]
+    fn test_internal_resource_single_segment_size_boundary() {
+        let max = crate::resource::RESOURCE_MAX_EFFICIENT_SIZE;
+        assert!(ensure_single_segment_internal_resource_size(max).is_ok());
+        assert!(matches!(
+            ensure_single_segment_internal_resource_size(max + 1),
+            Err(crate::resource::ResourceError::ResourceTooLarge)
+        ));
     }
 
     #[test]
@@ -3891,6 +4101,187 @@ mod tests {
             .iter()
             .any(|e| matches!(e, NodeEvent::MessageReceived { .. }));
         assert!(has_msg, "responder should get MessageReceived event");
+    }
+
+    #[test]
+    fn test_send_packet_on_link_plain_data() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+
+        let (packet_hash, output) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"plain link data")
+            .unwrap();
+
+        assert_eq!(
+            pair.initiator
+                .receipt_count_for_link(&pair.initiator_link_id),
+            1,
+            "plain link packet should retain a proof receipt"
+        );
+
+        assert!(
+            !output.actions.is_empty(),
+            "send_packet_on_link should produce actions"
+        );
+
+        let data = extract_broadcast_data(&output);
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+
+        assert!(
+            output.events.iter().any(|event| matches!(
+                event,
+                NodeEvent::LinkDataReceived { data, .. } if data == b"plain link data"
+            )),
+            "responder should get plain LinkDataReceived event"
+        );
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|event| matches!(event, NodeEvent::MessageReceived { .. })),
+            "plain link packets should not be delivered through Channel"
+        );
+
+        let proof = extract_broadcast_data(&output);
+        let confirmed = pair.initiator.handle_packet(InterfaceId(0), &proof);
+        assert!(confirmed.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryConfirmed {
+                link_id,
+                packet_hash: confirmed_hash,
+            } if *link_id == pair.initiator_link_id && *confirmed_hash == packet_hash
+        )));
+        assert_eq!(
+            pair.initiator
+                .receipt_count_for_link(&pair.initiator_link_id),
+            0,
+            "raw receipt should be removed after its proof"
+        );
+    }
+
+    #[test]
+    fn raw_link_receipt_deadline_is_derived_from_rtt() {
+        use crate::constants::TRAFFIC_TIMEOUT_FACTOR;
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+        let rtt_ms = 2_000;
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .set_rtt_ms(rtt_ms);
+
+        let (packet_hash, _) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"rtt deadline")
+            .unwrap();
+        let deadline = TEST_TIME_MS + rtt_ms * TRAFFIC_TIMEOUT_FACTOR;
+
+        assert_eq!(
+            pair.initiator.receipt_tracker.earliest_expiry(),
+            Some(deadline),
+            "raw Link receipts must use Python's RTT-derived timeout"
+        );
+
+        pair.initiator.transport().clock().set(deadline - 1);
+        let waiting = pair.initiator.handle_timeout();
+        assert_eq!(pair.initiator.receipt_count(), 1);
+        assert!(!waiting.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+
+        pair.initiator.transport().clock().set(deadline);
+        let timed_out = pair.initiator.handle_timeout();
+        assert_eq!(pair.initiator.receipt_count(), 0);
+        assert!(timed_out.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed {
+                link_id,
+                packet_hash: hash,
+            } if *link_id == pair.initiator_link_id && *hash == packet_hash
+        )));
+
+        let repeated = pair.initiator.handle_timeout();
+        assert!(!repeated.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+    }
+
+    #[test]
+    fn raw_link_receipt_can_outlive_the_old_fixed_timeout() {
+        use crate::constants::{DATA_RECEIPT_TIMEOUT_MS, TRAFFIC_TIMEOUT_FACTOR};
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+        let rtt_ms = 6_000;
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .set_rtt_ms(rtt_ms);
+
+        let (packet_hash, _) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"slow link")
+            .unwrap();
+        let deadline = TEST_TIME_MS + rtt_ms * TRAFFIC_TIMEOUT_FACTOR;
+        assert!(deadline > TEST_TIME_MS + DATA_RECEIPT_TIMEOUT_MS);
+
+        pair.initiator
+            .transport()
+            .clock()
+            .set(TEST_TIME_MS + DATA_RECEIPT_TIMEOUT_MS);
+        let old_deadline = pair.initiator.handle_timeout();
+        assert_eq!(pair.initiator.receipt_count(), 1);
+        assert!(!old_deadline.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+
+        pair.initiator.transport().clock().set(deadline);
+        let timed_out = pair.initiator.handle_timeout();
+        assert!(timed_out.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+    }
+
+    #[test]
+    fn late_raw_link_proof_is_ignored_after_rtt_deadline() {
+        use crate::constants::TRAFFIC_TIMEOUT_FACTOR;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+        let rtt_ms = 2_000;
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .set_rtt_ms(rtt_ms);
+
+        let (packet_hash, sent) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"late proof")
+            .unwrap();
+        let data = extract_broadcast_data(&sent);
+        let proved = pair.responder.handle_packet(InterfaceId(0), &data);
+        let proof = extract_broadcast_data(&proved);
+
+        pair.initiator
+            .transport()
+            .clock()
+            .set(TEST_TIME_MS + rtt_ms * TRAFFIC_TIMEOUT_FACTOR);
+        let timeout = pair.initiator.handle_timeout();
+        assert!(timeout.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
+
+        let late = pair.initiator.handle_packet(InterfaceId(0), &proof);
+        assert!(!late.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryConfirmed { packet_hash: hash, .. } if *hash == packet_hash
+        )));
     }
 
     // The responder can originate a channel message (the initiator need not
@@ -5913,7 +6304,7 @@ mod tests {
     #[test]
     fn test_single_packet_prove_app_emits_event_and_send_proof_works() {
         // Bug 2 fix: ProofStrategy::App emits NodeEvent::PacketProofRequested
-        // and the app can call NodeCore::send_proof() to respond.
+        // and the app can call NodeCore::send_proof_on_interface() to respond.
         use crate::transport::{InterfaceId, PathEntry};
 
         let recv_identity = Identity::generate(&mut OsRng);
@@ -5933,8 +6324,9 @@ mod tests {
         let dest_hash = *dest.hash();
         receiver.register_destination(dest);
 
-        // Receiver needs an interface and a path back to sender for send_proof()
-        let recv_iface = receiver
+        // Receiver needs an interface so the proof can be emitted back on the
+        // same inbound interface, mirroring Python packet.prove().
+        let _recv_iface = receiver
             .transport
             .register_interface(alloc::boxed::Box::new(MockInterface::new("recv_if", 1)));
 
@@ -5991,11 +6383,12 @@ mod tests {
                 NodeEvent::PacketProofRequested {
                     packet_hash,
                     destination_hash,
-                } => Some((*packet_hash, *destination_hash)),
+                    interface_index,
+                } => Some((*packet_hash, *destination_hash, *interface_index)),
                 _ => None,
             })
             .expect("ProofStrategy::App should emit NodeEvent::PacketProofRequested");
-        let (packet_hash, req_dest_hash) = proof_req;
+        let (packet_hash, req_dest_hash, req_iface) = proof_req;
 
         // Must NOT have any auto-generated proof action
         let has_send_action = recv_output
@@ -6007,22 +6400,10 @@ mod tests {
             "ProofStrategy::App must NOT auto-generate a proof"
         );
 
-        // Now the app decides to prove: set up a path on receiver for send_proof()
-        // (In real usage the path would exist from the announce; here we add it manually)
-        receiver.transport.insert_path(
-            dest_hash.into_bytes(),
-            PathEntry {
-                hops: 1,
-                expires_ms: u64::MAX,
-                interface_index: recv_iface,
-                random_blobs: Vec::new(),
-                next_hop: None,
-            },
-        );
-
-        // Call send_proof(). Bug 2 fix: this method now exists
+        // Call send_proof_on_interface(). This mirrors Python packet.prove()
+        // and does not require a path-table entry for the receiving destination.
         let proof_output = receiver
-            .send_proof(&packet_hash, &req_dest_hash)
+            .send_proof_on_interface(&packet_hash, &req_dest_hash, req_iface)
             .expect("send_proof should succeed");
 
         // Should have a SendPacket action containing the proof
@@ -6197,6 +6578,50 @@ mod tests {
             received_data, payload,
             "decrypted data should match original plaintext"
         );
+    }
+
+    #[test]
+    fn test_encrypt_for_destination_uses_known_ratchet() {
+        let receiver_identity = Identity::generate(&mut OsRng);
+        let receiver_public = receiver_identity.public_key_bytes();
+        let mut destination = Destination::new(
+            Some(receiver_identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["paper"],
+        )
+        .unwrap();
+        destination
+            .enable_ratchets(&mut OsRng, TEST_TIME_MS)
+            .unwrap();
+        destination.set_enforce_ratchets(true);
+
+        let destination_hash = *destination.hash();
+        let ratchet_public = destination.current_ratchet_public().unwrap();
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut sender = NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+        sender.remember_identity(
+            destination_hash,
+            Identity::from_public_key_bytes(&receiver_public).unwrap(),
+        );
+        sender.storage_mut().remember_known_ratchet(
+            destination_hash.into_bytes(),
+            ratchet_public,
+            TEST_TIME_MS,
+        );
+
+        let plaintext = b"paper message payload";
+        let ciphertext = sender
+            .encrypt_for_destination(&destination_hash, plaintext)
+            .unwrap();
+        assert_eq!(destination.decrypt(&ciphertext).unwrap(), plaintext);
+
+        let unknown_hash = DestinationHash::new([0x55; TRUNCATED_HASHBYTES]);
+        assert!(matches!(
+            sender.encrypt_for_destination(&unknown_hash, plaintext),
+            Err(send::SendError::EncryptionFailed)
+        ));
     }
 
     #[test]
@@ -7956,6 +8381,151 @@ mod tests {
     }
 
     #[test]
+    fn test_internal_resource_senders_reject_split_sized_payloads() {
+        use crate::resource::{ResourceError, RESOURCE_MAX_EFFICIENT_SIZE};
+
+        let mut pair = establish_nodecore_link_pair();
+        let raw = alloc::vec![0x5a; RESOURCE_MAX_EFFICIENT_SIZE];
+        let mut encoded = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded, &raw);
+
+        assert!(matches!(
+            pair.initiator.send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded),
+                Some(60_000),
+            ),
+            Err(ResourceError::ResourceTooLarge)
+        ));
+
+        let request_id = [0x61; TRUNCATED_HASHBYTES];
+        assert!(matches!(
+            pair.responder
+                .send_response_resource(&pair.responder_link_id, &request_id, &encoded,),
+            Err(ResourceError::ResourceTooLarge)
+        ));
+
+        assert!(matches!(
+            pair.responder
+                .send_file_response(&pair.responder_link_id, &request_id, &raw, &[],),
+            Err(ResourceError::ResourceTooLarge)
+        ));
+    }
+
+    #[test]
+    fn test_split_request_resource_advertisement_is_rejected() {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceAdvertisement;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let mut encoded = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded, &alloc::vec![0x33; 1_400]);
+        let _ = pair
+            .initiator
+            .send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded),
+                Some(60_000),
+            )
+            .unwrap();
+
+        let mut advertisement = ResourceAdvertisement::unpack(
+            pair.initiator
+                .link(&pair.initiator_link_id)
+                .unwrap()
+                .outgoing_resource()
+                .unwrap()
+                .adv_packet(),
+        )
+        .unwrap();
+        advertisement.flags.split = true;
+        advertisement.total_segments = 2;
+        let packet = pair
+            .initiator
+            .link(&pair.initiator_link_id)
+            .unwrap()
+            .build_data_packet_with_context(
+                &advertisement.pack(),
+                PacketContext::ResourceAdv,
+                &mut OsRng,
+            )
+            .unwrap();
+
+        let output = pair.responder.handle_packet(InterfaceId(0), &packet);
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::ResourceTransferStarted {
+                is_sender: false,
+                ..
+            }
+        )));
+        assert!(!pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .has_incoming_resource());
+    }
+
+    #[test]
+    fn test_split_response_resource_advertisement_is_rejected() {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceAdvertisement;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let (request_id, _) = pair
+            .initiator
+            .send_request(&pair.initiator_link_id, "/echo", None, Some(60_000))
+            .unwrap();
+        let mut response = Vec::new();
+        crate::resource::msgpack::write_bin(&mut response, &alloc::vec![0x44; 1_400]);
+        let _ = pair
+            .responder
+            .send_response_resource(&pair.responder_link_id, &request_id, &response)
+            .unwrap();
+
+        let mut advertisement = ResourceAdvertisement::unpack(
+            pair.responder
+                .link(&pair.responder_link_id)
+                .unwrap()
+                .outgoing_resource()
+                .unwrap()
+                .adv_packet(),
+        )
+        .unwrap();
+        advertisement.flags.split = true;
+        advertisement.total_segments = 2;
+        let packet = pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .build_data_packet_with_context(
+                &advertisement.pack(),
+                PacketContext::ResourceAdv,
+                &mut OsRng,
+            )
+            .unwrap();
+
+        let output = pair.initiator.handle_packet(InterfaceId(0), &packet);
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::ResourceTransferStarted {
+                is_sender: false,
+                ..
+            }
+        )));
+        assert!(!pair
+            .initiator
+            .link(&pair.initiator_link_id)
+            .unwrap()
+            .has_incoming_resource());
+        assert!(pair.initiator.pending_requests.contains_key(&request_id));
+    }
+
+    #[test]
     fn test_request_roundtrip() {
         let mut pair = establish_nodecore_link_pair();
         let dest_hash = *pair
@@ -8028,6 +8598,173 @@ mod tests {
         let (resp_rid, resp_payload) = response.expect("initiator should get ResponseReceived");
         assert_eq!(resp_rid, request_id);
         assert_eq!(resp_payload, response_data);
+    }
+
+    #[test]
+    fn test_resource_request_and_response_roundtrip() {
+        use crate::resource::ResourceStrategy;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let dest_hash = *pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .destination_hash();
+        register_echo_handler(
+            &mut pair.responder,
+            dest_hash,
+            request::RequestPolicy::AllowAll,
+        );
+
+        // The Link protocol must accept request Resources even when ordinary
+        // application Resources are rejected.
+        pair.responder
+            .set_resource_strategy(&pair.responder_link_id, ResourceStrategy::AcceptNone)
+            .unwrap();
+
+        let request_bytes: Vec<u8> = (0..1_400)
+            .map(|index| ((index * 73 + 19) & 0xff) as u8)
+            .collect();
+        let mut encoded_request = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+
+        assert!(matches!(
+            pair.initiator.send_request(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                None,
+            ),
+            Err(request::RequestError::PayloadTooLarge)
+        ));
+
+        let (request_id, _resource_hash, output) = pair
+            .initiator
+            .send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                None,
+            )
+            .unwrap();
+
+        let mut to_responder = extract_all_action_data(&output);
+        let mut to_initiator = Vec::new();
+        let mut received_request = None;
+        let mut surfaced_request_as_application_resource = false;
+
+        for _ in 0..128 {
+            if to_responder.is_empty() && to_initiator.is_empty() {
+                break;
+            }
+
+            for packet in core::mem::take(&mut to_responder) {
+                let output = pair.responder.handle_packet(InterfaceId(0), &packet);
+                for event in &output.events {
+                    match event {
+                        NodeEvent::RequestReceived {
+                            link_id,
+                            request_id,
+                            data,
+                            ..
+                        } => received_request = Some((*link_id, *request_id, data.clone())),
+                        NodeEvent::ResourceAdvertised { .. } => {
+                            surfaced_request_as_application_resource = true;
+                        }
+                        _ => {}
+                    }
+                }
+                to_initiator.extend(extract_all_action_data(&output));
+            }
+
+            for packet in core::mem::take(&mut to_initiator) {
+                let output = pair.initiator.handle_packet(InterfaceId(0), &packet);
+                to_responder.extend(extract_all_action_data(&output));
+            }
+        }
+
+        assert!(to_responder.is_empty() && to_initiator.is_empty());
+        assert!(
+            !surfaced_request_as_application_resource,
+            "request Resources bypass the application Resource strategy"
+        );
+        let (response_link_id, received_request_id, received_data) =
+            received_request.expect("request Resource must dispatch its registered handler");
+        assert_eq!(response_link_id, pair.responder_link_id);
+        assert_eq!(received_request_id, request_id);
+        assert_eq!(received_data, encoded_request);
+
+        let response_bytes: Vec<u8> = (0..1_600)
+            .map(|index| ((index * 47 + 101) & 0xff) as u8)
+            .collect();
+        let mut encoded_response = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_response, &response_bytes);
+
+        assert!(matches!(
+            pair.responder.send_response(
+                &response_link_id,
+                &received_request_id,
+                &encoded_response,
+            ),
+            Err(request::RequestError::PayloadTooLarge)
+        ));
+
+        let (response_resource_hash, output) = pair
+            .responder
+            .send_response_resource(&response_link_id, &received_request_id, &encoded_response)
+            .unwrap();
+
+        let mut to_initiator = extract_all_action_data(&output);
+        let mut to_responder = Vec::new();
+        let mut received_response = None;
+        let mut saw_response_resource_correlation = false;
+
+        for _ in 0..128 {
+            if to_responder.is_empty() && to_initiator.is_empty() {
+                break;
+            }
+
+            for packet in core::mem::take(&mut to_initiator) {
+                let output = pair.initiator.handle_packet(InterfaceId(0), &packet);
+                saw_response_resource_correlation |= pair
+                    .initiator
+                    .response_resource_downloads
+                    .get(&response_resource_hash)
+                    == Some(&request_id);
+                for event in &output.events {
+                    if let NodeEvent::ResponseReceived {
+                        request_id,
+                        response_data,
+                        ..
+                    } = event
+                    {
+                        received_response = Some((*request_id, response_data.clone()));
+                    }
+                }
+                to_responder.extend(extract_all_action_data(&output));
+            }
+
+            for packet in core::mem::take(&mut to_responder) {
+                let output = pair.responder.handle_packet(InterfaceId(0), &packet);
+                to_initiator.extend(extract_all_action_data(&output));
+            }
+        }
+
+        assert!(to_responder.is_empty() && to_initiator.is_empty());
+        let (response_request_id, response_data) =
+            received_response.expect("response Resource must complete the pending request");
+        assert_eq!(response_request_id, request_id);
+        assert_eq!(response_data, encoded_response);
+        assert!(
+            saw_response_resource_correlation,
+            "an accepted response Resource must be correlated while downloading"
+        );
+        assert!(!pair.initiator.pending_requests.contains_key(&request_id));
+        assert!(!pair
+            .initiator
+            .response_resource_downloads
+            .contains_key(&response_resource_hash));
     }
 
     #[test]
@@ -8643,6 +9380,531 @@ mod tests {
             _ => None,
         });
         assert_eq!(timed_out, Some(request_id), "should emit RequestTimedOut");
+    }
+
+    #[test]
+    fn test_request_resource_timeout_starts_after_sender_completion() {
+        let mut pair = establish_nodecore_link_pair();
+        let request_bytes = alloc::vec![0x5a; 1_400];
+        let mut encoded_request = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+
+        let (request_id, resource_hash, _output) = pair
+            .initiator
+            .send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(100),
+            )
+            .unwrap();
+
+        assert_eq!(
+            pair.initiator
+                .pending_requests
+                .get(&request_id)
+                .and_then(|pending| pending.response_started_at_ms),
+            None,
+            "a request Resource must not arm the response timeout while uploading"
+        );
+        assert_eq!(
+            pair.initiator.request_resource_uploads.get(&resource_hash),
+            Some(&request_id)
+        );
+
+        // Advancing far beyond the response timeout does not expire an upload;
+        // the Resource engine owns its independent transfer deadline.
+        pair.initiator.transport().clock().advance(1_000);
+        let now_ms = pair.initiator.transport().clock().now_ms();
+        pair.initiator.check_request_timeouts(now_ms);
+        assert!(pair.initiator.pending_requests.contains_key(&request_id));
+        assert!(!pair
+            .initiator
+            .events
+            .iter()
+            .any(|event| matches!(event, NodeEvent::RequestTimedOut { .. })));
+
+        // A successful sender completion starts a fresh response deadline at
+        // the completion time and consumes the upload correlation.
+        pair.initiator.events.push(NodeEvent::ResourceCompleted {
+            link_id: pair.initiator_link_id,
+            resource_hash,
+            data: Vec::new(),
+            metadata: None,
+            is_sender: true,
+            segment_index: 1,
+            total_segments: 1,
+        });
+        let completion_time = pair.initiator.transport().clock().now_ms();
+        let output = pair.initiator.process_events_and_actions();
+        assert!(!output
+            .events
+            .iter()
+            .any(|event| matches!(event, NodeEvent::RequestTimedOut { .. })));
+        assert_eq!(
+            pair.initiator
+                .pending_requests
+                .get(&request_id)
+                .and_then(|pending| pending.response_started_at_ms),
+            Some(completion_time)
+        );
+        assert!(!pair
+            .initiator
+            .request_resource_uploads
+            .contains_key(&resource_hash));
+
+        pair.initiator.transport().clock().advance(100);
+        let now_ms = pair.initiator.transport().clock().now_ms();
+        pair.initiator.check_request_timeouts(now_ms);
+        assert!(pair.initiator.pending_requests.contains_key(&request_id));
+
+        pair.initiator.transport().clock().advance(1);
+        let now_ms = pair.initiator.transport().clock().now_ms();
+        pair.initiator.check_request_timeouts(now_ms);
+        let output = pair.initiator.process_events_and_actions();
+        assert!(output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::RequestTimedOut {
+                request_id: timed_out,
+                ..
+            } if *timed_out == request_id
+        )));
+    }
+
+    #[test]
+    fn test_request_resource_sender_failure_fails_request_immediately() {
+        let mut pair = establish_nodecore_link_pair();
+        let request_bytes = alloc::vec![0xa5; 1_400];
+        let mut encoded_request = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+        let (request_id, resource_hash, _output) = pair
+            .initiator
+            .send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(60_000),
+            )
+            .unwrap();
+
+        // Do not deliver the advertisement. Drive only the Resource watchdog
+        // so link-staleness maintenance cannot mask the upload outcome.
+        let mut events = Vec::new();
+        for _ in 0..crate::resource::RESOURCE_MAX_ADV_RETRIES {
+            pair.initiator.transport().clock().advance(100_000);
+            let now_ms = pair.initiator.transport().clock().now_ms();
+            pair.initiator.check_resource_timeouts(now_ms);
+            events.extend(pair.initiator.process_events_and_actions().events);
+        }
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    NodeEvent::ResourceFailed {
+                        resource_hash: failed,
+                        error: crate::resource::ResourceError::Timeout,
+                        is_sender: true,
+                        ..
+                    } if *failed == resource_hash
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    NodeEvent::RequestTimedOut {
+                        request_id: failed,
+                        ..
+                    } if *failed == request_id
+                ))
+                .count(),
+            1
+        );
+        assert!(!pair.initiator.pending_requests.contains_key(&request_id));
+        assert!(!pair
+            .initiator
+            .request_resource_uploads
+            .contains_key(&resource_hash));
+
+        // Once failed, later timeout passes cannot emit a duplicate outcome.
+        pair.initiator.transport().clock().advance(120_000);
+        let now_ms = pair.initiator.transport().clock().now_ms();
+        pair.initiator.check_request_timeouts(now_ms);
+        let output = pair.initiator.process_events_and_actions();
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::RequestTimedOut {
+                request_id: duplicate,
+                ..
+            } if *duplicate == request_id
+        )));
+    }
+
+    #[test]
+    fn test_response_resource_receiver_failure_fails_request_exactly_once() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let mut encoded_request = Vec::new();
+        crate::resource::msgpack::write_uint(&mut encoded_request, 1);
+        let (request_id, _output) = pair
+            .initiator
+            .send_request(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(100),
+            )
+            .unwrap();
+
+        let response_bytes = alloc::vec![0x7b; 1_600];
+        let mut encoded_response = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_response, &response_bytes);
+        let (resource_hash, output) = pair
+            .responder
+            .send_response_resource(&pair.responder_link_id, &request_id, &encoded_response)
+            .unwrap();
+        let adv = extract_broadcast_data(&output);
+
+        // Deliver only the ADV. The receiver accepts it and emits a REQ, but
+        // deliberately withholding that REQ/data drives the incoming Resource
+        // watchdog to its terminal failure.
+        let accepted = pair.initiator.handle_packet(InterfaceId(0), &adv);
+        assert!(accepted.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::ResourceTransferStarted {
+                resource_hash: started,
+                is_sender: false,
+                ..
+            } if *started == resource_hash
+        )));
+        assert_eq!(
+            pair.initiator
+                .response_resource_downloads
+                .get(&resource_hash),
+            Some(&request_id)
+        );
+        assert_eq!(
+            pair.initiator
+                .pending_requests
+                .get(&request_id)
+                .and_then(|pending| pending.response_started_at_ms),
+            None,
+            "the Resource watchdog must own liveness while downloading"
+        );
+
+        pair.initiator.transport().clock().advance(101);
+        let now_ms = pair.initiator.transport().clock().now_ms();
+        pair.initiator.check_request_timeouts(now_ms);
+        let output = pair.initiator.process_events_and_actions();
+        assert!(pair.initiator.pending_requests.contains_key(&request_id));
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::RequestTimedOut {
+                request_id: premature,
+                ..
+            } if *premature == request_id
+        )));
+
+        let mut events = Vec::new();
+        for _ in 0..crate::resource::RESOURCE_MAX_RETRIES {
+            pair.initiator.transport().clock().advance(100_000);
+            let now_ms = pair.initiator.transport().clock().now_ms();
+            pair.initiator.check_resource_timeouts(now_ms);
+            events.extend(pair.initiator.process_events_and_actions().events);
+        }
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    NodeEvent::ResourceFailed {
+                        resource_hash: failed,
+                        error: crate::resource::ResourceError::Timeout,
+                        is_sender: false,
+                        ..
+                    } if *failed == resource_hash
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    NodeEvent::RequestTimedOut {
+                        request_id: failed,
+                        ..
+                    } if *failed == request_id
+                ))
+                .count(),
+            1
+        );
+        assert!(!pair.initiator.pending_requests.contains_key(&request_id));
+        assert!(!pair
+            .initiator
+            .response_resource_downloads
+            .contains_key(&resource_hash));
+
+        // Neither watchdog can produce another semantic failure after the
+        // correlation and pending request have been consumed.
+        pair.initiator.transport().clock().advance(120_000);
+        let now_ms = pair.initiator.transport().clock().now_ms();
+        pair.initiator.check_resource_timeouts(now_ms);
+        pair.initiator.check_request_timeouts(now_ms);
+        let output = pair.initiator.process_events_and_actions();
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::RequestTimedOut {
+                request_id: duplicate,
+                ..
+            } if *duplicate == request_id
+        )));
+    }
+
+    #[test]
+    fn test_response_resource_correlation_cleans_on_completion_and_link_close() {
+        use crate::transport::InterfaceId;
+
+        // If a completed Resource does not decode into a semantic response,
+        // consume its correlation and restore a bounded response timeout.
+        let mut completion_pair = establish_nodecore_link_pair();
+        let mut encoded_request = Vec::new();
+        crate::resource::msgpack::write_uint(&mut encoded_request, 1);
+        let (request_id, _output) = completion_pair
+            .initiator
+            .send_request(
+                &completion_pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(60_000),
+            )
+            .unwrap();
+        let resource_hash = [0x42; 32];
+        completion_pair
+            .initiator
+            .pending_requests
+            .get_mut(&request_id)
+            .unwrap()
+            .response_started_at_ms = None;
+        completion_pair
+            .initiator
+            .response_resource_downloads
+            .insert(resource_hash, request_id);
+        completion_pair
+            .initiator
+            .events
+            .push(NodeEvent::ResourceCompleted {
+                link_id: completion_pair.initiator_link_id,
+                resource_hash,
+                data: Vec::new(),
+                metadata: None,
+                is_sender: false,
+                segment_index: 1,
+                total_segments: 1,
+            });
+        let completion_time = completion_pair.initiator.transport().clock().now_ms();
+        let output = completion_pair.initiator.process_events_and_actions();
+        assert!(!output
+            .events
+            .iter()
+            .any(|event| matches!(event, NodeEvent::RequestTimedOut { .. })));
+        assert!(!completion_pair
+            .initiator
+            .response_resource_downloads
+            .contains_key(&resource_hash));
+        assert_eq!(
+            completion_pair
+                .initiator
+                .pending_requests
+                .get(&request_id)
+                .and_then(|pending| pending.response_started_at_ms),
+            Some(completion_time)
+        );
+
+        // A real accepted response Resource is also pruned with its pending
+        // request when the link closes; LinkClosed remains the sole semantic
+        // notification for that terminal path.
+        let mut close_pair = establish_nodecore_link_pair();
+        let (request_id, _output) = close_pair
+            .initiator
+            .send_request(
+                &close_pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(60_000),
+            )
+            .unwrap();
+        let response_bytes = alloc::vec![0x39; 1_600];
+        let mut encoded_response = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_response, &response_bytes);
+        let (resource_hash, output) = close_pair
+            .responder
+            .send_response_resource(
+                &close_pair.responder_link_id,
+                &request_id,
+                &encoded_response,
+            )
+            .unwrap();
+        let adv = extract_broadcast_data(&output);
+        let _ = close_pair.initiator.handle_packet(InterfaceId(0), &adv);
+        assert_eq!(
+            close_pair
+                .initiator
+                .response_resource_downloads
+                .get(&resource_hash),
+            Some(&request_id)
+        );
+
+        let output = close_pair
+            .initiator
+            .close_link(&close_pair.initiator_link_id);
+        assert!(output
+            .events
+            .iter()
+            .any(|event| matches!(event, NodeEvent::LinkClosed { .. })));
+        assert!(!close_pair
+            .initiator
+            .pending_requests
+            .contains_key(&request_id));
+        assert!(!close_pair
+            .initiator
+            .response_resource_downloads
+            .contains_key(&resource_hash));
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::RequestTimedOut {
+                request_id: closed,
+                ..
+            } if *closed == request_id
+        )));
+    }
+
+    #[test]
+    fn test_request_resource_completion_does_not_override_response_download() {
+        let mut pair = establish_nodecore_link_pair();
+        let request_bytes = alloc::vec![0xa1; 1_400];
+        let mut encoded_request = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+        let (request_id, upload_hash, _output) = pair
+            .initiator
+            .send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(60_000),
+            )
+            .unwrap();
+        let response_hash = [0x93; 32];
+        pair.initiator
+            .response_resource_downloads
+            .insert(response_hash, request_id);
+
+        pair.initiator.events.push(NodeEvent::ResourceCompleted {
+            link_id: pair.initiator_link_id,
+            resource_hash: upload_hash,
+            data: Vec::new(),
+            metadata: None,
+            is_sender: true,
+            segment_index: 1,
+            total_segments: 1,
+        });
+        let _ = pair.initiator.process_events_and_actions();
+
+        assert_eq!(
+            pair.initiator
+                .pending_requests
+                .get(&request_id)
+                .and_then(|pending| pending.response_started_at_ms),
+            None,
+            "a late upload proof must not replace the active download watchdog"
+        );
+        assert!(!pair
+            .initiator
+            .request_resource_uploads
+            .contains_key(&upload_hash));
+        assert_eq!(
+            pair.initiator
+                .response_resource_downloads
+                .get(&response_hash),
+            Some(&request_id)
+        );
+    }
+
+    #[test]
+    fn test_request_resource_correlation_cleans_on_response_and_link_close() {
+        let request_bytes = alloc::vec![0x33; 1_400];
+        let mut encoded_request = Vec::new();
+        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+
+        let mut response_pair = establish_nodecore_link_pair();
+        let (request_id, resource_hash, _output) = response_pair
+            .initiator
+            .send_request_resource(
+                &response_pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(60_000),
+            )
+            .unwrap();
+        let mut response = Vec::new();
+        crate::resource::msgpack::write_fixarray_header(&mut response, 2);
+        crate::resource::msgpack::write_bin(&mut response, &request_id);
+        crate::resource::msgpack::write_uint(&mut response, 1);
+        response_pair
+            .initiator
+            .handle_response_payload(response_pair.initiator_link_id, &response);
+        assert!(response_pair.initiator.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::ResponseReceived {
+                request_id: received,
+                ..
+            } if *received == request_id
+        )));
+        assert!(!response_pair
+            .initiator
+            .request_resource_uploads
+            .contains_key(&resource_hash));
+
+        let mut close_pair = establish_nodecore_link_pair();
+        let (request_id, resource_hash, _output) = close_pair
+            .initiator
+            .send_request_resource(
+                &close_pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                Some(60_000),
+            )
+            .unwrap();
+        let output = close_pair
+            .initiator
+            .close_link(&close_pair.initiator_link_id);
+        assert!(output
+            .events
+            .iter()
+            .any(|event| matches!(event, NodeEvent::LinkClosed { .. })));
+        assert!(!close_pair
+            .initiator
+            .pending_requests
+            .contains_key(&request_id));
+        assert!(!close_pair
+            .initiator
+            .request_resource_uploads
+            .contains_key(&resource_hash));
+        assert!(!output.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::RequestTimedOut {
+                request_id: closed,
+                ..
+            } if *closed == request_id
+        )));
     }
 
     #[test]

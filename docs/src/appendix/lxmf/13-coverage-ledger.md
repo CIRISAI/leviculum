@@ -5,6 +5,16 @@ to the specification. Every **normative (N)** symbol maps to a section and a
 proof. Every **informative (I)** and **out-of-scope (X)** symbol carries a reason.
 A normative symbol with no section and proof is a coverage gap.
 
+This ledger preserves the original LXMF 0.9.6 source-line audit. Active Rust
+compatibility is locked to the 1.1.0 canonical fixture. Entries for `/offer`,
+propagation-node ingest, and `LXMPeer` describe the Python protocol only;
+`leviculum-lxmf` implements origin uploads and `/get` mailbox collection, not
+the server or peer state machine. The `/get` implementation is interoperable
+within one request/response Resource segment; Python's larger split form is a
+documented implementation gap rather than claimed coverage.
+Post-audit implementation and API differences introduced through LXMF 1.1.0
+are tracked separately in the [parity status](15-parity-status.md).
+
 Proof column: `vector` (a `[VEC-...]`), `computed` (derivation shown), `quoted`
 (byte/enum value cited verbatim), `n/a` (informative/out-of-scope).
 
@@ -22,10 +32,10 @@ Proof column: `vector` (a `[VEC-...]`), `computed` (derivation shown), `quoted`
 | `QR_ERROR_CORRECTION` | 103 | I | — | n/a (QR rendering) |
 | state constants | 14-21 | I | 06 | n/a (local lifecycle) |
 | `set_title/content_*`, `*_as_string` | 190-205 | N | 03 | vector VEC-MSG-1/3 |
-| `set_fields/get_fields` | 212-218 | N | 03, 04 | vector VEC-MSG-2 |
+| `set_fields/get_fields` | 212-218 | N | 03, 04 | vectors VEC-MSG-2/VEC-MSG-NEGATIVE-FIELD |
 | `validate_stamp` | 270 | N | 07 | vector VEC-STAMP-1 |
 | `get_stamp` | 293 | N | 07 | quoted |
-| `get_propagation_stamp` | 326 | N | 07, 10 | quoted |
+| `get_propagation_stamp` | 326 | N | 07, 10 | vector VEC-STAMP-PN |
 | `pack` | 352 | N | 03, 05 | vector VEC-MSG-1/2 |
 | `__as_packet` | 623 | N | 05, 06 | vector VEC-DLV-OPP/DIRECT |
 | `__as_resource` | 637 | N | 05, 06 | quoted |
@@ -55,7 +65,7 @@ Proof column: `vector` (a `[VEC-...]`), `computed` (derivation shown), `quoted`
 
 | Symbol(s) | file:line | Class | Section | Proof |
 |-----------|-----------|-------|---------|-------|
-| `WORKBLOCK_EXPAND_ROUNDS*`, `STAMP_SIZE` | 10-13 | N | 07 | quoted |
+| `WORKBLOCK_EXPAND_ROUNDS*`, `STAMP_SIZE` | 10-13 | N | 07 | vectors VEC-STAMP-1/VEC-STAMP-PN |
 | `stamp_workblock` | 18 | N | 07 | vector VEC-STAMP-1 |
 | `stamp_value` | 31 | N | 07 | vector VEC-STAMP-1 |
 | `stamp_valid` | 42 | N | 07 | vector VEC-STAMP-1 |

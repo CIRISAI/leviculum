@@ -44,19 +44,26 @@ interval). An implementation may use any scheduler.
 
 ## Persistence
 
-The reference persists to a writable storage path: the message store (one file
-per propagation message, named `transient_id_timestamp_stampvalue`), `peers`,
-`available_tickets`, `outbound_stamp_costs`, `locally_delivered_transient_ids`,
-`locally_processed_transient_ids`, and `node_stats`. The on-disk encoding (mostly
-msgpack) and file naming are implementation choices; only the messages and
-announces these structures drive onto the wire are normative. In libreticulum
-these map onto the `Storage` trait rather than a filesystem.
+The Python reference persists to a writable storage path: the message store
+(one file per propagation message, named
+`transient_id_timestamp_stampvalue`), `peers`, `available_tickets`,
+`outbound_stamp_costs`, `locally_delivered_transient_ids`,
+`locally_processed_transient_ids`, and `node_stats`. The on-disk encoding
+(mostly msgpack) and file naming are implementation choices; only the messages
+and announces these structures drive onto the wire are normative.
 
-## Sync state machine (`LXMPeer.py:17-22`)
+`leviculum-lxmf` checkpoints only its client/router state through
+`LxmfStorage`: outbound direct/opportunistic messages, delivered and processed
+IDs (including downloaded transient IDs), stamp costs, tickets, ignored
+destinations, and the next job deadline. It has no propagation message store,
+peer records, node statistics, or node-hosting persistence.
+
+## Python peer sync state machine (not implemented; `LXMPeer.py:17-22`)
 
 A propagation peer progresses `IDLE -> LINK_ESTABLISHING -> LINK_READY ->
 REQUEST_SENT -> RESPONSE_RECEIVED -> RESOURCE_TRANSFERRING -> IDLE`, with
 `STRATEGY_LAZY`/`STRATEGY_PERSISTENT` (default persistent) controlling whether a
 peer keeps syncing while unhandled messages remain. The states are local; the
-wire payloads they produce (`/offer`, the sync Resource) are normative
-([Propagation](10-propagation.md)).
+wire payloads they produce (`/offer`, the sync Resource) are documented for
+Python-reference completeness ([Propagation](10-propagation.md)); they are not
+part of the Rust client implementation.

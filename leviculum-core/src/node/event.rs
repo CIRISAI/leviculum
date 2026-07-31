@@ -194,6 +194,8 @@ pub enum NodeEvent {
         packet_hash: [u8; 32],
         /// Destination that received the packet
         destination_hash: DestinationHash,
+        /// Interface the packet was received on
+        interface_index: usize,
     },
 
     /// Application should decide whether to prove this link data packet
@@ -215,6 +217,18 @@ pub enum NodeEvent {
         /// The link that sent the data
         link_id: LinkId,
         /// Full SHA256 hash of the delivered packet
+        packet_hash: [u8; 32],
+    },
+
+    /// Delivery proof timeout for a plain link data packet.
+    ///
+    /// The deadline is derived from the Link RTT in the same way as Python's
+    /// `PacketReceipt`: `max(rtt * traffic_timeout_factor,
+    /// TRAFFIC_TIMEOUT_MIN_MS)`.
+    LinkDeliveryFailed {
+        /// The link that sent the data
+        link_id: LinkId,
+        /// Full SHA256 hash of the packet whose receipt timed out
         packet_hash: [u8; 32],
     },
 
@@ -419,6 +433,7 @@ impl NodeEvent {
             | NodeEvent::LinkClosed { link_id, .. }
             | NodeEvent::LinkProofRequested { link_id, .. }
             | NodeEvent::LinkDeliveryConfirmed { link_id, .. }
+            | NodeEvent::LinkDeliveryFailed { link_id, .. }
             | NodeEvent::ResourceAdvertised { link_id, .. }
             | NodeEvent::ResourceTransferStarted { link_id, .. }
             | NodeEvent::ResourceProgress { link_id, .. }
@@ -477,6 +492,7 @@ impl NodeEvent {
             | NodeEvent::MessageReceived { .. }
             | NodeEvent::LinkDataReceived { .. }
             | NodeEvent::LinkDeliveryConfirmed { .. }
+            | NodeEvent::LinkDeliveryFailed { .. }
             | NodeEvent::ChannelRetransmit { .. }
             | NodeEvent::ResourceProgress { .. } => EventClass::Data,
 
@@ -543,6 +559,7 @@ impl NodeEvent {
             NodeEvent::PacketProofRequested { .. } => "PacketProofRequested",
             NodeEvent::LinkProofRequested { .. } => "LinkProofRequested",
             NodeEvent::LinkDeliveryConfirmed { .. } => "LinkDeliveryConfirmed",
+            NodeEvent::LinkDeliveryFailed { .. } => "LinkDeliveryFailed",
             NodeEvent::ResourceAdvertised { .. } => "ResourceAdvertised",
             NodeEvent::ResourceTransferStarted { .. } => "ResourceTransferStarted",
             NodeEvent::ResourceProgress { .. } => "ResourceProgress",

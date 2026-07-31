@@ -168,11 +168,12 @@ All with additive facade accessors, unit and in-process tests, the `stats.c`
 acceptance program, docs, and ASan/LSan/TSan clean (the three-lock interface
 join has no lock-order issues).
 
-## Postponed: LXMF (messaging)
+## Postponed: LXMF C API (messaging)
 
-Out of scope until the Rust LXMF layer is implemented. After that, LXMF gets
-its own C API surface and a separate roadmap. Messenger, mail, and
-NomadNet-style apps depend on it.
+The `leviculum-lxmf` Rust layer is implemented as a separate `no_std + alloc`
+crate. Exposing it through `leviculum-ffi` remains out of scope for this
+roadmap; that work needs its own C ownership and event-surface design.
+Messenger, mail, and NomadNet-style apps depend on that future FFI layer.
 
 ## Ordering rationale
 
