@@ -259,7 +259,13 @@ _deb-stamp:
 # manifests install from. The Markdown is the single source: mdbook
 # publishes the same files, so the shipped manual pages and the online
 # documentation cannot drift apart.
+#
+# The selftest runs first because nothing downstream reads the roff: a
+# mangled conversion does not fail the build, it ships. It cost a silently
+# wrong lnomad(1) once already (a code span holding a backtick shifted
+# every span after it), so the conversions now have a standing guard.
 _deb-man:
+    @python3 scripts/md2man.py --selftest
     @python3 scripts/md2man.py --outdir target/man docs/src/man/*.1.md
 
 # amd64 musl-static .debs for all three packages: leviculum (the daemon

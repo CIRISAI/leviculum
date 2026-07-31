@@ -8,53 +8,45 @@ links interactively.
 ## Usage
 
 ```
-lnomad <address> [options]
+lnomad [url] [options]
 ```
 
-The address selects a destination and a page path:
+A URL names the node's destination address and the request path on it:
 
 ```
-<dest_hash>                     open the destination's /page/index.mu
-<dest_hash>:/page/about.mu      open a specific page
-<dest_hash>:/page/x.mu`a=1|b=2  carry preset query fields (var_a, var_b)
+<address>                     open the node's /page/index.mu
+<address>:/page/about.mu      open a specific page
+<address>:/page/x.mu`a=1|b=2  carry preset query fields (var_a, var_b)
+<address>:/file/manual.pdf    download a file instead of rendering a page
+:/page/about.mu              a local URL: the node of the page in view
 ```
 
-`<dest_hash>` is 32 hex characters (the 16-byte truncated destination hash).
+`<address>` is 32 hex characters (the 16-byte truncated destination hash).
+
+Leaving the address out makes the URL local — local to the page in view — but
+the `:` stays. A bare request path (`/page/about.mu`, no colon) names no node
+and is not a URL at all. It is rejected here exactly as the reference NomadNet
+browser rejects it, and the error names the missing `:`.
+
+The URL is optional. Started without one on a terminal, `lnomad` opens its
+start screen with the places panel showing — your bookmarks, and the nodes
+discovery has turned up. Without a terminal to browse in (piped, redirected, or
+`--print`) a URL is required, since there would be nothing to print.
 
 ## Discovering nodes
 
-Without a destination hash, `lnomad --discover` finds NomadNet page-hosting
-nodes by listening for their announces. Every NomadNet node announces the
-`nomadnetwork.node` destination, so the announces can be recognised and their
-destination hash and display name collected without knowing anything in advance:
+There is no discovery mode and no flag to turn it on: discovery runs
+continuously from startup, for the whole life of the browser. Every NomadNet
+node announces the `nomadnetwork.node` destination, so its announces can be
+recognised and its destination hash and display name collected without knowing
+anything about it in advance.
 
-```
-lnomad --discover                 listen (default 30s) and list nodes found
-lnomad --discover 60              listen for 60 seconds (bare positional)
-lnomad --discover --duration 60   listen for 60 seconds (explicit flag)
-```
-
-In `--discover` mode the positional argument is the listen duration in seconds,
-not a page address: `lnomad --discover 5` and `lnomad --discover --duration 5` are
-equivalent. A non-numeric positional is rejected, and giving both a positional
-and a `--duration` that disagree is an error.
-
-On a terminal, each node is printed as it is first seen, then a list is shown:
-
-```
-[N] <name>  <dest_hash>  hops=H  last-seen Xs ago
-```
-
-Enter a number to open that node's `/page/index.mu` in the browser, or `q` to
-quit. With `--print` or non-tty stdout, the accumulated list is printed after the
-listen window and the command exits. The discovered list is also reachable from
-the browser with the `d` (`nodes`) command, and `o <N>` opens a listed node.
-
-In the browser, discovery runs continuously in the background from startup: node
-announces are folded into the places panel whether or not a page is loading, so
-the list keeps filling while you read, scroll, or have a panel open. The registry
-is a bounded FIFO of the 500 most recent nodes (re-announces update in place; once
-full, the oldest-seen node is evicted), and is held in RAM only.
+Announces are folded into the places panel (`d`) whether or not a page is
+loading, so the list keeps filling while you read, scroll, or have a panel open.
+Until the first one arrives the panel says so rather than claiming there are
+none. The registry is a bounded FIFO of the 500 most recent nodes (re-announces
+update in place; once full, the oldest-seen node is evicted), and is held in RAM
+only — a node you want to keep belongs in the bookmarks.
 
 ### Options
 
@@ -72,27 +64,28 @@ full, the oldest-seen node is evicted), and is held in RAM only.
   overrides this and drops to monochrome.
 - `--width <n>`        render width (default: detected terminal width, else 80)
 - `--timeout <s>`      per-request timeout in seconds (default 30)
+- `--output <path>`    where a `/file/` download is saved: an existing directory
+  (or a path spelled with a trailing `/`) receives the file under its own name,
+  any other path names the exact file to write. Without it the file lands in the
+  current working directory
 - `--print`            fetch, render and print once, then exit
-- `--discover`         list NomadNet nodes seen from announces (no address needed)
-- `--duration <s>`     `--discover` listen window in seconds (default 30); may
-  also be given as the bare positional, e.g. `lnomad --discover <s>`
 
 When stdout is not a terminal, `lnomad` prints once and exits even without
-`--print`, so piping and redirection never block on the prompt.
+`--print`, so piping and redirection never block on the browser.
 
 ## Interactive keys
 
 On a terminal, `lnomad` opens a full-screen browser: a one-row top-bar (the page
-title, a `·`, and the address, with a right-aligned status cluster: a bookmark
-star, a cache bolt, and the hop count to the node), the scrollable page, and a
-footer. The footer is a strip of clickable button-hints where a keybinding and a
-button are the same thing: the navigation trio (`Alt-← back`, `Alt-→ forward`,
-`R reload`) first, then the current mode's actions. Each button's key reads
-bright and bold, its label muted; press the key or click the button. On a narrow
-terminal the footer drops the lowest-priority buttons and, if still too tight,
-collapses the rest to their keys. Links carry no `[N]` marker and there is
-no link legend; a link is set apart by its underline and colour, and is reached
-by focus, hint or click:
+title, a `·`, and the URL, with a right-aligned status cluster: a bookmark
+star, an identity key marker while identifying, a cache bolt, and the hop count
+to the node), the scrollable page, and a footer. The footer is a strip of
+clickable button-hints where a keybinding and a button are the same thing: the
+navigation trio (`Alt-← back`, `Alt-→ forward`, `R reload`) first, then the
+current mode's actions. Each button's key reads bright and bold, its label muted;
+press the key or click the button. On a narrow terminal the footer drops the
+lowest-priority buttons and, if still too tight, collapses the rest to their
+keys. Links carry no `[N]` marker and there is no link legend; a link is set
+apart by its underline and colour, and is reached by focus, hint or click:
 
 - `j` / `k`, `↓` / `↑`, `Ctrl-n` / `Ctrl-p`  scroll a line; `Ctrl-f` / `Ctrl-b`,
   `Ctrl-v`, `PageDown` / `PageUp`  page down / up; `Ctrl-d` / `Ctrl-u`  half a
@@ -102,11 +95,18 @@ by focus, hint or click:
 - `Enter`     follow the focused link
 - form fields, when focused: type to edit a text field, `Space` to toggle a
   checkbox / radio, `Esc` to leave field editing; a click focuses a field too
-- `f`         hint mode: type the label shown over a link (or the link's text)
+- `f`         hint mode: type the label shown over a link, a form field or a
+  top-bar control (or a link's text). A hinted link is followed, a hinted text
+  field is focused for editing, and a hinted checkbox or radio is toggled or
+  selected outright
 - `/`         in-page search: type a query, `Enter` highlights every match and
   jumps to the first; `n` / `N` cycle to the next / previous match, `Esc` clears
 - click       follow a link, activate a top-bar control, or press a footer button
-- `:`         enter an address
+- `:`         enter a URL
+- `m`         bookmark the current page (a click on the top-bar star does the same)
+- `y`         copy the focused link's or the current page's URL
+- `d`         open the places panel (bookmarks and discovered nodes)
+- `i`         identify to this node, or go back to anonymous
 - `R` / `Ctrl-R` / `F5`  reload the page (always refetches, bypassing the cache)
 - `t`         toggle the light / dark theme (correct a wrong auto-detection)
 - `Alt-←` / `Alt-→`  back / forward
@@ -120,9 +120,9 @@ by focus, hint or click:
 
 The focused or hovered link's target appears in a small floating field at the
 bottom-left of the content, just above the footer, so it never covers the
-clickable button-hints. Same-destination links (`:/page/x.mu`) resolve against
-the page currently in view; a followed link carries its preset (`f=v`) fields as
-`var_*` request variables.
+clickable button-hints. Local URLs (`:/page/x.mu`) resolve against the page
+currently in view; a followed link carries its preset (`f=v`) fields as `var_*`
+request variables.
 
 Recently viewed pages are held in an in-RAM cache (the last 50 distinct pages),
 so revisiting one, including stepping back and forward through history, renders
@@ -135,9 +135,21 @@ The places panel (`d`) takes the same up/down motions as the page scroll applied
 to its selection: `j` / `k`, `Ctrl-n` / `Ctrl-p`, arrows step a row; `Ctrl-f` /
 `Ctrl-b` and `Ctrl-d` / `Ctrl-u` jump several; `g` / `G`, `Home` / `End` go to
 the first / last entry. When the list is taller than the terminal the view
-follows the selection (and the wheel moves the selection), with a scrollbar on
-the border. `Enter` opens the selection, `x` deletes the selected bookmark,
-`Esc` / `d` close the panel.
+follows the selection, with a scrollbar on the border; the wheel scrolls that
+view without moving the selection, so every entry stays reachable.
+
+`Enter` opens the selection and a single click on a row opens it straight away;
+hovering a row highlights it. A bookmark row that is selected or hovered carries
+a right-aligned `×` marker: `x` or `Delete` removes the selected bookmark, and a
+click on the marker removes that row's. A deletion is announced in a toast and
+can be taken back with `u`, which restores the bookmark to its old position (one
+level of undo — a second deletion overwrites the stash). A click inside the panel
+but off an entry does nothing, a click outside closes it, and `Esc` / `d` close
+it too.
+
+Bookmarks persist in `${XDG_CONFIG_HOME:-~/.config}/lnomad/bookmarks.toml`; the
+discovered nodes beside them are the in-RAM registry described above and are
+gone at exit.
 
 ### Form fields and submitting
 
@@ -156,6 +168,45 @@ on Linux). Any other scheme (`file`, `javascript`, custom schemes) is refused
 and reported in a transient toast, since a page comes from an untrusted node and
 an arbitrary URI must never reach a system handler.
 
+A link to an LXMF address (`` `[Write me`lxmf@<hash>] ``, or the long
+`lxmf.delivery@<hash>` form) is an address, not a page. `lnomad` is a page
+browser with no message composer, so following such a link copies the
+destination hash to the clipboard and says so in a toast, ready to paste into a
+client that can send.
+
+### Identifying to a node
+
+By default `lnomad` browses anonymously: nothing about you reaches the node
+serving the page. `i` (or the footer's `identify` button) opts the current node
+in, and `i` again goes back to anonymous. While identifying, the top-bar cluster
+carries a 🔑 marker with the first eight hex characters of your own fingerprint,
+so the state with consequences is the visible one.
+
+The decision is per node and persists across runs in
+`${XDG_CONFIG_HOME:-~/.config}/lnomad/identify.toml`. The identity revealed is
+`lnomad`'s own, kept as `identity` in the same directory and minted on first
+use — not the shared instance's transport identity. Identifying binds to the
+link, not to the request, so toggling it reloads the page over a fresh link; a
+node that receives the identify sees a `remote_identity` on your requests and
+can attribute what you submit to you, which is what NomadNet's
+`identify_on_connect` does.
+
+### Downloads
+
+A `/file/` target is downloaded rather than rendered. Following a `/file/` link
+in the browser saves it under `$XDG_DOWNLOAD_DIR` (falling back to
+`$HOME/Downloads`) and reports the name, size and directory in a toast; `Esc`
+cancels a download in flight, just like a page load. Giving a `/file/` URL on
+the command line downloads it directly, without ever opening the TUI, and prints
+how many bytes were saved and where.
+
+The filename comes from the server's Resource metadata when it sends one, else
+from the URL's last path component. Either source is untrusted, so it is reduced
+to a bare basename — a name like `../../etc/passwd` can never write outside the
+target directory. An existing file is never overwritten silently: ` (1)`, ` (2)`
+and so on are appended until the name is free. The one exception is a `--output`
+that names an exact file, which opts into writing exactly there.
+
 The two bottom surfaces split cleanly. The bottom-left floating field carries the
 current pointer/page state (a focused/hovered link's target, or the loading
 spinner and path during a fetch) and stays as long as it applies. Transient notes
@@ -164,9 +215,8 @@ auto-dismissing toast floated at the bottom-right of the content; a toast clears
 after a few seconds or on the next key press. Neither covers the footer, which
 always keeps its clickable button-hints.
 
-## v1 limits
+## Anchors
 
-- A `#anchor` in a target (a followed link or the initial address) is resolved
-  against the page's anchors and scrolled to on load; an unknown anchor falls
-  back to the top of the page with a toast note.
-- `/file/` downloads are not supported.
+A `#anchor` in a target (a followed link or the initial URL) is resolved
+against the page's anchors and scrolled to on load; an unknown anchor falls back
+to the top of the page with a toast note.

@@ -3,7 +3,7 @@ name = "lnomad"
 # Versioned independently of the leviculum stack — see the note in
 # lblogd/Cargo.toml. A browser's releases track its own UI and rendering
 # work, not the protocol core it happens to be built from.
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

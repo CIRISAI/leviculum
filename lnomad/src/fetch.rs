@@ -318,36 +318,6 @@ impl Session {
             .await
     }
 
-    /// Run the NomadNet node discovery loop for `duration`, folding every node
-    /// announce seen on the event stream into the shared registry. `on_node` is
-    /// called with the discovered node each time one is inserted or refreshed, so
-    /// a caller can print the list as it grows. Returns when the duration elapses
-    /// or the event stream closes.
-    pub async fn run_discovery<F>(&mut self, duration: Duration, mut on_node: F)
-    where
-        F: FnMut(&DiscoveredNode),
-    {
-        let deadline = tokio::time::Instant::now() + duration;
-        loop {
-            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
-            else {
-                return;
-            };
-            if remaining.is_zero() {
-                return;
-            }
-            match self.next_node_announce(remaining).await {
-                Some(dest) => {
-                    if let Some(node) = self.registry.get_by_hash(&dest) {
-                        on_node(node);
-                    }
-                }
-                // Stream closed or the discovery window elapsed: stop cleanly.
-                None => return,
-            }
-        }
-    }
-
     /// Wait up to `timeout` for the next NomadNet node announce, fold it into the
     /// registry, and return its destination hash. Non-node announces seen while
     /// waiting are ignored by the filter and do not end the wait. Returns `None`
@@ -370,11 +340,6 @@ impl Session {
     /// The discovered NomadNet nodes, in discovery order.
     pub fn discovered_nodes(&self) -> Vec<&DiscoveredNode> {
         self.registry.nodes()
-    }
-
-    /// The discovered node at 1-based index `n`, matching the shown numbering.
-    pub fn discovered_node(&self, n: usize) -> Option<&DiscoveredNode> {
-        self.registry.get(n)
     }
 
     /// The friendly display name the announce registry knows for `dest_hash`, if

@@ -236,7 +236,8 @@ The web side is then `curl http://127.0.0.1:8080/`, the NomadNet side
 ```
 lblogd --config /tmp/lblogd-dev/lblogd.toml --print-hash   # the hash to dial
 lnomad --instance lblogd-dev --print <hash>:/page/index.mu
-lnomad --instance lblogd-dev --discover 20                 # see the announce
+lnomad --instance lblogd-dev                               # see it announced
+                                                           # in the places panel
 ```
 
 ## Deployment
