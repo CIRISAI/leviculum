@@ -118,7 +118,18 @@ pub fn cad_irq_params() -> [u8; 8] {
 ///
 /// `bw_hz` is zero before `configure_lora` has run, which is the one state
 /// in which the airtime is not computable; the window simply concludes.
-pub fn rx_extend_ms(flags: u16, bw_hz: u32, sf: u8, cr_denom: u8) -> Option<u64> {
+///
+/// `preamble_symbols` is the programmed preamble of the link (both ends run
+/// the same derived value): the frame still on the air carries it, so an
+/// extension sized from the preamble-8 formula would expire up to
+/// (preamble-8)*t_sym before the frame ends — 328 ms at SF12/BW125.
+pub fn rx_extend_ms(
+    flags: u16,
+    bw_hz: u32,
+    sf: u8,
+    cr_denom: u8,
+    preamble_symbols: u16,
+) -> Option<u64> {
     if bw_hz == 0 {
         return None;
     }
@@ -129,11 +140,12 @@ pub fn rx_extend_ms(flags: u16, bw_hz: u32, sf: u8, cr_denom: u8) -> Option<u64>
         return None;
     }
     Some(
-        crate::rnode::airtime_ms(
+        crate::rnode::airtime_ms_with_preamble(
             (crate::rnode::MAX_SINGLE_PAYLOAD + 1) as u32,
             bw_hz,
             sf,
             cr_denom,
+            preamble_symbols,
         )
         .max(1),
     )
@@ -202,6 +214,9 @@ mod tests {
     /// SF10 / 62.5 kHz / 4:5 — the slow end of the lab rig, where a single
     /// frame is seconds of airtime and the guard matters.
     const SLOW: (u32, u8, u8) = (62_500, 10, 5);
+    /// The rig's derived programmed preamble at the SLOW profile
+    /// (`rnode::derive_preamble_symbols(10, 5, 62_500)`).
+    const SLOW_PREAMBLE: u16 = 18;
 
     fn latch_mask(params: [u8; 8]) -> u16 {
         u16::from_be_bytes([params[0], params[1]])
@@ -264,10 +279,17 @@ mod tests {
     #[test]
     fn preamble_alone_extends_the_window() {
         let (bw, sf, cr) = SLOW;
-        let extend = rx_extend_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr).expect("guard must fire");
+        let extend = rx_extend_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, SLOW_PREAMBLE)
+            .expect("guard must fire");
         assert_eq!(
             extend,
-            crate::rnode::airtime_ms((crate::rnode::MAX_SINGLE_PAYLOAD + 1) as u32, bw, sf, cr)
+            crate::rnode::airtime_ms_with_preamble(
+                (crate::rnode::MAX_SINGLE_PAYLOAD + 1) as u32,
+                bw,
+                sf,
+                cr,
+                SLOW_PREAMBLE
+            )
         );
         // Worth stating as a number: at SF10/62.5k this is seconds, which is
         // why expiring the software wait mid-frame lost whole packets.
@@ -280,7 +302,7 @@ mod tests {
     #[test]
     fn header_alone_extends_the_window() {
         let (bw, sf, cr) = SLOW;
-        assert!(rx_extend_ms(IRQ_HEADER_VALID, bw, sf, cr).is_some());
+        assert!(rx_extend_ms(IRQ_HEADER_VALID, bw, sf, cr, SLOW_PREAMBLE).is_some());
     }
 
     #[test]
@@ -288,11 +310,23 @@ mod tests {
         let (bw, sf, cr) = SLOW;
         // RxDone wins even with a preamble still latched from the same frame.
         assert_eq!(
-            rx_extend_ms(IRQ_PREAMBLE_DETECTED | IRQ_RX_DONE, bw, sf, cr),
+            rx_extend_ms(
+                IRQ_PREAMBLE_DETECTED | IRQ_RX_DONE,
+                bw,
+                sf,
+                cr,
+                SLOW_PREAMBLE
+            ),
             None
         );
         assert_eq!(
-            rx_extend_ms(IRQ_PREAMBLE_DETECTED | IRQ_TIMEOUT, bw, sf, cr),
+            rx_extend_ms(
+                IRQ_PREAMBLE_DETECTED | IRQ_TIMEOUT,
+                bw,
+                sf,
+                cr,
+                SLOW_PREAMBLE
+            ),
             None
         );
     }
@@ -300,14 +334,20 @@ mod tests {
     #[test]
     fn a_silent_channel_is_not_extended() {
         let (bw, sf, cr) = SLOW;
-        assert_eq!(rx_extend_ms(0, bw, sf, cr), None);
+        assert_eq!(rx_extend_ms(0, bw, sf, cr, SLOW_PREAMBLE), None);
         // CAD bits are not evidence of an inbound frame.
-        assert_eq!(rx_extend_ms(IRQ_CAD_DETECTED, bw, sf, cr), None);
+        assert_eq!(
+            rx_extend_ms(IRQ_CAD_DETECTED, bw, sf, cr, SLOW_PREAMBLE),
+            None
+        );
     }
 
     #[test]
     fn an_unconfigured_radio_is_not_extended() {
-        assert_eq!(rx_extend_ms(IRQ_PREAMBLE_DETECTED, 0, 10, 5), None);
+        assert_eq!(
+            rx_extend_ms(IRQ_PREAMBLE_DETECTED, 0, 10, 5, SLOW_PREAMBLE),
+            None
+        );
     }
 
     /// The defect instance: a 184-byte announce at SF12/BW125/CR4:8 with the
@@ -391,11 +431,26 @@ mod tests {
     /// corpus reaches it, which is why it is asserted and not relied on.
     #[test]
     fn the_extension_tracks_the_settings() {
-        let fast = rx_extend_ms(IRQ_PREAMBLE_DETECTED, 500_000, 5, 5).expect("guard must fire");
+        // 94 is the derived programmed preamble at SF5 — 98.25 on-air symbols
+        // (6.3 ms at BW500), on top of the ~34 ms max-frame payload.
+        let fast = rx_extend_ms(IRQ_PREAMBLE_DETECTED, 500_000, 5, 5, 94).expect("guard must fire");
         let (bw, sf, cr) = SLOW;
-        let slow = rx_extend_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr).expect("guard must fire");
-        assert_eq!(fast, 35);
+        let slow = rx_extend_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, SLOW_PREAMBLE)
+            .expect("guard must fire");
+        assert_eq!(fast, 41);
         assert!(slow > 100 * fast, "slow={slow}ms fast={fast}ms");
         assert!(fast >= 1);
+    }
+
+    /// The extension charges the programmed preamble of the frame still on
+    /// the air: at the SLOW profile the derived 18 symbols are 10 symbols
+    /// (164 ms) more than the modem-default 8 the old formula assumed.
+    #[test]
+    fn the_extension_charges_the_programmed_preamble() {
+        let (bw, sf, cr) = SLOW;
+        let pre18 = rx_extend_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, SLOW_PREAMBLE)
+            .expect("guard must fire");
+        let pre8 = rx_extend_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, 8).expect("guard must fire");
+        assert!(pre18 - pre8 >= 163, "preamble delta {}ms", pre18 - pre8);
     }
 }

@@ -5030,7 +5030,7 @@ mod tests {
             "ready interface should short-circuit to None"
         );
         // Silence unused-import warning on non-LoRa path.
-        let _ = AirtimeCredit::new(125_000, 10, 8, 500);
+        let _ = AirtimeCredit::new(125_000, 10, 8, 18, 500);
     }
 
     /// When a queue head is NOT ready, return the MINIMUM over all
@@ -5047,7 +5047,7 @@ mod tests {
         // Two LoRa handles with different saturation, both have
         // not-ready heads; the earlier slot should win.
         for (idx, payload_charge) in [(0usize, 500u32), (1usize, 100u32)] {
-            let mut credit = AirtimeCredit::new(125_000, 10, 8, 500);
+            let mut credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
             credit.try_charge(payload_charge, now_ms).unwrap();
             let (_inc_tx, inc_rx) = tokio::sync::mpsc::channel(4);
             let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
@@ -5113,7 +5113,7 @@ mod tests {
         let mut registry = InterfaceRegistry::new();
 
         // LoRa handle (iface_idx=1), saturated bucket.
-        let mut saturated = AirtimeCredit::new(125_000, 10, 8, 500);
+        let mut saturated = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         saturated.try_charge(500, 0).unwrap();
         let (_li, l_inc_rx) = tokio::sync::mpsc::channel(4);
         let (l_out_tx, mut l_out_rx) = tokio::sync::mpsc::channel(4);
@@ -5254,7 +5254,7 @@ mod tests {
 
         let (_lora_inc_tx, lora_inc_rx) = tokio::sync::mpsc::channel(4);
         let (lora_out_tx, _lora_out_rx) = tokio::sync::mpsc::channel(4);
-        let mut lora_credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        let mut lora_credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         // Exhaust to guarantee earliest_fit_time > 0.
         lora_credit.try_charge(500, 0).unwrap();
         let lora_handle = InterfaceHandle {
@@ -5339,7 +5339,7 @@ mod tests {
         let mut registry = InterfaceRegistry::new();
         let (_inc_tx, inc_rx) = tokio::sync::mpsc::channel(4);
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
-        let credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        let credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         let expected_airtime = credit.max_airtime_ms();
         let handle = InterfaceHandle {
             info: InterfaceInfo {
@@ -5444,7 +5444,7 @@ mod tests {
         let mut registry = InterfaceRegistry::new();
         let (_inc_tx, inc_rx) = tokio::sync::mpsc::channel(4);
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
-        let credit = Arc::new(Mutex::new(AirtimeCredit::new(125_000, 7, 5, 500)));
+        let credit = Arc::new(Mutex::new(AirtimeCredit::new(125_000, 7, 5, 24, 500)));
         let handle = InterfaceHandle {
             info: InterfaceInfo {
                 id: InterfaceId(1),
@@ -5467,7 +5467,10 @@ mod tests {
         push_interface_state(&mut registry, &core);
         let sf7_jitter = core.lock().unwrap().announce_jitter_max_ms();
 
-        credit.lock().unwrap().update_radio_params(125_000, 10, 8);
+        credit
+            .lock()
+            .unwrap()
+            .update_radio_params(125_000, 10, 8, 18);
         push_interface_state(&mut registry, &core);
         let sf10_jitter = core.lock().unwrap().announce_jitter_max_ms();
 

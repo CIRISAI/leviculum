@@ -1,7 +1,8 @@
 //! Airtime credit bucket for LoRa-Serial interfaces.
 //!
 //! Models the per-interface airtime budget as a signed credit that
-//! decreases by `airtime_ms(len)` on every `try_send` and regenerates
+//! decreases by the packet's on-air time (programmed preamble included)
+//! on every `try_send` and regenerates
 //! at wall-clock rate. When a charge would push the credit below
 //! `threshold_ms`, the interface signals `BufferFull` instead of
 //! flooding the host-side serial queue (which on SF10 would absorb
@@ -11,7 +12,7 @@
 //! `leviculum-core`, so the `no_std` core stays free of host-side
 //! backpressure concerns.
 
-use leviculum_core::rnode::airtime_ms;
+use leviculum_core::rnode::airtime_ms_with_preamble;
 
 /// Leaky-bucket airtime accountant for a single LoRa interface.
 ///
@@ -28,18 +29,29 @@ pub(crate) struct AirtimeCredit {
     bw_hz: u32,
     sf: u8,
     cr: u8,
+    preamble_symbols: u16,
 }
 
 impl AirtimeCredit {
     /// Build a credit bucket for a given radio profile.
     ///
     /// `max_payload_bytes` is the largest frame the interface can
-    /// emit; the threshold is derived as `-airtime_ms(max_payload)`
+    /// emit; the threshold is derived as `-airtime(max_payload)`
     /// so one full-MTU packet in flight saturates the bucket.
     /// `max_credit_ms` is twice that, allowing a small idle-bank of
     /// ~2 packets of headroom after a quiet period.
-    pub(crate) fn new(bw_hz: u32, sf: u8, cr: u8, max_payload_bytes: u32) -> Self {
-        let per_packet = airtime_ms(max_payload_bytes, bw_hz, sf, cr) as i64;
+    /// `preamble_symbols` is the programmed preamble the radio keys per
+    /// frame; pricing with the modem-default 8 would undercount every
+    /// charge by (preamble-8)*t_sym.
+    pub(crate) fn new(
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+        preamble_symbols: u16,
+        max_payload_bytes: u32,
+    ) -> Self {
+        let per_packet =
+            airtime_ms_with_preamble(max_payload_bytes, bw_hz, sf, cr, preamble_symbols) as i64;
         Self {
             credit_ms: 0,
             last_update_ms: 0,
@@ -49,6 +61,7 @@ impl AirtimeCredit {
             bw_hz,
             sf,
             cr,
+            preamble_symbols,
         }
     }
 
@@ -60,11 +73,11 @@ impl AirtimeCredit {
         (self.credit_ms + elapsed).min(self.max_credit_ms)
     }
 
-    /// Deduct `airtime_ms(packet_bytes)` from the bucket if the
+    /// Deduct the packet's on-air time from the bucket if the
     /// result stays at or above `threshold_ms`. Returns `Err(())` on
     /// rejection; state is unchanged on `Err`.
     pub(crate) fn try_charge(&mut self, packet_bytes: u32, now_ms: u64) -> Result<(), ()> {
-        let cost = airtime_ms(packet_bytes, self.bw_hz, self.sf, self.cr) as i64;
+        let cost = self.cost_ms(packet_bytes) as i64;
         let current = self.current(now_ms);
         let new_credit = current - cost;
         if new_credit < self.threshold_ms {
@@ -79,7 +92,7 @@ impl AirtimeCredit {
     /// would succeed. Returns `now_ms` when the bucket already has
     /// enough headroom.
     pub(crate) fn earliest_fit_time(&self, packet_bytes: u32, now_ms: u64) -> u64 {
-        let cost = airtime_ms(packet_bytes, self.bw_hz, self.sf, self.cr) as i64;
+        let cost = self.cost_ms(packet_bytes) as i64;
         let current = self.current(now_ms);
         // Charge succeeds at time T when current(T) - cost >= threshold_ms.
         // With 1:1 regen, current(T) = current(now) + (T - now). Solve:
@@ -98,7 +111,19 @@ impl AirtimeCredit {
     /// populate Transport's `interface_max_airtime_ms` backchannel,
     /// which sizes the announce-retry jitter window.
     pub(crate) fn max_airtime_ms(&self) -> u64 {
-        airtime_ms(self.max_payload_bytes, self.bw_hz, self.sf, self.cr)
+        self.cost_ms(self.max_payload_bytes)
+    }
+
+    /// On-air time of a `packet_bytes` frame under the bucket's current
+    /// radio params, programmed preamble included.
+    fn cost_ms(&self, packet_bytes: u32) -> u64 {
+        airtime_ms_with_preamble(
+            packet_bytes,
+            self.bw_hz,
+            self.sf,
+            self.cr,
+            self.preamble_symbols,
+        )
     }
 
     /// Swap the radio params used to price subsequent charges.
@@ -108,11 +133,18 @@ impl AirtimeCredit {
     /// and max_credit are recomputed from `max_payload_bytes` under
     /// the new radio profile so "one MTU in flight" stays the
     /// invariant across reconfig.
-    pub(crate) fn update_radio_params(&mut self, bw_hz: u32, sf: u8, cr: u8) {
+    pub(crate) fn update_radio_params(
+        &mut self,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+        preamble_symbols: u16,
+    ) {
         self.bw_hz = bw_hz;
         self.sf = sf;
         self.cr = cr;
-        let per_packet = airtime_ms(self.max_payload_bytes, bw_hz, sf, cr) as i64;
+        self.preamble_symbols = preamble_symbols;
+        let per_packet = self.cost_ms(self.max_payload_bytes) as i64;
         self.threshold_ms = -per_packet;
         self.max_credit_ms = 2 * per_packet;
     }
@@ -137,22 +169,28 @@ impl AirtimeCredit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviculum_core::rnode::airtime_ms;
+    use leviculum_core::rnode::airtime_ms_with_preamble;
 
     // SF10/BW125/CR4/8, max_payload=500: cost derived by rnode helper.
     const BW: u32 = 125_000;
     const SF: u8 = 10;
     const CR: u8 = 8;
+    // The derived programmed preamble at SF10/BW125.
+    const PRE: u16 = 18;
     const MAX_PAYLOAD: u32 = 500;
 
+    fn cost(payload: u32, sf: u8, pre: u16) -> i64 {
+        airtime_ms_with_preamble(payload, BW, sf, CR, pre) as i64
+    }
+
     fn fresh() -> AirtimeCredit {
-        AirtimeCredit::new(BW, SF, CR, MAX_PAYLOAD)
+        AirtimeCredit::new(BW, SF, CR, PRE, MAX_PAYLOAD)
     }
 
     #[test]
     fn new_threshold_matches_airtime_formula() {
         let b = fresh();
-        let expected = -(airtime_ms(MAX_PAYLOAD, BW, SF, CR) as i64);
+        let expected = -cost(MAX_PAYLOAD, SF, PRE);
         assert_eq!(b.threshold_ms, expected);
         assert_eq!(b.max_credit_ms, -2 * expected);
     }
@@ -185,7 +223,7 @@ mod tests {
         let mut b = fresh();
         // Charge at t=0 so no regen has occurred; credit starts at 0,
         // drops to -airtime(50) after the charge.
-        let cost_50 = airtime_ms(50, BW, SF, CR) as i64;
+        let cost_50 = cost(50, SF, PRE);
         assert!(b.try_charge(50, 0).is_ok());
         assert_eq!(b.credit_ms, -cost_50);
         assert_eq!(b.last_update_ms, 0);
@@ -210,7 +248,7 @@ mod tests {
         let mut b = fresh();
         assert!(b.try_charge(MAX_PAYLOAD, 0).is_ok());
         // Wait long enough for the bucket to regenerate past threshold.
-        let wait_ms = airtime_ms(MAX_PAYLOAD, BW, SF, CR);
+        let wait_ms = cost(MAX_PAYLOAD, SF, PRE) as u64;
         assert!(b.try_charge(50, wait_ms).is_ok());
     }
 
@@ -229,9 +267,22 @@ mod tests {
         // T - 0 >= Y (since current(0) = -X and regen is 1 ms/ms).
         // So earliest_fit_time(50, 0) == Y.
         let t = 0u64;
-        let cost_small = airtime_ms(50, BW, SF, CR);
+        let cost_small = cost(50, SF, PRE) as u64;
         assert_eq!(b.earliest_fit_time(50, t), t + cost_small);
         assert!(b.earliest_fit_time(50, t) > t);
+    }
+
+    /// The bucket prices the programmed preamble: at SF10/BW125 the derived
+    /// 18-symbol preamble is 10 symbols (82 ms) more on the air per frame
+    /// than the modem-default 8 the old formula assumed.
+    #[test]
+    fn charge_prices_the_programmed_preamble() {
+        let mut pre18 = AirtimeCredit::new(BW, SF, CR, 18, MAX_PAYLOAD);
+        let mut pre8 = AirtimeCredit::new(BW, SF, CR, 8, MAX_PAYLOAD);
+        pre18.try_charge(50, 0).unwrap();
+        pre8.try_charge(50, 0).unwrap();
+        let delta = pre8.current(0) - pre18.current(0);
+        assert!(delta >= 81, "preamble delta {delta}ms");
     }
 
     #[test]
@@ -241,8 +292,9 @@ mod tests {
         b.try_charge(MAX_PAYLOAD, 0).unwrap();
         let credit_before = b.credit_ms;
         let last_before = b.last_update_ms;
-        // Reconfig to SF=7 (much smaller per-byte airtime).
-        b.update_radio_params(BW, 7, CR);
+        // Reconfig to SF=7 (much smaller per-byte airtime; the derived
+        // preamble at SF7/BW125 is 24).
+        b.update_radio_params(BW, 7, CR, 24);
         // Credit + timestamp preserved.
         assert_eq!(b.credit_ms, credit_before);
         assert_eq!(b.last_update_ms, last_before);
@@ -250,8 +302,8 @@ mod tests {
         let fit_sf7 = b.earliest_fit_time(50, 0);
         // Sanity: cost-per-byte at SF7 << SF10, so a 50-byte packet
         // prices much cheaper under the new params.
-        let cost_sf10 = airtime_ms(50, BW, SF, CR) as i64;
-        let cost_sf7 = airtime_ms(50, BW, 7, CR) as i64;
+        let cost_sf10 = cost(50, SF, PRE);
+        let cost_sf7 = cost(50, 7, 24);
         assert!(cost_sf7 < cost_sf10);
         // After reconfig, threshold was recomputed at SF7 (smaller |threshold|),
         // but credit_ms still carries the old SF10 charge. The bucket is

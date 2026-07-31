@@ -865,8 +865,17 @@ pub fn airtime_ms_with_preamble(
 /// frame per CSMA contest.
 ///
 /// spacing = airtime(frame) + DIFS + max_CW + margin
-pub fn compute_spacing_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
-    let air = airtime_ms(payload_bytes, bandwidth_hz, sf, cr);
+///
+/// The airtime term charges the programmed preamble: pacing that assumes the
+/// modem-default 8 symbols undercounts every frame by (preamble-8)*t_sym.
+pub fn compute_spacing_ms(
+    payload_bytes: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
+    let air = airtime_ms_with_preamble(payload_bytes, bandwidth_hz, sf, cr, preamble_symbols);
     let spacing = air + CSMA_DIFS_MS + CSMA_MAX_CW_MS + PACING_MARGIN_MS;
     // Never go below the serial-level floor
     spacing.max(MIN_SPACING_MS)
@@ -1104,16 +1113,48 @@ pub fn firmware_default_lt_alock(freq_hz: u64, explicit: Option<u16>) -> u16 {
 ///
 /// Mirrors [`build_lora_frames`]: a payload over [`MAX_SINGLE_PAYLOAD`] is sent
 /// as two frames, each with a 1-byte header; otherwise one frame with a 1-byte
-/// header. Uses [`airtime_ms`] so the accounting stays consistent with the
-/// interface's pacing math.
-pub fn packet_airtime_ms(data_len: usize, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
+/// header. Each frame carries a full programmed preamble on the air, so the
+/// preamble is charged per frame, keeping the accounting consistent with the
+/// per-frame ledger charge ([`frame_airtime_cost_ms`]).
+pub fn packet_airtime_ms(
+    data_len: usize,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
     if data_len > MAX_SINGLE_PAYLOAD {
         let f1 = (1 + MAX_SINGLE_PAYLOAD) as u32;
         let f2 = (1 + data_len - MAX_SINGLE_PAYLOAD) as u32;
-        airtime_ms(f1, bandwidth_hz, sf, cr) + airtime_ms(f2, bandwidth_hz, sf, cr)
+        airtime_ms_with_preamble(f1, bandwidth_hz, sf, cr, preamble_symbols)
+            + airtime_ms_with_preamble(f2, bandwidth_hz, sf, cr, preamble_symbols)
     } else {
-        airtime_ms((1 + data_len) as u32, bandwidth_hz, sf, cr)
+        airtime_ms_with_preamble(
+            (1 + data_len) as u32,
+            bandwidth_hz,
+            sf,
+            cr,
+            preamble_symbols,
+        )
     }
+}
+
+/// On-air cost, in milliseconds, charged to the regulatory airtime ledger
+/// for one keyed LoRa frame.
+///
+/// This is what the interface records via
+/// [`AirtimeTracker::add_airtime`] after every successful `transmit()`: the
+/// full on-air time of the frame at the live modulation, programmed preamble
+/// included, mirroring the RNode firmware's `add_airtime(written)`
+/// (RNode_Firmware.ino:654), whose symbol count adds `lora_preamble_symbols`.
+pub fn frame_airtime_cost_ms(
+    frame_len: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
+    airtime_ms_with_preamble(frame_len, bandwidth_hz, sf, cr, preamble_symbols)
 }
 
 /// Whether a bursting LoRa transmitter must yield the channel (open its
@@ -2270,10 +2311,25 @@ mod tests {
         assert_eq!(airtime_ms_with_preamble(184, 125_000, 12, 8, 18), 10_691);
     }
 
+    /// The regulatory ledger must be charged what was actually on the air.
+    /// Since the preamble fix the radios run SF-derived preambles (18 at
+    /// SF12/BW125), so one 184-byte SF12 frame is 10_691 ms on the air; a
+    /// preamble-8 charge (10_363 ms) undercounts every frame by 328 ms.
+    #[test]
+    fn airtime_lock_charges_the_programmed_preamble() {
+        let cost = frame_airtime_cost_ms(184, 125_000, 12, 8, 18);
+        assert!(
+            cost >= 10_691,
+            "ledger charge {cost}ms undercounts the on-air frame (preamble-8 \
+             accounting); the radio spent 10_691ms on the air"
+        );
+        assert_eq!(cost, airtime_ms_with_preamble(184, 125_000, 12, 8, 18));
+    }
+
     #[test]
     fn test_compute_spacing_includes_csma_overhead() {
-        let air = airtime_ms(491, 62_500, 7, 5);
-        let spacing = compute_spacing_ms(491, 62_500, 7, 5);
+        let air = airtime_ms_with_preamble(491, 62_500, 7, 5, 24);
+        let spacing = compute_spacing_ms(491, 62_500, 7, 5, 24);
         assert_eq!(
             spacing,
             air + CSMA_DIFS_MS + CSMA_MAX_CW_MS + PACING_MARGIN_MS,
@@ -2281,10 +2337,19 @@ mod tests {
         );
     }
 
+    /// TX pacing charges the programmed preamble: at SF12/BW125 the derived
+    /// 18-symbol preamble adds 328 ms per frame over the preamble-8 formula.
+    #[test]
+    fn test_compute_spacing_charges_the_programmed_preamble() {
+        let pre18 = compute_spacing_ms(184, 125_000, 12, 8, 18);
+        let pre8 = compute_spacing_ms(184, 125_000, 12, 8, 8);
+        assert!(pre18 - pre8 >= 327, "preamble delta {}ms", pre18 - pre8);
+    }
+
     #[test]
     fn test_compute_spacing_floor() {
         // Tiny packet with huge bandwidth, airtime < MIN_SPACING_MS
-        let spacing = compute_spacing_ms(1, 500_000, 7, 5);
+        let spacing = compute_spacing_ms(1, 500_000, 7, 5, 8);
         assert!(
             spacing >= MIN_SPACING_MS,
             "spacing must never go below MIN_SPACING_MS"
@@ -2984,11 +3049,13 @@ mod tests {
 
     #[test]
     fn packet_airtime_single_vs_split() {
-        // A <=254-byte payload is one frame; a larger one is two frames.
-        let single = packet_airtime_ms(100, 125_000, 7, 5);
-        assert_eq!(single, airtime_ms(101, 125_000, 7, 5));
-        let split = packet_airtime_ms(300, 125_000, 7, 5);
-        let expected = airtime_ms(255, 125_000, 7, 5) + airtime_ms(1 + 300 - 254, 125_000, 7, 5);
+        // A <=254-byte payload is one frame; a larger one is two frames, and
+        // each frame carries a full programmed preamble on the air.
+        let single = packet_airtime_ms(100, 125_000, 7, 5, 24);
+        assert_eq!(single, airtime_ms_with_preamble(101, 125_000, 7, 5, 24));
+        let split = packet_airtime_ms(300, 125_000, 7, 5, 24);
+        let expected = airtime_ms_with_preamble(255, 125_000, 7, 5, 24)
+            + airtime_ms_with_preamble(1 + 300 - 254, 125_000, 7, 5, 24);
         assert_eq!(split, expected);
     }
 }

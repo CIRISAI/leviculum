@@ -139,6 +139,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
             rc.bandwidth,
             rc.spreading_factor,
             rc.coding_rate,
+            rc.preamble_len,
             SERIAL_HW_MTU,
         )))
     });
@@ -262,6 +263,7 @@ async fn send_radio_config(
                                         config.bandwidth,
                                         config.spreading_factor,
                                         config.coding_rate,
+                                        config.preamble_len,
                                     );
                                 }
                                 return true;
@@ -759,7 +761,7 @@ mod tests {
         credit_arc
             .lock()
             .unwrap()
-            .update_radio_params(125_000, 10, 8);
+            .update_radio_params(125_000, 10, 8, 18);
         // Under the new, more-permissive SF10 threshold, the carried-over
         // SF7 deficit leaves room for the same small packet.
         {

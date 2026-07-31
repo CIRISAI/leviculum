@@ -577,6 +577,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             self.rx_ext_bw_hz,
             self.rx_ext_sf,
             self.rx_ext_cr_denom,
+            self.preamble_len,
         ) {
             crate::log::log_fmt(
                 "[SX_RX_EXTEND] ",
