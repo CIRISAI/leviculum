@@ -20,7 +20,7 @@ UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-master}"
 
 git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1 || git remote add "$UPSTREAM_REMOTE" "$UPSTREAM_URL"
 echo "==> fetching $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
-git fetch --tags "$UPSTREAM_REMOTE"
+git fetch --no-tags "$UPSTREAM_REMOTE"
 
 OLD_BASE=$(git merge-base "$SERIES_BRANCH" "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH")
 NEW_BASE=$(git rev-parse "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH")
