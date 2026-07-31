@@ -407,6 +407,14 @@ pub struct Link {
     /// Set from the receiving interface of the link request (responder) or
     /// the proof (initiator). Mirrors Python's `Link.attached_interface`.
     attached_interface: Option<usize>,
+    /// Cumulative sends rejected by the attached interface's airtime/next-slot
+    /// gate before reaching the channel (leviculum#35 backpressure telemetry).
+    iface_pacing_rejections: u64,
+    /// Cumulative bytes confirmed delivered via completed outgoing resource
+    /// transfers on this link (the completion proof covers the whole transfer)
+    /// — leviculum#35 delivery telemetry, complementing the channel's
+    /// per-envelope `delivered_bytes`.
+    resource_bytes_delivered: u64,
     /// Whether compression is enabled for this link
     compression_enabled: bool,
     /// Negotiated link MTU from signaling bytes (default: base protocol MTU).
@@ -527,6 +535,8 @@ impl Link {
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
             attached_interface: None,
+            iface_pacing_rejections: 0,
+            resource_bytes_delivered: 0,
             compression_enabled: false,
             negotiated_mtu: MTU as u32,
             phase: LinkPhase::Established,
@@ -642,6 +652,8 @@ impl Link {
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
             attached_interface: None,
+            iface_pacing_rejections: 0,
+            resource_bytes_delivered: 0,
             compression_enabled: false,
             negotiated_mtu,
             phase: LinkPhase::Established,
@@ -864,6 +876,29 @@ impl Link {
     /// Set the interface this link is attached to
     pub fn set_attached_interface(&mut self, iface: usize) {
         self.attached_interface = Some(iface);
+    }
+
+    /// Record a send rejected by the attached interface's airtime/next-slot
+    /// gate (leviculum#35 backpressure telemetry).
+    pub(crate) fn note_iface_pacing_rejection(&mut self) {
+        self.iface_pacing_rejections = self.iface_pacing_rejections.saturating_add(1);
+    }
+
+    /// Cumulative interface-gate send rejections (leviculum#35).
+    pub fn iface_pacing_rejections(&self) -> u64 {
+        self.iface_pacing_rejections
+    }
+
+    /// Credit a completed outgoing resource transfer's bytes as delivered —
+    /// the completion proof confirms the peer reassembled the whole transfer
+    /// (leviculum#35 delivery telemetry).
+    pub(crate) fn add_resource_bytes_delivered(&mut self, bytes: u64) {
+        self.resource_bytes_delivered = self.resource_bytes_delivered.saturating_add(bytes);
+    }
+
+    /// Cumulative bytes delivered via completed outgoing resources (leviculum#35).
+    pub fn resource_bytes_delivered(&self) -> u64 {
+        self.resource_bytes_delivered
     }
 
     /// Get the cached proof bytes (for re-sending on duplicate link requests)
