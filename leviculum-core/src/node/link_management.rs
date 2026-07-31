@@ -584,6 +584,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(iface_idx) = attached_iface {
             let next_slot = self.transport.next_slot_ms_for_interface(iface_idx, now_ms);
             if next_slot > now_ms {
+                // Telemetry (leviculum#35): the interface gate is backpressure
+                // a capacity estimator must distinguish from app-limited idle.
+                if let Some(link) = self.links.get_mut(link_id) {
+                    link.note_iface_pacing_rejection();
+                }
                 return Err(send::SendError::PacingDelay {
                     ready_at_ms: next_slot,
                 });
@@ -717,14 +722,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Get link statistics
     pub fn link_stats(&self, link_id: &LinkId) -> Option<LinkStats> {
         let link_id = &self.resolve_link_id(link_id);
-        self.links.get(link_id)?;
-        let ch = self.links.get(link_id).and_then(|l| l.channel());
-        Some(LinkStats::new(
-            ch.map(|c| c.outstanding()).unwrap_or(0),
-            ch.map(|c| c.window()).unwrap_or(0),
-            ch.map(|c| c.window_max()).unwrap_or(0),
-            ch.map(|c| c.pacing_interval_ms()).unwrap_or(0),
-        ))
+        let link = self.links.get(link_id)?;
+        let ch = link.channel();
+        Some(LinkStats {
+            tx_ring_size: ch.map(|c| c.outstanding()).unwrap_or(0),
+            window: ch.map(|c| c.window()).unwrap_or(0),
+            window_max: ch.map(|c| c.window_max()).unwrap_or(0),
+            pacing_interval_ms: ch.map(|c| c.pacing_interval_ms()).unwrap_or(0),
+            // — leviculum#35 delivery telemetry —
+            bytes_delivered: ch
+                .map(|c| c.delivered_bytes())
+                .unwrap_or(0)
+                .saturating_add(link.resource_bytes_delivered()),
+            srtt_ms: ch.map(|c| c.srtt_ms()).filter(|s| *s > 0.0),
+            rttvar_ms: ch.filter(|c| c.srtt_ms() > 0.0).map(|c| c.rttvar_ms()),
+            min_rtt_ms: ch.and_then(|c| c.min_rtt_ms()),
+            rtt_ms: link.rtt_us().map(|us| us / 1000),
+            busy_rejections: ch.map(|c| c.busy_rejections()).unwrap_or(0),
+            pacing_rejections: ch.map(|c| c.pacing_rejections()).unwrap_or(0),
+            iface_pacing_rejections: link.iface_pacing_rejections(),
+        })
     }
 
     // Internal: Link Packet Processing
@@ -2817,6 +2834,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         match res.handle_proof(proof_data) {
             Ok(crate::resource::ResourceStatus::Complete) => {
                 let resource_hash = *res.resource_hash();
+                // Telemetry (leviculum#35): the completion proof confirms the
+                // peer reassembled this whole (segment's) transfer — credit its
+                // bytes as delivered on the link. Per-segment for split
+                // transfers, so the counter advances as the transfer does.
+                let delivered = res.transfer_size() as u64;
+                if let Some(l) = self.links.get_mut(&link_id) {
+                    l.add_resource_bytes_delivered(delivered);
+                }
                 // Segment complete. If this is a split transfer with more
                 // segments to send, advertise the next one instead of signalling
                 // completion (mirrors Python's next_segment.advertise()). Only
