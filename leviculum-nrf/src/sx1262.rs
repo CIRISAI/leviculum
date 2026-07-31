@@ -658,16 +658,16 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
 
         self.write_command(opcode::SET_CAD, &[]).await?;
 
-        // Allow for 2 symbols of CAD + margin. SF12/BW125 ~ 260ms.
-        let timeout_ms = match sf {
-            7 | 8 => 50,
-            9 => 100,
-            10 => 200,
-            11 => 400,
-            12 => 800,
-            _ => 100,
-        };
-        match with_timeout(Duration::from_millis(timeout_ms), self.dio1.wait_for_high()).await {
+        // Timeout sized from the CAD's listening symbols at the live symbol
+        // time (SF and BW); a fixed per-SF table here assumed BW125.
+        let cad_symbols: u8 = if cad_sym_num == 0x03 { 8 } else { 4 };
+        let timeout_ms = irq::cad_timeout_ms(self.rx_ext_bw_hz, sf, cad_symbols);
+        match with_timeout(
+            Duration::from_millis(timeout_ms as u64),
+            self.dio1.wait_for_high(),
+        )
+        .await
+        {
             Ok(()) => {
                 let flags = self.get_irq_status().await?;
                 self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])

@@ -375,7 +375,17 @@ async fn transmit_all_frames(
                 ),
             );
         }
-        match radio.transmit(frame, 5000).await {
+        // Timeout sized from the frame's on-air time at the live modulation
+        // (10.69 s for a 184 B announce at SF12/BW125/CR4:8/preamble-18); a
+        // fixed 5000 ms here aborted every SF12 frame mid-air.
+        let tx_timeout_ms = leviculum_core::sx126x::tx_timeout_ms(
+            frame.len() as u32,
+            config.bw_hz,
+            config.sf,
+            config.cr_denom,
+            config.preamble_len,
+        );
+        match radio.transmit(frame, tx_timeout_ms).await {
             Ok(()) => {
                 // Record this frame's on-air time (header included, matching
                 // the RNode firmware's `add_airtime(written)`).

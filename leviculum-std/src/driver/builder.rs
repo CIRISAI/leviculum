@@ -48,6 +48,7 @@ pub struct ReticulumNodeBuilder {
     /// representable in the serializable `InterfaceConfig`.
     rnode_channels: Vec<RNodeChannelConfig>,
     corrupt_every: Option<u64>,
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     /// Explicit enable_transport override (takes priority over config value)
     enable_transport_explicit: Option<bool>,
     /// Explicit shared_instance override (takes priority over config value)
@@ -95,6 +96,7 @@ impl ReticulumNodeBuilder {
             interfaces: Vec::new(),
             rnode_channels: Vec::new(),
             corrupt_every: None,
+            outbound_socket_hook: None,
             enable_transport_explicit: None,
             share_instance_explicit: None,
             instance_name_explicit: None,
@@ -530,6 +532,14 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Register a hook invoked with each outbound TCP connect socket before it
+    /// dials, so an embedder can apply host-level socket policy. See
+    /// [`crate::socket_hook::OutboundSocketHook`].
+    pub fn outbound_socket_hook(mut self, hook: crate::socket_hook::OutboundSocketHook) -> Self {
+        self.outbound_socket_hook = Some(hook);
+        self
+    }
+
     /// Enable or disable transport mode
     ///
     /// When enabled, this node will forward packets between interfaces.
@@ -820,6 +830,7 @@ impl ReticulumNodeBuilder {
             control_channel_capacity,
             data_channel_capacity,
         );
+        node.outbound_socket_hook = self.outbound_socket_hook.clone();
         // Capture the configured shared-instance TCP-loopback ports
         // (`shared_instance_port` / `instance_control_port`, Codeberg #112) for
         // the AF_INET bind path. Unconditional: the AF_UNIX path never reads

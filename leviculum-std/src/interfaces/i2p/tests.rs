@@ -132,6 +132,7 @@ async fn announce_crosses_i2p_loopback() {
         next_id,
         new_interface_tx: new_tx,
         ifac: None,
+        outbound_socket_hook: None,
     });
 
     let mut client = spawn_i2p_client(I2pClientConfig {
@@ -143,6 +144,7 @@ async fn announce_crosses_i2p_loopback() {
         reconnect_wait: Duration::from_millis(200),
         ifac: None,
         reconnect_notify: None,
+        outbound_socket_hook: None,
     });
 
     // The server accept loop spawns an interface once the client connects.
@@ -199,6 +201,7 @@ async fn hdlc_escaping_survives_i2p_stream() {
         next_id,
         new_interface_tx: new_tx,
         ifac: None,
+        outbound_socket_hook: None,
     });
     let client = spawn_i2p_client(I2pClientConfig {
         id: InterfaceId(1),
@@ -209,6 +212,7 @@ async fn hdlc_escaping_survives_i2p_stream() {
         reconnect_wait: Duration::from_millis(200),
         ifac: None,
         reconnect_notify: None,
+        outbound_socket_hook: None,
     });
 
     let mut server_iface = tokio::time::timeout(Duration::from_secs(5), new_rx.recv())
@@ -224,6 +228,44 @@ async fn hdlc_escaping_survives_i2p_stream() {
         .expect("timeout: escaped packet")
         .unwrap();
     assert_eq!(pkt.data, payload);
+}
+
+/// The outbound-socket hook fires for every TCP dial the I2P client makes
+/// toward the SAM bridge: session control, NAMING LOOKUP (`.i2p` peer), and
+/// the stream socket — so an embedder's socket policy covers the I2P
+/// transport, not just plain TCP interfaces.
+#[tokio::test]
+async fn socket_hook_covers_every_sam_dial() {
+    let mock = start_mock_sam().await;
+
+    let dials = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::clone(&dials);
+    let hook: crate::socket_hook::OutboundSocketHook = Arc::new(move |_fd| {
+        recorded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    let handle = spawn_i2p_client(I2pClientConfig {
+        id: InterfaceId(1),
+        name: "cli".to_string(),
+        sam_address: mock.to_string(),
+        peer: "somepeer.b32.i2p".to_string(),
+        buffer_size: 32,
+        reconnect_wait: Duration::from_secs(30),
+        ifac: None,
+        reconnect_notify: None,
+        outbound_socket_hook: Some(hook),
+    });
+    handle
+        .ready
+        .wait(Duration::from_secs(5))
+        .await
+        .expect("client should establish its stream against the mock SAM");
+
+    assert_eq!(
+        dials.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "hook must fire for the control, lookup, and stream dials"
+    );
 }
 
 #[test]
