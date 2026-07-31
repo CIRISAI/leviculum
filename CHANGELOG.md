@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/files/mast.jpg` on the web and at `/file/mast.jpg` on the mesh, in
   NomadNet's `serve_file` wire form, linked from the page. Configured
   with `files_dir` and bounded per file by `max_file_bytes` (10 MiB).
+- lnomad draws those pictures in the page: a `/file/` link naming a
+  decodable format and standing alone on its line is fetched and drawn
+  through the terminal's graphics protocol (Kitty, iTerm2, Sixel), else
+  Unicode half-blocks, else a line naming the file, format and size —
+  which is also what a failed decode and `--no-color` give. Fetched
+  after the page is on screen, one at a time, at most eight per page;
+  `Esc` cancels the queue and `--images off` disables it. `Enter` saves
+  a picture and `o` opens it, neither transferring it again.
+- Fetched pictures are kept in a byte-bounded in-memory LRU cache, so a
+  revisit costs no airtime: `--image-cache <megabytes>` (default 10, `0`
+  disables). Memory only, never disk.
 
 ## [0.8.0] - 2026-08-01
 

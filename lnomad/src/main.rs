@@ -77,9 +77,33 @@ struct Args {
     #[arg(long)]
     output: Option<PathBuf>,
 
+    /// Inline images: `auto` draws a page's pictures where they are linked,
+    /// using the terminal's graphics protocol (Kitty, iTerm2 or Sixel) or
+    /// Unicode half-blocks; `off` leaves every image link an ordinary link and
+    /// fetches nothing. Ignored with `--print` / non-tty, which never draw
+    /// pictures.
+    #[arg(long, value_enum, default_value_t = ImagesArg::Auto)]
+    images: ImagesArg,
+
+    /// How much fetched image data to keep in memory for revisits, in
+    /// megabytes. A revisited page then costs no airtime for pictures it has
+    /// already shown; when the budget is exceeded, the pictures untouched
+    /// longest are dropped until it fits again. `0` disables the cache.
+    #[arg(long, default_value_t = 10)]
+    image_cache: u64,
+
     /// Fetch, render and print the page once, then exit (non-interactive).
     #[arg(long)]
     print: bool,
+}
+
+/// The `--images` choice.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ImagesArg {
+    /// Draw pictures inline when the terminal can show them.
+    Auto,
+    /// Never fetch or draw pictures.
+    Off,
 }
 
 /// The `--theme` choice, a clap-facing mirror of [`ThemeFlag`].
@@ -177,6 +201,8 @@ async fn main() -> ExitCode {
         no_color: args.no_color || !std::io::stdout().is_terminal(),
         depth,
         timeout: Duration::from_secs(args.timeout),
+        no_images: args.images == ImagesArg::Off,
+        image_cache_bytes: args.image_cache.saturating_mul(1_000_000),
     };
 
     // Connect to the shared instance: an explicit --instance overrides the

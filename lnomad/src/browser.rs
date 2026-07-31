@@ -72,6 +72,12 @@ pub struct BrowserOptions {
     pub depth: ColorDepth,
     /// Per-request fetch timeout.
     pub timeout: Duration,
+    /// Whether inline images are suppressed (`--images off`). Only the
+    /// interactive TUI acts on it; the print sink never drew pictures.
+    pub no_images: bool,
+    /// How many bytes of fetched pictures to keep for revisits
+    /// (`--image-cache`). Zero disables the cache.
+    pub image_cache_bytes: u64,
 }
 
 /// Fetch a page, parse it, and return the parsed document. The raw bytes are

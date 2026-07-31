@@ -33,6 +33,8 @@ pub mod download;
 pub mod fetch;
 pub mod identify;
 pub mod identity;
+pub mod image;
+pub mod image_cache;
 pub mod page_cache;
 pub mod render;
 pub mod theme;

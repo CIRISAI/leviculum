@@ -75,6 +75,16 @@ futures = "0.3.32"
 tui-input = "0.15"
 termbg = "0.6.2"
 open = "5"
+# Inline images. `default-features = false` is not optional: the default
+# `chafa-dyn` feature makes the build probe for libchafa via pkg-config, which
+# would put a C library in the path of the musl-static .deb. Without it the
+# crate is pure Rust and still carries Kitty, iTerm2, Sixel (icy_sixel) and
+# Unicode halfblocks, which is the whole fallback ladder we need.
+ratatui-image = { version = "11.0", default-features = false, features = ["crossterm"] }
+# Decoding only. `image`'s default feature set pulls in every codec it knows;
+# these three are what a blog post actually carries, and each extra decoder is
+# attack surface for bytes handed to us by a stranger's node.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 
 [dev-dependencies]
 tempfile = "3"

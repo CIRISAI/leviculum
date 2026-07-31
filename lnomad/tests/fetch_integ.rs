@@ -323,6 +323,8 @@ async fn print_mode_renders_page_and_link_list() {
         no_color: true,
         depth: lnomad::color::ColorDepth::Truecolor,
         timeout: Duration::from_secs(20),
+        no_images: false,
+        image_cache_bytes: lnomad::image_cache::DEFAULT_MAX_BYTES,
     };
     let mut out: Vec<u8> = Vec::new();
     print_once(&mut out, &mut session, &target, &opts)

@@ -16,6 +16,10 @@ Node discovery runs continuously while the UI is up: `nomadnetwork.node` announc
 
 A `/file/` URL downloads instead of rendering; see **--output** for where the file lands.
 
+Pictures are drawn in the page. Micron has no image construct, so a page can only link to a picture in its node's file area; **lnomad** recognises such a link by its target — a `/file/` path named `.png`, `.jpg`, `.jpeg` or `.gif` — and, when the link stands alone on its line, fetches it and draws it there. The terminal's own graphics protocol is used when it has one (Kitty, iTerm2 or Sixel); otherwise the picture is drawn with Unicode half-blocks, and where neither is possible a line naming the file, its format and its size takes its place. A page's pictures are fetched after it is displayed, one at a time, so nothing waits for them, `Esc` cancels the rest, and no more than eight are fetched from any one page. Fetched pictures are kept in memory (see **--image-cache**), so stepping back to a page shows them again without spending the airtime twice. Use **--images off** to fetch none at all.
+
+With a picture focused (`Tab`), `Enter` saves it to the download directory and `o` opens it in the system viewer. Neither transfers it a second time.
+
 ## OPTIONS
 
 *url*
@@ -39,8 +43,14 @@ A `/file/` URL downloads instead of rendering; see **--output** for where the fi
 **--timeout** *seconds*
 :   Per-request fetch timeout (default: 30).
 
+**--images** *mode*
+:   Inline images. `auto` draws a page's pictures where they are linked, using the terminal's graphics protocol or Unicode half-blocks; `off` leaves every image link an ordinary link and fetches nothing. Ignored with **--print** and when output is not a terminal, neither of which draws pictures (default: `auto`).
+
+**--image-cache** *megabytes*
+:   How much fetched image data to keep in memory for revisits (default: 10). A page visited again then costs no airtime for pictures it has already shown. When the budget is exceeded, the pictures untouched longest are dropped until it fits again; a single picture larger than the whole budget is never kept. `0` disables the cache. Memory only — nothing is written to disk.
+
 **--no-color**
-:   Disable ANSI colour in the rendered output.
+:   Disable ANSI colour in the rendered output. Also suppresses inline images: a picture painted out of coloured blocks is not what a reader asking for no colour had in mind.
 
 **--theme** *theme*
 :   Colour theme for the interactive UI: `auto` detects the terminal background, `light` and `dark` force a theme. Ignored with **--print** and when output is not a terminal (default: `auto`).
@@ -57,7 +67,7 @@ A `/file/` URL downloads instead of rendering; see **--output** for where the fi
 :   Base for **lnomad**'s own directory (`lnomad/`), holding the bookmarks (`bookmarks.toml`), the per-node identify decisions (`identify.toml`) and the identity **lnomad** reveals when identifying (`identity`). Defaults to `~/.config`.
 
 **XDG_DOWNLOAD_DIR**
-:   Where a `/file/` link followed inside the UI is saved. Defaults to `$HOME/Downloads`. The **--output** option covers downloads started from the command line instead.
+:   Where a `/file/` link followed inside the UI is saved, inline pictures included. Defaults to `$HOME/Downloads`. The **--output** option covers downloads started from the command line instead.
 
 ## EXAMPLES
 

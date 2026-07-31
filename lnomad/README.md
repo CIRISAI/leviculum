@@ -191,6 +191,50 @@ node that receives the identify sees a `remote_identity` on your requests and
 can attribute what you submit to you, which is what NomadNet's
 `identify_on_connect` does.
 
+### Pictures
+
+Micron has no image construct, so a page can only link to a picture in its
+node's file area. `lnomad` recognises such a link by its target — a `/file/`
+path ending in `.png`, `.jpg`, `.jpeg` or `.gif` — and, when the link stands
+alone on its line, fetches the file and draws it there. A link inside a
+sentence stays a link: there is no rectangle to grow into without tearing the
+text apart.
+
+How it is drawn depends on what the terminal answered when asked at startup:
+
+| terminal                             | what you get                          |
+|--------------------------------------|---------------------------------------|
+| Kitty, Ghostty, WezTerm, iTerm2       | the picture, via its graphics protocol |
+| xterm, foot, Contour, mlterm          | the picture, via Sixel                 |
+| anything else with colour             | Unicode half-blocks                    |
+| `--no-color`, or a failed decode      | a line naming the file, format and size |
+
+The last row is the point of the ladder: a reader on a terminal that can show
+nothing still learns that a picture is there, what it is and how big it is, and
+can still save or open it.
+
+A page's pictures are fetched **after** the page is on screen, one at a time,
+never more than eight from any one page. Nothing waits for a picture, `Esc`
+cancels the queue, and leaving the page drops it. Over LoRa this matters: a
+20 kB thumbnail is roughly a minute of airtime at SF7 and ten or more at SF12,
+so `--images off` leaves every image link an ordinary link and fetches nothing.
+
+For the same reason a picture that has been paid for once is kept: fetched
+payloads stay in an in-memory cache, keyed by the node and path they came from,
+so stepping back to a page draws them again without a transfer. The cache is
+bounded by bytes rather than by count — pictures differ in size by three orders
+of magnitude, and "the last fifty" would say nothing about how much memory the
+browser is holding. `--image-cache <megabytes>` sets the budget (default 10);
+when it is exceeded, the pictures untouched longest are dropped one at a time
+until it fits again, and a single picture larger than the whole budget is never
+kept at all. `--image-cache 0` switches it off. Nothing is written to disk:
+caching a stranger's pictures into a directory is the reader's decision to
+make, not ours.
+
+With a picture focused (`Tab`), `Enter` saves it to the download directory and
+`o` opens it in the system image viewer. Neither fetches it a second time — the
+bytes are already here.
+
 ### Downloads
 
 A `/file/` target is downloaded rather than rendered. Following a `/file/` link
