@@ -9,383 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-The LXMF client messaging stack. The new `leviculum-lxmf` crate carries
-Python-compatible message, announce, attachment, paper-message, stamp
-and ticket primitives on a `no_std` + alloc core, and the std runtimes
-drive opportunistic, direct-link and propagated delivery through the
-node. Propagation works as a client: discover propagation nodes, upload
-recipient-encrypted envelopes, and run the list/download/acknowledge
-exchange against a real propagation node; hosting one stays out of
-scope. Wire behaviour is locked against Python LXMF 1.1.0 with generated
-golden vectors, and 13 interop tests exercise delivery in both
-directions, a stamp round trip and a propagation sync against the real
-Python LXMRouter (PR #138 by nilu96).
-
-Two link primitives LXMF needed and any application can use, both
-Python-canonical (from #138's core work): `send_packet_on_link` sends a
-plain encrypted packet over an active link with a packet receipt and an
-explicit link-signed proof, matching Python `RNS.Packet(link, data)` —
-small direct and propagated LXMF messages travel this way, not as
-Channel frames. And a link request whose body exceeds the link MDU is
-now carried as a request Resource with Python's request ID and `u`-flag
-advertisement, so oversized requests and their responses round-trip
-where they previously failed at the packet boundary. Application proofs
-also leave on the interface the proved packet arrived on, instead of
-consulting the path table for a sender that may not be in it.
-
-A byte-channel interface over a caller-supplied duplex:
-`spawn_byte_channel` attaches an in-process `AsyncRead`+`AsyncWrite`
-pair as an HDLC-framed interface (the PipeInterface wire contract
-without the subprocess), for embedders whose transport is not a socket
-or a serial port. These interfaces report the new `Channel` interface
-kind, and status now reports every interface's transport kind from the
-transport itself instead of guessing from the name label (PR #141 by
-PAzter1101).
-
-Runtime interface add and remove for every interface kind. Config-file
-initialization and runtime attach now share one construction path, so
-`spawn_interface` / `remove_interface` can hot-plug TCP clients
-(including SOCKS5-capable ones), PipeInterface subprocesses and the
-rest without rebuilding the node, and a removal that races ahead of its
-own add is resolved instead of leaking the interface (PR #135's
-commits by PAzter1101, landed through the #142 branch).
-
-An outbound-socket hook for TCP client connects: a caller-registered
-hook sees each outbound socket before it dials, so an embedder can
-apply host-level socket policy such as routing-domain confinement. The
-hook is applied to every dial the node makes, including the I2P SAM
-bridge's session-control, lookup, stream and accept sockets, which
-would otherwise escape the policy (PR #142 by PAzter1101; SAM coverage
-ours). The semantics are fail-closed: a hook that panics aborts the
-dial before the peer ever sees a connection.
-
-`RNodeInterface` can be driven over a host-supplied duplex byte channel
-instead of a serial-port path, for platforms where the process never sees
-`/dev/ttyACM*` (Android USB host / BLE GATT, iOS BLE). A new
-`RNodeChannelFactory` trait yields boxed `AsyncRead`/`AsyncWrite` halves;
-`ReticulumNodeBuilder::add_rnode_channel_interface` wires one at
-construction, and `ReticulumNode::spawn_rnode_channel_interface` attaches
-one at runtime (hot-plug) returning an `RNodeChannelHandle` — hold it to
-keep the radio attached, drop it (or call `.detach()`) to tear the
-interface down cleanly without rebuilding the node. The detect → configure
-→ online → reconnect lifecycle is identical to the serial path; only the
-transport differs, and `spawn_rnode_interface` (serial) is unchanged.
-Groundwork for the BLE client role (#45) and generic byte-channel TNCs
-(#26).
-
-An interface that recovers now gets the node's destinations
-re-announced on that interface alone, so a peer behind a link that was
-down learns us again immediately instead of waiting out the global
-announce cadence (#132).
-
-Five interface types close most of the remaining gap to Python's
-interface roster: `PipeInterface` bridges packets to an external
-subprocess (#95), `KISSInterface` speaks KISS TNC framing over serial
-(#96), `AX25KISSInterface` adds AX.25 UI-frame addressing on top (#97),
-`RNodeMultiInterface` runs multiple virtual radio ports over one RNode
-serial link (#98), and `I2PInterface` carries Reticulum over I2P via
-SAM v3 (#99). `BackboneInterface` / `BackboneClientInterface` config
-sections are accepted as their TCP equivalents (#89), several
-AutoInterface sections can run at once (#7), `UDPInterface` forwards
-outgoing datagrams to multiple addresses (#4), and TCP/UDP/Backbone
-honour a configured device bind and `prefer_ipv6`.
-
-Python's per-interface transport semantics are implemented: interface
-propagation modes (#91), per-interface announce rate limiting from the
-config (#92), the configured bitrate feeding announce weighting and
-reporting (#93), advanced interface-mode semantics (#104), and
-per-interface ingress control, defaulting off for point-to-point media
-(#8). IFAC `network_name` / `passphrase` are enforced rather than
-warned about, with the interop against Python proven (#90).
-
-On-network interface auto-discovery, wire-compatible with Python's
-(#32): discovery announces carry the LXStamper proof-of-work stamp and
-can be encrypted to a shared network identity so only its holders can
-decode discoverable neighbours; a discovered-interface registry sits
-behind `lnstatus -d` / `-D`; discovered interfaces can auto-connect at
-runtime; and an autonomous InterfaceAnnouncer makes a
-`discoverable = yes` interface advertise itself on Python's cadence, so
-a Python rnsd discovers an lnsd with no manual trigger (#106, #107).
-
-Remote management: lnsd serves `/status` to Python's `rnstatus -R`
-(#86), and `lnstatus` gained the matching client flags (`-R`, `-i`,
-`-w`) to query any remote RNS daemon.
-
-Tunnel synthesis over TCP (#64): a tunnel-capable TCP client sends the
-`rnstransport.tunnel.synthesize` handshake on connect and on reconnect,
-wire-compatible with Python's, and held paths are restored through the
-rebuilt tunnel — so destinations behind a flapping TCP uplink come back
-without waiting for fresh announces.
-
-Sender-side segmentation for resources over `MAX_EFFICIENT_SIZE` (#27):
-a file whose metadata+data exceed ~1 MiB is split into chained
-per-segment resource transfers exactly as Python splits it, so `lncp`
-can send a 2.2 MiB file that a Python rncp receiver reassembles intact.
-The resource receive window is now a swappable policy with `PythonLike`
-and `Adaptive` implementations available for measurement; after a rig
-A/B confirmed the Adaptive default livelocks at SF10, the proven
-`Current` policy remains the default and the others are explicit
-opt-ins (#85).
-
-Config parity with rnsd: `[logging] loglevel` with rnsd precedence,
-case-insensitive booleans and ConfigObj-style value stripping including
-inline `#` comments, `use_implicit_proof`, `shared_instance_port`,
-`instance_control_port` and `discovery_encrypt` (#112), and discovery
-producer keys (#109). lnsd gained `-s`/`--service` and
-`--exampleconfig`, and a shared-instance connect that finds no daemon
-now names the socket it tried.
-
-Regulatory airtime enforcement, in the firmware where it belongs: the
-LNode firmware ships an EU 868 lawful-by-default duty-cycle cap (#55),
-and the serial driver arms that lawful limit instead of a hardcoded
-unlimited. On RNodes the host now gates TX while the firmware's airtime
-lock is engaged, so lawfully muted packets stay host-side, visible and
-drainable, instead of feeding the silent firmware queue (#121). RNode
-radio statistics are stored and reported through `interface_stats`
-(#25).
-
-Observability: a per-packet journey event contract on the
-`leviculum_core::pkt` target, instrumentation of the endpoint
-link/proof/local/responder paths (#114), and the transmitted hop count
-on `PKT_TX`. An announce that does not fit its interface now reports
-which of the five packing failures actually occurred and by how much
-the budget was missed, and the app_data budget is exported so a caller
-can size before packing — previously every failure was misdiagnosed as
-`PacketTooLarge` with no numbers, and an over-budget announce left the
-node invisible to the mesh while looking healthy locally.
-
-A `same-interface-relay` drop reason. On a shared medium a relay's only
-outbound interface can be the one a packet arrived on, and relaying it
-back onto that air is suppressed on purpose; until now that happened
-after a bare `trace!`, so a packet a relay declined to forward left no
-trace of its death anywhere. It now emits a `PKT_DROP` with the same `ph`
-as the receive side and increments `drops_same_interface_relay`, so it
-shows up in the journey and in `PKT_DROP_SUMMARY`. The suppression itself
-is unchanged. `DropReason` gains a variant, which is a breaking change
-for downstream exhaustive matches.
-
-A `leviculum-micron` crate: a parser for NomadNet's micron (`.mu`)
-markup into a document model, written as a format implementation
-reconciled against the canonical MicronParser. It backs the lnomad
-browser (its own product, with its own version and changelog) and is
-usable standalone.
-
-Eight event fields the Rust engine carried but the C ABI dropped are now
-projected, with the accessors to read them:
-`lev_event_interface_id` (the interface an announce, path or packet event
-arrived on), `lev_event_close_reason` with the `LEV_CLOSE_*` constants,
-`lev_event_transfer_size` / `lev_event_data_size`, and
-`lev_event_segment_index` / `lev_event_total_segments`. The close reason
-is behavioural rather than cosmetic: `LEV_CLOSE_BLACKHOLED` must not be
-retried at all, while `LEV_CLOSE_NORMAL` may be reconnected immediately.
-The two resource sizes are also projected onto
-`LEV_EVENT_RESOURCE_PROGRESS`, because the advertisement event they were
-supposed to arrive on is only emitted under the AcceptApp strategy, so an
-auto-accepting receiver never saw one.
-
-`lev_interface_stats_id` reads the node-assigned id of an interface in a
-stats snapshot. The snapshot was addressable only by position, so the ids
-the API hands out elsewhere (`lev_path_table_entry`'s `interface_index`,
-and now `lev_event_interface_id`) named nothing a C application could
-resolve. Position is not identity: the node never renumbers, so a removed
-interface leaves a gap.
-
-`lev_event_delivery_error` reports why a single-packet delivery failed, as
-one of the `LEV_DELIVERY_*` constants.
+- LXMF client messaging stack: new `leviculum-lxmf` crate (no_std core,
+  std runtimes), opportunistic/direct/propagated delivery, stamps,
+  tickets, paper messages; locked against Python LXMF 1.1.0 (#138, nilu96).
+- Raw link packets (`send_packet_on_link`) and oversized link requests
+  carried as request Resources, both Python-canonical (#138).
+- Byte-channel interfaces over a caller-supplied duplex, including
+  RNode with runtime hot-plug (#141, PAzter1101).
+- Runtime add/remove of interfaces of every kind (#135, PAzter1101).
+- Outbound-socket hook on every TCP dial including the I2P SAM bridge,
+  fail-closed (#142, PAzter1101).
+- New interfaces Pipe, KISS, AX25KISS, RNodeMulti, I2P (#95-#99);
+  Backbone names, multiple AutoInterfaces, UDP multi-address (#89, #7, #4).
+- Per-interface propagation modes, announce rate limits, bitrate
+  weighting, ingress control, IFAC enforcement (#8, #90-#93, #104).
+- Interface auto-discovery with PoW-stamped, optionally encrypted
+  announces, Python-interoperable (#32, #106, #107).
+- Remote management: lnsd serves `rnstatus -R`; client `-R/-i/-w` (#86).
+- Tunnel synthesis and path restore on TCP connect/reconnect (#64).
+- Resources over 1 MiB send segmented like Python (#27).
+- Destination announces re-sent on a recovered interface (#132).
+- EU 868 lawful-by-default airtime cap in the LNode firmware (#55);
+  RNode TX gated during the firmware airtime lock (#121); radio stats (#25).
+- Config/CLI parity with rnsd (loglevel, ConfigObj quirks, instance
+  ports); lnsd `-s/--service` and `--exampleconfig`.
+- FFI: dropped event fields projected with accessors (interface id,
+  close reason, sizes, segments), stats-snapshot ids, delivery errors.
 
 ### Changed
 
-The client binary `lns` is renamed to `lnstest` to reflect its role as
-the test and diagnostics tool (selftest, diag, identity, interactive
-connect). The unimplemented `status`, `path`, `probe`, and `interfaces`
-placeholder subcommands are removed; use `lnstest diag` or the Python
-`rnstatus` / `rnpath` / `rnprobe` tools against the same shared instance
-instead. The `cp` subcommand is also removed; use the standalone `lncp`
-tool for file transfer.
-
-Request handlers are keyed by (destination, path) instead of by path
-alone. Registering a path on a second destination used to overwrite the
-first handler silently, and the request the first destination was meant
-to serve then died as a client-side timeout. Both entries now coexist and
-route independently. `deregister_request_handler` takes the destination
-as its first argument, which is a breaking change for callers; and
-`NodeEvent::RequestReceived` carries the `destination_hash` the request
-was addressed to, so a responder hosting several destinations under one
-path knows which endpoint to serve. The C API projects it as the event's
-`dest_hash`, as `LEV_EVENT_LINK_CLOSED` now does too.
-
-A per-interface `announce_cap` in the config is applied instead of
-parsed and dropped. The key was read into the interface config and never
-handed to the announce throttler, so every interface ran at the 2%
-default whatever the config said. It now takes effect where a bitrate is
-configured (without one there is no capacity to take a share of, and that
-case warns). The share is held as whole per cent, so a fractional value
-rounds to nearest and anything under half a per cent becomes 1%. The
-cap can also be changed at runtime through
-`Node::set_interface_announce_cap`, and `InterfaceStatusSnapshot` carries
-the `interface_id` so a snapshot can be paired with a runtime interface
-handle without matching on the name.
-
-`transport::DropReason` is now `#[non_exhaustive]`, matching
-`node::FrameDropReason`. The taxonomy grows whenever a new drop site is
-classified — two variants this release — and each addition was a breaking
-change for downstream exhaustive matches. A downstream match now needs a
-wildcard arm once, and further reasons are additive. Matches inside the
-crate are unaffected and stay exhaustive, so `kebab` and `record_drop`
-still fail to compile on a forgotten variant.
-
-Two behaviour changes on existing APIs fall out of the #138 hardening
-pins. A single-segment response too large for the link MDU now fails
-closed with `ResourceTooLarge` instead of advertising an unsplit form
-Python never sends and cannot reassemble. And a response carrying a
-valid request ID is accepted only on the link its request went out on,
-matching Python's per-link correlation, so a response arriving on a
-different link no longer consumes the pending request.
+- BREAKING: `lns` is renamed to `lnstest`; placeholder subcommands
+  removed, file transfer lives in `lncp`.
+- BREAKING: request handlers keyed by (destination, path); deregister
+  takes the destination, `RequestReceived` carries `destination_hash`.
+- BREAKING: `transport::DropReason` is `#[non_exhaustive]`.
+- Oversized single-segment responses fail closed (`ResourceTooLarge`);
+  response correlation is per-link like Python (#138).
 
 ### Fixed
 
-COMPAT-critical: idle Python-initiated links died. Python exempts the
-six link-traffic contexts KEEPALIVE, RESOURCE, RESOURCE_REQ,
-RESOURCE_PRF, CACHE_REQUEST and CHANNEL from its duplicate-hash filter;
-we exempted none. Python keepalives are byte-identical on every send,
-so our dedup ate every repeat after the first, the responder never
-echoed, and a Python-initiated link to a Rust node was torn down as
-stale after the idle window — resource and Channel retransmissions
-reused identical bytes and died the same way. The same six contexts are
-now exempt here too.
-
-The #38 LRPROOF hop-asymmetry family, all Python-compat. Python
-forwards and accepts a link proof only when its hop count equals the
-path's remaining hops, so a strict Python client behind our relay
-dropped the proof and timed out while our own lenient client masked the
-incompatibility; the relay now rewrites the forwarded proof's hop count
-to the value a symmetric path would produce (hops is a mutable counter
-outside the signed data, so the rewrite is wire-legal; opt out via
-`lrproof_rewrite_on_asymmetry`). A shared-instance client no longer
-counts the IPC hop, and inserts the transport header for a one-hop
-destination the way Python's local clients do (#119). A transport path
-response now reports the stored hop count instead of one hop too few,
-and `clean_link_table` heals the local-client link sub-case it used to
-skip.
-
-Authenticated-token unpadding matched only our own padding shape:
-Python validates just the final padding-length byte before truncating,
-while we required every padding byte to repeat it, so valid-HMAC
-resource advertisements from microReticulum nodes (which zero-fill
-padding) failed to decrypt. The truncation is now derived solely from
-the final byte, as in Python; HMAC verification is unchanged.
-
-Fuzzing the wire-format parsers found a remote DoS: a deeply nested
-msgpack container routed through the unknown-key skip path of a
-resource advertisement recursed one stack frame per byte, aborting the
-process on ~200 KiB of attacker bytes — on a path with no proof-of-work
-gate. Container nesting is now depth-capped and anything deeper is
-rejected as malformed (#23).
-
-AutoInterface carrier detection flapped on bridged networks: we forced
-`IPV6_MULTICAST_LOOP` off, so seeing our own discovery multicast
-depended on the network reflecting the group back, which a Linux bridge
-with multicast snooping intermittently stops doing. Python never
-touches the flag and inherits the OS default (on); we now default
-`multicast_loopback = true` to match. On-wire packets are identical.
-
-Link lifecycle robustness: an initiator-side RTT retry teardown closed
-healthy idle links (#123); a validated inbound proof now counts as link
-activity, so a proof-only link no longer goes stale (#124); link packet
-receipt timeouts are derived from the measured RTT instead of
-constants; the establishment timeout is jittered to break retransmit
-lockstep between peers that share a medium (#129); and `process_rtt`
-rejects non-finite or out-of-range values instead of poisoning the
-timers, as a resource advertisement with more than `u32::MAX` parts is
-rejected instead of trusted.
-
-The LoRa PHY against its reference, the RNode firmware. SF12 was
-undeliverable: a fixed 5 s TX timeout put the chip in standby mid-air,
-so no frame over ~75 B at SF12/BW125/CR4:8 (10.7 s of airtime) ever
-completed; TX and CAD software timeouts are now sized from the frame's
-airtime at the live modulation. The preamble is now derived the way the
-firmware derives it (duration-scaled with a symbol floor) instead of a
-constant 24 symbols, so mixed SX1262/SX127x pairs at SF8 and below
-decode each other (#143); the config can still pin `preamble_symbols`.
-The sx1262 RX-extend guard could never fire — its IRQ mask disabled the
-very bits it tested — so in-flight frames at slow spreading factors
-were truncated (#144). Airtime accounting now charges the programmed
-preamble, so the regulatory duty ledger no longer undercounts each
-frame (#149). And LDRO is derived from the symbol duration instead of
-an ordered comparison over the SX1262's non-monotonic bandwidth codes,
-matching the firmware bit for bit (#150). Note the wire-behaviour
-change: SF11/12 below 50 kHz now enable LDRO where they silently did
-not, and SF11/BW125 goes OFF — the old predicate had it on, a silent
-mismatch against every deployed RNode peer.
-
-`packed_size()` over-counted the wire length of every packet by 3
-bytes, so MTU decisions were made against a phantom size.
-
-Path handling: an expired path with a cached announce re-originates
-discovery instead of staying dark (#117), the path-request cache answer
-is gated on the path table, and a client retries a bounded
-PATH_REQUEST to recover announces held upstream (#44).
-
-Daemon robustness: a task panic while holding a std mutex no longer
-cascades into a whole-daemon crash — poisoned mutexes are recovered
-(with a one-time warning) and the poison degrades the offending path
-only. TCP clients reconnect with bounded exponential backoff and
-throttled logs instead of hammering a dead peer. A shared-instance
-connect that finds its name taken says what that means instead of
-silently spawning a second daemon.
-
-RPC and storage parity: `first_hop_timeout` is computed from the
-next-hop bitrate the way Python computes it, and 5-element
-`known_destinations` entries written by current rnsd are accepted.
-
-Runtime-attached interfaces get the configured IFAC applied instead of
-silently coming up unauthenticated; the RPC status path classifies
-byte-channel interfaces by their interface kind instead of a
-caller-supplied-name heuristic; and the outbound-socket hook's
-fail-closed semantics are pinned by test.
-
-LXMF follow-ups to the #138 merge: float-encoded propagation announce
-limits are accepted, and delivery retries follow the Python reference
-schedule. The router also reports propagation sync progress, transfer
-sizes and active incoming resource snapshots.
-
-The structured event log stopped flooding: name-field
-`EVENT_FIELD_VIOLATION`s are fixed at the source (#113), and the
-path-table dump cadence and tunnel messages no longer drown a soak
-log.
-
-A delivery proof that arrived and did not verify was reported as
-`DeliveryError::LinkFailed`. That is the name for a link fault, and it
-asks the caller to re-send — which cannot succeed, because the peer
-answered and will answer the same way again. It is now
-`DeliveryError::InvalidProof` (a new variant on the `#[non_exhaustive]`
-enum), projected to C as `LEV_DELIVERY_INVALID_PROOF`, and the caller is
-told to re-resolve the destination's identity instead.
-
-`PKT_DROP_SUMMARY` now carries a `blackholed_announce` field. The counter
-existed and was incremented, but the summary never emitted it, so a
-blackholed announce raised `total` while no per-reason field accounted
-for it and the fields no longer summed to the total — the one arithmetic
-the summary exists to support. Two mechanical guards now walk
-`DropReason::ALL` and require every variant to appear both in the emitted
-line and in the event catalog's `required_keys`, so the next drop reason
-cannot be forgotten the same way.
+- COMPAT: the six link-traffic contexts Python exempts from packet
+  dedup are exempt; idle Python-initiated links no longer die stale.
+- COMPAT: relays rewrite forwarded LRPROOF hops so strict Python
+  clients establish; shared-instance hop counting matches (#38, #119).
+- COMPAT: token unpadding matches Python; microReticulum peers decrypt.
+- COMPAT: `multicast_loopback` defaults true like Python (carrier flap fix).
+- SECURITY: msgpack recursion DoS via resource advertisements (#23).
+- Radio PHY matches the RNode firmware: airtime-scaled TX/CAD timeouts
+  (SF12 was undeliverable), derived preamble (#143), working RX-extend
+  guard (#144), preamble-charged airtime accounting (#149),
+  symbol-duration LDRO (#150; wire note: SF11/BW125 LDRO now off).
+- Links: healthy idle links survive (#123), inbound proofs count as
+  activity (#124), establishment jitter breaks lockstep (#129).
+- Expired paths re-originate discovery, with bounded retry (#117, #44).
+- Per-interface `announce_cap` now takes effect (was parsed and dropped).
+- A poisoned mutex no longer crashes the daemon; TCP reconnects back off.
+- Runtime-attached interfaces apply the configured IFAC.
+- An unverifiable delivery proof reports `InvalidProof`, not `LinkFailed`.
 
 ### Internal
 
-A cargo-fuzz harness with one target per parser that consumes untrusted
-bytes off the wire (#108) — which is what found the msgpack recursion
-DoS above. The interop suite against real Python grew substantially:
-the 13-test raw-link/request-Resource/LXMF batch, an always-on reverse
-RPC interop against Python rnsd, live serial interop over socat, and
-discovery interop against multiple rnsd instances. The Docker scenario
-harness is being extracted into the standalone periculum framework;
-tier-2 scenarios already run through the periculum binary and the
-in-repo harness is retired. The .debs now pass a clean lintian run and
-four Debian policy gaps are closed; lnomad and lblogd ship as their own
-nightly debs and tarballs with independent versions, stamped by one
-shared script. Dependency bumps clear RUSTSEC-2026-0007 and
-RUSTSEC-2026-0097.
+- Wire-parser fuzz harness, Python-interop suite growth, periculum
+  test-framework extraction, lintian-clean debs, RUSTSEC bumps.
 
 ## [0.7.0] - 2026-06-22
 
