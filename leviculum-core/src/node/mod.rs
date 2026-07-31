@@ -48,6 +48,8 @@ mod link_management;
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
 // (absent under `--no-default-features`, e.g. the core-no-tracing CI gate).
 #[cfg(test)]
+mod mvr_app_proof_ingress_iface;
+#[cfg(test)]
 mod mvr_bidir_transfer;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
