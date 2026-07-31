@@ -51,14 +51,12 @@ async fn run(args: Args) -> Result<(), MainError> {
 fn print_hash(config: &Config) -> Result<(), MainError> {
     let hash = node::resolve_destination_hash(&config.data_dir)?;
     let meta = config.blog_meta(Some(hash.to_string()));
-    let snapshot = load_snapshot(
-        &meta,
-        &config.posts_dir,
-        config.blog.css.as_deref(),
-        config.blog.about.as_deref(),
-    )?;
+    let snapshot = load_snapshot(&meta, &config.content_sources())?;
     println!("{hash}");
     for path in snapshot.served_paths() {
+        println!("{path}");
+    }
+    for path in snapshot.served_file_paths() {
         println!("{path}");
     }
     Ok(())
@@ -75,12 +73,7 @@ async fn serve(config: &Config) -> Result<(), MainError> {
 
     // A failure here is fatal: at startup there is no previous good state to
     // fall back on. Once running, a failed reload is not (see reload_task).
-    let (reloader, content) = Reloader::new(
-        meta,
-        &config.posts_dir,
-        config.blog.css.as_deref(),
-        config.blog.about.as_deref(),
-    )?;
+    let (reloader, content) = Reloader::new(meta, config.content_sources())?;
     let reloader = Arc::new(reloader);
 
     // Established before anything else starts, and synchronously: a broken
@@ -93,12 +86,7 @@ async fn serve(config: &Config) -> Result<(), MainError> {
                 "lblogd: watching {} for changes",
                 config.posts_dir.display()
             );
-            let extra: Vec<&std::path::Path> =
-                [config.blog.css.as_deref(), config.blog.about.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .collect();
-            Some(watcher::PostsWatcher::start(&config.posts_dir, &extra)?)
+            Some(watcher::PostsWatcher::start_for(reloader.sources())?)
         }
         false => None,
     };
@@ -106,6 +94,9 @@ async fn serve(config: &Config) -> Result<(), MainError> {
     let blog = BlogNode::start(config.blog_node_config(), content.clone()).await?;
     eprintln!("lblogd: node destination {}", blog.destination_hash());
     for path in blog.served_paths() {
+        eprintln!("lblogd: serving {path}");
+    }
+    for path in blog.served_file_paths() {
         eprintln!("lblogd: serving {path}");
     }
 

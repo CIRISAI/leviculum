@@ -42,12 +42,42 @@ What is still an error: a frontmatter block that opens with `+++` and never
 closes, a `date` that is not a valid `YYYY-MM-DD` calendar day, and a title
 that slugifies to nothing.
 
+## Pictures
+
+Micron, the NomadNet page format, has no image construct — its parser knows
+formatting, colour, sections, links, fields and tables, and nothing else. A
+picture therefore reaches a mesh reader the only way NomadNet has ever offered:
+as a file, linked from the page.
+
+Put the file in the file area (`files_dir`, by default a `files` directory
+beside `posts_dir`) and reference it from a post by name:
+
+```markdown
+![Der Mast](mast.jpg)
+```
+
+The web side serves it at `/files/mast.jpg` and renders a real `<img>`. The mesh
+side serves the same bytes at `/file/mast.jpg`, using NomadNet's `serve_file`
+wire form, and the page carries `` `[Der Mast`:/file/mast.jpg] ``. NomadNet
+shows that as a download link and saves the picture to the reader's download
+directory; `lnomad` draws it in the page. `./mast.jpg`, `files/mast.jpg` and
+`/files/mast.jpg` all mean the same file; anything with a scheme (an external
+`https://` image) is left alone and still degrades to `[image: alt]` on the mesh
+side, since nothing on the mesh can fetch it.
+
+The area is flat — one directory, no subdirectories — and a requested name can
+never contain a path separator, so no request can leave it. `max_file_bytes`
+(default 10 MiB) bounds a single file: a blog is not a file server, and over a
+LoRa interface an unbounded transfer denies service to every other reader of the
+node for as long as it runs. Files are read from disk per request rather than
+held in memory, and the area reloads with the posts.
+
 ## Renderers
 
 `markdown_to_html` uses pulldown-cmark; `markdown_to_micron` emits micron as
 defined by the `leviculum-micron` parser. Constructs without a micron
-equivalent degrade gracefully (images to `[image: alt]`, tables to plaintext
-rows, blockquotes to indented text); see the mapping table in
+equivalent degrade gracefully (an image outside the file area to `[image: alt]`,
+tables to plaintext rows, blockquotes to indented text); see the mapping table in
 `src/render.rs`. Round-trip tests parse the generated micron with
 `leviculum-micron` and assert the document structure.
 
@@ -58,6 +88,8 @@ One TOML file drives everything:
 ```toml
 data_dir    = "/var/lib/lblogd"        # identity, node storage, ACME cache
 posts_dir   = "/var/lib/lblogd/posts"  # the *.md blog posts
+# files_dir      = "/var/lib/lblogd/files"  # pictures; default: files/ beside posts_dir
+# max_file_bytes = 10485760                 # per-file ceiling, default 10 MiB
 watch_posts = false                    # optional, default false; see below
 
 [blog]                                 # optional, but see below

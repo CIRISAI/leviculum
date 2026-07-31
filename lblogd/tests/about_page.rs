@@ -1,7 +1,7 @@
 //! The about page: what it shows, when it exists, and how the author's name
 //! links to it on both sides.
 
-use lblogd::content::{load_snapshot, ABOUT_PATH};
+use lblogd::content::{load_snapshot, Sources, ABOUT_PATH};
 use lblogd::post::{Date, Post};
 use lblogd::render::{
     render_about_html, render_about_micron, render_index_html, render_index_micron,
@@ -176,8 +176,11 @@ fn the_about_page_is_served_over_micron_but_is_not_a_post() {
     let about = dir.path().join("..").join("about.md");
     std::fs::write(&about, "+++\ntitle = \"Über mich\"\n+++\n\nText.\n").expect("write about");
 
-    let snapshot =
-        load_snapshot(&meta_with_about(), dir.path(), None, Some(&about)).expect("load snapshot");
+    let snapshot = load_snapshot(
+        &meta_with_about(),
+        &Sources::new(dir.path()).with_about(Some(&about)),
+    )
+    .expect("load snapshot");
 
     assert!(
         snapshot.served_paths().contains(&ABOUT_PATH.to_string()),
@@ -198,7 +201,7 @@ fn contact_details_alone_are_enough_for_an_about_page() {
     // No text file: the page still exists and carries the addresses.
     let dir = tempfile::tempdir().expect("posts dir");
     std::fs::write(dir.path().join("erster.md"), "Text.\n").expect("write post");
-    let snapshot = load_snapshot(&meta_with_about(), dir.path(), None, None).expect("load");
+    let snapshot = load_snapshot(&meta_with_about(), &Sources::new(dir.path())).expect("load");
 
     assert!(snapshot.about.is_none());
     assert!(snapshot.served_paths().contains(&ABOUT_PATH.to_string()));
@@ -208,6 +211,6 @@ fn contact_details_alone_are_enough_for_an_about_page() {
 fn no_about_page_means_no_micron_page_for_it() {
     let dir = tempfile::tempdir().expect("posts dir");
     std::fs::write(dir.path().join("erster.md"), "Text.\n").expect("write post");
-    let snapshot = load_snapshot(&meta_without_about(), dir.path(), None, None).expect("load");
+    let snapshot = load_snapshot(&meta_without_about(), &Sources::new(dir.path())).expect("load");
     assert!(!snapshot.served_paths().contains(&ABOUT_PATH.to_string()));
 }

@@ -62,6 +62,33 @@ fn numbered_list() {
     assert!(html.contains("<li>second</li>"));
 }
 
+#[test]
+fn an_image_in_the_file_area_points_at_the_web_route() {
+    // The author writes the name of a file that sits beside the posts; the
+    // web side serves it from /files/, the mesh side as :/file/.
+    for md in [
+        "![Antenne](antenne.jpg)",
+        "![Antenne](./antenne.jpg)",
+        "![Antenne](files/antenne.jpg)",
+        "![Antenne](/files/antenne.jpg)",
+    ] {
+        let html = markdown_to_html(md);
+        assert!(
+            html.contains("<img src=\"/files/antenne.jpg\" alt=\"Antenne\""),
+            "input {md} produced {html}"
+        );
+    }
+}
+
+#[test]
+fn an_external_image_is_left_exactly_as_written() {
+    let html = markdown_to_html("![Antenne](https://example.com/antenne.jpg)");
+    assert!(
+        html.contains("<img src=\"https://example.com/antenne.jpg\""),
+        "{html}"
+    );
+}
+
 fn sample_post(title: &str) -> lblogd::post::Post {
     let src = format!("+++\ntitle = \"{title}\"\ndate = \"2026-07-12\"\n+++\n\nSome **body**.\n");
     parse_post(&src, &fixture_defaults()).unwrap()

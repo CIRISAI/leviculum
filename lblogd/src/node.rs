@@ -7,8 +7,14 @@
 //! answers page requests with the rendered Micron bytes. Small pages go out
 //! as a single RESPONSE packet; pages larger than the link MDU fall back to
 //! a response Resource.
+//!
+//! The file area is served from the same destination under `/file/<name>`,
+//! the path NomadNet's `serve_file` uses, and answered with the same wire
+//! form: a Resource carrying the raw bytes plus msgpack metadata naming the
+//! file. That is how a picture reaches a mesh reader, micron having no image
+//! construct of its own (see [`crate::files`]).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,12 +30,28 @@ use leviculum_std::{
 };
 
 use crate::content::{Snapshot, SnapshotRx};
+use crate::files::{self, FileEntry};
 
 /// Truncated request id length (matches the driver's request/response API).
 const REQUEST_ID_LEN: usize = 16;
 
-/// A queued large response: the request id it answers and the encoded page.
-type PendingResponse = ([u8; REQUEST_ID_LEN], Vec<u8>);
+/// A queued large response: the request id it answers, the bytes, and which
+/// wire form they go out in.
+type PendingResponse = ([u8; REQUEST_ID_LEN], Vec<u8>, ResourceForm);
+
+/// How a queued large response is sent once the link's resource slot frees.
+///
+/// The two forms are not interchangeable: a page is a response Resource whose
+/// payload is the `[request_id, response]` wrapper, a file is a Resource of
+/// raw bytes plus metadata. Sending a file the page way would hand the reader
+/// a msgpack-wrapped picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResourceForm {
+    /// A rendered page.
+    Page,
+    /// A file from the file area, with the name its metadata carries.
+    File(String),
+}
 
 /// Errors from building or running the blog node.
 #[derive(Debug, Error)]
@@ -131,8 +153,13 @@ impl BlogNode {
         // One handler per exact path: the wire carries only the truncated
         // path hash, so prefix or wildcard registration is impossible by
         // design. Unregistered paths are silently dropped by the stack.
-        for path in snapshot.pages.keys() {
-            node.register_request_handler(dest_hash, path, RequestPolicy::AllowAll);
+        for path in snapshot
+            .pages
+            .keys()
+            .cloned()
+            .chain(snapshot.served_file_paths())
+        {
+            node.register_request_handler(dest_hash, &path, RequestPolicy::AllowAll);
         }
 
         Ok(BlogNode {
@@ -152,9 +179,14 @@ impl BlogNode {
         self.dest_hash
     }
 
-    /// The request paths this node serves, sorted.
+    /// The page request paths this node serves, sorted.
     pub fn served_paths(&self) -> Vec<String> {
         self.snapshot.served_paths()
+    }
+
+    /// The file request paths this node serves, sorted.
+    pub fn served_file_paths(&self) -> Vec<String> {
+        self.snapshot.served_file_paths()
     }
 
     /// Announce the destination and serve page requests until the daemon
@@ -216,9 +248,10 @@ impl BlogNode {
                 .register_request_handler(self.dest_hash, path, RequestPolicy::AllowAll);
         }
         eprintln!(
-            "lblogd: reloaded {} posts, serving {} pages",
+            "lblogd: reloaded {} posts, serving {} pages and {} files",
             snapshot.posts.len(),
-            snapshot.pages.len()
+            snapshot.pages.len(),
+            snapshot.files.len()
         );
         self.snapshot = snapshot;
     }
@@ -231,12 +264,15 @@ impl BlogNode {
                 path,
                 ..
             } => {
-                // Unknown path: protocol-correct silent drop (there is no 404
-                // in the protocol; the client sees a clean timeout).
-                let Some(bytes) = self.snapshot.pages.get(&path).cloned() else {
-                    return;
-                };
-                self.respond(link_id, request_id, bytes).await;
+                let page = self.snapshot.pages.get(&path).cloned();
+                let file = self.snapshot.file_for_node_path(&path).cloned();
+                match (page, file) {
+                    (Some(bytes), _) => self.respond(link_id, request_id, bytes).await,
+                    (None, Some(entry)) => self.respond_file(link_id, request_id, &entry).await,
+                    // Unknown path: protocol-correct silent drop (there is no
+                    // 404 in the protocol; the client sees a clean timeout).
+                    (None, None) => {}
+                }
             }
             // The outgoing resource slot on this link freed up (a large-page
             // transfer finished or died): send the next queued response.
@@ -265,10 +301,51 @@ impl BlogNode {
         match self.node.send_response(&link_id, &request_id, &bytes).await {
             Ok(()) => {}
             Err(StdError::Request(RequestError::PayloadTooLarge)) => {
-                self.send_large(link_id, request_id, bytes).await;
+                self.send_large(link_id, request_id, bytes, ResourceForm::Page)
+                    .await;
             }
             Err(e) => eprintln!("lblogd: response failed: {e}"),
         }
+    }
+
+    /// Answer one file request the way NomadNet's `serve_file` does: a
+    /// Resource carrying the raw bytes, plus msgpack metadata naming the file
+    /// so the browser can save it under the name the author gave it.
+    ///
+    /// Always a Resource, never a single packet: a file is not a page, and a
+    /// reader that asked for `antenne.jpg` must not receive a msgpack-wrapped
+    /// value it would have to unwrap. NomadNet sends every file as a Resource
+    /// regardless of size, and `lnomad`'s download path reads the response
+    /// verbatim.
+    ///
+    /// A file that cannot be read is dropped silently, like an unknown path:
+    /// the protocol has no error response, and the reader sees a timeout.
+    async fn respond_file(
+        &mut self,
+        link_id: LinkId,
+        request_id: [u8; REQUEST_ID_LEN],
+        entry: &FileEntry,
+    ) {
+        let max_bytes = self
+            .snapshot
+            .file_area
+            .as_ref()
+            .map(|area| area.max_bytes)
+            .unwrap_or(files::DEFAULT_MAX_FILE_BYTES);
+        let bytes = match files::read_entry(entry, max_bytes) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("lblogd: cannot serve {}: {e}", entry.name);
+                return;
+            }
+        };
+        self.send_large(
+            link_id,
+            request_id,
+            bytes,
+            ResourceForm::File(entry.name.clone()),
+        )
+        .await;
     }
 
     async fn send_large(
@@ -276,12 +353,21 @@ impl BlogNode {
         link_id: LinkId,
         request_id: [u8; REQUEST_ID_LEN],
         bytes: Vec<u8>,
+        form: ResourceForm,
     ) {
-        match self
-            .node
-            .send_response_resource(&link_id, &request_id, &bytes)
-            .await
-        {
+        let sent = match &form {
+            ResourceForm::Page => {
+                self.node
+                    .send_response_resource(&link_id, &request_id, &bytes)
+                    .await
+            }
+            ResourceForm::File(name) => {
+                self.node
+                    .send_file_response(&link_id, &request_id, &bytes, &file_metadata(name))
+                    .await
+            }
+        };
+        match sent {
             Ok(()) => {}
             // A link serves one outgoing resource at a time; queue until the
             // in-flight transfer completes or fails.
@@ -289,7 +375,7 @@ impl BlogNode {
                 self.pending
                     .entry(link_id)
                     .or_default()
-                    .push_back((request_id, bytes));
+                    .push_back((request_id, bytes, form));
             }
             Err(e) => eprintln!("lblogd: resource response failed: {e}"),
         }
@@ -299,7 +385,7 @@ impl BlogNode {
         let Some(queue) = self.pending.get_mut(link_id) else {
             return;
         };
-        let Some((request_id, bytes)) = queue.pop_front() else {
+        let Some((request_id, bytes, form)) = queue.pop_front() else {
             self.pending.remove(link_id);
             return;
         };
@@ -308,8 +394,27 @@ impl BlogNode {
         }
         // send_large re-queues on TransferInProgress (e.g. a multi-segment
         // transfer that only completed one segment), so nothing is lost.
-        self.send_large(*link_id, request_id, bytes).await;
+        self.send_large(*link_id, request_id, bytes, form).await;
     }
+}
+
+/// The msgpack `{"name": "<name>"}` map a file response's Resource carries,
+/// which is what NomadNet's `serve_file` sends and what `lnomad` reads to
+/// name the saved file.
+///
+/// Encoding a two-element map cannot fail, so an error here would mean the
+/// encoder itself broke; an empty metadata blob is the honest fallback, and
+/// the reader then falls back to the URL basename.
+fn file_metadata(name: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let value = rmpv::Value::Map(vec![(
+        rmpv::Value::String("name".into()),
+        rmpv::Value::String(name.into()),
+    )]);
+    if rmpv::encode::write_value(&mut buf, &value).is_err() {
+        buf.clear();
+    }
+    buf
 }
 
 /// Where the persistent node identity lives under the data directory.
@@ -380,40 +485,62 @@ fn load_or_generate_identity(path: &Path) -> Result<Identity, NodeError> {
 /// grows with every reload and a node that accepts requests for pages it no
 /// longer serves — so the decision is what gets pinned.
 fn reconcile_paths(old: &Snapshot, new: &Snapshot) -> (Vec<String>, Vec<String>) {
-    let mut gone: Vec<String> = old
-        .pages
-        .keys()
-        .filter(|p| !new.pages.contains_key(*p))
-        .cloned()
-        .collect();
-    let mut added: Vec<String> = new
-        .pages
-        .keys()
-        .filter(|p| !old.pages.contains_key(*p))
-        .cloned()
-        .collect();
+    // Pages and files share one request-path namespace on the wire, so they
+    // are reconciled together: a picture removed from the file area must be
+    // deregistered exactly as a deleted post's page is.
+    let old_paths = served_request_paths(old);
+    let new_paths = served_request_paths(new);
+    let mut gone: Vec<String> = old_paths.difference(&new_paths).cloned().collect();
+    let mut added: Vec<String> = new_paths.difference(&old_paths).cloned().collect();
     gone.sort();
     added.sort();
     (gone, added)
 }
 
+/// Every request path a snapshot answers: its pages and its files.
+fn served_request_paths(snapshot: &Snapshot) -> BTreeSet<String> {
+    snapshot
+        .pages
+        .keys()
+        .cloned()
+        .chain(snapshot.served_file_paths())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::BlogMeta;
 
     /// A snapshot that has exactly the given page paths; nothing else in it
     /// matters to `reconcile_paths`.
     fn snapshot_with(paths: &[&str]) -> Snapshot {
         Snapshot {
-            meta: BlogMeta::default(),
-            posts: Vec::new(),
             pages: paths
                 .iter()
                 .map(|p| ((*p).to_string(), Vec::new()))
                 .collect(),
-            css: String::new(),
-            about: None,
+            ..Snapshot::default()
+        }
+    }
+
+    /// A snapshot serving the given file names out of `/tmp` (never read:
+    /// `reconcile_paths` only looks at names).
+    fn snapshot_with_files(pages: &[&str], files: &[&str]) -> Snapshot {
+        Snapshot {
+            files: files
+                .iter()
+                .map(|name| {
+                    (
+                        (*name).to_string(),
+                        FileEntry {
+                            name: (*name).to_string(),
+                            path: PathBuf::from("/tmp").join(name),
+                            len: 0,
+                        },
+                    )
+                })
+                .collect(),
+            ..snapshot_with(pages)
         }
     }
 
@@ -432,6 +559,29 @@ mod tests {
             vec!["/page/third.mu"],
             "a page the reload added must get a handler"
         );
+    }
+
+    #[test]
+    fn a_vanished_file_is_deregistered_like_a_page() {
+        // Pages and files share the request-path namespace, so a picture
+        // removed from the file area has to lose its handler too.
+        let old = snapshot_with_files(&["/page/index.mu"], &["antenne.png", "mast.jpg"]);
+        let new = snapshot_with_files(&["/page/index.mu"], &["mast.jpg", "rig.png"]);
+        let (gone, added) = reconcile_paths(&old, &new);
+        assert_eq!(gone, vec!["/file/antenne.png"]);
+        assert_eq!(added, vec!["/file/rig.png"]);
+    }
+
+    #[test]
+    fn file_metadata_is_the_map_nomadnet_sends() {
+        let blob = file_metadata("antenne.png");
+        let value = rmpv::decode::read_value(&mut std::io::Cursor::new(&blob[..])).unwrap();
+        let rmpv::Value::Map(entries) = value else {
+            panic!("metadata must be a map, got {value:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.as_str(), Some("name"));
+        assert_eq!(entries[0].1.as_str(), Some("antenne.png"));
     }
 
     #[test]

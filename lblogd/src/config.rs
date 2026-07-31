@@ -4,6 +4,7 @@
 //! ```toml
 //! data_dir  = "/var/lib/lblogd"
 //! posts_dir = "/var/lib/lblogd/posts"
+//! files_dir = "/var/lib/lblogd/files"   # optional, this is the default
 //!
 //! [node]
 //! instance_name          = "leviculum"
@@ -40,6 +41,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::content::Sources;
+use crate::files::{self, FileArea};
 use crate::node::BlogNodeConfig;
 use crate::render::BlogMeta;
 use crate::web::{AcmeSettings, WebConfig};
@@ -84,6 +87,21 @@ pub struct Config {
     /// Directory of Markdown posts, served by both the node and the web
     /// server.
     pub posts_dir: PathBuf,
+    /// Directory of files a post can reference: pictures, mostly.
+    ///
+    /// Defaults to a `files` sibling of [`posts_dir`](Self::posts_dir). The
+    /// directory need not exist; without it the blog simply has no file area.
+    /// Served as `/file/<name>` on the mesh and `/files/<name>` on the web
+    /// (see [`crate::files`]).
+    #[serde(default)]
+    pub files_dir: Option<PathBuf>,
+    /// The largest single file that will be served, in bytes.
+    ///
+    /// Defaults to [`crate::files::DEFAULT_MAX_FILE_BYTES`] (10 MiB). A blog is not a file server, and an unbounded transfer over
+    /// a LoRa interface denies service to every other reader of the node for
+    /// as long as it runs.
+    #[serde(default)]
+    pub max_file_bytes: Option<u64>,
     /// Reload the posts automatically whenever `posts_dir` changes, instead
     /// of only on SIGHUP.
     ///
@@ -347,6 +365,27 @@ impl Config {
     /// nothing on it would be worse than not linking it.
     pub fn has_about_page(&self) -> bool {
         self.blog.email.is_some() || self.blog.lxmf.is_some() || self.blog.about.is_some()
+    }
+
+    /// Where the content comes from: the posts directory plus the optional
+    /// stylesheet, about text and file area.
+    ///
+    /// The file area is always configured, because it is optional by
+    /// existence rather than by declaration: a blog that has no `files`
+    /// directory simply serves no files, and one that grows one later starts
+    /// serving them on the next reload without a config change.
+    pub fn content_sources(&self) -> Sources {
+        let dir = self
+            .files_dir
+            .clone()
+            .unwrap_or_else(|| files::default_files_dir(&self.posts_dir));
+        Sources::new(&self.posts_dir)
+            .with_css(self.blog.css.clone())
+            .with_about(self.blog.about.clone())
+            .with_files(Some(FileArea {
+                dir,
+                max_bytes: self.max_file_bytes.unwrap_or(files::DEFAULT_MAX_FILE_BYTES),
+            }))
     }
 
     /// The NomadNet node config this file describes.

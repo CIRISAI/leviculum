@@ -12,7 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lblogd::content::{Reloader, SnapshotRx};
+use lblogd::content::{Reloader, SnapshotRx, Sources};
+use lblogd::files::FileArea;
 use lblogd::render::BlogMeta;
 use lblogd::watcher::PostsWatcher;
 
@@ -28,8 +29,8 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// task yet.
 fn spawn_watcher(posts_dir: &Path) -> SnapshotRx {
     let (reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir, None, None).expect("initial load");
-    let watcher = PostsWatcher::start(posts_dir, &[]).expect("establish watch");
+        Reloader::new(fixture_meta(), Sources::new(posts_dir)).expect("initial load");
+    let watcher = PostsWatcher::start(&[posts_dir], &[]).expect("establish watch");
     tokio::spawn(watcher.run(Arc::new(reloader)));
     content
 }
@@ -155,6 +156,54 @@ async fn an_edit_is_picked_up_and_a_broken_edit_is_not_fatal() {
         paths.iter().any(|p| p == "/page/wieder-gut.mu")
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_picture_added_to_the_file_area_is_picked_up_without_a_signal() {
+    // The file area is watched like the posts directory: dropping a photograph
+    // next to the posts publishes it, on both sides, with no signal and no
+    // restart.
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    let files_dir = tempfile::tempdir().expect("files dir");
+    std::fs::write(posts_dir.path().join("erster.md"), "Erster Text.\n").expect("write first");
+
+    let sources = Sources::new(posts_dir.path()).with_files(Some(FileArea::new(files_dir.path())));
+    let (reloader, content) = Reloader::new(fixture_meta(), sources).expect("initial load");
+    let watcher = PostsWatcher::start_for(reloader.sources()).expect("establish watch");
+    tokio::spawn(watcher.run(Arc::new(reloader)));
+    assert!(content.borrow().served_file_paths().is_empty());
+
+    std::fs::write(files_dir.path().join("antenne.png"), b"pixels").expect("write picture");
+    wait_for(&content, "the new picture to appear", |snapshot| {
+        snapshot
+            .served_file_paths()
+            .iter()
+            .any(|p| p == "/file/antenne.png")
+    })
+    .await;
+
+    std::fs::remove_file(files_dir.path().join("antenne.png")).expect("remove picture");
+    wait_for(&content, "the deleted picture to disappear", |snapshot| {
+        snapshot.served_file_paths().is_empty()
+    })
+    .await;
+}
+
+/// Poll the snapshot itself until `want` holds. The sibling [`wait_until`]
+/// looks only at page paths, which is the wrong surface for the file area.
+async fn wait_for(
+    content: &SnapshotRx,
+    what: &str,
+    want: impl Fn(&lblogd::content::Snapshot) -> bool,
+) {
+    let started = Instant::now();
+    while started.elapsed() < DEADLINE {
+        if want(&content.borrow()) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
 }
 
 /// Blog metadata for these fixtures.

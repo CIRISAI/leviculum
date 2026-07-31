@@ -15,7 +15,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use lblogd::content::{Reloader, SnapshotRx};
+use lblogd::content::{Reloader, SnapshotRx, Sources};
+use lblogd::files::FileArea;
 use lblogd::render::BlogMeta;
 use lblogd::web::{run_web, AcmeSettings, WebConfig, WebError};
 
@@ -43,6 +44,27 @@ async fn wait_for_listener(addr: SocketAddr) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("no listener on {addr} after 2 s");
+}
+
+/// One plain HTTP/1.1 GET, returning the response's raw bytes. Needed where
+/// the body is binary: [`http_get`] decodes lossily, which would replace every
+/// non-UTF-8 byte of a picture with U+FFFD and hide exactly the corruption
+/// worth testing for.
+async fn http_get_bytes(addr: SocketAddr, path: &str) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response has a header/body separator");
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    (head, raw[split + 4..].to_vec())
 }
 
 /// One plain HTTP/1.1 GET, returning the whole raw response. `Connection:
@@ -83,7 +105,7 @@ async fn plain_http_serves_the_blog_without_acme() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let (_reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial load");
     let bind = serve_plain(content).await;
 
     let index = http_get(bind, "/").await;
@@ -103,13 +125,80 @@ async fn plain_http_serves_the_blog_without_acme() {
 }
 
 #[tokio::test]
+async fn the_file_area_is_served_verbatim_and_nothing_else_is() {
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    let files_dir = tempfile::tempdir().expect("files dir");
+    write_fixture_posts(posts_dir.path());
+    // Deliberately not valid UTF-8: a picture is bytes, and the server must
+    // hand them back unchanged.
+    let pixels: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xc3,
+    ];
+    std::fs::write(files_dir.path().join("antenne.png"), &pixels).expect("write picture");
+    std::fs::write(files_dir.path().join("huge.png"), vec![0u8; 4096]).expect("write huge");
+
+    let sources = Sources::new(posts_dir.path()).with_files(Some(FileArea {
+        dir: files_dir.path().to_path_buf(),
+        max_bytes: 1024,
+    }));
+    let (_reloader, content) = Reloader::new(fixture_meta(), sources).expect("initial load");
+    let bind = serve_plain(content).await;
+
+    let (head, body) = http_get_bytes(bind, "/files/antenne.png").await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head.contains("content-type: image/png"), "{head}");
+    assert_eq!(body, pixels, "the picture must come back byte for byte");
+
+    // A file the mesh side refuses to serve is not served here either: one
+    // snapshot, one answer to "does this exist".
+    let (head, _) = http_get_bytes(bind, "/files/huge.png").await;
+    assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+
+    let (head, _) = http_get_bytes(bind, "/files/nicht-da.png").await;
+    assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+}
+
+#[tokio::test]
+async fn a_file_request_cannot_climb_out_of_the_area() {
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    let files_dir = tempfile::tempdir().expect("files dir");
+    write_fixture_posts(posts_dir.path());
+    std::fs::write(files_dir.path().join("antenne.png"), b"pixels").expect("write picture");
+    let secret = files_dir.path().parent().unwrap().join("secret.txt");
+    std::fs::write(&secret, b"not for readers").expect("write secret");
+
+    let sources = Sources::new(posts_dir.path()).with_files(Some(FileArea::new(files_dir.path())));
+    let (_reloader, content) = Reloader::new(fixture_meta(), sources).expect("initial load");
+    let bind = serve_plain(content).await;
+
+    // Percent-encoded, because axum decodes the segment before the handler
+    // sees it: this is what actually reaches the name check.
+    for path in [
+        "/files/..%2Fsecret.txt",
+        "/files/%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        "/files/%2e%2e",
+        "/files/.hidden",
+    ] {
+        let (head, body) = http_get_bytes(bind, path).await;
+        assert!(
+            head.starts_with("HTTP/1.1 404") || head.starts_with("HTTP/1.1 30"),
+            "{path} must not be served: {head}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&body).contains("not for readers"),
+            "{path} escaped the file area"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_reload_reaches_the_running_listener() {
     // The listener is bound once and never rebound, so this proves publishing
     // needs no restart: same socket, new content.
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let (reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial load");
     let bind = serve_plain(content).await;
 
     assert!(
@@ -150,7 +239,7 @@ async fn a_failed_reload_keeps_the_server_serving() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
     let (reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial load");
     let bind = serve_plain(content).await;
 
     std::fs::write(
@@ -177,7 +266,7 @@ async fn the_feed_route_answers_or_404s_by_configuration() {
 
     // A plaintext development run has no public URL, so no feed.
     let (_reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial load");
     let bind = serve_plain(content).await;
     assert!(
         http_get(bind, "/feed.xml")
@@ -192,7 +281,7 @@ async fn the_feed_route_answers_or_404s_by_configuration() {
         ..fixture_meta()
     };
     let (_reloader, content) =
-        Reloader::new(meta, posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(meta, Sources::new(posts_dir.path())).expect("initial load");
     let bind = serve_plain(content).await;
     let response = http_get(bind, "/feed.xml").await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
@@ -214,7 +303,7 @@ async fn the_about_route_answers_or_404s_by_configuration() {
 
     // Nothing configured for it: the route must not offer an empty page.
     let (_reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial load");
     let bind = serve_plain(content).await;
     assert!(
         http_get(bind, "/about").await.starts_with("HTTP/1.1 404"),
@@ -228,7 +317,7 @@ async fn the_about_route_answers_or_404s_by_configuration() {
         ..fixture_meta()
     };
     let (_reloader, content) =
-        Reloader::new(meta, posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(meta, Sources::new(posts_dir.path())).expect("initial load");
     let bind = serve_plain(content).await;
 
     let about = http_get(bind, "/about").await;
@@ -246,7 +335,7 @@ async fn acme_mode_still_requires_domains() {
     write_fixture_posts(posts_dir.path());
     let cache_dir = tempfile::tempdir().expect("acme cache dir");
     let (_reloader, content) =
-        Reloader::new(fixture_meta(), posts_dir.path(), None, None).expect("initial load");
+        Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial load");
 
     let err = run_web(
         WebConfig {

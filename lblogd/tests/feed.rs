@@ -141,6 +141,19 @@ fn images_are_absolutised_too() {
 }
 
 #[test]
+fn a_file_area_image_resolves_to_the_web_route_before_being_absolutised() {
+    // Resolving first is what keeps the feed honest: a bare `antenne.jpg`
+    // absolutised on its own would point at /posts/pic/antenne.jpg, where
+    // nothing is served.
+    let posts = vec![post("Pic", "2026-07-12", "![alt](antenne.jpg)\n", None)];
+    let xml = render_feed_atom(&meta(), &posts).expect("feed");
+    assert!(
+        xml.contains("src=&quot;https://leviculum.network/files/antenne.jpg&quot;"),
+        "{xml}"
+    );
+}
+
+#[test]
 fn a_guest_author_overrides_the_feed_author() {
     let posts = vec![
         post("Mine", "2026-07-12", "Body.\n", None),

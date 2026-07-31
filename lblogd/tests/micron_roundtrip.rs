@@ -192,12 +192,58 @@ fn rule_becomes_a_divider() {
 }
 
 #[test]
-fn image_degrades_to_alt_text_without_panicking() {
-    let doc = roundtrip("An image: ![a rig photo](rig.png) inline.\n");
+fn image_in_the_file_area_becomes_a_link_to_the_file() {
+    // Micron has no image construct, so the picture reaches a mesh reader the
+    // only way NomadNet offers: as a file link. NomadNet saves it to the
+    // reader's download directory; lnomad draws it in the page.
+    let doc = roundtrip("![a rig photo](rig.png)\n");
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one paragraph, got {:?}", doc.blocks);
+    };
+    let link = line.spans[0].link.as_ref().expect("image must be a link");
+    assert_eq!(link.label, "a rig photo");
+    assert_eq!(link.target, ":/file/rig.png");
+    assert_eq!(line_text(line), "a rig photo");
+}
+
+#[test]
+fn image_without_alt_text_is_labelled_with_its_file_name() {
+    let doc = roundtrip("![](rig.png)\n");
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one paragraph, got {:?}", doc.blocks);
+    };
+    let link = line.spans[0].link.as_ref().expect("image must be a link");
+    assert_eq!(link.label, "rig.png");
+    assert_eq!(link.target, ":/file/rig.png");
+}
+
+#[test]
+fn the_file_area_spellings_all_reach_the_same_target() {
+    for md in [
+        "![p](rig.png)",
+        "![p](./rig.png)",
+        "![p](files/rig.png)",
+        "![p](/files/rig.png)",
+    ] {
+        let doc = roundtrip(md);
+        let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+            panic!("expected one paragraph for {md}, got {:?}", doc.blocks);
+        };
+        let link = line.spans[0].link.as_ref().expect("image must be a link");
+        assert_eq!(link.target, ":/file/rig.png", "input {md}");
+    }
+}
+
+#[test]
+fn an_external_image_still_degrades_to_alt_text() {
+    // Nothing on the mesh can fetch it, and a micron link to an `https://`
+    // target would be a destination hash NomadNet cannot resolve.
+    let doc = roundtrip("An image: ![a rig photo](https://example.com/rig.png) inline.\n");
     let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
         panic!("expected one paragraph, got {:?}", doc.blocks);
     };
     assert_eq!(line_text(line), "An image: [image: a rig photo] inline.");
+    assert!(line.spans.iter().all(|s| s.link.is_none()));
 }
 
 #[test]

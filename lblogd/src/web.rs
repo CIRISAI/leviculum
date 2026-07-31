@@ -35,6 +35,7 @@ use rustls_acme::AcmeConfig;
 use thiserror::Error;
 
 use crate::content::SnapshotRx;
+use crate::files;
 use crate::render::{
     render_about_html, render_feed_atom, render_index_html, render_post_html, ABOUT_HTML_PATH,
     FEED_PATH,
@@ -103,7 +104,8 @@ pub struct WebConfig {
 }
 
 /// Build the blog router: `/` is the post index, `/posts/{slug}` one post,
-/// everything else a small HTML 404.
+/// `/files/{name}` a file from the file area, everything else a small HTML
+/// 404.
 ///
 /// The handlers read the snapshot per request, so a reload takes effect on
 /// the next request without touching the listener.
@@ -113,8 +115,45 @@ pub fn build_router(content: SnapshotRx) -> Router {
         .route("/posts/{slug}", get(post_page))
         .route(ABOUT_HTML_PATH, get(about_page))
         .route(FEED_PATH, get(feed))
+        .route(&format!("{}{{name}}", files::WEB_PREFIX), get(file_asset))
         .fallback(fallback_page)
         .with_state(content)
+}
+
+/// One file from the file area: the same bytes the mesh side serves under
+/// `/file/<name>`, with a content type from the extension.
+///
+/// Served through the snapshot rather than straight off the filesystem, so
+/// the two sides can never disagree about which files exist — a name the
+/// mesh will not serve (too large, unusable name) is a 404 here too. That is
+/// also why there is no `ServeDir`: it would answer from the directory, not
+/// from the snapshot.
+async fn file_asset(State(content): State<SnapshotRx>, UrlPath(name): UrlPath<String>) -> Response {
+    let snapshot = content.borrow().clone();
+    // axum has already percent-decoded the segment, so a `%2e%2e%2f` attempt
+    // arrives here as `../` and dies on the separator check.
+    let Some(entry) = files::sanitize_name(&name).and_then(|name| snapshot.files.get(&name)) else {
+        return not_found();
+    };
+    let max_bytes = snapshot
+        .file_area
+        .as_ref()
+        .map(|area| area.max_bytes)
+        .unwrap_or(files::DEFAULT_MAX_FILE_BYTES);
+    match files::read_entry(entry, max_bytes) {
+        Ok(bytes) => (
+            [(header::CONTENT_TYPE, files::mime_for(&entry.name))],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            // The snapshot says it exists but the disk disagrees: it was
+            // deleted or replaced since the load, and the next reload will
+            // drop it. A 404 is the honest answer in the meantime.
+            eprintln!("lblogd: cannot serve {}: {e}", entry.name);
+            not_found()
+        }
+    }
 }
 
 /// The Atom feed, or a 404 when the blog has no public URL to build absolute
@@ -340,9 +379,7 @@ mod tests {
         let snapshot = Arc::new(Snapshot {
             meta: test_meta(),
             posts,
-            pages: Default::default(),
-            css: String::new(),
-            about: None,
+            ..Snapshot::default()
         });
         let (tx, rx) = watch::channel(snapshot);
         (build_router(rx), tx)
@@ -410,9 +447,7 @@ mod tests {
         tx.send(Arc::new(Snapshot {
             meta: test_meta(),
             posts,
-            pages: Default::default(),
-            css: String::new(),
-            about: None,
+            ..Snapshot::default()
         }))
         .unwrap();
 

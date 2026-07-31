@@ -15,6 +15,8 @@ lblogd -- dev blog server, on the web and on NomadNet
 
 The NomadNet side is a shared-instance client, so a Reticulum daemon must already be running — either **lnsd**(1) or Python's **rnsd** — under the instance name named in the configuration file. **lblogd** exits if no daemon answers, and the packaged service restarts it until one does.
 
+Images travel as files. Micron, the NomadNet page format, has no image construct at all, so a picture referenced from a post is published as a file and linked from the page: NomadNet saves it to the reader's download directory, and **lnomad**(1) draws it inline. On the web the same reference becomes an ordinary `<img>`. Write `![Mast](mast.jpg)` in a post and put `mast.jpg` in the file area; the same name is then served as `/files/mast.jpg` over HTTP and `/file/mast.jpg` over Reticulum.
+
 The web side either obtains its own certificate from Let's Encrypt, or runs plain behind a reverse proxy that terminates TLS. Note that the canonical page URL and the Atom feed are derived from the configured `domains` list even when certificate handling is switched off, so a deployment behind a proxy still has to set that list.
 
 ## OPTIONS
@@ -33,13 +35,16 @@ The web side either obtains its own certificate from Let's Encrypt, or runs plai
 */var/lib/lblogd/posts/*
 :   Where the packaged service reads posts from: one Markdown file per post.
 
+*/var/lib/lblogd/files/*
+:   The file area: pictures and other files a post references. Configurable with `files_dir`, capped per file by `max_file_bytes` (default 10 MiB). Reloaded with the posts.
+
 */var/lib/lblogd/*
 :   Node identity and, when certificate handling is enabled, the ACME certificate cache.
 
 ## SIGNALS
 
 **SIGHUP**
-:   Re-read the posts directory. The packaged service maps `systemctl reload lblogd` onto this.
+:   Re-read the posts directory and the file area. The packaged service maps `systemctl reload lblogd` onto this.
 
 ## EXIT STATUS
 

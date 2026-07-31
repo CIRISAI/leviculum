@@ -27,7 +27,9 @@
 //! - inline code: micron has no inline literal, so code is set off with a
 //!   `` `B333 `` background colour toggle (a dark neutral that reads on the
 //!   dark NomadNet default theme) and closed with `` `b ``
-//! - images: `[image: alt]` plain text (or `[image]` with no alt text)
+//! - images: an image naming a file in the file area becomes a link to it
+//!   (`` `[alt`:/file/name] ``), which is the only form micron has; any other
+//!   image (an external URL) stays `[image: alt]` plain text
 //! - tables: plaintext rows, cells joined with ` | ` (micron's `` `t `` table
 //!   is a NomadNet extension still stubbed in our parser, so we stay plain)
 //! - blockquotes: two-space indented text per nesting level
@@ -42,6 +44,7 @@
 
 use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+use crate::files;
 use crate::post::{slugify, Date, Post};
 
 /// Micron heading depth is meaningful for 1-3 `>`; deeper Markdown headings
@@ -129,10 +132,40 @@ fn markdown_options() -> Options {
 
 /// Render a Markdown fragment to an HTML fragment (no surrounding document).
 pub fn markdown_to_html(md: &str) -> String {
-    let parser = Parser::new_ext(md, markdown_options()).map(demote_heading);
+    let parser = Parser::new_ext(md, markdown_options())
+        .map(demote_heading)
+        .map(resolve_file_ref);
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
+}
+
+/// Point an image or link at the file area's web route when it names a file
+/// there.
+///
+/// An author writes `![Antenne](antenne.jpg)` and means "the picture next to
+/// my posts". On the web that is `/files/antenne.jpg`; on the mesh the same
+/// reference becomes a `:/file/antenne.jpg` link (see
+/// [`MicronWriter::end`]). Anything [`files::file_ref`] does not recognise —
+/// an external URL above all — is left exactly as written.
+fn resolve_file_ref(event: Event<'_>) -> Event<'_> {
+    match event {
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: match files::file_ref(&dest_url) {
+                Some(name) => files::web_path(&name).into(),
+                None => dest_url,
+            },
+            title,
+            id,
+        }),
+        other => other,
+    }
 }
 
 /// Push a Markdown heading down one level.
@@ -172,6 +205,10 @@ fn demote_heading(event: Event<'_>) -> Event<'_> {
 fn markdown_to_html_absolute(md: &str, base: &str, page: &str) -> String {
     let parser = Parser::new_ext(md, markdown_options())
         .map(demote_heading)
+        // File references resolve to the web route BEFORE absolutising, so a
+        // feed entry's picture points at `<base>/files/x.jpg` rather than at
+        // a name resolved against the post's own URL, where nothing is.
+        .map(resolve_file_ref)
         .map(|event| absolutize(event, base, page));
     let mut out = String::new();
     html::push_html(&mut out, parser);
@@ -699,6 +736,15 @@ fn sanitize_link_part(s: &str) -> String {
 /// escaping already turns it into `` \` ``.
 const LINE_CONTROL_CHARS: [char; 4] = ['>', '#', '-', '<'];
 
+/// The image currently being collected: its alt text, and where it points.
+#[derive(Clone, Debug, Default)]
+struct OpenImage {
+    /// Alt text buffered until the closing event.
+    alt: String,
+    /// The destination as the author wrote it.
+    dest: String,
+}
+
 /// The streaming Markdown-event-to-micron writer.
 #[derive(Default)]
 struct MicronWriter {
@@ -719,8 +765,8 @@ struct MicronWriter {
     link_url: Option<String>,
     /// Label text buffered while a link is open.
     link_label: String,
-    /// Alt text buffered while an image is open.
-    image_alt: Option<String>,
+    /// Alt text buffered while an image is open, with the image's target.
+    image: Option<OpenImage>,
     /// Cells emitted so far in the current (degraded) table row.
     table_cells: usize,
 }
@@ -812,7 +858,12 @@ impl MicronWriter {
                 self.link_url = Some(dest_url.to_string());
                 self.link_label.clear();
             }
-            Tag::Image { .. } => self.image_alt = Some(String::new()),
+            Tag::Image { dest_url, .. } => {
+                self.image = Some(OpenImage {
+                    alt: String::new(),
+                    dest: dest_url.to_string(),
+                })
+            }
             Tag::HtmlBlock => self.block_sep(),
             // Extensions we do not enable (footnotes, definition lists,
             // strikethrough, sub/superscript, metadata): contents degrade to
@@ -851,11 +902,26 @@ impl MicronWriter {
                 self.push_raw(&format!("`[{label}`{url}]"));
             }
             TagEnd::Image => {
-                let alt = self.image_alt.take().unwrap_or_default();
-                if alt.trim().is_empty() {
+                let image = self.image.take().unwrap_or_default();
+                let alt = image.alt.trim();
+                // A picture in the file area becomes an ordinary micron link
+                // to it. NomadNet shows a link that saves the file to the
+                // reader's download directory; lnomad draws it in the page.
+                // Micron has no image construct, so this is the whole of what
+                // is available, and inventing one would render as raw markup
+                // in every other browser.
+                if let Some(name) = files::file_ref(&image.dest) {
+                    let label = match alt.is_empty() {
+                        true => name.clone(),
+                        false => alt.to_string(),
+                    };
+                    let label = sanitize_link_part(&label);
+                    let target = sanitize_link_part(&files::micron_target(&name));
+                    self.push_raw(&format!("`[{label}`{target}]"));
+                } else if alt.is_empty() {
                     self.push_text("[image]");
                 } else {
-                    self.push_text(&format!("[image: {}]", alt.trim()));
+                    self.push_text(&format!("[image: {alt}]"));
                 }
             }
             _ => {}
@@ -866,8 +932,8 @@ impl MicronWriter {
     /// label, literal block, or the current line (escaped). Embedded
     /// newlines (raw HTML, code text) split lines.
     fn text(&mut self, t: &str) {
-        if let Some(alt) = self.image_alt.as_mut() {
-            alt.push_str(t);
+        if let Some(image) = self.image.as_mut() {
+            image.alt.push_str(t);
             return;
         }
         if self.link_url.is_some() {
@@ -893,8 +959,8 @@ impl MicronWriter {
     /// Inline code: no micron inline literal exists, so set it off with a
     /// background colour toggle (degradation documented in the module docs).
     fn inline_code(&mut self, code: &str) {
-        if let Some(alt) = self.image_alt.as_mut() {
-            alt.push_str(code);
+        if let Some(image) = self.image.as_mut() {
+            image.alt.push_str(code);
             return;
         }
         if self.link_url.is_some() {
@@ -909,7 +975,7 @@ impl MicronWriter {
     /// Emit a style toggle unless a link/image is collecting text (labels run
     /// raw to the closing bracket, so styles inside them are dropped).
     fn style_toggle(&mut self, toggle: &str) {
-        if self.image_alt.is_none() && self.link_url.is_none() {
+        if self.image.is_none() && self.link_url.is_none() {
             self.push_raw(toggle);
         }
     }

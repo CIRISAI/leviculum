@@ -22,7 +22,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::content::Reloader;
+use crate::content::{Reloader, Sources};
 
 /// How long the directory must be quiet before a burst counts as finished.
 ///
@@ -67,20 +67,39 @@ pub struct PostsWatcher {
 }
 
 impl PostsWatcher {
-    /// Establish the watch on `posts_dir` and, if configured, on the
-    /// stylesheet. Changes are recorded from here on.
+    /// Establish the watch on everything a snapshot is built from: the posts
+    /// directory, the file area, the stylesheet and the about text.
+    pub fn start_for(sources: &Sources) -> Result<PostsWatcher, WatchError> {
+        let mut dirs: Vec<&Path> = vec![sources.posts_dir.as_path()];
+        if let Some(files) = &sources.files {
+            dirs.push(files.dir.as_path());
+        }
+        let single: Vec<&Path> = [sources.css_path.as_deref(), sources.about_path.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        PostsWatcher::start(&dirs, &single)
+    }
+
+    /// Establish the watch on the content directories and files. Changes are
+    /// recorded from here on.
     ///
-    /// `extra` names individual files outside the posts directory that also
-    /// belong to the content: the stylesheet and the about text.
+    /// `dirs` are directories every change inside counts (the posts directory
+    /// and the file area); `files` names individual files outside them that
+    /// also belong to the content: the stylesheet and the about text.
     ///
-    /// They are watched through their parent directory rather than directly:
-    /// an inotify watch follows the inode, and editors that save by writing a
-    /// temporary file and renaming it over the target would leave a direct
-    /// watch pointing at the replaced file. Watching the directory and
-    /// filtering by path survives that. It does mean events for their
-    /// neighbours arrive too; the watcher discards those by path before
+    /// The individual files are watched through their parent directory rather
+    /// than directly: an inotify watch follows the inode, and editors that
+    /// save by writing a temporary file and renaming it over the target would
+    /// leave a direct watch pointing at the replaced file. Watching the
+    /// directory and filtering by path survives that. It does mean events for
+    /// their neighbours arrive too; the watcher discards those by path before
     /// recording a change.
-    pub fn start(posts_dir: &Path, extra: &[&Path]) -> Result<PostsWatcher, WatchError> {
+    ///
+    /// A directory that does not exist is skipped with a note rather than
+    /// failing the run: the file area is optional by existence, and a blog
+    /// with no pictures should still start.
+    pub fn start(dirs: &[&Path], files: &[&Path]) -> Result<PostsWatcher, WatchError> {
         let (tx, rx) = mpsc::channel(EVENT_QUEUE);
         let watch_err = |path: &Path| {
             let path = path.display().to_string();
@@ -91,9 +110,10 @@ impl PostsWatcher {
         };
 
         let targets = Targets {
-            posts_dir: posts_dir.to_path_buf(),
-            files: extra.iter().map(|p| p.to_path_buf()).collect(),
+            dirs: dirs.iter().map(|p| p.to_path_buf()).collect(),
+            files: files.iter().map(|p| p.to_path_buf()).collect(),
         };
+        let first = dirs.first().copied().unwrap_or(Path::new("."));
         let mut watcher: RecommendedWatcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 // Which file changed matters only insofar as it has to be one
@@ -105,18 +125,23 @@ impl PostsWatcher {
                     let _ = tx.try_send(());
                 }
             })
-            .map_err(watch_err(posts_dir))?;
+            .map_err(watch_err(first))?;
 
-        // The posts directory is flat (load_posts_dir reads its top level
-        // only), so there is nothing below it worth watching.
-        watcher
-            .watch(posts_dir, RecursiveMode::NonRecursive)
-            .map_err(watch_err(posts_dir))?;
-        // One watch per distinct parent directory; watching the same
-        // directory twice is at best redundant and at worst an error.
-        let mut watched: Vec<&Path> = vec![posts_dir];
-        for dir in extra.iter().filter_map(|f| f.parent()) {
+        // Both content directories are flat (the loaders read their top level
+        // only), so there is nothing below them worth watching. One watch per
+        // distinct directory: watching the same one twice is at best redundant
+        // and at worst an error.
+        let mut watched: Vec<&Path> = Vec::new();
+        for dir in dirs
+            .iter()
+            .copied()
+            .chain(files.iter().filter_map(|f| f.parent()))
+        {
             if watched.contains(&dir) {
+                continue;
+            }
+            if !dir.is_dir() {
+                eprintln!("lblogd: not watching {}: no such directory", dir.display());
                 continue;
             }
             watcher
@@ -149,25 +174,28 @@ impl PostsWatcher {
 /// What this watcher considers its own, used to discard events for unrelated
 /// neighbours of the stylesheet.
 struct Targets {
-    posts_dir: PathBuf,
-    /// Individual files outside the posts directory: the stylesheet and the
-    /// about text.
+    /// Directories every change inside counts: the posts directory and the
+    /// file area.
+    dirs: Vec<PathBuf>,
+    /// Individual files outside them: the stylesheet and the about text.
     files: Vec<PathBuf>,
 }
 
 impl Targets {
     /// Whether any of an event's paths is content we serve.
     ///
-    /// A path counts when it sits directly in the posts directory or is the
-    /// stylesheet itself. Watching the stylesheet's directory means events
-    /// arrive for every file beside it, and a config file being edited next
-    /// to it is no reason to re-render the blog.
+    /// A path counts when it sits directly in one of the content directories
+    /// or is one of the named files. Watching the stylesheet's directory means
+    /// events arrive for every file beside it, and a config file being edited
+    /// next to it is no reason to re-render the blog.
     fn is_relevant(&self, paths: &[PathBuf]) -> bool {
         // An event with no paths carries no way to rule it out, and dropping
         // it could lose a change; reloading spuriously only costs a read.
         paths.is_empty()
             || paths.iter().any(|path| {
-                path.parent() == Some(self.posts_dir.as_path()) || self.files.contains(path)
+                path.parent()
+                    .is_some_and(|parent| self.dirs.iter().any(|dir| dir == parent))
+                    || self.files.contains(path)
             })
     }
 }

@@ -29,9 +29,22 @@ data_dir = "/var/lib/lblogd"
 # optional — a bare .md file is a valid post.
 posts_dir = "/var/lib/lblogd/posts"
 
+# Files a post can reference: pictures, mostly. Served as /files/<name>
+# on the web and /file/<name> on the mesh, so `![Mast](mast.jpg)` in a
+# post works on both sides. The directory need not exist; without it the
+# blog simply has no files. Micron has no image construct, so a mesh
+# reader sees a link that saves (NomadNet) or draws (lnomad) the picture.
+# files_dir = "/var/lib/lblogd/files"
+
+# The largest single file that will be served, in bytes (default 10 MiB).
+# A blog is not a file server, and over a LoRa interface an unbounded
+# transfer denies service to every other reader of this node for as long
+# as it runs.
+# max_file_bytes = 10485760
+
 # Reload automatically whenever posts_dir changes, instead of only on
 # SIGHUP. Convenient while writing; a deployment that publishes
-# deliberately should leave it off.
+# deliberately should leave it off. Covers files_dir too.
 watch_posts = false
 
 # What a reader sees. Everything here except the title is optional.
