@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-cli"
-version = "0.10.2+ciris.1"
+version = "0.11.0+ciris.1"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.10.2+ciris.1"
+version = "0.11.0+ciris.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-ffi"
-version = "0.10.2+ciris.1"
+version = "0.11.0+ciris.1"
 dependencies = [
  "cbindgen",
  "hex",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.10.2+ciris.1"
+version = "0.11.0+ciris.1"
 dependencies = [
  "futures",
  "hex",
@@ -1707,11 +1707,11 @@ dependencies = [
 
 [[package]]
 name = "leviculum-micron"
-version = "0.10.2+ciris.1"
+version = "0.11.0+ciris.1"
 
 [[package]]
 name = "leviculum-proxy"
-version = "0.10.2+ciris.1"
+version = "0.11.0+ciris.1"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.10.2+ciris.1"
+version = "0.11.0+ciris.1"
 dependencies = [
  "clap",
  "hex",
