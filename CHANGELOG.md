@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.12.0+ciris.1] — CIRIS fork
+
+### Added
+
+Per-link delivery telemetry on `LinkStats` (leviculum#35, for CIRISEdge's A/V
+ALM passive capacity estimator): `bytes_delivered` (proof-confirmed channel
+envelopes + completed outgoing resources — the BBR-style delivery-rate
+numerator), `srtt_ms`/`rttvar_ms` (the channel's existing Karn-gated RFC 6298
+smoothed RTT, now exported), `min_rtt_ms` (floor of Karn-valid samples, new),
+the handshake `rtt_ms`, and the backpressure counters
+`busy_rejections`/`pacing_rejections`/`iface_pacing_rejections` (the
+app-limited-vs-congestion-limited signal, by source). Cumulative counters the
+caller samples ~1 Hz and differences; read-only, no wire change, no new task.
+
 ## [0.11.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream **0.8.0** (`Lew_Palm/leviculum` master @ `e023994`): the
