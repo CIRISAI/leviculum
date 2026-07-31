@@ -205,6 +205,22 @@ class TestDaemon:
         self.inbound_trace = []  # [(timestamp, flags, packet_type, dest_hash_hex, transport_id_hex)]
         self.received_resources = []  # [{resource_hash, data, metadata, status}]
         self.resource_strategies = {}  # dest_hash -> "accept_all" | "accept_none"
+        # Tracked PacketReceipts from send_on_link_tracked (interop batch I1):
+        # the Rust side polls get_receipt_status to observe DELIVERED/FAILED,
+        # i.e. whether its data proof reached this Python peer's PacketReceipt.
+        self.packet_receipts = {}  # receipt_id -> RNS.PacketReceipt
+        self.next_receipt_id = 1
+        # Tracked RequestReceipts from send_link_request (Python as Link.request
+        # client against a Rust responder).
+        self.request_receipts = {}  # request_id -> RNS.RequestReceipt
+        self.next_request_id = 1
+        # LXMF state (interop batch I1): one LXMRouter per daemon, driven by
+        # the vendored reference/LXMF pinned at 1.1.0.
+        self.lxmf_router = None
+        self.lxmf_identity = None
+        self.lxmf_dest = None
+        self.lxmf_received = []  # [dict] recorded by _on_lxmf_delivery
+        self.lxmf_sent = {}  # message_hash_hex -> LXMessage
 
         # Create temp config directory
         self.config_dir = tempfile.mkdtemp(prefix="rns_test_")
@@ -1739,12 +1755,268 @@ class TestDaemon:
                 })
             return {"result": out}
 
+        elif method == "send_on_link_tracked":
+            # Send RNS.Packet(link, data) and keep the PacketReceipt so the
+            # peer's data proof can be observed via get_receipt_status.
+            link_hash = params.get("link_hash")
+            data = params.get("data")
+            if not link_hash or data is None:
+                return {"error": "link_hash and data required"}
+            link = self.links.get(link_hash)
+            if link is None:
+                return {"error": f"Link {link_hash} not found"}
+            try:
+                packet = RNS.Packet(link, bytes.fromhex(data))
+                receipt = packet.send()
+                if receipt is None:
+                    return {"error": "packet.send() returned no receipt"}
+                receipt_id = str(self.next_receipt_id)
+                self.next_receipt_id += 1
+                self.packet_receipts[receipt_id] = receipt
+                return {"result": {
+                    "receipt_id": receipt_id,
+                    "packet_hash": receipt.hash.hex(),
+                }}
+            except Exception as e:
+                return {"error": f"send failed: {str(e)}"}
+
+        elif method == "get_receipt_status":
+            receipt_id = params.get("receipt_id")
+            receipt = self.packet_receipts.get(receipt_id)
+            if receipt is None:
+                return {"error": f"receipt {receipt_id} not found"}
+            # Transport's cull job drives timeouts on its own cadence; check
+            # explicitly so a FAILED verdict is observable promptly.
+            try:
+                receipt.check_timeout()
+            except Exception:
+                pass
+            names = {
+                RNS.PacketReceipt.FAILED: "FAILED",
+                RNS.PacketReceipt.SENT: "SENT",
+                RNS.PacketReceipt.DELIVERED: "DELIVERED",
+                RNS.PacketReceipt.CULLED: "CULLED",
+            }
+            status = receipt.get_status()
+            return {"result": {"status": names.get(status, str(status))}}
+
+        elif method == "send_link_request":
+            # Python-side RNS.Link.request() against a (Rust) responder.
+            # Non-blocking: returns a request id; poll get_request_status.
+            link_hash = params.get("link_hash")
+            path = params.get("path")
+            data = params.get("data")  # hex, packed with umsgpack as bytes
+            timeout = params.get("timeout")  # seconds or None
+            if not link_hash or not path:
+                return {"error": "link_hash and path required"}
+            link = self.links.get(link_hash)
+            if link is None:
+                return {"error": f"Link {link_hash} not found"}
+            try:
+                receipt = link.request(
+                    path,
+                    data=bytes.fromhex(data) if data else None,
+                    timeout=timeout,
+                )
+                if receipt is None:
+                    return {"error": "link.request() returned no receipt"}
+                request_id = str(self.next_request_id)
+                self.next_request_id += 1
+                self.request_receipts[request_id] = receipt
+                return {"result": {"request_id": request_id}}
+            except Exception as e:
+                return {"error": f"request failed: {str(e)}"}
+
+        elif method == "get_request_status":
+            request_id = params.get("request_id")
+            receipt = self.request_receipts.get(request_id)
+            if receipt is None:
+                return {"error": f"request {request_id} not found"}
+            names = {
+                RNS.RequestReceipt.FAILED: "FAILED",
+                RNS.RequestReceipt.SENT: "SENT",
+                RNS.RequestReceipt.DELIVERED: "DELIVERED",
+                RNS.RequestReceipt.RECEIVING: "RECEIVING",
+                RNS.RequestReceipt.READY: "READY",
+            }
+            status = receipt.get_status()
+            response_hex = None
+            if status == RNS.RequestReceipt.READY:
+                response = receipt.get_response()
+                if isinstance(response, bytes):
+                    response_hex = response.hex()
+                elif response is not None:
+                    from RNS.vendor import umsgpack
+                    response_hex = umsgpack.packb(response).hex()
+            return {"result": {
+                "status": names.get(status, str(status)),
+                "response": response_hex,
+            }}
+
+        elif method == "lxmf_init":
+            # Real LXMF client: LXMRouter + delivery identity/destination from
+            # the vendored reference/LXMF (pinned 1.1.0).
+            import LXMF
+            if self.lxmf_router is not None:
+                return {"error": "lxmf already initialized"}
+            display_name = params.get("display_name", "test-daemon")
+            stamp_cost = params.get("stamp_cost")  # None or int
+            storage = os.path.join(self.config_dir, "lxmf")
+            os.makedirs(storage, exist_ok=True)
+            self.lxmf_identity = RNS.Identity()
+            # LXMRouter.__init__ installs SIGINT/SIGTERM handlers
+            # (LXMRouter.py:308-309), which only works on the main thread;
+            # this RPC handler runs on a worker thread, so shim signal.signal
+            # for the constructor call. The daemon manages shutdown itself.
+            import signal as signal_module
+            original_signal = signal_module.signal
+            signal_module.signal = lambda *args, **kwargs: None
+            try:
+                self.lxmf_router = LXMF.LXMRouter(
+                    identity=self.lxmf_identity, storagepath=storage
+                )
+            finally:
+                signal_module.signal = original_signal
+            self.lxmf_dest = self.lxmf_router.register_delivery_identity(
+                self.lxmf_identity,
+                display_name=display_name,
+                stamp_cost=stamp_cost,
+            )
+            self.lxmf_router.register_delivery_callback(self._on_lxmf_delivery)
+            return {"result": {
+                "delivery_hash": self.lxmf_dest.hash.hex(),
+                "public_key": self.lxmf_identity.get_public_key().hex(),
+            }}
+
+        elif method == "lxmf_announce":
+            if self.lxmf_router is None:
+                return {"error": "lxmf not initialized"}
+            self.lxmf_router.announce(self.lxmf_dest.hash)
+            return {"result": "ok"}
+
+        elif method == "lxmf_send":
+            # Build and hand a real LXMessage to LXMRouter.handle_outbound.
+            import LXMF
+            if self.lxmf_router is None:
+                return {"error": "lxmf not initialized"}
+            dest_hash_hex = params.get("dest_hash")
+            method_name = params.get("method", "direct")
+            content = bytes.fromhex(params.get("content", ""))
+            title = bytes.fromhex(params.get("title", ""))
+            fields_hex = params.get("fields")  # msgpack map, hex, or None
+            dest_hash_bytes = bytes.fromhex(dest_hash_hex)
+            recalled = RNS.Identity.recall(dest_hash_bytes)
+            if recalled is None:
+                return {"error": f"no identity known for {dest_hash_hex}"}
+            dest_out = RNS.Destination(
+                recalled, RNS.Destination.OUT, RNS.Destination.SINGLE,
+                "lxmf", "delivery",
+            )
+            methods = {
+                "opportunistic": LXMF.LXMessage.OPPORTUNISTIC,
+                "direct": LXMF.LXMessage.DIRECT,
+                "propagated": LXMF.LXMessage.PROPAGATED,
+            }
+            if method_name not in methods:
+                return {"error": f"unknown method {method_name}"}
+            fields = None
+            if fields_hex:
+                from RNS.vendor import umsgpack
+                fields = umsgpack.unpackb(bytes.fromhex(fields_hex))
+            try:
+                message = LXMF.LXMessage(
+                    dest_out,
+                    self.lxmf_dest,
+                    content=content,
+                    title=title,
+                    fields=fields,
+                    desired_method=methods[method_name],
+                )
+                self.lxmf_router.handle_outbound(message)
+                message_hash = message.hash.hex()
+                self.lxmf_sent[message_hash] = message
+                return {"result": {"message_hash": message_hash}}
+            except Exception as e:
+                return {"error": f"lxmf_send failed: {str(e)}"}
+
+        elif method == "lxmf_get_outbound_status":
+            import LXMF
+            message = self.lxmf_sent.get(params.get("message_hash"))
+            if message is None:
+                return {"error": "message not tracked"}
+            names = {
+                LXMF.LXMessage.GENERATING: "GENERATING",
+                LXMF.LXMessage.OUTBOUND: "OUTBOUND",
+                LXMF.LXMessage.SENDING: "SENDING",
+                LXMF.LXMessage.SENT: "SENT",
+                LXMF.LXMessage.DELIVERED: "DELIVERED",
+                LXMF.LXMessage.REJECTED: "REJECTED",
+                LXMF.LXMessage.CANCELLED: "CANCELLED",
+                LXMF.LXMessage.FAILED: "FAILED",
+            }
+            return {"result": {"state": names.get(message.state, str(message.state))}}
+
+        elif method == "lxmf_get_received":
+            return {"result": self.lxmf_received}
+
+        elif method == "lxmf_enable_propagation":
+            # The lxmd propagation node in-process: lxmd wires an LXMRouter and
+            # calls enable_propagation() (LXMF/Utilities/lxmd.py:444-452); this
+            # drives the identical router code path on this daemon's router.
+            if self.lxmf_router is None:
+                return {"error": "lxmf not initialized"}
+            self.lxmf_router.set_message_storage_limit(megabytes=5)
+            self.lxmf_router.enable_propagation()
+            return {"result": {
+                "propagation_hash": self.lxmf_router.propagation_destination.hash.hex(),
+            }}
+
+        elif method == "lxmf_announce_propagation_node":
+            if self.lxmf_router is None:
+                return {"error": "lxmf not initialized"}
+            self.lxmf_router.announce_propagation_node()
+            return {"result": "ok"}
+
+        elif method == "lxmf_set_propagation_node":
+            if self.lxmf_router is None:
+                return {"error": "lxmf not initialized"}
+            dest_hash_bytes = bytes.fromhex(params.get("dest_hash"))
+            if RNS.Identity.recall(dest_hash_bytes) is None:
+                return {"error": "propagation node identity not known yet"}
+            self.lxmf_router.set_outbound_propagation_node(dest_hash_bytes)
+            return {"result": "ok"}
+
         elif method == "shutdown":
             self.running = False
             return {"result": "shutting_down"}
 
         else:
             return {"error": f"Unknown method: {method}"}
+
+    def _on_lxmf_delivery(self, message):
+        """LXMRouter delivery callback: record every asserted LXMessage field."""
+        try:
+            from RNS.vendor import umsgpack
+            methods = {0x01: "opportunistic", 0x02: "direct", 0x03: "propagated"}
+            self.lxmf_received.append({
+                "message_hash": message.hash.hex(),
+                "content": message.content.hex(),
+                "title": message.title.hex(),
+                "fields": umsgpack.packb(message.fields).hex(),
+                "source_hash": message.source_hash.hex(),
+                "destination_hash": message.destination_hash.hex(),
+                "timestamp": message.timestamp,
+                "signature_validated": bool(message.signature_validated),
+                "stamp_valid": message.stamp_valid,
+                "stamp_value": message.stamp_value,
+                "method": methods.get(message.method, str(message.method)),
+            })
+        except Exception as e:
+            # Surface callback bugs to the polling test instead of dying in
+            # LXMRouter's silent callback exception handler.
+            self.lxmf_received.append({"message_hash": f"callback-error: {e}"})
+        if self.verbose:
+            print(f"LXMF delivery: {message.hash.hex()}")
 
     def _on_single_packet(self, dest, data, packet):
         """Called when a single (non-link) packet is received at a destination."""
@@ -1828,7 +2100,7 @@ class TestDaemon:
                     meta = resource.metadata.hex()
                 else:
                     # Non-bytes metadata (dict, string, etc) — encode back for RPC
-                    import umsgpack
+                    from RNS.vendor import umsgpack
                     meta = umsgpack.packb(resource.metadata).hex()
             self.received_resources.append({
                 "resource_hash": resource.hash.hex(),

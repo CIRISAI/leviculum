@@ -1731,6 +1731,7 @@ dependencies = [
  "hmac",
  "if-addrs",
  "leviculum-core",
+ "leviculum-lxmf",
  "libc",
  "lnomad",
  "md-5",
