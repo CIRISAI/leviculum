@@ -960,6 +960,46 @@ mod tests {
         assert!(fds[0] >= 0, "hook received a real fd");
     }
 
+    /// Failure semantics: the hook has no error return, so an embedder whose
+    /// socket policy fails (setsockopt EPERM, missing device) can only veto the
+    /// dial by panicking. The panic must fail closed — abort the interface task
+    /// before connect, so the peer never sees a connection and the interface
+    /// detaches cleanly instead of dialing unconfined.
+    #[tokio::test]
+    async fn panicking_hook_fails_closed_without_dialing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let hook: crate::socket_hook::OutboundSocketHook = Arc::new(|_fd| {
+            panic!("socket policy failed, veto the dial");
+        });
+
+        let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
+            id: InterfaceId(0),
+            name: "test_panic_hook".to_string(),
+            addr,
+            buffer_size: 16,
+            corrupt_every: None,
+            reconnect_interval: Duration::from_millis(100),
+            max_reconnect_tries: None,
+            reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
+            connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
+            reconnect_notify: None,
+            tunnel_notify: None,
+            socks_target: None,
+            shutdown: None,
+            outbound_socket_hook: Some(hook),
+        });
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv()).await;
+        assert!(
+            matches!(closed, Ok(None)),
+            "interface must detach cleanly after the hook panic"
+        );
+        let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accepted.is_err(), "a vetoed dial must never reach the peer");
+    }
+
     #[test]
     fn test_backoff_delay_schedule() {
         let base = Duration::from_secs(5);
