@@ -1,0 +1,84 @@
+//! RNode (single LoRa transceiver) interface builder.
+
+use crate::config::InterfaceConfig;
+use crate::error::Error;
+use leviculum_core::transport::InterfaceId;
+
+use super::super::resolve_lt_alock;
+use super::{Built, InterfaceBuildCtx};
+
+pub(super) fn build(
+    idx: usize,
+    config: &InterfaceConfig,
+    ctx: &InterfaceBuildCtx<'_>,
+) -> Result<Built, Error> {
+    let port_path = config
+        .port
+        .as_ref()
+        .ok_or_else(|| Error::Config("RNodeInterface requires port".to_string()))?
+        .clone();
+    let frequency: u32 = config
+        .frequency
+        .ok_or_else(|| Error::Config("RNodeInterface requires frequency".to_string()))
+        .and_then(|f| {
+            u32::try_from(f)
+                .map_err(|_| Error::Config(format!("frequency {} exceeds u32 range", f)))
+        })?;
+    let bandwidth = config
+        .bandwidth
+        .ok_or_else(|| Error::Config("RNodeInterface requires bandwidth".to_string()))?;
+    let sf = config
+        .spreading_factor
+        .ok_or_else(|| Error::Config("RNodeInterface requires spreading_factor".to_string()))?;
+    let cr = config
+        .coding_rate
+        .ok_or_else(|| Error::Config("RNodeInterface requires coding_rate".to_string()))?;
+    let tx_power: u8 = config.tx_power.unwrap_or(0).try_into().map_err(|_| {
+        Error::Config(format!(
+            "tx_power {} out of range (0-37)",
+            config.tx_power.unwrap_or(0)
+        ))
+    })?;
+
+    leviculum_core::rnode::validate_config(frequency, bandwidth, tx_power, sf, cr)
+        .map_err(|e| Error::Config(format!("RNodeInterface: {}", e)))?;
+
+    let st_alock = config.airtime_limit_short.map(|p| (p * 100.0) as u16);
+    let lt_alock = resolve_lt_alock(config.airtime_limit_long, frequency);
+    let flow_control = config.flow_control.unwrap_or(false);
+    let buffer_size = config
+        .buffer_size
+        .unwrap_or(crate::interfaces::rnode::RNODE_DEFAULT_BUFFER_SIZE);
+
+    let iface_name = format!("rnode_{}", idx);
+    let id = InterfaceId(idx);
+
+    let handle = crate::interfaces::rnode::spawn_rnode_interface(
+        crate::interfaces::rnode::RNodeInterfaceConfig {
+            id,
+            name: iface_name,
+            port_path: port_path.clone(),
+            frequency,
+            bandwidth,
+            tx_power,
+            sf,
+            cr,
+            st_alock,
+            lt_alock,
+            flow_control,
+            buffer_size,
+            reconnect_notify: Some(ctx.reconnect_tx.clone()),
+        },
+    );
+
+    tracing::info!(
+        "RNode interface on {} (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm)",
+        port_path,
+        frequency,
+        sf,
+        bandwidth,
+        cr,
+        tx_power,
+    );
+    Ok(Built::Handles(vec![handle]))
+}

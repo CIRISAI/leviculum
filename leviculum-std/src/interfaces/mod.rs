@@ -19,6 +19,7 @@ pub(crate) mod kiss;
 pub(crate) mod local;
 pub(crate) mod netdevice;
 pub(crate) mod pipe;
+pub use pipe::PipeClientHandle;
 pub(crate) mod rnode;
 pub use rnode::{
     RNodeChannelConfig, RNodeChannelFactory, RNodeChannelHalves, RNodeChannelHandle,
@@ -26,7 +27,7 @@ pub use rnode::{
 };
 pub(crate) mod serial;
 pub(crate) mod tcp;
-pub use tcp::{disable_fault_injection, enable_fault_injection};
+pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
 pub(crate) mod udp;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
