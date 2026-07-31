@@ -532,7 +532,7 @@ int  lev_event_total_segments(const struct lev_event_t *ev, uint32_t *out);
 | `LEV_EVENT_RESOURCE_FAILED` | 16 | link_id, resource_hash, is_sender |
 | `LEV_EVENT_LINK_IDENTIFIED` | 17 | link_id, data (16-byte identity hash) |
 | `LEV_EVENT_LINK_MESSAGE` | 18 | link_id, data, msgtype, sequence (reliable channel) |
-| `LEV_EVENT_PACKET_PROOF_REQUESTED` | 19 | dest_hash, data (32-byte packet hash) |
+| `LEV_EVENT_PACKET_PROOF_REQUESTED` | 19 | dest_hash, data (32-byte packet hash), interface_id |
 | `LEV_EVENT_LINK_PROOF_REQUESTED` | 20 | link_id, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_DELIVERY_CONFIRMED` | 21 | link_id, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_STALE` | 22 | link_id (link inactive past keepalive) |
@@ -540,6 +540,7 @@ int  lev_event_total_segments(const struct lev_event_t *ev, uint32_t *out);
 | `LEV_EVENT_PATH_LOST` | 24 | dest_hash (path expired) |
 | `LEV_EVENT_PACKET_DELIVERY_CONFIRMED` | 25 | data (16-byte packet hash) |
 | `LEV_EVENT_DELIVERY_FAILED` | 26 | data (16-byte packet hash), delivery_error |
+| `LEV_EVENT_LINK_DELIVERY_FAILED` | 27 | link_id, data (32-byte packet hash) |
 
 ## Diagnostics
 

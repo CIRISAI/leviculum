@@ -71,8 +71,9 @@ pub const LEV_EVENT_LINK_IDENTIFIED: c_int = 17;
 /// sequence number via `lev_event_msgtype` and `lev_event_sequence`.
 pub const LEV_EVENT_LINK_MESSAGE: c_int = 18;
 /// A single packet arrived at a destination with the App proof strategy; the
-/// app may call `lev_send_proof`. `dest_hash` is the destination and the data
-/// payload is the 32-byte packet hash.
+/// app may call `lev_send_proof`. `dest_hash` is the destination, the data
+/// payload is the 32-byte packet hash, and `lev_event_interface_id` reads the
+/// interface the packet arrived on.
 pub const LEV_EVENT_PACKET_PROOF_REQUESTED: c_int = 19;
 /// Data arrived on a link whose destination has the App proof strategy. The
 /// `link_id` is set and the data payload is the 32-byte packet hash.
@@ -93,6 +94,11 @@ pub const LEV_EVENT_PACKET_DELIVERY_CONFIRMED: c_int = 25;
 /// Delivery of a single packet we sent failed; the data payload is the 16-byte
 /// packet hash and `lev_event_delivery_error` says why.
 pub const LEV_EVENT_DELIVERY_FAILED: c_int = 26;
+/// No delivery proof arrived for a packet we sent on a link before its
+/// RTT-derived receipt deadline expired. The `link_id` is set and the data
+/// payload is the 32-byte packet hash (the failure half of
+/// `LEV_EVENT_LINK_DELIVERY_CONFIRMED`).
+pub const LEV_EVENT_LINK_DELIVERY_FAILED: c_int = 27;
 
 // --- Link close reasons, read with `lev_event_close_reason` on a
 // `LEV_EVENT_LINK_CLOSED` event. The values follow the engine's
@@ -291,11 +297,12 @@ fn project(ev: NodeEvent) -> lev_event_t {
         NodeEvent::PacketProofRequested {
             packet_hash,
             destination_hash,
-            interface_index: _,
+            interface_index,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_PACKET_PROOF_REQUESTED, is_control);
             e.dest_hash = Some(*destination_hash.as_bytes());
             e.data = packet_hash.to_vec();
+            e.interface_id = Some(interface_index as u64);
             e
         }
         NodeEvent::LinkProofRequested {
@@ -312,6 +319,15 @@ fn project(ev: NodeEvent) -> lev_event_t {
             packet_hash,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_LINK_DELIVERY_CONFIRMED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.data = packet_hash.to_vec();
+            e
+        }
+        NodeEvent::LinkDeliveryFailed {
+            link_id,
+            packet_hash,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_DELIVERY_FAILED, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.data = packet_hash.to_vec();
             e
