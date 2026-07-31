@@ -1896,12 +1896,23 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let is_link_request_for_us = packet.flags.packet_type == PacketType::LinkRequest
             && (self.local_destinations.contains(&packet.destination_hash)
                 || self.is_for_local_client(&packet.destination_hash));
-        // CacheRequest packets skip dedup unconditionally: the sender retries
-        // CacheRequest on timeout with identical bytes (deterministic packet_hash).
-        // Without this exemption, both the daemon and the lncp client would reject
-        // retries as duplicates. The handler (handle_cache_request) is idempotent.        // it simply re-sends the cached proof. No routing loop risk: CacheRequests
-        // are link-addressed (dest_type=Link) and never forwarded via path table.
-        let is_cache_request = packet.context == PacketContext::CacheRequest;
+        // Python exempts these link-traffic contexts from packet-hash dedup
+        // unconditionally (Transport.py:1347-1352). Keepalives are plaintext
+        // and byte-identical on every send (Link.py:848-850): dropping the
+        // repeats means the responder never echoes and the Python initiator
+        // tears the link down as stale. Resource part/req/proof, Channel and
+        // CacheRequest retransmissions reuse identical bytes; their handlers
+        // are idempotent, and link-addressed packets follow the fixed link
+        // table with no routing loop risk.
+        let is_dedup_exempt_context = matches!(
+            packet.context,
+            PacketContext::Keepalive
+                | PacketContext::ResourceReq
+                | PacketContext::ResourcePrf
+                | PacketContext::Resource
+                | PacketContext::CacheRequest
+                | PacketContext::Channel
+        );
         // LRPROOFs for our own links skip dedup: link-request retries generate
         // identical proofs (deterministic for same link_id). Without
         // this exemption, the first proof's hash is cached and all
@@ -1914,7 +1925,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             && !is_local_link_relay
             && !is_local_client_link_request
             && !is_link_request_for_us
-            && !is_cache_request
+            && !is_dedup_exempt_context
             && !is_lrproof_for_us
             && self.storage.has_packet_hash(&full_packet_hash)
         {
@@ -12222,6 +12233,73 @@ mod tests {
                 got_event_2,
                 "Duplicate LRPROOF for local destination must NOT be dropped by dedup"
             );
+        }
+
+        // Python exempts these link-traffic contexts from packet-hash dedup
+        // unconditionally (Transport.py:1347-1352). Keepalives are plaintext
+        // and byte-identical on every send (Link.py:848-850), so without the
+        // exemption the second keepalive dies in dedup, the responder never
+        // echoes, and the Python initiator tears the link down as stale.
+        // Resource part/req/proof and Channel retransmissions reuse identical
+        // bytes for the same reason.
+        #[test]
+        fn test_python_dedup_exempt_contexts_pass_twice() {
+            let contexts = [
+                PacketContext::Keepalive,
+                PacketContext::ResourceReq,
+                PacketContext::ResourcePrf,
+                PacketContext::Resource,
+                PacketContext::CacheRequest,
+                PacketContext::Channel,
+            ];
+
+            for context in contexts {
+                let mut transport = make_transport_enabled();
+                let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                // The link_id is a local destination (an established link on
+                // this node).
+                let link_id = [0xAB; TRUNCATED_HASHBYTES];
+                transport.register_destination(link_id);
+
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type: crate::destination::DestinationType::Link,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 0,
+                    transport_id: None,
+                    destination_hash: link_id,
+                    context,
+                    data: PacketData::Owned(alloc::vec![0xFF]),
+                };
+                let mut buf = [0u8; 500];
+                let len = packet.pack(&mut buf).unwrap();
+                let raw = buf[..len].to_vec();
+
+                transport.process_incoming(0, &raw).unwrap();
+                let got_first = transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PacketReceived { .. }));
+                assert!(
+                    got_first,
+                    "first {context:?} packet must produce PacketReceived"
+                );
+
+                transport.process_incoming(0, &raw).unwrap();
+                let got_second = transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PacketReceived { .. }));
+                assert!(
+                    got_second,
+                    "identical {context:?} packet must NOT be dropped by dedup \
+                     (Python Transport.py:1347-1352)"
+                );
+            }
         }
 
         // Relay data retransmit dedup
