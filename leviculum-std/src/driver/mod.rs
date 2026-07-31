@@ -370,6 +370,23 @@ fn build_ifac_config(config: &InterfaceConfig) -> Option<leviculum_core::ifac::I
     }
 }
 
+/// At startup, IFAC for leaf interfaces is registered by index in the config
+/// loop, which never runs for a runtime attach — without this, a runtime
+/// interface configured with IFAC keys would silently come up unauthenticated.
+/// Carry the IFAC on the handle instead: the dynamic-registration branch
+/// applies `info.ifac` exactly like a server-accepted child. Handles that
+/// already carry one (I2P children) keep theirs.
+fn apply_runtime_ifac(config: &InterfaceConfig, handles: &mut [InterfaceHandle]) {
+    let Some(ifac) = build_ifac_config(config) else {
+        return;
+    };
+    for handle in handles.iter_mut() {
+        if handle.info.ifac.is_none() {
+            handle.info.ifac = Some(ifac.clone());
+        }
+    }
+}
+
 /// Build an [`AnnounceRateConfig`] from interface configuration, applying
 /// Python's validation and coupling (Reticulum.py:798-821). Returns `None`
 /// when no `announce_rate_*` key was set (an absent entry resolves identically
@@ -1898,7 +1915,8 @@ impl ReticulumNode {
         };
 
         match built {
-            interface_build::Built::Handles(handles) => {
+            interface_build::Built::Handles(mut handles) => {
+                apply_runtime_ifac(&config, &mut handles);
                 let ids: Vec<InterfaceId> = handles.iter().map(|h| h.info.id).collect();
                 for handle in handles {
                     new_iface_tx
@@ -4129,6 +4147,67 @@ mod tests {
         let expected =
             leviculum_core::ifac::IfacConfig::new(Some("mynet"), Some("s3cret"), 8).expect("valid");
         assert_eq!(built.identity().hash(), expected.identity().hash());
+    }
+
+    /// A runtime attach must carry the config's IFAC on the handle (the
+    /// startup config loop that registers IFAC by index never runs for it),
+    /// and must not clobber an IFAC the builder already set.
+    #[test]
+    fn runtime_attach_carries_ifac_on_the_handle() {
+        use crate::interfaces::{InterfaceCounters, InterfaceHandle, InterfaceInfo};
+
+        fn dummy_handle(ifac: Option<leviculum_core::ifac::IfacConfig>) -> InterfaceHandle {
+            let (_inc_tx, inc_rx) = mpsc::channel(1);
+            let (out_tx, _out_rx) = mpsc::channel(1);
+            InterfaceHandle {
+                info: InterfaceInfo {
+                    id: InterfaceId(7),
+                    name: "udp_7".into(),
+                    hw_mtu: None,
+                    is_local_client: false,
+                    bitrate: None,
+                    ifac,
+                    mode: leviculum_core::traits::InterfaceMode::default(),
+                    kind: leviculum_core::traits::InterfaceKind::Udp,
+                },
+                incoming: inc_rx,
+                outgoing: out_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+                credit: None,
+                ready: crate::interfaces::ReadySignal::ready_immediate(),
+            }
+        }
+
+        let cfg = InterfaceConfig {
+            interface_type: "UDPInterface".to_string(),
+            networkname: Some("mynet".to_string()),
+            passphrase: Some("s3cret".to_string()),
+            ..Default::default()
+        };
+
+        let mut handles = vec![dummy_handle(None)];
+        apply_runtime_ifac(&cfg, &mut handles);
+        let applied = handles[0].info.ifac.as_ref().expect("IFAC applied");
+        let expected = build_ifac_config(&cfg).expect("valid");
+        assert_eq!(applied.identity().hash(), expected.identity().hash());
+
+        // A pre-set IFAC (I2P children) survives untouched.
+        let own = leviculum_core::ifac::IfacConfig::new(Some("othernet"), None, 16).expect("valid");
+        let mut handles = vec![dummy_handle(Some(own.clone()))];
+        apply_runtime_ifac(&cfg, &mut handles);
+        assert_eq!(
+            handles[0].info.ifac.as_ref().unwrap().identity().hash(),
+            own.identity().hash()
+        );
+
+        // No IFAC keys → nothing applied.
+        let plain = InterfaceConfig {
+            interface_type: "UDPInterface".to_string(),
+            ..Default::default()
+        };
+        let mut handles = vec![dummy_handle(None)];
+        apply_runtime_ifac(&plain, &mut handles);
+        assert!(handles[0].info.ifac.is_none());
     }
 
     /// Codeberg #67 Stage 2a: build_announce_rate_config mirrors Python's
