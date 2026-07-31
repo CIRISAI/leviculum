@@ -207,6 +207,41 @@ pub fn cad_timeout_ms(bw_hz: u32, sf: u8, cad_symbols: u8) -> u32 {
     (cad_us.div_ceil(1_000) + SOFT_TIMEOUT_SLACK_MS).min(u32::MAX as u64) as u32
 }
 
+/// Whether `SetModulationParams` must enable the low-data-rate optimisation
+/// for the given modulation.
+///
+/// LDRO is keyed to symbol duration, not to a spreading-factor/bandwidth-code
+/// pair: the SX126x needs it when a symbol stretches past ~16 ms. Both sides
+/// of a link must agree — an LDRO mismatch between ends kills decoding
+/// entirely — so this replicates the reference RNode firmware's decision
+/// bit for bit (`sx126x.cpp:725-729 handleLowDataRate()`, identical in
+/// `sx127x.cpp:457-467`):
+///
+/// ```c
+/// if ( long( (1<<_sf) / (getSignalBandwidth()/1000)) > 16)
+/// ```
+///
+/// i.e. integer-millisecond symbol duration strictly above 16. The integer
+/// truncation is part of the wire contract: SF11/BW125 and SF12/BW250 sit at
+/// exactly 16.384 ms and the reference (and therefore every RNode peer)
+/// runs them with LDRO OFF, while the narrow interleaved SX1262 bandwidths
+/// (10.42/20.83/41.67 kHz) push even mid spreading factors far past the
+/// threshold. `bw_hz` comes from the chip's bandwidth-code table
+/// (`bw_code_to_hz`); the quotient `bw_hz / 1000` is identical for the
+/// reference's rounded table values, so the decisions coincide on the whole
+/// code domain. Predicates over the raw SX1262 register code cannot express
+/// this: the code space is not monotonic in bandwidth (0x08-0x0A are the
+/// narrowest bandwidths but the numerically largest codes).
+///
+/// `bw_hz` of 0 (unconfigured, or an unknown code) reports no LDRO.
+pub fn ldro_enabled(bw_hz: u32, sf: u8) -> bool {
+    let bw_khz = bw_hz as u64 / 1000;
+    if bw_khz == 0 {
+        return false;
+    }
+    (1u64 << sf) / bw_khz > 16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +475,80 @@ mod tests {
         assert_eq!(fast, 41);
         assert!(slow > 100 * fast, "slow={slow}ms fast={fast}ms");
         assert!(fast >= 1);
+    }
+
+    /// The defect instance (#150): the SX1262 interleaved bandwidth codes
+    /// 0x08/0x09/0x0A are 10.42/20.83/41.67 kHz — the narrowest bandwidths
+    /// in the table, where an SF11/12 symbol is 49-393 ms, far above the
+    /// 16 ms LDRO threshold. The old predicate compared the register code
+    /// (`bw <= 0x04`) as if the code space were monotonic in bandwidth, so
+    /// exactly these configurations ran with LDRO off while any conforming
+    /// peer (the reference firmware derives LDRO from symbol duration) has
+    /// it on — and an LDRO mismatch between ends kills decoding entirely.
+    #[test]
+    fn ldro_covers_the_interleaved_bandwidth_codes() {
+        for bw_hz in [10_420u32, 20_830, 41_670] {
+            for sf in [11u8, 12] {
+                assert!(
+                    ldro_enabled(bw_hz, sf),
+                    "SF{sf}/BW{bw_hz}: symbol far above 16 ms, LDRO must be on"
+                );
+            }
+        }
+    }
+
+    /// The regime the old predicate got right must stay put: SF12/BW125 is
+    /// LDRO-on, SF10/BW125 off.
+    #[test]
+    fn ldro_bw125_regime_is_unchanged() {
+        assert!(ldro_enabled(125_000, 12), "SF12/BW125 must stay LDRO-on");
+        assert!(!ldro_enabled(125_000, 10), "SF10/BW125 must stay LDRO-off");
+    }
+
+    /// The full decision matches the reference firmware on every bandwidth
+    /// code in the SX1262 table (`long((1<<sf)/(bw/1000)) > 16`,
+    /// RNode_Firmware sx126x.cpp:725-729). The interesting members:
+    /// SF11/BW125 and SF12/BW250 sit at exactly 16 integer-ms and the
+    /// reference runs them LDRO-OFF (matching every deployed RNode peer),
+    /// while narrow bandwidths need LDRO well below SF11 — down to SF7 at
+    /// 7.81 kHz.
+    #[test]
+    fn ldro_matches_the_reference_decision_on_the_whole_code_table() {
+        // (bw_hz, reference getSignalBandwidth() value)
+        const BW_TABLE: [(u32, u32); 10] = [
+            (7_810, 7_800),
+            (10_420, 10_400),
+            (15_630, 15_600),
+            (20_830, 20_800),
+            (31_250, 31_250),
+            (41_670, 41_700),
+            (62_500, 62_500),
+            (125_000, 125_000),
+            (250_000, 250_000),
+            (500_000, 500_000),
+        ];
+        for (bw_hz, ref_bw) in BW_TABLE {
+            for sf in 5u8..=12 {
+                let reference = (1u64 << sf) / (ref_bw as u64 / 1000) > 16;
+                assert_eq!(
+                    ldro_enabled(bw_hz, sf),
+                    reference,
+                    "SF{sf}/BW{bw_hz} disagrees with the reference firmware"
+                );
+            }
+        }
+        // The boundary members, stated as facts rather than derived:
+        assert!(!ldro_enabled(125_000, 11), "SF11/BW125 is reference-OFF");
+        assert!(!ldro_enabled(250_000, 12), "SF12/BW250 is reference-OFF");
+        assert!(ldro_enabled(7_810, 7), "SF7/BW7.81k is reference-ON");
+    }
+
+    /// Unconfigured (bw 0) and sub-kHz values report no LDRO instead of
+    /// dividing by zero.
+    #[test]
+    fn ldro_unconfigured_is_off() {
+        assert!(!ldro_enabled(0, 12));
+        assert!(!ldro_enabled(999, 12));
     }
 
     /// The extension charges the programmed preamble of the frame still on

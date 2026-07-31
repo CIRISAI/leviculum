@@ -417,8 +417,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             .await?;
         self.write_command(opcode::SET_BUFFER_BASE_ADDRESS, &[0x00, 0x00])
             .await?;
-        // LDRO: needed when symbol time > 16ms
-        let ldro = if sf >= 11 && bw <= 0x04 { 1 } else { 0 };
+        // LDRO is keyed to symbol duration; the decision lives in core
+        // (`sx126x::ldro_enabled`) because the bandwidth-code space is not
+        // monotonic and both link ends must agree.
+        let ldro = if leviculum_core::sx126x::ldro_enabled(self.rx_ext_bw_hz, sf) {
+            1
+        } else {
+            0
+        };
         self.write_command(
             opcode::SET_MODULATION_PARAMS,
             &[sf, bw, cr, ldro, 0, 0, 0, 0],
