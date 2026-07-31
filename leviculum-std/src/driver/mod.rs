@@ -2942,7 +2942,8 @@ async fn run_event_loop(
     let mut remove_iface_rx = channels.remove_iface_rx;
     // A removal can arrive before the event loop has registered its interface
     // (a detach racing a just-accepted add); held here, applied on arrival.
-    let mut pending_removals: std::collections::HashSet<InterfaceId> = std::collections::HashSet::new();
+    let mut pending_removals: std::collections::HashSet<InterfaceId> =
+        std::collections::HashSet::new();
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
