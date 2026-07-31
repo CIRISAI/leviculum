@@ -76,6 +76,8 @@ mod mvr_proof_activity;
 #[cfg(test)]
 mod mvr_request_response_pins;
 #[cfg(test)]
+mod mvr_resource_strategy_branches;
+#[cfg(test)]
 mod mvr_resource_window;
 #[cfg(test)]
 mod mvr_response_resource;
