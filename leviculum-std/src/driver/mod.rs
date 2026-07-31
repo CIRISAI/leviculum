@@ -3994,6 +3994,24 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
     }
 }
 
+/// Map a configured interface type (Python-style class name) to its transport
+/// medium, for status reporting.
+fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::InterfaceKind {
+    use leviculum_core::traits::InterfaceKind;
+    match interface_type {
+        "TCPClientInterface" | "TCPServerInterface" => InterfaceKind::Tcp,
+        "UDPInterface" => InterfaceKind::Udp,
+        "I2PInterface" => InterfaceKind::I2p,
+        "SerialInterface" => InterfaceKind::Serial,
+        "RNodeInterface" | "RNodeMultiInterface" => InterfaceKind::Rnode,
+        "KISSInterface" | "AX25KISSInterface" => InterfaceKind::Kiss,
+        "PipeInterface" => InterfaceKind::Pipe,
+        "AutoInterface" => InterfaceKind::Auto,
+        "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
+        _ => InterfaceKind::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5604,23 +5622,5 @@ mod tests {
             Some(dest_hash),
             "active link must expose the dialed destination"
         );
-    }
-}
-
-/// Map a configured interface type (Python-style class name) to its transport
-/// medium, for status reporting.
-fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::InterfaceKind {
-    use leviculum_core::traits::InterfaceKind;
-    match interface_type {
-        "TCPClientInterface" | "TCPServerInterface" => InterfaceKind::Tcp,
-        "UDPInterface" => InterfaceKind::Udp,
-        "I2PInterface" => InterfaceKind::I2p,
-        "SerialInterface" => InterfaceKind::Serial,
-        "RNodeInterface" | "RNodeMultiInterface" => InterfaceKind::Rnode,
-        "KISSInterface" | "AX25KISSInterface" => InterfaceKind::Kiss,
-        "PipeInterface" => InterfaceKind::Pipe,
-        "AutoInterface" => InterfaceKind::Auto,
-        "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
-        _ => InterfaceKind::Unknown,
     }
 }
