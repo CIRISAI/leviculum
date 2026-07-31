@@ -49,6 +49,7 @@ pub(super) fn build(
             next_id: ctx.next_id.clone(),
             new_interface_tx: ctx.new_iface_tx.clone(),
             ifac: ifac.clone(),
+            outbound_socket_hook: ctx.outbound_socket_hook.clone(),
         });
         tracing::info!("I2P connectable endpoint (interface {})", idx);
     }
@@ -74,6 +75,7 @@ pub(super) fn build(
                 reconnect_wait,
                 ifac: ifac.clone(),
                 reconnect_notify: Some(ctx.reconnect_tx.clone()),
+                outbound_socket_hook: ctx.outbound_socket_hook.clone(),
             });
             if ctx.new_iface_tx.try_send(handle).is_err() {
                 tracing::error!(

@@ -593,12 +593,7 @@ async fn connect_hooked(
     addr: SocketAddr,
     hook: &Option<crate::socket_hook::OutboundSocketHook>,
 ) -> io::Result<tokio::net::TcpStream> {
-    let socket = match addr {
-        SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
-        SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
-    };
-    crate::socket_hook::apply(hook.as_ref(), &socket);
-    socket.connect(addr).await
+    crate::socket_hook::connect_hooked(addr, hook.as_ref()).await
 }
 
 #[allow(clippy::too_many_arguments)]
