@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.11.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream **0.8.0** (`Lew_Palm/leviculum` master @ `e023994`): the
+LXMF client messaging stack, raw link packets + request Resources, byte-channel
+interfaces with runtime hot-plug, runtime add/remove of every interface kind,
+new interfaces (Pipe/KISS/AX25KISS/RNodeMulti/I2P), per-interface propagation
+modes and rate limits, interface auto-discovery, remote management, tunnel
+synthesis, segmented >1 MiB resources, radio PHY fixes, and the Python-compat
+dedup/LRPROOF/unpadding fixes — see upstream's `## [0.8.0]` section below.
+
+Everything upstream absorbed from the fork's carry is dropped: `FramesDropped`
+(#125), the alias-resolving link accessors (#126), the platform-portability
+tests (#127), and the reverse-path contention repro (#128) are now upstream
+code. The fork's carry shrinks to: the explicit-hash listen API (leviculum#30),
+the leviculum#29 stage-1 off-lock resource build + inbound pre-hash (offered
+upstream next), the two `now_ms()` de-flakes upstream's copy still lacks, and
+fork CI/bench/tooling.
+
+Merge notes: the off-lock pre-hash now composes with upstream's packet-journey
+hash (one hash per packet, driver-precomputed when the bytes are unchanged);
+the phased resource-build API carries over onto upstream's new
+`new_request`/timeout-watchdog constructor surface; the sync script fetches
+upstream `--no-tags` (upstream's independent tags collide with fork-marked
+ones); fork CI initializes `reference/Reticulum` + `reference/LXMF` for the
+interop suite.
+
 ## [0.10.2+ciris.1] — CIRIS fork
 
 Stage 1 of the transport concurrency work (leviculum#29, the transport-side
