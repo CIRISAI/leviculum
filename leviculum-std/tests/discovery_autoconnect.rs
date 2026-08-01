@@ -22,8 +22,11 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
-use leviculum_core::discovery::{build_announce_app_data, InterfaceDescriptor};
+use leviculum_core::discovery::{
+    build_announce_app_data, DiscoveredInterface, DiscoveredInterfaceRecord, InterfaceDescriptor,
+};
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
+use leviculum_std::config::{Config, InterfaceConfig};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(53100);
@@ -168,4 +171,228 @@ async fn discovered_backbone_endpoint_is_auto_connected_and_carries_traffic() {
 
     let _ = node_a.stop().await;
     let _ = node_b.stop().await;
+}
+
+// ===========================================================================
+// Codeberg #151: discovered peers get their IFAC, and fail closed when they
+// cannot.
+// ===========================================================================
+
+/// Unix wall-clock seconds, like the driver's `now_unix_secs`.
+fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Seed `storage` with a persisted discovered-interface record advertising a
+/// TCP endpoint at `127.0.0.1:port`, optionally carrying IFAC netname/netkey.
+/// Writing the record directly (instead of hearing an announce) keeps the test
+/// deterministic and interface-free: the auto-connect poll reads it from disk.
+fn seed_discovered_record(
+    storage: &std::path::Path,
+    port: u16,
+    ifac_netname: Option<&str>,
+    ifac_netkey: Option<&str>,
+    seed: u8,
+) {
+    let di = DiscoveredInterface {
+        interface_type: "TCPServerInterface".to_string(),
+        transport: true,
+        name: format!("Seeded-{seed}"),
+        transport_id: [seed; 16],
+        network_id: [seed; 16],
+        value: 20,
+        stamp: [seed; 32],
+        latitude: None,
+        longitude: None,
+        height: None,
+        reachable_on: Some("127.0.0.1".to_string()),
+        port: Some(port as u64),
+        frequency: None,
+        bandwidth: None,
+        spreadingfactor: None,
+        codingrate: None,
+        ifac_netname: ifac_netname.map(str::to_string),
+        ifac_netkey: ifac_netkey.map(str::to_string),
+        discovery_hash: [seed; 32],
+    };
+    let now = now_unix();
+    let rec = DiscoveredInterfaceRecord::from_discovered(&di, 1, now, now, now, 0);
+    let dir = storage.join("discovery").join("interfaces");
+    std::fs::create_dir_all(&dir).expect("create discovery dir");
+    let mut name = String::new();
+    for b in di.discovery_hash {
+        name.push_str(&format!("{b:02x}"));
+    }
+    std::fs::write(dir.join(name), rec.encode_msgpack()).expect("write record");
+}
+
+const IFAC_NETNAME: &str = "closednet-151";
+const IFAC_NETKEY: &str = "closedkey-151";
+
+/// #151 case 1, end to end: the discovery record advertises IFAC
+/// netname/netkey, node B's advertised TCP server runs the same IFAC, and node
+/// A (no IFAC configured anywhere) auto-connects. A must derive the advertised
+/// IFAC for the spawned client, otherwise B drops every packet A sends and A
+/// drops every (masked) announce B sends -- so A learning a path to B's probe
+/// destination proves the spawned client authenticates in both directions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn advertised_ifac_record_connects_under_that_ifac() {
+    let server_port = next_port();
+    let server_addr: SocketAddr = format!("127.0.0.1:{server_port}").parse().unwrap();
+
+    // Node B: an IFAC-protected TCP server, built through the production
+    // config path (network_name/passphrase -> build_ifac_config).
+    let mut b_config = Config::default();
+    b_config.interfaces.insert(
+        "Protected Server".to_string(),
+        InterfaceConfig {
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: Some("127.0.0.1".to_string()),
+            listen_port: Some(server_port),
+            networkname: Some(IFAC_NETNAME.to_string()),
+            passphrase: Some(IFAC_NETKEY.to_string()),
+            ..Default::default()
+        },
+    );
+    let _ = server_addr;
+    let b_storage = tempfile::tempdir().expect("tempdir b");
+    let mut node_b = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .config(b_config)
+        .storage_path(b_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build b");
+    node_b.start().await.expect("start b");
+
+    // B's probe destination; its announce is the traffic A must authenticate.
+    let probe_identity = Identity::generate(&mut rand_core::OsRng);
+    let probe_dest = Destination::new(
+        Some(probe_identity),
+        Direction::In,
+        DestinationType::Single,
+        "test151",
+        &["probe"],
+    )
+    .expect("probe destination");
+    let probe_hash = *probe_dest.hash();
+    node_b.register_destination(probe_dest);
+
+    // Node A: auto-connect enabled, NO interfaces, NO IFAC configured. The
+    // pre-seeded record is its only knowledge of B.
+    let a_storage = tempfile::tempdir().expect("tempdir a");
+    seed_discovered_record(
+        a_storage.path(),
+        server_port,
+        Some(IFAC_NETNAME),
+        Some(IFAC_NETKEY),
+        0x51,
+    );
+    let mut node_a = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .autoconnect_discovered_interfaces(4)
+        .storage_path(a_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build a");
+    node_a.start().await.expect("start a");
+
+    // A spawns the auto-connect client from the seeded record.
+    let auto_connected = wait_until(Duration::from_secs(15), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name.starts_with("autoconnect/"))
+    })
+    .await;
+    assert!(
+        auto_connected,
+        "A did not auto-connect the seeded record; interfaces = {:?}",
+        node_a.interface_stats()
+    );
+
+    // B announces its probe destination until A has authenticated the masked
+    // announce and learned the path. Without the advertised IFAC on the
+    // spawned client this never happens: B's announces fail A's IFAC check
+    // (and A's own packets are dropped by B).
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut path_learned = false;
+    while Instant::now() < deadline {
+        node_b
+            .announce_destination(&probe_hash, None)
+            .await
+            .expect("announce probe");
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if node_a.has_path(&probe_hash) {
+            path_learned = true;
+            break;
+        }
+    }
+    assert!(
+        path_learned,
+        "A never learned B's probe path over the IFAC-protected auto-connect \
+         link; the spawned client is not authenticating (Codeberg #151)"
+    );
+
+    let _ = node_a.stop().await;
+    let _ = node_b.stop().await;
+}
+
+/// #151 case 3, end to end: this node runs IFAC (an operator-configured UDP
+/// interface), the seeded record offers no IFAC material, and no hearing
+/// interface can be inherited from (the record was read from disk). The
+/// auto-connect must fail closed: no `autoconnect/*` interface may appear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ifac_node_refuses_open_discovered_endpoint() {
+    let udp_listen = next_port();
+    let udp_forward = next_port();
+    let target_port = next_port(); // nothing listens; must not even be dialed
+
+    let mut config = Config::default();
+    config.interfaces.insert(
+        "Protected UDP".to_string(),
+        InterfaceConfig {
+            interface_type: "UDPInterface".to_string(),
+            listen_ip: Some("127.0.0.1".to_string()),
+            listen_port: Some(udp_listen),
+            forward_ip: Some("127.0.0.1".to_string()),
+            forward_port: Some(udp_forward),
+            networkname: Some(IFAC_NETNAME.to_string()),
+            passphrase: Some(IFAC_NETKEY.to_string()),
+            ..Default::default()
+        },
+    );
+
+    let storage = tempfile::tempdir().expect("tempdir");
+    seed_discovered_record(storage.path(), target_port, None, None, 0x52);
+    let mut node = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .autoconnect_discovered_interfaces(4)
+        .config(config)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build node");
+    node.start().await.expect("start node");
+
+    // Several auto-connect polls (1 s interval) worth of settling time: the
+    // record is live and auto-connectable, so pre-#151 the spawner would have
+    // registered an `autoconnect/*` interface on the first poll.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let spawned: Vec<String> = node
+        .interface_stats()
+        .iter()
+        .map(|i| i.name.clone())
+        .filter(|n| n.starts_with("autoconnect/"))
+        .collect();
+    assert!(
+        spawned.is_empty(),
+        "IFAC-running node must NOT auto-connect an endpoint with no \
+         resolvable IFAC (fail closed, Codeberg #151); spawned = {spawned:?}"
+    );
+
+    let _ = node.stop().await;
 }

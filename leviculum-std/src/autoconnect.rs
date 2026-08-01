@@ -50,9 +50,19 @@ pub(crate) const DETACH_THRESHOLD_SECS: f64 = 12.0;
 /// running event loop's interface channels and online map.
 pub(crate) trait AutoConnectSpawner {
     /// Spawn a TCP client interface to `host:port` at runtime and register it
-    /// with the transport. Returns the assigned [`InterfaceId`], or `None` if
-    /// the endpoint could not be resolved / the interface could not be spawned.
-    fn spawn_tcp_client(&mut self, name: &str, host: &str, port: u16) -> Option<InterfaceId>;
+    /// with the transport. `rec` is the backing discovery record; the spawner
+    /// resolves the interface's IFAC from it (advertised netname/netkey, or
+    /// inherited from the interface the announce was heard on — Codeberg #151).
+    /// Returns the assigned [`InterfaceId`], or `None` if the endpoint could
+    /// not be resolved, the interface could not be spawned, or the spawner
+    /// refused the endpoint (fail closed: IFAC required but unresolvable).
+    fn spawn_tcp_client(
+        &mut self,
+        name: &str,
+        host: &str,
+        port: u16,
+        rec: &DiscoveredInterfaceRecord,
+    ) -> Option<InterfaceId>;
 
     /// Tear down a previously spawned auto-connected interface.
     fn teardown(&mut self, id: InterfaceId);
@@ -218,7 +228,7 @@ impl AutoConnectManager {
                 continue; // already auto-connected to this endpoint
             }
             let name = format!("autoconnect/{}", rec.name);
-            if let Some(id) = spawner.spawn_tcp_client(&name, host, port) {
+            if let Some(id) = spawner.spawn_tcp_client(&name, host, port, rec) {
                 tracing::info!(
                     "discovery: auto-connecting {} \"{}\" at {}:{}",
                     rec.interface_type,
@@ -260,6 +270,8 @@ mod tests {
     struct MockSpawner {
         next_id: usize,
         spawned: Vec<(String, String, u16, InterfaceId)>,
+        /// IFAC netname/netkey of the record each spawn was handed (#151).
+        spawned_ifac: Vec<(Option<String>, Option<String>)>,
         torn_down: Vec<InterfaceId>,
         /// Interface ids currently reporting offline (default: online).
         offline: BTreeSet<usize>,
@@ -268,7 +280,13 @@ mod tests {
     }
 
     impl AutoConnectSpawner for MockSpawner {
-        fn spawn_tcp_client(&mut self, name: &str, host: &str, port: u16) -> Option<InterfaceId> {
+        fn spawn_tcp_client(
+            &mut self,
+            name: &str,
+            host: &str,
+            port: u16,
+            rec: &DiscoveredInterfaceRecord,
+        ) -> Option<InterfaceId> {
             if self.fail_next_spawn {
                 self.fail_next_spawn = false;
                 return None;
@@ -277,6 +295,8 @@ mod tests {
             self.next_id += 1;
             self.spawned
                 .push((name.to_string(), host.to_string(), port, id));
+            self.spawned_ifac
+                .push((rec.ifac_netname.clone(), rec.ifac_netkey.clone()));
             Some(id)
         }
         fn teardown(&mut self, id: InterfaceId) {
@@ -479,6 +499,26 @@ mod tests {
         mgr.poll(std::slice::from_ref(&rec), 1001.0, &mut sp);
         assert_eq!(sp.spawned.len(), 1);
         assert_eq!(mgr.active_count(), 1);
+    }
+
+    /// #151: the manager hands the backing record to the spawner, so the
+    /// spawner can resolve the interface's IFAC from the advertised
+    /// netname/netkey (or refuse the endpoint, fail closed).
+    #[test]
+    fn spawner_receives_the_records_ifac_material() {
+        let mut mgr = AutoConnectManager::new(4);
+        let mut sp = MockSpawner::default();
+        let mut rec = backbone_rec("Hub", "10.0.0.5", 4965, 1);
+        rec.ifac_netname = Some("closednet".to_string());
+        rec.ifac_netkey = Some("closedkey".to_string());
+
+        mgr.poll(std::slice::from_ref(&rec), 1000.0, &mut sp);
+        assert_eq!(sp.spawned.len(), 1);
+        assert_eq!(
+            sp.spawned_ifac[0],
+            (Some("closednet".to_string()), Some("closedkey".to_string())),
+            "record IFAC material must reach the spawner"
+        );
     }
 
     #[test]

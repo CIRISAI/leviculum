@@ -390,6 +390,43 @@ impl TestDaemon {
         Err(last_error)
     }
 
+    /// Like [`start_discoverable_backbone`](Self::start_discoverable_backbone),
+    /// but the discoverable backbone server is IFAC-protected with
+    /// `netname`/`passphrase` and publishes them in its discovery announce
+    /// (`publish_ifac = yes`, Codeberg #151). The main bootstrap server stays
+    /// open, so a peer can hear the announce without holding the keys.
+    pub async fn start_discoverable_backbone_ifac(
+        name: &str,
+        netname: &str,
+        passphrase: &str,
+    ) -> Result<(Self, u16), HarnessError> {
+        ensure_reticulum_submodule()?;
+        let mut last_error = HarnessError::StartupTimeout;
+        for attempt in 0..Self::MAX_STARTUP_RETRIES {
+            let (rns_port, cmd_port) = find_two_available_ports()?;
+            let backbone_port = pick_free_tcp_port()?;
+            let mut extra = Self::discovery_args(name);
+            extra.push("--discovery-port".to_string());
+            extra.push(backbone_port.to_string());
+            extra.push("--ifac-netname".to_string());
+            extra.push(netname.to_string());
+            extra.push("--ifac-passphrase".to_string());
+            extra.push(passphrase.to_string());
+            extra.push("--discovery-publish-ifac".to_string());
+            match Self::start_with_ports_and_options(rns_port, cmd_port, extra).await {
+                Ok(daemon) => return Ok((daemon, backbone_port)),
+                Err(HarnessError::StartupTimeout) => {
+                    if attempt + 1 < Self::MAX_STARTUP_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    last_error = HarnessError::StartupTimeout;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_error)
+    }
+
     /// Start a daemon running the InterfaceDiscovery *listener* (reverse
     /// direction): it populates its own discovered-interface registry from
     /// received discovery announces (`get_discovered_interfaces`). Plaintext.

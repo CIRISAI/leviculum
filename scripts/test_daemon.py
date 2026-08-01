@@ -141,7 +141,8 @@ class TestDaemon:
                  discoverable: bool = False, discovery_name: str = None,
                  discovery_stamp_value: int = None, discovery_encrypt: bool = False,
                  discovery_port: int = None, discover_interfaces: bool = False,
-                 network_identity: str = None, discovery_job_interval: float = None):
+                 network_identity: str = None, discovery_job_interval: float = None,
+                 discovery_publish_ifac: bool = False):
         # Interface auto-discovery (Codeberg #32): drive the REAL Python
         # RNS.Discovery.InterfaceAnnouncer / InterfaceDiscovery. `discoverable`
         # marks a TCPServer interface discoverable so the daemon emits announces
@@ -158,6 +159,7 @@ class TestDaemon:
         self.discovery_stamp_value = discovery_stamp_value
         self.discovery_encrypt = discovery_encrypt
         self.discovery_port = discovery_port
+        self.discovery_publish_ifac = discovery_publish_ifac
         self.discover_interfaces = discover_interfaces
         self.network_identity = network_identity
         self.discovery_job_interval = discovery_job_interval
@@ -318,6 +320,11 @@ class TestDaemon:
             keys += f"    discovery_stamp_value = {self.discovery_stamp_value}\n"
         if self.discovery_encrypt:
             keys += "    discovery_encrypt = yes\n"
+        if self.discovery_publish_ifac:
+            # Publish the block's network_name/passphrase in the discovery
+            # announce (Reticulum.py `publish_ifac`, default off) -- Codeberg
+            # #151: an auto-connecting peer derives the IFAC from the record.
+            keys += "    publish_ifac = yes\n"
         return keys
 
     def _write_config(self):
@@ -2253,6 +2260,9 @@ def main():
                         help="Path to a shared 64-byte network identity file")
     parser.add_argument("--discovery-job-interval", type=float, default=None,
                         help="Reduce the InterfaceAnnouncer job interval (seconds)")
+    parser.add_argument("--discovery-publish-ifac", action="store_true",
+                        help="Publish the discoverable interface's IFAC keys "
+                             "in the discovery announce (#151)")
 
     args = parser.parse_args()
 
@@ -2293,6 +2303,7 @@ def main():
         discover_interfaces=args.discover_interfaces,
         network_identity=args.network_identity,
         discovery_job_interval=args.discovery_job_interval,
+        discovery_publish_ifac=args.discovery_publish_ifac,
     )
     daemon.run()
 
