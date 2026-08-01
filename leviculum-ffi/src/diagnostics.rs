@@ -3,6 +3,7 @@
 
 use std::os::raw::c_int;
 
+use leviculum_std::api::LinkId;
 use leviculum_std::{InterfaceStatusSnapshot, PathTableExport};
 
 use crate::error::*;
@@ -294,6 +295,100 @@ pub unsafe extern "C" fn lev_interface_stats_free(table: *mut lev_interface_stat
         if !table.is_null() {
             drop(Box::from_raw(table));
         }
+    })
+}
+
+/// Read the per-link delivery telemetry (leviculum#35) for the link with the
+/// given 16-byte id into the provided out-parameters. Any out-pointer may be
+/// NULL to skip that value. Counters are cumulative; sample periodically and
+/// difference consecutive readings.
+///
+/// - `out_bytes_delivered` — proof-confirmed bytes (channel envelopes plus
+///   completed outgoing resources), the delivery-rate numerator.
+/// - `out_srtt_ms` / `out_rttvar_ms` — RFC 6298 smoothed delivery RTT and
+///   variance in milliseconds; `-1.0` until the first Karn-valid sample.
+/// - `out_min_rtt_ms` — floor of Karn-valid delivery RTT samples in
+///   milliseconds; `-1` until the first sample.
+/// - `out_rtt_ms` — handshake RTT from link establishment in milliseconds;
+///   `-1` when not measured.
+/// - `out_busy_rejections` / `out_pacing_rejections` /
+///   `out_iface_pacing_rejections` — sends rejected by a full channel window,
+///   the link pacer, and the interface airtime gate respectively: a non-zero
+///   interval delta marks the interval congestion-limited rather than
+///   app-limited.
+/// - `out_tx_ring_size`, `out_window`, `out_window_max`,
+///   `out_pacing_interval_ms` — the channel flow-control state.
+///
+/// Returns `LEV_OK`; `LEV_ERR_NULL_PTR` on a NULL node or link id;
+/// `LEV_ERR_LINK` when no link with that id exists.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn lev_link_stats(
+    node: *const leviculum_t,
+    link_id: *const u8,
+    out_bytes_delivered: *mut u64,
+    out_srtt_ms: *mut f64,
+    out_rttvar_ms: *mut f64,
+    out_min_rtt_ms: *mut i64,
+    out_rtt_ms: *mut i64,
+    out_busy_rejections: *mut u64,
+    out_pacing_rejections: *mut u64,
+    out_iface_pacing_rejections: *mut u64,
+    out_tx_ring_size: *mut u64,
+    out_window: *mut u64,
+    out_window_max: *mut u64,
+    out_pacing_interval_ms: *mut u64,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if link_id.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        let lid = LinkId::new(crate::read_array::<LEV_ADDR_LEN>(link_id));
+        let stats = match h.node().engine().link_stats(&lid) {
+            Some(s) => s,
+            None => return LEV_ERR_LINK,
+        };
+        if !out_bytes_delivered.is_null() {
+            *out_bytes_delivered = stats.bytes_delivered();
+        }
+        if !out_srtt_ms.is_null() {
+            *out_srtt_ms = stats.srtt_ms().unwrap_or(-1.0);
+        }
+        if !out_rttvar_ms.is_null() {
+            *out_rttvar_ms = stats.rttvar_ms().unwrap_or(-1.0);
+        }
+        if !out_min_rtt_ms.is_null() {
+            *out_min_rtt_ms = stats.min_rtt_ms().map(|v| v as i64).unwrap_or(-1);
+        }
+        if !out_rtt_ms.is_null() {
+            *out_rtt_ms = stats.rtt_ms().map(|v| v as i64).unwrap_or(-1);
+        }
+        if !out_busy_rejections.is_null() {
+            *out_busy_rejections = stats.busy_rejections();
+        }
+        if !out_pacing_rejections.is_null() {
+            *out_pacing_rejections = stats.pacing_rejections();
+        }
+        if !out_iface_pacing_rejections.is_null() {
+            *out_iface_pacing_rejections = stats.iface_pacing_rejections();
+        }
+        if !out_tx_ring_size.is_null() {
+            *out_tx_ring_size = stats.tx_ring_size() as u64;
+        }
+        if !out_window.is_null() {
+            *out_window = stats.window() as u64;
+        }
+        if !out_window_max.is_null() {
+            *out_window_max = stats.window_max() as u64;
+        }
+        if !out_pacing_interval_ms.is_null() {
+            *out_pacing_interval_ms = stats.pacing_interval_ms();
+        }
+        LEV_OK
     })
 }
 

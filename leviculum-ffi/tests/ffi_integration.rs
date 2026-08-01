@@ -1449,3 +1449,124 @@ fn announce_interface_id_resolves_to_an_interface() {
          be the same numbering, or neither resolves through the snapshot"
     );
 }
+
+// leviculum#35 (PR #154 companion): the per-link delivery telemetry must be
+// reachable from C. `lev_link_stats` projects every LinkStats field; here the
+// live ones move: a proofed channel send advances bytes_delivered and seeds
+// the RTT estimators, while an app-limited link keeps busy_rejections at 0.
+#[test]
+fn link_stats_project_delivery_telemetry() {
+    let p = setup_pair();
+    let (lb, _la) = establish_link(&p.a, &p.b, &p.dest);
+
+    let mut link_id = [0u8; 16];
+    let mut id_len = 0usize;
+    assert_eq!(
+        unsafe { lev_link_id(lb.0, link_id.as_mut_ptr(), 16, &mut id_len) },
+        LEV_OK
+    );
+    assert_eq!(id_len, 16);
+
+    let read_stats = |bytes: &mut u64,
+                      srtt: &mut f64,
+                      min_rtt: &mut i64,
+                      busy: &mut u64|
+     -> i32 {
+        unsafe {
+            lev_link_stats(
+                p.b.0,
+                link_id.as_ptr(),
+                bytes,
+                srtt,
+                ptr::null_mut(),
+                min_rtt,
+                ptr::null_mut(),
+                busy,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        }
+    };
+
+    // Baseline: nothing delivered yet, estimators unset, no backpressure.
+    let (mut bytes, mut srtt, mut min_rtt, mut busy) = (u64::MAX, 0.0f64, 0i64, u64::MAX);
+    assert_eq!(read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy), LEV_OK);
+    assert_eq!(bytes, 0, "nothing proofed yet");
+    assert_eq!(srtt, -1.0, "SRTT unset is projected as -1.0");
+    assert_eq!(min_rtt, -1, "min-RTT unset is projected as -1");
+    assert_eq!(busy, 0);
+
+    // One proofed send must advance the counter and seed the estimators.
+    let msg = [0x5Au8; 64];
+    assert_eq!(
+        unsafe { lev_link_send(lb.0, msg.as_ptr(), msg.len(), 5000) },
+        LEV_OK,
+        "send: {}",
+        last_error()
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert_eq!(read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy), LEV_OK);
+        if bytes > 0 || std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(bytes >= 64, "a proofed 64-byte send must count, got {bytes}");
+    assert!(srtt >= 0.0, "SRTT must be seeded (handshake or delivery sample)");
+    // A loopback proof can round-trip inside one millisecond; a 0 ms sample is
+    // Karn-style discarded, so min-RTT may legitimately still be unset here.
+    // Its projected VALUE semantics are pinned deterministically at core level
+    // (MockClock); this asserts the projection stays in the contract's domain.
+    assert!(min_rtt >= -1, "min-RTT projection out of domain: {min_rtt}");
+    assert_eq!(busy, 0, "an app-limited link must show zero busy rejections");
+
+    // Unknown link id -> LEV_ERR_LINK; NULL node -> LEV_ERR_NULL_PTR.
+    let bogus = [0xEEu8; 16];
+    assert_eq!(
+        unsafe {
+            lev_link_stats(
+                p.b.0,
+                bogus.as_ptr(),
+                &mut bytes,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        LEV_ERR_LINK
+    );
+    assert_eq!(
+        unsafe {
+            lev_link_stats(
+                ptr::null(),
+                link_id.as_ptr(),
+                &mut bytes,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        LEV_ERR_NULL_PTR
+    );
+}
