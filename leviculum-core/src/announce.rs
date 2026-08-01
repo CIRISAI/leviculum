@@ -27,9 +27,10 @@
 //! The signature covers: destination_hash + public_key + name_hash + random_hash + \[ratchet\] + app_data
 
 use crate::constants::{
-    slice_to_array, ED25519_SIGNATURE_SIZE, HEADER_MINSIZE, IDENTITY_KEY_SIZE, IFAC_MIN_SIZE, MTU,
-    NAME_HASHBYTES, RANDOM_HASHBYTES, RANDOM_HASH_RANDOM_SIZE, RANDOM_HASH_TIMESTAMP_OFFSET,
-    RANDOM_HASH_TIMESTAMP_SIZE, RATCHET_SIZE, TRUNCATED_HASHBYTES,
+    slice_to_array, ED25519_SIGNATURE_SIZE, EMISSION_TIMESTAMP_MAX_SECS, HEADER_MINSIZE,
+    IDENTITY_KEY_SIZE, IFAC_MIN_SIZE, MTU, NAME_HASHBYTES, RANDOM_HASHBYTES,
+    RANDOM_HASH_RANDOM_SIZE, RANDOM_HASH_TIMESTAMP_OFFSET, RANDOM_HASH_TIMESTAMP_SIZE,
+    RATCHET_SIZE, TRUNCATED_HASHBYTES,
 };
 use crate::destination::DestinationHash;
 
@@ -160,7 +161,10 @@ pub(crate) fn generate_random_hash(
     rng.fill_bytes(&mut random_16);
     let random_part = truncated_hash(&random_16);
 
-    let timestamp_bytes = emission_secs.to_be_bytes();
+    // The field keeps only 8*RANDOM_HASH_TIMESTAMP_SIZE bits; a plain copy
+    // of anything larger drops the high bits and emits a near-zero value
+    // that sorts below every stored path entry (Codeberg #160).
+    let timestamp_bytes = emission_secs.min(EMISSION_TIMESTAMP_MAX_SECS).to_be_bytes();
 
     let mut result = [0u8; RANDOM_HASHBYTES]; // 10 bytes
     result[..RANDOM_HASH_RANDOM_SIZE].copy_from_slice(&random_part[..RANDOM_HASH_RANDOM_SIZE]);
@@ -833,6 +837,19 @@ mod tests {
 
         // Last 5 bytes (timestamp) should be the same (same emission)
         assert_eq!(&hash1[5..10], &hash2[5..10]);
+    }
+
+    #[test]
+    fn test_generate_random_hash_saturates_at_field_max() {
+        // Codeberg #160: an emission just past 2^40 would truncate to 99 in
+        // a naive byte copy — the encoder must saturate at the field
+        // maximum so the emitted ordering never collapses.
+        use crate::constants::EMISSION_TIMESTAMP_MAX_SECS;
+        let hash = generate_random_hash(&mut OsRng, EMISSION_TIMESTAMP_MAX_SECS + 100);
+        assert_eq!(
+            emission_from_random_hash(&hash),
+            EMISSION_TIMESTAMP_MAX_SECS
+        );
     }
 
     #[test]

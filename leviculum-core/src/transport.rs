@@ -43,10 +43,11 @@ use alloc::vec::Vec;
 
 use crate::constants::{
     ANNOUNCE_RATE_LIMIT_MS, DEFAULT_ANNOUNCE_CAP_PERCENT, DISCOVERY_RETRY_INTERVAL_MS,
-    DISCOVERY_TIMEOUT_MS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS, JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS,
-    LOCAL_CLIENT_ANNOUNCE_DELAY_MS, LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX,
-    MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU,
-    PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
+    DISCOVERY_TIMEOUT_MS, EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS,
+    EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS, JITTER_AIRTIME_FACTOR,
+    LINK_TIMEOUT_MS, LOCAL_CLIENT_ANNOUNCE_DELAY_MS, LOCAL_CLIENT_DEST_EXPIRY_MS,
+    LOCAL_REBROADCASTS_MAX, MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND,
+    MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
     PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS, RATCHET_SIZE,
     RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES,
     UNKNOWN_BITRATE_ASSUMPTION_BPS,
@@ -2550,15 +2551,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ///    the above is available. Never beats a stored path entry on a
     ///    peer, but is monotonic within one boot.
     pub fn emission_secs(&self, now_ms: u64) -> u64 {
-        if let Some(wall) = self.clock.wall_unix_secs() {
-            return wall;
-        }
-        match self.emission_floor {
-            Some((floor_secs, floor_at_ms)) => {
-                floor_secs + now_ms.saturating_sub(floor_at_ms) / 1000
+        let secs = if let Some(wall) = self.clock.wall_unix_secs() {
+            wall
+        } else {
+            match self.emission_floor {
+                Some((floor_secs, floor_at_ms)) => {
+                    floor_secs.saturating_add(now_ms.saturating_sub(floor_at_ms) / 1000)
+                }
+                None => now_ms / 1000,
             }
-            None => now_ms / 1000,
-        }
+        };
+        // The wire field holds 8*RANDOM_HASH_TIMESTAMP_SIZE bits; a larger
+        // value would drop its high bits on emission and sort our next
+        // announce below our own stored entries on every peer (Codeberg
+        // #160). Saturating here makes that unrepresentable regardless of
+        // which source produced the value.
+        secs.min(EMISSION_TIMESTAMP_MAX_SECS)
     }
 
     /// Inject wall-clock unix time from the host (Codeberg #155).
@@ -2568,19 +2576,52 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// no-op in effect on platforms whose `Clock::wall_unix_secs` already
     /// returns real wall time, which always takes precedence.
     pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64) {
+        // Same ceiling as learned adoption (Codeberg #160): a value no real
+        // clock can produce would wedge the timebase there forever, since
+        // the floor never moves backwards.
+        if unix_secs > EMISSION_LEARN_CEILING_SECS {
+            crate::tracing::warn!(unix_secs, "Refused implausible wall-time injection");
+            return;
+        }
         self.emission_floor = Some((unix_secs, self.clock.now_ms()));
     }
 
     /// Learn the emission timebase from a validated announce's emission
     /// timestamp (Codeberg #155). Only meaningful without a wall clock;
     /// only ever moves the timebase forward.
+    ///
+    /// `validate()` proves only that the announce signs itself, so this
+    /// field is arbitrary input from anyone in radio range (Codeberg #160).
+    /// Hardening, in order: values past [`EMISSION_LEARN_CEILING_SECS`]
+    /// cannot come from a real clock and are refused outright; the first
+    /// adoption is unbounded so a node booting at uptime seconds reaches
+    /// real unix time in one step; every later adoption may advance the
+    /// timebase by at most [`EMISSION_LEARN_MAX_ADVANCE_SECS`], so a peer
+    /// with a badly wrong clock cannot capture it in one announce.
+    ///
+    /// Unlike the persisted offset in microReticulum (which the #155
+    /// commit message overstated as the same pattern), the learned floor
+    /// is in-memory only: after a reboot a clockless node emits uptime
+    /// seconds again until the first validated announce re-seeds it.
     fn learn_emission_timebase(&mut self, emitted_secs: u64, now_ms: u64) {
         if self.clock.wall_unix_secs().is_some() {
             return;
         }
-        if emitted_secs > self.emission_secs(now_ms) {
-            self.emission_floor = Some((emitted_secs, now_ms));
+        if emitted_secs > EMISSION_LEARN_CEILING_SECS {
+            return;
         }
+        let current = self.emission_secs(now_ms);
+        if emitted_secs <= current {
+            return;
+        }
+        let adopted = match self.emission_floor {
+            // First adoption: unbounded, or a clockless node could never
+            // climb from uptime seconds to real unix time (#155).
+            None => emitted_secs,
+            // Subsequent adoptions: bounded advance (#160).
+            Some(_) => emitted_secs.min(current.saturating_add(EMISSION_LEARN_MAX_ADVANCE_SECS)),
+        };
+        self.emission_floor = Some((adopted, now_ms));
     }
 
     /// Return all path table entries for RPC export.
@@ -14966,6 +15007,26 @@ mod tests {
                 transport.emission_secs(now) >= 1_800_000_005,
                 "an older announce emission must not regress the timebase"
             );
+
+            // Codeberg #160: an emission above the learn ceiling must be
+            // refused outright — adopting it would wedge the timebase and,
+            // once the floor advances past 2^40, truncate the next emitted
+            // value to near zero.
+            let prev = transport.emission_secs(now);
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let a3 =
+                make_announce_raw_for_dest(&dest, 1, crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
+            transport.process_incoming(0, &a3).unwrap();
+            let now = transport.clock.now_ms();
+            let cur = transport.emission_secs(now);
+            assert!(
+                cur < crate::constants::EMISSION_LEARN_CEILING_SECS,
+                "an over-ceiling emission must not be adopted (got {cur})"
+            );
+            assert!(
+                cur > prev,
+                "the next emitted value must stay strictly greater after the refusal"
+            );
         }
 
         // Codeberg #155: a host that knows wall time can seed the emission
@@ -14981,6 +15042,144 @@ mod tests {
                 transport.emission_secs(now),
                 1_790_000_003,
                 "injected wall time must seed the timebase and advance monotonically"
+            );
+        }
+
+        // Codeberg #160: once a timebase exists, a single announce may
+        // advance it by at most EMISSION_LEARN_MAX_ADVANCE_SECS. A peer
+        // whose clock is merely set wrong (year 2100 here, ~4.1e9 — well
+        // below both 2^40 and the learn ceiling) must not capture every
+        // clockless node in range in one announce.
+        #[test]
+        fn test_clockless_timebase_advance_is_bounded_after_first_adoption() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase"],
+            )
+            .unwrap();
+
+            // First adoption: real unix time.
+            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            transport.process_incoming(0, &a1).unwrap();
+            let now = transport.clock.now_ms();
+            let prev = transport.emission_secs(now);
+            assert_eq!(prev, 1_800_000_000);
+
+            // Year-2100 emission from a misconfigured peer.
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let a2 = make_announce_raw_for_dest(&dest, 1, 4_102_444_800);
+            transport.process_incoming(0, &a2).unwrap();
+            let now = transport.clock.now_ms();
+            let cur = transport.emission_secs(now);
+            assert!(
+                cur < 4_102_444_800,
+                "a wrong-clock announce must not capture the timebase (got {cur})"
+            );
+            assert!(
+                cur >= prev + EMISSION_LEARN_MAX_ADVANCE_SECS,
+                "the bounded advance must still move the timebase forward by the cap"
+            );
+            assert!(
+                cur <= prev + EMISSION_LEARN_MAX_ADVANCE_SECS + ANNOUNCE_RATE_LIMIT_MS / 1000 + 1,
+                "the advance must not exceed the cap plus elapsed clock time"
+            );
+        }
+
+        // Codeberg #160: the FIRST adoption is deliberately unbounded — a
+        // clockless node boots at uptime seconds and must climb to real
+        // unix time in a single step, or the #155 restart fix is dead.
+        // Only SUBSEQUENT adoptions are bounded.
+        #[test]
+        fn test_clockless_first_timebase_adoption_is_unbounded() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase"],
+            )
+            .unwrap();
+
+            // The jump this pins is far beyond the bounded-advance cap.
+            let now = transport.clock.now_ms();
+            assert!(1_800_000_000 - now / 1000 > EMISSION_LEARN_MAX_ADVANCE_SECS);
+
+            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            transport.process_incoming(0, &a1).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_000,
+                "first adoption must be unbounded: uptime secs to real unix time in one step"
+            );
+        }
+
+        // Codeberg #160: a host injecting nonsense over the config channel
+        // must not be able to wedge the timebase or produce a truncating
+        // emission either.
+        #[test]
+        fn test_absurd_wall_time_injection_is_refused() {
+            let mut transport = make_transport_enabled();
+
+            transport.set_wall_time_unix_secs(1u64 << 50);
+            let now = transport.clock.now_ms();
+            let e = transport.emission_secs(now);
+            assert_eq!(
+                e,
+                now / 1000,
+                "an over-ceiling wall-time injection must be ignored"
+            );
+            assert!(e <= crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
+
+            // A sane injection afterwards still works.
+            transport.set_wall_time_unix_secs(1_790_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), 1_790_000_000);
+        }
+
+        // Codeberg #160: even a platform wall clock past the 40-bit wire
+        // maximum must never make emission_secs return a value the field
+        // cannot represent — the clamp sits at the point of use, so
+        // truncation is unrepresentable regardless of the value's source.
+        #[test]
+        fn test_emission_secs_saturates_at_wire_field_max() {
+            struct AbsurdWallClock;
+            impl Clock for AbsurdWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    Some(u64::MAX)
+                }
+            }
+
+            let transport = Transport::new(
+                TransportConfig::default(),
+                AbsurdWallClock,
+                MemoryStorage::with_defaults(),
+                Identity::generate(&mut OsRng),
+            );
+            assert_eq!(
+                transport.emission_secs(0),
+                crate::constants::EMISSION_TIMESTAMP_MAX_SECS,
+                "emission_secs must saturate at the wire field maximum"
             );
         }
 

@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a restarted node reclaims its own path entries (#155). Clockless
   nodes (LNode) learn the timebase from received announces or a host
   injection.
+- The learned emission timebase refuses implausible values, a single
+  announce can only advance an existing timebase by a bounded step,
+  and emitted timestamps saturate at the 40-bit field maximum, so a
+  crafted or wrong-clock announce can no longer capture a clockless
+  node's timebase or truncate its emissions (#160).
 
 ### Added
 

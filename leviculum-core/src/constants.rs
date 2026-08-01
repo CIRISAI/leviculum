@@ -476,6 +476,33 @@ pub const RANDOM_HASH_TIMESTAMP_SIZE: usize = 5;
 /// Offset into timestamp bytes (skip high bytes)
 pub const RANDOM_HASH_TIMESTAMP_OFFSET: usize = 3;
 
+/// Highest emission value the announce random-hash timestamp field can
+/// carry: `2^(8*RANDOM_HASH_TIMESTAMP_SIZE) - 1`. Anything larger silently
+/// drops its high bits in the wire copy, so the emitted value collapses to
+/// near zero and sorts below every stored path entry (Codeberg #160); all
+/// emission producers saturate here.
+pub const EMISSION_TIMESTAMP_MAX_SECS: u64 = (1 << (8 * RANDOM_HASH_TIMESTAMP_SIZE)) - 1;
+
+/// Upper bound on emission timestamps a clockless node adopts as its
+/// timebase, whether learned from an announce or injected by the host
+/// (Codeberg #160): 2200-01-01T00:00:00Z. Must sit decades above any wall
+/// clock the deployment can ever legitimately see (~174 years from 2026),
+/// yet so far below [`EMISSION_TIMESTAMP_MAX_SECS`] that a floor at the
+/// ceiling plus any achievable uptime cannot reach the field's truncation
+/// point (~34,600 years of margin).
+pub const EMISSION_LEARN_CEILING_SECS: u64 = 7_258_118_400;
+
+/// Once a clockless node has an emission timebase, a single announce may
+/// advance it at most this far (Codeberg #160). Legitimate forward
+/// corrections after the first adoption are bounded by peer clock skew
+/// (minutes) plus our monotonic drift (~50 ppm, under half an hour per year
+/// of isolation), so a day covers them with orders-of-magnitude headroom —
+/// while a peer whose clock is decades wrong needs tens of thousands of
+/// rate-limited announces instead of one to drag the timebase there. The
+/// FIRST adoption is deliberately unbounded: a node booting at uptime
+/// seconds must climb to real unix time in one step (Codeberg #155).
+pub const EMISSION_LEARN_MAX_ADVANCE_SECS: u64 = 86_400;
+
 // BLE Interface Constants (Columba Protocol v2.2)
 /// Reticulum BLE GATT service UUID
 pub const BLE_SERVICE_UUID: &str = "37145b00-442d-4a94-917f-8f42c5da28e3";
