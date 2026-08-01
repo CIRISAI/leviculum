@@ -247,18 +247,52 @@ fn an_external_image_still_degrades_to_alt_text() {
 }
 
 #[test]
-fn table_degrades_to_plaintext_rows_without_panicking() {
+fn a_table_becomes_a_micron_table() {
+    // Micron has tables — NomadNet's parser buffers the lines between two
+    // `` `t `` toggles and hands them to the same Markdown-shaped formatter
+    // (RNS rngit util.py:530-547) — so a table stays a table on the mesh.
     let doc = roundtrip("| a | b |\n|---|---|\n| 1 | 2 |\n");
-    assert!(!doc.blocks.iter().any(|b| matches!(b, Block::Table { .. })));
-    let blocks = content_blocks(&doc);
-    let texts: Vec<String> = blocks
-        .iter()
-        .map(|b| match b {
-            Block::Paragraph { line, .. } => line_text(line),
-            other => panic!("expected paragraphs, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(texts, ["a | b", "1 | 2"]);
+    let [Block::Table { rows, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one table, got {:?}", doc.blocks);
+    };
+    assert_eq!(
+        rows,
+        &[
+            "a | b".to_string(),
+            "--- | ---".to_string(),
+            "1 | 2".to_string()
+        ],
+        "the second line must be the alignment row the reference reads"
+    );
+}
+
+#[test]
+fn the_alignment_row_carries_the_markdown_alignment() {
+    // The reference reads `:x:` as centre and `x:` as right
+    // (rngit util.py:656-664); anything else is left.
+    let doc = roundtrip("| l | c | r |\n|:---|:-:|---:|\n| 1 | 2 | 3 |\n");
+    let [Block::Table { rows, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one table, got {:?}", doc.blocks);
+    };
+    assert_eq!(rows[1], "--- | :---: | ---:");
+}
+
+#[test]
+fn a_pipe_inside_a_cell_is_escaped_so_it_stays_one_cell() {
+    let doc = roundtrip("| a | b |\n|---|---|\n| pipe \\| inside | 2 |\n");
+    let [Block::Table { rows, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one table, got {:?}", doc.blocks);
+    };
+    assert_eq!(rows[2], "pipe \\| inside | 2");
+}
+
+#[test]
+fn a_link_inside_a_cell_survives_as_a_link() {
+    let doc = roundtrip("| where |\n|---|\n| [docs](https://example.com/x) |\n");
+    let [Block::Table { rows, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one table, got {:?}", doc.blocks);
+    };
+    assert_eq!(rows[2], "`[docs`https://example.com/x]");
 }
 
 #[test]

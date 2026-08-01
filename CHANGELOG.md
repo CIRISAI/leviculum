@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fetched pictures are kept in a byte-bounded in-memory LRU cache, so a
   revisit costs no airtime: `--image-cache <megabytes>` (default 10, `0`
   disables). Memory only, never disk.
+- A Markdown table in a post becomes a micron `` `t `` table instead of
+  plaintext rows: header, the alignment row micron reads as the second
+  line, then the data rows, with a literal `|` in a cell escaped as the
+  reference parser expects.
 
 ## [0.8.0] - 2026-08-01
 

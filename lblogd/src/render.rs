@@ -30,8 +30,9 @@
 //! - images: an image naming a file in the file area becomes a link to it
 //!   (`` `[alt`:/file/name] ``), which is the only form micron has; any other
 //!   image (an external URL) stays `[image: alt]` plain text
-//! - tables: plaintext rows, cells joined with ` | ` (micron's `` `t `` table
-//!   is a NomadNet extension still stubbed in our parser, so we stay plain)
+//! - tables: emitted as a micron `` `t `` table — a header row, the alignment
+//!   row micron reads as the table's second line, then the data rows, cells
+//!   separated by `|` with any literal pipe escaped
 //! - blockquotes: two-space indented text per nesting level
 //! - raw HTML: emitted as escaped plain text
 //! - strikethrough/footnotes/task lists: extensions not enabled, so their
@@ -42,7 +43,7 @@
 //! would start with a line-level control character (`>`, `#`, `-`, `<`) gets
 //! a leading `\` line escape.
 
-use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{html, Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::files;
 use crate::post::{slugify, Date, Post};
@@ -736,6 +737,16 @@ fn sanitize_link_part(s: &str) -> String {
 /// escaping already turns it into `` \` ``.
 const LINE_CONTROL_CHARS: [char; 4] = ['>', '#', '-', '<'];
 
+/// The table currently being emitted.
+#[derive(Clone, Debug, Default)]
+struct OpenTable {
+    /// The column alignments, for the separator row micron wants as the
+    /// table's second line.
+    alignments: Vec<Alignment>,
+    /// Cells emitted so far in the current row.
+    cells: usize,
+}
+
 /// The image currently being collected: its alt text, and where it points.
 #[derive(Clone, Debug, Default)]
 struct OpenImage {
@@ -767,8 +778,12 @@ struct MicronWriter {
     link_label: String,
     /// Alt text buffered while an image is open, with the image's target.
     image: Option<OpenImage>,
-    /// Cells emitted so far in the current (degraded) table row.
-    table_cells: usize,
+    /// The table currently being emitted, if any.
+    table: Option<OpenTable>,
+    /// The cell currently being collected. Holds finished output fragments,
+    /// not source text, so a link or a style toggle inside a cell survives;
+    /// only plain text picks up the extra `|` escaping on the way in.
+    cell: Option<String>,
 }
 
 impl MicronWriter {
@@ -841,16 +856,32 @@ impl MicronWriter {
                 };
                 self.push_raw(&format!("{indent}{marker}"));
             }
-            Tag::Table(_) => self.block_sep(),
+            Tag::Table(alignments) => {
+                self.block_sep();
+                self.out.push("`t".to_string());
+                self.table = Some(OpenTable {
+                    alignments,
+                    cells: 0,
+                });
+            }
             Tag::TableHead | Tag::TableRow => {
                 self.flush_line();
-                self.table_cells = 0;
+                if let Some(table) = self.table.as_mut() {
+                    table.cells = 0;
+                }
             }
             Tag::TableCell => {
-                if self.table_cells > 0 {
+                let first = self.table.as_ref().is_none_or(|t| t.cells == 0);
+                if !first {
                     self.push_raw(" | ");
                 }
-                self.table_cells += 1;
+                if let Some(table) = self.table.as_mut() {
+                    table.cells += 1;
+                }
+                // Collect the cell rather than writing straight to the line:
+                // a literal `|` in its text has to be escaped, and that can
+                // only be decided per cell.
+                self.cell = Some(String::new());
             }
             Tag::Emphasis => self.style_toggle("`*"),
             Tag::Strong => self.style_toggle("`!"),
@@ -892,7 +923,36 @@ impl MicronWriter {
                 self.flush_line();
                 self.list_stack.pop();
             }
-            TagEnd::TableHead | TagEnd::TableRow => self.flush_line(),
+            TagEnd::TableCell => {
+                let cell = self.cell.take().unwrap_or_default();
+                self.push_raw(&cell);
+            }
+            TagEnd::TableHead => {
+                self.flush_line();
+                // Micron takes the table's second line as the alignment row,
+                // exactly as Markdown does (RNS rngit util.py:534-535), so it
+                // is emitted rather than inferred.
+                let alignments = self
+                    .table
+                    .as_ref()
+                    .map(|t| t.alignments.clone())
+                    .unwrap_or_default();
+                let cols = alignments.len().max(1);
+                let row: Vec<&str> = (0..cols)
+                    .map(|i| match alignments.get(i) {
+                        Some(Alignment::Center) => ":---:",
+                        Some(Alignment::Right) => "---:",
+                        _ => "---",
+                    })
+                    .collect();
+                self.out.push(row.join(" | "));
+            }
+            TagEnd::TableRow => self.flush_line(),
+            TagEnd::Table => {
+                self.flush_line();
+                self.out.push("`t".to_string());
+                self.table = None;
+            }
             TagEnd::Emphasis => self.style_toggle("`*"),
             TagEnd::Strong => self.style_toggle("`!"),
             TagEnd::Link => {
@@ -982,6 +1042,10 @@ impl MicronWriter {
 
     /// Append micron markup we emit deliberately (never escaped).
     fn push_raw(&mut self, s: &str) {
+        if let Some(cell) = self.cell.as_mut() {
+            cell.push_str(s);
+            return;
+        }
         if self.line.is_empty() {
             self.line_is_text = false;
         }
@@ -990,10 +1054,17 @@ impl MicronWriter {
 
     /// Append plain text, escaped so micron reads it verbatim.
     fn push_text(&mut self, s: &str) {
+        let escaped = escape_micron_text(s);
+        if let Some(cell) = self.cell.as_mut() {
+            // Inside a table cell an unescaped `|` would start the next
+            // column. The reference honours `\|` (rngit util.py:641-647).
+            cell.push_str(&escaped.replace('|', "\\|"));
+            return;
+        }
         if self.line.is_empty() {
             self.line_is_text = true;
         }
-        self.line.push_str(&escape_micron_text(s));
+        self.line.push_str(&escaped);
     }
 
     /// Finish the current line: line-escape a leading control character on

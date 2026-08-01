@@ -77,8 +77,10 @@ held in memory, and the area reloads with the posts.
 `markdown_to_html` uses pulldown-cmark; `markdown_to_micron` emits micron as
 defined by the `leviculum-micron` parser. Constructs without a micron
 equivalent degrade gracefully (an image outside the file area to `[image: alt]`,
-tables to plaintext rows, blockquotes to indented text); see the mapping table in
-`src/render.rs`. Round-trip tests parse the generated micron with
+blockquotes to indented text); see the mapping table in `src/render.rs`. Tables
+are not among them: a Markdown table becomes a micron `` `t `` table — header
+row, the alignment row micron reads as the table's second line, then the data
+rows — so it stays a table on the mesh side as well. Round-trip tests parse the generated micron with
 `leviculum-micron` and assert the document structure.
 
 ## Configuration
