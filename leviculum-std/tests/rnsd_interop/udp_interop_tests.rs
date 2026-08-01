@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use leviculum_std::config::{Config, InterfaceConfig};
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::{Destination, DestinationType, Direction, Identity, NodeEvent};
 use tokio::time::timeout;
@@ -147,6 +148,95 @@ async fn test_python_receives_announce_from_rust_over_udp() {
     assert!(
         found,
         "Python should have path to Rust destination announced over UDP (hash: {})",
+        hex::encode(dest_hash.as_bytes())
+    );
+
+    node.stop().await.expect("Failed to stop node");
+}
+
+/// Test: Python receives an announce from Rust when the Rust node's config
+/// names the UDP peer by hostname (Codeberg #148).
+///
+/// This is the container case that found the gap: `forward_ip` holds a
+/// service name, not an address. The same config keys work against rnsd
+/// because Python passes `forward_ip` straight to `sendto`; lnsd must
+/// resolve the name and deliver over the resolved address. Driven through
+/// the real config path (`Config` → interface builder), not a builder
+/// convenience method, so this exercises exactly what a config file does.
+#[tokio::test]
+async fn test_python_receives_announce_from_rust_over_udp_hostname_forward() {
+    let daemon = TestDaemon::start_with_udp()
+        .await
+        .expect("Failed to start daemon with UDP");
+
+    let py_listen = daemon
+        .udp_listen_addr()
+        .expect("daemon should have UDP listen addr");
+    let rust_listen = daemon
+        .udp_forward_addr()
+        .expect("daemon should have UDP forward addr");
+
+    // Same shape an rnsd-style config file produces, with the peer named
+    // by hostname instead of by address.
+    let mut config = Config::default();
+    config.interfaces.insert(
+        "udp".to_string(),
+        InterfaceConfig {
+            interface_type: "UDPInterface".to_string(),
+            listen_ip: Some(rust_listen.ip().to_string()),
+            listen_port: Some(rust_listen.port()),
+            forward_ip: Some("localhost".to_string()),
+            forward_port: Some(py_listen.port()),
+            ..Default::default()
+        },
+    );
+
+    let _storage = crate::common::temp_storage(
+        "test_python_receives_announce_from_rust_over_udp_hostname_forward",
+        "node",
+    );
+    let mut node = ReticulumNodeBuilder::new()
+        .config(config)
+        .storage_path(_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("a hostname forward_ip must build — rnsd accepts this config");
+
+    node.start().await.expect("Failed to start node");
+
+    // Wait for UDP interface to settle
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Register and announce a destination on the Rust side
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "test",
+        &["udp_hostname_announce"],
+    )
+    .expect("Failed to create destination");
+
+    let dest_hash = *dest.hash();
+    node.register_destination(dest);
+
+    node.announce_destination(&dest_hash, Some(b"rust-udp-hostname"))
+        .await
+        .expect("Failed to announce");
+
+    let found = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &node,
+        b"rust-udp-hostname",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        found,
+        "Python should have path to Rust destination announced over a \
+         hostname-configured UDP forward (hash: {})",
         hex::encode(dest_hash.as_bytes())
     );
 

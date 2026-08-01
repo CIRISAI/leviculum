@@ -151,7 +151,7 @@ defaults are in `config.rs:259-305`.
 |-----|------|---------|---------|
 | `listen_ip` | string | unset | Local bind address. (`ini_config.rs:207`) |
 | `listen_port` | u16 | unset | Local bind port. (`ini_config.rs:208`) |
-| `forward_ip` | string | unset | Broadcast/forward address. (`ini_config.rs:211`) |
+| `forward_ip` | string | unset | Broadcast/forward address or hostname. Names are resolved at runtime and re-resolved periodically; a resolution failure is a logged interface error, not a config error. (`ini_config.rs:211`) |
 | `forward_port` | u16 | unset | Broadcast/forward port. (`ini_config.rs:212`) |
 
 ### AutoInterface (`AutoInterface`)

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- UDPInterface accepts a hostname in `forward_ip` like rnsd, resolves
+  it at runtime with periodic re-resolution, and reports resolution
+  failures as interface errors instead of config errors (#148).
 - Announces now carry wall-clock unix time in the emission timestamp
   instead of process uptime, so Python peers order our paths correctly
   and a restarted node reclaims its own path entries (#155). Clockless
