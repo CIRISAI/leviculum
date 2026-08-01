@@ -34,9 +34,20 @@ pub const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "gif"];
 pub const MAX_INLINE_IMAGES: usize = 8;
 
 /// The tallest an inline image may be drawn, in rows, before the viewport
-/// bound applies. Keeps a portrait photograph from turning a page into a
-/// scroll through one picture.
+/// bound applies — on a terminal with a graphics protocol. Keeps a portrait
+/// photograph from turning a page into a scroll through one picture.
+///
+/// Deliberately not applied to half-blocks: there a row IS two pixels of
+/// resolution, so the same cap costs detail rather than screen estate, and a
+/// picture drawn small enough to fit the cap is a picture nobody can make out
+/// (see the half-block sizing note on [`Backend::cell_pixels`]).
 pub const MAX_IMAGE_ROWS: u16 = 24;
+
+/// How many viewport heights a half-block picture may occupy. See
+/// [`Backend::max_rows`] for why this is not 1: with half-blocks, height is
+/// resolution, and a picture nobody can make out is worth less than one that
+/// costs a scroll.
+pub const HALFBLOCK_VIEWPORT_MULTIPLE: usize = 2;
 
 /// How the terminal will be asked to draw pictures.
 ///
@@ -51,6 +62,49 @@ pub enum Backend {
     /// No picture at all: a text box naming the file. What a monochrome
     /// terminal, `--no-color`, or an undecodable payload gets.
     Text,
+}
+
+impl Backend {
+    /// How many image pixels one character cell carries, which is what
+    /// "natural size" has to be measured in.
+    ///
+    /// A graphics protocol paints the cell's full pixel box, so the terminal's
+    /// font size is the answer. Half-blocks carry exactly one pixel across and
+    /// two down — the upper and lower half of the cell — whatever the font
+    /// size is. Measuring half-blocks against the font size was the bug this
+    /// distinction exists for: a 300x300 portrait came out as 38x38 pixels on
+    /// an 8x16 font, when the same 78-column page had room for 78x44.
+    pub fn cell_pixels(self, font: FontSize) -> (u16, u16) {
+        match self {
+            Backend::Graphics(_) => (font.width.max(1), font.height.max(1)),
+            Backend::Halfblocks => (1, 2),
+            // Nothing is drawn; the value is never used.
+            Backend::Text => (font.width.max(1), font.height.max(1)),
+        }
+    }
+
+    /// The row ceiling for an inline image on this backend, given the page's
+    /// viewport height.
+    ///
+    /// Under a graphics protocol the cap keeps one photograph from taking over
+    /// the page, and costs no detail: the pixels are there either way.
+    ///
+    /// Under half-blocks a row IS two pixels, so the same cap is the thing
+    /// standing between the reader and a recognisable picture. A square
+    /// portrait on a 24-row terminal fits 22 rows, i.e. 44 pixels tall, and
+    /// the aspect ratio then holds it to 44 wide however many columns the page
+    /// has. Allowing [`HALFBLOCK_VIEWPORT_MULTIPLE`] screens of height lets the
+    /// WIDTH become the binding constraint instead, which is what a reader
+    /// actually has to spare: the same portrait then fills 78 columns at 78x78
+    /// pixels — twice the linear resolution — at the price of scrolling once.
+    pub fn max_rows(self, viewport: usize) -> u16 {
+        let room = viewport.saturating_sub(2).max(1);
+        let bounded = match self {
+            Backend::Halfblocks => room.saturating_mul(HALFBLOCK_VIEWPORT_MULTIPLE),
+            _ => return MAX_IMAGE_ROWS.min(room.min(u16::MAX as usize) as u16),
+        };
+        bounded.min(u16::MAX as usize) as u16
+    }
 }
 
 /// Choose how to draw, from what the terminal answered and how much colour it
@@ -175,15 +229,22 @@ pub fn decode(bytes: &[u8]) -> Result<::image::DynamicImage, String> {
 /// The cell size an image is drawn at: its natural size in cells, shrunk to
 /// fit the available width and height, never enlarged.
 ///
+/// `cell_px` is how many image pixels one cell carries — the font size under a
+/// graphics protocol, `(1, 2)` under half-blocks (see
+/// [`Backend::cell_pixels`]). Everything else follows from that: a 300x300
+/// picture is 38x19 cells on an 8x16 font (drawn 1:1) but 300x150 cells in
+/// half-block geometry, which the shrink below then fits to the page — filling
+/// the width, because on that backend every extra cell is extra resolution.
+///
 /// Never enlarged because upscaling a 32-pixel icon to half the terminal
 /// serves nobody, and because the graphics protocols are perfectly happy to
 /// draw something small. The result is at least one cell in each direction, so
 /// a rounding-down can never produce an empty rectangle.
-pub fn fit_cells(px: (u32, u32), font: FontSize, max_cols: u16, max_rows: u16) -> (u16, u16) {
+pub fn fit_cells(px: (u32, u32), cell_px: (u16, u16), max_cols: u16, max_rows: u16) -> (u16, u16) {
     let max_cols = max_cols.max(1);
     let max_rows = max_rows.max(1);
-    let font_w = font.width.max(1) as u32;
-    let font_h = font.height.max(1) as u32;
+    let font_w = cell_px.0.max(1) as u32;
+    let font_h = cell_px.1.max(1) as u32;
 
     let natural_cols = px.0.div_ceil(font_w).max(1);
     let natural_rows = px.1.div_ceil(font_h).max(1);
@@ -307,6 +368,16 @@ mod tests {
         }
     }
 
+    /// Cell geometry under a graphics protocol: the terminal's font box.
+    fn graphics_cell() -> (u16, u16) {
+        Backend::Graphics(ProtocolType::Kitty).cell_pixels(font())
+    }
+
+    /// Cell geometry under half-blocks: one pixel across, two down.
+    fn halfblock_cell() -> (u16, u16) {
+        Backend::Halfblocks.cell_pixels(font())
+    }
+
     #[test]
     fn only_file_paths_with_a_drawable_extension_are_images() {
         assert!(is_image_path("/file/antenne.png"));
@@ -380,14 +451,14 @@ mod tests {
     #[test]
     fn a_small_image_is_drawn_at_its_natural_size() {
         // 80x32 pixels at an 8x16 font is 10 by 2 cells, well inside the page.
-        assert_eq!(fit_cells((80, 32), font(), 60, 24), (10, 2));
+        assert_eq!(fit_cells((80, 32), graphics_cell(), 60, 24), (10, 2));
     }
 
     #[test]
     fn a_wide_image_shrinks_to_the_page_width_keeping_its_shape() {
         // 1600x800 is 200x50 cells naturally; at 40 columns the height has to
         // come down by the same factor, to 10 rows (not stay at 50).
-        let (cols, rows) = fit_cells((1600, 800), font(), 40, 100);
+        let (cols, rows) = fit_cells((1600, 800), graphics_cell(), 40, 100);
         assert_eq!(cols, 40);
         assert_eq!(rows, 10);
     }
@@ -395,16 +466,69 @@ mod tests {
     #[test]
     fn a_tall_image_shrinks_to_the_row_ceiling_keeping_its_shape() {
         // 400x1600 is 50x100 cells; capped at 10 rows it must lose width too.
-        let (cols, rows) = fit_cells((400, 1600), font(), 200, 10);
+        let (cols, rows) = fit_cells((400, 1600), graphics_cell(), 200, 10);
         assert_eq!(rows, 10);
         assert_eq!(cols, 5);
     }
 
     #[test]
+    fn half_blocks_fill_the_page_width_instead_of_the_font_box() {
+        // The bug this distinction exists for. A 300x300 portrait on an 8x16
+        // font is 38x19 cells "naturally" — right for a graphics protocol,
+        // which then paints 304x304 pixels, but on half-blocks those same
+        // cells carry only 38x38 pixels. Measured in half-block geometry the
+        // picture is 300x150 cells, so the fit uses the whole page width and
+        // the reader gets twice the linear resolution.
+        assert_eq!(fit_cells((300, 300), graphics_cell(), 78, 22), (38, 19));
+
+        // 22 visible rows, so the half-block ceiling is 44 (two screens).
+        let (cols, rows) = fit_cells((300, 300), halfblock_cell(), 78, 44);
+        assert_eq!(cols, 78, "half-blocks must use the width available");
+        assert_eq!(rows, 39, "height follows the aspect ratio, not the width");
+        assert!(
+            cols > 38,
+            "the half-block picture must beat the font-box fit of 38 columns"
+        );
+    }
+
+    #[test]
+    fn half_blocks_still_never_enlarge_a_small_picture() {
+        // Filling the width is only right while the picture has pixels to
+        // spare. A 20x20 icon is 20x10 cells in half-block geometry and stays
+        // there rather than being blown up to the full page.
+        assert_eq!(fit_cells((20, 20), halfblock_cell(), 78, 22), (20, 10));
+    }
+
+    #[test]
+    fn the_row_ceiling_follows_the_backend() {
+        // A graphics protocol keeps the fixed cap so one photograph cannot
+        // take over the page; half-blocks are bounded only by the viewport,
+        // because there height IS resolution.
+        let tall = 60;
+        assert_eq!(
+            Backend::Graphics(ProtocolType::Kitty).max_rows(tall),
+            MAX_IMAGE_ROWS
+        );
+        assert_eq!(
+            Backend::Halfblocks.max_rows(tall),
+            ((tall - 2) * HALFBLOCK_VIEWPORT_MULTIPLE) as u16
+        );
+        // A short viewport still bounds both, and never yields zero rows.
+        assert_eq!(
+            Backend::Halfblocks.max_rows(3),
+            HALFBLOCK_VIEWPORT_MULTIPLE as u16
+        );
+        assert_eq!(
+            Backend::Halfblocks.max_rows(0),
+            HALFBLOCK_VIEWPORT_MULTIPLE as u16
+        );
+    }
+
+    #[test]
     fn a_tiny_image_never_collapses_to_nothing() {
         // Smaller than one cell in both directions, and a zero-sized area.
-        assert_eq!(fit_cells((1, 1), font(), 80, 24), (1, 1));
-        assert_eq!(fit_cells((1600, 800), font(), 0, 0), (1, 1));
+        assert_eq!(fit_cells((1, 1), graphics_cell(), 80, 24), (1, 1));
+        assert_eq!(fit_cells((1600, 800), graphics_cell(), 0, 0), (1, 1));
     }
 
     #[test]
