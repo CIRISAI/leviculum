@@ -106,7 +106,9 @@ fn make_responder() -> (EndpointNode, crate::DestinationHash, [u8; 32], Vec<u8>)
     dest.set_proof_strategy(ProofStrategy::All);
     let dest_hash = *dest.hash();
 
-    let announce = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+    let announce = dest
+        .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+        .unwrap();
     let mut buf = [0u8; crate::constants::MTU];
     let len = announce.pack(&mut buf).unwrap();
     let announce_raw = buf[..len].to_vec();

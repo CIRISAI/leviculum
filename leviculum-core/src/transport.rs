@@ -1166,6 +1166,13 @@ pub struct Transport<C: Clock, S: Storage> {
     last_path_snapshot_ms: u64,
     last_path_entries_dump_ms: u64,
 
+    /// Learned emission timebase for platforms without a wall clock
+    /// (Codeberg #155): `(unix_secs, at_now_ms)` anchoring the highest
+    /// emission timestamp seen in a validated announce (or injected by the
+    /// host) to the monotonic clock. Ignored whenever
+    /// `Clock::wall_unix_secs` provides real wall time.
+    emission_floor: Option<(u64, u64)>,
+
     /// Well-known hash for path request destination (rnstransport.path.request)
     path_request_hash: [u8; TRUNCATED_HASHBYTES],
 
@@ -1366,6 +1373,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             stats: TransportStats::default(),
             last_path_snapshot_ms: 0,
             last_path_entries_dump_ms: 0,
+            emission_floor: None,
             path_request_hash,
             tunnel_synthesize_hash,
             // announce_cache: migrated to Storage
@@ -2521,6 +2529,60 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         &self.clock
     }
 
+    /// Unix-seconds value to write into announce emission timestamps
+    /// (Codeberg #155).
+    ///
+    /// Python-RNS orders same-destination paths by this wire field across
+    /// process lifetimes (`announce_emitted > path_timebase`,
+    /// Transport.py:1772/1809), so it must be comparable to the values our
+    /// own earlier announces carried — never the process-relative
+    /// `Clock::now_ms`. Sources, in order:
+    ///
+    /// 1. `Clock::wall_unix_secs` — real wall clock (std platforms).
+    /// 2. The learned emission timebase — highest emission timestamp seen
+    ///    in a validated announce (or injected via
+    ///    [`set_wall_time_unix_secs`](Self::set_wall_time_unix_secs)),
+    ///    advanced by the monotonic clock. This is how a clockless node
+    ///    (LNode: no RTC) stays ordered: even its own pre-restart announce
+    ///    echoing back re-seeds the timebase past the value that would
+    ///    otherwise poison its path entries.
+    /// 3. Monotonic uptime seconds — degenerate fallback until either of
+    ///    the above is available. Never beats a stored path entry on a
+    ///    peer, but is monotonic within one boot.
+    pub fn emission_secs(&self, now_ms: u64) -> u64 {
+        if let Some(wall) = self.clock.wall_unix_secs() {
+            return wall;
+        }
+        match self.emission_floor {
+            Some((floor_secs, floor_at_ms)) => {
+                floor_secs + now_ms.saturating_sub(floor_at_ms) / 1000
+            }
+            None => now_ms / 1000,
+        }
+    }
+
+    /// Inject wall-clock unix time from the host (Codeberg #155).
+    ///
+    /// For deployments where a clockless node (no RTC) has a host that
+    /// does know wall time, e.g. over the LNode serial config channel. A
+    /// no-op in effect on platforms whose `Clock::wall_unix_secs` already
+    /// returns real wall time, which always takes precedence.
+    pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64) {
+        self.emission_floor = Some((unix_secs, self.clock.now_ms()));
+    }
+
+    /// Learn the emission timebase from a validated announce's emission
+    /// timestamp (Codeberg #155). Only meaningful without a wall clock;
+    /// only ever moves the timebase forward.
+    fn learn_emission_timebase(&mut self, emitted_secs: u64, now_ms: u64) {
+        if self.clock.wall_unix_secs().is_some() {
+            return;
+        }
+        if emitted_secs > self.emission_secs(now_ms) {
+            self.emission_floor = Some((emitted_secs, now_ms));
+        }
+    }
+
     /// Return all path table entries for RPC export.
     pub fn path_table_entries(&self) -> Vec<PathTableExport> {
         self.storage
@@ -3232,6 +3294,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Validate signature and destination hash
         announce.validate().map_err(TransportError::AnnounceError)?;
+
+        // Codeberg #155: on platforms without a wall clock, adopt the
+        // highest emission timestamp seen in any validated announce as our
+        // own emission timebase. Runs before the own-destination echo drop
+        // on purpose: after a reboot, our own still-circulating announce is
+        // exactly the value our next announce must exceed for Python peers
+        // to accept the path update.
+        self.learn_emission_timebase(emission_from_random_hash(announce.random_hash()), now);
 
         let dest_hash = announce.destination_hash().into_bytes();
 
@@ -14076,7 +14146,12 @@ mod tests {
             let dest_hash = dest.hash().into_bytes();
 
             let announce = dest
-                .announce(None, &mut OsRng, transport.clock.now_ms())
+                .announce(
+                    None,
+                    &mut OsRng,
+                    transport.clock.now_ms(),
+                    transport.clock.now_ms() / 1000,
+                )
                 .unwrap();
             let mut buf = [0u8; MTU];
             let len = announce.pack(&mut buf).unwrap();
@@ -14836,6 +14911,79 @@ mod tests {
             );
         }
 
+        // Codeberg #155: a node without a wall clock (MockClock returns
+        // None from wall_unix_secs, like the LNode's EmbassyClock) adopts
+        // the highest emission timestamp seen in a validated announce as
+        // its own emission timebase, advanced by the monotonic clock, so
+        // its announces stay ordered on Python peers across its restarts.
+        #[test]
+        fn test_clockless_node_learns_emission_timebase_from_announce() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            // Degenerate fallback before anything is learned: uptime secs.
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), now / 1000);
+
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase"],
+            )
+            .unwrap();
+
+            // A validated announce carrying a unix emission timestamp
+            // seeds the timebase.
+            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            transport.process_incoming(0, &a1).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_000,
+                "validated announce emission must seed the timebase"
+            );
+
+            // The timebase advances with the monotonic clock.
+            transport.clock.advance(5_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_005,
+                "learned timebase must advance with the monotonic clock"
+            );
+
+            // An older emission never moves the timebase backwards.
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let a2 = make_announce_raw_for_dest(&dest, 1, 1_700_000_000);
+            transport.process_incoming(0, &a2).unwrap();
+            let now = transport.clock.now_ms();
+            assert!(
+                transport.emission_secs(now) >= 1_800_000_005,
+                "an older announce emission must not regress the timebase"
+            );
+        }
+
+        // Codeberg #155: a host that knows wall time can seed the emission
+        // timebase of a clockless node directly (LNode serial channel).
+        #[test]
+        fn test_wall_time_injection_seeds_emission_timebase() {
+            let mut transport = make_transport_enabled();
+
+            transport.set_wall_time_unix_secs(1_790_000_000);
+            transport.clock.advance(3_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_790_000_003,
+                "injected wall time must seed the timebase and advance monotonically"
+            );
+        }
+
         // Codeberg #63 mvr: replicate the link_failure_recovery flip shape
         // (scenario log 2026-06-11, alice/bob path tables).  A FRESH direct
         // 1-hop entry, then two worse-hop (2-hop) relay announces:
@@ -15287,7 +15435,7 @@ mod tests {
             .unwrap();
             let dest_hash = dest.hash().into_bytes();
             let now = transport.clock.now_ms();
-            let announce_packet = dest.announce(None, &mut OsRng, now).unwrap();
+            let announce_packet = dest.announce(None, &mut OsRng, now, now / 1000).unwrap();
 
             // Pack the announce
             let mut buf = [0u8; 500];
@@ -15350,7 +15498,7 @@ mod tests {
             .unwrap();
             let dest_hash = dest.hash().into_bytes();
             let now = transport.clock.now_ms();
-            let announce_packet = dest.announce(None, &mut OsRng, now).unwrap();
+            let announce_packet = dest.announce(None, &mut OsRng, now, now / 1000).unwrap();
 
             let mut buf = [0u8; 500];
             let len = announce_packet.pack(&mut buf).unwrap();
@@ -20045,7 +20193,7 @@ mod tests {
             )
             .unwrap();
             let now = transport.clock.now_ms();
-            let announce = dest.announce(None, &mut OsRng, now).unwrap();
+            let announce = dest.announce(None, &mut OsRng, now, now / 1000).unwrap();
             let mut buf = [0u8; 500];
             let len = announce.pack(&mut buf).unwrap();
 

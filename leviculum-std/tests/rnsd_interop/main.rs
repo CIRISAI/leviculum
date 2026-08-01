@@ -31,6 +31,7 @@
 //! cargo test --package leviculum-std --test rnsd_interop protocol_tests
 //! ```
 
+mod announce_emission_interop_tests;
 mod announce_interop_tests;
 mod auto_interop_tests;
 mod backbone_interop_tests;

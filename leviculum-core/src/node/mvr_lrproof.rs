@@ -143,7 +143,9 @@ fn make_responder() -> (EndpointNode, crate::DestinationHash, [u8; 32], Vec<u8>)
 
     // Pack a direct (hops=0, no transport_id) announce BEFORE moving dest into
     // the node, so relays that receive it install a 1-hop DIRECT path.
-    let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+    let announce_packet = dest
+        .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+        .unwrap();
     let mut buf = [0u8; crate::constants::MTU];
     let len = announce_packet.pack(&mut buf).unwrap();
     let announce_raw = buf[..len].to_vec();

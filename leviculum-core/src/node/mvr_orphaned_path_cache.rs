@@ -83,7 +83,9 @@ fn make_destination() -> (crate::DestinationHash, Vec<u8>) {
     )
     .unwrap();
     let dest_hash = *dest.hash();
-    let ann = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+    let ann = dest
+        .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+        .unwrap();
     let mut buf = [0u8; MTU];
     let len = ann.pack(&mut buf).unwrap();
     (dest_hash, buf[..len].to_vec())

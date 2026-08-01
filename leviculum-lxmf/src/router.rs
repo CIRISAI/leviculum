@@ -1938,7 +1938,12 @@ mod persistence_tests {
         let destination_hash = *destination.hash();
         let app_data = announce::delivery(Some(b"remote"), None);
         let packet = destination
-            .announce(Some(&app_data), &mut OsRng, node.now_ms())
+            .announce(
+                Some(&app_data),
+                &mut OsRng,
+                node.now_ms(),
+                node.now_ms() / 1000,
+            )
             .expect("remote delivery announce");
         let mut packed = alloc::vec![0; packet.packed_size()];
         let length = packet.pack(&mut packed).expect("pack remote announce");
@@ -2172,7 +2177,7 @@ mod persistence_tests {
             LxmfNode::delivery_destination(identity).expect("remote delivery destination");
         let app_data = announce::delivery(Some(b"remote"), Some(9));
         let packet = destination
-            .announce(Some(&app_data), &mut OsRng, 1_000)
+            .announce(Some(&app_data), &mut OsRng, 1_000, 1_000 / 1000)
             .expect("delivery announce");
         let destination_hash = *destination.hash();
         let mut packed = alloc::vec![0; packet.packed_size()];

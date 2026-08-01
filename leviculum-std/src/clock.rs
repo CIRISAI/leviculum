@@ -7,7 +7,9 @@ use std::time::Instant;
 
 /// System clock using `std::time::Instant`
 ///
-/// Monotonic, suitable for timeouts and RTT measurement.
+/// Monotonic, suitable for timeouts and RTT measurement. Wall-clock unix
+/// time for wire fields (announce emission timestamps, Codeberg #155) is
+/// exposed separately via `wall_unix_secs`, backed by `SystemTime`.
 pub(crate) struct SystemClock {
     start: Instant,
 }
@@ -39,11 +41,28 @@ impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
     }
+
+    fn wall_unix_secs(&self) -> Option<u64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_wall_unix_secs_is_plausible_unix_time() {
+        // Codeberg #155: the announce emission timestamp is built from this
+        // value; it must be wall-clock unix seconds, not process uptime.
+        let secs = SystemClock::new()
+            .wall_unix_secs()
+            .expect("std has a wall clock");
+        assert!((1_750_000_000..2_200_000_000).contains(&secs));
+    }
 
     #[test]
     fn test_system_clock() {

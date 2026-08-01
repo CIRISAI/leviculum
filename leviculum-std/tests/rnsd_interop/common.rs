@@ -165,7 +165,7 @@ pub async fn build_and_send_announce(
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(app_data), &mut OsRng, now_ms())
+        .announce(Some(app_data), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("Failed to create announce");
 
     let mut raw_packet = [0u8; MTU];
@@ -198,7 +198,7 @@ pub fn build_announce_raw(
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(app_data), &mut OsRng, now_ms())
+        .announce(Some(app_data), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("Failed to create announce");
 
     let mut raw_packet = [0u8; MTU];
@@ -907,7 +907,7 @@ pub async fn setup_rust_destination(
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(app_data), &mut OsRng, now_ms())
+        .announce(Some(app_data), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("Failed to create announce");
 
     let mut raw_packet = [0u8; MTU];

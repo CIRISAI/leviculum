@@ -694,7 +694,7 @@ mod tests {
         .expect("destination");
         let dest_hash = *dest.hash();
         let announce_packet = dest
-            .announce(Some(b"kiss-e2e"), &mut OsRng, 1_000)
+            .announce(Some(b"kiss-e2e"), &mut OsRng, 1_000, 1_000 / 1000)
             .expect("announce packet");
         let mut buf = [0u8; leviculum_core::constants::MTU];
         let len = announce_packet.pack(&mut buf).expect("pack announce");
@@ -833,7 +833,7 @@ mod tests {
         .expect("destination");
         let dest_hash = *dest.hash();
         let announce_packet = dest
-            .announce(Some(b"ax25-e2e"), &mut OsRng, 1_000)
+            .announce(Some(b"ax25-e2e"), &mut OsRng, 1_000, 1_000 / 1000)
             .expect("announce packet");
         let mut buf = [0u8; leviculum_core::constants::MTU];
         let len = announce_packet.pack(&mut buf).expect("pack announce");

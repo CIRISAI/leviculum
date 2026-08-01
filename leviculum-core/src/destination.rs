@@ -859,7 +859,12 @@ impl Destination {
     /// # Arguments
     /// * `app_data` - Optional application-specific data (max ~350 bytes)
     /// * `rng` - Random number generator
-    /// * `now_ms` - Current timestamp in milliseconds
+    /// * `now_ms` - Monotonic timestamp in milliseconds (ratchet rotation)
+    /// * `emission_secs` - Wire emission timestamp in unix seconds. Peers
+    ///   order same-destination paths by this field across our restarts
+    ///   (Python Transport.py:1772/1809), so it must come from
+    ///   `Transport::emission_secs` (wall clock or learned timebase), never
+    ///   from the monotonic clock (Codeberg #155).
     ///
     /// # Errors
     /// * `OnlySingleCanAnnounce` - Only SINGLE destinations can announce
@@ -882,7 +887,7 @@ impl Destination {
     ///     &["echo"],
     /// ).unwrap();
     ///
-    /// let packet = dest.announce(Some(b"my-data"), &mut OsRng, 1704067200000).unwrap();
+    /// let packet = dest.announce(Some(b"my-data"), &mut OsRng, 12_000, 1704067200).unwrap();
     /// assert_eq!(packet.destination_hash, *dest.hash());
     /// ```
     pub fn announce(
@@ -890,6 +895,7 @@ impl Destination {
         app_data: Option<&[u8]>,
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
+        emission_secs: u64,
     ) -> Result<Packet, AnnounceError> {
         // Only SINGLE destinations can announce (per Python Reticulum spec)
         if self.dest_type != DestinationType::Single {
@@ -941,7 +947,7 @@ impl Destination {
             ratchet.as_ref(),
             app_data,
             rng,
-            now_ms,
+            emission_secs,
         )?;
 
         // Create the packet
@@ -1224,7 +1230,12 @@ mod tests {
         .unwrap();
 
         let packet = dest
-            .announce(Some(b"hello"), &mut OsRng, TEST_TIME_MS)
+            .announce(
+                Some(b"hello"),
+                &mut OsRng,
+                TEST_TIME_MS,
+                TEST_TIME_MS / 1000,
+            )
             .unwrap();
 
         // Verify packet structure
@@ -1255,7 +1266,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = dest.announce(None, &mut OsRng, TEST_TIME_MS);
+        let result = dest.announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000);
 
         assert!(matches!(result, Err(AnnounceError::WrongDirection)));
     }
@@ -1272,7 +1283,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = dest.announce(None, &mut OsRng, TEST_TIME_MS);
+        let result = dest.announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000);
 
         // PLAIN destinations can't announce - OnlySingleCanAnnounce takes priority
         assert!(matches!(result, Err(AnnounceError::OnlySingleCanAnnounce)));
@@ -1290,7 +1301,9 @@ mod tests {
         )
         .unwrap();
 
-        let packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let packet = dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
 
         let announce = ReceivedAnnounce::from_packet(&packet).unwrap();
         assert!(announce.app_data().is_empty());
@@ -1311,7 +1324,12 @@ mod tests {
         .unwrap();
 
         let packet = dest
-            .announce(Some(b"app-data"), &mut OsRng, TEST_TIME_MS)
+            .announce(
+                Some(b"app-data"),
+                &mut OsRng,
+                TEST_TIME_MS,
+                TEST_TIME_MS / 1000,
+            )
             .unwrap();
 
         // Full validation should pass
@@ -1395,7 +1413,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = group_dest.announce(None, &mut OsRng, TEST_TIME_MS);
+        let result = group_dest.announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000);
         assert!(matches!(result, Err(AnnounceError::OnlySingleCanAnnounce)));
     }
 
@@ -1411,7 +1429,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = dest.announce(None, &mut OsRng, TEST_TIME_MS);
+        let result = dest.announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000);
         assert!(result.is_ok());
     }
 
@@ -1746,7 +1764,12 @@ mod tests {
         dest.enable_ratchets(&mut OsRng, TEST_TIME_MS).unwrap();
 
         let packet = dest
-            .announce(Some(b"test-data"), &mut OsRng, TEST_TIME_MS)
+            .announce(
+                Some(b"test-data"),
+                &mut OsRng,
+                TEST_TIME_MS,
+                TEST_TIME_MS / 1000,
+            )
             .unwrap();
 
         // context_flag should be set
@@ -1780,7 +1803,12 @@ mod tests {
         // Don't enable ratchets
 
         let packet = dest
-            .announce(Some(b"test-data"), &mut OsRng, TEST_TIME_MS)
+            .announce(
+                Some(b"test-data"),
+                &mut OsRng,
+                TEST_TIME_MS,
+                TEST_TIME_MS / 1000,
+            )
             .unwrap();
 
         // context_flag should NOT be set
@@ -1813,7 +1841,9 @@ mod tests {
         let first_ratchet = dest.current_ratchet_public().unwrap();
 
         // First announce - uses first ratchet
-        let packet1 = dest.announce(None, &mut OsRng, time_ms).unwrap();
+        let packet1 = dest
+            .announce(None, &mut OsRng, time_ms, time_ms / 1000)
+            .unwrap();
         let announce1 = ReceivedAnnounce::from_packet(&packet1).unwrap();
         assert_eq!(announce1.ratchet().unwrap(), &first_ratchet);
 
@@ -1821,7 +1851,9 @@ mod tests {
         time_ms += 2000;
 
         // Second announce - should rotate and use new ratchet
-        let packet2 = dest.announce(None, &mut OsRng, time_ms).unwrap();
+        let packet2 = dest
+            .announce(None, &mut OsRng, time_ms, time_ms / 1000)
+            .unwrap();
         let announce2 = ReceivedAnnounce::from_packet(&packet2).unwrap();
 
         let second_ratchet = dest.current_ratchet_public().unwrap();
@@ -2356,7 +2388,12 @@ mod tests {
             let app_data = alloc::vec![0xAAu8; budget];
 
             let packet = dest
-                .announce(Some(&app_data), &mut OsRng, TEST_TIME_MS)
+                .announce(
+                    Some(&app_data),
+                    &mut OsRng,
+                    TEST_TIME_MS,
+                    TEST_TIME_MS / 1000,
+                )
                 .unwrap_or_else(|e| {
                     panic!("announce at budget must succeed (ratchet={with_ratchet}): {e}")
                 });
@@ -2383,7 +2420,12 @@ mod tests {
             let oversized = alloc::vec![0xAAu8; budget + 1];
 
             let err = dest
-                .announce(Some(&oversized), &mut OsRng, TEST_TIME_MS)
+                .announce(
+                    Some(&oversized),
+                    &mut OsRng,
+                    TEST_TIME_MS,
+                    TEST_TIME_MS / 1000,
+                )
                 .expect_err("announce one byte over budget must be refused");
 
             match err {

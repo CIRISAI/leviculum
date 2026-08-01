@@ -199,7 +199,7 @@ fn make_responder() -> (
     let dest_hash = *dest.hash();
 
     let mut pack = |ts: u64| {
-        let ann = dest.announce(None, &mut OsRng, ts).unwrap();
+        let ann = dest.announce(None, &mut OsRng, ts, ts / 1000).unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = ann.pack(&mut buf).unwrap();
         buf[..len].to_vec()

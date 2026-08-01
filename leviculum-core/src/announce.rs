@@ -145,17 +145,22 @@ pub(crate) const ANNOUNCE_RATCHETED_MIN_SIZE: usize = ANNOUNCE_MIN_SIZE + RATCHE
 ///
 /// The random hash ensures announce uniqueness even for the same destination.
 /// Format: 5 bytes from truncated_hash(random_16) + 5 bytes from timestamp (seconds).
+///
+/// `emission_secs` must be unix seconds (Python writes
+/// `int(time.time()).to_bytes(5, "big")`, Destination.py:282) — peers order
+/// same-destination paths by this value across our restarts
+/// (Transport.py:1772/1809), so a process-relative timebase breaks path
+/// replacement (Codeberg #155). Callers obtain it from
+/// `Transport::emission_secs`, never from the monotonic `Clock::now_ms`.
 pub(crate) fn generate_random_hash(
     rng: &mut impl CryptoRngCore,
-    now_ms: u64,
+    emission_secs: u64,
 ) -> [u8; RANDOM_HASHBYTES] {
     let mut random_16 = [0u8; 16];
     rng.fill_bytes(&mut random_16);
     let random_part = truncated_hash(&random_16);
 
-    // Convert to seconds to match Python's int(time.time()).to_bytes(5, "big")
-    // (Destination.py:282). Cross-source emission comparison requires same units.
-    let timestamp_bytes = (now_ms / 1000).to_be_bytes();
+    let timestamp_bytes = emission_secs.to_be_bytes();
 
     let mut result = [0u8; RANDOM_HASHBYTES]; // 10 bytes
     result[..RANDOM_HASH_RANDOM_SIZE].copy_from_slice(&random_part[..RANDOM_HASH_RANDOM_SIZE]);
@@ -209,10 +214,10 @@ pub(crate) fn build_announce_payload(
     ratchet: Option<&[u8; RATCHET_SIZE]>,
     app_data: Option<&[u8]>,
     rng: &mut impl CryptoRngCore,
-    now_ms: u64,
+    emission_secs: u64,
 ) -> Result<Vec<u8>, AnnounceError> {
     let public_key = identity.public_key_bytes();
-    let random_hash = generate_random_hash(rng, now_ms);
+    let random_hash = generate_random_hash(rng, emission_secs);
     let app_data_bytes = app_data.unwrap_or(&[]);
 
     // Build signed data using helper
@@ -569,7 +574,7 @@ mod tests {
     use alloc::vec;
     use rand_core::OsRng;
 
-    const TEST_TIME_MS: u64 = 1704067200000; // 2024-01-01 00:00:00 UTC
+    const TEST_EMISSION_SECS: u64 = 1704067200; // 2024-01-01 00:00:00 UTC
 
     fn create_test_announce_payload(with_ratchet: bool) -> Vec<u8> {
         let mut payload = Vec::new();
@@ -805,38 +810,38 @@ mod tests {
 
     #[test]
     fn test_generate_random_hash_format() {
-        let hash = generate_random_hash(&mut OsRng, TEST_TIME_MS);
+        let hash = generate_random_hash(&mut OsRng, TEST_EMISSION_SECS);
 
         // Should be 10 bytes
         assert_eq!(hash.len(), RANDOM_HASHBYTES);
 
-        // Last 5 bytes should be from timestamp in seconds (1704067200000 / 1000 = 1704067200)
-        // 1704067200 = 0x65920080
-        // to_be_bytes() gives [0x00, 0x00, 0x00, 0x00, 0x65, 0x92, 0x00, 0x80]
+        // Last 5 bytes carry the emission timestamp verbatim, in unix
+        // seconds (Codeberg #155): 1704067200 = 0x65920080,
+        // to_be_bytes() gives [0x00, 0x00, 0x00, 0x00, 0x65, 0x92, 0x00, 0x80],
         // bytes 3..8 are [0x00, 0x65, 0x92, 0x00, 0x80]
         assert_eq!(&hash[5..10], &[0x00, 0x65, 0x92, 0x00, 0x80]);
     }
 
     #[test]
     fn test_generate_random_hash_different_each_call() {
-        let hash1 = generate_random_hash(&mut OsRng, TEST_TIME_MS);
-        let hash2 = generate_random_hash(&mut OsRng, TEST_TIME_MS);
+        let hash1 = generate_random_hash(&mut OsRng, TEST_EMISSION_SECS);
+        let hash2 = generate_random_hash(&mut OsRng, TEST_EMISSION_SECS);
 
         // First 5 bytes (random) should be different
         // (with overwhelming probability)
         assert_ne!(&hash1[0..5], &hash2[0..5]);
 
-        // Last 5 bytes (timestamp) should be the same (same now_ms)
+        // Last 5 bytes (timestamp) should be the same (same emission)
         assert_eq!(&hash1[5..10], &hash2[5..10]);
     }
 
     #[test]
     fn test_emission_from_random_hash_consistency() {
         // emission_from_random_hash extracts a 40-bit timebase, not the full
-        // u64 timestamp. Two hashes with the same now_ms produce the same
+        // u64 timestamp. Two hashes with the same emission produce the same
         // timebase, and different timestamps produce ordered timebases.
-        let h1 = generate_random_hash(&mut OsRng, TEST_TIME_MS);
-        let h2 = generate_random_hash(&mut OsRng, TEST_TIME_MS);
+        let h1 = generate_random_hash(&mut OsRng, TEST_EMISSION_SECS);
+        let h2 = generate_random_hash(&mut OsRng, TEST_EMISSION_SECS);
         assert_eq!(
             emission_from_random_hash(&h1),
             emission_from_random_hash(&h2),
@@ -868,8 +873,8 @@ mod tests {
         let h2 = generate_random_hash(&mut OsRng, 3_000_000);
         let h3 = generate_random_hash(&mut OsRng, 2_000_000);
         let blobs = [h1, h2, h3];
-        // Emission timestamps are stored in seconds (ms / 1000)
-        assert_eq!(max_emission_from_blobs(&blobs), 3_000);
+        // Emission timestamps are stored verbatim in unix seconds
+        assert_eq!(max_emission_from_blobs(&blobs), 3_000_000);
     }
 
     /// Regression guard (Codeberg #108, fuzz `announce_from_packet`): the

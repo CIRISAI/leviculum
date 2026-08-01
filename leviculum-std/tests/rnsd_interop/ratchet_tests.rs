@@ -167,7 +167,12 @@ async fn test_send_ratcheted_announce_from_rust() {
 
     // Build and send announce with ratchet
     let packet = dest
-        .announce(Some(b"rust-ratchet-test"), &mut OsRng, now_ms())
+        .announce(
+            Some(b"rust-ratchet-test"),
+            &mut OsRng,
+            now_ms(),
+            now_ms() / 1000,
+        )
         .expect("Failed to create announce");
 
     // Verify context_flag is set
@@ -261,7 +266,7 @@ async fn test_rust_to_rust_ratcheted_announce_via_python() {
 
     // A announces
     let packet_a = dest_a
-        .announce(Some(b"from-a"), &mut OsRng, now_ms())
+        .announce(Some(b"from-a"), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("Failed to create announce A");
 
     let mut raw_a = [0u8; MTU];
@@ -280,7 +285,7 @@ async fn test_rust_to_rust_ratcheted_announce_via_python() {
 
     // B announces
     let packet_b = dest_b
-        .announce(Some(b"from-b"), &mut OsRng, now_ms())
+        .announce(Some(b"from-b"), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("Failed to create announce B");
 
     let mut raw_b = [0u8; MTU];
@@ -356,7 +361,7 @@ async fn test_context_flag_indicates_ratchet() {
     .expect("Failed to create destination");
 
     let packet_no_ratchet = dest_no_ratchet
-        .announce(Some(b"no-ratchet"), &mut OsRng, now_ms())
+        .announce(Some(b"no-ratchet"), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("Failed to create announce");
 
     assert!(
@@ -380,7 +385,7 @@ async fn test_context_flag_indicates_ratchet() {
         .expect("Failed to enable ratchets");
 
     let packet_with_ratchet = dest_with_ratchet
-        .announce(Some(b"with-ratchet"), &mut OsRng, now_ms())
+        .announce(Some(b"with-ratchet"), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("Failed to create announce");
 
     assert!(

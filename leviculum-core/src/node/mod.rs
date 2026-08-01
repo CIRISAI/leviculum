@@ -576,8 +576,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // 15s periodic announce or a discovery retry. No interfaces exist at
         // build time, so this only populates the cache; the actual path
         // response is regenerated fresh by the PathRequestReceived handler.
+        let emission_secs = self.transport.emission_secs(now_ms);
         if let Some(dest) = self.destinations.get_mut(&hash) {
-            if let Ok(packet) = dest.announce(None, &mut self.rng, now_ms) {
+            if let Ok(packet) = dest.announce(None, &mut self.rng, now_ms, emission_secs) {
                 let mut buf = [0u8; crate::constants::MTU];
                 if let Ok(len) = packet.pack(&mut buf) {
                     self.transport
@@ -665,6 +666,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.announce_destination_impl(dest_hash, app_data, Some(interface_index))
     }
 
+    /// Inject wall-clock unix time from the host (Codeberg #155).
+    ///
+    /// On platforms whose [`crate::traits::Clock`] has no wall clock
+    /// (LNode: no RTC), this seeds the emission timebase that announce
+    /// emission timestamps are derived from, e.g. from a host over the
+    /// serial config channel. Platforms with a real wall clock ignore it.
+    pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64) {
+        self.transport.set_wall_time_unix_secs(unix_secs);
+    }
+
     fn announce_destination_impl(
         &mut self,
         dest_hash: &DestinationHash,
@@ -672,13 +683,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         interface_index: Option<usize>,
     ) -> Result<crate::transport::TickOutput, AnnounceError> {
         let now_ms = self.transport.clock().now_ms();
+        let emission_secs = self.transport.emission_secs(now_ms);
 
         let dest = self
             .destinations
             .get_mut(dest_hash)
             .ok_or(AnnounceError::DestinationNotFound)?;
 
-        let packet = dest.announce(app_data, &mut self.rng, now_ms)?;
+        let packet = dest.announce(app_data, &mut self.rng, now_ms, emission_secs)?;
         let ratchet_pub = dest.current_ratchet_public();
 
         // Size was already gated at compose time in `Destination::announce`, so
@@ -1724,6 +1736,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Clone hashes to avoid borrow conflict with self
         let hashes: Vec<DestinationHash> = self.mgmt_destinations.clone();
+        let emission_secs = self.transport.emission_secs(now_ms);
         for dest_hash in &hashes {
             // Installed announce-suppression policy: skip silently. Borrows
             // announce_control only; released before destinations.get_mut.
@@ -1736,7 +1749,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 Some(d) => d,
                 None => continue,
             };
-            let packet = match dest.announce(None, &mut self.rng, now_ms) {
+            let packet = match dest.announce(None, &mut self.rng, now_ms, emission_secs) {
                 Ok(p) => p,
                 Err(e) => {
                     crate::tracing::warn!("Management announce failed for <{}>: {}", dest_hash, e);
@@ -2115,6 +2128,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// seen them (Block D).
     pub fn handle_interface_up(&mut self, interface_index: usize) -> crate::transport::TickOutput {
         let now_ms = self.transport.clock().now_ms();
+        let emission_secs = self.transport.emission_secs(now_ms);
 
         // Collect destination hashes first to avoid borrow conflict
         let local_hashes: Vec<crate::destination::DestinationHash> = self
@@ -2132,7 +2146,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             if let Some(dest) = self.destinations.get_mut(dest_hash) {
-                match dest.announce(None, &mut self.rng, now_ms) {
+                match dest.announce(None, &mut self.rng, now_ms, emission_secs) {
                     Ok(packet) => {
                         let mut buf = [0u8; crate::constants::MTU];
                         if let Ok(len) = packet.pack(&mut buf) {
@@ -2720,11 +2734,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // instead of serving cached bytes. Transport set up a deferred AnnounceEntry
                 // with the 400ms grace period, we replace its raw_packet with fresh bytes.
                 let now_ms = self.transport.clock().now_ms();
+                let emission_secs = self.transport.emission_secs(now_ms);
                 if let Some(dest) = self
                     .destinations
                     .get_mut(&DestinationHash::new(destination_hash))
                 {
-                    match dest.announce(None, &mut self.rng, now_ms) {
+                    match dest.announce(None, &mut self.rng, now_ms, emission_secs) {
                         Ok(packet) => {
                             let mut buf = [0u8; crate::constants::MTU];
                             if let Ok(len) = packet.pack(&mut buf) {
@@ -2978,7 +2993,9 @@ mod tests {
         )
         .unwrap();
 
-        let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
 
@@ -3021,7 +3038,9 @@ mod tests {
         )
         .unwrap();
 
-        let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
         let _ = node.handle_packet(InterfaceId(0), &buf[..len]);
@@ -3060,7 +3079,9 @@ mod tests {
         )
         .unwrap();
 
-        let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
         let _ = node.handle_packet(InterfaceId(0), &buf[..len]);
@@ -3123,7 +3144,9 @@ mod tests {
             )
             .unwrap();
             let hash = *dest.hash();
-            let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+            let announce_packet = dest
+                .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+                .unwrap();
             let mut buf = [0u8; crate::constants::MTU];
             let len = announce_packet.pack(&mut buf).unwrap();
             let _ = node.handle_packet(InterfaceId(iface), &buf[..len]);
@@ -3204,7 +3227,9 @@ mod tests {
         )
         .unwrap();
 
-        let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
         let _ = node.handle_packet(InterfaceId(0), &buf[..len]);
@@ -3244,7 +3269,9 @@ mod tests {
         )
         .unwrap();
 
-        let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
 
@@ -3315,7 +3342,7 @@ mod tests {
         )
         .unwrap();
         let announce_packet = client_dest
-            .announce(None, &mut OsRng, TEST_TIME_MS)
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
             .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
@@ -3364,7 +3391,7 @@ mod tests {
         .unwrap();
 
         let announce_packet = remote_dest
-            .announce(None, &mut OsRng, TEST_TIME_MS)
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
             .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
@@ -3449,7 +3476,7 @@ mod tests {
         .unwrap();
 
         let announce_packet = remote_dest
-            .announce(None, &mut OsRng, TEST_TIME_MS)
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
             .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
@@ -3504,7 +3531,7 @@ mod tests {
         .unwrap();
 
         let announce_packet = remote_dest
-            .announce(None, &mut OsRng, TEST_TIME_MS)
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
             .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
@@ -3640,7 +3667,9 @@ mod tests {
         resp_dest.set_accepts_links(true);
         resp_dest.set_proof_strategy(ProofStrategy::All);
         let dest_hash = *resp_dest.hash();
-        let announce_packet = resp_dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = resp_dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         responder.register_destination(resp_dest);
         let mut buf = [0u8; MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
@@ -3741,7 +3770,9 @@ mod tests {
         resp_dest.set_accepts_links(true);
         resp_dest.set_proof_strategy(ProofStrategy::All);
         let dest_hash = *resp_dest.hash();
-        let announce_packet = resp_dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = resp_dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         responder.register_destination(resp_dest);
         let mut buf = [0u8; MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
@@ -4727,7 +4758,9 @@ mod tests {
             &["ifdown2"],
         )
         .unwrap();
-        let announce_packet = dest.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let announce_packet = dest
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_packet.pack(&mut buf).unwrap();
         let _ = node.handle_packet(InterfaceId(0), &buf[..len]);
@@ -4881,8 +4914,12 @@ mod tests {
         )
         .unwrap();
 
-        let ann1 = dest1.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
-        let ann2 = dest2.announce(None, &mut OsRng, TEST_TIME_MS).unwrap();
+        let ann1 = dest1
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
+        let ann2 = dest2
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len1 = ann1.pack(&mut buf).unwrap();
         let _ = node.handle_packet(InterfaceId(0), &buf[..len1]);
@@ -6827,7 +6864,7 @@ mod tests {
         .unwrap();
 
         let announce_packet = remote_dest
-            .announce(None, &mut OsRng, TEST_TIME_MS)
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
             .unwrap();
         let remote_dest_hash = *remote_dest.hash();
 
@@ -7665,7 +7702,9 @@ mod tests {
         .unwrap();
         let client_hash = client_dest.hash().into_bytes();
         let now_ms = node.transport.clock().now_ms();
-        let announce_pkt = client_dest.announce(None, &mut OsRng, now_ms).unwrap();
+        let announce_pkt = client_dest
+            .announce(None, &mut OsRng, now_ms, now_ms / 1000)
+            .unwrap();
         let mut buf = [0u8; crate::constants::MTU];
         let len = announce_pkt.pack(&mut buf).unwrap();
         let client_announce_raw = buf[..len].to_vec();

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Announces now carry wall-clock unix time in the emission timestamp
+  instead of process uptime, so Python peers order our paths correctly
+  and a restarted node reclaims its own path entries (#155). Clockless
+  nodes (LNode) learn the timebase from received announces or a host
+  injection.
+
 ### Added
 
 - lblogd serves a file area, so a post can carry pictures. Micron has

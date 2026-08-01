@@ -318,6 +318,26 @@ pub trait Clock {
     /// Milliseconds since some arbitrary epoch (monotonic)
     fn now_ms(&self) -> u64;
 
+    /// Wall-clock unix time in seconds, if the platform has one.
+    ///
+    /// This is NOT a timer source. All timeout and deadline arithmetic must
+    /// keep using the monotonic [`now_ms`](Self::now_ms); this method exists
+    /// solely for wire fields that remote peers compare across our process
+    /// lifetimes — today the 5-byte announce emission timestamp, which
+    /// Python-RNS fills with `int(time.time())` (Destination.py:282) and
+    /// orders same-destination paths by (Transport.py:1772/1809). A value
+    /// derived from process start restarts from zero on every reboot and
+    /// permanently loses that ordering (Codeberg #155).
+    ///
+    /// Platforms without a real-time clock return `None`; the transport
+    /// then falls back to its learned emission timebase
+    /// ([`Transport::emission_secs`](crate::transport::Transport::emission_secs)),
+    /// seeded from validated received announces or an explicit host
+    /// injection.
+    fn wall_unix_secs(&self) -> Option<u64> {
+        None
+    }
+
     /// Seconds since epoch (convenience method)
     fn now_secs(&self) -> u64 {
         self.now_ms() / 1000
