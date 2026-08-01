@@ -191,6 +191,13 @@ node that receives the identify sees a `remote_identity` on your requests and
 can attribute what you submit to you, which is what NomadNet's
 `identify_on_connect` does.
 
+### Tables
+
+A micron `` `t `` table renders with box-drawing separators, columns sized to
+their visible width. A cell is inline micron, so a style, a colour or a link
+inside one renders (and a link in a cell is followable like any other); a
+literal `|` written `\|` stays part of its cell.
+
 ### Pictures
 
 Micron has no image construct, so a page can only link to a picture in its

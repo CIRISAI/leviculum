@@ -112,3 +112,121 @@ fn leading_whitespace_of_link_is_not_underlined() {
     assert!(beta_line.cells[beta.col_start].st.underline);
     assert_eq!(beta_line.cells[beta.col_start].link, Some(beta.index));
 }
+
+/// A row's cells as `lnomad` splits them, through the public layout: the
+/// splitting itself is private, so this drives it the way a page does.
+fn table_cells(mu: &str) -> Vec<String> {
+    let (lines, _) = layout(&parse(mu), 80, Theme::Dark);
+    lines
+        .iter()
+        .map(|line| line.cells.iter().map(|c| c.ch).collect::<String>())
+        .filter(|text| !text.trim().is_empty())
+        .collect()
+}
+
+#[test]
+fn a_table_row_splits_on_unescaped_pipes_only() {
+    // lblogd escapes a literal pipe in a cell as `\|`, following the
+    // reference parser. It must stay one cell, and the backslash must not
+    // reach the screen.
+    let rendered = table_cells("`t\na | b\n--- | ---\npipe \\| inside | 2\n`t\n");
+    let row = rendered
+        .iter()
+        .find(|line| line.contains("pipe"))
+        .expect("the data row must render");
+    assert!(
+        row.contains("pipe | inside"),
+        "the escaped pipe must survive as text: {row:?}"
+    );
+    assert!(
+        !row.contains('\\'),
+        "and its backslash must not be shown: {row:?}"
+    );
+    // Two columns, so exactly one column separator.
+    assert_eq!(
+        row.matches('\u{2502}').count(),
+        1,
+        "the escaped pipe must not open a third column: {row:?}"
+    );
+}
+
+#[test]
+fn a_table_still_has_its_ordinary_columns() {
+    let rendered = table_cells("`t\na | b\n--- | ---\n1 | 2\n`t\n");
+    let row = rendered
+        .iter()
+        .find(|line| line.contains('1'))
+        .expect("the data row must render");
+    assert_eq!(row.matches('\u{2502}').count(), 1, "{row:?}");
+}
+
+#[test]
+fn markup_inside_a_cell_renders_instead_of_showing_itself() {
+    // A cell is inline micron. The reference re-parses each formatted row line
+    // (NomadNet MicronParser.render_table), so a style in a cell has to render
+    // — and lblogd emits exactly this for a Markdown code span.
+    let (lines, _) = layout(
+        &parse("`t\na | b\n--- | ---\n`!loud`! | `B333code`b\n`t\n"),
+        80,
+        Theme::Dark,
+    );
+    let row = lines
+        .iter()
+        .find(|line| line.cells.iter().any(|c| c.ch == 'l'))
+        .expect("the data row must render");
+    let text: String = row.cells.iter().map(|c| c.ch).collect();
+    assert!(text.contains("loud"), "{text:?}");
+    assert!(text.contains("code"), "{text:?}");
+    assert!(
+        !text.contains('`'),
+        "no markup may reach the screen: {text:?}"
+    );
+    let l = row.cells.iter().find(|c| c.ch == 'l').unwrap();
+    assert!(l.st.bold, "the bold toggle must apply to the cell text");
+}
+
+#[test]
+fn a_column_is_sized_by_visible_width_not_by_its_markup() {
+    // `B333` + `b is nine characters of markup around four of text. Sizing on
+    // the raw string would pad every other row to thirteen.
+    let (lines, _) = layout(&parse("`t\nh\n---\n`B333code`b\n`t\n"), 80, Theme::Dark);
+    let widths: Vec<usize> = lines
+        .iter()
+        .map(|line| line.cells.iter().filter(|c| c.ch != ' ').count())
+        .collect();
+    assert!(
+        widths.iter().all(|w| *w <= 4),
+        "columns must be as wide as the text, not the markup: {widths:?}"
+    );
+}
+
+#[test]
+fn a_link_inside_a_cell_stays_a_link() {
+    let (_, links) = layout(
+        &parse("`t\nwhere\n---\n`[docs`:/page/x.mu]\n`t\n"),
+        80,
+        Theme::Dark,
+    );
+    let link = links.first().expect("the cell's link must be collected");
+    assert_eq!(link.label, "docs");
+    assert_eq!(link.target, ":/page/x.mu");
+}
+
+#[test]
+fn a_cell_that_parses_to_nothing_still_shows_its_text() {
+    // "- gone" is a divider at line start, so parsing the cell on its own
+    // yields no text. Dropping a reader's content would be worse than showing
+    // the stray character.
+    let (lines, _) = layout(
+        &parse("`t\nh | h2\n--- | ---\n- gone | kept\n`t\n"),
+        80,
+        Theme::Dark,
+    );
+    let text: String = lines
+        .iter()
+        .map(|line| line.cells.iter().map(|c| c.ch).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("gone"), "{text:?}");
+    assert!(text.contains("kept"), "{text:?}");
+}

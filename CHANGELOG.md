@@ -41,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line, then the data rows, with a literal `|` in a cell escaped as the
   reference parser expects.
 
+### Fixed
+
+- lnomad renders a table cell's contents as the inline micron they are.
+  Cells were pushed to the screen as plain text, so a style, a colour or
+  a link inside one showed its markup — `` `B333code`b `` instead of
+  `code` — and the column was sized to the markup rather than to the
+  text. Each cell is now parsed and flattened, as the reference does by
+  re-parsing every formatted row line, which also makes a link in a cell
+  followable and sizes columns by visible width. An escaped `\|` splits
+  no column and loses its backslash.
+
 ## [0.8.0] - 2026-08-01
 
 ### Added

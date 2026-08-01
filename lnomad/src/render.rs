@@ -623,23 +623,31 @@ impl Renderer<'_> {
             .min(self.width.saturating_sub(indent))
             .max(MIN_WIDTH);
 
-        let parsed: Vec<Vec<String>> = rows
-            .iter()
-            .map(|row| row.split('|').map(|c| c.trim().to_string()).collect())
-            .collect();
+        let parsed: Vec<Vec<String>> = rows.iter().map(|row| split_cells(row)).collect();
         let ncols = parsed.iter().map(Vec::len).max().unwrap_or(0);
         if ncols == 0 {
             return;
         }
 
+        // A cell's text is inline micron, so it is parsed and flattened rather
+        // than printed. The reference does the same thing by re-parsing each
+        // formatted row line (NomadNet MicronParser.render_table -> parse_line),
+        // and without it a cell holding `!bold`! or a link shows its markup.
+        // Flattening also gives the VISIBLE width for free: the markup is gone
+        // by the time the characters are counted.
+        let flat: Vec<Vec<Vec<StyledChar>>> = parsed
+            .iter()
+            .map(|row| match is_separator_row(row) {
+                true => Vec::new(),
+                false => row.iter().map(|cell| self.flatten_cell(cell)).collect(),
+            })
+            .collect();
+
         // Natural column widths from the non-separator rows.
         let mut colw = vec![1usize; ncols];
-        for row in &parsed {
-            if is_separator_row(row) {
-                continue;
-            }
+        for row in &flat {
             for (c, cell) in row.iter().enumerate() {
-                colw[c] = colw[c].max(cell.chars().count());
+                colw[c] = colw[c].max(cell.len());
             }
         }
 
@@ -655,7 +663,7 @@ impl Renderer<'_> {
             }
         }
 
-        for row in &parsed {
+        for (r, row) in parsed.iter().enumerate() {
             let mut cells: Vec<StyledChar> = Vec::new();
             for _ in 0..indent {
                 cells.push(cell(' ', RStyle::default()));
@@ -670,13 +678,13 @@ impl Renderer<'_> {
                     }
                 }
             } else {
+                let empty: Vec<StyledChar> = Vec::new();
                 for (c, w) in colw.iter().enumerate() {
                     if c > 0 {
                         push_plain(&mut cells, " \u{2502} ");
                     }
-                    let empty = String::new();
-                    let cell = row.get(c).unwrap_or(&empty);
-                    push_plain(&mut cells, &fit(cell, *w, cell_align));
+                    let content = flat[r].get(c).unwrap_or(&empty);
+                    push_fitted(&mut cells, content, *w, cell_align);
                 }
             }
             self.push_line(cells);
@@ -753,6 +761,29 @@ impl Renderer<'_> {
         }
         let align = line.spans.last().map(|s| s.style.align).unwrap_or_default();
         (out, align)
+    }
+
+    /// Parse one table cell's inline micron and flatten it to styled cells.
+    ///
+    /// Falls back to the raw text when the parse yields nothing visible: a cell
+    /// whose text happens to start with a line-level control character (`-`,
+    /// `>`) parses as a divider or a heading and would otherwise vanish, and
+    /// losing a reader's content is worse than showing a stray character.
+    fn flatten_cell(&mut self, text: &str) -> Vec<StyledChar> {
+        let doc = leviculum_micron::parse(text);
+        let mut out: Vec<StyledChar> = Vec::new();
+        for block in &doc.blocks {
+            let line = match block {
+                Block::Paragraph { line, .. } | Block::Heading { line, .. } => line,
+                _ => continue,
+            };
+            let (chars, _) = self.flatten_line(line);
+            out.extend(chars);
+        }
+        if out.is_empty() && !text.trim().is_empty() {
+            push_plain(&mut out, text);
+        }
+        out
     }
 
     /// Flatten a heading line, forcing the theme band colours while preserving
@@ -890,6 +921,31 @@ fn push_plain(out: &mut Vec<StyledChar>, text: &str) {
     push_styled(out, text, RStyle::default());
 }
 
+/// Append `content` padded or truncated to exactly `width` columns per
+/// `align`, keeping each character's style (and link tag).
+fn push_fitted(out: &mut Vec<StyledChar>, content: &[StyledChar], width: usize, align: Align) {
+    if width == 0 {
+        return;
+    }
+    if content.len() >= width {
+        out.extend_from_slice(&content[..width]);
+        return;
+    }
+    let slack = width - content.len();
+    let (left, right) = match align {
+        Align::Left => (0, slack),
+        Align::Right => (slack, 0),
+        Align::Center => (slack / 2, slack - slack / 2),
+    };
+    for _ in 0..left {
+        out.push(cell(' ', RStyle::default()));
+    }
+    out.extend_from_slice(content);
+    for _ in 0..right {
+        out.push(cell(' ', RStyle::default()));
+    }
+}
+
 /// Fit `text` into exactly `width` columns, truncating or padding per `align`.
 fn fit(text: &str, width: usize, align: Align) -> String {
     if width == 0 {
@@ -918,6 +974,37 @@ fn fit(text: &str, width: usize, align: Align) -> String {
 
 /// Whether a parsed table row is a markdown separator (all cells are dashes,
 /// optionally with alignment colons).
+/// Split a micron table row into cells on unescaped `|`, unescaping `\|` and
+/// `\\` as it goes.
+///
+/// The escape is the reference's (RNS `rngit/util.py:633-654`): a cell whose
+/// text contains a pipe is written `\|`, which must not start a new column
+/// and must not keep its backslash on screen.
+fn split_cells(row: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for ch in row.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '|' {
+            cells.push(current.trim().to_string());
+            current = String::new();
+        } else {
+            current.push(ch);
+        }
+    }
+    // A trailing backslash is a literal one; dropping it would eat a character.
+    if escaped {
+        current.push('\\');
+    }
+    cells.push(current.trim().to_string());
+    cells
+}
+
 fn is_separator_row(row: &[String]) -> bool {
     !row.is_empty()
         && row.iter().all(|cell| {
