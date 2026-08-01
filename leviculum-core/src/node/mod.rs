@@ -1293,9 +1293,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Phase 1 of the off-lock resource send (leviculum#29): snapshot the
     /// link-derived inputs [`crate::resource::prepare_resource_send`] needs.
-    /// Fails fast with [`ResourceError::TransferInProgress`] /
-    /// [`ResourceError::InvalidRequest`] so no build work is wasted on a link
-    /// that cannot accept a transfer.
+    /// Fails fast with [`crate::resource::ResourceError::TransferInProgress`]
+    /// / [`crate::resource::ResourceError::InvalidRequest`] so no build work
+    /// is wasted on a link that cannot accept a transfer.
     pub fn resource_send_params(
         &self,
         link_id: &LinkId,
@@ -1324,9 +1324,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// advertisement.
     ///
     /// Re-validates what may have changed while the build ran off-lock:
-    /// - link gone → [`ResourceError::InvalidRequest`]
-    /// - a transfer started meanwhile → [`ResourceError::TransferInProgress`]
-    /// - the link re-keyed (#66) → [`ResourceError::LinkStateChanged`] — the
+    /// - link gone → [`crate::resource::ResourceError::InvalidRequest`]
+    /// - a transfer started meanwhile →
+    ///   [`crate::resource::ResourceError::TransferInProgress`]
+    /// - the link re-keyed (#66) →
+    ///   [`crate::resource::ResourceError::LinkStateChanged`] — the
     ///   ciphertext was built under the old key and the peer could never
     ///   decrypt it; the caller should re-run the phases once.
     pub fn commit_resource_send(
