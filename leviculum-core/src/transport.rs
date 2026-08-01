@@ -12345,6 +12345,127 @@ mod tests {
             }
         }
 
+        // PR #152 guard: the pre-hashed entry point (the std driver computes
+        // the dedup SHA-256 off-lock, leviculum#29) must honor the same six
+        // exempt contexts as process_incoming. If the pre-hash path ever
+        // bypasses the exemption, byte-identical keepalive/resource/channel
+        // retransmissions die in dedup again — a compat regression on the
+        // fix above.
+        #[test]
+        fn test_prehashed_path_honors_dedup_exempt_contexts() {
+            use crate::packet::packet_hash;
+            let contexts = [
+                PacketContext::Keepalive,
+                PacketContext::ResourceReq,
+                PacketContext::ResourcePrf,
+                PacketContext::Resource,
+                PacketContext::CacheRequest,
+                PacketContext::Channel,
+            ];
+
+            for context in contexts {
+                let mut transport = make_transport_enabled();
+                let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let link_id = [0xAB; TRUNCATED_HASHBYTES];
+                transport.register_destination(link_id);
+
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type: crate::destination::DestinationType::Link,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 0,
+                    transport_id: None,
+                    destination_hash: link_id,
+                    context,
+                    data: PacketData::Owned(alloc::vec![0xFF]),
+                };
+                let mut buf = [0u8; 500];
+                let len = packet.pack(&mut buf).unwrap();
+                let raw = buf[..len].to_vec();
+                let pre_hash = packet_hash(&raw);
+
+                transport
+                    .process_incoming_prehashed(0, &raw, pre_hash)
+                    .unwrap();
+                let got_first = transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PacketReceived { .. }));
+                assert!(
+                    got_first,
+                    "first pre-hashed {context:?} packet must produce PacketReceived"
+                );
+
+                transport
+                    .process_incoming_prehashed(0, &raw, pre_hash)
+                    .unwrap();
+                let got_second = transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PacketReceived { .. }));
+                assert!(
+                    got_second,
+                    "identical pre-hashed {context:?} packet must NOT be dropped \
+                     by dedup (exemption from 7efdfa3 must survive the pre-hash \
+                     path of leviculum#29)"
+                );
+            }
+        }
+
+        // PR #152 guard, negative side: the pre-hashed path must still DROP a
+        // duplicate of a non-exempt packet — the exemption must not widen.
+        #[test]
+        fn test_prehashed_path_still_drops_non_exempt_duplicate() {
+            use crate::destination::DestinationType;
+            use crate::packet::packet_hash;
+
+            let mut transport = test_transport();
+            transport.register_interface(Box::new(MockInterface::new("test", 1)));
+            let hash = [0x42; TRUNCATED_HASHBYTES];
+            transport.register_destination(hash);
+
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(b"hello".to_vec()),
+            };
+
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).unwrap();
+            let raw = &buf[..len];
+            let pre_hash = packet_hash(raw);
+
+            transport
+                .process_incoming_prehashed(0, raw, pre_hash)
+                .unwrap();
+            assert_eq!(transport.pending_events(), 2, "first passes");
+
+            transport.drain_events();
+            transport
+                .process_incoming_prehashed(0, raw, pre_hash)
+                .unwrap();
+            assert_eq!(
+                transport.stats().packets_dropped,
+                1,
+                "duplicate non-exempt packet must be dropped via the pre-hash path"
+            );
+            assert_eq!(transport.pending_events(), 0);
+        }
+
         // Relay data retransmit dedup
         #[test]
         fn test_relay_forwards_retransmitted_link_data() {
@@ -22073,6 +22194,102 @@ mod tests {
             assert!(result.is_ok(), "IFAC-valid packet should be accepted");
             // Should not be counted as dropped
             assert_eq!(transport.stats().packets_dropped, 0);
+        }
+
+        // PR #152 guard: the IFAC strip is the ONE case where the bytes change
+        // after the std driver's off-lock pre-hash (leviculum#29), so the
+        // precomputed hash must be discarded and dedup must run on the
+        // post-strip bytes — in both directions:
+        //  - no false drop: a stale precomputed hash that happens to equal a
+        //    DIFFERENT packet's post-strip hash must not poison the dedup
+        //    store against that other packet;
+        //  - no false pass: a duplicate must still be caught even though every
+        //    delivery carries a (discarded) pre-strip hash, i.e. dedup keys on
+        //    the recomputed post-strip hash, never on the caller's value.
+        #[test]
+        fn test_ifac_strip_invalidates_prehash_no_false_pass_no_false_drop() {
+            use crate::destination::DestinationType;
+            use crate::packet::{
+                packet_hash, HeaderType, PacketContext, PacketData, PacketFlags, TransportType,
+            };
+
+            let mut transport = test_transport();
+            let iface_idx = transport.register_interface(Box::new(MockInterface::new("ifac0", 0)));
+            transport.set_interface_name(iface_idx, "ifac0".into());
+            let cfg = IfacConfig::new(Some("testnet"), Some("secret"), 16).unwrap();
+            transport.set_ifac_config(iface_idx, cfg.clone());
+
+            let dest = [0x42; TRUNCATED_HASHBYTES];
+            transport.register_destination(dest);
+
+            let make_raw = |payload: &[u8]| {
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 0,
+                    transport_id: None,
+                    destination_hash: dest,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(payload.to_vec()),
+                };
+                let mut buf = [0u8; MTU];
+                let len = packet.pack(&mut buf).unwrap();
+                buf[..len].to_vec()
+            };
+
+            let raw_a = make_raw(b"payload-A");
+            let raw_b = make_raw(b"payload-B");
+            let wrapped_a = cfg.apply_ifac(&raw_a).unwrap();
+            let wrapped_b = cfg.apply_ifac(&raw_b).unwrap();
+
+            let received = |t: &mut Transport<_, _>| {
+                t.drain_events()
+                    .any(|e| matches!(e, TransportEvent::PacketReceived { .. }))
+            };
+
+            // Deliver A with a stale precomputed hash that equals B's
+            // post-strip hash. The strip rewrites the bytes, so the value must
+            // be discarded — it must NOT enter the dedup store as if B had
+            // been seen.
+            transport
+                .process_incoming_prehashed(iface_idx, &wrapped_a, packet_hash(&raw_b))
+                .unwrap();
+            assert!(
+                received(&mut transport),
+                "A must be processed (prehash discarded after IFAC strip)"
+            );
+
+            // No false drop: B arrives for the first time and must pass, even
+            // though A's delivery carried hash(B) as its (discarded) prehash.
+            transport.process_incoming(iface_idx, &wrapped_b).unwrap();
+            assert!(
+                received(&mut transport),
+                "first delivery of B must NOT be dropped — a discarded IFAC \
+                 prehash must never poison the dedup store"
+            );
+
+            // No false pass: duplicate of A, carrying the hash the std driver
+            // would really compute (over the still-wrapped bytes). Dedup must
+            // key on the recomputed post-strip hash and drop it.
+            let dropped_before = transport.stats().packets_dropped;
+            transport
+                .process_incoming_prehashed(iface_idx, &wrapped_a, packet_hash(&wrapped_a))
+                .unwrap();
+            assert!(
+                !received(&mut transport),
+                "duplicate of A must be dropped via the recomputed post-strip hash"
+            );
+            assert_eq!(
+                transport.stats().packets_dropped,
+                dropped_before + 1,
+                "dedup drop must be counted for the duplicate of A"
+            );
         }
 
         #[test]
