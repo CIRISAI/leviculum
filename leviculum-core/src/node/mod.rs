@@ -60,6 +60,8 @@ mod mvr_hop_asymmetry;
 #[cfg(test)]
 mod mvr_identify_relay;
 #[cfg(test)]
+mod mvr_link_delivery_telemetry;
+#[cfg(test)]
 mod mvr_link_rekey_alias;
 #[cfg(test)]
 mod mvr_lnode_pathresolve;
