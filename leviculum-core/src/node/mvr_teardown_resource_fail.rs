@@ -521,3 +521,72 @@ fn reverse_path_packet_interleaves_a_busy_resource_transfer() {
         "the in-flight resource must be undisturbed by the interleaved packet"
     );
 }
+
+/// leviculum#35 — `link_stats` surfaces per-link delivery telemetry
+/// end-to-end: a proofed channel send advances `bytes_delivered` and yields
+/// SRTT/min-RTT samples, and window-full rejections surface as
+/// `busy_rejections` (the congestion-limited signal).
+#[test]
+fn link_stats_expose_delivery_telemetry() {
+    use crate::node::send::SendError;
+
+    let (mut initiator, mut responder, i_iface, r_iface, link) = establish();
+
+    // Baseline: nothing delivered, no delivery-RTT samples yet.
+    let s0 = initiator.link_stats(&link).expect("stats after establish");
+    assert_eq!(s0.bytes_delivered(), 0);
+    assert_eq!(s0.srtt_ms(), None);
+    assert_eq!(s0.min_rtt_ms(), None);
+
+    // One channel send, delivered and proofed with 40 ms of round-trip time.
+    let out = initiator
+        .send_on_link(&link, b"telemetry-payload")
+        .expect("send");
+    let replies = deliver_all(&mut responder, r_iface, action_data(&out));
+    initiator.transport().clock().advance(40);
+    let _ = deliver_all(&mut initiator, i_iface, replies);
+
+    let s1 = initiator.link_stats(&link).expect("stats after proof");
+    assert!(
+        s1.bytes_delivered() > 0,
+        "a proofed send must count its bytes"
+    );
+    assert_eq!(
+        s1.min_rtt_ms(),
+        Some(40),
+        "the 40 ms round trip is the floor"
+    );
+    assert!(s1.srtt_ms().is_some(), "SRTT seeded by the delivery sample");
+    // (No assertion on the handshake rtt_ms: this harness establishes with a
+    // frozen MockClock, so the 0 ms handshake sample is legitimately absent.)
+
+    // Congestion signal: push sends (hopping over the pacer) until the
+    // channel window rejects with Busy, then confirm the counter surfaces it.
+    let mut saw_busy = false;
+    for _ in 0..64 {
+        match initiator.send_on_link(&link, b"flood") {
+            Err(SendError::Busy) => {
+                saw_busy = true;
+                break;
+            }
+            Err(SendError::PacingDelay { ready_at_ms }) => {
+                let now = initiator.transport().clock().now_ms();
+                initiator
+                    .transport()
+                    .clock()
+                    .advance(ready_at_ms.saturating_sub(now) + 1);
+            }
+            Ok(_) => {}
+            Err(other) => panic!("unexpected send error: {other:?}"),
+        }
+    }
+    assert!(
+        saw_busy,
+        "the window must eventually reject (congestion-limited)"
+    );
+    let s2 = initiator.link_stats(&link).expect("stats after flood");
+    assert!(
+        s2.busy_rejections() >= 1,
+        "the Busy rejection must surface in the stats"
+    );
+}

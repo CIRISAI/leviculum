@@ -220,6 +220,22 @@ pub struct Channel {
     srtt_ms: f64,
     /// RTT variance (f64, milliseconds). 0.0 = not yet measured.
     rttvar_ms: f64,
+    /// Minimum RTT observed across Karn-valid delivery samples (milliseconds).
+    /// `None` until the first sample. Telemetry only (leviculum#35) — never
+    /// consulted by window/pacing logic.
+    min_rtt_ms: Option<u64>,
+    /// Cumulative bytes confirmed delivered on this channel: the packed size
+    /// of every envelope removed from `tx_ring` by a delivery proof. The
+    /// BBR-style delivery-rate numerator (leviculum#35); callers sample this
+    /// counter periodically and difference it.
+    delivered_bytes: u64,
+    /// Cumulative sends rejected because the window was full
+    /// (`ChannelError::Busy`) — the congestion-limited signal (leviculum#35).
+    busy_rejections: u64,
+    /// Cumulative sends rejected by the link pacer
+    /// (`ChannelError::PacingDelay`) — backpressure, but from pacing rather
+    /// than a full window (leviculum#35).
+    pacing_rejections: u64,
 }
 
 impl Default for Channel {
@@ -244,6 +260,10 @@ impl Channel {
             next_send_at_ms: 0,
             srtt_ms: 0.0,
             rttvar_ms: 0.0,
+            min_rtt_ms: None,
+            delivered_bytes: 0,
+            busy_rejections: 0,
+            pacing_rejections: 0,
         }
     }
 
@@ -315,6 +335,26 @@ impl Channel {
     /// Get the RTT variance in milliseconds (0.0 if not yet measured)
     pub fn rttvar_ms(&self) -> f64 {
         self.rttvar_ms
+    }
+
+    /// Minimum Karn-valid delivery RTT observed, in milliseconds (leviculum#35).
+    pub fn min_rtt_ms(&self) -> Option<u64> {
+        self.min_rtt_ms
+    }
+
+    /// Cumulative confirmed-delivered envelope bytes (leviculum#35).
+    pub fn delivered_bytes(&self) -> u64 {
+        self.delivered_bytes
+    }
+
+    /// Cumulative window-full send rejections (leviculum#35).
+    pub fn busy_rejections(&self) -> u64 {
+        self.busy_rejections
+    }
+
+    /// Cumulative pacing send rejections (leviculum#35).
+    pub fn pacing_rejections(&self) -> u64 {
+        self.pacing_rejections
     }
 
     /// Check if the receive ring is empty
@@ -505,10 +545,12 @@ impl Channel {
                 window_max = self.window_max,
                 "channel: busy — send rejected"
             );
+            self.busy_rejections = self.busy_rejections.saturating_add(1);
             return Err(ChannelError::Busy);
         }
         // 2. Pacing check SECOND, only when window has room
         if now_ms < self.next_send_at_ms {
+            self.pacing_rejections = self.pacing_rejections.saturating_add(1);
             return Err(ChannelError::PacingDelay {
                 ready_at_ms: self.next_send_at_ms,
             });
@@ -738,9 +780,22 @@ impl Channel {
                 let sample_rtt = now_ms.saturating_sub(sent_at);
                 if sample_rtt > 0 {
                     self.update_srtt(sample_rtt);
+                    // Telemetry (leviculum#35): track the floor of Karn-valid
+                    // samples — the conservative propagation-delay estimate a
+                    // delivery-rate consumer wants alongside the smoothed RTT.
+                    self.min_rtt_ms = Some(match self.min_rtt_ms {
+                        Some(m) => m.min(sample_rtt),
+                        None => sample_rtt,
+                    });
                 }
             }
 
+            // Telemetry (leviculum#35): every envelope a delivery proof
+            // removes from the ring is confirmed-delivered payload — the
+            // delivery-rate numerator.
+            self.delivered_bytes = self
+                .delivered_bytes
+                .saturating_add(self.tx_ring[pos].envelope.packed_size() as u64);
             self.tx_ring.remove(pos);
             // Window tiers use handshake RTT (conservative), not SRTT.
             // SRTT from proof round-trips can be much lower than the true
@@ -1103,6 +1158,108 @@ mod tests {
         // Should return false for unknown sequence
         assert!(!channel.mark_delivered(0, 1200, 100));
         assert!(!channel.mark_delivered(999, 1200, 100));
+    }
+
+    // leviculum#35: the per-link delivery telemetry counters.
+
+    /// Every proof-confirmed envelope adds its packed size to
+    /// `delivered_bytes`; a duplicate/unknown ack adds nothing.
+    #[test]
+    fn test_delivered_bytes_accumulates_on_proofed_envelopes_only() {
+        let mut channel = Channel::new();
+        let msg = TestMessage {
+            data: vec![1, 2, 3],
+        };
+
+        channel.send(&msg, MDU, 1000, 100).unwrap();
+        channel.send(&msg, MDU, 1010, 100).unwrap();
+        assert_eq!(channel.delivered_bytes(), 0, "nothing proofed yet");
+
+        assert!(channel.mark_delivered(0, 1100, 100));
+        let after_one = channel.delivered_bytes();
+        assert!(after_one > 0, "proofed envelope must count its bytes");
+
+        // Duplicate ack for the same sequence adds nothing.
+        assert!(!channel.mark_delivered(0, 1150, 100));
+        assert_eq!(channel.delivered_bytes(), after_one);
+
+        assert!(channel.mark_delivered(1, 1200, 100));
+        assert_eq!(
+            channel.delivered_bytes(),
+            after_one * 2,
+            "identical envelopes must count identical bytes"
+        );
+    }
+
+    /// `min_rtt_ms` tracks the floor of Karn-valid samples: it starts unset,
+    /// takes the first sample, keeps the minimum thereafter, and ignores
+    /// retransmitted (tries > 1) deliveries entirely.
+    #[test]
+    fn test_min_rtt_tracks_karn_valid_floor() {
+        let mut channel = Channel::new();
+        let msg = TestMessage { data: vec![1] };
+
+        assert_eq!(channel.min_rtt_ms(), None);
+
+        // First delivery: 100 ms sample.
+        channel.send(&msg, MDU, 1000, 100).unwrap();
+        assert!(channel.mark_delivered(0, 1100, 100));
+        assert_eq!(channel.min_rtt_ms(), Some(100));
+
+        // Faster delivery lowers the floor.
+        channel.send(&msg, MDU, 2000, 100).unwrap();
+        assert!(channel.mark_delivered(1, 2040, 100));
+        assert_eq!(channel.min_rtt_ms(), Some(40));
+
+        // Slower delivery does not raise it.
+        channel.send(&msg, MDU, 3000, 100).unwrap();
+        assert!(channel.mark_delivered(2, 3300, 100));
+        assert_eq!(channel.min_rtt_ms(), Some(40));
+
+        // A retransmitted envelope (tries > 1 after a timeout retransmit) is
+        // Karn-excluded: even an apparently-tiny RTT must not move the floor.
+        channel.send(&msg, MDU, 4000, 100).unwrap();
+        let actions = channel.poll(100_000, 100);
+        assert!(matches!(&actions[0], ChannelAction::Retransmit { .. }));
+        assert!(channel.mark_delivered(3, 100_001, 100));
+        assert_eq!(channel.min_rtt_ms(), Some(40));
+    }
+
+    /// Window-full and pacing rejections increment their distinct counters —
+    /// the congestion-limited vs pacing-limited backpressure signals.
+    #[test]
+    fn test_backpressure_rejection_counters() {
+        let mut channel = Channel::new();
+        let msg = TestMessage { data: vec![1] };
+
+        assert_eq!(channel.busy_rejections(), 0);
+        assert_eq!(channel.pacing_rejections(), 0);
+
+        // Fill the window (initial window = CHANNEL_WINDOW_INITIAL) with
+        // sends spaced past any pacing delay, then one more send must be Busy.
+        let mut now = 1_000u64;
+        while channel.is_ready_to_send() {
+            channel.send(&msg, MDU, now, 100).unwrap();
+            now += channel.pacing_interval_ms().max(1) + 1;
+        }
+        assert!(matches!(
+            channel.send(&msg, MDU, now, 100),
+            Err(ChannelError::Busy)
+        ));
+        assert_eq!(channel.busy_rejections(), 1);
+        assert_eq!(channel.pacing_rejections(), 0);
+
+        // Free a slot, then send again immediately inside the pacing window.
+        assert!(channel.mark_delivered(0, now, 100));
+        let ready_at = channel.next_send_at_ms();
+        if ready_at > 0 {
+            assert!(matches!(
+                channel.send(&msg, MDU, ready_at - 1, 100),
+                Err(ChannelError::PacingDelay { .. })
+            ));
+            assert_eq!(channel.pacing_rejections(), 1);
+            assert_eq!(channel.busy_rejections(), 1, "busy count untouched");
+        }
     }
 
     #[test]

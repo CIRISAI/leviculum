@@ -136,27 +136,22 @@ fn ensure_single_segment_internal_resource_size(
 /// Link statistics for observability
 #[derive(Debug, Clone)]
 pub struct LinkStats {
-    tx_ring_size: usize,
-    window: usize,
-    window_max: usize,
-    pacing_interval_ms: u64,
+    pub(crate) tx_ring_size: usize,
+    pub(crate) window: usize,
+    pub(crate) window_max: usize,
+    pub(crate) pacing_interval_ms: u64,
+    // — per-link delivery telemetry (leviculum#35) —
+    pub(crate) bytes_delivered: u64,
+    pub(crate) srtt_ms: Option<f64>,
+    pub(crate) rttvar_ms: Option<f64>,
+    pub(crate) min_rtt_ms: Option<u64>,
+    pub(crate) rtt_ms: Option<u64>,
+    pub(crate) busy_rejections: u64,
+    pub(crate) pacing_rejections: u64,
+    pub(crate) iface_pacing_rejections: u64,
 }
 
 impl LinkStats {
-    pub(crate) fn new(
-        tx_ring_size: usize,
-        window: usize,
-        window_max: usize,
-        pacing_interval_ms: u64,
-    ) -> Self {
-        Self {
-            tx_ring_size,
-            window,
-            window_max,
-            pacing_interval_ms,
-        }
-    }
-
     /// Number of outstanding (unacknowledged) messages in the channel tx ring
     pub fn tx_ring_size(&self) -> usize {
         self.tx_ring_size
@@ -175,6 +170,58 @@ impl LinkStats {
     /// Current pacing interval between sends (milliseconds)
     pub fn pacing_interval_ms(&self) -> u64 {
         self.pacing_interval_ms
+    }
+
+    /// Cumulative bytes confirmed delivered on this link: channel envelopes
+    /// removed by delivery proofs plus completed outgoing resource transfers.
+    ///
+    /// This is the BBR-style delivery-rate numerator (leviculum#35): sample it
+    /// periodically (e.g. 1 Hz) and difference consecutive readings for
+    /// bytes-per-interval. Monotonic per link; resets only with the link.
+    pub fn bytes_delivered(&self) -> u64 {
+        self.bytes_delivered
+    }
+
+    /// Smoothed RTT from Karn-valid delivery-proof round-trips (RFC 6298
+    /// EWMA), in milliseconds. `None` until the first valid sample.
+    pub fn srtt_ms(&self) -> Option<f64> {
+        self.srtt_ms
+    }
+
+    /// RTT variance companion to [`srtt_ms`](Self::srtt_ms), in milliseconds.
+    pub fn rttvar_ms(&self) -> Option<f64> {
+        self.rttvar_ms
+    }
+
+    /// Minimum Karn-valid delivery RTT observed, in milliseconds — the
+    /// conservative propagation-delay floor (leviculum#35).
+    pub fn min_rtt_ms(&self) -> Option<u64> {
+        self.min_rtt_ms
+    }
+
+    /// The handshake RTT measured at link establishment, in milliseconds.
+    pub fn rtt_ms(&self) -> Option<u64> {
+        self.rtt_ms
+    }
+
+    /// Cumulative sends rejected because the channel window was full — the
+    /// congestion-limited signal (leviculum#35): a non-zero delta over an
+    /// interval means the link was backpressured while the app had more to
+    /// send, so a delivery-rate sample from that interval is a *floor*, not a
+    /// ceiling.
+    pub fn busy_rejections(&self) -> u64 {
+        self.busy_rejections
+    }
+
+    /// Cumulative sends rejected by the link pacer (leviculum#35).
+    pub fn pacing_rejections(&self) -> u64 {
+        self.pacing_rejections
+    }
+
+    /// Cumulative sends rejected by the attached interface's airtime/next-slot
+    /// gate before reaching the channel (leviculum#35).
+    pub fn iface_pacing_rejections(&self) -> u64 {
+        self.iface_pacing_rejections
     }
 }
 
