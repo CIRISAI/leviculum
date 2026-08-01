@@ -414,7 +414,7 @@ pub fn insert_image_rows(
             Some((link.line, *rows))
         })
         .collect();
-    pending.sort_by(|a, b| b.0.cmp(&a.0));
+    pending.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
     for (line, rows) in pending {
         if line >= lines.len() {
