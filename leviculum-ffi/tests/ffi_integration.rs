@@ -1467,11 +1467,7 @@ fn link_stats_project_delivery_telemetry() {
     );
     assert_eq!(id_len, 16);
 
-    let read_stats = |bytes: &mut u64,
-                      srtt: &mut f64,
-                      min_rtt: &mut i64,
-                      busy: &mut u64|
-     -> i32 {
+    let read_stats = |bytes: &mut u64, srtt: &mut f64, min_rtt: &mut i64, busy: &mut u64| -> i32 {
         unsafe {
             lev_link_stats(
                 p.b.0,
@@ -1494,7 +1490,10 @@ fn link_stats_project_delivery_telemetry() {
 
     // Baseline: nothing delivered yet, estimators unset, no backpressure.
     let (mut bytes, mut srtt, mut min_rtt, mut busy) = (u64::MAX, 0.0f64, 0i64, u64::MAX);
-    assert_eq!(read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy), LEV_OK);
+    assert_eq!(
+        read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy),
+        LEV_OK
+    );
     assert_eq!(bytes, 0, "nothing proofed yet");
     assert_eq!(srtt, -1.0, "SRTT unset is projected as -1.0");
     assert_eq!(min_rtt, -1, "min-RTT unset is projected as -1");
@@ -1510,20 +1509,32 @@ fn link_stats_project_delivery_telemetry() {
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        assert_eq!(read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy), LEV_OK);
+        assert_eq!(
+            read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy),
+            LEV_OK
+        );
         if bytes > 0 || std::time::Instant::now() > deadline {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(bytes >= 64, "a proofed 64-byte send must count, got {bytes}");
-    assert!(srtt >= 0.0, "SRTT must be seeded (handshake or delivery sample)");
+    assert!(
+        bytes >= 64,
+        "a proofed 64-byte send must count, got {bytes}"
+    );
+    assert!(
+        srtt >= 0.0,
+        "SRTT must be seeded (handshake or delivery sample)"
+    );
     // A loopback proof can round-trip inside one millisecond; a 0 ms sample is
     // Karn-style discarded, so min-RTT may legitimately still be unset here.
     // Its projected VALUE semantics are pinned deterministically at core level
     // (MockClock); this asserts the projection stays in the contract's domain.
     assert!(min_rtt >= -1, "min-RTT projection out of domain: {min_rtt}");
-    assert_eq!(busy, 0, "an app-limited link must show zero busy rejections");
+    assert_eq!(
+        busy, 0,
+        "an app-limited link must show zero busy rejections"
+    );
 
     // Unknown link id -> LEV_ERR_LINK; NULL node -> LEV_ERR_NULL_PTR.
     let bogus = [0xEEu8; 16];
