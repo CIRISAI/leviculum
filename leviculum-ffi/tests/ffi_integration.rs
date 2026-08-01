@@ -552,6 +552,14 @@ fn request_response_echo() {
     let got_path = read2(|b, c, l| unsafe { lev_event_path(rr.0, b, c, l) }).unwrap();
     assert_eq!(got_path, b"/echo");
     assert_eq!(event_data(&rr), req);
+    // The destination the request was addressed to: several destinations may
+    // share a request path, so a C responder hosting more than one needs this
+    // to pick the endpoint.
+    assert_eq!(
+        support::event_dest_hash(&rr),
+        p.dest,
+        "the request event must name its destination"
+    );
     let a_link = event_link_id(&rr);
     let got_id = read2(|b, c, l| unsafe { lev_event_request_id(rr.0, b, c, l) }).unwrap();
     assert_eq!(
@@ -1320,4 +1328,256 @@ fn send_on_closed_link_fails() {
     std::thread::sleep(Duration::from_millis(200));
     let rc = unsafe { lev_link_send(lb.0, b"x".as_ptr(), 1, 1000) };
     assert_ne!(rc, LEV_OK, "send on a closed link must fail");
+}
+
+/// The whole point of the interface id: an id a C app receives from an event
+/// must resolve to an interface it can look up.
+///
+/// Until `lev_interface_stats_id` existed, the snapshot was addressable only by
+/// position, so an id had nothing to be compared against — which is why the
+/// three `interface_index` fields were not projected at all. This drives the
+/// full chain on a real interface: B receives A's announce, reads the id off the
+/// event, finds the interface with that id in its snapshot, reads its name, and
+/// checks the path B learned from that announce is attributed to the same id.
+///
+/// The id-is-not-a-position half cannot be shown here (a one-interface node has
+/// id 0 at position 0); `stats_id_reports_the_node_assigned_id_not_the_position`
+/// pins that on a snapshot with gaps.
+#[test]
+fn announce_interface_id_resolves_to_an_interface() {
+    let port = support::free_port();
+    let da = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let ida = Identity::generate();
+    let id_ptr = ida.0;
+    let addr = format!("127.0.0.1:{port}");
+    let addr_c = cstr(&addr);
+    let server_ptr = addr_c.as_ptr();
+    let a = start_node(da.path(), |b| unsafe {
+        assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
+    });
+    let bnode = start_node(db.path(), |b| unsafe {
+        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+    });
+    let dest = register_single_dest(a.0, id_ptr, "levtest", &["iface"]);
+
+    let mut ann = None;
+    for _ in 0..50 {
+        unsafe { lev_announce(a.0, dest.as_ptr(), ptr::null(), 0, 2000) };
+        if let Some(ev) = wait_event(
+            bnode.0,
+            LEV_EVENT_ANNOUNCE_RECEIVED,
+            Duration::from_millis(400),
+        ) {
+            if support::event_dest_hash(&ev) == dest {
+                ann = Some(ev);
+                break;
+            }
+        }
+    }
+    let ann = ann.expect("B never saw A's announce");
+
+    let mut event_iface = u64::MAX;
+    assert_eq!(
+        unsafe { lev_event_interface_id(ann.0, &mut event_iface) },
+        LEV_OK,
+        "an announce must name the interface it arrived on: {}",
+        last_error()
+    );
+
+    // Resolve the id against the snapshot, the way a C app would.
+    let table = unsafe { lev_interface_stats_snapshot(bnode.0) };
+    assert!(!table.is_null());
+    let count = unsafe { lev_interface_stats_count(table) };
+    assert!(count > 0, "B has at least its TCP client interface");
+    let mut name = None;
+    for i in 0..count as usize {
+        let mut id = u64::MAX;
+        assert_eq!(unsafe { lev_interface_stats_id(table, i, &mut id) }, LEV_OK);
+        if id == event_iface {
+            let mut buf = [0u8; 128];
+            let mut len = 0usize;
+            assert_eq!(
+                unsafe {
+                    lev_interface_stats_name(table, i, buf.as_mut_ptr(), buf.len(), &mut len)
+                },
+                LEV_OK
+            );
+            name = Some(String::from_utf8_lossy(&buf[..len]).into_owned());
+            break;
+        }
+    }
+    unsafe { lev_interface_stats_free(table) };
+    let name = name.unwrap_or_else(|| {
+        panic!("no interface in B's snapshot has id {event_iface} — the id the announce carried names nothing a C app can look up")
+    });
+    assert!(!name.is_empty(), "the resolved interface has a name");
+
+    // The path that announce created is attributed to the same interface, so the
+    // two numbering schemes really are one.
+    let paths = unsafe { lev_path_table_snapshot(bnode.0) };
+    assert!(!paths.is_null());
+    let mut path_iface = None;
+    for i in 0..unsafe { lev_path_table_count(paths) } as usize {
+        let mut hash = [0u8; 16];
+        let mut iface = u64::MAX;
+        assert_eq!(
+            unsafe {
+                lev_path_table_entry(
+                    paths,
+                    i,
+                    hash.as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut iface,
+                    ptr::null_mut(),
+                )
+            },
+            LEV_OK
+        );
+        if hash == dest {
+            path_iface = Some(iface);
+        }
+    }
+    unsafe { lev_path_table_free(paths) };
+    assert_eq!(
+        path_iface,
+        Some(event_iface),
+        "lev_path_table_entry's interface_index and lev_event_interface_id must \
+         be the same numbering, or neither resolves through the snapshot"
+    );
+}
+
+// leviculum#35 (PR #154 companion): the per-link delivery telemetry must be
+// reachable from C. `lev_link_stats` projects every LinkStats field; here the
+// live ones move: a proofed channel send advances bytes_delivered and seeds
+// the RTT estimators, while an app-limited link keeps busy_rejections at 0.
+#[test]
+fn link_stats_project_delivery_telemetry() {
+    let p = setup_pair();
+    let (lb, _la) = establish_link(&p.a, &p.b, &p.dest);
+
+    let mut link_id = [0u8; 16];
+    let mut id_len = 0usize;
+    assert_eq!(
+        unsafe { lev_link_id(lb.0, link_id.as_mut_ptr(), 16, &mut id_len) },
+        LEV_OK
+    );
+    assert_eq!(id_len, 16);
+
+    let read_stats = |bytes: &mut u64, srtt: &mut f64, min_rtt: &mut i64, busy: &mut u64| -> i32 {
+        unsafe {
+            lev_link_stats(
+                p.b.0,
+                link_id.as_ptr(),
+                bytes,
+                srtt,
+                ptr::null_mut(),
+                min_rtt,
+                ptr::null_mut(),
+                busy,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        }
+    };
+
+    // Baseline: nothing delivered yet, estimators unset, no backpressure.
+    let (mut bytes, mut srtt, mut min_rtt, mut busy) = (u64::MAX, 0.0f64, 0i64, u64::MAX);
+    assert_eq!(
+        read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy),
+        LEV_OK
+    );
+    assert_eq!(bytes, 0, "nothing proofed yet");
+    assert_eq!(srtt, -1.0, "SRTT unset is projected as -1.0");
+    assert_eq!(min_rtt, -1, "min-RTT unset is projected as -1");
+    assert_eq!(busy, 0);
+
+    // One proofed send must advance the counter and seed the estimators.
+    let msg = [0x5Au8; 64];
+    assert_eq!(
+        unsafe { lev_link_send(lb.0, msg.as_ptr(), msg.len(), 5000) },
+        LEV_OK,
+        "send: {}",
+        last_error()
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert_eq!(
+            read_stats(&mut bytes, &mut srtt, &mut min_rtt, &mut busy),
+            LEV_OK
+        );
+        if bytes > 0 || std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        bytes >= 64,
+        "a proofed 64-byte send must count, got {bytes}"
+    );
+    assert!(
+        srtt >= 0.0,
+        "SRTT must be seeded (handshake or delivery sample)"
+    );
+    // A loopback proof can round-trip inside one millisecond; a 0 ms sample is
+    // Karn-style discarded, so min-RTT may legitimately still be unset here.
+    // Its projected VALUE semantics are pinned deterministically at core level
+    // (MockClock); this asserts the projection stays in the contract's domain.
+    assert!(min_rtt >= -1, "min-RTT projection out of domain: {min_rtt}");
+    assert_eq!(
+        busy, 0,
+        "an app-limited link must show zero busy rejections"
+    );
+
+    // Unknown link id -> LEV_ERR_LINK; NULL node -> LEV_ERR_NULL_PTR.
+    let bogus = [0xEEu8; 16];
+    assert_eq!(
+        unsafe {
+            lev_link_stats(
+                p.b.0,
+                bogus.as_ptr(),
+                &mut bytes,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        LEV_ERR_LINK
+    );
+    assert_eq!(
+        unsafe {
+            lev_link_stats(
+                ptr::null(),
+                link_id.as_ptr(),
+                &mut bytes,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        },
+        LEV_ERR_NULL_PTR
+    );
 }

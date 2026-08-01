@@ -205,7 +205,12 @@ async fn test_python_prove_all_sends_proof() {
 
     // Send our announce so Python knows where to send the proof
     let announce_packet = our_dest
-        .announce(None, &mut OsRng, crate::common::now_ms())
+        .announce(
+            None,
+            &mut OsRng,
+            crate::common::now_ms(),
+            crate::common::now_ms() / 1000,
+        )
         .expect("Failed to create announce");
 
     let mut announce_raw = [0u8; MTU];

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use leviculum_core::constants::MTU;
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+use leviculum_core::rnode::derive_preamble_symbols;
 use leviculum_core::transport::InterfaceId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -48,6 +49,58 @@ pub(crate) struct SerialRadioConfig {
     pub tx_power: i8,
     pub preamble_len: u16,
     pub csma_enabled: bool,
+    /// Long-term airtime lock in the firmware's `fraction * 10000` encoding;
+    /// `0` is what the firmware reads as unlimited.
+    pub lt_alock: u16,
+}
+
+/// Build the LNode radio config a `SerialInterface` block asks for, or
+/// `None` when the block names no `frequency` and is therefore a plain
+/// (non-LoRa) serial pipe.
+///
+/// Every PHY default here is the firmware's own compiled default
+/// (`leviculum_nrf::lora::RadioConfig::eu_medium`), with one exception the
+/// preamble makes necessary. The firmware's compiled 24 is a constant for
+/// every spreading factor, while the RNode firmware — our reference for LoRa
+/// PHY behaviour — scales the preamble to a target duration and floors it at
+/// 18 symbols. The two agree at SF7/BW125 and disagree from SF8 down, so a
+/// constant here is a wire-level deviation that costs interop with every
+/// RNode peer in the long-range regime. The default is therefore
+/// [`derive_preamble_symbols`], and `preamble_symbols` in the config file
+/// still overrides it — which is how the corner gets re-measured, and how a
+/// node with a non-conforming peer copes.
+///
+/// The airtime lock resolves the same way, and for the same reason. An
+/// LNode is configured by this function and by nothing else, so a hardcoded
+/// `lt_alock = 0` here was the host telling the firmware "unlimited" and
+/// overriding the lawful default the firmware would otherwise have derived
+/// from its own frequency ([`firmware_default_lt_alock`]). Sending the
+/// resolution instead of a constant means an LNode ends up under the same
+/// limit as an RNode on the same frequency (`driver::resolve_lt_alock`),
+/// and `airtime_limit_long` in the config file still overrides it — with
+/// `0` still available for a bench that means unlimited and says so.
+pub(crate) fn serial_radio_config(
+    cfg: &crate::config::InterfaceConfig,
+) -> Option<SerialRadioConfig> {
+    let frequency = cfg.frequency?;
+    let bandwidth = cfg.bandwidth.unwrap_or(125_000);
+    let spreading_factor = cfg.spreading_factor.unwrap_or(7);
+    let coding_rate = cfg.coding_rate.unwrap_or(5);
+    Some(SerialRadioConfig {
+        frequency,
+        bandwidth,
+        spreading_factor,
+        coding_rate,
+        tx_power: cfg.tx_power.unwrap_or(17),
+        preamble_len: cfg
+            .preamble_symbols
+            .unwrap_or_else(|| derive_preamble_symbols(spreading_factor, coding_rate, bandwidth)),
+        csma_enabled: cfg.csma_enabled.unwrap_or(true),
+        lt_alock: leviculum_core::rnode::firmware_default_lt_alock(
+            frequency,
+            cfg.airtime_limit_long.map(|p| (p * 100.0) as u16),
+        ),
+    })
 }
 
 /// Configuration for a serial interface.
@@ -86,6 +139,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
             rc.bandwidth,
             rc.spreading_factor,
             rc.coding_rate,
+            rc.preamble_len,
             SERIAL_HW_MTU,
         )))
     });
@@ -113,6 +167,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Serial,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -148,10 +203,11 @@ async fn send_radio_config(
         csma_enabled: config.csma_enabled,
         radio_silent: false,
         // Airtime limits are enforced by the LNode firmware's airtime lock.
-        // 0 = unlimited; host-config plumbing of a non-zero limit is a
-        // separate follow-on (the firmware honours whatever it receives here).
+        // Short-term stays unset (no config key spells one); long-term is
+        // resolved in `serial_radio_config` — lawful for the frequency
+        // unless `airtime_limit_long` says otherwise.
         st_alock: 0,
-        lt_alock: 0,
+        lt_alock: config.lt_alock,
         // Send-side only; `build_radio_config_frame` always emits the full
         // 21-byte frame, so the receiver parses the lt_alock field as present.
         lt_alock_present: true,
@@ -207,6 +263,7 @@ async fn send_radio_config(
                                         config.bandwidth,
                                         config.spreading_factor,
                                         config.coding_rate,
+                                        config.preamble_len,
                                     );
                                 }
                                 return true;
@@ -449,6 +506,167 @@ pub(crate) fn parse_stop_bits(n: u8) -> tokio_serial::StopBits {
 mod tests {
     use super::*;
 
+    /// An LNode is lawful out of the box: with no `airtime_limit_long` in
+    /// the config, the frequency's own ETSI sub-band limit is what gets
+    /// pushed, not the 0 (unlimited) this used to hardcode.
+    #[test]
+    fn absent_airtime_limit_pushes_the_lawful_limit_for_the_frequency() {
+        let at = |frequency, explicit| {
+            serial_radio_config(&crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(frequency),
+                airtime_limit_long: explicit,
+                ..Default::default()
+            })
+            .expect("frequency present → radio config")
+            .lt_alock
+        };
+        // 869.525 MHz is ETSI sub-band P: 10% -> 0.10 * 10000.
+        assert_eq!(at(869_525_000, None), 1000);
+        // 868.1 MHz is sub-band M: 1%. The limit follows the frequency, so a
+        // node that moves band moves limit without touching its config.
+        assert_eq!(at(868_100_000, None), 100);
+        // Outside the band this build can cite, nothing is invented.
+        assert_eq!(at(915_000_000, None), 0);
+        // An explicit value still wins, including an explicit 0: a bench
+        // that means unlimited says so, and the host does not second-guess.
+        assert_eq!(at(869_525_000, Some(5.0)), 500);
+        assert_eq!(at(869_525_000, Some(0.0)), 0);
+    }
+
+    /// The whole point of the key: a `preamble_symbols` written in a config
+    /// file has to survive as far as the bytes on the wire. This drives the
+    /// same `serial_radio_config` the driver calls and then the same
+    /// `build_radio_config_frame` `send_radio_config` calls, and reads the
+    /// preamble back out of the frame — so it fails if any link of the
+    /// chain drops the value, not merely if the struct field is unset.
+    #[test]
+    fn preamble_symbols_travels_from_config_to_wire_frame() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(869_525_000),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(10),
+            coding_rate: Some(8),
+            tx_power: Some(17),
+            preamble_symbols: Some(18),
+            ..Default::default()
+        };
+        let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.preamble_len, 18);
+
+        let payload = leviculum_core::rnode::build_radio_config_frame(
+            &leviculum_core::rnode::RadioConfigWire {
+                frequency_hz: radio.frequency as u32,
+                bandwidth_hz: radio.bandwidth,
+                sf: radio.spreading_factor,
+                cr: radio.coding_rate,
+                tx_power_dbm: radio.tx_power,
+                preamble_len: radio.preamble_len,
+                csma_enabled: radio.csma_enabled,
+                radio_silent: false,
+                st_alock: 0,
+                lt_alock: 0,
+                lt_alock_present: true,
+            },
+        );
+        // Strip the 2-byte magic the parser expects to be gone.
+        let parsed =
+            leviculum_core::rnode::parse_radio_config(&payload[2..]).expect("frame parses back");
+        assert_eq!(parsed.preamble_len, 18);
+    }
+
+    /// A block that omits the key gets the preamble the RNode firmware would
+    /// program for the same PHY, not a constant. At the block's own defaults
+    /// (SF7/BW125) that derives 24 — the value this code pushed before the
+    /// derivation existed — so every config file that named no spreading
+    /// factor still means exactly what it meant.
+    #[test]
+    fn absent_preamble_symbols_derives_the_reference_value() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(869_525_000),
+            ..Default::default()
+        };
+        let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.spreading_factor, 7);
+        assert_eq!(radio.preamble_len, 24);
+    }
+
+    /// The defect this closes, at the interface boundary. The same block at
+    /// SF10 used to push 24 while the RNode on the far end programmed 18,
+    /// and a mixed pair resolved 4 of 20 path requests. Deriving gives 18 on
+    /// both sides. Written out per spreading factor rather than looped, so a
+    /// regression names the SF it broke.
+    #[test]
+    fn absent_preamble_symbols_scales_with_the_spreading_factor() {
+        let derived_at = |sf: u8| {
+            let cfg = crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(869_525_000),
+                bandwidth: Some(125_000),
+                spreading_factor: Some(sf),
+                coding_rate: Some(8),
+                ..Default::default()
+            };
+            serial_radio_config(&cfg)
+                .expect("frequency present → radio config")
+                .preamble_len
+        };
+        assert_eq!(derived_at(7), 24);
+        assert_eq!(derived_at(8), 18);
+        assert_eq!(derived_at(9), 18);
+        assert_eq!(derived_at(10), 18);
+        assert_eq!(derived_at(11), 18);
+        assert_eq!(derived_at(12), 18);
+    }
+
+    /// The override still wins over the derivation, including when it names
+    /// the value the derivation would have rejected. That is what makes the
+    /// corner re-measurable — an A/B over the preamble needs a way to pin the
+    /// old 24 on the fixed build — and what lets a node with a
+    /// non-conforming peer cope.
+    #[test]
+    fn explicit_preamble_symbols_overrides_the_derivation() {
+        let pinned = |sf: u8, preamble: u16| {
+            let cfg = crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(869_525_000),
+                bandwidth: Some(125_000),
+                spreading_factor: Some(sf),
+                coding_rate: Some(8),
+                preamble_symbols: Some(preamble),
+                ..Default::default()
+            };
+            serial_radio_config(&cfg)
+                .expect("frequency present → radio config")
+                .preamble_len
+        };
+        // The pre-fix constant, pinned back on at the SF where it is wrong.
+        assert_eq!(pinned(10, 24), 24);
+        // And a value below the reference's own floor, which the derivation
+        // would never produce.
+        assert_eq!(pinned(10, 8), 8);
+    }
+
+    /// No `frequency` means a plain serial pipe, not a LoRa modem: no radio
+    /// config is pushed at all, whatever the other keys say.
+    #[test]
+    fn no_frequency_means_no_radio_config() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            preamble_symbols: Some(18),
+            ..Default::default()
+        };
+        assert!(serial_radio_config(&cfg).is_none());
+    }
+
     fn base_config(port: &str, radio: Option<SerialRadioConfig>) -> SerialInterfaceConfig {
         SerialInterfaceConfig {
             id: InterfaceId(0),
@@ -476,6 +694,7 @@ mod tests {
             tx_power: 17,
             preamble_len: 24,
             csma_enabled: true,
+            lt_alock: 1000,
         };
         let handle = spawn_serial_interface(base_config("/dev/null-test-no-radio-a", Some(radio)));
         assert!(handle.credit.is_some());
@@ -518,6 +737,7 @@ mod tests {
             tx_power: 17,
             preamble_len: 24,
             csma_enabled: true,
+            lt_alock: 1000,
         };
         let handle = spawn_serial_interface(base_config("/dev/null-test-reconfig", Some(radio)));
         let credit_arc = handle
@@ -541,7 +761,7 @@ mod tests {
         credit_arc
             .lock()
             .unwrap()
-            .update_radio_params(125_000, 10, 8);
+            .update_radio_params(125_000, 10, 8, 18);
         // Under the new, more-permissive SF10 threshold, the carried-over
         // SF7 deficit leaves room for the same small packet.
         {

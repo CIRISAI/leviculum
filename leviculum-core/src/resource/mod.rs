@@ -33,6 +33,9 @@ pub(crate) mod msgpack;
 pub(crate) mod outgoing;
 pub mod window;
 
+pub use outgoing::{
+    prepare_resource_send, PreparedResourceSend, ResourceCryptParams, ResourceSendParams,
+};
 pub use window::{RateSample, WindowPolicy};
 
 use crate::constants::{
@@ -254,6 +257,11 @@ pub enum ResourceError {
     InvalidRequest,
     /// Advertised resource exceeds the configured size limit.
     ResourceTooLarge,
+    /// The link's state changed between an off-lock resource build and its
+    /// commit (e.g. a #66 establishment-retry re-key replaced the token key),
+    /// so the prepared ciphertext is no longer decryptable by the peer.
+    /// Retryable: re-run params -> prepare -> commit against the fresh state.
+    LinkStateChanged,
 }
 
 impl core::fmt::Display for ResourceError {
@@ -276,6 +284,9 @@ impl core::fmt::Display for ResourceError {
             Self::InvalidProof => write!(f, "invalid resource proof"),
             Self::InvalidRequest => write!(f, "invalid resource request"),
             Self::ResourceTooLarge => write!(f, "resource exceeds size limit"),
+            Self::LinkStateChanged => {
+                write!(f, "link state changed during off-lock resource build")
+            }
         }
     }
 }

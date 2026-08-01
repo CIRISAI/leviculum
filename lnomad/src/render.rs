@@ -360,6 +360,83 @@ pub struct RLine {
     pub cells: Vec<StyledChar>,
 }
 
+/// The links that stand alone on their line, by 1-based link index.
+///
+/// Only these can become inline pictures. A link inside a sentence has no
+/// rectangle to grow into without tearing the text apart, and an author who
+/// writes an image in Markdown gets a paragraph of its own anyway — which is
+/// exactly what lblogd renders and what this rule then recognises.
+///
+/// "Alone" means the line holds no visible character outside the link's own
+/// columns: leading indentation and trailing spaces do not count.
+pub fn standalone_links(lines: &[RLine], links: &[RenderedLink]) -> Vec<usize> {
+    links
+        .iter()
+        .filter(|link| {
+            let Some(line) = lines.get(link.line) else {
+                return false;
+            };
+            line.cells
+                .iter()
+                .enumerate()
+                .all(|(col, cell)| (col >= link.col_start && col < link.col_end) || cell.ch == ' ')
+        })
+        .map(|link| link.index)
+        .collect()
+}
+
+/// Reserve rows under laid-out links, shifting everything below down.
+///
+/// `reserved` gives `(1-based link index, rows)` pairs; each link's line gains
+/// that many blank rows immediately under it, which the caller then draws an
+/// image (or a status line) into. Every stored line index — links, fields, the
+/// block-to-line map used by `#anchor` navigation — is moved with the text, so
+/// hit-testing, focus and anchors keep pointing at what they pointed at.
+///
+/// A separate pass rather than a parameter to [`layout_blocks`]: the reserved
+/// height is not known until an image has been fetched and decoded, which
+/// happens long after the page was first laid out, and keeping it out of the
+/// renderer means the frozen `--print` output cannot be disturbed by it.
+pub fn insert_image_rows(
+    lines: &mut Vec<RLine>,
+    links: &mut [RenderedLink],
+    fields: &mut [RenderedField],
+    block_lines: &mut [usize],
+    reserved: &[(usize, u16)],
+) {
+    // Insert from the bottom up so an earlier insertion cannot move the line
+    // a later one was measured against.
+    let mut pending: Vec<(usize, u16)> = reserved
+        .iter()
+        .filter(|(_, rows)| *rows > 0)
+        .filter_map(|(index, rows)| {
+            let link = links.iter().find(|l| l.index == *index)?;
+            Some((link.line, *rows))
+        })
+        .collect();
+    pending.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+
+    for (line, rows) in pending {
+        if line >= lines.len() {
+            continue;
+        }
+        let at = line + 1;
+        for _ in 0..rows {
+            lines.insert(at, RLine::default());
+        }
+        let rows = rows as usize;
+        for link in links.iter_mut().filter(|l| l.line >= at) {
+            link.line += rows;
+        }
+        for field in fields.iter_mut().filter(|f| f.line >= at) {
+            field.line += rows;
+        }
+        for block in block_lines.iter_mut().filter(|b| **b >= at) {
+            *block += rows;
+        }
+    }
+}
+
 struct Renderer<'a> {
     lines: Vec<RLine>,
     links: Vec<RenderedLink>,

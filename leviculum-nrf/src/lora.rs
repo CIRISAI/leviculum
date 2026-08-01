@@ -141,6 +141,13 @@ impl RadioConfig {
             bw: 0x04,
             cr: 0x01,
             tx_power_dbm: 17,
+            // 24 is not an SF-independent constant, it is what the RNode
+            // firmware's own derivation yields at this profile's SF7/BW125
+            // (`leviculum_core::rnode::derive_preamble_symbols`). The host
+            // sends the derived value for whatever PHY it configures; this
+            // compiled default only ever applies at SF7, where the two agree.
+            // A firmware that ever changes SF without a host frame would have
+            // to derive it here too.
             preamble_len: 24,
             bw_hz: 125_000,
             cr_denom: 5,
@@ -280,8 +287,13 @@ fn compute_slot_ms(cfg: &RadioConfig) -> u64 {
 fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
     // One full LoRa frame on the wire (header + max single payload).
     let reply_bytes = (leviculum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32;
-    let reply_airtime =
-        leviculum_core::rnode::airtime_ms(reply_bytes, cfg.bw_hz, cfg.sf, cfg.cr_denom);
+    let reply_airtime = leviculum_core::rnode::airtime_ms_with_preamble(
+        reply_bytes,
+        cfg.bw_hz,
+        cfg.sf,
+        cfg.cr_denom,
+        cfg.preamble_len,
+    );
     // Peer turnaround: host processing jitter + its DIFS-equivalent (2 slots).
     let turnaround = leviculum_core::rnode::PACING_MARGIN_MS + 2 * compute_slot_ms(cfg);
     // Clamp to >=1ms (the SX1262 needs a non-zero timeout) and a sane ceiling.
@@ -368,16 +380,28 @@ async fn transmit_all_frames(
                 ),
             );
         }
-        match radio.transmit(frame, 5000).await {
+        // Timeout sized from the frame's on-air time at the live modulation
+        // (10.69 s for a 184 B announce at SF12/BW125/CR4:8/preamble-18); a
+        // fixed 5000 ms here aborted every SF12 frame mid-air.
+        let tx_timeout_ms = leviculum_core::sx126x::tx_timeout_ms(
+            frame.len() as u32,
+            config.bw_hz,
+            config.sf,
+            config.cr_denom,
+            config.preamble_len,
+        );
+        match radio.transmit(frame, tx_timeout_ms).await {
             Ok(()) => {
-                // Record this frame's on-air time (header included, matching
-                // the RNode firmware's `add_airtime(written)`).
+                // Record this frame's on-air time (header and programmed
+                // preamble included, matching the RNode firmware's
+                // `add_airtime(written)`).
                 let now_ms = embassy_time::Instant::now().as_millis();
-                let cost = leviculum_core::rnode::airtime_ms(
+                let cost = leviculum_core::rnode::frame_airtime_cost_ms(
                     frame.len() as u32,
                     config.bw_hz,
                     config.sf,
                     config.cr_denom,
+                    config.preamble_len,
                 );
                 airtime.add_airtime(now_ms, cost);
             }
@@ -725,6 +749,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 config.bw_hz,
                 config.sf,
                 config.cr_denom,
+                config.preamble_len,
             );
 
             if !config.csma_enabled {

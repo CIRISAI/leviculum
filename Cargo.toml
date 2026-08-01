@@ -5,10 +5,10 @@ members = [
     "leviculum-micron",
     "lnomad",
     "lblogd",
+    "leviculum-lxmf",
     "leviculum-std",
     "leviculum-ffi",
     "leviculum-cli",
-    "reticulum-integ",
     "leviculum-proxy",
 ]
 
@@ -24,7 +24,6 @@ default-members = [
     "lblogd",
     "leviculum-std",
     "leviculum-cli",
-    "reticulum-integ",
     "leviculum-proxy",
 ]
 
@@ -41,7 +40,7 @@ exclude = ["leviculum-nrf", "vendor/crossterm"]
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
@@ -62,6 +61,8 @@ md-5 = { version = "0.10" }
 hkdf = { version = "0.12", default-features = false }
 rand_core = { version = "0.6", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# MessagePack wire primitives for the no_std + alloc LXMF codec.
+rmp = { version = "0.8.15", default-features = false }
 
 # std dependencies
 tokio = { version = "1", features = ["full"] }
@@ -92,6 +93,9 @@ axum-server = "0.8"
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
+# Filesystem watching for lblogd's optional posts auto-reload. Version 8 is
+# the stable line; 9 is still a release candidate.
+notify = "8"
 
 # FFI
 libc = "0.2"

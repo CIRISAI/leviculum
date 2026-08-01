@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use crate::sync_ext::MutexRecover;
 
 use leviculum_core::constants::{DEFAULT_PER_HOP_TIMEOUT, MTU, TRUNCATED_HASHBYTES};
+use leviculum_core::traits::InterfaceKind;
 use serde_pickle::value::{HashableValue, Value};
 
 use super::error::RpcError;
@@ -311,7 +312,7 @@ pub(crate) fn build_interface_stats(
         }
 
         let iface_hash = compute_interface_hash(&entry.name);
-        let itype = interface_type(&entry.name);
+        let itype = interface_type(entry.kind, &entry.name);
 
         // Read byte counters and compute speeds from the shared counters
         let (rxb, txb, rxs, txs) = counters_map
@@ -870,8 +871,44 @@ fn short_name(name: &str) -> String {
     name.to_string()
 }
 
-/// Infer interface type from name.
-fn interface_type(name: &str) -> String {
+/// Reported interface type.
+///
+/// The transport the interface was built over is authoritative: the name is a
+/// peer/instance label the driver generates (`rnode_0`, `i2p_0_to_<peer>`,
+/// `autoconnect/<addr>`), so classifying by it reports the wrong medium for
+/// every interface whose label carries no transport prefix. The name is still
+/// consulted for the TCP client/server split, which the kind does not carry,
+/// and as the fallback for interfaces that register no kind.
+fn interface_type(kind: InterfaceKind, name: &str) -> String {
+    match kind {
+        InterfaceKind::Tcp => {
+            if name.starts_with("tcp_server") || name.starts_with("TCPServer") {
+                "TCPServerInterface"
+            } else {
+                "TCPClientInterface"
+            }
+        }
+        InterfaceKind::Udp => "UDPInterface",
+        InterfaceKind::I2p => "I2PInterface",
+        InterfaceKind::Serial => "SerialInterface",
+        InterfaceKind::Rnode => "RNodeInterface",
+        InterfaceKind::Kiss => "KISSInterface",
+        InterfaceKind::Local => "LocalInterface",
+        InterfaceKind::Pipe => "PipeInterface",
+        InterfaceKind::Auto => "AutoInterface",
+        // Not `ChannelInterface`: Python's `RNS.Channel` is an unrelated
+        // link-layer concept, and byte-channel names are caller-supplied, so
+        // the name heuristic must not get a say here.
+        InterfaceKind::Channel => "ByteChannelInterface",
+        InterfaceKind::Unknown => return interface_type_from_name(name),
+    }
+    .to_string()
+}
+
+/// Fallback classification for interfaces that register no transport kind
+/// (dynamically spawned interfaces that inherit `Unknown`, and out-of-tree
+/// `Interface` implementations that do not override `kind()`).
+fn interface_type_from_name(name: &str) -> String {
     if name.starts_with("AutoInterface") || name.starts_with("auto/") {
         "AutoInterface".to_string()
     } else if name.starts_with("tcp_client") || name.starts_with("TCPClient") {
@@ -970,24 +1007,78 @@ mod tests {
         assert_eq!(short_name("tcp_client_0"), "tcp_client_0");
     }
 
+    // The four name cases below pin the fallback an interface that registers no
+    // kind still gets, so they pass `InterfaceKind::Unknown` deliberately.
     #[test]
     fn test_interface_type_auto() {
-        assert_eq!(interface_type("AutoInterface[foo]"), "AutoInterface");
+        assert_eq!(
+            interface_type(InterfaceKind::Unknown, "AutoInterface[foo]"),
+            "AutoInterface"
+        );
     }
 
     #[test]
     fn test_interface_type_auto_peer() {
-        assert_eq!(interface_type("auto/eth0/abcd1234"), "AutoInterface");
+        assert_eq!(
+            interface_type(InterfaceKind::Unknown, "auto/eth0/abcd1234"),
+            "AutoInterface"
+        );
     }
 
     #[test]
     fn test_interface_type_tcp_client() {
-        assert_eq!(interface_type("tcp_client_0"), "TCPClientInterface");
+        assert_eq!(
+            interface_type(InterfaceKind::Unknown, "tcp_client_0"),
+            "TCPClientInterface"
+        );
     }
 
     #[test]
     fn test_interface_type_unknown() {
-        assert_eq!(interface_type("custom_iface"), "Interface");
+        assert_eq!(
+            interface_type(InterfaceKind::Unknown, "custom_iface"),
+            "Interface"
+        );
+    }
+
+    // The kind is authoritative where the name label carries no transport: the
+    // driver's own generated names for RNode, I2P, serial and discovery-
+    // autoconnected TCP interfaces all fall through the name heuristic.
+    #[test]
+    fn test_interface_type_prefers_kind_over_name_label() {
+        for (kind, name, expected) in [
+            (InterfaceKind::Rnode, "rnode_0", "RNodeInterface"),
+            (InterfaceKind::I2p, "i2p_0_to_peer", "I2PInterface"),
+            (InterfaceKind::Serial, "serial_0", "SerialInterface"),
+            (InterfaceKind::Kiss, "kiss_0", "KISSInterface"),
+            (InterfaceKind::Pipe, "pipe_0", "PipeInterface"),
+            (
+                InterfaceKind::Tcp,
+                "autoconnect/10.0.0.1:4242",
+                "TCPClientInterface",
+            ),
+            (
+                InterfaceKind::Tcp,
+                "tcp_server/10.0.0.1",
+                "TCPServerInterface",
+            ),
+            (InterfaceKind::Udp, "udp_0", "UDPInterface"),
+            (InterfaceKind::Local, "Local[lnsd]", "LocalInterface"),
+            (InterfaceKind::Auto, "auto/eth0/abcd", "AutoInterface"),
+            // Byte-channel names are caller-supplied, so a name the heuristic
+            // would misread must not override the registered kind.
+            (
+                InterfaceKind::Channel,
+                "tcp_client_app",
+                "ByteChannelInterface",
+            ),
+        ] {
+            assert_eq!(
+                interface_type(kind, name),
+                expected,
+                "kind={kind} name={name}"
+            );
+        }
     }
 
     #[test]
@@ -1297,5 +1388,57 @@ mod tests {
         assert_eq!(get("cpu_temp"), Some(Value::I64(25)));
         assert_eq!(get("battery_state"), Some(Value::String("charging".into())));
         assert_eq!(get("battery_percent"), Some(Value::I64(85)));
+    }
+
+    // Codeberg #140: the reported interface type must come from the transport
+    // the interface was built over, not from its name. The driver names a
+    // configured RNode interface `rnode_<idx>` (driver/mod.rs:1607) — a peer/
+    // instance label that matches none of `interface_type`'s name prefixes, so
+    // a LoRa radio is reported as the generic "Interface". That is not only a
+    // wrong medium column in rnstatus: `itype` also picks the bitrate guess
+    // (handlers.rs:341-345), so the radio is advertised at 10 Mbps.
+    #[test]
+    fn interface_type_comes_from_the_transport_not_the_name() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::{InterfaceCounters, InterfaceOnlineMap, InterfaceStatsMap};
+        use leviculum_core::node::NodeCoreBuilder;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-iface-kind-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        // Exactly what the driver registers for `[[RNode LoRa Interface]]`.
+        core.set_interface_name(0, "rnode_0".into());
+        core.set_interface_kind(0, InterfaceKind::Rnode);
+
+        let counters = Arc::new(InterfaceCounters::new());
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(0usize, counters)])));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let value = build_interface_stats(&mut core, std::time::Instant::now(), &stats, &online, 0);
+
+        let Value::Dict(top) = value else {
+            panic!("interface_stats must be a dict")
+        };
+        let Value::List(list) = top
+            .get(&HashableValue::String("interfaces".into()))
+            .expect("interfaces key")
+        else {
+            panic!("interfaces must be a list")
+        };
+        let Value::Dict(iface) = &list[0] else {
+            panic!("interface entry must be a dict")
+        };
+        let get = |k: &str| iface.get(&HashableValue::String(k.into())).cloned();
+        assert_eq!(
+            get("type"),
+            Some(Value::String("RNodeInterface".into())),
+            "a radio interface must be reported as an RNode, not classified by its name label"
+        );
     }
 }

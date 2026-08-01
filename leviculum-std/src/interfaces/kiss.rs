@@ -428,6 +428,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Kiss,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -693,7 +694,7 @@ mod tests {
         .expect("destination");
         let dest_hash = *dest.hash();
         let announce_packet = dest
-            .announce(Some(b"kiss-e2e"), &mut OsRng, 1_000)
+            .announce(Some(b"kiss-e2e"), &mut OsRng, 1_000, 1_000 / 1000)
             .expect("announce packet");
         let mut buf = [0u8; leviculum_core::constants::MTU];
         let len = announce_packet.pack(&mut buf).expect("pack announce");
@@ -832,7 +833,7 @@ mod tests {
         .expect("destination");
         let dest_hash = *dest.hash();
         let announce_packet = dest
-            .announce(Some(b"ax25-e2e"), &mut OsRng, 1_000)
+            .announce(Some(b"ax25-e2e"), &mut OsRng, 1_000, 1_000 / 1000)
             .expect("announce packet");
         let mut buf = [0u8; leviculum_core::constants::MTU];
         let len = announce_packet.pack(&mut buf).expect("pack announce");

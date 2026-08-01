@@ -108,9 +108,18 @@ pub struct EventSchema {
 /// can't detect it), so every entry here MUST have a corresponding
 /// `tracing::debug!(event = "FOO", ...)` in production code.
 pub const EVENT_CATALOG: &[EventSchema] = &[
+    // Per-packet journey contract (Periculum phase 6): PKT_RX / PKT_TX /
+    // PKT_FORWARD / PKT_DROP / DEDUP_DROP live on the dedicated
+    // `leviculum_core::pkt` tracing target and carry `ph`, the first
+    // 16 hex chars of the dedup packet hash, as the cross-node journey
+    // correlator. This layer sees every record regardless of target.
     EventSchema {
         name: "PKT_RX",
-        required_keys: &["iface", "type", "dst", "hops", "len"],
+        required_keys: &["iface", "type", "dst", "hops", "len", "ph"],
+    },
+    EventSchema {
+        name: "PKT_TX",
+        required_keys: &["iface", "hops", "len", "ph"],
     },
     EventSchema {
         name: "ANN_RX",
@@ -134,11 +143,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     },
     EventSchema {
         name: "PKT_DROP",
-        required_keys: &["dst", "hops", "iface_in", "reason", "type"],
+        required_keys: &["dst", "hops", "iface_in", "ph", "reason", "type"],
     },
     EventSchema {
         name: "PKT_FORWARD",
-        required_keys: &["dst", "hops", "iface_in", "iface_out", "next_hop", "type"],
+        required_keys: &[
+            "dst",
+            "hops",
+            "iface_in",
+            "iface_out",
+            "next_hop",
+            "ph",
+            "type",
+        ],
     },
     // Codeberg #66 observability: duplicate-hash drop in
     // process_incoming. Deliberately its own event name (not
@@ -147,10 +164,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // #66 failure class must be greppable by name alone.
     EventSchema {
         name: "DEDUP_DROP",
-        required_keys: &["dst", "iface", "type", "context"],
+        required_keys: &["dst", "iface", "ph", "type", "context"],
     },
     // Codeberg #50 Bug-A forensic instrumentation.  Emitted by
-    // `reticulum-integ/src/runner.rs::silence_unused_lnode` at function
+    // periculum's `src/runner.rs::silence_unused_lnode` at function
     // entry and at every exit branch; lets jl/jldiff diff between
     // RNode-only and T114-involved scenarios for any future hang.
     EventSchema {
@@ -279,6 +296,8 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "ingress_burst_announce",
             "lrproof_invalid",
             "forward_max_hops",
+            "blackholed_announce",
+            "same_interface_relay",
             "total",
         ],
     },

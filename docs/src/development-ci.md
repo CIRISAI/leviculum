@@ -11,8 +11,8 @@ external runners.
 |------|------|---------|--------|------------|
 | 0 | `fast` | pre-push hook | ~3 min | fmt + clippy (host + nrf firmware workspace, both BSPs) + rustdoc gate + workspace lib tests |
 | 1 | `standard` | post-commit (background) | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop + TCP-hub endurance smoke soak (see [Soak and endurance](soak-and-endurance.md)) |
-| 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + integ Docker tests |
-| 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LoRa hardware tests |
+| 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + the periculum `conformance/` and `regression/` corpora (docker) |
+| 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LNode flash-from-HEAD + the periculum `hardware/` corpus |
 
 Each tier runs everything from the lower tiers as well, so a green
 nightly proves the entire stack.
@@ -128,27 +128,39 @@ failure trace cannot vanish under a successful re-run. The path of
 the specific log goes into `last-results.txt` so `just status` can
 point at exactly the right file.
 
-## Convention: `#[ignore]` is for hardware-dependent tests only
+## The scenario suites live in periculum
 
-In `reticulum-integ`, the CI tier separation depends on `#[ignore]`:
+The multi-node scenarios that used to be `reticulum-integ` are now the
+sibling [periculum](https://codeberg.org/Lew_Palm/periculum) checkout,
+which leviculum expects at `../periculum` (override with
+`PERICULUM_ROOT`, or the binary with `PERICULUM_BIN`). They are TOML
+files, not `#[test]` functions, so the tier separation is a matter of
+which directory a tier runs rather than of `#[ignore]`:
 
-- Tier 2 runs `cargo test` with default behavior (skips ignored).
-- Tier 3 adds `--include-ignored` to pick up exactly the LoRa
-  hardware tests.
+| Corpus | Binds hardware | Run by |
+|---|---|---|
+| `conformance/` | no | Tier 2 |
+| `regression/` | no | Tier 2 |
+| `hardware/` | yes | Tier 3 |
 
-If you mark a slow but non-hardware test as `#[ignore]`, it ends up
-in nightly Tier 3 alongside the LoRa tests — wrong tier. Use a
-Cargo feature (e.g. `slow-tests`) for that case instead. Currently
-the invariant `#[ignore] tests == #[serial(lora)] tests` holds; keep
-it that way.
+The split is machine-checked in periculum
+(`periculum/tests/corpus_admission.rs`), so a scenario cannot drift into
+the wrong tier by convention alone. A `hardware/` scenario whose boards
+this bench does not hold reports `SKIPPED_INFRA` naming what was
+missing — never RED.
+
+Run one scenario by hand:
+
+```
+periculum run ../periculum/hardware/lora_link_rust.toml
+```
 
 ## Concurrent test protection
 
-Two `cargo test -p reticulum-integ` invocations on the same machine
-fight over Docker container names and USB serial handles. To prevent
-that, every integ test silently acquires a process-wide file lock on
-`~/.local/state/leviculum-ci/test.lock` as the first step inside
-`TestRunner::new()`.
+Two scenario runs on the same machine fight over Docker container names
+and USB serial handles. To prevent that, periculum acquires a
+process-wide file lock on `~/.local/state/leviculum-ci/test.lock` before
+bringing any node up.
 
 Single invocation: transparent. No extra output.
 
@@ -161,8 +173,8 @@ pid, started time, cwd, optionally the test-name filter. Example:
 [leviculum] Current holder:
 [leviculum]   pid=12345
 [leviculum]   started=2026-04-14T02:01:33
-[leviculum]   pkg=reticulum-integ
-[leviculum]   binary=reticulum_integ-abc123def
+[leviculum]   pkg=periculum
+[leviculum]   binary=periculum
 [leviculum]   cwd=/path/to/leviculum
 [leviculum] Wait for it to finish or stop that process, then retry.
 ```
@@ -192,13 +204,12 @@ overwritten.
 
 ### Scope
 
-The lock protects only `reticulum-integ` tests. Unit tests in
-`leviculum-core`, `leviculum-std`, `leviculum-ffi`,
-`leviculum-proxy`, and `leviculum-cli` do not acquire it — they
-parallelise freely with an in-progress integ run. Pure-parse unit
-tests inside `reticulum-integ` (e.g. compose YAML validation,
-radio-config wire round-trips) also don't acquire the lock because
-they never call `TestRunner::new()`.
+The lock protects only scenario runs. Unit tests in `leviculum-core`,
+`leviculum-std`, `leviculum-ffi`, `leviculum-proxy`, and
+`leviculum-cli` do not acquire it — they parallelise freely with an
+in-progress scenario run. `periculum validate` and `periculum list`
+do not acquire it either: they read scenario files and touch no node,
+container or radio.
 
 ### Filesystem requirement
 
@@ -209,50 +220,55 @@ dev-box tool; not an issue in practice.
 
 ## Hardware test profiles (Tier 3)
 
-Tier 3 (`just nightly`) runs LoRa hardware tests over USB-attached
-embedded devices.  Different tests need different subsets of the
-attached hardware powered on; the rest must stay off so that
-their RF activity does not contaminate the run.
+Tier 3 runs the periculum `hardware/` corpus over USB-attached
+embedded devices. Different scenarios need different subsets of the
+attached boards; the rest must not transmit, so their RF activity does
+not contaminate the run.
 
-The mapping of devices to USB-hub ports lives at
-`reticulum-integ/profiles/devices.toml`.  Each LoRa test descriptor
-in `reticulum-integ/tests/lora_*.toml` may carry a
-`profile = "..."` field that names one of the profiles defined in
-`devices.toml`.  Tests without that field default to the `default`
-profile (= every device powered on).
+**No USB-hub power switching.** Every board stays permanently powered
+and passed through to the VM. RF isolation of non-participating
+firmware nodes is done in software: the runner pushes `radio_silent`
+over serial to every discovered board it did not bind. Per-port power
+cycling correlated with hamster hardware-watchdog freezes (proven
+2026-06-15) and was removed, together with the `usbhub-helper` and its
+libvirt-passthrough caveats.
 
-Active profile assignments on master HEAD:
+Which individual boards exist on this bench is site data and lives in
+periculum's `rig.toml` (override with `$PERICULUM_RIG`). What *kind* of
+board each is — how it is recognised over USB, which port carries which
+role, what it can be asked to do — lives in `periculum/devices/*.toml`
+and is the same everywhere. A scenario names the set of boards it needs:
 
-| Test descriptor | Profile | Active devices |
-|---|---|---|
-| `lora_lncp_bidir.toml` | `lora_lncp_bidir` | t-beam-1, t-beam-2 |
-| `lora_lnode_lncp_bidir.toml` | `lora_lnode_lncp_bidir` | pocket-v2, t114 |
-| (all other `lora_*.toml`) | `default` (implicit) | all five devices |
+```toml
+profile = "rnode_lnode_pair"
+```
 
-Adding a new profile means: (a) declare the device subset in
-`devices.toml`, (b) add `profile = "<name>"` to the test descriptors
-that need it.  No code changes required.
+which is resolved against the rig file. A scenario needing more boards
+than the bench holds is `SKIPPED_INFRA` with a reason naming what was
+missing — never RED. An absent board is not a protocol result.
 
-The `default` fallback is intentional: a test without an explicit
-profile keeps the historic behaviour of "all devices powered on,
-nothing power-managed", so existing tests are not at risk of
-silent regression from the introduction of the profile system.
+### Firmware identity
 
-USB-hub power switching is performed by the hamster-side helper
-script (`scripts/usbhub-helper`) over a restricted SSH key from
-schneckenschreck.  See `scripts/run-tier3-hw.sh` for the
-orchestration logic.
+Before any hardware scenario runs, `scripts/flash-lnodes-from-head.sh`
+flashes every attached LNode from the current commit and reads its
+`[FW_BUILD]` banner back over the debug serial to confirm the board
+really runs that commit. A board whose firmware cannot be confirmed
+makes the tier RED and is named in the verdict
+(`firmware_unverified=<vid:pid>`): a run against unknown firmware must
+never be silently trusted. This step is leviculum's, not periculum's —
+periculum tests whatever firmware it finds and leaves board preparation
+out of scope on purpose.
 
-### libvirt USB-passthrough caveat
+### Device-vanish watchdog
 
-When a device is disabled via the helper, hub power is genuinely
-cut on hamster — no power, no LoRa TX/RX, no MCU activity.  But
-the schneckenschreck VM keeps the cached USB-passthrough handle:
-`/dev/serial/by-id/...` symlinks and `lsusb` entries persist
-after the disable.  **`ssh hamster usbhub-helper status` is the
-source of truth, not VM-side device enumeration.**  The wrapper
-queries hamster after each profile transition and emits the
-authoritative state into the per-test log as `[CI_HW] hamster_status=...`.
+`scripts/run-tier3-hw.sh` polls `lsusb` once a second for the whole run
+and latches the first drop below each USB id's baseline count. Under
+VFIO controller passthrough the host cannot inject a phantom VM-side
+disconnect, so a board that vanishes mid-run is always a real
+device/firmware failure (suspected self-reset under load, Codeberg
+#65), never an infra artefact. It forces RED with the board named
+(`board_vanish=<vid:pid> firmware_self_reset_suspected`), and every
+scenario verdict from the vanish onwards is untrusted.
 
 ## Troubleshooting
 

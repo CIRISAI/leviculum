@@ -98,7 +98,12 @@ async fn test_better_path_replaces_worse() {
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(b"path-test"), &mut OsRng, crate::common::now_ms())
+        .announce(
+            Some(b"path-test"),
+            &mut OsRng,
+            crate::common::now_ms(),
+            crate::common::now_ms() / 1000,
+        )
         .expect("Failed to create announce");
 
     // Pack and manually set hops=3
@@ -159,7 +164,12 @@ async fn test_worse_path_does_not_replace() {
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(b"path-test"), &mut OsRng, crate::common::now_ms())
+        .announce(
+            Some(b"path-test"),
+            &mut OsRng,
+            crate::common::now_ms(),
+            crate::common::now_ms() / 1000,
+        )
         .expect("Failed to create announce");
 
     // Send first announce with hops=1 (good path)

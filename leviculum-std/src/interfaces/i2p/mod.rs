@@ -90,6 +90,9 @@ pub(crate) struct I2pClientConfig {
     pub reconnect_wait: Duration,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// Applied to every TCP socket this sub-interface dials toward the SAM
+    /// bridge, before it connects. See [`crate::socket_hook::OutboundSocketHook`].
+    pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 }
 
 /// Configuration for the `connectable` server endpoint of an I2P interface.
@@ -103,6 +106,9 @@ pub(crate) struct I2pServerConfig {
     pub next_id: Arc<AtomicUsize>,
     pub new_interface_tx: mpsc::Sender<InterfaceHandle>,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
+    /// Applied to every TCP socket the server endpoint dials toward the SAM
+    /// bridge (control and accept sockets), before it connects.
+    pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 }
 
 /// Spawn an outbound I2P client sub-interface.
@@ -134,6 +140,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
             task_counters,
             config.reconnect_notify,
             task_ready,
+            config.outbound_socket_hook,
         )
         .await;
     });
@@ -147,6 +154,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
             bitrate: None,
             ifac: config.ifac,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::I2p,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -174,12 +182,15 @@ async fn i2p_client_task(
     counters: Arc<InterfaceCounters>,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     ready: Arc<ReadySignal>,
+    outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
 ) {
     let nick = generate_session_id();
     let mut has_connected_before = false;
 
     loop {
-        match establish_client_stream(&sam_address, &nick, &peer).await {
+        match establish_client_stream(&sam_address, &nick, &peer, outbound_socket_hook.as_ref())
+            .await
+        {
             Ok((ctrl, stream)) => {
                 tracing::info!("{}: I2P stream established to {}", name, peer);
                 ready.signal_ready();
@@ -226,9 +237,10 @@ async fn establish_client_stream(
     sam_address: &str,
     nick: &str,
     peer: &str,
+    hook: Option<&crate::socket_hook::OutboundSocketHook>,
 ) -> Result<(TcpStream, TcpStream), SamError> {
     // 1. Control socket: HELLO + SESSION CREATE (transient destination).
-    let mut ctrl = TcpStream::connect(sam_address).await?;
+    let mut ctrl = crate::socket_hook::connect_hooked_host(sam_address, hook).await?;
     sam::handshake(&mut ctrl).await?;
     let reply = sam::command(
         &mut ctrl,
@@ -240,10 +252,10 @@ async fn establish_client_stream(
     }
 
     // 2. Resolve the peer to a full base64 destination.
-    let dest_b64 = resolve_destination(sam_address, peer).await?;
+    let dest_b64 = resolve_destination(sam_address, peer, hook).await?;
 
     // 3. Stream socket: HELLO + STREAM CONNECT.
-    let mut stream = TcpStream::connect(sam_address).await?;
+    let mut stream = crate::socket_hook::connect_hooked_host(sam_address, hook).await?;
     sam::handshake(&mut stream).await?;
     let reply = sam::command(&mut stream, &sam::stream_connect(nick, &dest_b64, false)).await?;
     if !reply.ok() {
@@ -256,11 +268,15 @@ async fn establish_client_stream(
 /// Resolve a peer address to a full base64 destination. A `.i2p` address is
 /// looked up via `NAMING LOOKUP` on a throwaway SAM socket; a bare base64
 /// destination is used as-is (matches i2plib `stream_connect`).
-async fn resolve_destination(sam_address: &str, peer: &str) -> Result<String, SamError> {
+async fn resolve_destination(
+    sam_address: &str,
+    peer: &str,
+    hook: Option<&crate::socket_hook::OutboundSocketHook>,
+) -> Result<String, SamError> {
     if !peer.ends_with(".i2p") {
         return Ok(peer.to_string());
     }
-    let mut lookup = TcpStream::connect(sam_address).await?;
+    let mut lookup = crate::socket_hook::connect_hooked_host(sam_address, hook).await?;
     sam::handshake(&mut lookup).await?;
     let reply = sam::command(&mut lookup, &sam::naming_lookup(peer)).await?;
     if !reply.ok() {
@@ -309,7 +325,11 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
     let nick = generate_session_id();
 
     // Control socket for the session; kept open for its whole lifetime.
-    let mut ctrl = TcpStream::connect(&config.sam_address).await?;
+    let mut ctrl = crate::socket_hook::connect_hooked_host(
+        &config.sam_address,
+        config.outbound_socket_hook.as_ref(),
+    )
+    .await?;
     sam::handshake(&mut ctrl).await?;
 
     // Persistent destination: reuse the stored private key if present, else ask
@@ -352,7 +372,11 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
     // connection; we re-issue after each. With SILENT=false the first line the
     // socket delivers, once a peer connects, is that peer's full destination.
     loop {
-        let mut accept_sock = TcpStream::connect(&config.sam_address).await?;
+        let mut accept_sock = crate::socket_hook::connect_hooked_host(
+            &config.sam_address,
+            config.outbound_socket_hook.as_ref(),
+        )
+        .await?;
         sam::handshake(&mut accept_sock).await?;
         let reply = sam::command(&mut accept_sock, &sam::stream_accept(&nick, false)).await?;
         if !reply.ok() {
@@ -411,6 +435,7 @@ fn spawn_i2p_accepted(
             bitrate: None,
             ifac,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::I2p,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

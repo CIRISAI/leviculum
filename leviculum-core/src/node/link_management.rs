@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 
 use crate::constants::{
     CHANNEL_DEFAULT_RTT_MS, DATA_RECEIPT_TIMEOUT_MS, LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC,
-    MS_PER_SECOND, PROOF_DATA_SIZE, RTT_RETRY_MAX_ATTEMPTS, TRUNCATED_HASHBYTES,
+    MS_PER_SECOND, PROOF_DATA_SIZE, RTT_RETRY_MAX_ATTEMPTS, TRAFFIC_TIMEOUT_FACTOR,
+    TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofStrategy};
 use crate::hex_fmt::{HexFmt, HexShort};
@@ -61,8 +62,9 @@ impl Message for RawBytesMessage<'_> {
 
 /// Tracks channel message receipts awaiting delivery proofs.
 ///
-/// Each entry records a sent channel message: its packet hashes, link, sequence
-/// number, and timestamp. A single `Vec<ReceiptEntry>` replaces the three
+/// Each entry records a sent link packet: its packet hashes, link, optional
+/// channel sequence number, and absolute proof deadline. A single
+/// `Vec<ReceiptEntry>` replaces the three
 /// separate maps that previously encoded this relationship in different
 /// directions (`data_receipts`, `channel_receipt_keys`, `channel_hash_to_seq`).
 ///
@@ -76,8 +78,9 @@ pub(super) struct ReceiptEntry {
     pub(super) truncated_hash: [u8; TRUNCATED_HASHBYTES],
     pub(super) full_hash: [u8; 32],
     pub(super) link_id: LinkId,
-    pub(super) sequence: u16,
-    pub(super) sent_at_ms: u64,
+    /// Channel sequence, or `None` for a raw link packet such as LXMF.
+    pub(super) sequence: Option<u16>,
+    pub(super) deadline_ms: u64,
 }
 
 impl ReceiptTracker {
@@ -97,7 +100,7 @@ impl ReceiptTracker {
         now_ms: u64,
     ) {
         self.entries
-            .retain(|e| !(e.link_id == link_id && e.sequence == sequence));
+            .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)));
 
         let full_hash = packet_hash(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
@@ -114,9 +117,30 @@ impl ReceiptTracker {
             truncated_hash,
             full_hash,
             link_id,
-            sequence,
-            sent_at_ms: now_ms,
+            sequence: Some(sequence),
+            deadline_ms: now_ms.saturating_add(DATA_RECEIPT_TIMEOUT_MS),
         });
+    }
+
+    /// Register a proof receipt for a plain (non-Channel) link packet.
+    pub(super) fn register_raw(
+        &mut self,
+        packet_data: &[u8],
+        link_id: LinkId,
+        deadline_ms: u64,
+    ) -> [u8; 32] {
+        let full_hash = packet_hash(packet_data);
+        let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
+        truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
+        self.entries.retain(|entry| entry.full_hash != full_hash);
+        self.entries.push(ReceiptEntry {
+            truncated_hash,
+            full_hash,
+            link_id,
+            sequence: None,
+            deadline_ms,
+        });
+        full_hash
     }
 
     /// Look up a receipt by truncated hash. Returns `(link_id, full_hash)`.
@@ -134,7 +158,7 @@ impl ReceiptTracker {
     pub(super) fn confirm_delivery(
         &mut self,
         truncated: &[u8; TRUNCATED_HASHBYTES],
-    ) -> Option<u16> {
+    ) -> Option<Option<u16>> {
         let idx = self
             .entries
             .iter()
@@ -148,10 +172,18 @@ impl ReceiptTracker {
         self.entries.retain(|e| e.link_id != *link_id);
     }
 
-    /// Remove entries older than `DATA_RECEIPT_TIMEOUT_MS`.
-    pub(super) fn expire(&mut self, now_ms: u64) {
-        self.entries
-            .retain(|e| now_ms.saturating_sub(e.sent_at_ms) <= DATA_RECEIPT_TIMEOUT_MS);
+    /// Remove and return entries whose proof deadline has elapsed.
+    pub(super) fn expire(&mut self, now_ms: u64) -> Vec<ReceiptEntry> {
+        let mut expired = Vec::new();
+        let mut index = 0;
+        while index < self.entries.len() {
+            if now_ms >= self.entries[index].deadline_ms {
+                expired.push(self.entries.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        expired
     }
 
     /// Number of tracked receipts.
@@ -161,10 +193,7 @@ impl ReceiptTracker {
 
     /// Earliest expiry deadline across all entries, if any.
     pub(super) fn earliest_expiry(&self) -> Option<u64> {
-        self.entries
-            .iter()
-            .map(|e| e.sent_at_ms.saturating_add(DATA_RECEIPT_TIMEOUT_MS))
-            .min()
+        self.entries.iter().map(|e| e.deadline_ms).min()
     }
 
     #[cfg(test)]
@@ -555,6 +584,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(iface_idx) = attached_iface {
             let next_slot = self.transport.next_slot_ms_for_interface(iface_idx, now_ms);
             if next_slot > now_ms {
+                // Telemetry (leviculum#35): the interface gate is backpressure
+                // a capacity estimator must distinguish from app-limited idle.
+                if let Some(link) = self.links.get_mut(link_id) {
+                    link.note_iface_pacing_rejection();
+                }
                 return Err(send::SendError::PacingDelay {
                     ready_at_ms: next_slot,
                 });
@@ -609,6 +643,71 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok(self.process_events_and_actions())
     }
 
+    /// Send a plain data packet on an existing link.
+    ///
+    /// This mirrors Python `RNS.Packet(link, data)`: the payload is encrypted
+    /// for the link and sent with `PacketContext::None`, without Channel
+    /// framing. A raw receipt is retained so a PROVE_ALL response emits
+    /// `LinkDeliveryConfirmed`, matching Python's packet receipt callback.
+    pub fn send_packet_on_link(
+        &mut self,
+        link_id: &LinkId,
+        data: &[u8],
+    ) -> Result<([u8; 32], crate::transport::TickOutput), send::SendError> {
+        let link_id = &self.resolve_link_id(link_id);
+        let link = self.links.get(link_id).ok_or(send::SendError::NoLink)?;
+
+        if link.state() != LinkState::Active {
+            return Err(send::SendError::LinkFailed);
+        }
+        if data.len() > link.mdu() {
+            return Err(send::SendError::TooLarge);
+        }
+
+        let packet_bytes = link
+            .build_data_packet(data, &mut self.rng)
+            .map_err(|e| match e {
+                LinkError::InvalidState => send::SendError::LinkFailed,
+                _ => send::SendError::LinkFailed,
+            })?;
+
+        let now_ms = self.transport.clock().now_ms();
+        // Python PacketReceipt derives Link packet timeouts from the measured
+        // RTT (Packet.py:430-431). Raw packets have no Channel retransmission
+        // state, so this is their actual proof-acceptance deadline.
+        let receipt_timeout_ms = link
+            .rtt_ms()
+            .saturating_mul(TRAFFIC_TIMEOUT_FACTOR)
+            .max(TRAFFIC_TIMEOUT_MIN_MS);
+        let deadline_ms = now_ms.saturating_add(receipt_timeout_ms);
+        let packet_hash = self
+            .receipt_tracker
+            .register_raw(&packet_bytes, *link_id, deadline_ms);
+        self.route_link_packet(link_id, &packet_bytes);
+
+        Ok((packet_hash, self.process_events_and_actions()))
+    }
+
+    /// Send a proof for an application-accepted plain link data packet.
+    pub fn send_data_proof(
+        &mut self,
+        link_id: &LinkId,
+        packet_hash: &[u8; 32],
+    ) -> Result<crate::transport::TickOutput, LinkError> {
+        let link_id = self.resolve_link_id(link_id);
+        let link = self.links.get(&link_id).ok_or(LinkError::NotFound)?;
+        let signing_key = link
+            .proof_signing_key()
+            .ok_or(LinkError::NoIdentity)?
+            .clone();
+        let proof_packet =
+            link.build_data_proof_packet_with_signing_key(packet_hash, &signing_key)?;
+
+        self.route_link_packet(&link_id, &proof_packet);
+
+        Ok(self.process_events_and_actions())
+    }
+
     /// Find an existing active link to a destination
     #[cfg(test)]
     pub(crate) fn find_link_to(&self, dest_hash: &DestinationHash) -> Option<LinkId> {
@@ -623,14 +722,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Get link statistics
     pub fn link_stats(&self, link_id: &LinkId) -> Option<LinkStats> {
         let link_id = &self.resolve_link_id(link_id);
-        self.links.get(link_id)?;
-        let ch = self.links.get(link_id).and_then(|l| l.channel());
-        Some(LinkStats::new(
-            ch.map(|c| c.outstanding()).unwrap_or(0),
-            ch.map(|c| c.window()).unwrap_or(0),
-            ch.map(|c| c.window_max()).unwrap_or(0),
-            ch.map(|c| c.pacing_interval_ms()).unwrap_or(0),
-        ))
+        let link = self.links.get(link_id)?;
+        let ch = link.channel();
+        Some(LinkStats {
+            tx_ring_size: ch.map(|c| c.outstanding()).unwrap_or(0),
+            window: ch.map(|c| c.window()).unwrap_or(0),
+            window_max: ch.map(|c| c.window_max()).unwrap_or(0),
+            pacing_interval_ms: ch.map(|c| c.pacing_interval_ms()).unwrap_or(0),
+            // — leviculum#35 delivery telemetry —
+            bytes_delivered: ch
+                .map(|c| c.delivered_bytes())
+                .unwrap_or(0)
+                .saturating_add(link.resource_bytes_delivered()),
+            srtt_ms: ch.map(|c| c.srtt_ms()).filter(|s| *s > 0.0),
+            rttvar_ms: ch.filter(|c| c.srtt_ms() > 0.0).map(|c| c.rttvar_ms()),
+            min_rtt_ms: ch.and_then(|c| c.min_rtt_ms()),
+            rtt_ms: link.rtt_us().map(|us| us / 1000),
+            busy_rejections: ch.map(|c| c.busy_rejections()).unwrap_or(0),
+            pacing_rejections: ch.map(|c| c.pacing_rejections()).unwrap_or(0),
+            iface_pacing_rejections: link.iface_pacing_rejections(),
+        })
     }
 
     // Internal: Link Packet Processing
@@ -1017,9 +1128,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                 let now_ms = self.transport.clock().now_ms();
                 let rtt_ms = self.links.get(link_id).map(|l| l.rtt_ms()).unwrap_or(500);
-                if let Some(link) = self.links.get_mut(link_id) {
-                    if let Some(ch) = link.channel_mut() {
-                        ch.mark_delivered(sequence, now_ms, rtt_ms);
+                if let Some(sequence) = sequence {
+                    if let Some(link) = self.links.get_mut(link_id) {
+                        if let Some(ch) = link.channel_mut() {
+                            ch.mark_delivered(sequence, now_ms, rtt_ms);
+                        }
                     }
                 }
 
@@ -1604,10 +1717,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         _now_ms: u64, // passed by dispatch_link_data_packet uniformly; unused here
         now_secs: u64,
     ) {
-        use crate::resource::msgpack::{
-            read_fixarray_len, read_float64, read_msgpack_bin, read_msgpack_raw_value,
-        };
-
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -1635,6 +1744,25 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Compute request_id = truncated_packet_hash(raw_packet)
         let request_id = crate::packet::truncated_packet_hash(raw_packet);
+
+        self.handle_request_payload(link_id, request_id, plaintext);
+    }
+
+    /// Parse, authorize, and dispatch a decrypted request payload.
+    ///
+    /// Both ordinary Request packets and request Resources use this path. The
+    /// caller supplies the request ID because packet requests derive it from
+    /// the packet hash while Resource requests derive it from the packed
+    /// plaintext hash (matching Python `Link.request()`).
+    fn handle_request_payload(
+        &mut self,
+        link_id: LinkId,
+        request_id: [u8; crate::constants::TRUNCATED_HASHBYTES],
+        plaintext: &[u8],
+    ) {
+        use crate::resource::msgpack::{
+            read_fixarray_len, read_float64, read_msgpack_bin, read_msgpack_raw_value,
+        };
 
         // Parse msgpack
         let mut pos = 0;
@@ -1685,25 +1813,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             data_raw.to_vec()
         };
 
-        // Look up handler
-        let Some(handler) = self.request_handlers.get(&path_hash) else {
+        // Look up handler keyed by (destination, path).
+        let link = self.links.get(&link_id).expect("link checked above");
+        let destination_hash = *link.destination_hash();
+        let Some(handler) = self.request_handlers.get(&(destination_hash, path_hash)) else {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 path_hash = %HexShort(&path_hash),
-                "Request: no handler for path_hash, dropping"
+                "Request: no handler for (destination, path_hash), dropping"
             );
             return;
         };
-
-        // Verify destination matches
-        let link = self.links.get(&link_id).expect("link checked above");
-        if handler.destination_hash != *link.destination_hash() {
-            crate::tracing::debug!(
-                link = %HexShort(link_id.as_bytes()),
-                "Request: destination mismatch, dropping"
-            );
-            return;
-        }
 
         // Authorization check
         let path = handler.path.clone();
@@ -1747,6 +1867,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         self.events.push(NodeEvent::RequestReceived {
             link_id,
+            destination_hash,
             request_id,
             path,
             path_hash,
@@ -1765,9 +1886,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         raw_packet: &[u8],
         now_secs: u64,
     ) {
-        use crate::resource::msgpack::{
-            read_fixarray_len, read_msgpack_bin, read_msgpack_raw_value,
-        };
         let _ = raw_packet; // request_id is inside the payload, not derived from packet hash
 
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -1794,6 +1912,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
         let plaintext = &plaintext[..plaintext_len];
+
+        self.handle_response_payload(link_id, plaintext);
+    }
+
+    /// Parse and correlate a decrypted response payload.
+    ///
+    /// Shared by ordinary Response packets and response Resources. Responses
+    /// are accepted only on the link where the request is pending.
+    pub(super) fn handle_response_payload(&mut self, link_id: LinkId, plaintext: &[u8]) {
+        use crate::resource::msgpack::{
+            read_fixarray_len, read_msgpack_bin, read_msgpack_raw_value,
+        };
 
         // Parse msgpack
         let mut pos = 0;
@@ -1830,8 +1960,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         };
 
-        // Remove pending request
-        if self.pending_requests.remove(&request_id).is_none() {
+        // Correlate the response before removing the pending request. A valid
+        // ID arriving on another link must not consume the real request.
+        if self
+            .pending_requests
+            .get(&request_id)
+            .is_none_or(|request| request.link_id != link_id)
+        {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 request_id = %HexShort(&request_id),
@@ -1839,6 +1974,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             return;
         }
+        self.remove_pending_request(&request_id);
 
         self.events.push(NodeEvent::ResponseReceived {
             link_id,
@@ -1922,7 +2058,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     pub(super) fn reset_pending_requests_on_link(&mut self, link_id: &LinkId, now_ms: u64) {
         for pr in self.pending_requests.values_mut() {
             if pr.link_id == *link_id {
-                pr.sent_at_ms = now_ms;
+                if let Some(response_started_at_ms) = &mut pr.response_started_at_ms {
+                    *response_started_at_ms = now_ms;
+                }
             }
         }
     }
@@ -1932,18 +2070,129 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let expired: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]> = self
             .pending_requests
             .iter()
-            .filter(|(_, pr)| pr.sent_at_ms.saturating_add(pr.timeout_ms) < now_ms)
+            .filter(|(_, pr)| {
+                pr.response_started_at_ms
+                    .is_some_and(|started| started.saturating_add(pr.timeout_ms) < now_ms)
+            })
             .map(|(id, _)| *id)
             .collect();
 
         for request_id in expired {
-            if let Some(pr) = self.pending_requests.remove(&request_id) {
+            if let Some(pr) = self.remove_pending_request(&request_id) {
                 self.events.push(NodeEvent::RequestTimedOut {
                     link_id: pr.link_id,
                     request_id: pr.request_id,
                 });
             }
         }
+    }
+
+    /// Apply Resource outcomes to correlated outgoing requests.
+    ///
+    /// Request-body uploads and response-Resource downloads are phases where
+    /// the Resource engine owns liveness. A transfer failure therefore fails
+    /// the semantic request immediately instead of waiting for its ordinary
+    /// response timeout.
+    pub(super) fn reconcile_request_resource_outcomes(&mut self) {
+        // Only inspect events that existed on entry. A failed transfer appends
+        // a RequestTimedOut below, which is deliberately not another Resource
+        // outcome. Indexing avoids a temporary allocation on constrained nodes.
+        let outcome_count = self.events.len();
+        let now_ms = self.transport.clock().now_ms();
+        for index in 0..outcome_count {
+            let outcome = match self.events.get(index) {
+                Some(NodeEvent::ResourceCompleted {
+                    link_id,
+                    resource_hash,
+                    is_sender,
+                    ..
+                }) => Some((*link_id, *resource_hash, *is_sender, true)),
+                Some(NodeEvent::ResourceFailed {
+                    link_id,
+                    resource_hash,
+                    is_sender,
+                    ..
+                }) => Some((*link_id, *resource_hash, *is_sender, false)),
+                _ => None,
+            };
+            let Some((link_id, resource_hash, is_sender, completed)) = outcome else {
+                continue;
+            };
+            let request_id = if is_sender {
+                self.request_resource_uploads.get(&resource_hash).copied()
+            } else {
+                self.response_resource_downloads
+                    .get(&resource_hash)
+                    .copied()
+            };
+            let Some(request_id) = request_id else {
+                continue;
+            };
+            let matches_link = self
+                .pending_requests
+                .get(&request_id)
+                .is_some_and(|pending| pending.link_id == link_id);
+            if !matches_link {
+                continue;
+            }
+
+            if is_sender {
+                self.request_resource_uploads.remove(&resource_hash);
+            } else {
+                self.response_resource_downloads.remove(&resource_hash);
+            }
+            if completed {
+                // A normal response-Resource completion is decoded by
+                // handle_response_payload before this reconciliation pass and
+                // has already removed the pending request. If decoding did not
+                // produce a response, re-arm the bounded semantic timeout.
+                // A peer may advertise its response before the sender-side
+                // proof for a request Resource is processed. In that race the
+                // accepted response download remains the active phase, so its
+                // Resource watchdog must continue to own liveness.
+                let response_in_progress = self
+                    .response_resource_downloads
+                    .values()
+                    .any(|mapped_request| *mapped_request == request_id);
+                if !is_sender || !response_in_progress {
+                    if let Some(pending) = self.pending_requests.get_mut(&request_id) {
+                        pending.response_started_at_ms = Some(now_ms);
+                    }
+                }
+            } else if let Some(pending) = self.remove_pending_request(&request_id) {
+                // RequestTimedOut is the existing request-failure notification
+                // used by sans-I/O clients. The preceding ResourceFailed event
+                // retains the precise transport failure reason.
+                self.events.push(NodeEvent::RequestTimedOut {
+                    link_id: pending.link_id,
+                    request_id: pending.request_id,
+                });
+            }
+        }
+    }
+
+    fn remove_pending_request(
+        &mut self,
+        request_id: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> Option<super::request::PendingRequest> {
+        let pending = self.pending_requests.remove(request_id);
+        if pending.is_some() {
+            self.request_resource_uploads
+                .retain(|_, mapped_request| mapped_request != request_id);
+            self.response_resource_downloads
+                .retain(|_, mapped_request| mapped_request != request_id);
+        }
+        pending
+    }
+
+    fn remove_pending_requests_for_link(&mut self, wire_id: LinkId, visible_id: LinkId) {
+        self.pending_requests
+            .retain(|_, pending| pending.link_id != wire_id && pending.link_id != visible_id);
+        let pending_requests = &self.pending_requests;
+        self.request_resource_uploads
+            .retain(|_, request_id| pending_requests.contains_key(request_id));
+        self.response_resource_downloads
+            .retain(|_, request_id| pending_requests.contains_key(request_id));
     }
 
     /// If the link is Stale and we receive any valid packet, recover to Active.
@@ -2013,82 +2262,123 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
 
-        let strategy = link.resource_strategy();
+        // Python can split large request and response Resources, but the
+        // request-correlation path here currently represents one transfer.
+        // Reject non-canonical multi-segment forms explicitly instead of
+        // accepting bytes that cannot be reassembled with Python semantics.
+        if (adv.flags.is_request || adv.flags.is_response)
+            && (adv.flags.split || adv.segment_index != 1 || adv.total_segments != 1)
+        {
+            crate::tracing::debug!(
+                segment = adv.segment_index,
+                total = adv.total_segments,
+                "Split request/response Resources are unsupported"
+            );
+            return;
+        }
+
+        // Request and response Resources are Link protocol internals, not
+        // application Resources. Python accepts request Resources regardless
+        // of `resource_strategy`, and accepts response Resources only when
+        // their advertised request ID belongs to a pending request on this
+        // exact link.
+        let is_request = adv.request_id.is_some() && adv.flags.is_request;
+        let is_response = adv.request_id.is_some() && !is_request && adv.flags.is_response;
+        let response_request_id = if is_response {
+            adv.request_id.as_deref().and_then(|bytes| {
+                <[u8; crate::constants::TRUNCATED_HASHBYTES]>::try_from(bytes).ok()
+            })
+        } else {
+            None
+        };
+        let strategy = if is_request {
+            ResourceStrategy::AcceptAll
+        } else if is_response {
+            let matching_pending_request = response_request_id
+                .and_then(|request_id| self.pending_requests.get(&request_id))
+                .is_some_and(|request| request.link_id == link_id);
+
+            if !matching_pending_request {
+                crate::tracing::trace!(
+                    link = %HexShort(link_id.as_bytes()),
+                    "Response Resource has no matching pending request, ignoring"
+                );
+                return;
+            }
+            ResourceStrategy::AcceptAll
+        } else {
+            link.resource_strategy()
+        };
         let resource_hash = adv.resource_hash;
         let transfer_size = adv.transfer_size;
         let data_size = adv.data_size;
         let link_mdu = link.mdu();
         let sdu = crate::resource::resource_sdu(link.negotiated_mtu());
+        let mut accepted_response_request = None;
 
-        // A response resource (`is_response`) whose `request_id` matches an
-        // outstanding request is always accepted, regardless of resource
-        // strategy — Python `Link.py` accepts it in the
-        // `ResourceAdvertisement.is_response(packet)` branch BEFORE the
-        // `ACCEPT_*` checks. Without this an initiator with the default
-        // `AcceptNone` strategy would drop the response to its own request, so
-        // a `> MDU` request response (e.g. a NomadNet page) would never
-        // transfer. The generic strategy still governs every non-response
-        // resource.
-        let is_response_match = adv.flags.is_response
-            && adv
-                .request_id
-                .as_deref()
-                .and_then(|rid| <[u8; TRUNCATED_HASHBYTES]>::try_from(rid).ok())
-                .is_some_and(|rid| self.pending_requests.contains_key(&rid));
-
-        if is_response_match || matches!(strategy, ResourceStrategy::AcceptAll) {
-            // Auto-accept: create IncomingResource and send first REQ.
-            match IncomingResource::from_advertisement(
-                &adv,
-                link_mdu,
-                sdu,
-                now_ms,
-                self.max_incoming_resource_size,
-                self.resource_window_policy,
-            ) {
-                Ok((incoming, req_payload)) => {
-                    let req_packet = link.build_data_packet_with_context(
-                        &req_payload,
-                        PacketContext::ResourceReq,
-                        &mut self.rng,
-                    );
-                    match req_packet {
-                        Ok(pkt) => {
-                            link.set_incoming_resource(incoming);
-                            link.record_outbound(now_secs);
-                            self.route_link_packet(&link_id, &pkt);
-                            self.events.push(NodeEvent::ResourceTransferStarted {
-                                link_id,
-                                resource_hash,
-                                is_sender: false,
-                            });
-                        }
-                        Err(e) => {
-                            crate::tracing::debug!("Failed to build REQ packet: {e}");
+        match strategy {
+            ResourceStrategy::AcceptAll => {
+                // Request Resources and responses matching a pending request
+                // bypass the application Resource strategy, matching Python.
+                match IncomingResource::from_advertisement(
+                    &adv,
+                    link_mdu,
+                    sdu,
+                    now_ms,
+                    self.max_incoming_resource_size,
+                    self.resource_window_policy,
+                ) {
+                    Ok((incoming, req_payload)) => {
+                        let req_packet = link.build_data_packet_with_context(
+                            &req_payload,
+                            PacketContext::ResourceReq,
+                            &mut self.rng,
+                        );
+                        match req_packet {
+                            Ok(pkt) => {
+                                link.set_incoming_resource(incoming);
+                                link.record_outbound(now_secs);
+                                self.route_link_packet(&link_id, &pkt);
+                                self.events.push(NodeEvent::ResourceTransferStarted {
+                                    link_id,
+                                    resource_hash,
+                                    is_sender: false,
+                                });
+                                accepted_response_request = response_request_id;
+                            }
+                            Err(e) => {
+                                crate::tracing::debug!("Failed to build REQ packet: {e}");
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    crate::tracing::debug!("Failed to create IncomingResource: {e}");
+                    Err(e) => {
+                        crate::tracing::debug!("Failed to create IncomingResource: {e}");
+                    }
                 }
             }
-        } else {
-            match strategy {
-                ResourceStrategy::AcceptApp => {
-                    // Store for application to accept/reject.
-                    link.set_pending_resource_adv(adv);
-                    self.events.push(NodeEvent::ResourceAdvertised {
-                        link_id,
-                        resource_hash,
-                        transfer_size,
-                        data_size,
-                    });
-                }
-                // AcceptNone (and the already-handled AcceptAll) reject a
-                // non-response resource.
-                _ => {
-                    crate::tracing::trace!("Resource ADV rejected (strategy=AcceptNone)");
-                }
+            ResourceStrategy::AcceptApp => {
+                // Store for application to accept/reject.
+                link.set_pending_resource_adv(adv);
+                self.events.push(NodeEvent::ResourceAdvertised {
+                    link_id,
+                    resource_hash,
+                    transfer_size,
+                    data_size,
+                });
+            }
+            ResourceStrategy::AcceptNone => {
+                crate::tracing::trace!("Resource ADV rejected (strategy=AcceptNone)");
+            }
+        }
+
+        if let Some(request_id) = accepted_response_request {
+            self.response_resource_downloads
+                .insert(resource_hash, request_id);
+            if let Some(pending) = self.pending_requests.get_mut(&request_id) {
+                // The Resource transfer watchdog now owns liveness. Leaving
+                // the ordinary response timer armed could fail a healthy
+                // transfer on slow/single-threaded transports.
+                pending.response_started_at_ms = None;
             }
         }
 
@@ -2245,6 +2535,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         let result = incoming.receive_part(part_data, now_ms, rtt_ms);
         let resource_hash = *incoming.resource_hash();
+        let resource_flags = incoming.flags();
+        let has_request_id = incoming.request_id().is_some();
+        let mut completed_internal_payload: Option<alloc::vec::Vec<u8>> = None;
 
         match result {
             ResourcePartResult::Continue => {
@@ -2353,7 +2646,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         };
 
                         if let Some((request_id, unwrapped)) = response_delivery {
-                            self.pending_requests.remove(&request_id);
+                            self.remove_pending_request(&request_id);
                             // A file response's raw data IS the response value
                             // and its resource metadata (the `{"name": ...}`
                             // blob) rides along; a wrapped one delivers the
@@ -2369,6 +2662,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 metadata,
                             });
                         } else {
+                            if has_request_id
+                                && (resource_flags.is_request || resource_flags.is_response)
+                            {
+                                completed_internal_payload = Some(data.clone());
+                            }
+
                             self.events.push(NodeEvent::ResourceCompleted {
                                 link_id,
                                 resource_hash,
@@ -2408,6 +2707,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // the rtt-derived timer (mod.rs:694) does not fire mid-
         // transfer.
         self.reset_pending_requests_on_link(&link_id, now_ms);
+
+        // Link-level request/response Resources complete through the same
+        // parser, authorization and pending-request machinery as their packet
+        // counterparts. Keep ResourceCompleted as transfer telemetry while
+        // also producing the semantic RequestReceived/ResponseReceived event.
+        if let Some(payload) = completed_internal_payload {
+            if resource_flags.is_request {
+                let request_id = crate::crypto::truncated_hash(&payload);
+                self.handle_request_payload(link_id, request_id, &payload);
+            } else if resource_flags.is_response {
+                self.handle_response_payload(link_id, &payload);
+            }
+        }
     }
 
     /// Handle a ResourceHmu packet (hashmap update).
@@ -2522,6 +2834,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         match res.handle_proof(proof_data) {
             Ok(crate::resource::ResourceStatus::Complete) => {
                 let resource_hash = *res.resource_hash();
+                // Telemetry (leviculum#35): the completion proof confirms the
+                // peer reassembled this whole (segment's) transfer — credit its
+                // bytes as delivered on the link. Per-segment for split
+                // transfers, so the counter advances as the transfer does.
+                let delivered = res.transfer_size() as u64;
+                if let Some(l) = self.links.get_mut(&link_id) {
+                    l.add_resource_bytes_delivered(delivered);
+                }
                 // Segment complete. If this is a split transfer with more
                 // segments to send, advertise the next one instead of signalling
                 // completion (mirrors Python's next_segment.advertise()). Only
@@ -2607,7 +2927,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let Some(link) = self.links.get(link_id) else {
                 return SegmentAdvance::Done { total_segments };
             };
-            plan.build_segment(index, link, &mut self.rng, now_ms)
+            plan.build_segment(index, &link.resource_crypt_params(), &mut self.rng, now_ms)
         };
 
         let outgoing = match build {
@@ -2776,8 +3096,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
         }
 
-        // Clean up expired receipts
-        self.receipt_tracker.expire(now_ms);
+        // Raw Link packets mirror Python PacketReceipt timeout callbacks.
+        // Channel receipt expiry remains silent because Channel owns retries
+        // and terminal failure independently.
+        for expired in self.receipt_tracker.expire(now_ms) {
+            if expired.sequence.is_none() {
+                self.events.push(NodeEvent::LinkDeliveryFailed {
+                    link_id: expired.link_id,
+                    packet_hash: expired.full_hash,
+                });
+            }
+        }
     }
 
     /// Confirm RTT delivery on an initiator link if not yet confirmed.
@@ -3286,7 +3615,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Pending request timeout deadlines
         for pr in self.pending_requests.values() {
-            update(pr.sent_at_ms.saturating_add(pr.timeout_ms));
+            if let Some(started) = pr.response_started_at_ms {
+                update(started.saturating_add(pr.timeout_ms));
+            }
         }
 
         // Resource transfer deadlines
@@ -3353,8 +3684,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         // Clean up pending requests for this link (no timeout events. LinkClosed suffices)
-        self.pending_requests
-            .retain(|_, pr| pr.link_id != wire_id && pr.link_id != link_id);
+        self.remove_pending_requests_for_link(wire_id, link_id);
 
         // Path recovery for locally-initiated links that never activated
         // (Python Transport.py:472-494)
@@ -3497,7 +3827,7 @@ mod receipt_tracker_tests {
         trunc1.copy_from_slice(&hash1[..TRUNCATED_HASHBYTES]);
 
         let seq = tracker.confirm_delivery(&trunc1);
-        assert_eq!(seq, Some(1));
+        assert_eq!(seq, Some(Some(1)));
         assert_eq!(tracker.len(), 0);
 
         // Re-register same sequence (after wraparound or new message)

@@ -34,7 +34,7 @@ pub const LEV_EVENT_LINK_REQUEST: c_int = 3;
 /// responder; the link is already accepted and proved, mint a handle with
 /// `lev_accept_link`), 1 means a link this node initiated.
 pub const LEV_EVENT_LINK_ESTABLISHED: c_int = 4;
-/// A link closed.
+/// A link closed. `link_id` and `dest_hash` are set.
 pub const LEV_EVENT_LINK_CLOSED: c_int = 5;
 /// Data arrived on a link.
 pub const LEV_EVENT_LINK_DATA: c_int = 6;
@@ -43,7 +43,10 @@ pub const LEV_EVENT_PACKET_RECEIVED: c_int = 7;
 /// Control events were dropped; the count is available via
 /// `lev_event_dropped_count`.
 pub const LEV_EVENT_CONTROL_OVERFLOW: c_int = 8;
-/// A request arrived on a link (respond with `lev_send_response`).
+/// A request arrived on a link (respond with `lev_send_response`). `dest_hash`
+/// is the destination the request was addressed to: several destinations may
+/// register the same request path, so a responder hosting more than one needs
+/// it to know which endpoint to serve.
 pub const LEV_EVENT_REQUEST_RECEIVED: c_int = 9;
 /// A response to a sent request arrived.
 pub const LEV_EVENT_RESPONSE_RECEIVED: c_int = 10;
@@ -68,8 +71,9 @@ pub const LEV_EVENT_LINK_IDENTIFIED: c_int = 17;
 /// sequence number via `lev_event_msgtype` and `lev_event_sequence`.
 pub const LEV_EVENT_LINK_MESSAGE: c_int = 18;
 /// A single packet arrived at a destination with the App proof strategy; the
-/// app may call `lev_send_proof`. `dest_hash` is the destination and the data
-/// payload is the 32-byte packet hash.
+/// app may call `lev_send_proof`. `dest_hash` is the destination, the data
+/// payload is the 32-byte packet hash, and `lev_event_interface_id` reads the
+/// interface the packet arrived on.
 pub const LEV_EVENT_PACKET_PROOF_REQUESTED: c_int = 19;
 /// Data arrived on a link whose destination has the App proof strategy. The
 /// `link_id` is set and the data payload is the 32-byte packet hash.
@@ -88,8 +92,55 @@ pub const LEV_EVENT_PATH_LOST: c_int = 24;
 /// 16-byte packet hash (as returned by `lev_send_datagram`).
 pub const LEV_EVENT_PACKET_DELIVERY_CONFIRMED: c_int = 25;
 /// Delivery of a single packet we sent failed; the data payload is the 16-byte
-/// packet hash.
+/// packet hash and `lev_event_delivery_error` says why.
 pub const LEV_EVENT_DELIVERY_FAILED: c_int = 26;
+/// No delivery proof arrived for a packet we sent on a link before its
+/// RTT-derived receipt deadline expired. The `link_id` is set and the data
+/// payload is the 32-byte packet hash (the failure half of
+/// `LEV_EVENT_LINK_DELIVERY_CONFIRMED`).
+pub const LEV_EVENT_LINK_DELIVERY_FAILED: c_int = 27;
+
+// --- Link close reasons, read with `lev_event_close_reason` on a
+// `LEV_EVENT_LINK_CLOSED` event. The values follow the engine's
+// `LinkCloseReason` declaration order so the mapping is auditable.
+
+/// The local side or the peer closed the link deliberately. Reconnect freely.
+pub const LEV_CLOSE_NORMAL: c_int = 0;
+/// The link handshake did not complete in time: the peer may be unreachable or
+/// the path stale. Re-resolve the path before retrying.
+pub const LEV_CLOSE_TIMEOUT: c_int = 1;
+/// A proof on the link did not verify. Retrying the same link gains nothing.
+pub const LEV_CLOSE_INVALID_PROOF: c_int = 2;
+/// The peer closed the link. Reconnect when there is something to send.
+pub const LEV_CLOSE_PEER_CLOSED: c_int = 3;
+/// The link went inactive past its keepalive deadline and was torn down.
+/// Reconnect; a keepalive or traffic would have kept it alive.
+pub const LEV_CLOSE_STALE: c_int = 4;
+/// A channel message could not be delivered after the maximum retries. The link
+/// was working, so a reconnect is reasonable, but the payload was lost.
+pub const LEV_CLOSE_CHANNEL_EXHAUSTED: c_int = 5;
+/// The peer identified as a blackholed identity and the link was torn down.
+/// **Do not retry**: every attempt will be torn down the same way.
+pub const LEV_CLOSE_BLACKHOLED: c_int = 6;
+/// A close reason this ABI version has no constant for. The engine enum is
+/// extensible; `event_projection_coverage` fails on a new variant that reaches
+/// here, so this is a forward-compatibility floor and not a silent bucket.
+pub const LEV_CLOSE_OTHER: c_int = 255;
+
+// --- Single-packet delivery failures, read with `lev_event_delivery_error` on a
+// `LEV_EVENT_DELIVERY_FAILED` event.
+
+/// No proof arrived before the receipt expired. Re-send.
+pub const LEV_DELIVERY_TIMEOUT: c_int = 0;
+/// The link carrying the packet failed. Re-send (on a fresh link).
+pub const LEV_DELIVERY_LINK_FAILED: c_int = 1;
+/// A proof arrived and did not verify against the destination's identity. The
+/// peer answered, so re-sending produces the same unverifiable proof: re-resolve
+/// the destination's identity instead.
+pub const LEV_DELIVERY_INVALID_PROOF: c_int = 2;
+/// A delivery error this ABI version has no constant for; see
+/// [`LEV_CLOSE_OTHER`].
+pub const LEV_DELIVERY_OTHER: c_int = 255;
 
 /// One projected event, fully self-owned (all payloads deep-copied out of the
 /// `NodeEvent`), so it outlives the queue slot and is valid until
@@ -109,6 +160,19 @@ pub struct lev_event_t {
     msgtype: u16,
     sequence: u16,
     is_sender: bool,
+    /// The node-assigned interface id the event came in on, resolvable against
+    /// `lev_interface_stats_id`.
+    interface_id: Option<u64>,
+    /// `LEV_CLOSE_*` for a link close.
+    close_reason: Option<c_int>,
+    /// `LEV_DELIVERY_*` for a failed single-packet delivery.
+    delivery_error: Option<c_int>,
+    /// Encrypted transfer size and uncompressed data size of a resource.
+    transfer_size: Option<u64>,
+    data_size: Option<u64>,
+    /// Position of a completed resource segment within its transfer (1-based).
+    segment_index: Option<u32>,
+    total_segments: Option<u32>,
 }
 
 impl lev_event_t {
@@ -128,6 +192,13 @@ impl lev_event_t {
             msgtype: 0,
             sequence: 0,
             is_sender: false,
+            interface_id: None,
+            close_reason: None,
+            delivery_error: None,
+            transfer_size: None,
+            data_size: None,
+            segment_index: None,
+            total_segments: None,
         }
     }
 }
@@ -140,17 +211,24 @@ impl lev_event_t {
 fn project(ev: NodeEvent) -> lev_event_t {
     let is_control = matches!(ev.event_class(), EventClass::Control);
     match ev {
-        NodeEvent::AnnounceReceived { announce, .. } => {
+        NodeEvent::AnnounceReceived {
+            announce,
+            interface_index,
+        } => {
             let mut e = lev_event_t::bare(LEV_EVENT_ANNOUNCE_RECEIVED, is_control);
             e.dest_hash = Some(*announce.destination_hash().as_bytes());
             e.data = announce.app_data().to_vec();
+            e.interface_id = Some(interface_index as u64);
             e
         }
         NodeEvent::PathFound {
-            destination_hash, ..
+            destination_hash,
+            interface_index,
+            ..
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_PATH_FOUND, is_control);
             e.dest_hash = Some(*destination_hash.as_bytes());
+            e.interface_id = Some(interface_index as u64);
             e
         }
         NodeEvent::ControlPlaneOverflow { dropped_count } => {
@@ -176,9 +254,16 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.dest_hash = Some(*destination_hash.as_bytes());
             e
         }
-        NodeEvent::LinkClosed { link_id, .. } => {
+        NodeEvent::LinkClosed {
+            link_id,
+            destination_hash,
+            reason,
+            ..
+        } => {
             let mut e = lev_event_t::bare(LEV_EVENT_LINK_CLOSED, is_control);
             e.link_id = Some(*link_id.as_bytes());
+            e.dest_hash = Some(*destination_hash.as_bytes());
+            e.close_reason = Some(close_reason_code(reason));
             e
         }
         NodeEvent::LinkIdentified {
@@ -212,10 +297,12 @@ fn project(ev: NodeEvent) -> lev_event_t {
         NodeEvent::PacketProofRequested {
             packet_hash,
             destination_hash,
+            interface_index,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_PACKET_PROOF_REQUESTED, is_control);
             e.dest_hash = Some(*destination_hash.as_bytes());
             e.data = packet_hash.to_vec();
+            e.interface_id = Some(interface_index as u64);
             e
         }
         NodeEvent::LinkProofRequested {
@@ -232,6 +319,15 @@ fn project(ev: NodeEvent) -> lev_event_t {
             packet_hash,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_LINK_DELIVERY_CONFIRMED, is_control);
+            e.link_id = Some(*link_id.as_bytes());
+            e.data = packet_hash.to_vec();
+            e
+        }
+        NodeEvent::LinkDeliveryFailed {
+            link_id,
+            packet_hash,
+        } => {
+            let mut e = lev_event_t::bare(LEV_EVENT_LINK_DELIVERY_FAILED, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.data = packet_hash.to_vec();
             e
@@ -256,21 +352,26 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.data = packet_hash.to_vec();
             e
         }
-        NodeEvent::DeliveryFailed { packet_hash, .. } => {
+        NodeEvent::DeliveryFailed { packet_hash, error } => {
             let mut e = lev_event_t::bare(LEV_EVENT_DELIVERY_FAILED, is_control);
             e.data = packet_hash.to_vec();
+            e.delivery_error = Some(delivery_error_code(error));
             e
         }
         NodeEvent::PacketReceived {
-            destination, data, ..
+            destination,
+            data,
+            interface_index,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_PACKET_RECEIVED, is_control);
             e.dest_hash = Some(*destination.as_bytes());
             e.data = data;
+            e.interface_id = Some(interface_index as u64);
             e
         }
         NodeEvent::RequestReceived {
             link_id,
+            destination_hash,
             request_id,
             path,
             data,
@@ -278,6 +379,7 @@ fn project(ev: NodeEvent) -> lev_event_t {
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_REQUEST_RECEIVED, is_control);
             e.link_id = Some(*link_id.as_bytes());
+            e.dest_hash = Some(*destination_hash.as_bytes());
             e.request_id = Some(request_id);
             e.path = Some(path);
             e.data = data;
@@ -287,12 +389,18 @@ fn project(ev: NodeEvent) -> lev_event_t {
             link_id,
             request_id,
             response_data,
-            ..
+            metadata,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESPONSE_RECEIVED, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.request_id = Some(request_id);
             e.data = response_data;
+            // A response that arrived as a resource carries the resource's
+            // metadata blob (the `{"name": ...}` a file response rides with).
+            // Dropping it here left `lev_event_metadata` returning
+            // LEV_ERR_INVALID_ARG for every response, though the accessor is
+            // generic and `ResourceCompleted` has always projected it.
+            e.metadata = metadata;
             e
         }
         NodeEvent::RequestTimedOut {
@@ -307,11 +415,16 @@ fn project(ev: NodeEvent) -> lev_event_t {
         NodeEvent::ResourceAdvertised {
             link_id,
             resource_hash,
-            ..
+            transfer_size,
+            data_size,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_ADVERTISED, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.resource_hash = Some(resource_hash);
+            // The event exists so the app can accept or reject, and size is what
+            // that decision turns on.
+            e.transfer_size = Some(transfer_size);
+            e.data_size = Some(data_size);
             e
         }
         NodeEvent::ResourceTransferStarted {
@@ -329,13 +442,20 @@ fn project(ev: NodeEvent) -> lev_event_t {
             resource_hash,
             progress,
             is_sender,
-            ..
+            transfer_size,
+            data_size,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_PROGRESS, is_control);
             e.link_id = Some(*link_id.as_bytes());
             e.resource_hash = Some(resource_hash);
             e.progress = progress as f64;
             e.is_sender = is_sender;
+            // Not redundant with the advertise event: `ResourceAdvertised` is
+            // emitted only under the AcceptApp strategy, so an auto-accepting
+            // receiver (AcceptAll, and every response resource) never sees one
+            // and this is its only route to the sizes.
+            e.transfer_size = Some(transfer_size);
+            e.data_size = Some(data_size);
             e
         }
         NodeEvent::ResourceCompleted {
@@ -344,7 +464,8 @@ fn project(ev: NodeEvent) -> lev_event_t {
             data,
             metadata,
             is_sender,
-            ..
+            segment_index,
+            total_segments,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_RESOURCE_COMPLETED, is_control);
             e.link_id = Some(*link_id.as_bytes());
@@ -352,6 +473,11 @@ fn project(ev: NodeEvent) -> lev_event_t {
             e.data = data;
             e.metadata = metadata;
             e.is_sender = is_sender;
+            // A multi-segment resource fires this event once per segment with the
+            // same resource_hash; without these a C receiver can neither order
+            // the chunks nor tell which one is the last.
+            e.segment_index = Some(segment_index);
+            e.total_segments = Some(total_segments);
             e
         }
         NodeEvent::ResourceFailed {
@@ -369,6 +495,43 @@ fn project(ev: NodeEvent) -> lev_event_t {
         // Other variants keep their class so the cap policy is right, but carry
         // no typed fields yet.
         _ => lev_event_t::bare(LEV_EVENT_OTHER, is_control),
+    }
+}
+
+/// Map the engine's link close reason to its `LEV_CLOSE_*` constant.
+///
+/// Both this and [`delivery_error_code`] live *below* `project()` on purpose:
+/// `event_projection_coverage` clamps its arm parsing at `project()`'s `_ =>`
+/// catch-all, so a wildcard arm above it would truncate what the guard sees.
+/// The clamp is anchored on `fn project(` there, and this ordering keeps the two
+/// independent.
+fn close_reason_code(reason: leviculum_std::LinkCloseReason) -> c_int {
+    use leviculum_std::LinkCloseReason as R;
+    match reason {
+        R::Normal => LEV_CLOSE_NORMAL,
+        R::Timeout => LEV_CLOSE_TIMEOUT,
+        R::InvalidProof => LEV_CLOSE_INVALID_PROOF,
+        R::PeerClosed => LEV_CLOSE_PEER_CLOSED,
+        R::Stale => LEV_CLOSE_STALE,
+        R::ChannelExhausted => LEV_CLOSE_CHANNEL_EXHAUSTED,
+        R::Blackholed => LEV_CLOSE_BLACKHOLED,
+        // `LinkCloseReason` is `#[non_exhaustive]`, so this arm is required to
+        // compile. It is not a silent bucket: `every_close_reason_has_a_c_constant`
+        // fails on a variant that has no arm above, which is what keeps a new
+        // engine reason from landing here unnoticed.
+        _ => LEV_CLOSE_OTHER,
+    }
+}
+
+/// Map the engine's single-packet delivery error to its `LEV_DELIVERY_*`
+/// constant. See [`close_reason_code`] for why this sits here.
+fn delivery_error_code(error: leviculum_std::DeliveryError) -> c_int {
+    use leviculum_std::DeliveryError as E;
+    match error {
+        E::Timeout => LEV_DELIVERY_TIMEOUT,
+        E::LinkFailed => LEV_DELIVERY_LINK_FAILED,
+        E::InvalidProof => LEV_DELIVERY_INVALID_PROOF,
+        _ => LEV_DELIVERY_OTHER,
     }
 }
 
@@ -764,9 +927,229 @@ pub unsafe extern "C" fn lev_event_dropped_count(ev: *const lev_event_t, out: *m
     })
 }
 
+/// Read the node-assigned id of the interface an event arrived on into `*out`.
+///
+/// Set on `LEV_EVENT_ANNOUNCE_RECEIVED`, `LEV_EVENT_PATH_FOUND` and
+/// `LEV_EVENT_PACKET_RECEIVED`; `LEV_ERR_INVALID_ARG` on any other event type.
+///
+/// This is an *id*, not a position in the interface snapshot: resolve it to an
+/// interface by walking `lev_interface_stats_snapshot` and comparing
+/// `lev_interface_stats_id`, then read the name with
+/// `lev_interface_stats_name`. It is the same numbering `lev_path_table_entry`
+/// reports as `interface_index`, so a path and the announce that created it can
+/// be attributed to one interface.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_interface_id(ev: *const lev_event_t, out: *mut u64) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match e.interface_id {
+            Some(id) => {
+                *out = id;
+                LEV_OK
+            }
+            None => {
+                set_last_error("event has no interface id");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Read why a `LEV_EVENT_LINK_CLOSED` event's link closed into `*out`, as one of
+/// the `LEV_CLOSE_*` constants. `LEV_ERR_INVALID_ARG` for any other event type.
+///
+/// The reason is behavioural, not cosmetic: `LEV_CLOSE_BLACKHOLED` must not be
+/// retried at all, `LEV_CLOSE_TIMEOUT` wants the path re-resolved first, and
+/// `LEV_CLOSE_NORMAL`/`_PEER_CLOSED` may be reconnected immediately.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_close_reason(ev: *const lev_event_t, out: *mut c_int) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match e.close_reason {
+            Some(r) => {
+                *out = r;
+                LEV_OK
+            }
+            None => {
+                set_last_error("event has no close reason");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Read why a `LEV_EVENT_DELIVERY_FAILED` event's packet was not delivered into
+/// `*out`, as one of the `LEV_DELIVERY_*` constants. `LEV_ERR_INVALID_ARG` for
+/// any other event type.
+///
+/// `LEV_DELIVERY_TIMEOUT` and `_LINK_FAILED` mean re-send;
+/// `LEV_DELIVERY_INVALID_PROOF` means the peer answered with a proof that did
+/// not verify, so re-sending produces the same result.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_delivery_error(
+    ev: *const lev_event_t,
+    out: *mut c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match e.delivery_error {
+            Some(err) => {
+                *out = err;
+                LEV_OK
+            }
+            None => {
+                set_last_error("event has no delivery error");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Read the total encrypted transfer size of a resource, in bytes, into `*out`.
+///
+/// Set on `LEV_EVENT_RESOURCE_ADVERTISED` (so an app under the AcceptApp
+/// strategy can decide whether to accept it) and on
+/// `LEV_EVENT_RESOURCE_PROGRESS` (the only place an auto-accepting receiver sees
+/// it, since no advertisement is surfaced there). `LEV_ERR_INVALID_ARG` for any
+/// other event type.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_transfer_size(ev: *const lev_event_t, out: *mut u64) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match e.transfer_size {
+            Some(n) => {
+                *out = n;
+                LEV_OK
+            }
+            None => {
+                set_last_error("event has no transfer size");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Read the original uncompressed data size of a resource, in bytes, into
+/// `*out`. Set on the same events as `lev_event_transfer_size`; this is the size
+/// the assembled payload will have, which is what an accept/reject decision and
+/// a receive buffer are sized against. `LEV_ERR_INVALID_ARG` for any other event
+/// type.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_data_size(ev: *const lev_event_t, out: *mut u64) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match e.data_size {
+            Some(n) => {
+                *out = n;
+                LEV_OK
+            }
+            None => {
+                set_last_error("event has no data size");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Read the 1-based segment index of a `LEV_EVENT_RESOURCE_COMPLETED` event into
+/// `*out`. `LEV_ERR_INVALID_ARG` for any other event type.
+///
+/// A multi-segment resource fires one completion per segment, all carrying the
+/// same `resource_hash`, so this and `lev_event_total_segments` are how a C
+/// receiver orders the chunks and recognises the last one
+/// (`segment_index == total_segments`). Metadata is present on segment 1 only.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_segment_index(ev: *const lev_event_t, out: *mut u32) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match e.segment_index {
+            Some(n) => {
+                *out = n;
+                LEV_OK
+            }
+            None => {
+                set_last_error("event has no segment index");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Read the total number of segments of a `LEV_EVENT_RESOURCE_COMPLETED` event's
+/// transfer into `*out`. 1 for a single-segment resource.
+/// `LEV_ERR_INVALID_ARG` for any other event type. See
+/// `lev_event_segment_index`.
+#[no_mangle]
+pub unsafe extern "C" fn lev_event_total_segments(ev: *const lev_event_t, out: *mut u32) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let e = match ev.as_ref() {
+            Some(e) => e,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if out.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        match e.total_segments {
+            Some(n) => {
+                *out = n;
+                LEV_OK
+            }
+            None => {
+                set_last_error("event has no segment count");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
 /// Whether a resource event is for a transfer this node is *sending*. Returns 1
 /// on the sender side of a `LEV_EVENT_RESOURCE_PROGRESS`/`_COMPLETED`/`_FAILED`
-/// event, 0 on the receiver side (and 0 for other events or a NULL pointer).
+/// event, 0 on the receiver side.
+///
+/// `LEV_EVENT_RESOURCE_STARTED` is absent from that list because the engine
+/// emits it on the receiver only (`is_sender: false` at both push sites), so 0
+/// there is the truth and not a gap in the projection.
+///
+/// One non-resource event also sets this flag: `LEV_EVENT_LINK_ESTABLISHED`
+/// returns 1 for a link this node initiated and 0 for an inbound one, which is
+/// that event's documented inbound indicator (see the constant). Everything
+/// else, and a NULL pointer, returns 0.
 ///
 /// A sender's `LEV_EVENT_RESOURCE_COMPLETED` is the signal that an outgoing
 /// transfer finished (its data payload is empty); a receiver's carries the
@@ -904,6 +1287,287 @@ mod tests {
         assert_eq!(marker.dropped_count, 2);
         assert!(b.next().is_none());
         assert!(!readable(b.fd()));
+    }
+
+    /// A response that arrived as a resource carries the resource's metadata
+    /// blob, and `lev_event_metadata` is the generic accessor for it. The arm
+    /// bound the variant with `..` and dropped the field, so every C caller saw
+    /// `LEV_ERR_INVALID_ARG` on a response that did have metadata — found by
+    /// `event_projection_coverage`'s field guard, which is why the projection
+    /// is asserted here rather than only through a C round trip (the C API
+    /// sends msgpack-wrapped responses, which never carry metadata).
+    #[test]
+    fn response_metadata_reaches_the_projection() {
+        let ev = leviculum_std::NodeEvent::ResponseReceived {
+            link_id: leviculum_std::LinkId::new([1u8; 16]),
+            request_id: [2u8; 16],
+            response_data: b"page body".to_vec(),
+            metadata: Some(b"\x81\xa4name\xa5a.txt".to_vec()),
+        };
+        let p = project(ev);
+        assert_eq!(p.ty, LEV_EVENT_RESPONSE_RECEIVED);
+        assert_eq!(
+            p.metadata.as_deref(),
+            Some(&b"\x81\xa4name\xa5a.txt"[..]),
+            "a response's resource metadata must reach lev_event_metadata"
+        );
+        assert_eq!(p.data, b"page body");
+    }
+
+    /// Codeberg #137 projected the destination of a link close, but the only
+    /// check on it was `event_projection_coverage`'s source-level guard, which
+    /// sees that `e.dest_hash =` appears in the arm and cannot see *what* it is
+    /// set to — the projection would still pass with the link id copied in by
+    /// mistake. The C-level suite only asserts that a LINK_CLOSED event arrives.
+    /// This pins the value.
+    #[test]
+    fn link_closed_projects_its_own_destination() {
+        let dest = leviculum_std::DestinationHash::new([0xABu8; 16]);
+        let ev = leviculum_std::NodeEvent::LinkClosed {
+            link_id: leviculum_std::LinkId::new([0x11u8; 16]),
+            reason: leviculum_std::LinkCloseReason::PeerClosed,
+            is_initiator: true,
+            destination_hash: dest,
+        };
+        let p = project(ev);
+        assert_eq!(p.ty, LEV_EVENT_LINK_CLOSED);
+        assert_eq!(p.link_id, Some([0x11u8; 16]));
+        assert_eq!(
+            p.dest_hash,
+            Some([0xABu8; 16]),
+            "a link close must name the destination whose link closed, so a \
+             responder hosting several destinations knows which one lost a peer"
+        );
+    }
+
+    /// Read an event through the C accessor, as a C app would.
+    fn as_ptr(e: &lev_event_t) -> *const lev_event_t {
+        e as *const lev_event_t
+    }
+
+    /// The interface an event arrived on is an id, and it is the id the engine
+    /// used — not the position of anything.
+    ///
+    /// `AnnounceReceived` carries the identical one-line projection but cannot
+    /// be built here: `ReceivedAnnounce`'s only constructor is
+    /// `pub(crate) from_packet` inside `leviculum-core`. The source-level field
+    /// guard covers that arm, and `announce_interface_id_resolves_to_an_interface`
+    /// in `ffi_integration` drives it end to end over a real interface.
+    #[test]
+    fn path_and_packet_events_carry_the_interface_they_arrived_on() {
+        let path = project(leviculum_std::NodeEvent::PathFound {
+            destination_hash: leviculum_std::DestinationHash::new([1u8; 16]),
+            hops: 3,
+            interface_index: 7,
+        });
+        let packet = project(leviculum_std::NodeEvent::PacketReceived {
+            destination: leviculum_std::DestinationHash::new([2u8; 16]),
+            data: b"payload".to_vec(),
+            interface_index: 4,
+        });
+        unsafe {
+            let mut id = u64::MAX;
+            assert_eq!(lev_event_interface_id(as_ptr(&path), &mut id), LEV_OK);
+            assert_eq!(id, 7, "a path event must name the interface that found it");
+            assert_eq!(lev_event_interface_id(as_ptr(&packet), &mut id), LEV_OK);
+            assert_eq!(
+                id, 4,
+                "a packet event must name the interface it came in on"
+            );
+
+            // An event with no interface says so rather than reporting 0, which
+            // is a real interface id.
+            let stale = project(leviculum_std::NodeEvent::LinkStale {
+                link_id: leviculum_std::LinkId::new([3u8; 16]),
+            });
+            assert_eq!(
+                lev_event_interface_id(as_ptr(&stale), &mut id),
+                LEV_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                lev_event_interface_id(as_ptr(&path), std::ptr::null_mut()),
+                LEV_ERR_NULL_PTR
+            );
+            assert_eq!(
+                lev_event_interface_id(std::ptr::null(), &mut id),
+                LEV_ERR_NULL_PTR
+            );
+        }
+    }
+
+    /// Every close reason reaches C as its own constant. A C app reconnects
+    /// differently per reason — `LEV_CLOSE_BLACKHOLED` must not be retried at
+    /// all — so collapsing two of them, or letting one fall through to
+    /// `LEV_CLOSE_OTHER`, is a behavioural defect and not a cosmetic one.
+    #[test]
+    fn every_close_reason_reaches_c_as_its_own_constant() {
+        use leviculum_std::LinkCloseReason as R;
+        let expected = [
+            (R::Normal, LEV_CLOSE_NORMAL),
+            (R::Timeout, LEV_CLOSE_TIMEOUT),
+            (R::InvalidProof, LEV_CLOSE_INVALID_PROOF),
+            (R::PeerClosed, LEV_CLOSE_PEER_CLOSED),
+            (R::Stale, LEV_CLOSE_STALE),
+            (R::ChannelExhausted, LEV_CLOSE_CHANNEL_EXHAUSTED),
+            (R::Blackholed, LEV_CLOSE_BLACKHOLED),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (reason, want) in expected {
+            let p = project(leviculum_std::NodeEvent::LinkClosed {
+                link_id: leviculum_std::LinkId::new([9u8; 16]),
+                reason,
+                is_initiator: false,
+                destination_hash: leviculum_std::DestinationHash::new([8u8; 16]),
+            });
+            let mut got = -1;
+            unsafe {
+                assert_eq!(lev_event_close_reason(as_ptr(&p), &mut got), LEV_OK);
+            }
+            assert_eq!(got, want, "{reason:?} must project to {want}");
+            assert_ne!(
+                got, LEV_CLOSE_OTHER,
+                "{reason:?} fell into the wildcard arm"
+            );
+            assert!(
+                seen.insert(got),
+                "{reason:?} shares a constant with another"
+            );
+        }
+        assert_eq!(seen.len(), expected.len());
+
+        // Not a link close: no reason, and it says so.
+        let other = project(leviculum_std::NodeEvent::LinkStale {
+            link_id: leviculum_std::LinkId::new([9u8; 16]),
+        });
+        let mut got = 0;
+        unsafe {
+            assert_eq!(
+                lev_event_close_reason(as_ptr(&other), &mut got),
+                LEV_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                lev_event_close_reason(as_ptr(&other), std::ptr::null_mut()),
+                LEV_ERR_NULL_PTR
+            );
+        }
+    }
+
+    /// Each delivery failure reaches C as its own constant. `_INVALID_PROOF` is
+    /// the one that changes behaviour: the peer answered, so the re-send the
+    /// other two ask for cannot succeed.
+    #[test]
+    fn every_delivery_error_reaches_c_as_its_own_constant() {
+        use leviculum_std::DeliveryError as E;
+        for (error, want) in [
+            (E::Timeout, LEV_DELIVERY_TIMEOUT),
+            (E::LinkFailed, LEV_DELIVERY_LINK_FAILED),
+            (E::InvalidProof, LEV_DELIVERY_INVALID_PROOF),
+        ] {
+            let p = project(leviculum_std::NodeEvent::DeliveryFailed {
+                packet_hash: [0xEEu8; 16],
+                error,
+            });
+            let mut got = -1;
+            unsafe {
+                assert_eq!(lev_event_delivery_error(as_ptr(&p), &mut got), LEV_OK);
+            }
+            assert_eq!(got, want, "{error:?} must project to {want}");
+            assert_ne!(got, LEV_DELIVERY_OTHER, "{error:?} fell into the wildcard");
+        }
+    }
+
+    /// A resource's sizes are what an accept-or-reject decision turns on, and
+    /// they must be the resource's own numbers.
+    ///
+    /// The advertise event is only emitted under the AcceptApp strategy, so an
+    /// auto-accepting receiver sees the sizes on the progress event or nowhere;
+    /// both are pinned. The two sizes are deliberately different here — the
+    /// encrypted transfer is larger than the payload — so swapping them fails.
+    #[test]
+    fn resource_events_carry_both_sizes() {
+        let adv = project(leviculum_std::NodeEvent::ResourceAdvertised {
+            link_id: leviculum_std::LinkId::new([1u8; 16]),
+            resource_hash: [2u8; 32],
+            transfer_size: 9_000,
+            data_size: 8_192,
+        });
+        let progress = project(leviculum_std::NodeEvent::ResourceProgress {
+            link_id: leviculum_std::LinkId::new([1u8; 16]),
+            resource_hash: [2u8; 32],
+            progress: 0.5,
+            transfer_size: 9_000,
+            data_size: 8_192,
+            is_sender: false,
+        });
+        unsafe {
+            for e in [&adv, &progress] {
+                let mut transfer = 0u64;
+                let mut data = 0u64;
+                assert_eq!(lev_event_transfer_size(as_ptr(e), &mut transfer), LEV_OK);
+                assert_eq!(lev_event_data_size(as_ptr(e), &mut data), LEV_OK);
+                assert_eq!(transfer, 9_000, "encrypted transfer size");
+                assert_eq!(data, 8_192, "uncompressed payload size");
+            }
+            // Neither size belongs to a link close.
+            let closed = project(leviculum_std::NodeEvent::LinkClosed {
+                link_id: leviculum_std::LinkId::new([1u8; 16]),
+                reason: leviculum_std::LinkCloseReason::Normal,
+                is_initiator: false,
+                destination_hash: leviculum_std::DestinationHash::new([3u8; 16]),
+            });
+            let mut v = 0u64;
+            assert_eq!(
+                lev_event_transfer_size(as_ptr(&closed), &mut v),
+                LEV_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                lev_event_data_size(as_ptr(&closed), &mut v),
+                LEV_ERR_INVALID_ARG
+            );
+        }
+    }
+
+    /// A multi-segment resource fires one completion per segment under the same
+    /// resource hash, so the segment position is the only thing that tells the
+    /// chunks apart. Index and total are distinct values here so projecting one
+    /// into the other's slot fails.
+    #[test]
+    fn resource_completion_carries_its_segment_position() {
+        let p = project(leviculum_std::NodeEvent::ResourceCompleted {
+            link_id: leviculum_std::LinkId::new([1u8; 16]),
+            resource_hash: [2u8; 32],
+            data: b"chunk".to_vec(),
+            metadata: None,
+            is_sender: false,
+            segment_index: 2,
+            total_segments: 5,
+        });
+        unsafe {
+            let mut index = 0u32;
+            let mut total = 0u32;
+            assert_eq!(lev_event_segment_index(as_ptr(&p), &mut index), LEV_OK);
+            assert_eq!(lev_event_total_segments(as_ptr(&p), &mut total), LEV_OK);
+            assert_eq!(index, 2, "the 1-based position of this segment");
+            assert_eq!(total, 5, "how many segments the transfer has");
+            assert!(index < total, "segment 2 of 5 is not the last one");
+
+            let progress = project(leviculum_std::NodeEvent::ResourceProgress {
+                link_id: leviculum_std::LinkId::new([1u8; 16]),
+                resource_hash: [2u8; 32],
+                progress: 0.5,
+                transfer_size: 1,
+                data_size: 1,
+                is_sender: false,
+            });
+            assert_eq!(
+                lev_event_segment_index(as_ptr(&progress), &mut index),
+                LEV_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                lev_event_total_segments(as_ptr(&progress), &mut total),
+                LEV_ERR_INVALID_ARG
+            );
+        }
     }
 
     #[test]

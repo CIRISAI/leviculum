@@ -194,6 +194,8 @@ pub enum NodeEvent {
         packet_hash: [u8; 32],
         /// Destination that received the packet
         destination_hash: DestinationHash,
+        /// Interface the packet was received on
+        interface_index: usize,
     },
 
     /// Application should decide whether to prove this link data packet
@@ -215,6 +217,18 @@ pub enum NodeEvent {
         /// The link that sent the data
         link_id: LinkId,
         /// Full SHA256 hash of the delivered packet
+        packet_hash: [u8; 32],
+    },
+
+    /// Delivery proof timeout for a plain link data packet.
+    ///
+    /// The deadline is derived from the Link RTT in the same way as Python's
+    /// `PacketReceipt`: `max(rtt * traffic_timeout_factor,
+    /// TRAFFIC_TIMEOUT_MIN_MS)`.
+    LinkDeliveryFailed {
+        /// The link that sent the data
+        link_id: LinkId,
+        /// Full SHA256 hash of the packet whose receipt timed out
         packet_hash: [u8; 32],
     },
 
@@ -302,6 +316,10 @@ pub enum NodeEvent {
     RequestReceived {
         /// The link that received the request
         link_id: LinkId,
+        /// The destination this request was addressed to. Two destinations
+        /// may share the same request path (see `register_request_handler`);
+        /// this field tells the responder which one to serve.
+        destination_hash: DestinationHash,
         /// Unique request identifier (truncated packet hash)
         request_id: [u8; TRUNCATED_HASHBYTES],
         /// The request path string
@@ -415,6 +433,7 @@ impl NodeEvent {
             | NodeEvent::LinkClosed { link_id, .. }
             | NodeEvent::LinkProofRequested { link_id, .. }
             | NodeEvent::LinkDeliveryConfirmed { link_id, .. }
+            | NodeEvent::LinkDeliveryFailed { link_id, .. }
             | NodeEvent::ResourceAdvertised { link_id, .. }
             | NodeEvent::ResourceTransferStarted { link_id, .. }
             | NodeEvent::ResourceProgress { link_id, .. }
@@ -473,6 +492,7 @@ impl NodeEvent {
             | NodeEvent::MessageReceived { .. }
             | NodeEvent::LinkDataReceived { .. }
             | NodeEvent::LinkDeliveryConfirmed { .. }
+            | NodeEvent::LinkDeliveryFailed { .. }
             | NodeEvent::ChannelRetransmit { .. }
             | NodeEvent::ResourceProgress { .. } => EventClass::Data,
 
@@ -539,6 +559,7 @@ impl NodeEvent {
             NodeEvent::PacketProofRequested { .. } => "PacketProofRequested",
             NodeEvent::LinkProofRequested { .. } => "LinkProofRequested",
             NodeEvent::LinkDeliveryConfirmed { .. } => "LinkDeliveryConfirmed",
+            NodeEvent::LinkDeliveryFailed { .. } => "LinkDeliveryFailed",
             NodeEvent::ResourceAdvertised { .. } => "ResourceAdvertised",
             NodeEvent::ResourceTransferStarted { .. } => "ResourceTransferStarted",
             NodeEvent::ResourceProgress { .. } => "ResourceProgress",
@@ -562,6 +583,17 @@ pub enum DeliveryError {
     Timeout,
     /// Link failed during delivery
     LinkFailed,
+    /// A proof for the packet arrived but did not verify against the
+    /// destination's identity.
+    ///
+    /// Distinct from [`Timeout`](DeliveryError::Timeout) and
+    /// [`LinkFailed`](DeliveryError::LinkFailed) in what it asks of the sender:
+    /// the peer answered, so the path works and re-sending on it will keep
+    /// producing the same unverifiable proof. Either the recalled identity for
+    /// the destination is stale (re-resolve it) or something on the path is
+    /// forging proofs. Reported as `LinkFailed` until this variant existed,
+    /// which told a caller to retry a send that cannot succeed.
+    InvalidProof,
 }
 
 impl core::fmt::Display for DeliveryError {
@@ -569,6 +601,7 @@ impl core::fmt::Display for DeliveryError {
         match self {
             DeliveryError::Timeout => write!(f, "delivery timed out"),
             DeliveryError::LinkFailed => write!(f, "link failed during delivery"),
+            DeliveryError::InvalidProof => write!(f, "delivery proof did not verify"),
         }
     }
 }

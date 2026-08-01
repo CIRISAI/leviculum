@@ -37,9 +37,8 @@ Shipped: `lev_builder_config_file`, `lev_builder_share_instance`,
 `lev_builder_connect_shared_instance` on the facade and the C FFI; unit and
 in-process integration tests (config-file node bring-up, shared-instance
 announce forwarding); the `daemon.c` acceptance program; the `lnsd.c` C daemon
-with a spawn-and-signal lifecycle test; a `c-api` node type in
-`reticulum-integ` (static `c-lnsd` mounted like `lnsd`, driven by the existing
-tools); ASan/LSan/TSan clean (tokio-reactor false positives scoped out);
+with a spawn-and-signal lifecycle test; a `c-lnsd` adapter in periculum
+(static `c-lnsd` mounted like `lnsd`, driven by the existing tools); ASan/LSan/TSan clean (tokio-reactor false positives scoped out);
 reference and how-to docs.
 
 The highest-leverage, lowest-effort phase. The engine already supports all of
@@ -53,7 +52,7 @@ compatible. Exposing this unlocks two things at once:
   how `rncp`/`rnx`/`rnstatus` normally work.
 - A minimal C `lnsd`: load a config, offer a shared instance plus RPC, run.
   Because it speaks the same control surface as `lnsd`, it plugs into the
-  existing `reticulum-integ` Docker harness as a new `c-api` node type, driven
+  periculum docker harness as a node whose `adapter = "c-lnsd"`, driven
   by the existing `rnprobe`/`rnstatus`/`rnpath`/`lnstest`/`lncp` tools, with no new
   harness steps. This is the on-ramp to the deep in-mesh network tests.
 - Side effect: loading a config file also brings every interface type
@@ -64,7 +63,7 @@ FFI surface: `lev_builder_config_file`, `lev_builder_share_instance` (name +
 enable), `lev_builder_connect_shared_instance`.
 
 Deliverable: the C `lnsd` example program plus its integration into
-`reticulum-integ` as a `c-api` node, validated in a TCP scenario.
+periculum as a `c-lnsd`-adapter node, validated in a TCP scenario.
 
 ## Phase 2: programmatic radio interfaces (RNode + Serial). Size M. DONE
 
@@ -72,8 +71,9 @@ Shipped: `lev_builder_add_rnode` and `lev_builder_add_serial` on the facade and
 the C FFI, projecting two additive driver builder methods; NULL-guard unit
 tests; an in-process test bringing a node up over a serial interface backed by
 a pty; the `radio.c` acceptance program; reference and how-to docs. The over-
-the-lora-proxy and real-RNode validation remains for the integ LoRa tier (the
-Phase 1 `c-api` node with an RNode/serial config over the proxy device).
+the-lora-proxy and real-RNode validation remains for periculum's `hardware/`
+corpus (the Phase 1 `c-lnsd`-adapter node with an RNode/serial config over the
+proxy device).
 
 LoRa and off-grid mesh is the signature Reticulum use. Phase 1 already reaches
 it via a config file; this phase adds the ergonomic, programmatic path so a C
@@ -85,7 +85,7 @@ FFI surface: `lev_builder_add_rnode(port, frequency, bandwidth, sf, cr,
 tx_power, ...)`, `lev_builder_add_serial(port, speed, ...)`.
 
 Deliverable: a C node running over real RNodes, and over the mock-LoRa
-`lora-proxy` (serial over a pty), in the `reticulum-integ` LoRa tier. This is
+`lora-proxy` (serial over a pty), in periculum's `hardware/` corpus. This is
 the in-mesh hardware test with a C program in the loop.
 
 ## Phase 3: reliable streams (Channel/Buffer). Size M to L. DONE
@@ -168,11 +168,12 @@ All with additive facade accessors, unit and in-process tests, the `stats.c`
 acceptance program, docs, and ASan/LSan/TSan clean (the three-lock interface
 join has no lock-order issues).
 
-## Postponed: LXMF (messaging)
+## Postponed: LXMF C API (messaging)
 
-Out of scope until the Rust LXMF layer is implemented. After that, LXMF gets
-its own C API surface and a separate roadmap. Messenger, mail, and
-NomadNet-style apps depend on it.
+The `leviculum-lxmf` Rust layer is implemented as a separate `no_std + alloc`
+crate. Exposing it through `leviculum-ffi` remains out of scope for this
+roadmap; that work needs its own C ownership and event-surface design.
+Messenger, mail, and NomadNet-style apps depend on that future FFI layer.
 
 ## Ordering rationale
 
@@ -225,7 +226,7 @@ those.
 8. Soak and stress. Long-running runs with many links, high concurrent send
    volume, churn (open, close, free repeatedly), and event floods over minutes,
    to surface leaks, fd exhaustion, drift, and bridge robustness under load.
-9. Docker integration with a C `lnsd` (`reticulum-integ`, from Phase 1). The C
+9. Docker integration with a C `lnsd` (periculum, from Phase 1). The C
    daemon as a `c-api` node in the multi-container mesh alongside Rust `lnsd`
    and Python `rnsd`, driven by the existing `rnprobe`/`rnstatus`/`rnpath`
    tools. Multi-node, multi-hop, relay, and mixed-implementation scenarios with
@@ -254,5 +255,5 @@ nightly tier, matching the existing test tiers.
   the new surface, all green and non-flaky.
 - `just sanitize-ffi` clean for the new code paths.
 - mdbook docs updated (overview, how-to, reference) and the book builds.
-- For Phases 1 and 2, the C `lnsd` runs in the `reticulum-integ` mesh for at
+- For Phases 1 and 2, the C `lnsd` runs in a periculum mesh for at
   least one scenario.

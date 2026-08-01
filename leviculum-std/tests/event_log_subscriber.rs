@@ -108,6 +108,7 @@ fn test_schema_violation_emitted() {
         iface = "tcp0",
         r#type = "Data",
         dst = "ab",
+        ph = "00112233aabbccdd",
         // hops + len intentionally missing
     );
     let lines = lines_for(&handle, "PKT_RX");

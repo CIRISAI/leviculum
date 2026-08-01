@@ -23,6 +23,8 @@
 - [Manual page: lnstest(1)](man/lnstest.1.md)
 - [Manual page: lncp(1)](man/lncp.1.md)
 - [Manual page: lnstatus(1)](man/lnstatus.1.md)
+- [Manual page: lnomad(1)](man/lnomad.1.md)
+- [Manual page: lblogd(1)](man/lblogd.1.md)
 
 # Firmware (LNode)
 
@@ -90,4 +92,5 @@
   - [Constants reference](appendix/lxmf/12-constants.md)
   - [Coverage ledger](appendix/lxmf/13-coverage-ledger.md)
   - [Test vectors](appendix/lxmf/14-test-vectors.md)
+  - [Python 1.1.0 and RNS 1.4.0 parity status](appendix/lxmf/15-parity-status.md)
   - [Symbol inventory (frozen)](appendix/lxmf/_inventory.md)

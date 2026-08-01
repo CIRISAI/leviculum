@@ -31,6 +31,7 @@
 //! cargo test --package leviculum-std --test rnsd_interop protocol_tests
 //! ```
 
+mod announce_emission_interop_tests;
 mod announce_interop_tests;
 mod auto_interop_tests;
 mod backbone_interop_tests;
@@ -52,10 +53,12 @@ mod interface_mode_tests;
 mod lifecycle_tests;
 mod link_keepalive_close_tests;
 mod link_manager_tests;
+mod link_packet_interop_tests;
 mod link_tests;
 mod lnomad_fetch_interop_tests;
 mod loadtest_tcp_hub_tests;
 mod lrproof_hop_undercount_interop_tests;
+mod lxmf_interop_tests;
 mod mtu_tests;
 mod multihop_tests;
 mod node_api_tests;
@@ -74,6 +77,7 @@ mod ratchet_tests;
 mod relay_integration_tests;
 mod remote_management_server_tests;
 mod remote_management_tests;
+mod request_resource_interop_tests;
 mod request_tests;
 mod resource_tests;
 mod responder_node_tests;

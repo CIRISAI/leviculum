@@ -7,17 +7,22 @@
 //! exists at the HTTP layer. Certificates and the account key are cached in a
 //! persistent directory so restarts and renewals do not re-register.
 //!
-//! The plain-HTTP listener does exactly one thing: 301-redirect every request
-//! to the `https://` equivalent.
+//! In that deployment mode the plain-HTTP listener does exactly one thing:
+//! 301-redirect every request to the `https://` equivalent.
 //!
-//! Posts are loaded once at startup and rendered per request from the cached
-//! [`Post`]s; a reload-on-change mechanism is deliberately out of scope here
-//! (batch D wires the daemon and can add it).
+//! Setting [`WebConfig::acme`] to `None` selects the plaintext development
+//! mode instead: no HTTPS listener and no ACME traffic at all, and the HTTP
+//! listener serves the blog directly. Certificate acquisition needs a
+//! publicly reachable domain, so without this mode the server cannot be run
+//! at all on a developer machine.
+//!
+//! Posts come from the shared [`SnapshotRx`] channel and are rendered per
+//! request from whatever snapshot is current, so a reload is picked up by the
+//! next request without restarting the listener.
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
@@ -29,15 +34,16 @@ use rustls_acme::caches::DirCache;
 use rustls_acme::AcmeConfig;
 use thiserror::Error;
 
-use crate::post::{load_posts_dir, Post, PostError};
-use crate::render::{render_index_html, render_post_html};
+use crate::content::SnapshotRx;
+use crate::files;
+use crate::render::{
+    render_about_html, render_feed_atom, render_index_html, render_post_html, ABOUT_HTML_PATH,
+    FEED_PATH,
+};
 
 /// Errors from starting or running the web server.
 #[derive(Debug, Error)]
 pub enum WebError {
-    /// Loading the posts directory failed.
-    #[error("loading posts: {0}")]
-    Posts(#[from] PostError),
     /// The config lists no domains to obtain a certificate for.
     #[error("no domains configured")]
     NoDomains,
@@ -61,52 +67,138 @@ pub enum WebError {
     AcmeEnded,
 }
 
-/// Configuration for [`run_web`].
+/// Let's Encrypt settings, present exactly when HTTPS is wanted.
 #[derive(Clone, Debug)]
-pub struct WebConfig {
+pub struct AcmeSettings {
     /// Domains the certificate covers; the first one doubles as the redirect
     /// target when a request carries no Host header.
     pub domains: Vec<String>,
     /// Persistent directory caching the ACME account key and certificates.
     /// Losing it forces re-issuance on every start, which burns Let's
     /// Encrypt rate limits.
-    pub acme_cache_dir: PathBuf,
+    pub cache_dir: PathBuf,
     /// Contact email for the ACME account (expiry warnings and the like).
-    pub acme_contact_email: String,
+    pub contact_email: String,
     /// Use the Let's Encrypt STAGING directory instead of production.
     /// Staging issues untrusted certificates but has generous rate limits;
     /// production is a deliberate config choice for real deployments.
-    pub acme_staging: bool,
-    /// Plain-HTTP listen address (normally port 80), redirect-only.
+    pub staging: bool,
+}
+
+/// Configuration for [`run_web`].
+#[derive(Clone, Debug)]
+pub struct WebConfig {
+    /// `Some`: obtain HTTPS certificates from Let's Encrypt and make the
+    /// plain-HTTP listener redirect-only. `None`: plaintext development
+    /// mode, where [`http_bind`](Self::http_bind) serves the blog itself and
+    /// no HTTPS listener is opened.
+    pub acme: Option<AcmeSettings>,
+    /// Plain-HTTP listen address (normally port 80). Redirect-only with ACME
+    /// enabled, the blog itself without it.
     pub http_bind: SocketAddr,
     /// HTTPS listen address (normally port 443). TLS-ALPN-01 validation
     /// requires the ACME server to reach the certificate domains on port
-    /// 443, so in real deployments this must be reachable there.
+    /// 443, so in real deployments this must be reachable there. Unused, and
+    /// never bound, when [`acme`](Self::acme) is `None`.
     pub https_bind: SocketAddr,
-    /// Directory of Markdown posts to serve.
-    pub posts_dir: PathBuf,
 }
 
 /// Build the blog router: `/` is the post index, `/posts/{slug}` one post,
-/// everything else a small HTML 404.
-pub fn build_router(posts: Arc<Vec<Post>>) -> Router {
+/// `/files/{name}` a file from the file area, everything else a small HTML
+/// 404.
+///
+/// The handlers read the snapshot per request, so a reload takes effect on
+/// the next request without touching the listener.
+pub fn build_router(content: SnapshotRx) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/posts/{slug}", get(post_page))
+        .route(ABOUT_HTML_PATH, get(about_page))
+        .route(FEED_PATH, get(feed))
+        .route(&format!("{}{{name}}", files::WEB_PREFIX), get(file_asset))
         .fallback(fallback_page)
-        .with_state(posts)
+        .with_state(content)
 }
 
-async fn index_page(State(posts): State<Arc<Vec<Post>>>) -> Html<String> {
-    Html(render_index_html(&posts))
+/// One file from the file area: the same bytes the mesh side serves under
+/// `/file/<name>`, with a content type from the extension.
+///
+/// Served through the snapshot rather than straight off the filesystem, so
+/// the two sides can never disagree about which files exist — a name the
+/// mesh will not serve (too large, unusable name) is a 404 here too. That is
+/// also why there is no `ServeDir`: it would answer from the directory, not
+/// from the snapshot.
+async fn file_asset(State(content): State<SnapshotRx>, UrlPath(name): UrlPath<String>) -> Response {
+    let snapshot = content.borrow().clone();
+    // axum has already percent-decoded the segment, so a `%2e%2e%2f` attempt
+    // arrives here as `../` and dies on the separator check.
+    let Some(entry) = files::sanitize_name(&name).and_then(|name| snapshot.files.get(&name)) else {
+        return not_found();
+    };
+    let max_bytes = snapshot
+        .file_area
+        .as_ref()
+        .map(|area| area.max_bytes)
+        .unwrap_or(files::DEFAULT_MAX_FILE_BYTES);
+    match files::read_entry(entry, max_bytes) {
+        Ok(bytes) => (
+            [(header::CONTENT_TYPE, files::mime_for(&entry.name))],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            // The snapshot says it exists but the disk disagrees: it was
+            // deleted or replaced since the load, and the next reload will
+            // drop it. A 404 is the honest answer in the meantime.
+            eprintln!("lblogd: cannot serve {}: {e}", entry.name);
+            not_found()
+        }
+    }
 }
 
-async fn post_page(
-    State(posts): State<Arc<Vec<Post>>>,
-    UrlPath(slug): UrlPath<String>,
-) -> Response {
-    match posts.iter().find(|p| p.slug == slug) {
-        Some(post) => Html(render_post_html(post)).into_response(),
+/// The Atom feed, or a 404 when the blog has no public URL to build absolute
+/// links from (a plaintext development run).
+async fn feed(State(content): State<SnapshotRx>) -> Response {
+    let snapshot = content.borrow().clone();
+    match render_feed_atom(&snapshot.meta, &snapshot.posts) {
+        Some(xml) => (
+            [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")],
+            xml,
+        )
+            .into_response(),
+        None => not_found(),
+    }
+}
+
+/// The about page, or a 404 when nothing is configured for it.
+async fn about_page(State(content): State<SnapshotRx>) -> Response {
+    let snapshot = content.borrow().clone();
+    match snapshot.meta.has_about {
+        true => Html(render_about_html(
+            &snapshot.meta,
+            &snapshot.css,
+            snapshot.about.as_ref(),
+        ))
+        .into_response(),
+        false => not_found(),
+    }
+}
+
+async fn index_page(State(content): State<SnapshotRx>) -> Html<String> {
+    // Clone the Arc out of the watch borrow immediately: the borrow holds a
+    // read lock, and holding one across rendering would block reloads.
+    let snapshot = content.borrow().clone();
+    Html(render_index_html(
+        &snapshot.meta,
+        &snapshot.css,
+        &snapshot.posts,
+    ))
+}
+
+async fn post_page(State(content): State<SnapshotRx>, UrlPath(slug): UrlPath<String>) -> Response {
+    let snapshot = content.borrow().clone();
+    match snapshot.posts.iter().find(|p| p.slug == slug) {
+        Some(post) => Html(render_post_html(&snapshot.meta, &snapshot.css, post)).into_response(),
         None => not_found(),
     }
 }
@@ -122,24 +214,52 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Html(BODY)).into_response()
 }
 
-/// Serve the blog over HTTPS with automatic Let's Encrypt certificates, plus
-/// a plain-HTTP listener that 301-redirects to HTTPS. Runs until one of the
-/// servers fails.
+/// Serve the blog and run until a server fails.
+///
+/// With [`WebConfig::acme`] set, that means HTTPS with automatic Let's
+/// Encrypt certificates plus a plain-HTTP listener that 301-redirects to it;
+/// without it, a single plain-HTTP listener serving the blog directly.
+pub async fn run_web(config: WebConfig, content: SnapshotRx) -> Result<(), WebError> {
+    let router = build_router(content);
+    match config.acme {
+        Some(acme) => serve_https(router, acme, config.http_bind, config.https_bind).await,
+        None => serve_plain(router, config.http_bind).await,
+    }
+}
+
+/// Plaintext development mode: one listener, no TLS, no ACME.
+async fn serve_plain(router: Router, http_bind: SocketAddr) -> Result<(), WebError> {
+    let listener = tokio::net::TcpListener::bind(http_bind)
+        .await
+        .map_err(|source| WebError::Bind {
+            addr: http_bind,
+            source,
+        })?;
+    axum::serve(listener, router.into_make_service())
+        .await
+        .map_err(WebError::Http)
+}
+
+/// Deployment mode: HTTPS with Let's Encrypt certificates, plain HTTP
+/// redirecting to it.
 ///
 /// The certificate acquisition path (rustls-acme against Let's Encrypt) is
 /// compile-verified only: it needs a publicly reachable domain, so it is
 /// exercised in real deployment, not in CI.
-pub async fn run_web(config: WebConfig) -> Result<(), WebError> {
-    if config.domains.is_empty() {
+async fn serve_https(
+    router: Router,
+    acme: AcmeSettings,
+    http_bind: SocketAddr,
+    https_bind: SocketAddr,
+) -> Result<(), WebError> {
+    if acme.domains.is_empty() {
         return Err(WebError::NoDomains);
     }
-    let posts = Arc::new(load_posts_dir(&config.posts_dir)?);
-    let router = build_router(posts);
 
-    let mut acme_state = AcmeConfig::new(&config.domains)
-        .contact_push(format!("mailto:{}", config.acme_contact_email))
-        .cache(DirCache::new(config.acme_cache_dir.clone()))
-        .directory_lets_encrypt(!config.acme_staging)
+    let mut acme_state = AcmeConfig::new(&acme.domains)
+        .contact_push(format!("mailto:{}", acme.contact_email))
+        .cache(DirCache::new(acme.cache_dir.clone()))
+        .directory_lets_encrypt(!acme.staging)
         .state();
     let acceptor = acme_state.axum_acceptor(acme_state.default_rustls_config());
     // The state stream drives ACME ordering and renewal; it must be polled
@@ -153,15 +273,15 @@ pub async fn run_web(config: WebConfig) -> Result<(), WebError> {
         }
     };
 
-    let https_server = axum_server::bind(config.https_bind)
+    let https_server = axum_server::bind(https_bind)
         .acceptor(acceptor)
         .serve(router.into_make_service());
 
-    let redirect = redirect_router(config.https_bind.port(), config.domains[0].clone());
-    let http_listener = tokio::net::TcpListener::bind(config.http_bind)
+    let redirect = redirect_router(https_bind.port(), acme.domains[0].clone());
+    let http_listener = tokio::net::TcpListener::bind(http_bind)
         .await
         .map_err(|source| WebError::Bind {
-            addr: config.http_bind,
+            addr: http_bind,
             source,
         })?;
     let http_server = axum::serve(http_listener, redirect.into_make_service());
@@ -216,25 +336,57 @@ fn host_without_port(host: &str) -> &str {
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use tokio::sync::watch;
     use tower::ServiceExt;
 
-    fn sample_posts() -> Arc<Vec<Post>> {
-        Arc::new(vec![
+    use crate::content::Snapshot;
+    use crate::post::Post;
+    use crate::render::BlogMeta;
+
+    fn test_meta() -> BlogMeta {
+        BlogMeta {
+            title: "Test Blog".to_string(),
+            language: "en".to_string(),
+            ..BlogMeta::default()
+        }
+    }
+
+    fn sample_posts() -> Vec<Post> {
+        vec![
             Post {
                 title: "Hello World".to_string(),
                 date: "2026-07-02".parse().unwrap(),
+                author: None,
                 slug: "hello-world".to_string(),
                 body_md: "First **post** body.".to_string(),
             },
             Post {
                 title: "Older Post".to_string(),
                 date: "2026-06-30".parse().unwrap(),
+                author: None,
                 slug: "older-post".to_string(),
                 body_md: "Nothing to see.".to_string(),
             },
-        ])
+        ]
+    }
+
+    /// A router over a fixed snapshot, plus the sender that can replace it.
+    fn router_over(posts: Vec<Post>) -> (Router, watch::Sender<Arc<Snapshot>>) {
+        let snapshot = Arc::new(Snapshot {
+            meta: test_meta(),
+            posts,
+            ..Snapshot::default()
+        });
+        let (tx, rx) = watch::channel(snapshot);
+        (build_router(rx), tx)
+    }
+
+    fn sample_router() -> Router {
+        router_over(sample_posts()).0
     }
 
     async fn get(router: Router, path: &str) -> (StatusCode, HeaderMap, String) {
@@ -250,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn index_lists_posts_with_links() {
-        let (status, headers, body) = get(build_router(sample_posts()), "/").await;
+        let (status, headers, body) = get(sample_router(), "/").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
         assert!(body.contains("Hello World"));
@@ -260,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_page_renders_body() {
-        let (status, headers, body) = get(build_router(sample_posts()), "/posts/hello-world").await;
+        let (status, headers, body) = get(sample_router(), "/posts/hello-world").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
         assert!(body.contains("Hello World"));
@@ -269,14 +421,51 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_slug_is_404() {
-        let (status, _, body) = get(build_router(sample_posts()), "/posts/does-not-exist").await;
+        let (status, _, body) = get(sample_router(), "/posts/does-not-exist").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("404"));
     }
 
     #[tokio::test]
+    async fn a_reload_is_visible_to_the_next_request() {
+        // The router is built once and never rebuilt, so this is the property
+        // that makes reloading possible without restarting the listener.
+        let (router, tx) = router_over(sample_posts());
+
+        let (status, _, _) = get(router.clone(), "/posts/hello-world").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut posts = sample_posts();
+        posts.retain(|p| p.slug != "hello-world");
+        posts.push(Post {
+            title: "Fresh Post".to_string(),
+            date: "2026-07-27".parse().unwrap(),
+            author: None,
+            slug: "fresh-post".to_string(),
+            body_md: "Brand new.".to_string(),
+        });
+        tx.send(Arc::new(Snapshot {
+            meta: test_meta(),
+            posts,
+            ..Snapshot::default()
+        }))
+        .unwrap();
+
+        let (status, _, body) = get(router.clone(), "/posts/fresh-post").await;
+        assert_eq!(status, StatusCode::OK, "the new post must be served");
+        assert!(body.contains("Fresh Post"), "{body}");
+
+        let (status, _, _) = get(router, "/posts/hello-world").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a removed post must stop being served"
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_route_is_404() {
-        let (status, _, body) = get(build_router(sample_posts()), "/random").await;
+        let (status, _, body) = get(sample_router(), "/random").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("404"));
     }

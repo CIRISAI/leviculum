@@ -2,10 +2,12 @@
 //!
 //! It connects to a running `lnsd`/`rnsd` shared instance, fetches the page at
 //! the given URL, renders it to ANSI text, and (on a tty) enters an interactive
-//! navigation loop. With `--print`, or when stdout is not a terminal, it fetches
-//! and prints a single page and exits, for scripting and acceptance tests.
+//! navigation loop. Started without a URL on a tty it opens the browser's start
+//! screen instead, with the places panel showing. With `--print`, or when stdout
+//! is not a terminal, it fetches and prints a single page and exits, for
+//! scripting and acceptance tests.
 
-use std::io::{BufReader, IsTerminal};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -27,13 +29,13 @@ const FALLBACK_WIDTH: usize = 80;
 #[derive(Parser, Debug)]
 #[command(
     name = "lnomad",
-    version = env!("CARGO_PKG_VERSION"),
+    version = env!("LEVICULUM_VERSION"),
     about = "Terminal browser for NomadNet micron pages"
 )]
 struct Args {
     /// Page URL: `<dest_hash>[:/page/x.mu[`f=v|...]]` (a bare hash opens the
-    /// default page). In `--discover` mode it is instead an optional listen
-    /// duration in seconds (equivalent to `--duration`).
+    /// default page). Omitted on a terminal, the browser opens its start screen
+    /// with the places panel showing.
     url: Option<String>,
 
     /// Shared-instance name to connect to (overrides the config file's).
@@ -75,19 +77,33 @@ struct Args {
     #[arg(long)]
     output: Option<PathBuf>,
 
+    /// Inline images: `auto` draws a page's pictures where they are linked,
+    /// using the terminal's graphics protocol (Kitty, iTerm2 or Sixel) or
+    /// Unicode half-blocks; `off` leaves every image link an ordinary link and
+    /// fetches nothing. Ignored with `--print` / non-tty, which never draw
+    /// pictures.
+    #[arg(long, value_enum, default_value_t = ImagesArg::Auto)]
+    images: ImagesArg,
+
+    /// How much fetched image data to keep in memory for revisits, in
+    /// megabytes. A revisited page then costs no airtime for pictures it has
+    /// already shown; when the budget is exceeded, the pictures untouched
+    /// longest are dropped until it fits again. `0` disables the cache.
+    #[arg(long, default_value_t = 10)]
+    image_cache: u64,
+
     /// Fetch, render and print the page once, then exit (non-interactive).
     #[arg(long)]
     print: bool,
+}
 
-    /// Discover NomadNet nodes from announces instead of fetching a page: listen
-    /// for `nomadnetwork.node` announces and list the nodes seen.
-    #[arg(long)]
-    discover: bool,
-
-    /// How long to listen in `--discover` mode, in seconds. Alternatively pass
-    /// the seconds as the bare positional: `lnomad --discover [seconds]`.
-    #[arg(long)]
-    duration: Option<u64>,
+/// The `--images` choice.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ImagesArg {
+    /// Draw pictures inline when the terminal can show them.
+    Auto,
+    /// Never fetch or draw pictures.
+    Off,
 }
 
 /// The `--theme` choice, a clap-facing mirror of [`ThemeFlag`].
@@ -133,9 +149,6 @@ impl From<ColorArg> for ColorFlag {
     }
 }
 
-/// Default listen duration in `--discover` mode, in seconds.
-const DEFAULT_DISCOVER_DURATION: u64 = 30;
-
 /// Detect the terminal width in columns, falling back to [`FALLBACK_WIDTH`].
 fn detect_width() -> usize {
     terminal_size::terminal_size()
@@ -148,14 +161,13 @@ fn detect_width() -> usize {
 async fn main() -> ExitCode {
     let args = Args::parse();
 
-    // Resolve the positional: in page mode it is the URL, in --discover mode it
-    // is an optional listen duration in seconds.
-    let mode = match resolve_args(
-        args.discover,
-        args.url.as_deref(),
-        args.duration,
-        DEFAULT_DISCOVER_DURATION,
-    ) {
+    // Print-once mode: also chosen automatically when stdout is not a tty, so a
+    // piped/redirected invocation never blocks on the UI. It also decides what a
+    // missing URL means: the start screen on a terminal, an error otherwise.
+    let interactive =
+        !args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+
+    let mode = match resolve_args(args.url.as_deref(), interactive) {
         Ok(mode) => mode,
         Err(err) => {
             eprintln!("lnomad: {err}");
@@ -164,12 +176,14 @@ async fn main() -> ExitCode {
     };
 
     // In page mode, parse and validate the URL up front.
-    let (target, discover_duration) = match &mode {
-        Mode::Discover { duration } => (None, *duration),
+    let target = match &mode {
+        Mode::Start => None,
         Mode::Page { url } => match parse_url(url, None) {
-            Ok(target) => (Some(target), DEFAULT_DISCOVER_DURATION),
+            Ok(target) => Some(target),
             Err(err) => {
-                eprintln!("lnomad: {err}: {url}");
+                // URL first, then the reason: the reasons carry advice of their
+                // own now, so trailing the URL behind one read as part of it.
+                eprintln!("lnomad: {url}: {err}");
                 return ExitCode::from(2);
             }
         },
@@ -187,6 +201,8 @@ async fn main() -> ExitCode {
         no_color: args.no_color || !std::io::stdout().is_terminal(),
         depth,
         timeout: Duration::from_secs(args.timeout),
+        no_images: args.images == ImagesArg::Off,
+        image_cache_bytes: args.image_cache.saturating_mul(1_000_000),
     };
 
     // Connect to the shared instance: an explicit --instance overrides the
@@ -207,64 +223,44 @@ async fn main() -> ExitCode {
         }
     };
 
-    // Print-once mode: also chosen automatically when stdout is not a tty, so a
-    // piped/redirected invocation never blocks on the REPL.
-    let interactive =
-        !args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let duration = Duration::from_secs(discover_duration);
+    // A /file/ target downloads to disk (never rendered, never a TUI session):
+    // fetch the raw bytes, save them, print the save line.
+    let downloading = target.as_ref().is_some_and(|t| t.is_file);
 
-    let code = if args.discover {
-        let mut out = std::io::stdout();
-        let result = if interactive {
-            let stdin = std::io::stdin();
-            let mut input = BufReader::new(stdin.lock());
-            browser::discover_interactive(&mut input, &mut out, &mut session, duration, &opts).await
-        } else {
-            browser::discover_print(&mut out, &mut session, duration).await
-        };
-        match result {
+    if interactive && !downloading {
+        // The TUI owns the session and drives navigation: it does the initial
+        // fetch of `target` (or opens the start screen when there is none) and
+        // every subsequent navigation (links, the address bar, history) itself,
+        // keeping the UI live while a page loads. The session is moved in and
+        // closed there, so we return directly rather than fall through to the
+        // shared teardown below.
+        return match run_tui(session, target, opts, args.theme.into()).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("lnomad: {err}");
                 ExitCode::FAILURE
             }
-        }
-    } else if let Some(target) = target {
-        // A /file/ target downloads to disk (never rendered, never a TUI
-        // session): fetch the raw bytes, save them, print the save path.
-        if target.is_file {
+        };
+    }
+
+    // Non-interactive from here on, so a target is always present: `Mode::Start`
+    // is only reachable when the browser can run interactively.
+    let code = match target {
+        Some(target) => {
             let mut out = std::io::stdout();
-            match browser::download_once(
-                &mut out,
-                &mut session,
-                &target,
-                args.output.as_deref(),
-                opts.timeout,
-            )
-            .await
-            {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(err) => {
-                    eprintln!("lnomad: {err}");
-                    ExitCode::FAILURE
-                }
-            }
-        } else if interactive {
-            // The TUI owns the session and drives navigation: it does the
-            // initial fetch of `target` and every subsequent navigation (links,
-            // the address bar, history) itself, keeping the UI live while a page
-            // loads. The session is moved in and closed there, so we return
-            // directly rather than fall through to the shared teardown below.
-            return match run_tui(session, target, opts, args.theme.into()).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(err) => {
-                    eprintln!("lnomad: {err}");
-                    ExitCode::FAILURE
-                }
+            let result = if target.is_file {
+                browser::download_once(
+                    &mut out,
+                    &mut session,
+                    &target,
+                    args.output.as_deref(),
+                    opts.timeout,
+                )
+                .await
+            } else {
+                browser::print_once(&mut out, &mut session, &target, &opts).await
             };
-        } else {
-            let mut out = std::io::stdout();
-            match browser::print_once(&mut out, &mut session, &target, &opts).await {
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("lnomad: {err}");
@@ -272,10 +268,12 @@ async fn main() -> ExitCode {
                 }
             }
         }
-    } else {
-        // Unreachable: page mode always validates a URL into `Some` above.
-        eprintln!("lnomad: a page URL is required (or pass --discover)");
-        ExitCode::from(2)
+        None => {
+            // Unreachable: resolve_args rejects a missing URL when the browser
+            // cannot run interactively.
+            eprintln!("lnomad: a page URL is required when the browser cannot run interactively");
+            ExitCode::from(2)
+        }
     };
 
     // Best-effort teardown; the exit code already reflects the fetch outcome.

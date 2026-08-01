@@ -6,7 +6,7 @@ lnsd -- Reticulum network daemon
 
 ## SYNOPSIS
 
-**lnsd** [**-c** *dir*] [**-s** *dir*] [**-v**...] [**-q**...]
+**lnsd** [**-c** *dir*] [**--storage** *dir*] [**-s**] [**--exampleconfig**] [**-v**...] [**-q**...]
 
 ## DESCRIPTION
 
@@ -19,10 +19,16 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 ## OPTIONS
 
 **-c**, **--config** *dir*
-:   Path to the Reticulum configuration directory. Defaults to `~/.reticulum`. The config file is `<dir>/config`.
+:   Path to the Reticulum configuration directory, the way `rnsd --config` takes one. The config file is `<dir>/config`. Without this option the default lookup order applies; see FILES.
 
-**-s**, **--storage** *dir*
-:   Storage directory path. Defaults to `<config_dir>/storage`.
+**--storage** *dir*
+:   Storage directory path. Defaults to `<config_dir>/storage`. Long-only on purpose: in `rnsd`, `-s` means `--service`, so the short letter stays reserved for that and the storage override is a Leviculum extension.
+
+**-s**, **--service**
+:   Declare that the daemon is running as a service, accepted for compatibility with `rnsd -s`. **lnsd** keeps logging to standard output, which journald captures; it does not redirect to a log file.
+
+**--exampleconfig**
+:   Print an example configuration to standard output and exit, like `rnsd --exampleconfig`. The output loads through **lnsd**'s own config loader.
 
 **-v**, **--verbose**
 :   Increase log verbosity. Once for debug, twice for trace.
@@ -37,11 +43,19 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 
 ## FILES
 
-*~/.reticulum/config*
-:   Default configuration file (INI format, same as Python Reticulum).
+*/etc/reticulum/config*
+:   System-wide configuration, used when it exists. The Debian package installs one here, which is also what lets Python clients find the running daemon without extra flags.
 
-*~/.reticulum/storage/*
-:   Default storage directory for identities, known destinations, and cached path state.
+*~/.config/reticulum/config*
+:   Per-user configuration, used when the system-wide file is absent.
+
+*~/.reticulum/config*
+:   Final fallback (INI format, same as Python Reticulum).
+
+*<config_dir>/storage/*
+:   Storage directory for identities, known destinations, and cached path state.
+
+The three configuration directories are tried in that order, matching Python-Reticulum's own lookup.
 
 ## SIGNALS
 

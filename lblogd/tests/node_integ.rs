@@ -20,9 +20,11 @@ use std::time::Duration;
 
 use leviculum_std::driver::ReticulumNodeBuilder;
 
+use lblogd::content::{Reloader, Sources};
+use lblogd::files::FileArea;
 use lblogd::node::{BlogNode, BlogNodeConfig};
 use lblogd::post::load_posts_dir;
-use lblogd::render::{render_index_micron, render_post_micron};
+use lblogd::render::{render_index_micron, render_post_micron, BlogMeta};
 use lnomad::fetch::{FetchError, Session};
 use lnomad::url::parse_url;
 
@@ -79,14 +81,21 @@ async fn blog_node_serves_pages_end_to_end() {
     // topology), serving the fixture posts.
     let posts_dir = tempfile::tempdir().expect("posts dir");
     write_fixture_posts(posts_dir.path());
+    let files_dir = tempfile::tempdir().expect("files dir");
+    let picture = fixture_picture();
+    std::fs::write(files_dir.path().join("antenne.png"), &picture).expect("write picture");
     let data_dir = tempfile::tempdir().expect("data dir");
-    let blog = BlogNode::start(BlogNodeConfig {
-        instance_name: instance_name.clone(),
-        data_dir: data_dir.path().to_path_buf(),
-        posts_dir: posts_dir.path().to_path_buf(),
-        display_name: "lblogd test blog".to_string(),
-        announce_interval: Duration::from_secs(3600),
-    })
+    let sources = Sources::new(posts_dir.path()).with_files(Some(FileArea::new(files_dir.path())));
+    let (reloader, content) = Reloader::new(fixture_meta(), sources).expect("initial content load");
+    let blog = BlogNode::start(
+        BlogNodeConfig {
+            instance_name: instance_name.clone(),
+            data_dir: data_dir.path().to_path_buf(),
+            display_name: "lblogd test blog".to_string(),
+            announce_interval: Duration::from_secs(3600),
+        },
+        content,
+    )
     .await
     .expect("start blog node");
     let dest_hex = hex::encode(blog.destination_hash().as_bytes());
@@ -97,17 +106,17 @@ async fn blog_node_serves_pages_end_to_end() {
     // What the node must serve: exactly the renderer output over the same
     // fixture directory.
     let posts = load_posts_dir(posts_dir.path()).expect("load fixture posts");
-    let expected_index = render_index_micron(&posts).into_bytes();
+    let expected_index = render_index_micron(&fixture_meta(), &posts).into_bytes();
     let small = posts
         .iter()
         .find(|p| p.slug == "second")
         .expect("second fixture post");
-    let expected_small = render_post_micron(small).into_bytes();
+    let expected_small = render_post_micron(&fixture_meta(), small).into_bytes();
     let large = posts
         .iter()
         .find(|p| p.slug == "large")
         .expect("large fixture post");
-    let expected_large = render_post_micron(large).into_bytes();
+    let expected_large = render_post_micron(&fixture_meta(), large).into_bytes();
     assert!(
         expected_large.len() > 262_144,
         "large post must exceed the max link MDU to force the resource path (got {})",
@@ -159,6 +168,35 @@ async fn blog_node_serves_pages_end_to_end() {
         "large post must round-trip byte-exactly over the resource path"
     );
 
+    // A picture from the file area: NomadNet's `serve_file` wire form, which
+    // is a Resource of the RAW bytes plus msgpack metadata naming the file —
+    // no msgpack `bytes` wrapper, unlike a page. This is the whole reason an
+    // image can reach a mesh reader at all, micron having no image construct,
+    // so it is asserted through lnomad's real download path.
+    let target = parse_url(&format!("{dest_hex}:/file/antenne.png"), None).expect("parse file url");
+    let (bytes, name) = session
+        .download_file(&target, Duration::from_secs(60))
+        .await
+        .expect("download the picture");
+    assert_eq!(
+        bytes, picture,
+        "the picture must arrive byte for byte, with no page wrapper around it"
+    );
+    assert_eq!(
+        name.as_deref(),
+        Some("antenne.png"),
+        "the response metadata must name the file, as NomadNet's serve_file does"
+    );
+
+    // An unknown file is a clean timeout, exactly like an unknown page.
+    let target =
+        parse_url(&format!("{dest_hex}:/file/nicht-da.png"), None).expect("parse file url");
+    let result = session.download_file(&target, Duration::from_secs(2)).await;
+    assert!(
+        matches!(result, Err(FetchError::Timeout)),
+        "an unknown file must surface a clean Timeout, got {result:?}"
+    );
+
     // Unknown path: the stack drops it silently (no 404 in the protocol),
     // the client sees a clean timeout, nothing crashes.
     let target = parse_url(&format!("{dest_hex}:/page/nope.mu"), None).expect("parse bad url");
@@ -168,7 +206,100 @@ async fn blog_node_serves_pages_end_to_end() {
         "unknown path must surface a clean Timeout, got {result:?}"
     );
 
+    // A reload registers handlers for new pages and deregisters vanished
+    // ones, both visible over the same live link without restarting anything.
+    std::fs::write(
+        posts_dir.path().join("third.md"),
+        "+++\ntitle = \"Third Post\"\ndate = \"2026-07-20\"\nslug = \"third\"\n+++\n\nAdded at runtime.\n",
+    )
+    .expect("write third.md");
+    std::fs::remove_file(posts_dir.path().join("second.md")).expect("remove second.md");
+    reloader.reload().expect("reload");
+    // The node applies the swap on its select! loop; give it a turn.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let reloaded = load_posts_dir(posts_dir.path()).expect("load reloaded posts");
+    let third = reloaded
+        .iter()
+        .find(|p| p.slug == "third")
+        .expect("third fixture post");
+    let target = parse_url(&format!("{dest_hex}:/page/third.mu"), None).expect("parse third url");
+    let page = session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch post added by reload");
+    assert_eq!(
+        page,
+        render_post_micron(&fixture_meta(), third).into_bytes(),
+        "a post added by reload must be served byte-exactly"
+    );
+
+    let target = parse_url(&format!("{dest_hex}:/page/index.mu"), None).expect("parse index url");
+    let page = session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch reloaded index");
+    assert_eq!(
+        page,
+        render_index_micron(&fixture_meta(), &reloaded).into_bytes(),
+        "the index must reflect the reloaded post set"
+    );
+
+    // A picture added at runtime is served after the reload, and one removed
+    // stops being served: the file area reconciles like the pages do.
+    std::fs::write(files_dir.path().join("mast.jpg"), b"jpeg-ish bytes").expect("write mast.jpg");
+    std::fs::remove_file(files_dir.path().join("antenne.png")).expect("remove antenne.png");
+    reloader.reload().expect("reload the file area");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let target = parse_url(&format!("{dest_hex}:/file/mast.jpg"), None).expect("parse file url");
+    let (bytes, name) = session
+        .download_file(&target, Duration::from_secs(20))
+        .await
+        .expect("download the picture added by reload");
+    assert_eq!(bytes, b"jpeg-ish bytes");
+    assert_eq!(name.as_deref(), Some("mast.jpg"));
+
+    let target = parse_url(&format!("{dest_hex}:/file/antenne.png"), None).expect("parse file url");
+    let result = session.download_file(&target, Duration::from_secs(2)).await;
+    assert!(
+        matches!(result, Err(FetchError::Timeout)),
+        "a file removed by reload must stop being served, got {result:?}"
+    );
+
+    // A removed post stops being served: a clean timeout rather than stale
+    // content. What this pins is the page lookup in `respond`, not the handler
+    // deregistration — a leaked handler lets the request reach the node, which
+    // then drops it for the missing page, and the client sees the same timeout
+    // either way (verified by deleting the deregistration loop: this test still
+    // passed). The deregistration decision is pinned by
+    // `node::tests::a_vanished_page_is_deregistered_and_a_new_one_registered`.
+    let target = parse_url(&format!("{dest_hex}:/page/second.mu"), None).expect("parse second url");
+    let result = session.fetch(&target, Duration::from_secs(2)).await;
+    assert!(
+        matches!(result, Err(FetchError::Timeout)),
+        "a post removed by reload must stop being served, got {result:?}"
+    );
+
     session.close().await.expect("close session");
     blog_task.abort();
     daemon.stop().await.expect("stop daemon");
+}
+
+/// Fixture picture bytes: a PNG signature followed by a run of values that is
+/// deliberately not valid UTF-8, so any decode-and-re-encode on the way would
+/// show up as a mismatch rather than pass silently.
+fn fixture_picture() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend((0..4096).map(|i| (i % 256) as u8));
+    bytes
+}
+
+/// Blog metadata for this fixture: identity is not what the test is about.
+fn fixture_meta() -> BlogMeta {
+    BlogMeta {
+        title: "lblogd test blog".to_string(),
+        language: "en".to_string(),
+        ..BlogMeta::default()
+    }
 }

@@ -1,13 +1,13 @@
-//! Request/response types for single-packet request/response protocol.
+//! Request/response types for Link packet and Resource transport.
 //!
-//! Stage 1: single-packet only (payload fits within Link MDU ~431 bytes).
-//! Large request/response via Resource is deferred to Stage 2.
+//! Payloads that fit the Link MDU use request/response packets. Larger request
+//! and response bodies use request-correlated Resources while preserving the
+//! same handler, response, timeout, and failure semantics.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::constants::TRUNCATED_HASHBYTES;
-use crate::destination::DestinationHash;
 use crate::link::LinkId;
 
 /// Policy controlling which identities may send requests to a handler.
@@ -21,23 +21,30 @@ pub enum RequestPolicy {
     AllowList(Vec<[u8; TRUNCATED_HASHBYTES]>),
 }
 
-/// A registered request handler entry.
+/// A registered request handler entry. Keyed by (destination_hash,
+/// path_hash) in the storage map, so those live in the key, not here.
 ///
 /// Cleanup: entries removed via `deregister_request_handler()`.
 pub(super) struct RequestHandlerEntry {
     pub(super) path: String,
-    pub(super) destination_hash: DestinationHash,
     pub(super) policy: RequestPolicy,
 }
 
 /// A pending outgoing request awaiting a response.
 ///
 /// Cleanup: removed when (a) response arrives, (b) timeout fires,
-/// (c) link closes (`emit_link_closed` cleans all for that link).
+/// (c) a correlated Resource transfer fails, or (d) the link closes
+/// (`emit_link_closed` cleans all for that link).
 pub(super) struct PendingRequest {
     pub(super) link_id: LinkId,
     pub(super) request_id: [u8; TRUNCATED_HASHBYTES],
-    pub(super) sent_at_ms: u64,
+    /// Start of the response-wait phase.
+    ///
+    /// Packet requests enter this phase when sent. Resource requests remain
+    /// `None` while their request body is uploading and are armed only after
+    /// the sender receives the Resource completion proof. An accepted response
+    /// Resource suspends this timer again while its own watchdog owns liveness.
+    pub(super) response_started_at_ms: Option<u64>,
     pub(super) timeout_ms: u64,
 }
 

@@ -19,9 +19,11 @@ use std::path::PathBuf;
 
 use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
 
+pub use crate::config::InterfaceConfig;
 pub use crate::error::{Error as ApiError, Result};
 pub use crate::{Destination, DestinationHash, DestinationType, Direction, LinkHandle, LinkId};
 pub use leviculum_core::resource::ResourceStrategy;
+pub use leviculum_core::transport::InterfaceId;
 pub use leviculum_core::{Identity, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
@@ -152,6 +154,13 @@ impl NodeBuilder {
         self
     }
 
+    /// Register an outbound-socket hook. See
+    /// [`ReticulumNodeBuilder::outbound_socket_hook`](crate::driver::ReticulumNodeBuilder::outbound_socket_hook).
+    pub fn outbound_socket_hook(mut self, hook: crate::socket_hook::OutboundSocketHook) -> Self {
+        self.inner = self.inner.outbound_socket_hook(hook);
+        self
+    }
+
     /// Override the link keepalive interval (seconds) for every link. Shrinks
     /// the stale-link timeout proportionally; useful for slow links and for
     /// making stale/recovery observable quickly.
@@ -234,6 +243,43 @@ impl Node {
     /// `None` if already taken or if the node was built without events.
     pub fn take_event_receiver(&mut self) -> Option<crate::driver::EventReceiver> {
         self.inner.take_event_receiver()
+    }
+
+    /// Attach a TCP client interface to the running node, optionally egressing
+    /// through a SOCKS5 proxy. See
+    /// [`ReticulumNode::spawn_tcp_client`](crate::driver::ReticulumNode::spawn_tcp_client).
+    pub fn spawn_tcp_client(
+        &self,
+        name: &str,
+        host: &str,
+        port: u16,
+        socks_proxy: Option<(String, u16)>,
+    ) -> Result<crate::interfaces::TcpClientHandle> {
+        self.inner.spawn_tcp_client(name, host, port, socks_proxy)
+    }
+
+    /// Attach a PipeInterface subprocess to the running node. See
+    /// [`ReticulumNode::spawn_pipe_client`](crate::driver::ReticulumNode::spawn_pipe_client).
+    pub fn spawn_pipe_client(
+        &self,
+        name: &str,
+        command: &str,
+        respawn_delay: Option<std::time::Duration>,
+    ) -> Result<crate::interfaces::PipeClientHandle> {
+        self.inner.spawn_pipe_client(name, command, respawn_delay)
+    }
+
+    /// Attach any configured interface type to the running node. See
+    /// [`ReticulumNode::spawn_interface`](crate::driver::ReticulumNode::spawn_interface).
+    #[must_use = "the returned ids are the only handle for removing the interface"]
+    pub fn spawn_interface(&self, config: InterfaceConfig) -> Result<Vec<InterfaceId>> {
+        self.inner.spawn_interface(config)
+    }
+
+    /// Detach an interface by id. See
+    /// [`ReticulumNode::remove_interface`](crate::driver::ReticulumNode::remove_interface).
+    pub fn remove_interface(&self, id: InterfaceId) -> Result<()> {
+        self.inner.remove_interface(id)
     }
 
     /// Register a local destination so the node can announce it and accept
@@ -323,9 +369,33 @@ impl Node {
         self.inner.interface_stats()
     }
 
+    /// Change the announce bandwidth cap on a registered interface at runtime.
+    /// See [`crate::driver::ReticulumNode::set_interface_announce_cap`].
+    pub fn set_interface_announce_cap(
+        &self,
+        iface_id: leviculum_core::transport::InterfaceId,
+        cap_percent: u32,
+    ) -> bool {
+        self.inner.set_interface_announce_cap(iface_id, cap_percent)
+    }
+
     /// The cached identity for a destination, learned from an announce.
     pub fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity> {
         self.inner.get_identity(dest_hash)
+    }
+
+    /// Attach a byte-channel interface over a caller-supplied duplex stream. See
+    /// [`ReticulumNode::spawn_byte_channel`](crate::driver::ReticulumNode::spawn_byte_channel).
+    #[must_use = "dropping the handle immediately detaches the interface"]
+    pub fn spawn_byte_channel<S>(
+        &self,
+        name: &str,
+        stream: S,
+    ) -> Result<crate::interfaces::ByteChannelHandle>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        self.inner.spawn_byte_channel(name, stream)
     }
 
     /// Request a path to a destination. The result arrives as a path-found event.
@@ -420,6 +490,11 @@ impl Node {
         policy: RequestPolicy,
     ) {
         self.inner.register_request_handler(dest_hash, path, policy);
+    }
+
+    /// Remove the handler for `path`, returning whether one was registered.
+    pub fn deregister_request_handler(&self, dest_hash: DestinationHash, path: &str) -> bool {
+        self.inner.deregister_request_handler(dest_hash, path)
     }
 
     /// Send a request on an established link, returning the request id. The

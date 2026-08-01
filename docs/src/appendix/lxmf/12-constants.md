@@ -82,7 +82,7 @@ in [`vectors.json`](vectors/vectors.json) `constants`.
 | `STAMP_SIZE` | 32 | 13 |
 | `PN_VALIDATION_POOL_MIN_SIZE` | 256 | 14 |
 
-## Propagation peer (`LXMPeer.py:14-50`)
+## Python propagation peer (`LXMPeer.py:14-50`; Rust server out of scope)
 
 Paths `OFFER_REQUEST_PATH` "/offer" (14), `MESSAGE_GET_PATH` "/get" (15). States
 `IDLE` 0x00 … `RESOURCE_TRANSFERRING` 0x05 (17-22). Errors `ERROR_NO_IDENTITY`
@@ -91,6 +91,12 @@ Paths `OFFER_REQUEST_PATH` "/offer" (14), `MESSAGE_GET_PATH` "/get" (15). States
 `ERROR_TIMEOUT` 0xFE (24-31). `STRATEGY_LAZY` 0x01, `STRATEGY_PERSISTENT` 0x02
 (33-34). `MAX_UNREACHABLE` 14 days, `SYNC_BACKOFF_STEP` 12 min,
 `PATH_REQUEST_GRACE` 7.5 s (39-50).
+
+`leviculum-lxmf` implements origin-client uploads, the `/get` mailbox-client
+path, and response errors. It does not expose `/offer`, these peer-sync
+states/strategies, or a propagation server. Its default `/get` transfer limit
+is 1000 KB, which stays below Core's current 1,048,575-byte single-segment
+request/response Resource ceiling.
 
 ## Router (`LXMRouter.py:30-83`) — informative
 

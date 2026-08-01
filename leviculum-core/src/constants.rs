@@ -248,7 +248,10 @@ pub const RTT_RETRY_MIN_INTERVAL_MS: u64 = 10_000;
 /// RTT packet retry: interval = rtt_ms * this multiplier (floored by min).
 pub const RTT_RETRY_INTERVAL_MULTIPLIER: u64 = 3;
 
-/// Timeout for data receipts awaiting proofs (milliseconds)
+/// Cleanup timeout for Channel packet receipts awaiting proofs (milliseconds).
+///
+/// Plain Link packets use the RTT-derived Python `PacketReceipt` timeout
+/// instead; see [`TRAFFIC_TIMEOUT_FACTOR`] and [`TRAFFIC_TIMEOUT_MIN_MS`].
 pub const DATA_RECEIPT_TIMEOUT_MS: u64 = 30_000;
 
 /// Default announce rate limit interval (milliseconds)
@@ -265,6 +268,9 @@ pub const MAX_RANDOM_BLOBS: usize = 64;
 
 /// Default timeout factor for request/response (Python Link.TRAFFIC_TIMEOUT_FACTOR = 6)
 pub const TRAFFIC_TIMEOUT_FACTOR: u64 = 6;
+
+/// Minimum timeout for Link packet receipts (Python Link.TRAFFIC_TIMEOUT_MIN_MS = 5).
+pub const TRAFFIC_TIMEOUT_MIN_MS: u64 = 5;
 
 /// Max grace time for response in ms (Python Resource.RESPONSE_MAX_GRACE_TIME = 10s)
 pub const RESPONSE_MAX_GRACE_TIME_MS: u64 = 10_000;

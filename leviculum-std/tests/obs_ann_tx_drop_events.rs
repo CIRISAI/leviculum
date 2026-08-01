@@ -14,8 +14,9 @@ use leviculum_core::constants::{MTU, RANDOM_HASHBYTES, TRUNCATED_HASHBYTES};
 use leviculum_core::packet::{
     HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
 };
-use leviculum_core::transport::{Transport, TransportConfig};
+use leviculum_core::transport::{DropReason, Transport, TransportConfig};
 use leviculum_core::{Clock, Destination, DestinationType, Direction, Identity, MemoryStorage};
+use leviculum_std::event_log::EVENT_CATALOG;
 use leviculum_std::test_support::event_log::init_event_log;
 
 use rand_core::OsRng;
@@ -114,8 +115,8 @@ fn make_overheard_packet() -> Vec<u8> {
 }
 
 /// A PLAIN/GROUP packet that the early filters drop (rare anomaly -> per-packet
-/// PKT_DROP). `Announce` -> invalid_announce; `Data` with hops>1 ->
-/// plain_group_multihop.
+/// PKT_DROP). `Announce` -> invalid-announce; `Data` with hops>1 ->
+/// plain-group-multihop (kebab DropReason on the journey contract).
 fn make_plain_group_packet(dest_type: DestinationType, ptype: PacketType, hops: u8) -> Vec<u8> {
     let packet = Packet {
         flags: PacketFlags {
@@ -155,6 +156,47 @@ fn assert_well_formed(line: &str) {
         let (k, _v) = tok.split_once('=').unwrap();
         assert!(!k.is_empty(), "empty key in {line:?}");
     }
+}
+
+/// The field names PKT_DROP_SUMMARY must carry, one per drop reason,
+/// derived mechanically from the taxonomy: the summary spells its fields
+/// as the snake-case form of `DropReason::kebab()`.
+///
+/// Enumerating here rather than by hand is the point. `blackholed-announce`
+/// was counted for months without a field of its own, so the fields silently
+/// stopped summing to `total` -- exactly the arithmetic the summary exists to
+/// support. A new reason now fails this test and the catalog test below
+/// instead of going unnoticed.
+fn summary_reason_fields() -> Vec<String> {
+    DropReason::ALL
+        .iter()
+        .map(|r| r.kebab().replace('-', "_"))
+        .collect()
+}
+
+/// The event catalog's `required_keys` is the other hand-written copy of the
+/// same list: the EventLogLayer validates emitted lines against it, so a
+/// reason missing here is a reason nothing enforces.
+#[test]
+fn pkt_drop_summary_catalog_covers_every_drop_reason() {
+    let schema = EVENT_CATALOG
+        .iter()
+        .find(|s| s.name == "PKT_DROP_SUMMARY")
+        .expect("PKT_DROP_SUMMARY must be catalogued");
+    let missing: Vec<String> = summary_reason_fields()
+        .into_iter()
+        .filter(|f| !schema.required_keys.contains(&f.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "PKT_DROP_SUMMARY schema is missing required_keys {missing:?}; \
+         required_keys: {:?}",
+        schema.required_keys
+    );
+    assert!(
+        schema.required_keys.contains(&"total"),
+        "the grand total is what the per-reason fields have to sum to"
+    );
 }
 
 fn lines_for<'a>(dump: &'a [String], event: &str) -> Vec<&'a String> {
@@ -226,32 +268,45 @@ fn obs_events_are_well_formed_under_event_log_layer() {
     );
     for l in &summary {
         assert_well_formed(l);
+        // Every taxonomy reason, enumerated from DropReason::ALL rather than
+        // by hand -- a counted-but-unemitted reason (as blackholed-announce
+        // was) makes the fields stop summing to `total`.
+        let keys: Vec<&str> = l
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|tok| tok.split_once('=').map(|(k, _)| k))
+            .collect();
+        let missing: Vec<String> = summary_reason_fields()
+            .into_iter()
+            .filter(|f| !keys.contains(&f.as_str()))
+            .collect();
         assert!(
-            l.contains("overheard_transport_id=")
-                && l.contains("invalid_announce=")
-                && l.contains("plain_group_multihop=")
-                && l.contains("no_path=")
-                && l.contains("total="),
-            "summary missing a reason field: {l}"
+            missing.is_empty() && keys.contains(&"total"),
+            "summary missing reason fields {missing:?}: {l}"
         );
     }
 
-    // Per-packet PKT_DROP for the rare anomalies, well-formed, with reason set.
+    // Per-packet PKT_DROP for the rare anomalies, well-formed, with the kebab
+    // reason and the journey ph correlator (16 hex chars).
     let pkt_drop = lines_for(&dump, "PKT_DROP");
     assert!(
         pkt_drop
             .iter()
-            .any(|l| l.contains("reason=invalid_announce")),
-        "expected per-packet PKT_DROP reason=invalid_announce; dump:\n{dump:#?}"
+            .any(|l| l.contains("reason=invalid-announce")),
+        "expected per-packet PKT_DROP reason=invalid-announce; dump:\n{dump:#?}"
     );
     assert!(
         pkt_drop
             .iter()
-            .any(|l| l.contains("reason=plain_group_multihop")),
-        "expected per-packet PKT_DROP reason=plain_group_multihop; dump:\n{dump:#?}"
+            .any(|l| l.contains("reason=plain-group-multihop")),
+        "expected per-packet PKT_DROP reason=plain-group-multihop; dump:\n{dump:#?}"
     );
     for l in &pkt_drop {
         assert_well_formed(l);
+        assert!(
+            l.contains("ph="),
+            "journey contract: PKT_DROP must carry ph; line: {l}"
+        );
     }
     // The high-volume overheard path must NOT emit a per-packet event: no
     // PKT_DROP line carries its destination hash (0x11..) and there is no

@@ -683,6 +683,90 @@ pub fn compute_bitrate(sf: u8, cr: u8, bandwidth: u32) -> u32 {
     (numerator / denominator) as u32
 }
 
+/// Preamble floor in symbols (`LORA_PREAMBLE_SYMBOLS_MIN`,
+/// `RNode_Firmware/Config.h:84`).
+pub const LORA_PREAMBLE_SYMBOLS_MIN: u16 = 18;
+
+/// Preamble duration the reference aims for, in milliseconds
+/// (`LORA_PREAMBLE_TARGET_MS`, `RNode_Firmware/Config.h:85`).
+pub const LORA_PREAMBLE_TARGET_MS: u32 = 24;
+
+/// Milliseconds subtracted from the target above the fast-rate threshold
+/// (`LORA_PREAMBLE_FAST_DELTA`, `RNode_Firmware/Config.h:86`).
+pub const LORA_PREAMBLE_FAST_DELTA: u32 = 18;
+
+/// Bitrate above which the reference calls a link "fast" and shortens the
+/// preamble target (`LORA_FAST_THRESHOLD_BPS`, `RNode_Firmware/Config.h:87`).
+pub const LORA_FAST_THRESHOLD_BPS: u32 = 30_000;
+
+/// The preamble length in symbols the RNode firmware programs for a given
+/// PHY, which is what a peer running that firmware expects to hear.
+///
+/// The reference scales the preamble to a target *duration* with a symbol
+/// floor, so the symbol count falls as the spreading factor rises. Ours was
+/// a constant 24 for every SF, which agrees with the reference at SF7/BW125
+/// and disagrees from SF8 down — the entire long-range regime (Codeberg
+/// issue in the commit message).
+///
+/// Reference: `RNode_Firmware/Config.h:84-87` for the constants and
+/// `RNode_Firmware/Utilities.h:1235-1258` for the derivation:
+///
+/// ```text
+/// lora_symbol_rate     = bw / 2^sf                       [Hz]
+/// lora_symbol_time_ms  = 1000 / lora_symbol_rate         [ms]
+/// fast_rate            = lora_bitrate > LORA_FAST_THRESHOLD_BPS
+/// target_ms            = LORA_PREAMBLE_TARGET_MS - (fast_rate ? FAST_DELTA : 0)
+/// target_symbols       = target_ms / lora_symbol_time_ms
+/// if target_symbols < MIN { MIN } else { ceil(target_symbols) }
+/// ```
+///
+/// `lora_bitrate` is the same quantity [`compute_bitrate`] already computes;
+/// the reference spells it at `Utilities.h:1237` and truncates to `uint32_t`,
+/// which is what integer division does here.
+///
+/// # Where this is not bit-identical to the reference
+///
+/// The reference evaluates the last three lines in floating point;
+/// this evaluates the exact rational `ceil(target_ms * bw / (2^sf * 1000))`
+/// in integers. The two agree whenever the exact quotient is not within
+/// float rounding error of an integer — and the quotient only has to be
+/// rounded at all where it reaches 18, since below that both forms take the
+/// floor and the rounding is never consulted.
+///
+/// Over the domain the reference itself admits — its ten bandwidths,
+/// SF5..=SF12, CR4/5..4/8, 320 points — 64 reach the ceiling, the smallest
+/// distance from one of those quotients to an integer is 0.125, the largest
+/// quotient is 187.5 and its f32 ulp is 2.2e-5. Four orders of margin, so
+/// the results are identical; `derive_preamble_matches_reference_float`
+/// asserts that by brute force rather than by this paragraph.
+///
+/// Outside that domain (an arbitrary bandwidth from a config file) a
+/// quotient can land exactly on an integer, and there this returns that
+/// integer where the reference could return one more. That is a deliberate
+/// difference and the only one.
+///
+/// Returns [`LORA_PREAMBLE_SYMBOLS_MIN`] for degenerate inputs (sf or
+/// bandwidth zero, sf out of the range the modems accept), since the floor is
+/// what the reference's own variable is initialised to (`Config.h:91`).
+pub fn derive_preamble_symbols(sf: u8, cr: u8, bandwidth_hz: u32) -> u16 {
+    if sf == 0 || sf > 12 || bandwidth_hz == 0 || cr == 0 {
+        return LORA_PREAMBLE_SYMBOLS_MIN;
+    }
+
+    let target_ms = if compute_bitrate(sf, cr, bandwidth_hz) > LORA_FAST_THRESHOLD_BPS {
+        LORA_PREAMBLE_TARGET_MS - LORA_PREAMBLE_FAST_DELTA
+    } else {
+        LORA_PREAMBLE_TARGET_MS
+    };
+
+    // target_ms / symbol_time_ms, with symbol_time_ms = 2^sf * 1000 / bw.
+    let symbols = (target_ms as u64 * bandwidth_hz as u64).div_ceil((1u64 << sf) * 1000);
+
+    // The clamp only bites for a bandwidth no modem offers (hundreds of MHz);
+    // the reference stores a `long` and would not wrap there either.
+    symbols.clamp(LORA_PREAMBLE_SYMBOLS_MIN as u64, u16::MAX as u64) as u16
+}
+
 /// Maximum random jitter (ms) for the first packet after idle.
 /// Matches Python's PATHFINDER_RW = 0.5s.
 pub const JITTER_MAX_MS: u64 = 500;
@@ -713,8 +797,27 @@ pub const PACING_MARGIN_MS: u64 = 100;
 /// - `sf`: spreading factor (6-12)
 /// - `cr`: coding rate denominator (5-8, meaning 4/5 through 4/8)
 ///
+/// Assumes the modem-default programmed preamble of 8 symbols; when the
+/// radio is configured with a longer preamble (the RNode derivation yields
+/// 18 at SF12, 24 at SF7), use [`airtime_ms_with_preamble`] — at SF12/BW125
+/// the 10 extra symbols are 327 ms, more than a whole timeout slack.
+///
 /// Returns airtime in milliseconds, rounded up.
 pub fn airtime_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
+    airtime_ms_with_preamble(payload_bytes, bandwidth_hz, sf, cr, 8)
+}
+
+/// [`airtime_ms`] with an explicit programmed preamble length in symbols.
+///
+/// The on-air preamble is the programmed count plus the fixed 4.25-symbol
+/// tail (sync word + start markers), i.e. `(4*n + 17)/4` symbols.
+pub fn airtime_ms_with_preamble(
+    payload_bytes: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
     // Symbol time: T_sym = 2^SF / BW (in seconds)
     // We compute in microseconds to avoid floating point.
     // T_sym_us = 2^SF * 1_000_000 / BW
@@ -722,9 +825,9 @@ pub fn airtime_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 
     let bw = bandwidth_hz as u64;
     let t_sym_us = (1u64 << sf) * 1_000_000 / bw;
 
-    // Preamble: 8 symbols + 4.25 symbols = 12.25 symbols
-    // In microseconds: 12.25 * T_sym = (49 * T_sym) / 4
-    let t_preamble_us = 49 * t_sym_us / 4;
+    // Preamble: programmed symbols + 4.25 symbols
+    // In microseconds: (n + 4.25) * T_sym = ((4n + 17) * T_sym) / 4
+    let t_preamble_us = (4 * preamble_symbols as u64 + 17) * t_sym_us / 4;
 
     // Payload symbol count (explicit header mode, CRC on):
     //   n_payload = 8 + max(ceil((8*PL - 4*SF + 28 + 16) / (4*(SF-2*DE))) * (CR-4+4), 0)
@@ -762,8 +865,17 @@ pub fn airtime_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 
 /// frame per CSMA contest.
 ///
 /// spacing = airtime(frame) + DIFS + max_CW + margin
-pub fn compute_spacing_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
-    let air = airtime_ms(payload_bytes, bandwidth_hz, sf, cr);
+///
+/// The airtime term charges the programmed preamble: pacing that assumes the
+/// modem-default 8 symbols undercounts every frame by (preamble-8)*t_sym.
+pub fn compute_spacing_ms(
+    payload_bytes: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
+    let air = airtime_ms_with_preamble(payload_bytes, bandwidth_hz, sf, cr, preamble_symbols);
     let spacing = air + CSMA_DIFS_MS + CSMA_MAX_CW_MS + PACING_MARGIN_MS;
     // Never go below the serial-level floor
     spacing.max(MIN_SPACING_MS)
@@ -1001,16 +1113,48 @@ pub fn firmware_default_lt_alock(freq_hz: u64, explicit: Option<u16>) -> u16 {
 ///
 /// Mirrors [`build_lora_frames`]: a payload over [`MAX_SINGLE_PAYLOAD`] is sent
 /// as two frames, each with a 1-byte header; otherwise one frame with a 1-byte
-/// header. Uses [`airtime_ms`] so the accounting stays consistent with the
-/// interface's pacing math.
-pub fn packet_airtime_ms(data_len: usize, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 {
+/// header. Each frame carries a full programmed preamble on the air, so the
+/// preamble is charged per frame, keeping the accounting consistent with the
+/// per-frame ledger charge ([`frame_airtime_cost_ms`]).
+pub fn packet_airtime_ms(
+    data_len: usize,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
     if data_len > MAX_SINGLE_PAYLOAD {
         let f1 = (1 + MAX_SINGLE_PAYLOAD) as u32;
         let f2 = (1 + data_len - MAX_SINGLE_PAYLOAD) as u32;
-        airtime_ms(f1, bandwidth_hz, sf, cr) + airtime_ms(f2, bandwidth_hz, sf, cr)
+        airtime_ms_with_preamble(f1, bandwidth_hz, sf, cr, preamble_symbols)
+            + airtime_ms_with_preamble(f2, bandwidth_hz, sf, cr, preamble_symbols)
     } else {
-        airtime_ms((1 + data_len) as u32, bandwidth_hz, sf, cr)
+        airtime_ms_with_preamble(
+            (1 + data_len) as u32,
+            bandwidth_hz,
+            sf,
+            cr,
+            preamble_symbols,
+        )
     }
+}
+
+/// On-air cost, in milliseconds, charged to the regulatory airtime ledger
+/// for one keyed LoRa frame.
+///
+/// This is what the interface records via
+/// [`AirtimeTracker::add_airtime`] after every successful `transmit()`: the
+/// full on-air time of the frame at the live modulation, programmed preamble
+/// included, mirroring the RNode firmware's `add_airtime(written)`
+/// (RNode_Firmware.ino:654), whose symbol count adds `lora_preamble_symbols`.
+pub fn frame_airtime_cost_ms(
+    frame_len: u32,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+    preamble_symbols: u16,
+) -> u64 {
+    airtime_ms_with_preamble(frame_len, bandwidth_hz, sf, cr, preamble_symbols)
 }
 
 /// Whether a bursting LoRa transmitter must yield the channel (open its
@@ -1965,6 +2109,153 @@ mod tests {
         assert_eq!(br, 21875);
     }
 
+    // Preamble derivation tests
+    //
+    // The ten bandwidths the reference offers (`RNode_Firmware/Framing.h`
+    // bandwidth table) crossed with the spreading factors and coding rates a
+    // modem accepts. Everything below is checked over this grid.
+    const REFERENCE_BANDWIDTHS: [u32; 10] = [
+        7_800, 10_400, 15_600, 20_800, 31_250, 41_700, 62_500, 125_000, 250_000, 500_000,
+    ];
+
+    /// The reference derivation transcribed literally, in the float types the
+    /// firmware uses, so the integer implementation has something to be
+    /// compared against rather than re-derived from.
+    ///
+    /// `RNode_Firmware/Utilities.h:1235-1258`.
+    fn reference_preamble_symbols_f32(sf: u8, cr: u8, bw: u32) -> u16 {
+        let two_pow_sf = 2f64.powi(sf as i32);
+        // Utilities.h:1235-1236
+        let lora_symbol_rate = (bw as f32) / (two_pow_sf as f32);
+        let lora_symbol_time_ms = ((1.0f64 / lora_symbol_rate as f64) * 1000.0) as f32;
+        // Utilities.h:1237, truncated to uint32_t
+        let lora_bitrate = ((sf as f64)
+            * ((4.0f64 / cr as f64) / ((two_pow_sf as f32) as f64 / (bw as f64 / 1000.0)))
+            * 1000.0) as u32;
+        // Utilities.h:1240, 1245-1247
+        let fast_rate = lora_bitrate > 30_000;
+        let mut target_ms: f32 = 24.0;
+        if fast_rate {
+            target_ms -= 18.0;
+        }
+        // Utilities.h:1254-1256
+        let mut target_symbols: f32 = target_ms / lora_symbol_time_ms;
+        if target_symbols < 18.0 {
+            target_symbols = 18.0;
+        } else {
+            target_symbols = target_symbols.ceil();
+        }
+        target_symbols as u16
+    }
+
+    /// The whole point of the exercise: over every PHY the reference itself
+    /// can be configured for, our integer derivation returns exactly what the
+    /// firmware's float derivation returns. This is the assertion behind the
+    /// "not bit-identical" caveat in the doc comment — it says where the two
+    /// *are* identical, by exhaustion rather than by argument.
+    #[test]
+    fn derive_preamble_matches_reference_float() {
+        for sf in 5..=12u8 {
+            for cr in 5..=8u8 {
+                for bw in REFERENCE_BANDWIDTHS {
+                    assert_eq!(
+                        derive_preamble_symbols(sf, cr, bw),
+                        reference_preamble_symbols_f32(sf, cr, bw),
+                        "sf={sf} cr={cr} bw={bw}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The float and integer bitrates agree on the fast-rate side of
+    /// `LORA_FAST_THRESHOLD_BPS` everywhere on the grid, which is the one
+    /// place a rounding difference could change a preamble by 18 symbols
+    /// rather than by one. Checked separately from the derivation so a
+    /// failure says which of the two steps drifted.
+    #[test]
+    fn derive_preamble_fast_rate_decision_matches_reference() {
+        for sf in 5..=12u8 {
+            for cr in 5..=8u8 {
+                for bw in REFERENCE_BANDWIDTHS {
+                    let ours = compute_bitrate(sf, cr, bw) > LORA_FAST_THRESHOLD_BPS;
+                    let theirs = ((sf as f64)
+                        * ((4.0f64 / cr as f64)
+                            / ((2f64.powi(sf as i32) as f32) as f64 / (bw as f64 / 1000.0)))
+                        * 1000.0) as u32
+                        > 30_000;
+                    assert_eq!(ours, theirs, "sf={sf} cr={cr} bw={bw}");
+                }
+            }
+        }
+    }
+
+    /// Hand-computed values at the bandwidth every LoRa scenario uses, and
+    /// the two that matter for the interop defect this function exists to
+    /// close: SF7 derives the 24 we used to hardcode (which is why SF7 always
+    /// worked), and SF8 and slower derive the floor of 18 (which is why they
+    /// did not).
+    ///
+    /// T_sym at BW125 is 2^SF/125 ms, so target_symbols = 24 * 125 / 2^SF:
+    ///   SF5  93.75 -> 94    SF6  46.875 -> 47   SF7  23.4375 -> 24
+    ///   SF8  11.72 -> 18    SF9  5.86 -> 18     SF10 2.93 -> 18
+    ///   SF11 1.46 -> 18     SF12 0.73 -> 18
+    #[test]
+    fn derive_preamble_bw125_hand_computed() {
+        assert_eq!(derive_preamble_symbols(5, 5, 125_000), 94);
+        assert_eq!(derive_preamble_symbols(6, 5, 125_000), 47);
+        assert_eq!(derive_preamble_symbols(7, 5, 125_000), 24);
+        assert_eq!(derive_preamble_symbols(8, 5, 125_000), 18);
+        assert_eq!(derive_preamble_symbols(9, 5, 125_000), 18);
+        assert_eq!(derive_preamble_symbols(10, 5, 125_000), 18);
+        assert_eq!(derive_preamble_symbols(11, 5, 125_000), 18);
+        assert_eq!(derive_preamble_symbols(12, 5, 125_000), 18);
+    }
+
+    /// The coding rate reaches the result only through the fast-rate test, so
+    /// at BW125 (where no SF is fast) the derivation is CR-independent. The
+    /// SF10/CR8 cell the mixed-pair measurement ran on is the third row.
+    #[test]
+    fn derive_preamble_bw125_ignores_coding_rate() {
+        for sf in 5..=12u8 {
+            let at_cr5 = derive_preamble_symbols(sf, 5, 125_000);
+            for cr in 6..=8u8 {
+                assert_eq!(derive_preamble_symbols(sf, cr, 125_000), at_cr5, "sf={sf}");
+            }
+        }
+    }
+
+    /// The fast-rate branch, which only three PHYs on the grid reach:
+    /// BW500k/SF5 (all CRs), BW500k/SF6 (CR4/5 and 4/6), BW250k/SF5 (CR4/5).
+    /// There the target drops from 24 ms to 6 ms and the symbol count with
+    /// it — 375 -> 94 at BW500k/SF5. A derivation that skipped the branch
+    /// would program a four-times-too-long preamble on exactly the settings
+    /// where airtime is scarcest.
+    #[test]
+    fn derive_preamble_fast_rate_branch() {
+        assert_eq!(derive_preamble_symbols(5, 5, 500_000), 94);
+        assert_eq!(derive_preamble_symbols(5, 8, 500_000), 94);
+        assert_eq!(derive_preamble_symbols(6, 5, 500_000), 47);
+        assert_eq!(derive_preamble_symbols(5, 5, 250_000), 47);
+        // Just below the threshold: BW500k/SF6/CR4/7 is 26785 bps, so the
+        // target stays 24 ms and the count is four times the fast one.
+        assert_eq!(compute_bitrate(6, 7, 500_000), 26_785);
+        assert_eq!(derive_preamble_symbols(6, 7, 500_000), 188);
+    }
+
+    /// Degenerate inputs return the floor rather than dividing by zero or
+    /// wrapping, and no input can return below the floor.
+    #[test]
+    fn derive_preamble_degenerate_inputs() {
+        assert_eq!(derive_preamble_symbols(0, 5, 125_000), 18);
+        assert_eq!(derive_preamble_symbols(13, 5, 125_000), 18);
+        assert_eq!(derive_preamble_symbols(7, 5, 0), 18);
+        assert_eq!(derive_preamble_symbols(7, 0, 125_000), 18);
+        // The u16 clamp, reachable only at the lowest SF and a bandwidth in
+        // the hundreds of megahertz: 6 ms / (32 / 4294.97 MHz) = 805307.
+        assert_eq!(derive_preamble_symbols(5, 5, u32::MAX), u16::MAX);
+    }
+
     // Airtime tests
     #[test]
     fn test_airtime_491b_bw62500_sf7_cr5() {
@@ -2009,9 +2300,36 @@ mod tests {
     }
 
     #[test]
+    fn test_airtime_ms_is_the_preamble_8_case() {
+        assert_eq!(
+            airtime_ms(184, 125_000, 12, 8),
+            airtime_ms_with_preamble(184, 125_000, 12, 8, 8)
+        );
+        // The SF12 announce that motivated the parameter: 18 programmed
+        // preamble symbols put a 184-byte frame at 10.69 s on the air, 328 ms
+        // more than the preamble-8 formula reports.
+        assert_eq!(airtime_ms_with_preamble(184, 125_000, 12, 8, 18), 10_691);
+    }
+
+    /// The regulatory ledger must be charged what was actually on the air.
+    /// Since the preamble fix the radios run SF-derived preambles (18 at
+    /// SF12/BW125), so one 184-byte SF12 frame is 10_691 ms on the air; a
+    /// preamble-8 charge (10_363 ms) undercounts every frame by 328 ms.
+    #[test]
+    fn airtime_lock_charges_the_programmed_preamble() {
+        let cost = frame_airtime_cost_ms(184, 125_000, 12, 8, 18);
+        assert!(
+            cost >= 10_691,
+            "ledger charge {cost}ms undercounts the on-air frame (preamble-8 \
+             accounting); the radio spent 10_691ms on the air"
+        );
+        assert_eq!(cost, airtime_ms_with_preamble(184, 125_000, 12, 8, 18));
+    }
+
+    #[test]
     fn test_compute_spacing_includes_csma_overhead() {
-        let air = airtime_ms(491, 62_500, 7, 5);
-        let spacing = compute_spacing_ms(491, 62_500, 7, 5);
+        let air = airtime_ms_with_preamble(491, 62_500, 7, 5, 24);
+        let spacing = compute_spacing_ms(491, 62_500, 7, 5, 24);
         assert_eq!(
             spacing,
             air + CSMA_DIFS_MS + CSMA_MAX_CW_MS + PACING_MARGIN_MS,
@@ -2019,10 +2337,19 @@ mod tests {
         );
     }
 
+    /// TX pacing charges the programmed preamble: at SF12/BW125 the derived
+    /// 18-symbol preamble adds 328 ms per frame over the preamble-8 formula.
+    #[test]
+    fn test_compute_spacing_charges_the_programmed_preamble() {
+        let pre18 = compute_spacing_ms(184, 125_000, 12, 8, 18);
+        let pre8 = compute_spacing_ms(184, 125_000, 12, 8, 8);
+        assert!(pre18 - pre8 >= 327, "preamble delta {}ms", pre18 - pre8);
+    }
+
     #[test]
     fn test_compute_spacing_floor() {
         // Tiny packet with huge bandwidth, airtime < MIN_SPACING_MS
-        let spacing = compute_spacing_ms(1, 500_000, 7, 5);
+        let spacing = compute_spacing_ms(1, 500_000, 7, 5, 8);
         assert!(
             spacing >= MIN_SPACING_MS,
             "spacing must never go below MIN_SPACING_MS"
@@ -2722,11 +3049,13 @@ mod tests {
 
     #[test]
     fn packet_airtime_single_vs_split() {
-        // A <=254-byte payload is one frame; a larger one is two frames.
-        let single = packet_airtime_ms(100, 125_000, 7, 5);
-        assert_eq!(single, airtime_ms(101, 125_000, 7, 5));
-        let split = packet_airtime_ms(300, 125_000, 7, 5);
-        let expected = airtime_ms(255, 125_000, 7, 5) + airtime_ms(1 + 300 - 254, 125_000, 7, 5);
+        // A <=254-byte payload is one frame; a larger one is two frames, and
+        // each frame carries a full programmed preamble on the air.
+        let single = packet_airtime_ms(100, 125_000, 7, 5, 24);
+        assert_eq!(single, airtime_ms_with_preamble(101, 125_000, 7, 5, 24));
+        let split = packet_airtime_ms(300, 125_000, 7, 5, 24);
+        let expected = airtime_ms_with_preamble(255, 125_000, 7, 5, 24)
+            + airtime_ms_with_preamble(1 + 300 - 254, 125_000, 7, 5, 24);
         assert_eq!(split, expected);
     }
 }

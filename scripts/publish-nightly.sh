@@ -54,6 +54,30 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-arm6
 
 \`tar xzf leviculum-nightly-amd64.tar.gz && ./leviculum-nightly-amd64/bin/lnsd --version\` runs without installing anything system-wide.
 
+**lnomad — Nomadnet terminal browser** (separate package, does not install or start the lnsd service):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-amd64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-arm64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnomad-nightly-arm64.tar.gz
+\`\`\`
+
+\`sudo apt install ./lnomad-nightly-amd64.deb\` — the browser needs a running RNS instance (leviculum's \`lnsd\` or Python \`rnsd\`).
+
+**lblogd — dev-blog server** (separate package; serves Markdown posts as a NomadNet page node and on the clearnet):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lblogd-nightly-amd64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lblogd-nightly-arm64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lblogd-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lblogd-nightly-arm64.tar.gz
+\`\`\`
+
+\`sudo apt install ./lblogd-nightly-amd64.deb\` installs and starts \`lblogd\` as a systemd service. As shipped it serves on \`http://127.0.0.1:8180/\`; \`/etc/lblogd/config.toml\` explains how to put it on a public domain with automatic HTTPS.
+
+\`lnomad\` and \`lblogd\` carry their own version numbers, independent of the \`leviculum\` packages above.
+
 **Source tarball** (tracked files at the same commit as the .debs above, no submodules):
 
 \`\`\`

@@ -22,7 +22,7 @@ use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::transport::InterfaceId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
     IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket, ReadySignal,
@@ -56,6 +56,11 @@ pub(crate) struct PipeInterfaceConfig {
     /// Notified with this interface's id after a *reconnect* (not the first
     /// spawn), so the driver can re-announce on the freshly respawned child.
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// Detach signal. When it resolves (a value is sent, or the sender is
+    /// dropped) the supervisor stops respawning, kills any live child, and the
+    /// interface is removed. `None` for file-config interfaces, which live for
+    /// the node's lifetime.
+    pub shutdown: Option<oneshot::Receiver<()>>,
 }
 
 /// Spawn a pipe interface with automatic child respawn.
@@ -63,7 +68,7 @@ pub(crate) struct PipeInterfaceConfig {
 /// Creates the channel pair once and spawns a supervisor task that keeps the
 /// child process alive across exits. The `InterfaceHandle` stays valid across
 /// respawns, mirroring the serial/TCP reconnect pattern.
-pub(crate) fn spawn_pipe_interface(config: PipeInterfaceConfig) -> InterfaceHandle {
+pub(crate) fn spawn_pipe_interface(mut config: PipeInterfaceConfig) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
@@ -74,8 +79,17 @@ pub(crate) fn spawn_pipe_interface(config: PipeInterfaceConfig) -> InterfaceHand
     let task_counters = Arc::clone(&counters);
     let task_ready = Arc::clone(&ready);
 
+    let shutdown = config.shutdown.take();
     tokio::spawn(async move {
-        pipe_respawn_task(config, incoming_tx, outgoing_rx, task_counters, task_ready).await;
+        pipe_respawn_task(
+            config,
+            incoming_tx,
+            outgoing_rx,
+            task_counters,
+            task_ready,
+            shutdown,
+        )
+        .await;
     });
 
     InterfaceHandle {
@@ -87,6 +101,7 @@ pub(crate) fn spawn_pipe_interface(config: PipeInterfaceConfig) -> InterfaceHand
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Pipe,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -96,6 +111,40 @@ pub(crate) fn spawn_pipe_interface(config: PipeInterfaceConfig) -> InterfaceHand
         credit: None,
         ready,
     }
+}
+
+/// Control handle for a pipe interface added at runtime via
+/// [`ReticulumNode::spawn_pipe_client`](crate::driver::ReticulumNode::spawn_pipe_client).
+///
+/// Hold it to keep the interface attached; drop it (or call [`detach`]) to
+/// detach — the supervisor stops respawning, kills the current child if any,
+/// and the event loop removes the interface from routing, cleanly, without
+/// rebuilding the node.
+///
+/// [`detach`]: PipeClientHandle::detach
+pub struct PipeClientHandle {
+    id: InterfaceId,
+    // Dropping this sender resolves the task's shutdown receiver, which stops
+    // the supervisor -> closes the incoming channel -> event loop detaches.
+    _shutdown: oneshot::Sender<()>,
+}
+
+impl PipeClientHandle {
+    pub(crate) fn new(id: InterfaceId, shutdown: oneshot::Sender<()>) -> Self {
+        Self {
+            id,
+            _shutdown: shutdown,
+        }
+    }
+
+    /// The id the node assigned to this interface.
+    pub fn id(&self) -> InterfaceId {
+        self.id
+    }
+
+    /// Detach the interface now. Equivalent to dropping the handle; provided as
+    /// an explicit, self-documenting call for host bindings.
+    pub fn detach(self) {}
 }
 
 /// Supervisor task: keep the child process alive, respawning on exit.
@@ -110,7 +159,11 @@ async fn pipe_respawn_task(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
     ready: Arc<ReadySignal>,
+    shutdown: Option<oneshot::Receiver<()>>,
 ) {
+    // Pin the optional receiver so we can select on it every iteration without
+    // moving it; `None` collapses to a never-ready branch (pending forever).
+    let mut shutdown = shutdown;
     let mut has_spawned_before = false;
     loop {
         match spawn_child(&config.command) {
@@ -136,15 +189,28 @@ async fn pipe_respawn_task(
                     }
                 }
 
-                outgoing_rx = pipe_io_task(
+                // Race the I/O pump against the caller's shutdown signal.
+                let io = pipe_io_task(
                     config.name.clone(),
                     stdin,
                     stdout,
                     incoming_tx.clone(),
                     outgoing_rx,
                     Arc::clone(&counters),
-                )
-                .await;
+                );
+                tokio::pin!(io);
+                outgoing_rx = match await_shutdown_or(io.as_mut(), shutdown.as_mut()).await {
+                    IoOutcome::Done(rx) => rx,
+                    IoOutcome::Shutdown => {
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        tracing::debug!(
+                            "Pipe interface {}: detach requested, supervisor stopping",
+                            config.name
+                        );
+                        return;
+                    }
+                };
 
                 // Child's stdout closed (it exited or we lost the pipe). Make
                 // sure it is fully reaped before respawning so we don't leak
@@ -172,12 +238,49 @@ async fn pipe_respawn_task(
             return;
         }
 
-        tracing::info!(
-            "Pipe interface {}: respawning in {}s",
-            config.name,
-            config.respawn_delay.as_secs()
-        );
-        tokio::time::sleep(config.respawn_delay).await;
+        // Sleep before respawning, but wake immediately on detach.
+        let delay = tokio::time::sleep(config.respawn_delay);
+        tokio::pin!(delay);
+        match await_shutdown_or(delay.as_mut(), shutdown.as_mut()).await {
+            IoOutcome::Done(()) => {
+                tracing::info!(
+                    "Pipe interface {}: respawning after {}s",
+                    config.name,
+                    config.respawn_delay.as_secs()
+                );
+            }
+            IoOutcome::Shutdown => {
+                tracing::debug!(
+                    "Pipe interface {}: detach requested during backoff, stopping",
+                    config.name
+                );
+                return;
+            }
+        }
+    }
+}
+
+enum IoOutcome<T> {
+    Done(T),
+    Shutdown,
+}
+
+/// Wait for either the future to complete or the shutdown signal to fire.
+/// A missing shutdown collapses to "just await the future".
+async fn await_shutdown_or<F, T>(
+    fut: std::pin::Pin<&mut F>,
+    shutdown: Option<&mut oneshot::Receiver<()>>,
+) -> IoOutcome<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    match shutdown {
+        Some(sig) => tokio::select! {
+            biased;
+            _ = sig => IoOutcome::Shutdown,
+            v = fut => IoOutcome::Done(v),
+        },
+        None => IoOutcome::Done(fut.await),
     }
 }
 
@@ -421,6 +524,7 @@ mod tests {
             respawn_delay: PIPE_DEFAULT_RESPAWN_DELAY,
             buffer_size: PIPE_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
+            shutdown: None,
         });
 
         // Wait until the child is spawned.
@@ -469,6 +573,7 @@ mod tests {
             respawn_delay: Duration::from_millis(50),
             buffer_size: PIPE_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
+            shutdown: None,
         });
 
         handle
@@ -495,5 +600,40 @@ mod tests {
         handle
             .try_send(&[4, 5, 6])
             .expect("send after respawn should succeed");
+    }
+
+    /// Detach path: shutting the handle stops the supervisor even mid-backoff.
+    /// A child that keeps exiting would otherwise force the caller to wait out
+    /// the full respawn delay; the shutdown signal must interrupt it.
+    #[tokio::test]
+    async fn shutdown_stops_supervisor_during_backoff() {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let handle = spawn_pipe_interface(PipeInterfaceConfig {
+            id: InterfaceId(2),
+            name: "pipe-detach".to_string(),
+            // Exit immediately so the supervisor drops straight into the
+            // respawn-backoff branch, where the shutdown path is exercised.
+            command: "sh -c 'exit 0'".to_string(),
+            respawn_delay: Duration::from_secs(30),
+            buffer_size: PIPE_DEFAULT_BUFFER_SIZE,
+            reconnect_notify: None,
+            shutdown: Some(shutdown_rx),
+        });
+
+        // Wait until the first spawn has been observed (child is guaranteed to
+        // have exited by now and the supervisor is sleeping the 30s backoff).
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Fire the detach signal; the supervisor must stop within a small
+        // window even though the respawn delay is 30s.
+        drop(shutdown_tx);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while handle.is_online() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !handle.is_online(),
+            "supervisor must exit after the shutdown signal, not sit out the backoff"
+        );
     }
 }

@@ -112,7 +112,12 @@ async fn test_two_hop_announce_propagation() {
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(b"two-hop-test"), &mut OsRng, crate::common::now_ms())
+        .announce(
+            Some(b"two-hop-test"),
+            &mut OsRng,
+            crate::common::now_ms(),
+            crate::common::now_ms() / 1000,
+        )
         .expect("Failed to create announce");
 
     // Send announce to entry daemon
@@ -235,7 +240,12 @@ async fn test_three_hop_topology_setup() {
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(b"three-hop-test"), &mut OsRng, crate::common::now_ms())
+        .announce(
+            Some(b"three-hop-test"),
+            &mut OsRng,
+            crate::common::now_ms(),
+            crate::common::now_ms() / 1000,
+        )
         .expect("Failed to create announce");
 
     // Send announce to entry daemon
@@ -415,7 +425,12 @@ async fn test_path_table_in_topology() {
     .expect("Failed to create destination");
 
     let packet = dest
-        .announce(Some(b"path-test"), &mut OsRng, crate::common::now_ms())
+        .announce(
+            Some(b"path-test"),
+            &mut OsRng,
+            crate::common::now_ms(),
+            crate::common::now_ms() / 1000,
+        )
         .expect("Failed to create announce");
 
     // Send announce to entry daemon

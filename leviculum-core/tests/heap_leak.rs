@@ -250,7 +250,9 @@ fn make_responder(clock_ms: u64) -> (EndpointNode, StepClock, DestinationHash, [
 
     // Pack a direct announce before moving the destination into the node, so the
     // initiator installs a 1-hop path and remembers the signing identity.
-    let announce = dest.announce(None, &mut OsRng, clock_ms).unwrap();
+    let announce = dest
+        .announce(None, &mut OsRng, clock_ms, clock_ms / 1000)
+        .unwrap();
     let mut buf = [0u8; MTU];
     let len = announce.pack(&mut buf).unwrap();
     let announce_bytes = buf[..len].to_vec();
@@ -354,7 +356,7 @@ fn run_announce(iters: u64, feed: bool, drain_events: bool) -> AnnounceOutcome {
         // tiny instead of growing toward its eviction cap.
         transport.storage_mut().clear_packet_hashes();
         for dest in peers.iter_mut() {
-            let announce = dest.announce(None, &mut OsRng, now).unwrap();
+            let announce = dest.announce(None, &mut OsRng, now, now / 1000).unwrap();
             let mut buf = [0u8; MTU];
             let len = announce.pack(&mut buf).unwrap();
             if feed {

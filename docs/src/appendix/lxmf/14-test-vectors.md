@@ -12,20 +12,21 @@ PYTHONPATH=reference/Reticulum:reference/LXMF \
     python3 docs/src/appendix/lxmf/vectors/gen_vectors.py
 ```
 
-Pinned to LXMF `8499729` (0.9.6) and Reticulum `d5e62d4` (RNS 1.3.5). Fixed
+Pinned to LXMF `795fdaa` (1.1.0) and Reticulum `d5e62d4` (RNS 1.3.5). Fixed
 inputs: source identity private = `00010203…3f`, destination identity private =
 `404142…7f`, message timestamp = `1700000000.0`.
 
 ## Vector kinds
 
 - **frozen** — deterministic; the hex is the proof; reproduces byte for byte.
-- **roundtrip** — output depends on ephemeral encryption key material, so the
-  ciphertext is not reproducible; proven by a decrypt round trip plus structural
-  assertions.
+- **roundtrip** — encryption uses ephemeral key material. The fixture omits the
+  random ciphertext and ciphertext-derived hashes, retaining deterministic
+  lengths, structure, and decrypt assertions. The complete JSON therefore
+  reproduces byte for byte.
 
 ## VEC-MSG-1 (frozen) — minimal opportunistic message
 
-`title=b"Hi"`, `content=b"Hello"`, `fields={}`. (`LXMessage.py:359-384`)
+`title=b"Hi"`, `content=b"Hello"`, `fields={}`. (`LXMessage.py:355-388`)
 
 ```
 packed (118 B):
@@ -44,7 +45,7 @@ signature_valid = true
 
 ## VEC-MSG-2 (frozen) — fields dict with integer key
 
-`title=b""`, `content=b"body text"`, `fields={0x0F: 0x02}`. (`LXMessage.py:359`)
+`title=b""`, `content=b"body text"`, `fields={0x0F: 0x02}`. (`LXMessage.py:355`)
 
 ```
 packed_payload: 94cb41d954fc40000000c400c409626f64792074657874810f02
@@ -55,30 +56,46 @@ packed_payload: 94cb41d954fc40000000c400c409626f64792074657874810f02
   81 0f 02                fields {0x0F: 0x02}
 ```
 
+## VEC-MSG-NEGATIVE-FIELD (frozen) — negative-fixint field key
+
+`fields={-1: b"negative field"}` proves that unknown signed integer keys retain
+their MessagePack type. The `0xff` byte below is negative fixint `-1`, not an
+unsigned field ID or a string key. (`LXMessage.py:215-219,355-387`)
+
+```
+packed_payload:
+94cb41d954fc40000000c40c6e65676174697665206b6579c404626f6479
+81ffc40e6e65676174697665206669656c64
+                                                      ^^ key = -1
+```
+
 ## VEC-MSG-3 (frozen) — unpack + verify of VEC-MSG-1
 
 After making the source identity recallable, `unpack_from_bytes` of VEC-MSG-1
 yields `signature_validated = true`, `matches_source = true`, recovered
-`title="Hi"`, `content="Hello"`. (`LXMessage.py:735-807`)
+`title="Hi"`, `content="Hello"`. (`LXMessage.py:747-822`)
 
 ## VEC-DLV-OPP (frozen) — opportunistic on-air payload
 
-`on_air = packed[16:]` (destination hash omitted). (`LXMessage.py:631`)
+`on_air = packed[16:]` (destination hash omitted). (`LXMessage.py:633-634`)
 
 ## VEC-DLV-DIRECT (frozen) — direct on-air payload
 
-`on_air = packed` (full bytes over a link). (`LXMessage.py:633`)
+`on_air = packed` (full bytes over a link). (`LXMessage.py:635-636`)
 
 ## VEC-PROP-ENVELOPE (roundtrip) — propagation envelope
 
 Structure `destination_hash(16) || destination.encrypt(packed[16:])`; envelope
 `msgpack([timestamp, [lxmf_data]])`; `transient_id = full_hash(lxmf_data)`;
-`destination.decrypt(pn_encrypted) == packed[16:]` holds. (`LXMessage.py:423-433`)
+`destination.decrypt(pn_encrypted) == packed[16:]` holds. The random transient
+ID itself is intentionally not stored. (`LXMessage.py:426-436`)
 
 ## VEC-PAPER-URI (roundtrip) — paper URI
 
 `lxm://base64url(destination_hash(16) || destination.encrypt(packed[16:]))` with
-`=` padding stripped; observed prefix `lxm://`. (`LXMessage.py:687-702`)
+`=` padding stripped; prefix `lxm://`; decoding and decrypting recovers
+`packed[16:]`. Random URI body bytes are intentionally not stored.
+(`LXMessage.py:446-451,698-713`)
 
 ## VEC-STAMP-1 (frozen) — stamp workblock, validity, value
 
@@ -94,31 +111,103 @@ valid  = true
 value  = 8
 ```
 
-(`LXStamper.py:18-46`)
+(`LXStamper.py:49-77`)
+
+## VEC-STAMP-PN (frozen) — propagation-node stamp
+
+This vector pins the full propagation-node workblock rather than only the
+common stamp algorithm: material `00..1f`, `expand_rounds=1000`, and
+`target_cost=8` produce a 256000-byte workblock whose SHA-256 is
+`36224067c2ebd1a40b0dc8908bd34dc4b7cd84be57f68a765dbaf3298bcd9719`.
+Searching `counter_be32` finds counter 17:
+
+```
+stamp  = 0000000000000000000000000000000000000000000000000000000000000011
+digest = 00420981fc866c09cb2f28e7503147d56bae0b3a6fc69f00478cb247f8d95b91
+valid  = true
+value  = 9
+```
+
+(`LXStamper.py:13,53-63,122-155`)
+
+## Propagation mailbox `/get` vectors (frozen)
+
+These are the complete client-only exchange at `/get`
+(`LXMPeer.MESSAGE_GET_PATH`): initial list, selected download,
+acknowledgement/purge, and both response shapes. The implementation does not
+expose `/offer`.
+
+### VEC-PROP-GET-LIST
+
+`[None, None]` (`LXMRouter.py:492-501`):
+
+```
+request: 92c0c0
+```
+
+### VEC-PROP-GET-DOWNLOAD
+
+One wanted ID (`20..3f`), one already-held ID (`40..5f`), transfer limit 1000
+KB (`LXMRouter.py:1521-1539`):
+
+```
+request:
+9391c420202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f
+91c420404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
+cd03e8
+```
+
+### VEC-PROP-GET-ACK
+
+`[None, [transient_id]]`, which asks the node to purge the acknowledged entry
+(`LXMRouter.py:1569-1581`):
+
+```
+request: 92c091c420000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+```
+
+### VEC-PROP-LIST-RESPONSE
+
+```
+response:
+92c420202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f
+c420404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
+```
+
+### VEC-PROP-GET-RESPONSE
+
+Two binary downloaded entries, `b"one"` and `b"two"`; error responses are
+`ccf0` (`NO_IDENTITY`) and `ccf1` (`NO_ACCESS`).
+
+```
+response: 92c4036f6e65c40374776f
+```
 
 ## VEC-ANN-DELIVERY (frozen) — delivery announce app_data
 
-`msgpack([b"Alice", 8])`:
+LXMF 1.0.1 advertises Resource compression in the third element:
+`msgpack([b"Alice", 8, [SF_COMPRESSION]])`.
 
 ```
-app_data: 92c405416c69636508
-  92                array(2)
+app_data: 93c405416c696365089100
+  93                array(3)
   c4 05 416c696365  display_name bin(5) = "Alice"
   08                stamp_cost = 8
-first_byte = 0x92  (new-format sniff)
-decoded: display_name="Alice", stamp_cost=8
+  91 00             supported functionality = [SF_COMPRESSION]
+first_byte = 0x93  (new-format sniff)
+decoded: display_name="Alice", stamp_cost=8, compression_supported=true
 ```
 
-(`LXMRouter.py:990-1002`; `LXMF.py:117-152`)
+(`LXMRouter.py:985-1001`; `LXMF.py:151-200`)
 
 ## VEC-ANN-PROPAGATION (frozen) — propagation node announce app_data
 
-7-element list, `metadata={PN_META_NAME: b"NodeA"}`, `stamp_costs=[16,3,18]`,
+7-element list, `metadata={PN_META_NAME: b"Node"}`, `stamp_costs=[16,3,18]`,
 fixed timebase:
 
 ```
-app_data: 97c2ce6553f100c3cd0100cd2800931003128101c4054e6f646541
-valid = true; pn_name = "NodeA"; pn_stamp_cost = 16
+app_data: 97c2ce6553f100c3cd0100cd2800931003128101c4044e6f6465
+valid = true; pn_name = "Node"; pn_stamp_cost = 16
 ```
 
-(`LXMRouter.py:307-319`; `LXMF.py:191-211`)
+(`LXMRouter.py:306-318`; `LXMF.py:202-250`)

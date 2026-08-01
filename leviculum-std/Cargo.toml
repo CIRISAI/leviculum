@@ -65,3 +65,6 @@ tempfile = "3"
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.
 lnomad = { path = "../lnomad" }
+# The LXMF interop tests drive the sans-io LXMF router over a live TCP
+# connection against the vendored Python LXMF reference.
+leviculum-lxmf = { path = "../leviculum-lxmf" }

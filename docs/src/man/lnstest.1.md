@@ -24,6 +24,9 @@ shared-instance interface. For file transfer use **lncp**(1).
 **-v**, **--verbose**
 :   Enable verbose logging.
 
+**--corrupt-every** *n*
+:   Fault injection: corrupt roughly one byte per *n* bytes written to TCP. For **selftest**, corruption is held back until mutual discovery has completed, so that announces cross a clean stream.
+
 ## COMMANDS
 
 ### lnstest identity generate [**-o** *file*]

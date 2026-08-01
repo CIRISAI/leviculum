@@ -57,7 +57,7 @@ fn build_announce_for_identity(identity: &Identity, aspect: &str) -> (Vec<u8>, D
     )
     .expect("create destination");
     let packet = dest
-        .announce(Some(b"bh"), &mut OsRng, now_ms())
+        .announce(Some(b"bh"), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("create announce");
     let mut raw = [0u8; MTU];
     let size = packet.pack(&mut raw).expect("pack announce");

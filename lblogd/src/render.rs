@@ -27,7 +27,9 @@
 //! - inline code: micron has no inline literal, so code is set off with a
 //!   `` `B333 `` background colour toggle (a dark neutral that reads on the
 //!   dark NomadNet default theme) and closed with `` `b ``
-//! - images: `[image: alt]` plain text (or `[image]` with no alt text)
+//! - images: an image naming a file in the file area becomes a link to it
+//!   (`` `[alt`:/file/name] ``), which is the only form micron has; any other
+//!   image (an external URL) stays `[image: alt]` plain text
 //! - tables: plaintext rows, cells joined with ` | ` (micron's `` `t `` table
 //!   is a NomadNet extension still stubbed in our parser, so we stay plain)
 //! - blockquotes: two-space indented text per nesting level
@@ -42,11 +44,82 @@
 
 use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::post::Post;
+use crate::files;
+use crate::post::{slugify, Date, Post};
 
 /// Micron heading depth is meaningful for 1-3 `>`; deeper Markdown headings
 /// clamp here.
 const MAX_MICRON_HEADING_DEPTH: usize = 3;
+
+/// What a reader learns about the blog itself, independent of any one post.
+///
+/// Assembled once from the config and the resolved destination, then rendered
+/// into every page on both sides. Optional fields are simply omitted when
+/// absent rather than rendered empty, so a minimal configuration produces a
+/// clean page rather than a page with blanks in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlogMeta {
+    /// The blog's name; the heading of every page.
+    pub title: String,
+    /// Who writes it, shown unless a post names its own author.
+    pub author: Option<String>,
+    /// One sentence on what this is.
+    pub description: Option<String>,
+    /// BCP 47 language tag for the HTML `lang` attribute.
+    pub language: String,
+    /// The blog's clearnet URL, shown on the NomadNet side so mesh readers
+    /// can find the web version.
+    pub web_url: Option<String>,
+    /// The blog's NomadNet destination hash, shown on the web side so
+    /// clearnet readers can find the mesh version.
+    pub nomadnet_address: Option<String>,
+    /// Contact address for the about page.
+    pub email: Option<String>,
+    /// LXMF destination hash for the about page, 32 hex characters.
+    pub lxmf: Option<String>,
+    /// Whether an about page exists, and therefore whether the author's name
+    /// is a link.
+    ///
+    /// It exists as soon as there is anything to put on it: an address, a
+    /// hash, or a text file. Without any of those a link would lead to an
+    /// empty page, so the name stays plain text.
+    pub has_about: bool,
+}
+
+impl BlogMeta {
+    /// The author to credit for `post`: its own, else the blog's.
+    fn author_of<'a>(&'a self, post: &'a Post) -> Option<&'a str> {
+        post.author.as_deref().or(self.author.as_deref())
+    }
+
+    /// The blog author's name as HTML, linked to the about page when there is
+    /// one.
+    ///
+    /// Only the blog's own author is linked. A guest author's name pointing
+    /// at the blog author's about page would simply be wrong, and a page per
+    /// author is more machinery than a blog with one writer needs.
+    fn author_html(&self, name: &str) -> String {
+        let escaped = escape_html(name);
+        match self.has_about && Some(name) == self.author.as_deref() {
+            true => format!("<a href=\"{ABOUT_HTML_PATH}\">{escaped}</a>"),
+            false => escaped,
+        }
+    }
+
+    /// The same for micron, linking to the local about page.
+    fn author_micron(&self, name: &str) -> String {
+        match self.has_about && Some(name) == self.author.as_deref() {
+            true => format!("`[{}`{ABOUT_MICRON_PATH}]", sanitize_link_part(name)),
+            false => escape_micron_text(name),
+        }
+    }
+}
+
+/// The HTTP path of the about page.
+pub const ABOUT_HTML_PATH: &str = "/about";
+
+/// The micron request path of the about page.
+pub const ABOUT_MICRON_PATH: &str = ":/page/about.mu";
 
 /// The micron background colour used to set off inline code (12-bit form).
 const INLINE_CODE_BG: &str = "333";
@@ -59,10 +132,165 @@ fn markdown_options() -> Options {
 
 /// Render a Markdown fragment to an HTML fragment (no surrounding document).
 pub fn markdown_to_html(md: &str) -> String {
-    let parser = Parser::new_ext(md, markdown_options());
+    let parser = Parser::new_ext(md, markdown_options())
+        .map(demote_heading)
+        .map(resolve_file_ref);
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
+}
+
+/// Point an image or link at the file area's web route when it names a file
+/// there.
+///
+/// An author writes `![Antenne](antenne.jpg)` and means "the picture next to
+/// my posts". On the web that is `/files/antenne.jpg`; on the mesh the same
+/// reference becomes a `:/file/antenne.jpg` link (see
+/// [`MicronWriter::end`]). Anything [`files::file_ref`] does not recognise —
+/// an external URL above all — is left exactly as written.
+fn resolve_file_ref(event: Event<'_>) -> Event<'_> {
+    match event {
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: match files::file_ref(&dest_url) {
+                Some(name) => files::web_path(&name).into(),
+                None => dest_url,
+            },
+            title,
+            id,
+        }),
+        other => other,
+    }
+}
+
+/// Push a Markdown heading down one level.
+///
+/// The page template already gives the post its `<h1>`, so a `# Heading` in
+/// the body would produce a second one and leave the document with two
+/// competing top-level headings. Demoting means an author can write `#` for
+/// their first section, as Markdown habit dictates, and still get a correctly
+/// nested document.
+///
+/// Both the start and the end event carry the level, and moving only one of
+/// them emits mismatched tags like `<h2>Text</h1>`.
+fn demote_heading(event: Event<'_>) -> Event<'_> {
+    match event {
+        Event::Start(Tag::Heading {
+            level,
+            id,
+            classes,
+            attrs,
+        }) => Event::Start(Tag::Heading {
+            level: one_level_down(level),
+            id,
+            classes,
+            attrs,
+        }),
+        Event::End(TagEnd::Heading(level)) => Event::End(TagEnd::Heading(one_level_down(level))),
+        other => other,
+    }
+}
+
+/// Render a post body to HTML with every link and image made absolute.
+///
+/// A feed entry is read somewhere else entirely, so a relative link in it
+/// resolves against the reader's own address and lands nowhere. `base` is the
+/// blog's root and `page` the post's own URL, which is what a document-
+/// relative reference resolves against.
+fn markdown_to_html_absolute(md: &str, base: &str, page: &str) -> String {
+    let parser = Parser::new_ext(md, markdown_options())
+        .map(demote_heading)
+        // File references resolve to the web route BEFORE absolutising, so a
+        // feed entry's picture points at `<base>/files/x.jpg` rather than at
+        // a name resolved against the post's own URL, where nothing is.
+        .map(resolve_file_ref)
+        .map(|event| absolutize(event, base, page));
+    let mut out = String::new();
+    html::push_html(&mut out, parser);
+    out
+}
+
+/// Rewrite the destination of a link or image event to an absolute URL.
+fn absolutize<'a>(event: Event<'a>, base: &str, page: &str) -> Event<'a> {
+    match event {
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: absolute_url(&dest_url, base, page).into(),
+            title,
+            id,
+        }),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: absolute_url(&dest_url, base, page).into(),
+            title,
+            id,
+        }),
+        other => other,
+    }
+}
+
+/// Resolve one reference against the blog root and the containing page.
+///
+/// Only the forms that occur in a post are handled, deliberately rather than
+/// implementing RFC 3986: anything already carrying a scheme (`https:`,
+/// `mailto:`) or a network path (`//host/x`) is left alone, a root-relative
+/// path resolves against the blog root, a fragment against the page it sits
+/// in, and anything else against the page's directory.
+fn absolute_url(url: &str, base: &str, page: &str) -> String {
+    if url.is_empty() || has_scheme(url) || url.starts_with("//") {
+        return url.to_string();
+    }
+    if let Some(fragment) = url.strip_prefix('#') {
+        // An in-page anchor would otherwise jump inside the reader's own page.
+        return format!("{page}#{fragment}");
+    }
+    if let Some(path) = url.strip_prefix('/') {
+        return format!("{base}/{path}");
+    }
+    // Document-relative: resolve against the directory the page sits in.
+    let dir = page.rsplit_once('/').map(|(d, _)| d).unwrap_or(page);
+    format!("{dir}/{url}")
+}
+
+/// Whether a reference starts with a URL scheme, e.g. `https:` or `mailto:`.
+///
+/// A scheme is a letter followed by letters, digits, `+`, `-` or `.`, then a
+/// colon. Checking the shape rather than a list of known schemes avoids
+/// mangling anything exotic an author writes on purpose.
+fn has_scheme(url: &str) -> bool {
+    let Some((prefix, _)) = url.split_once(':') else {
+        return false;
+    };
+    let mut chars = prefix.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// The next heading level down; `h6` has nowhere to go and stays put.
+fn one_level_down(level: pulldown_cmark::HeadingLevel) -> pulldown_cmark::HeadingLevel {
+    use pulldown_cmark::HeadingLevel::*;
+    match level {
+        H1 => H2,
+        H2 => H3,
+        H3 => H4,
+        H4 => H5,
+        H5 | H6 => H6,
+    }
 }
 
 /// Escape text for inclusion in HTML element content or attribute values.
@@ -81,55 +309,332 @@ fn escape_html(s: &str) -> String {
     out
 }
 
-/// The shared minimal inline stylesheet. Theme-neutral and readable.
-const STYLE: &str = "\
+/// The built-in stylesheet, used when the operator configures none. Minimal,
+/// theme-neutral and readable.
+pub const DEFAULT_STYLE: &str = "\
 body{margin:0 auto;max-width:42rem;padding:1rem;font-family:system-ui,sans-serif;\
 line-height:1.6;color:#222;background:#fdfdfd}\
 h1,h2,h3{line-height:1.25}\
 code,pre{font-family:ui-monospace,monospace;background:#eee}\
 pre{padding:.75rem;overflow-x:auto}\
 a{color:#1a5fb4}\
-.date{color:#666;font-size:.9rem}\
+.tagline{color:#444}\
+.byline,.date{color:#666;font-size:.9rem}\
 ul.posts{list-style:none;padding:0}\
-ul.posts li{margin:.5rem 0}";
+ul.posts li{margin:.5rem 0}\
+footer{margin-top:3rem;border-top:1px solid #ddd;padding-top:1rem;\
+color:#666;font-size:.9rem}\
+footer code{background:none}";
 
-/// Wrap `body` in a complete minimal HTML document titled `title`.
-fn html_document(title: &str, body: &str) -> String {
+/// Wrap `body` in a complete HTML document.
+///
+/// `title` is the browser-tab title, which is the post title on a post page
+/// and the blog title on the index; `css` is inlined rather than linked so a
+/// page is always styled by the stylesheet it was rendered with.
+fn html_document(meta: &BlogMeta, css: &str, title: &str, body: &str) -> String {
+    let description = match &meta.description {
+        Some(d) => format!(
+            "<meta name=\"description\" content=\"{}\">\n",
+            escape_html(d)
+        ),
+        None => String::new(),
+    };
+    // Feed autodiscovery, so a reader finds the feed from any page. Only
+    // emitted when there is a feed to find, which mirrors the route.
+    let feed = match meta.web_url {
+        Some(_) => format!(
+            "<link rel=\"alternate\" type=\"application/atom+xml\" \
+             title=\"{}\" href=\"{FEED_PATH}\">\n",
+            escape_html(&meta.title)
+        ),
+        None => String::new(),
+    };
     format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+        "<!doctype html>\n<html lang=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
+         {}{}<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
+        escape_html(&meta.language),
+        description,
+        feed,
         escape_html(title),
-        STYLE,
+        css,
         body
     )
 }
 
-/// Render the post index as a complete HTML document. Posts link to
-/// `/posts/<slug>` (the HTTP route shape; wired up in a later batch).
-pub fn render_index_html(posts: &[Post]) -> String {
-    let mut body = String::from("<h1>Posts</h1>\n<ul class=\"posts\">\n");
-    for post in posts {
+/// The footer shown on every HTML page: where to find the blog on the mesh.
+///
+/// A reader on the clearnet side has no way to discover the NomadNet
+/// destination otherwise, and it is the more interesting half of this blog.
+fn html_footer(meta: &BlogMeta) -> String {
+    match &meta.nomadnet_address {
+        Some(address) => format!(
+            "\n<footer>\nAlso on NomadNet over Reticulum: <code>{}</code>\n</footer>",
+            escape_html(address)
+        ),
+        None => String::new(),
+    }
+}
+
+/// Render the post index as a complete HTML document: who this is, what it
+/// is about, and the posts. Posts link to `/posts/<slug>`.
+pub fn render_index_html(meta: &BlogMeta, css: &str, posts: &[Post]) -> String {
+    let mut body = format!("<h1>{}</h1>\n", escape_html(&meta.title));
+    if let Some(author) = &meta.author {
         body.push_str(&format!(
-            "<li><span class=\"date\">{}</span> <a href=\"/posts/{}\">{}</a></li>\n",
+            "<p class=\"byline\">by {}</p>\n",
+            meta.author_html(author)
+        ));
+    }
+    if let Some(description) = &meta.description {
+        body.push_str(&format!(
+            "<p class=\"tagline\">{}</p>\n",
+            escape_html(description)
+        ));
+    }
+
+    body.push_str("<ul class=\"posts\">\n");
+    for post in posts {
+        // Only name an author who differs from the blog's: repeating the same
+        // name on every line is noise, a guest post is information.
+        let byline = match &post.author {
+            Some(author) if Some(author.as_str()) != meta.author.as_deref() => {
+                format!(
+                    " <span class=\"byline\">by {}</span>",
+                    meta.author_html(author)
+                )
+            }
+            _ => String::new(),
+        };
+        body.push_str(&format!(
+            "<li><span class=\"date\">{}</span> <a href=\"/posts/{}\">{}</a>{}</li>\n",
             post.date,
             escape_html(&post.slug),
-            escape_html(&post.title)
+            escape_html(&post.title),
+            byline
         ));
     }
     body.push_str("</ul>");
-    html_document("Posts", &body)
+    body.push_str(&html_footer(meta));
+    html_document(meta, css, &meta.title, &body)
 }
 
-/// Render one post as a complete HTML document.
-pub fn render_post_html(post: &Post) -> String {
+/// Render one post as a complete HTML document, with a way back to the index.
+pub fn render_post_html(meta: &BlogMeta, css: &str, post: &Post) -> String {
+    let byline = match meta.author_of(post) {
+        Some(author) => format!(" &middot; {}", meta.author_html(author)),
+        None => String::new(),
+    };
     let body = format!(
-        "<article>\n<h1>{}</h1>\n<p class=\"date\">{}</p>\n{}</article>",
+        "<article>\n<h1>{}</h1>\n<p class=\"date\">{}{}</p>\n{}</article>\n\
+         <p><a href=\"/\">&larr; {}</a></p>{}",
         escape_html(&post.title),
         post.date,
-        markdown_to_html(&post.body_md)
+        byline,
+        markdown_to_html(&post.body_md),
+        escape_html(&meta.title),
+        html_footer(meta)
     );
-    html_document(&post.title, &body)
+    html_document(meta, css, &post.title, &body)
+}
+
+/// Render the about page as a complete HTML document.
+///
+/// `text` is the optional Markdown file, parsed exactly like a post. Its
+/// date, slug and author are ignored: an about page is not a dated entry, so
+/// showing a publication date and a byline on it would be misleading.
+pub fn render_about_html(meta: &BlogMeta, css: &str, text: Option<&Post>) -> String {
+    let heading = about_heading(meta, text);
+    let mut body = format!("<h1>{}</h1>\n", escape_html(&heading));
+
+    if let Some(email) = &meta.email {
+        body.push_str(&format!(
+            "<p class=\"contact\">Email: <a href=\"mailto:{0}\">{0}</a></p>\n",
+            escape_html(email)
+        ));
+    }
+    if let Some(lxmf) = &meta.lxmf {
+        // No link: a browser has nothing to do with an LXMF address. The hash
+        // is what a reader copies into their own client.
+        body.push_str(&format!(
+            "<p class=\"contact\">LXMF: <code>{}</code></p>\n",
+            escape_html(lxmf)
+        ));
+    }
+    if let Some(text) = text {
+        body.push_str(&markdown_to_html(&text.body_md));
+    }
+
+    body.push_str(&format!(
+        "<p><a href=\"/\">&larr; {}</a></p>",
+        escape_html(&meta.title)
+    ));
+    body.push_str(&html_footer(meta));
+    html_document(meta, css, &heading, &body)
+}
+
+/// Render the about page as a micron page.
+///
+/// The LXMF address becomes a `lxmf@<hash>` link, which NomadNet opens as a
+/// conversation with that address.
+pub fn render_about_micron(meta: &BlogMeta, text: Option<&Post>) -> String {
+    let heading = about_heading(meta, text);
+    let mut out = format!(">{}\n\n", escape_micron_text(&heading));
+
+    if let Some(email) = &meta.email {
+        out.push_str(&format!("Email: {}\n", escape_micron_text(email)));
+    }
+    if let Some(lxmf) = &meta.lxmf {
+        out.push_str(&format!(
+            "LXMF: `[{0}`lxmf@{0}]\n",
+            sanitize_link_part(lxmf)
+        ));
+    }
+    if meta.email.is_some() || meta.lxmf.is_some() {
+        out.push_str("\n-\n\n");
+    }
+    if let Some(text) = text {
+        out.push_str(&markdown_to_micron(&text.body_md));
+        out.push('\n');
+    }
+
+    out.push_str(&format!(
+        "\n`[\u{2190} {}`{ABOUT_BACK_PATH}]\n",
+        sanitize_link_part(&meta.title)
+    ));
+    out.push_str(&micron_footer(meta));
+    out
+}
+
+/// The micron request path of the index, used by the about page's back link.
+const ABOUT_BACK_PATH: &str = ":/page/index.mu";
+
+/// The about page's heading.
+///
+/// The text file's title when there is one, which the loader already defaults
+/// to [`default_about_title`], so a file without frontmatter still lands on
+/// the author's name rather than on its own file name.
+fn about_heading(meta: &BlogMeta, text: Option<&Post>) -> String {
+    match text {
+        Some(text) => text.title.clone(),
+        None => default_about_title(meta.author.as_deref()),
+    }
+}
+
+/// The title an about page carries when nothing names one: the author, or a
+/// plain "About".
+///
+/// A name that slugifies to nothing is skipped, because the post parser
+/// requires a usable slug and would otherwise reject the file over a title it
+/// never asked for.
+pub fn default_about_title(author: Option<&str>) -> String {
+    author
+        .filter(|a| !slugify(a).is_empty())
+        .unwrap_or("About")
+        .to_string()
+}
+
+/// The path the Atom feed is served under.
+pub const FEED_PATH: &str = "/feed.xml";
+
+/// Render the Atom feed, or `None` when the blog has no public URL.
+///
+/// A feed is only meaningful with absolute links, and those need a domain.
+/// A plaintext development run has none, so it serves no feed rather than a
+/// feed full of links that resolve against whatever the reader happens to be
+/// looking at.
+///
+/// Atom rather than RSS 2.0: entry identity is explicit rather than
+/// conventional, and timestamps are RFC 3339 rather than RFC 822. Every
+/// reader handles both.
+pub fn render_feed_atom(meta: &BlogMeta, posts: &[Post]) -> Option<String> {
+    let base = meta.web_url.as_deref()?;
+
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    out.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
+    out.push_str(&format!("<title>{}</title>\n", escape_html(&meta.title)));
+    if let Some(description) = &meta.description {
+        out.push_str(&format!(
+            "<subtitle>{}</subtitle>\n",
+            escape_html(description)
+        ));
+    }
+    out.push_str(&format!("<id>{}/</id>\n", escape_html(base)));
+    out.push_str(&format!(
+        "<link rel=\"alternate\" type=\"text/html\" href=\"{}/\"/>\n",
+        escape_html(base)
+    ));
+    out.push_str(&format!(
+        "<link rel=\"self\" type=\"application/atom+xml\" href=\"{}{}\"/>\n",
+        escape_html(base),
+        FEED_PATH
+    ));
+    // Posts are newest first, so the first one dates the feed. With no posts
+    // there is no date to give and the epoch stands in; `updated` is
+    // mandatory, and an empty feed is not worth a special case.
+    let updated = posts
+        .first()
+        .map(|p| rfc3339(&p.date))
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+    out.push_str(&format!("<updated>{updated}</updated>\n"));
+    if let Some(author) = &meta.author {
+        out.push_str(&format!(
+            "<author><name>{}</name></author>\n",
+            escape_html(author)
+        ));
+    }
+
+    for post in posts {
+        out.push_str(&feed_entry(meta, base, post));
+    }
+    out.push_str("</feed>\n");
+    Some(out)
+}
+
+/// One `<entry>`, carrying the post's full text.
+///
+/// Full text rather than a teaser: this is a text blog, and a feed a reader
+/// can actually read in their reader is the point of having one.
+fn feed_entry(meta: &BlogMeta, base: &str, post: &Post) -> String {
+    let url = format!("{base}/posts/{}", post.slug);
+    let mut entry = String::from("<entry>\n");
+    entry.push_str(&format!("<title>{}</title>\n", escape_html(&post.title)));
+    // The entry id has to stay stable, or readers show the post again as new.
+    // It is the post URL, which means it moves when an untitled-slug post is
+    // retitled; see the README note on pinning `slug` once published.
+    entry.push_str(&format!("<id>{}</id>\n", escape_html(&url)));
+    entry.push_str(&format!(
+        "<link rel=\"alternate\" type=\"text/html\" href=\"{}\"/>\n",
+        escape_html(&url)
+    ));
+    let stamp = rfc3339(&post.date);
+    entry.push_str(&format!("<published>{stamp}</published>\n"));
+    entry.push_str(&format!("<updated>{stamp}</updated>\n"));
+    // Atom lets entries inherit the feed's author, so only a differing one
+    // needs saying. With no feed author, the post's own is all there is.
+    if let Some(author) = meta.author_of(post) {
+        if Some(author) != meta.author.as_deref() {
+            entry.push_str(&format!(
+                "<author><name>{}</name></author>\n",
+                escape_html(author)
+            ));
+        }
+    }
+    entry.push_str(&format!(
+        "<content type=\"html\">{}</content>\n",
+        escape_html(&markdown_to_html_absolute(&post.body_md, base, &url))
+    ));
+    entry.push_str("</entry>\n");
+    entry
+}
+
+/// A post's date as an RFC 3339 timestamp.
+///
+/// Posts are dated to the day, so the time is always midnight UTC. Two posts
+/// on one day therefore carry identical timestamps and a reader may order
+/// them either way; our own index breaks that tie by title, a reader cannot.
+fn rfc3339(date: &Date) -> String {
+    format!("{date}T00:00:00Z")
 }
 
 /// Convert a Markdown fragment to valid micron markup. See the module docs
@@ -143,29 +648,66 @@ pub fn markdown_to_micron(md: &str) -> String {
     writer.finish()
 }
 
-/// Render the post index as a micron page: a heading plus one link per post
-/// targeting the local page `:/page/<slug>.mu` (NomadNet's same-node link
-/// form, as resolved by lnomad and NomadNet).
-pub fn render_index_micron(posts: &[Post]) -> String {
-    let mut out = String::from(">Posts\n\n");
+/// Render the post index as a micron page: the blog's identity, then one link
+/// per post targeting the local page `:/page/<slug>.mu` (NomadNet's same-node
+/// link form, as resolved by lnomad and NomadNet).
+pub fn render_index_micron(meta: &BlogMeta, posts: &[Post]) -> String {
+    let mut out = format!(">{}\n\n", escape_micron_text(&meta.title));
+    if let Some(author) = &meta.author {
+        out.push_str(&format!("by {}\n", meta.author_micron(author)));
+    }
+    if let Some(description) = &meta.description {
+        out.push_str(&format!("{}\n", escape_micron_text(description)));
+    }
+    if meta.author.is_some() || meta.description.is_some() {
+        out.push('\n');
+    }
+
     for post in posts {
+        // Same rule as HTML: name an author only where it differs.
+        let byline = match &post.author {
+            Some(author) if Some(author.as_str()) != meta.author.as_deref() => {
+                format!(" by {author}")
+            }
+            _ => String::new(),
+        };
         out.push_str(&format!(
             "`[{}`:/page/{}.mu]\n",
-            sanitize_link_part(&format!("{} {}", post.date, post.title)),
+            sanitize_link_part(&format!("{} {}{}", post.date, post.title, byline)),
             sanitize_link_part(&post.slug)
         ));
     }
+    out.push_str(&micron_footer(meta));
     out
 }
 
-/// Render one post as a micron page: title heading, date line, divider, body.
-pub fn render_post_micron(post: &Post) -> String {
+/// Render one post as a micron page: title heading, date and author line,
+/// divider, body, and a link back to the index.
+pub fn render_post_micron(meta: &BlogMeta, post: &Post) -> String {
+    let byline = match meta.author_of(post) {
+        Some(author) => format!(" \u{b7} {}", meta.author_micron(author)),
+        None => String::new(),
+    };
     format!(
-        ">{}\n\n{}\n-\n\n{}",
+        ">{}\n\n{}{}\n-\n\n{}\n\n`[\u{2190} {}`:/page/index.mu]\n{}",
         escape_micron_text(&post.title),
         post.date,
-        markdown_to_micron(&post.body_md)
+        byline,
+        markdown_to_micron(&post.body_md),
+        sanitize_link_part(&meta.title),
+        micron_footer(meta)
     )
+}
+
+/// The footer shown on every micron page: where to find the blog on the web.
+///
+/// The mirror of [`html_footer`]; a mesh reader who wants to share the blog
+/// with someone off-mesh needs the clearnet URL.
+fn micron_footer(meta: &BlogMeta) -> String {
+    match &meta.web_url {
+        Some(url) => format!("\n-\n\nAlso on the web: {}\n", escape_micron_text(url)),
+        None => String::new(),
+    }
 }
 
 /// Escape plain text so micron's inline parser reads it verbatim: `\` and
@@ -194,6 +736,15 @@ fn sanitize_link_part(s: &str) -> String {
 /// escaping already turns it into `` \` ``.
 const LINE_CONTROL_CHARS: [char; 4] = ['>', '#', '-', '<'];
 
+/// The image currently being collected: its alt text, and where it points.
+#[derive(Clone, Debug, Default)]
+struct OpenImage {
+    /// Alt text buffered until the closing event.
+    alt: String,
+    /// The destination as the author wrote it.
+    dest: String,
+}
+
 /// The streaming Markdown-event-to-micron writer.
 #[derive(Default)]
 struct MicronWriter {
@@ -214,8 +765,8 @@ struct MicronWriter {
     link_url: Option<String>,
     /// Label text buffered while a link is open.
     link_label: String,
-    /// Alt text buffered while an image is open.
-    image_alt: Option<String>,
+    /// Alt text buffered while an image is open, with the image's target.
+    image: Option<OpenImage>,
     /// Cells emitted so far in the current (degraded) table row.
     table_cells: usize,
 }
@@ -252,7 +803,11 @@ impl MicronWriter {
             Tag::Paragraph => {}
             Tag::Heading { level, .. } => {
                 self.block_sep();
-                let depth = (level as usize).min(MAX_MICRON_HEADING_DEPTH);
+                // Demoted for the same reason as on the HTML side: the page
+                // template already used `>` for the post title, so a body
+                // heading starts one level in. Micron has only three levels,
+                // so this also means `>` is reserved for the title alone.
+                let depth = (level as usize + 1).min(MAX_MICRON_HEADING_DEPTH);
                 self.push_raw(&">".repeat(depth));
             }
             Tag::BlockQuote(_) => {
@@ -303,7 +858,12 @@ impl MicronWriter {
                 self.link_url = Some(dest_url.to_string());
                 self.link_label.clear();
             }
-            Tag::Image { .. } => self.image_alt = Some(String::new()),
+            Tag::Image { dest_url, .. } => {
+                self.image = Some(OpenImage {
+                    alt: String::new(),
+                    dest: dest_url.to_string(),
+                })
+            }
             Tag::HtmlBlock => self.block_sep(),
             // Extensions we do not enable (footnotes, definition lists,
             // strikethrough, sub/superscript, metadata): contents degrade to
@@ -342,11 +902,26 @@ impl MicronWriter {
                 self.push_raw(&format!("`[{label}`{url}]"));
             }
             TagEnd::Image => {
-                let alt = self.image_alt.take().unwrap_or_default();
-                if alt.trim().is_empty() {
+                let image = self.image.take().unwrap_or_default();
+                let alt = image.alt.trim();
+                // A picture in the file area becomes an ordinary micron link
+                // to it. NomadNet shows a link that saves the file to the
+                // reader's download directory; lnomad draws it in the page.
+                // Micron has no image construct, so this is the whole of what
+                // is available, and inventing one would render as raw markup
+                // in every other browser.
+                if let Some(name) = files::file_ref(&image.dest) {
+                    let label = match alt.is_empty() {
+                        true => name.clone(),
+                        false => alt.to_string(),
+                    };
+                    let label = sanitize_link_part(&label);
+                    let target = sanitize_link_part(&files::micron_target(&name));
+                    self.push_raw(&format!("`[{label}`{target}]"));
+                } else if alt.is_empty() {
                     self.push_text("[image]");
                 } else {
-                    self.push_text(&format!("[image: {}]", alt.trim()));
+                    self.push_text(&format!("[image: {alt}]"));
                 }
             }
             _ => {}
@@ -357,8 +932,8 @@ impl MicronWriter {
     /// label, literal block, or the current line (escaped). Embedded
     /// newlines (raw HTML, code text) split lines.
     fn text(&mut self, t: &str) {
-        if let Some(alt) = self.image_alt.as_mut() {
-            alt.push_str(t);
+        if let Some(image) = self.image.as_mut() {
+            image.alt.push_str(t);
             return;
         }
         if self.link_url.is_some() {
@@ -384,8 +959,8 @@ impl MicronWriter {
     /// Inline code: no micron inline literal exists, so set it off with a
     /// background colour toggle (degradation documented in the module docs).
     fn inline_code(&mut self, code: &str) {
-        if let Some(alt) = self.image_alt.as_mut() {
-            alt.push_str(code);
+        if let Some(image) = self.image.as_mut() {
+            image.alt.push_str(code);
             return;
         }
         if self.link_url.is_some() {
@@ -400,7 +975,7 @@ impl MicronWriter {
     /// Emit a style toggle unless a link/image is collecting text (labels run
     /// raw to the closing bracket, so styles inside them are dropped).
     fn style_toggle(&mut self, toggle: &str) {
-        if self.image_alt.is_none() && self.link_url.is_none() {
+        if self.image.is_none() && self.link_url.is_none() {
             self.push_raw(toggle);
         }
     }

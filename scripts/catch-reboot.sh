@@ -23,6 +23,13 @@ case "$BOARD" in rak4631) IDPAT="RAK" ;; t114) IDPAT="T114" ;; *) echo "unknown 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/leviculum-ci-target}"
 export CARGO_TERM_COLOR=never
 export LORA_SF="${LORA_SF:-10}" LORA_CR="${LORA_CR:-8}" LORA_BANDWIDTH="${LORA_BANDWIDTH:-125000}"
+# The repro scenario lives in the sibling periculum checkout.
+PERICULUM_ROOT="${PERICULUM_ROOT:-$REPO/../periculum}"
+PERICULUM_BIN="${PERICULUM_BIN:-$PERICULUM_ROOT/target/release/periculum}"
+if [ ! -x "$PERICULUM_BIN" ]; then
+  echo "periculum binary not found at $PERICULUM_BIN (build it, or set PERICULUM_BIN)" >&2
+  exit 2
+fi
 
 echo "=== catch-reboot board=$BOARD SF=$LORA_SF CR=$LORA_CR T0=$(date +%H:%M:%S) ===" > "$OUT"
 : > "$CAP"
@@ -50,8 +57,8 @@ for n in $(seq 1 "$RUNS"); do
   docker container prune -f >/dev/null 2>&1; docker network prune -f >/dev/null 2>&1
   rm -f "$HOME/.local/state/leviculum-ci/test.lock"
   ts=$(date +%s)
-  timeout 200 cargo test -p reticulum-integ --release --lib -- \
-    --exact executor::tests::lora_lnode_lncp_bidir --ignored --test-threads=1 >/dev/null 2>&1
+  timeout 200 "$PERICULUM_BIN" run "$PERICULUM_ROOT/hardware/lora_lnode_lncp_bidir.toml" \
+    >/dev/null 2>&1
   rc=$?
   boots=$(grep -ac "booting" "$CAP" 2>/dev/null)
   newb=$((boots - BASE_BOOTS))

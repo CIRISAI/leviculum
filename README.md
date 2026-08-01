@@ -42,6 +42,20 @@ That covers everything: the native Rust clients (`lnstatus`, `lnstest`, `lncp`) 
 
 The binaries are statically linked against musl, so the package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 (amd64 + arm64) regardless of host glibc. SHA-256 checksums are published alongside every `.deb` with the suffix `.sha256`. The exact build is embedded in the binaries — `lnsd --version` prints e.g. `0.7.1-nightly.20260419-5a5df20`.
 
+### Applications
+
+Two programs ship as their own nightly packages, so neither drags in the auto-started `lnsd` service that `leviculum` sets up. Both are versioned independently of the stack — their version numbers track the programs, not the protocol core.
+
+```sh
+# lnomad — Nomadnet terminal browser
+sudo apt install ./lnomad-nightly-amd64.deb
+
+# lblogd — dev-blog server (NomadNet page node + clearnet web)
+sudo apt install ./lblogd-nightly-amd64.deb
+```
+
+Download them from the same [nightly release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly), as `.deb` or as a userspace `.tar.gz`, for amd64 and arm64. `lnomad` is a plain terminal program. `lblogd` installs and starts a systemd service that serves on `http://127.0.0.1:8180/` until you point it at a domain in `/etc/lblogd/config.toml`. Both need a running Reticulum instance for their mesh side — `lnsd` from the package above, or the Python `rnsd`.
+
 ### Build from source
 
 Tested on current Debian (trixie). Install the toolchain once. Rust comes

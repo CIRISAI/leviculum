@@ -428,6 +428,19 @@ pub struct InterfaceConfig {
     pub coding_rate: Option<u8>,
     /// TX power in dBm
     pub tx_power: Option<i8>,
+    /// LoRa preamble length in symbols, pushed to LNode firmware in the
+    /// radio-config frame (`SerialInterface` with a `[radio]`-derived PHY).
+    /// Unset derives the value the RNode firmware programs for the same PHY
+    /// (`leviculum_core::rnode::derive_preamble_symbols`), which is what an
+    /// RNode peer expects to hear: 24 symbols at SF7/BW125, the 18-symbol
+    /// floor from SF8 down. Setting it pins a value instead, which is how
+    /// the corner gets re-measured and how a node with a non-conforming peer
+    /// copes.
+    ///
+    /// Distinct from [`preamble`](Self::preamble), which is the KISS TNC
+    /// TX delay in milliseconds (`CMD_TXDELAY`) and does not reach a LoRa
+    /// modem.
+    pub preamble_symbols: Option<u16>,
     /// Hardware flow control (RNode waits for CMD_READY before next TX)
     pub flow_control: Option<bool>,
     /// Short-term airtime limit as percent (0.0-100.0)
@@ -563,6 +576,7 @@ impl Default for InterfaceConfig {
             spreading_factor: None,
             coding_rate: None,
             tx_power: None,
+            preamble_symbols: None,
             flow_control: None,
             airtime_limit_short: None,
             airtime_limit_long: None,

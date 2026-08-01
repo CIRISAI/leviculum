@@ -44,7 +44,7 @@ fn next_port() -> u16 {
 /// Resolve the release binary that the integ runner and this mvr share.
 /// Honours `CARGO_TARGET_DIR` so a `just build-integ-bins` under the
 /// nightly's CI cache dir is picked up the same way the runner's
-/// `reticulum-integ::paths` helper resolves it.
+/// periculum's `paths` helper resolves it.
 fn release_bin(name: &str) -> PathBuf {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
@@ -69,7 +69,7 @@ fn release_bin(name: &str) -> PathBuf {
 /// Write a minimal lnsd INI config for the mvr.
 ///
 /// The Reticulum config format is documented in
-/// `reticulum-integ/src/topology.rs::render_config`; this helper emits the
+/// periculum's `src/topology.rs::render_config`; this helper emits the
 /// subset we need: one TCP interface, no LoRa, no shared-instance extras,
 /// and `ingress_control = false` to keep the first-announce path clean
 /// the same way the integ-test scenarios do.

@@ -35,7 +35,8 @@ rustflags = ["-C", "link-self-contained=yes"]
 test-core = "test -p leviculum-core --lib"
 test-std = "test -p leviculum-std --lib"
 test-interop = "test -p leviculum-std --test rnsd_interop"
-test-integ = "test -p reticulum-integ -- --nocapture"
+# No test-integ alias: the scenario suites are periculum's, not a cargo
+# target. `just extensive` runs them; `periculum run <file>` runs one.
 lint = "clippy --all"
 
 # C-API library builds — explicitly glibc, overriding the workspace

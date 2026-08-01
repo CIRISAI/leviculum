@@ -181,7 +181,7 @@ impl RustTestNode {
     async fn announce(&mut self, app_data: &[u8]) {
         let packet = self
             .destination
-            .announce(Some(app_data), &mut OsRng, now_ms())
+            .announce(Some(app_data), &mut OsRng, now_ms(), now_ms() / 1000)
             .expect("Failed to create announce");
 
         let mut raw = [0u8; MTU];

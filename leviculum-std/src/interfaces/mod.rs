@@ -11,12 +11,15 @@
 
 pub(crate) mod airtime;
 pub mod auto_interface;
+pub(crate) mod byte_channel;
+pub use byte_channel::ByteChannelHandle;
 pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod kiss;
 pub(crate) mod local;
 pub(crate) mod netdevice;
 pub(crate) mod pipe;
+pub use pipe::PipeClientHandle;
 pub(crate) mod rnode;
 pub use rnode::{
     RNodeChannelConfig, RNodeChannelFactory, RNodeChannelHalves, RNodeChannelHandle,
@@ -24,7 +27,7 @@ pub use rnode::{
 };
 pub(crate) mod serial;
 pub(crate) mod tcp;
-pub use tcp::{disable_fault_injection, enable_fault_injection};
+pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
 pub(crate) mod udp;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -33,7 +36,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::sync_ext::MutexRecover;
 use std::time::{Duration, Instant};
 
-use leviculum_core::traits::{InterfaceError, InterfaceMode};
+use leviculum_core::traits::{InterfaceError, InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
 use tokio::sync::{mpsc, Notify};
 
@@ -397,6 +400,11 @@ pub(crate) struct InterfaceInfo {
     /// hands this value to `Transport::set_interface_mode` when the interface is
     /// registered.
     pub mode: InterfaceMode,
+    /// Transport medium this interface runs over (TCP, UDP, I2P, LoRa, …). Set by
+    /// the builder from the interface it constructs; the driver hands it to
+    /// `Transport::set_interface_kind` at registration so status can group by
+    /// transport rather than by the peer-label name.
+    pub kind: InterfaceKind,
 }
 
 /// Event loop's handle to a spawned interface task
@@ -432,6 +440,9 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
     }
     fn mode(&self) -> InterfaceMode {
         self.info.mode
+    }
+    fn kind(&self) -> InterfaceKind {
+        self.info.kind
     }
     fn is_online(&self) -> bool {
         !self.outgoing.is_closed()
@@ -583,6 +594,7 @@ mod tests {
                 bitrate: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -675,7 +687,7 @@ mod tests {
     #[test]
     fn interface_handle_with_credit_attached_is_some() {
         let (mut h, _rx) = make_handle(8);
-        let credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        let credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         h.credit = Some(Arc::new(Mutex::new(credit)));
         assert!(h.credit.is_some());
     }
@@ -718,7 +730,7 @@ mod tests {
     fn try_send_with_fresh_credit_charges_bucket() {
         use leviculum_core::traits::Interface;
         let (mut h, _rx) = make_handle(10);
-        let mut credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        let mut credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         // Anchor the bucket's baseline to "now" so it carries zero idle credit
         // when `try_send_prioritized` charges it via the global clock. Without
         // this, `current()` would add `now_ms()` ms of regenerated credit
@@ -749,16 +761,16 @@ mod tests {
     /// the old `< 0` assertion would have failed.
     #[test]
     fn pre_fix_observation_is_clock_fragile_seed_fixes_it() {
-        use leviculum_core::rnode::airtime_ms;
+        use leviculum_core::rnode::airtime_ms_with_preamble;
 
-        let cost = airtime_ms(50, 125_000, 10, 8) as i64;
+        let cost = airtime_ms_with_preamble(50, 125_000, 10, 8, 18) as i64;
         // A clock past the 50-byte packet cost: the regime the old test
         // silently entered the later it ran in the suite.
         let large_now = cost as u64 + 1;
 
         // Old path: fresh bucket (last_update_ms = 0), charge via the clock,
         // then re-read current() the way the original test did.
-        let mut old_bucket = AirtimeCredit::new(125_000, 10, 8, 500);
+        let mut old_bucket = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         old_bucket
             .try_charge(50, large_now)
             .expect("charge succeeds");
@@ -771,7 +783,7 @@ mod tests {
 
         // New path: seed the baseline to the clock so no idle credit accrues.
         // Same large clock now yields a deterministic deficit.
-        let mut new_bucket = AirtimeCredit::new(125_000, 10, 8, 500);
+        let mut new_bucket = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         new_bucket.seed_last_update_ms(large_now);
         new_bucket
             .try_charge(50, large_now)
@@ -794,7 +806,7 @@ mod tests {
     fn next_slot_ms_lora_fresh_is_ready() {
         use leviculum_core::traits::Interface;
         let (mut h, _rx) = make_handle(20);
-        let credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        let credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         h.credit = Some(Arc::new(Mutex::new(credit)));
         // A fresh bucket with no charge history: enough credit has
         // regenerated by `now_ms = 20_000` to fit a 50-byte packet.
@@ -806,7 +818,7 @@ mod tests {
     fn next_slot_ms_lora_saturated_returns_future() {
         use leviculum_core::traits::Interface;
         let (mut h, _rx) = make_handle(21);
-        let mut credit = AirtimeCredit::new(125_000, 10, 8, 500);
+        let mut credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         credit.try_charge(500, 0).expect("initial charge fits");
         let expected = credit.earliest_fit_time(50, 0);
         h.credit = Some(Arc::new(Mutex::new(credit)));
@@ -837,21 +849,24 @@ mod tests {
     fn try_send_with_exhausted_credit_returns_buffer_full() {
         use leviculum_core::traits::Interface;
         let (mut h, _rx) = make_handle(11);
-        let mut credit = AirtimeCredit::new(125_000, 10, 8, 500);
-        // Charge a full MTU at the SAME clock the send will read, so the
-        // exhaustion is measured relative to it. Charging at a fixed t=0 was
-        // flaky: now_ms() is ms since the clock's start instant, not 0, so in a
-        // long-running (parallel) test process it can be large enough that the
-        // bucket fully regenerates between t=0 and the send — and the follow-up
-        // charge then wrongly succeeds. Anchoring at now_ms() removes the race.
-        let now = now_ms();
-        credit
-            .try_charge(500, now)
-            .expect("first charge should fit");
+        let mut credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
+        // Drive the bucket to its floor at a FAR-FUTURE instant, then let the
+        // send read the real clock. `try_send_prioritized` charges against the
+        // global `now_ms()`, which we can't inject; anchoring the exhaustion in
+        // the future means the send sees zero (saturating) elapsed against
+        // `last_update_ms`, so no wall-clock regeneration between here and the
+        // send can lift the bucket back over the threshold. This removes the
+        // timing race that made the test flaky on fast CI runners: at a fixed
+        // t=0 the bucket had already regenerated (now_ms() is ms-since-anchor,
+        // often large by the time this test runs), so the follow-up charge
+        // wrongly succeeded. (Anchoring the charge at now_ms() — the previous
+        // fix — still raced when the runner stalled between charge and send.)
+        let exhaust_at = now_ms() + 60_000;
+        while credit.try_charge(500, exhaust_at).is_ok() {}
         h.credit = Some(Arc::new(Mutex::new(credit)));
 
-        // Immediate follow-up at ~the same instant: no meaningful regeneration,
-        // so the second charge must fail. Expect BufferFull.
+        // The bucket is at its floor as of a time strictly after any real
+        // now_ms() the send can read, so the next charge must fail.
         let err = h
             .try_send_prioritized(&[0u8; 500], true)
             .expect_err("exhausted credit → BufferFull");

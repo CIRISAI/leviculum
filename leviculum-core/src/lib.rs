@@ -77,17 +77,26 @@ extern crate alloc;
 /// crate builds on atomic-less MCUs without touching any call site.
 #[cfg(feature = "tracing")]
 pub(crate) mod tracing {
-    pub(crate) use ::tracing::{debug, info, trace, warn};
+    pub(crate) use ::tracing::{debug, enabled, info, trace, warn, Level};
 }
 #[cfg(not(feature = "tracing"))]
 pub(crate) mod tracing {
     macro_rules! noop {
         ($($tt:tt)*) => {{}};
     }
+    // `enabled!` must yield a bool so guard blocks like
+    // `if crate::tracing::enabled!(...) { hash; emit }` compile (to dead
+    // code) on atomic-less MCUs where the real tracing crate is absent.
+    macro_rules! noop_enabled {
+        ($($tt:tt)*) => {
+            false
+        };
+    }
     pub(crate) use noop as debug;
     pub(crate) use noop as info;
     pub(crate) use noop as trace;
     pub(crate) use noop as warn;
+    pub(crate) use noop_enabled as enabled;
 }
 
 pub(crate) mod announce;
@@ -119,6 +128,7 @@ pub(crate) mod receipt;
 pub mod resource;
 pub mod rnode;
 pub mod storage_types;
+pub mod sx126x;
 #[cfg(all(test, feature = "tracing"))]
 pub(crate) mod test_log_capture;
 #[cfg(test)]
@@ -150,5 +160,6 @@ pub use transport::{Action, InterfaceId, TickOutput, TransportStats};
 pub use embedded_storage::EmbeddedStorage;
 pub use memory_storage::MemoryStorage;
 pub use traits::{
-    Clock, Interface, InterfaceError, InterfaceMode, NoStorage, Storage, StorageError,
+    Clock, Interface, InterfaceError, InterfaceKind, InterfaceMode, NoStorage, Storage,
+    StorageError,
 };

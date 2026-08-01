@@ -16,7 +16,7 @@ automation details.
 The interop and integration tests shell out to real external tools, so these
 system packages must be installed (all apt-installable on Debian):
 
-- **docker** — the Tier 2 integ suite.
+- **docker** — the Tier 2 scenario corpora (run by periculum).
 - **python3** + **Python RNS** (`rns`) — the `rnsd_interop` tests drive a real
   Python `rnsd`/`rnstatus` as the compatibility reference.
 - **socat** — bridges a virtual serial pty pair so the serial-family interfaces
@@ -48,8 +48,8 @@ up from scratch.
 |------|-----------------------------------|-----------------|-----------|-------|
 | 0    | on `git push` (hook)              | `just fast`     | ~3 min    | fmt + clippy + workspace lib tests |
 | 1    | after `git commit` (hook, background) | `just standard` | ~15 min (40 min cold[^cold]) | Tier 0 + core/tests + ffi + proxy + rnsd_interop |
-| 2    | 12:30 & 18:30 daily (systemd timer) | `just extensive` | 30–90 min | Tier 1 + Docker integ suite |
-| 3    | 02:00 daily (systemd timer)       | `just nightly`  | 2–6 h     | Tier 2 + LoRa hardware tests |
+| 2    | 12:30 & 18:30 daily (systemd timer) | `just extensive` | 30–90 min | Tier 1 + periculum `conformance/` + `regression/` |
+| 3    | 02:00 daily (systemd timer)       | `just nightly`  | 2–6 h     | Tier 2 + LNode flash-from-HEAD + periculum `hardware/` |
 
 Each tier includes every lower tier, so a green nightly proves the
 whole stack.
@@ -86,16 +86,16 @@ just standard                        # manually trigger Tier 1 (~15 min)
 This is the "15-minute-budget" check that CLAUDE.md expects after
 every task.
 
-**Never** run the full integ suite casually:
+**Never** run a full scenario corpus casually:
 
 ```sh
-# DON'T do this without a reason — Docker tests collide with anything
-# else using integ infra on the box.
-cargo test -p reticulum-integ
+# DON'T do this without a reason — the containers and the USB handles
+# collide with anything else running scenarios on the box.
+periculum run ../periculum/conformance
 ```
 
-If you must, use `just extensive` which is lock-protected and
-serialised properly.
+If you must, use `just extensive`, which builds the binaries the nodes
+mount first and is lock-protected.
 
 ## Before pushing
 
@@ -139,16 +139,16 @@ just flash-one /dev/ttyACM3       # flash one specific T114 (A/B testing)
 just nightly                      # full Tier 3 run
 ```
 
-A single LoRa test in isolation:
+A single LoRa scenario in isolation:
 
 ```sh
-cargo test --release -p reticulum-integ --test-threads=1 -- \
-    --exact executor::tests::<name> --ignored --nocapture
+periculum run ../periculum/hardware/<name>.toml
 ```
 
-All hardware tests are gated behind `#[ignore]`; `--ignored`
-unlocks them. `#[ignore]` is reserved for hardware tests — don't
-use it for slow-but-CPU-only tests (wrong tier).
+Hardware scenarios are not gated behind a flag: they live in
+`hardware/`, and periculum decides from the scenario itself whether
+this bench can serve it. One that binds a board the bench does not
+hold reports `SKIPPED_INFRA` naming what was missing, never RED.
 
 ### Radio duty-cycle lock is OFF by default in tests
 
@@ -171,7 +171,7 @@ one-off run with `LORA_AIRTIME_LIMIT_LONG=10`.
 
 ## Concurrent runs
 
-Only one integ test process can run at a time — Docker names and
+Only one scenario run can be in flight at a time — Docker names and
 USB handles would otherwise collide. A second invocation exits in
 under a second:
 
@@ -180,8 +180,8 @@ under a second:
 [leviculum] Current holder:
 [leviculum]   pid=12345
 [leviculum]   started=2026-04-14T02:01:33
-[leviculum]   pkg=reticulum-integ
-[leviculum]   binary=reticulum_integ-abc123def
+[leviculum]   pkg=periculum
+[leviculum]   binary=periculum
 [leviculum]   cwd=/path/to/leviculum
 [leviculum] Wait for it to finish or stop that process, then retry.
 ```
@@ -193,10 +193,10 @@ practice this means: if you're doing late-night hardware work and
 the 02:00 nightly fires, it silently defers. You don't need to
 stop it.
 
-Unit tests in other crates (`leviculum-core`, `leviculum-std`,
-`leviculum-ffi`, `leviculum-proxy`, `leviculum-cli`) run in
-parallel with a held integ lock — they never touch the integ
-infrastructure.
+Unit tests in the leviculum crates (`leviculum-core`,
+`leviculum-std`, `leviculum-ffi`, `leviculum-proxy`,
+`leviculum-cli`) run in parallel with a held scenario lock — they
+never touch containers or boards.
 
 ## Installing / updating the CI
 
@@ -216,7 +216,7 @@ fetches and renders that page over the shared-instance path, and the script
 asserts the rendered output contains the known content.
 
 ```sh
-reticulum-integ/scripts/lnomad_nomadnet_acceptance.sh
+../periculum/periculum/assets/scripts/lnomad_nomadnet_acceptance.sh
 ```
 
 It prints `ACCEPT-PASS` / `LNOMAD-ACCEPT-COMPLETE` and exits 0 on success, or

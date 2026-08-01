@@ -133,6 +133,7 @@ pub(crate) fn spawn_udp_interface_from_socket(
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Udp,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

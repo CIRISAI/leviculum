@@ -2,9 +2,9 @@
 
 Stamps are an anti-spam proof-of-work bound to a message-id (delivery stamps) or
 a transient-id (propagation stamps). This section is normative and is proven by
-`[VEC-STAMP-1]`. An implementation MUST reproduce the workblock, validity test,
-and value computation bit-for-bit, or its stamps will not be accepted by a Python
-peer (and vice versa).
+`[VEC-STAMP-1]` and `[VEC-STAMP-PN]`. An implementation MUST reproduce the
+workblock, validity test, and value computation bit-for-bit, or its stamps will
+not be accepted by a Python peer (and vice versa).
 
 ## Workblock
 
@@ -30,9 +30,9 @@ the integer `n` (`LXStamper.py:24`). The expand-round counts are:
 | Propagation stamp | `WORKBLOCK_EXPAND_ROUNDS_PN` = 1000 | 256 000 B | `LXStamper.py:11` |
 | Peering key | `WORKBLOCK_EXPAND_ROUNDS_PEERING` = 25 | 6 400 B | `LXStamper.py:12` |
 
-> The 768 kB delivery workblock is held in RAM during both generation and
-> validation. On constrained targets this is significant; see the `no_std`
-> discussion in the feasibility report.
+The Python reference holds the entire workblock in RAM. The Rust cooperative
+executor instead feeds one 256-byte HKDF block at a time into SHA-256, keeping
+constant workblock workspace while producing the same final digest.
 
 ## Validity
 
@@ -67,6 +67,13 @@ bits), `valid = true`, and `stamp_value = 8`. The reduced round count keeps the 
 the **algorithm** it pins is identical to the production path, which differs only
 in `expand_rounds`.
 
+### Proof: `[VEC-STAMP-PN]`
+
+The propagation vector uses the complete 1000-round, 256000-byte logical
+workblock and pins its hash, one valid cost-8 stamp, and value. This guards the
+otherwise easy interop error of using the 3000-round delivery workblock for the
+outer propagation-node stamp.
+
 ## Generation
 
 `generate_stamp(material, stamp_cost, expand_rounds)` brute-forces random 32-byte
@@ -74,6 +81,31 @@ stamps until `stamp_valid` (`LXStamper.py:92-111`). The reference parallelizes
 this across processes on Linux and falls back to single-process elsewhere
 (`LXStamper.py:145-354`); the parallelism is informative, the resulting stamp is
 not.
+
+## Rust execution model
+
+`CooperativeStamper::cooperative` is the default: its future yields after a
+bounded number of workblock rounds and candidate attempts. Router events carry
+owned `DeliveryStampRequest`, `InboundStampRequest`, or
+`PropagationStampRequest` values. Calling `generate_with()` or
+`validate_with()` on one of those values borrows only the stamp executor, not
+the router or `NodeCore`, so packet receive, Link, Resource, and router tasks
+remain callable throughout calculation on a single-threaded executor. The
+result is attached later with the matching router setter.
+
+For outbound work, use `set_outbound_stamp_result()` or
+`set_outbound_propagation_stamp_result()` with the same request after awaiting
+the worker. These guarded setters reject a result if the advertised cost,
+queued message, or encrypted transient changed while work was in flight.
+Inbound messages remain queued until `set_inbound_stamp_result()` receives the
+matching `InboundStampRequest` result. The lower-level stamp setters are kept
+for trusted externally generated or restored stamps.
+
+`StampExecutor` is the override boundary. Host applications MAY implement it
+with Rayon, another worker pool, dedicated hardware, or a detached WASM worker;
+the returned stamp is attached through the router's delivery-stamp or
+propagation-stamp setter. This keeps `leviculum-lxmf` `no_std + alloc` and does
+not make threads a protocol dependency.
 
 ## Where stamps are required
 

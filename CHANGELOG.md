@@ -7,31 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-The client binary `lns` is renamed to `lnstest` to reflect its role as
-the test and diagnostics tool (selftest, diag, identity, interactive
-connect). The unimplemented `status`, `path`, `probe`, and `interfaces`
-placeholder subcommands are removed; use `lnstest diag` or the Python
-`rnstatus` / `rnpath` / `rnprobe` tools against the same shared instance
-instead. The `cp` subcommand is also removed; use the standalone `lncp`
-tool for file transfer.
+- Announces now carry wall-clock unix time in the emission timestamp
+  instead of process uptime, so Python peers order our paths correctly
+  and a restarted node reclaims its own path entries (#155). Clockless
+  nodes (LNode) learn the timebase from received announces or a host
+  injection.
 
 ### Added
 
-`RNodeInterface` can be driven over a host-supplied duplex byte channel
-instead of a serial-port path, for platforms where the process never sees
-`/dev/ttyACM*` (Android USB host / BLE GATT, iOS BLE). A new
-`RNodeChannelFactory` trait yields boxed `AsyncRead`/`AsyncWrite` halves;
-`ReticulumNodeBuilder::add_rnode_channel_interface` wires one at
-construction, and `ReticulumNode::spawn_rnode_channel_interface` attaches
-one at runtime (hot-plug) returning an `RNodeChannelHandle` — hold it to
-keep the radio attached, drop it (or call `.detach()`) to tear the
-interface down cleanly without rebuilding the node. The detect → configure
-→ online → reconnect lifecycle is identical to the serial path; only the
-transport differs, and `spawn_rnode_interface` (serial) is unchanged.
-Groundwork for the BLE client role (#45) and generic byte-channel TNCs
-(#26).
+- lblogd serves a file area, so a post can carry pictures. Micron has
+  no image construct, so `![Mast](mast.jpg)` publishes the file at
+  `/files/mast.jpg` on the web and at `/file/mast.jpg` on the mesh, in
+  NomadNet's `serve_file` wire form, linked from the page. Configured
+  with `files_dir` and bounded per file by `max_file_bytes` (10 MiB).
+- lnomad draws those pictures in the page: a `/file/` link naming a
+  decodable format and standing alone on its line is fetched and drawn
+  through the terminal's graphics protocol (Kitty, iTerm2, Sixel), else
+  Unicode half-blocks, else a line naming the file, format and size —
+  which is also what a failed decode and `--no-color` give. Fetched
+  after the page is on screen, one at a time, at most eight per page;
+  `Esc` cancels the queue and `--images off` disables it. `Enter` saves
+  a picture and `o` opens it, neither transferring it again.
+- Fetched pictures are kept in a byte-bounded in-memory LRU cache, so a
+  revisit costs no airtime: `--image-cache <megabytes>` (default 10, `0`
+  disables). Memory only, never disk.
+
+## [0.8.0] - 2026-08-01
+
+### Added
+
+- LXMF client messaging stack: new `leviculum-lxmf` crate (no_std core,
+  std runtimes), opportunistic/direct/propagated delivery, stamps,
+  tickets, paper messages; locked against Python LXMF 1.1.0 (#138, nilu96).
+- Raw link packets (`send_packet_on_link`) and oversized link requests
+  carried as request Resources, both Python-canonical (#138).
+- Byte-channel interfaces over a caller-supplied duplex, including
+  RNode with runtime hot-plug (#141, PAzter1101).
+- Runtime add/remove of interfaces of every kind (#135, PAzter1101).
+- Outbound-socket hook on every TCP dial including the I2P SAM bridge,
+  fail-closed (#142, PAzter1101).
+- New interfaces Pipe, KISS, AX25KISS, RNodeMulti, I2P (#95-#99);
+  Backbone names, multiple AutoInterfaces, UDP multi-address (#89, #7, #4).
+- Per-interface propagation modes, announce rate limits, bitrate
+  weighting, ingress control, IFAC enforcement (#8, #90-#93, #104).
+- Interface auto-discovery with PoW-stamped, optionally encrypted
+  announces, Python-interoperable (#32, #106, #107).
+- Remote management: lnsd serves `rnstatus -R`; client `-R/-i/-w` (#86).
+- Tunnel synthesis and path restore on TCP connect/reconnect (#64).
+- Resources over 1 MiB send segmented like Python (#27).
+- Destination announces re-sent on a recovered interface (#132).
+- EU 868 lawful-by-default airtime cap in the LNode firmware (#55);
+  RNode TX gated during the firmware airtime lock (#121); radio stats (#25).
+- Config/CLI parity with rnsd (loglevel, ConfigObj quirks, instance
+  ports); lnsd `-s/--service` and `--exampleconfig`.
+- FFI: dropped event fields projected with accessors (interface id,
+  close reason, sizes, segments), stats-snapshot ids, delivery errors.
+
+### Changed
+
+- BREAKING: `lns` is renamed to `lnstest`; placeholder subcommands
+  removed, file transfer lives in `lncp`.
+- BREAKING: request handlers keyed by (destination, path); deregister
+  takes the destination, `RequestReceived` carries `destination_hash`.
+- BREAKING: `transport::DropReason` is `#[non_exhaustive]`.
+- Oversized single-segment responses fail closed (`ResourceTooLarge`);
+  response correlation is per-link like Python (#138).
+
+### Fixed
+
+- COMPAT: the six link-traffic contexts Python exempts from packet
+  dedup are exempt; idle Python-initiated links no longer die stale.
+- COMPAT: relays rewrite forwarded LRPROOF hops so strict Python
+  clients establish; shared-instance hop counting matches (#38, #119).
+- COMPAT: token unpadding matches Python; microReticulum peers decrypt.
+- COMPAT: `multicast_loopback` defaults true like Python (carrier flap fix).
+- SECURITY: msgpack recursion DoS via resource advertisements (#23).
+- Radio PHY matches the RNode firmware: airtime-scaled TX/CAD timeouts
+  (SF12 was undeliverable), derived preamble (#143), working RX-extend
+  guard (#144), preamble-charged airtime accounting (#149),
+  symbol-duration LDRO (#150; wire note: SF11/BW125 LDRO now off).
+- Links: healthy idle links survive (#123), inbound proofs count as
+  activity (#124), establishment jitter breaks lockstep (#129).
+- Expired paths re-originate discovery, with bounded retry (#117, #44).
+- Per-interface `announce_cap` now takes effect (was parsed and dropped).
+- A poisoned mutex no longer crashes the daemon; TCP reconnects back off.
+- Runtime-attached interfaces apply the configured IFAC.
+- An unverifiable delivery proof reports `InvalidProof`, not `LinkFailed`.
+
+### Internal
+
+- Wire-parser fuzz harness, Python-interop suite growth, periculum
+  test-framework extraction, lintian-clean debs, RUSTSEC bumps.
 
 ## [0.7.0] - 2026-06-22
 

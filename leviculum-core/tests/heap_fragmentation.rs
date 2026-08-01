@@ -205,7 +205,9 @@ fn make_responder(clock_ms: u64) -> (EndpointNode, StepClock, DestinationHash, [
     dest.set_proof_strategy(ProofStrategy::All);
     let dest_hash = *dest.hash();
 
-    let announce = dest.announce(None, &mut OsRng, clock_ms).unwrap();
+    let announce = dest
+        .announce(None, &mut OsRng, clock_ms, clock_ms / 1000)
+        .unwrap();
     let mut buf = [0u8; MTU];
     let len = announce.pack(&mut buf).unwrap();
     let announce_bytes = buf[..len].to_vec();
@@ -345,7 +347,7 @@ impl Churn {
         let now = self.transport.clock().now_ms();
         self.transport.storage_mut().clear_packet_hashes();
         for dest in self.peers.iter_mut() {
-            let announce = dest.announce(None, &mut OsRng, now).unwrap();
+            let announce = dest.announce(None, &mut OsRng, now, now / 1000).unwrap();
             let mut buf = [0u8; MTU];
             let len = announce.pack(&mut buf).unwrap();
             let _ = self.transport.process_incoming(IFACE_IDX, &buf[..len]);

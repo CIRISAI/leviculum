@@ -32,6 +32,7 @@
 //! left-click hit-testing, and mouse-hover. The focused or hovered link's target
 //! shows in the status bar. Links no longer carry a visible `[N]` marker.
 
+use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,13 +48,16 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as RtLine, Span as RtSpan, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::{Frame, Terminal};
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
+use ratatui_image::Resize;
 use tokio::sync::{mpsc, Mutex};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -66,10 +70,15 @@ use crate::browser::{self, BrowserOptions};
 use crate::color::{rgb_to_ansi256, ColorDepth};
 use crate::discovery::{DiscoveredNode, NomadNodeRegistry};
 use crate::fetch::Session;
+use crate::image::{Backend, ImageSlot, Probe, SlotState, MAX_IMAGE_ROWS, MAX_INLINE_IMAGES};
+use crate::image_cache::ImageCache;
 use crate::page_cache::{CacheEntry, PageCache};
-use crate::render::{layout_blocks, FieldValue, RLine, RStyle, RenderedField, RenderedLink};
+use crate::render::{
+    insert_image_rows, layout_blocks, standalone_links, FieldValue, RLine, RStyle, RenderedField,
+    RenderedLink,
+};
 use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
-use crate::url::{classify_link, parse_url, LinkKind, Target, DEFAULT_PATH};
+use crate::url::{classify_link, parse_url, LinkKind, Target, UrlError, DEFAULT_PATH};
 use leviculum_micron::FieldKind;
 
 /// The number of columns reserved on the right for the scrollbar.
@@ -558,6 +567,15 @@ pub enum HistoryAction {
     Goto(usize),
 }
 
+/// One inline image to fetch: which link it belongs to and where it lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageRequest {
+    /// The 1-based link index, which every image event refers back to.
+    pub link: usize,
+    /// The file target to download.
+    pub target: Target,
+}
+
 /// A navigation in flight: the target being fetched and how history records it
 /// once the page loads.
 #[derive(Clone, Debug)]
@@ -582,6 +600,26 @@ pub enum Effect {
     /// Open this external URL in the user's default handler (the IO shell runs
     /// `open::that`). Only whitelisted safe schemes ever reach this effect.
     OpenExternal(String),
+    /// Fetch the current page's inline images, in this order. The IO shell
+    /// works the list one at a time — a link carries one transfer at a time
+    /// anyway — and folds each outcome back as an image event. The page is
+    /// already on screen when this starts, so nothing waits for a picture.
+    /// Starting one drops whatever image queue was running, as do
+    /// [`Navigate`](Effect::Navigate) and [`Cancel`](Effect::Cancel): the
+    /// transfers still to come belong to a page nobody is looking at.
+    FetchImages(Vec<ImageRequest>),
+    /// Save an already-fetched inline image to the download directory, with no
+    /// second transfer.
+    SaveImage {
+        /// The link index whose picture to save.
+        link: usize,
+    },
+    /// Save an already-fetched inline image and hand the file to the platform
+    /// handler (`xdg-open` on Linux).
+    OpenImage {
+        /// The link index whose picture to open.
+        link: usize,
+    },
     /// Cancel the in-flight fetch and stay on the current page.
     Cancel,
     /// Copy this text to the system clipboard (the IO shell writes it as an
@@ -785,6 +823,16 @@ pub struct Model {
     /// here; the page cache only holds pages fetched this run, so the answer was
     /// always learned first.
     pub identify_known: std::collections::BTreeSet<[u8; 16]>,
+    /// The current page's inline images, one slot per standalone image link,
+    /// in link order. Rebuilt on every page load; drives both the rows the
+    /// relayout reserves and what is drawn into them.
+    pub images: Vec<ImageSlot>,
+    /// Whether inline images are suppressed (`--images off`). Named like
+    /// [`no_color`](Model::no_color), and for the same reason: the default of
+    /// a `bool` field is the ordinary behaviour, not the opt-out. With it set
+    /// an image link stays an ordinary link, which is exactly what NomadNet
+    /// shows.
+    pub no_images: bool,
     /// Set once the user has asked to quit; the IO loop breaks on it.
     pub quit: bool,
 }
@@ -862,12 +910,47 @@ impl Model {
     pub fn relayout(&mut self, width: usize) {
         self.width = width;
         let values = self.field_values();
-        let (page, links, block_lines, field_defs) =
+        let (mut page, mut links, mut block_lines, mut field_defs) =
             layout_blocks(&self.doc, width, self.theme, &values);
+        // Inline pictures are reserved AFTER the text is laid out: their height
+        // is not known until the image has arrived and been decoded, which is
+        // long after the page first appeared.
+        let reserved: Vec<(usize, u16)> = self
+            .images
+            .iter()
+            .map(|slot| (slot.link, slot.state.rows()))
+            .collect();
+        insert_image_rows(
+            &mut page,
+            &mut links,
+            &mut field_defs,
+            &mut block_lines,
+            &reserved,
+        );
         self.page = page;
         self.links = links;
         self.block_lines = block_lines;
         self.field_defs = field_defs;
+    }
+
+    /// The slot for a link index, if that link is an inline picture.
+    pub fn image_slot(&self, link: usize) -> Option<&ImageSlot> {
+        self.images.iter().find(|slot| slot.link == link)
+    }
+
+    /// Fold an image state change in and re-lay the page out, since the rows a
+    /// slot reserves depend on its state.
+    fn set_image_state(&mut self, link: usize, state: SlotState) {
+        let Some(slot) = self.images.iter_mut().find(|slot| slot.link == link) else {
+            return;
+        };
+        if slot.state == state {
+            return;
+        }
+        slot.state = state;
+        let (w, vp) = (self.width, self.viewport());
+        self.relayout(w);
+        self.clamp_scroll(vp);
     }
 
     /// Toggle between the dark and light theme, re-laying the page out so the
@@ -1141,6 +1224,41 @@ pub enum AppEvent {
     },
     /// A file download failed with a human-readable message.
     DownloadFailed(String),
+    /// An inline image's transfer started.
+    ImageLoading {
+        /// The link index it belongs to.
+        link: usize,
+    },
+    /// An inline image arrived, decoded, and is ready to be drawn at `cells`.
+    /// The encoded protocol itself lives in the IO shell's `ImageStore`; the
+    /// model only needs the size, so it stays pure data.
+    ImageReady {
+        /// The link index it belongs to.
+        link: usize,
+        /// The cell size it will be drawn at.
+        cells: (u16, u16),
+        /// What the payload turned out to be.
+        probe: Probe,
+    },
+    /// An inline image arrived but will not be drawn: the terminal cannot show
+    /// pictures, or the payload did not decode. The reader gets a status line
+    /// instead, which is the whole point of keeping this distinct from a
+    /// failure.
+    ImageText {
+        /// The link index it belongs to.
+        link: usize,
+        /// What the payload turned out to be, if it could be read at all.
+        probe: Option<Probe>,
+        /// Why there is no picture.
+        reason: String,
+    },
+    /// An inline image's transfer failed.
+    ImageFailed {
+        /// The link index it belongs to.
+        link: usize,
+        /// What went wrong.
+        reason: String,
+    },
     /// A NomadNet node announce was seen on the session's event stream; fold it
     /// into the model's discovered-node registry.
     NodeDiscovered(DiscoveredNode),
@@ -1162,10 +1280,7 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
             model.expire_toast();
             Vec::new()
         }
-        AppEvent::PageLoaded { doc, title } => {
-            apply_loaded(model, doc, title);
-            Vec::new()
-        }
+        AppEvent::PageLoaded { doc, title } => apply_loaded(model, doc, title),
         AppEvent::LoadFailed(msg) => {
             model.pending = None;
             model.set_toast(ToastKind::Error, msg);
@@ -1182,6 +1297,26 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         AppEvent::DownloadFailed(msg) => {
             model.download = None;
             model.set_toast(ToastKind::Error, msg);
+            Vec::new()
+        }
+        AppEvent::ImageLoading { link } => {
+            model.set_image_state(link, SlotState::Loading);
+            Vec::new()
+        }
+        AppEvent::ImageReady { link, cells, probe } => {
+            model.set_image_state(link, SlotState::Ready { cells, probe });
+            Vec::new()
+        }
+        AppEvent::ImageText {
+            link,
+            probe,
+            reason,
+        } => {
+            model.set_image_state(link, SlotState::Text { probe, reason });
+            Vec::new()
+        }
+        AppEvent::ImageFailed { link, reason } => {
+            model.set_image_state(link, SlotState::Failed(reason));
             Vec::new()
         }
         AppEvent::NodeDiscovered(node) => {
@@ -1245,7 +1380,7 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
 
 /// Fold a completed page load: replace the document, relayout, reset scroll, set
 /// the title, and record the navigation in history per its pending action.
-fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
+fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) -> Vec<Effect> {
     let pending = model.pending.take();
     let anchor = model.pending_anchor.take();
     // A fresh fetch, not a cache hit: clear the "cached" marker.
@@ -1307,6 +1442,106 @@ fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) {
             );
         }
     }
+    plan_images(model)
+}
+
+/// Work out which of the page's links are pictures, install a slot for each,
+/// and ask the IO shell to fetch them.
+///
+/// Called after every load, cached or fresh: the page cache holds documents,
+/// not payloads, so a revisit re-fetches its pictures. The list is capped at
+/// [`MAX_INLINE_IMAGES`]; the rest keep their slots (so the reader is told they
+/// exist) but reserve no rows and fetch nothing until followed.
+fn plan_images(model: &mut Model) -> Vec<Effect> {
+    model.images.clear();
+    if model.no_images {
+        return Vec::new();
+    }
+    let standalone = standalone_links(&model.page, &model.links);
+    let mut requests = Vec::new();
+    let mut slots = Vec::new();
+    for index in standalone {
+        let Some(link) = model.links.iter().find(|l| l.index == index) else {
+            continue;
+        };
+        let path = crate::image::link_path(&link.target);
+        if !crate::image::is_image_path(path) {
+            continue;
+        }
+        let Some(name) = crate::image::file_name(path).map(str::to_string) else {
+            continue;
+        };
+        if requests.len() >= MAX_INLINE_IMAGES {
+            slots.push(ImageSlot {
+                link: index,
+                name,
+                state: SlotState::TooMany,
+            });
+            continue;
+        }
+        let Ok((target, _)) = browser::resolve_link(link, model.current_dest) else {
+            continue;
+        };
+        requests.push(ImageRequest {
+            link: index,
+            target,
+        });
+        slots.push(ImageSlot {
+            link: index,
+            name,
+            state: SlotState::Queued,
+        });
+    }
+    model.images = slots;
+    if model.images.is_empty() {
+        return Vec::new();
+    }
+    // The slots reserve a status row each, so re-lay the page out before the
+    // first frame: the reader sees where the pictures will be while they load.
+    let (w, vp) = (model.width, model.viewport());
+    model.relayout(w);
+    model.clamp_scroll(vp);
+    match requests.is_empty() {
+        true => Vec::new(),
+        false => vec![Effect::FetchImages(requests)],
+    }
+}
+
+/// The places panel's placeholder under "Discovered nodes" while the registry
+/// is empty.
+const NO_NODES_YET: &str = "  (listening for announces…)";
+
+/// The start screen's micron source: what a reader sees when `lnomad` is
+/// started without a URL. A real micron document rather than hand-drawn chrome,
+/// so it goes through the same parse/layout/render path as a fetched page and
+/// re-wraps on a resize or a theme change for free.
+const START_PAGE: &str = "\
+>lnomad
+
+Terminal browser for NomadNet pages.
+
+No page is open. Node discovery runs in the background, so nodes appear in the \
+places panel as their announces arrive.
+
+`!d`! places   `!:`! URL   `!?`! help   `!q`! quit";
+
+/// The title shown for the start screen, in place of a page's node name.
+const START_TITLE: &str = "lnomad";
+
+/// Show the start screen and open the places panel over it.
+///
+/// The page is applied through the ordinary load path with no pending
+/// navigation, so nothing is fetched, no history entry is pushed and no current
+/// destination is set: the top bar carries no address, `back` / `forward` /
+/// `reload` stay unavailable, and the first real navigation starts the history
+/// from scratch.
+fn show_start_screen(model: &mut Model) {
+    apply_loaded(
+        model,
+        leviculum_micron::parse(START_PAGE),
+        START_TITLE.to_string(),
+    );
+    model.show_places = true;
 }
 
 /// Split a trailing `#anchor` off a target's path, returning the anchor-free
@@ -1559,7 +1794,7 @@ fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
                     begin_navigation(model, target, HistoryAction::Push, None)
                 }
                 Err(err) => {
-                    model.set_toast(ToastKind::Error, format!("bad address: {raw} ({err})"));
+                    model.set_toast(ToastKind::Error, bad_url_note("bad URL", &raw, err));
                     Vec::new()
                 }
             }
@@ -1642,6 +1877,21 @@ fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) -> Vec<Effect
     // Bookmark (or un-bookmark) the current page (`m`).
     if key.code == KeyCode::Char('m') && !ctrl && !alt {
         return toggle_bookmark_current(model);
+    }
+
+    // Open the focused picture in the system image viewer (`o`): it is saved
+    // to the download directory first, because the platform handler needs a
+    // file and the picture has only ever existed in memory. A no-op unless an
+    // arrived picture is focused.
+    if key.code == KeyCode::Char('o') && !ctrl && !alt {
+        if let Some(effect) = model
+            .focus
+            .and_then(|index| saved_image_effect(model, index, true))
+        {
+            model.dismiss_toast();
+            return vec![effect];
+        }
+        return Vec::new();
     }
 
     // Yank the current page (or focused link) URL to the clipboard (`y`).
@@ -2106,10 +2356,7 @@ fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         Place::Bookmark { url, .. } => match parse_url(&url, model.current_dest) {
             Ok(target) => target,
             Err(err) => {
-                model.set_toast(
-                    ToastKind::Error,
-                    format!("bad bookmark address: {url} ({err})"),
-                );
+                model.set_toast(ToastKind::Error, bad_url_note("bad bookmark", &url, err));
                 return Vec::new();
             }
         },
@@ -2419,11 +2666,15 @@ fn load_from_cache(
 
     model.cached_view = true;
 
+    // The page cache holds documents, not payloads: a revisit re-fetches its
+    // pictures. Cheap to change later (the store could keep the bytes), but
+    // caching an unbounded pile of photographs is not obviously the kindness
+    // it looks like.
+    let mut effects = plan_images(model);
     if was_loading {
-        vec![Effect::Cancel]
-    } else {
-        Vec::new()
+        effects.insert(0, Effect::Cancel);
     }
+    effects
 }
 
 /// Reload the page under the history cursor without changing history.
@@ -2498,6 +2749,12 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
     let Some(link) = model.links.iter().find(|l| l.index == index).cloned() else {
         return Vec::new();
     };
+    // A picture already on the page has been transferred once; following its
+    // link saves those bytes rather than fetching them again. Over a mesh link
+    // that difference is minutes, not milliseconds.
+    if let Some(effect) = saved_image_effect(model, index, false) {
+        return vec![effect];
+    }
     // An external URL is opened in the user's default handler; an unsafe scheme
     // is refused outright. Only an RNS target is fetched in-mesh.
     match classify_link(&link.target) {
@@ -2508,6 +2765,16 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
         LinkKind::Unsafe(scheme) => {
             model.set_toast(ToastKind::Error, format!("won't open {scheme}: link"));
             Vec::new()
+        }
+        // NomadNet opens a conversation here. We are a page browser with no
+        // composer, so the useful thing is to hand the address over: show it
+        // and put it on the clipboard, ready to paste into a client that can
+        // send. Anything is better than the "malformed URL" this used to
+        // produce, which read as a broken page rather than an unsupported
+        // action.
+        LinkKind::Lxmf(hash) => {
+            model.set_toast(ToastKind::Info, format!("LXMF address copied: {hash}"));
+            vec![Effect::Copy(hash)]
         }
         LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
             Ok((mut target, anchor)) => {
@@ -2525,11 +2792,48 @@ fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
             Err(err) => {
                 model.set_toast(
                     ToastKind::Error,
-                    format!("bad link: {} ({err})", link.target),
+                    bad_url_note("bad link", &link.target, err),
                 );
                 Vec::new()
             }
         },
+    }
+}
+
+/// The toast for a URL that would not parse: what was wrong and, when the fix
+/// is mechanical, the URL that would have worked.
+///
+/// A page that links to its own node with `/page/about.mu` has dropped the `:`
+/// that a local URL keeps. That is a dead end in the reference browser too, so
+/// the useful thing is not to restate the grammar but to show the reader (and,
+/// through them, the node's author) the exact string that works.
+///
+/// The suggestion leads and the explanation trails, because the toast is one
+/// truncated line: an over-long path eats the parenthetical rather than the fix.
+/// The rejected URL is not repeated — the suggestion already contains it.
+/// The save-or-open effect for a link that is an inline picture already held
+/// in memory, or `None` when it is not one (or has not arrived).
+///
+/// `open` picks between saving and saving-then-opening. A slot that is still
+/// queued, loading or failed has no bytes, so it falls through to the ordinary
+/// download path and fetches them.
+fn saved_image_effect(model: &Model, index: usize, open: bool) -> Option<Effect> {
+    let slot = model.image_slot(index)?;
+    match slot.state {
+        SlotState::Ready { .. } | SlotState::Text { .. } => Some(match open {
+            true => Effect::OpenImage { link: index },
+            false => Effect::SaveImage { link: index },
+        }),
+        _ => None,
+    }
+}
+
+fn bad_url_note(what: &str, raw: &str, err: UrlError) -> String {
+    match err {
+        UrlError::NoDestination if raw.starts_with('/') => {
+            format!("{what} — try :{raw} (a local URL keeps the \":\")")
+        }
+        other => format!("{what}: {raw} — {other}"),
     }
 }
 
@@ -3225,10 +3529,13 @@ fn top_bar_controls(model: &Model, area: Rect) -> Vec<ControlRect> {
 
 /// Draw the whole UI: the top-bar, the scrollable content, and the status bar,
 /// plus the help overlay when active.
-pub fn view(model: &Model, frame: &mut Frame) {
+pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
     let [topbar, content, status] = regions(frame.area());
     render_topbar(model, frame, topbar);
     render_content(model, frame, content);
+    // Pictures go over the reserved rows, before every other overlay: a toast,
+    // the help or the places panel must be able to cover one.
+    render_images(model, images, frame, content);
     // The bottom-left status chip floats over the content, above the footer row,
     // so the footer's clickable buttons below it are never covered.
     render_status_chip(model, frame, frame.area());
@@ -3492,6 +3799,64 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(scrollbar, area, &mut state);
 }
 
+/// Draw the current page's inline images into the rows the layout reserved
+/// for them, and a status line for every slot that is not a picture.
+///
+/// A picture is drawn with [`SlicedImage`], which crops it to the area: an
+/// image half-scrolled off the top is drawn from its middle rather than
+/// jumping or spilling over the top bar. The position is signed for exactly
+/// that reason.
+fn render_images(model: &Model, images: &ImageStore, frame: &mut Frame, area: Rect) {
+    if model.images.is_empty() || area.height == 0 || area.width == 0 {
+        return;
+    }
+    let body = Rect {
+        width: area.width.saturating_sub(SCROLLBAR_COLS),
+        ..area
+    };
+    for slot in &model.images {
+        let Some(link) = model.links.iter().find(|l| l.index == slot.link) else {
+            continue;
+        };
+        // The reserved rows sit directly under the link's line.
+        let first = link.line + 1;
+        let y = first as i64 - model.scroll as i64;
+        let x = link.col_start.min(u16::MAX as usize) as i16;
+
+        match (&slot.state, images.protocol(slot.link)) {
+            (SlotState::Ready { cells, .. }, Some(protocol)) => {
+                // Entirely above or below the viewport: nothing to draw.
+                if y + cells.1 as i64 <= 0 || y >= body.height as i64 {
+                    continue;
+                }
+                let position =
+                    SignedPosition::from((x, y.clamp(i16::MIN as i64, i16::MAX as i64) as i16));
+                frame.render_widget(SlicedImage::new(protocol, position), body);
+            }
+            // Everything else is one line of text: queued, loading, failed, or
+            // a terminal that cannot draw pictures at all.
+            (state, _) => {
+                if y < 0 || y >= body.height as i64 {
+                    continue;
+                }
+                let row = body.y + y as u16;
+                let text = crate::image::status_line(&slot.name, state);
+                let style = match model.no_color {
+                    true => Style::default().add_modifier(Modifier::DIM),
+                    false => Style::default().fg(rgb(model.theme.chrome_muted_fg())),
+                };
+                let rect = Rect {
+                    x: body.x + x as u16,
+                    y: row,
+                    width: body.width.saturating_sub(x as u16),
+                    height: 1,
+                };
+                frame.render_widget(Paragraph::new(RtSpan::styled(text, style)), rect);
+            }
+        }
+    }
+}
+
 /// Draw the one-row top bar: the page title, a `·`, and the address on the left,
 /// then the right-aligned status cluster (bookmark star, cache bolt, hop count).
 /// In address mode the address slot becomes the live editor.
@@ -3627,7 +3992,7 @@ fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
 fn breadcrumb(model: &Model) -> String {
     match model.history.current() {
         Some(target) => format!("{}:{}", short_hex(&target.dest_hash), target.path),
-        None => "press : to enter an address".to_string(),
+        None => "press : to enter a URL".to_string(),
     }
 }
 
@@ -4339,7 +4704,7 @@ fn help_groups() -> Vec<HelpGroup> {
                 },
                 HelpEntry {
                     keys: "hover a link",
-                    desc: "show its address",
+                    desc: "show its URL",
                 },
             ],
         },
@@ -4347,8 +4712,8 @@ fn help_groups() -> Vec<HelpGroup> {
             title: "Page",
             entries: vec![
                 HelpEntry {
-                    keys: ": / click address",
-                    desc: "enter an address",
+                    keys: ": / click the URL",
+                    desc: "enter a URL",
                 },
                 HelpEntry {
                     keys: "R / Ctrl-R / F5",
@@ -4364,7 +4729,7 @@ fn help_groups() -> Vec<HelpGroup> {
                 },
                 HelpEntry {
                     keys: "y",
-                    desc: "copy link / page address",
+                    desc: "copy the link's / page's URL",
                 },
                 HelpEntry {
                     keys: "d / click a place",
@@ -4381,6 +4746,23 @@ fn help_groups() -> Vec<HelpGroup> {
                 HelpEntry {
                     keys: "/ n N",
                     desc: "search / next / prev",
+                },
+            ],
+        },
+        HelpGroup {
+            title: "Images",
+            entries: vec![
+                HelpEntry {
+                    keys: "Enter",
+                    desc: "save the focused picture (no second transfer)",
+                },
+                HelpEntry {
+                    keys: "o",
+                    desc: "open it in the system viewer",
+                },
+                HelpEntry {
+                    keys: "",
+                    desc: "start with --images off to leave them as plain links",
                 },
             ],
         },
@@ -4489,7 +4871,11 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     lines.push(RtLine::from(""));
     lines.push(RtLine::from(RtSpan::styled("Discovered nodes", header)));
     if entries.len() == bm_count {
-        lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
+        // Not "(none)": discovery is always running, so an empty list means
+        // nothing has announced YET. Saying so keeps a first run — where this
+        // panel opens by itself and both sections are empty — from reading as a
+        // broken feature rather than a quiet mesh.
+        lines.push(RtLine::from(RtSpan::styled(NO_NODES_YET, muted)));
     } else {
         for (i, place) in entries.iter().enumerate().skip(bm_count) {
             lines.push(place_line(
@@ -5010,6 +5396,312 @@ fn spawn_download(
     *inflight = Some(handle);
 }
 
+/// One inline image's outcome, reported by the image-queue task.
+struct ImageOutcome {
+    /// The queue generation this belongs to; a stale one is dropped.
+    generation: u64,
+    /// The link index it belongs to.
+    link: usize,
+    /// Where it was fetched from, which is the cache key.
+    target: Target,
+    /// What happened.
+    result: ImageResult,
+}
+
+/// What the image-queue task has to say about one picture.
+enum ImageResult {
+    /// Its transfer has started.
+    Started,
+    /// Its bytes arrived.
+    Bytes(Vec<u8>),
+    /// Its transfer failed.
+    Failed(String),
+}
+
+/// One picture the shell is holding: the payload, and the encoded form the
+/// terminal will actually be handed.
+struct ImageEntry {
+    /// The file name, for saving and for the toast.
+    name: String,
+    /// The payload as fetched, kept so the picture can be re-encoded on a
+    /// resize and saved without a second transfer.
+    bytes: Vec<u8>,
+    /// The encoded picture, absent when the backend is [`Backend::Text`] or
+    /// the payload did not decode.
+    protocol: Option<SlicedProtocol>,
+    /// Where it was written, once the reader has saved it.
+    saved: Option<PathBuf>,
+}
+
+/// The IO shell's side of inline images: what this terminal can draw, the
+/// pictures held for the current page, and the transfer queue.
+///
+/// Kept out of [`Model`] on purpose. The model is pure, cloneable data that
+/// every unit test builds by hand; an encoded Kitty or Sixel payload is
+/// neither, and the fetch queue is IO. The model carries only the slot states,
+/// which is all the layout and the assertions need.
+pub struct ImageStore {
+    picker: Option<Picker>,
+    backend: Backend,
+    entries: HashMap<usize, ImageEntry>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    generation: u64,
+    /// Payloads held across page changes, so a revisit costs no airtime.
+    /// Bounded by bytes; see [`ImageCache`].
+    cache: ImageCache,
+}
+
+impl Default for ImageStore {
+    /// A store that draws nothing: no terminal was asked, so there is no
+    /// picture to draw. What the unit tests and the print sink use.
+    fn default() -> Self {
+        ImageStore {
+            picker: None,
+            backend: Backend::Text,
+            entries: HashMap::new(),
+            task: None,
+            generation: 0,
+            cache: ImageCache::default(),
+        }
+    }
+}
+
+impl ImageStore {
+    /// Ask the terminal what it can draw, and settle on a backend.
+    ///
+    /// The query talks to the terminal directly and wants raw mode, so this
+    /// runs after the terminal is set up. Any failure — a terminal that
+    /// answers nothing, a pipe, a query that times out — falls back to
+    /// half-blocks rather than propagating: a browser that refuses to start
+    /// because it could not identify the terminal would be absurd.
+    pub fn detect(no_color: bool, depth: ColorDepth, cache_bytes: u64) -> Self {
+        let picker = match no_color {
+            // Nothing will be drawn, so do not write query sequences at all.
+            true => None,
+            false => Some(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())),
+        };
+        let detected = picker
+            .as_ref()
+            .map(|p| p.protocol_type())
+            .unwrap_or(ProtocolType::Halfblocks);
+        ImageStore {
+            picker,
+            backend: crate::image::choose_backend(detected, depth, no_color),
+            entries: HashMap::new(),
+            task: None,
+            generation: 0,
+            cache: ImageCache::new(cache_bytes),
+        }
+    }
+
+    /// Split a page's image requests into the ones the cache can answer at
+    /// once and the ones that have to be fetched.
+    ///
+    /// The cached ones come back as folded-ready events: they are decoded and
+    /// encoded here exactly as a fresh payload would be, so a cache hit and a
+    /// fetch are indistinguishable from the model's side apart from the
+    /// waiting. Note that the ENCODED form is not cached, only the payload —
+    /// the cell size an encode targets depends on the terminal width, which
+    /// changes between visits.
+    fn take_cached(
+        &mut self,
+        requests: Vec<ImageRequest>,
+        model: &Model,
+    ) -> (Vec<AppEvent>, Vec<ImageRequest>) {
+        let mut events = Vec::new();
+        let mut pending = Vec::new();
+        for request in requests {
+            let Some(bytes) = self.cache.get(&request.target).map(<[u8]>::to_vec) else {
+                pending.push(request);
+                continue;
+            };
+            let name = model
+                .image_slot(request.link)
+                .map(|slot| slot.name.clone())
+                .unwrap_or_else(|| "image".to_string());
+            events.push(self.accept(request.link, name, bytes, model));
+        }
+        (events, pending)
+    }
+
+    /// The encoded picture for a link, if there is one to draw.
+    fn protocol(&self, link: usize) -> Option<&SlicedProtocol> {
+        self.entries.get(&link)?.protocol.as_ref()
+    }
+
+    /// Drop the current page's pictures and stop its transfer queue. The
+    /// cache is deliberately untouched: it exists precisely to outlive the
+    /// page that filled it.
+    fn reset(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.entries.clear();
+    }
+
+    /// Take a fetched payload, encode it if this terminal can draw it, and
+    /// return the event the model should fold.
+    ///
+    /// Every failure path ends in [`AppEvent::ImageText`] rather than an error:
+    /// the reader still gets a line saying what the file is and can still save
+    /// or open it, which is a better answer than a picture-shaped hole.
+    fn accept(&mut self, link: usize, name: String, bytes: Vec<u8>, model: &Model) -> AppEvent {
+        let probe = crate::image::probe(&bytes);
+        let entry = ImageEntry {
+            name,
+            bytes,
+            protocol: None,
+            saved: None,
+        };
+        self.entries.insert(link, entry);
+
+        if self.backend == Backend::Text {
+            return AppEvent::ImageText {
+                link,
+                probe,
+                reason: "this terminal shows no images".to_string(),
+            };
+        }
+        let Some(probe) = probe else {
+            return AppEvent::ImageText {
+                link,
+                probe: None,
+                reason: "not a format this browser decodes".to_string(),
+            };
+        };
+        match self.encode(link, probe, model) {
+            Ok(cells) => AppEvent::ImageReady { link, cells, probe },
+            Err(reason) => AppEvent::ImageText {
+                link,
+                probe: Some(probe),
+                reason,
+            },
+        }
+    }
+
+    /// Decode and encode one held payload at the size the current layout
+    /// allows, storing the result. Returns the cell size it will occupy.
+    fn encode(&mut self, link: usize, probe: Probe, model: &Model) -> Result<(u16, u16), String> {
+        let Some(picker) = self.picker.as_ref() else {
+            return Err("this terminal shows no images".to_string());
+        };
+        let Some(entry) = self.entries.get_mut(&link) else {
+            return Err("no payload".to_string());
+        };
+        let decoded = crate::image::decode(&entry.bytes)?;
+        let max_rows = MAX_IMAGE_ROWS.min(model.viewport().max(4) as u16 - 2);
+        let cells = crate::image::fit_cells(
+            (probe.width, probe.height),
+            picker.font_size(),
+            model.width.min(u16::MAX as usize) as u16,
+            max_rows,
+        );
+        let size = Size::new(cells.0, cells.1);
+        let sliced = SlicedProtocol::new_with_resize(picker, decoded, size, Resize::Fit(None))
+            .map_err(|e| format!("cannot draw: {e}"))?;
+        entry.protocol = Some(sliced);
+        Ok(cells)
+    }
+
+    /// Re-encode every held picture for the current layout, after a resize.
+    ///
+    /// Returns the events the caller should fold, so a picture that no longer
+    /// fits (or now fits better) changes the rows it reserves.
+    fn reencode_all(&mut self, model: &Model) -> Vec<AppEvent> {
+        let links: Vec<usize> = model
+            .images
+            .iter()
+            .filter(|slot| matches!(slot.state, SlotState::Ready { .. }))
+            .map(|slot| slot.link)
+            .collect();
+        let mut events = Vec::new();
+        for link in links {
+            let Some(probe) = self
+                .entries
+                .get(&link)
+                .and_then(|entry| crate::image::probe(&entry.bytes))
+            else {
+                continue;
+            };
+            match self.encode(link, probe, model) {
+                Ok(cells) => events.push(AppEvent::ImageReady { link, cells, probe }),
+                Err(reason) => events.push(AppEvent::ImageText {
+                    link,
+                    probe: Some(probe),
+                    reason,
+                }),
+            }
+        }
+        events
+    }
+
+    /// Write a held picture into the download directory, once. A second save
+    /// returns the path it already has, so `s` then `o` does not produce two
+    /// files.
+    fn save(&mut self, link: usize) -> Result<(PathBuf, usize), String> {
+        let Some(entry) = self.entries.get_mut(&link) else {
+            return Err("that image has not arrived yet".to_string());
+        };
+        if let Some(path) = &entry.saved {
+            return Ok((path.clone(), entry.bytes.len()));
+        }
+        let dir = crate::download::download_dir()
+            .ok_or("no download directory (neither XDG_DOWNLOAD_DIR nor HOME set)")?;
+        let path = crate::download::save_to_dir(&dir, &entry.name, &entry.bytes)
+            .map_err(|e| format!("could not save {}: {e}", entry.name))?;
+        entry.saved = Some(path.clone());
+        Ok((path, entry.bytes.len()))
+    }
+}
+
+/// Fetch a page's inline images one after another, reporting each outcome.
+///
+/// Sequential on purpose: a link carries one transfer at a time, so issuing
+/// them in parallel would only queue them inside the stack while holding the
+/// session lock longer. Between images the lock is released, so a navigation
+/// the reader starts is served promptly — and it aborts this task anyway.
+fn spawn_image_queue(
+    store: &mut ImageStore,
+    session: &Arc<Mutex<Session>>,
+    tx: &mpsc::UnboundedSender<ImageOutcome>,
+    timeout: Duration,
+    requests: Vec<ImageRequest>,
+) {
+    let generation = store.generation;
+    let session = session.clone();
+    let tx = tx.clone();
+    store.task = Some(tokio::spawn(async move {
+        for request in requests {
+            let _ = tx.send(ImageOutcome {
+                generation,
+                link: request.link,
+                target: request.target.clone(),
+                result: ImageResult::Started,
+            });
+            let fetched = {
+                let mut guard = session.lock().await;
+                guard.download_file(&request.target, timeout).await
+            };
+            let result = match fetched {
+                Ok((bytes, _)) => ImageResult::Bytes(bytes),
+                Err(err) => ImageResult::Failed(err.to_string()),
+            };
+            if tx
+                .send(ImageOutcome {
+                    generation,
+                    link: request.link,
+                    target: request.target,
+                    result,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }));
+}
+
 /// How long the background discovery drain parks on the shared session before
 /// yielding the lock. A fetch that wants the session waits at most this slice,
 /// while an idle mesh still has its announces drained continuously. Kept small
@@ -5052,22 +5744,82 @@ fn spawn_discovery(session: &Arc<Mutex<Session>>) -> tokio::task::JoinHandle<()>
     })
 }
 
+/// The IO handles [`run_effects`] works with, bundled.
+///
+/// A struct rather than eight positional arguments: the list grew past the
+/// point where a caller could get the order right by reading it, and every
+/// member is borrowed from the same run loop anyway.
+struct Shell<'a> {
+    /// The in-flight page fetch or download.
+    inflight: &'a mut Option<tokio::task::JoinHandle<()>>,
+    /// The fetch generation, bumped to invalidate a superseded result.
+    generation: &'a mut u64,
+    /// The shared session every transfer runs over.
+    session: &'a Arc<Mutex<Session>>,
+    /// Where a fetch reports back.
+    tx: &'a mpsc::UnboundedSender<FetchOutcome>,
+    /// The inline-image store and its queue.
+    images: &'a mut ImageStore,
+    /// Where the image queue reports back.
+    image_tx: &'a mpsc::UnboundedSender<ImageOutcome>,
+    /// Per-request timeout.
+    timeout: Duration,
+}
+
 /// Run the effects [`update`] returned: start navigations, cancel the in-flight
 /// fetch, persist an identify decision, or record a quit.
-async fn run_effects(
-    effects: Vec<Effect>,
-    model: &mut Model,
-    inflight: &mut Option<tokio::task::JoinHandle<()>>,
-    generation: &mut u64,
-    session: &Arc<Mutex<Session>>,
-    tx: &mpsc::UnboundedSender<FetchOutcome>,
-    timeout: Duration,
-) {
+async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) {
+    let Shell {
+        inflight,
+        generation,
+        session,
+        tx,
+        images,
+        image_tx,
+        timeout,
+    } = shell;
     for effect in effects {
         match effect {
             Effect::Navigate(target) => {
+                // The pictures of the page being left are of no use to anyone.
+                images.reset();
                 spawn_fetch(inflight, generation, session, tx, timeout, target);
             }
+            Effect::FetchImages(requests) => {
+                // Whatever the queue was working on belongs to the page just
+                // left. Reset before serving, so a cache hit is not wiped by
+                // its own reset.
+                images.reset();
+                let (cached, pending) = images.take_cached(requests, model);
+                for event in cached {
+                    update(model, event);
+                }
+                if !pending.is_empty() {
+                    spawn_image_queue(images, session, image_tx, timeout, pending);
+                }
+            }
+            Effect::SaveImage { link } => match images.save(link) {
+                Ok((path, bytes)) => model.set_toast(
+                    ToastKind::Info,
+                    format!("saved {} ({bytes} bytes)", path.display()),
+                ),
+                Err(err) => model.set_toast(ToastKind::Error, err),
+            },
+            Effect::OpenImage { link } => match images.save(link) {
+                // Saved first, because the platform handler needs a file: the
+                // picture only ever existed in this process's memory.
+                Ok((path, _)) => match open::that(&path) {
+                    Ok(_) => model.set_toast(
+                        ToastKind::Info,
+                        format!("opened {} externally", path.display()),
+                    ),
+                    Err(_) => model.set_toast(
+                        ToastKind::Error,
+                        format!("failed to open {}", path.display()),
+                    ),
+                },
+                Err(err) => model.set_toast(ToastKind::Error, err),
+            },
             Effect::Download(target) => {
                 spawn_download(inflight, generation, session, tx, timeout, target);
             }
@@ -5101,6 +5853,8 @@ async fn run_effects(
                 if let Some(handle) = inflight.take() {
                     handle.abort();
                 }
+                // Cancelling means cancelling: the queued pictures stop too.
+                images.reset();
                 // Invalidate any late result from the cancelled task.
                 *generation = generation.wrapping_add(1);
             }
@@ -5183,7 +5937,7 @@ fn ansi_index_grey(index: u8) -> (u8, u8, u8) {
 /// cancel drops the in-flight task; a slow or failed fetch never blocks the UI.
 pub async fn run_tui(
     session: Session,
-    initial: Target,
+    initial: Option<Target>,
     opts: BrowserOptions,
     theme_flag: ThemeFlag,
 ) -> io::Result<()> {
@@ -5211,6 +5965,7 @@ pub async fn run_tui(
 
     let mut model = Model {
         no_color: opts.no_color,
+        no_images: opts.no_images,
         depth: opts.depth,
         theme,
         bookmarks,
@@ -5233,36 +5988,53 @@ pub async fn run_tui(
 
     let session = Arc::new(Mutex::new(session));
     let (tx, mut rx) = mpsc::unbounded_channel::<FetchOutcome>();
+    let (image_tx, mut image_rx) = mpsc::unbounded_channel::<ImageOutcome>();
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let mut generation: u64 = 0;
+    // Ask the terminal what it can draw once, now that raw mode is on. Every
+    // failure path inside settles on half-blocks, so this cannot fail.
+    let mut images = match model.no_images {
+        true => ImageStore::default(),
+        false => ImageStore::detect(model.no_color, model.depth, opts.image_cache_bytes),
+    };
 
     // Continuous background discovery: lives for the whole session, independent
     // of fetches, feeding `node_rx` (see `spawn_discovery`).
     let discovery = spawn_discovery(&session);
 
-    // Kick off the initial navigation, honouring a `#anchor` on the initial URL
-    // (the parser folds it into the path; split it back off so the fetched path
-    // is clean and the load handler can scroll to it).
-    let (initial, initial_anchor) = split_path_anchor(initial);
-    model.pending = Some(Pending {
-        target: initial.clone(),
-        action: HistoryAction::Push,
-    });
-    model.pending_anchor = initial_anchor;
-    spawn_fetch(
-        &mut inflight,
-        &mut generation,
-        &session,
-        &tx,
-        opts.timeout,
-        initial,
-    );
+    match initial {
+        // Kick off the initial navigation, honouring a `#anchor` on the initial
+        // URL (the parser folds it into the path; split it back off so the
+        // fetched path is clean and the load handler can scroll to it).
+        Some(target) => {
+            let (target, anchor) = split_path_anchor(target);
+            model.pending = Some(Pending {
+                target: target.clone(),
+                action: HistoryAction::Push,
+            });
+            model.pending_anchor = anchor;
+            spawn_fetch(
+                &mut inflight,
+                &mut generation,
+                &session,
+                &tx,
+                opts.timeout,
+                target,
+            );
+        }
+        // No URL to open: show the start screen and put the places panel in
+        // front of it, since that is where a reader without an address finds
+        // one — their bookmarks, and the nodes background discovery turns up.
+        None => {
+            show_start_screen(&mut model);
+        }
+    }
 
     let mut ticker = tokio::time::interval(Duration::from_millis(SPINNER_TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let result = loop {
-        if let Err(err) = terminal.draw(|frame| view(&model, frame)) {
+        if let Err(err) = terminal.draw(|frame| view(&model, &images, frame)) {
             break Err(err);
         }
         if model.quit {
@@ -5274,15 +6046,27 @@ pub async fn run_tui(
         tokio::select! {
             maybe_event = events.next() => match step_event(maybe_event) {
                 EventStep::Apply(app) => {
-                    let effects = update(&mut model, app);
+                    // A resize changes how many cells a picture may occupy, so
+                    // every held picture is re-encoded for the new layout.
+                    let resized = matches!(app, AppEvent::Resize(_, _));
+                    let mut effects = update(&mut model, app);
+                    if resized {
+                        for event in images.reencode_all(&model) {
+                            effects.extend(update(&mut model, event));
+                        }
+                    }
                     run_effects(
                         effects,
                         &mut model,
-                        &mut inflight,
-                        &mut generation,
-                        &session,
-                        &tx,
-                        opts.timeout,
+                        Shell {
+                            inflight: &mut inflight,
+                            generation: &mut generation,
+                            session: &session,
+                            tx: &tx,
+                            images: &mut images,
+                            image_tx: &image_tx,
+                            timeout: opts.timeout,
+                        },
                     )
                     .await;
                 }
@@ -5299,7 +6083,22 @@ pub async fn run_tui(
                     inflight = None;
                     match outcome.result {
                         LoadResult::Ok { doc, title, dest, identifying } => {
-                            update(&mut model, AppEvent::PageLoaded { doc, title });
+                            let effects =
+                                update(&mut model, AppEvent::PageLoaded { doc, title });
+                            run_effects(
+                                effects,
+                                &mut model,
+                                Shell {
+                                    inflight: &mut inflight,
+                                    generation: &mut generation,
+                                    session: &session,
+                                    tx: &tx,
+                                    images: &mut images,
+                                    image_tx: &image_tx,
+                                    timeout: opts.timeout,
+                                },
+                            )
+                            .await;
                             // The session's answer for this load is
                             // authoritative: it corrects the optimistic toggle
                             // and covers a first visit to a node persisted in
@@ -5318,6 +6117,28 @@ pub async fn run_tui(
                     }
                 }
             },
+            Some(outcome) = image_rx.recv() => {
+                // A stale generation belongs to a page the reader has left.
+                if outcome.generation == images.generation {
+                    let event = match outcome.result {
+                        ImageResult::Started => AppEvent::ImageLoading { link: outcome.link },
+                        ImageResult::Failed(reason) => {
+                            AppEvent::ImageFailed { link: outcome.link, reason }
+                        }
+                        ImageResult::Bytes(bytes) => {
+                            let name = model
+                                .image_slot(outcome.link)
+                                .map(|slot| slot.name.clone())
+                                .unwrap_or_else(|| "image".to_string());
+                            // Cached before it is drawn, so it survives the
+                            // page: the airtime is already spent either way.
+                            images.cache.insert(outcome.target, bytes.clone());
+                            images.accept(outcome.link, name, bytes, &model)
+                        }
+                    };
+                    update(&mut model, event);
+                }
+            }
             Some(node) = node_rx.recv() => {
                 update(&mut model, AppEvent::NodeDiscovered(node));
             }
@@ -5334,6 +6155,7 @@ pub async fn run_tui(
         handle.abort();
         let _ = handle.await;
     }
+    images.reset();
     discovery.abort();
     let _ = discovery.await;
     drop(tx);
@@ -6219,9 +7041,23 @@ mod tests {
     }
 
     fn render(model: &Model, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        render_with_images(model, &ImageStore::default(), w, h)
+    }
+
+    /// Render with a specific image store. The default one holds no pictures
+    /// and draws none, which is what every test that is not about images
+    /// wants; the image tests build one that does.
+    fn render_with_images(
+        model: &Model,
+        images: &ImageStore,
+        w: u16,
+        h: u16,
+    ) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| view(model, frame)).expect("draw");
+        terminal
+            .draw(|frame| view(model, images, frame))
+            .expect("draw");
         terminal.backend().buffer().clone()
     }
 
@@ -7235,6 +8071,98 @@ mod tests {
         assert!(
             toast.text.contains("file"),
             "toast names the refused scheme: {}",
+            toast.text
+        );
+    }
+
+    #[test]
+    fn following_lxmf_link_copies_the_address_instead_of_failing() {
+        // Before this was handled, the target reached parse_url and produced
+        // "bad link: ... (malformed URL)", which reads as a broken page
+        // rather than an action this browser does not perform.
+        let hash = "0ec84236630cea839d80a71c39fb41ce";
+        let mut m = Model {
+            links: vec![RenderedLink {
+                index: 1,
+                label: "Lew Palm".to_string(),
+                target: format!("lxmf@{hash}"),
+                ..RenderedLink::default()
+            }],
+            ..Model::default()
+        };
+        let effects = follow_link(&mut m, 1);
+        assert_eq!(effects, vec![Effect::Copy(hash.to_string())]);
+        assert!(m.pending.is_none(), "an address must not start a fetch");
+        let toast = m.toast.as_ref().expect("a toast reports what happened");
+        assert_eq!(toast.kind, ToastKind::Info, "this is not an error");
+        assert!(
+            toast.text.contains(hash),
+            "the address is shown, not just copied: {}",
+            toast.text
+        );
+    }
+
+    /// A page that links to its own node with a bare `/page/x.mu` dropped the
+    /// `:` a local URL keeps. The link is dead here exactly as it is in the
+    /// reference (see `url::tests::reference_rejects_the_same_urls_we_do`), so
+    /// the toast's job is to hand over the string that would have worked rather
+    /// than to restate the grammar.
+    #[test]
+    fn link_missing_the_local_colon_is_told_which_colon() {
+        let mut m = loaded_model((80, 24));
+        m.links = vec![RenderedLink {
+            index: 1,
+            label: "About".to_string(),
+            target: "/page/about.md".to_string(),
+            ..RenderedLink::default()
+        }];
+
+        let effects = follow_link(&mut m, 1);
+        assert!(effects.is_empty(), "a dead link must not navigate");
+        assert!(m.pending.is_none());
+        let toast = m.toast.as_ref().expect("an error toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast.text.contains(":/page/about.md"),
+            "the toast must show the URL that works: {}",
+            toast.text
+        );
+        // The suggestion must survive the single truncated toast line at 80
+        // columns: the whole note fits, and in any case leads with the fix.
+        assert!(
+            UnicodeWidthStr::width(toast.text.as_str()) <= 74,
+            "toast too long to read at 80 columns: {}",
+            toast.text
+        );
+        let suggestion = toast.text.find(":/page/about.md").expect("suggestion");
+        assert!(
+            suggestion < toast.text.find("keeps").expect("explanation"),
+            "the fix must come before the explanation: {}",
+            toast.text
+        );
+    }
+
+    /// A local URL typed with nothing open — reachable from the start screen,
+    /// where the URL editor is one keypress away and no page is loaded.
+    #[test]
+    fn local_url_with_no_open_page_says_so() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+        m.show_places = false;
+
+        press(&mut m, KeyCode::Char(':'), KeyModifiers::NONE);
+        type_str(&mut m, ":/page/x.mu");
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+
+        let toast = m.toast.as_ref().expect("an error toast is raised");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast.text.contains("open page"),
+            "must say what is missing: {}",
             toast.text
         );
     }
@@ -8309,10 +9237,10 @@ mod tests {
         ] {
             assert!(text.contains(s), "help missing binding {s:?}:\n{text}");
         }
-        // The mouse affordances: the clickable address, the star, the footer
+        // The mouse affordances: the clickable URL, the star, the footer
         // buttons, and the side buttons.
         for s in [
-            "click address",
+            "click the URL",
             "click star",
             "footer button",
             "mouse side buttons",
@@ -8913,6 +9841,69 @@ mod tests {
         // Forward to node 2, also cached: anonymous again.
         go_forward(&mut m);
         assert!(!m.identifying, "cached forward restores anonymity");
+    }
+
+    #[test]
+    /// Started without a URL, the browser shows its start screen with the places
+    /// panel already in front of it: nothing is fetched, nothing enters the
+    /// history, and no destination is current, so the top bar carries no address
+    /// and back/forward/reload stay unavailable.
+    fn start_screen_opens_the_places_panel_over_a_local_page() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+
+        assert!(m.show_places, "the places panel must open by itself");
+        assert_eq!(m.title, START_TITLE);
+        assert!(!m.page.is_empty(), "the start page must be laid out");
+        assert!(m.history.current().is_none(), "no history entry");
+        assert!(!m.history.can_back() && !m.history.can_forward());
+        assert_eq!(m.current_dest, None, "no node is current");
+        assert_eq!(current_url(&m), None, "no address to show");
+        assert!(!m.is_loading(), "the start screen must not fetch anything");
+        assert!(m.page_cache.get(&tgt(0xab)).is_none(), "nothing cached");
+    }
+
+    #[test]
+    /// The start screen names the keys that lead somewhere, and closing the
+    /// panel leaves it in view rather than an empty frame.
+    fn start_screen_survives_closing_the_panel() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+
+        press(&mut m, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!m.show_places, "Esc closes the panel");
+
+        let text = flat(&render(&m, 80, 24));
+        assert!(text.contains("lnomad"), "start screen gone: {text}");
+        assert!(text.contains("places"), "no hint at the panel: {text}");
+        assert!(text.contains("URL"), "no hint at the URL entry: {text}");
+    }
+
+    #[test]
+    /// An empty discovered-nodes section says announces are still awaited, not
+    /// that there are none: on a first run the panel opens by itself with both
+    /// sections empty, and "(none)" would read as a broken feature.
+    fn empty_places_panel_says_it_is_still_listening() {
+        let mut m = Model {
+            size: (80, 24),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        show_start_screen(&mut m);
+
+        let text = flat(&render(&m, 80, 24));
+        assert!(
+            text.contains("listening for announces"),
+            "no listening note: {text}"
+        );
     }
 
     #[test]
@@ -10255,5 +11246,563 @@ mod tests {
         assert!(flat(&render(&checked, 80, 24)).contains("[x] On"));
         let unchecked = field_model("`<?|a`Off>", (80, 24));
         assert!(flat(&render(&unchecked, 80, 24)).contains("[ ] Off"));
+    }
+
+    // --- inline images ----------------------------------------------------
+
+    /// The micron a blog page with one picture looks like: a standalone link
+    /// to a file in the node's file area, which is the only form micron has.
+    const IMAGE_PAGE: &str = "\
+>>Antennenbau
+
+Der Mast steht.
+
+`[Antenne`:/file/antenne.png]
+
+Text unter dem Bild.
+";
+
+    /// A model showing IMAGE_PAGE, loaded through the ordinary load path so the
+    /// image slots are planned exactly as they are in production.
+    fn image_model() -> (Model, Vec<Effect>) {
+        let mut m = Model {
+            size: (80, 24),
+            current_dest: Some([0xab; 16]),
+            ..Model::default()
+        };
+        m.relayout(content_width(80));
+        let effects = update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse(IMAGE_PAGE),
+                title: "Blog".to_string(),
+            },
+        );
+        (m, effects)
+    }
+
+    /// The probe a fetched picture would have produced.
+    fn probe() -> Probe {
+        Probe {
+            format: "PNG",
+            width: 640,
+            height: 320,
+            len: 12_400,
+        }
+    }
+
+    #[test]
+    fn a_standalone_image_link_is_planned_and_fetched() {
+        let (m, effects) = image_model();
+        assert_eq!(m.images.len(), 1, "the picture must get a slot");
+        assert_eq!(m.images[0].name, "antenne.png");
+        assert_eq!(m.images[0].state, SlotState::Queued);
+
+        let [Effect::FetchImages(requests)] = &effects[..] else {
+            panic!("expected one FetchImages effect, got {effects:?}");
+        };
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].link, m.images[0].link);
+        assert_eq!(requests[0].target.path, "/file/antenne.png");
+        assert!(requests[0].target.is_file);
+        assert_eq!(
+            requests[0].target.dest_hash, [0xab; 16],
+            "a `:`-relative link resolves against the page's own node"
+        );
+    }
+
+    #[test]
+    fn a_page_without_pictures_asks_for_nothing() {
+        let mut m = model_from_sample(78, (80, 24));
+        let effects = update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse(SAMPLE),
+                title: "Sample".to_string(),
+            },
+        );
+        assert!(m.images.is_empty());
+        assert!(!effects.iter().any(|e| matches!(e, Effect::FetchImages(_))));
+    }
+
+    #[test]
+    fn images_off_plans_nothing_at_all() {
+        let mut m = Model {
+            size: (80, 24),
+            no_images: true,
+            current_dest: Some([0xab; 16]),
+            ..Model::default()
+        };
+        let effects = update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse(IMAGE_PAGE),
+                title: "Blog".to_string(),
+            },
+        );
+        assert!(m.images.is_empty(), "--images off must plan no pictures");
+        assert!(effects.is_empty(), "and must ask for no transfers");
+        // The link is still there and still followable.
+        assert_eq!(m.links.len(), 1);
+    }
+
+    #[test]
+    fn a_page_beyond_the_ceiling_fetches_only_the_first_ones() {
+        let mut page = String::new();
+        for i in 0..(MAX_INLINE_IMAGES + 3) {
+            page.push_str(&format!("`[Bild {i}`:/file/bild{i}.png]\n\n"));
+        }
+        let mut m = Model {
+            size: (80, 40),
+            current_dest: Some([0xab; 16]),
+            ..Model::default()
+        };
+        let effects = update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse(&page),
+                title: "Viele".to_string(),
+            },
+        );
+
+        assert_eq!(
+            m.images.len(),
+            MAX_INLINE_IMAGES + 3,
+            "every one gets a slot"
+        );
+        let fetched = m
+            .images
+            .iter()
+            .filter(|s| s.state == SlotState::Queued)
+            .count();
+        assert_eq!(fetched, MAX_INLINE_IMAGES);
+        let skipped = m
+            .images
+            .iter()
+            .filter(|s| s.state == SlotState::TooMany)
+            .count();
+        assert_eq!(skipped, 3, "a hostile page cannot start fifty transfers");
+
+        let [Effect::FetchImages(requests)] = &effects[..] else {
+            panic!("expected one FetchImages effect, got {effects:?}");
+        };
+        assert_eq!(requests.len(), MAX_INLINE_IMAGES);
+    }
+
+    #[test]
+    fn a_ready_picture_reserves_its_rows_and_pushes_the_text_down() {
+        let (mut m, _) = image_model();
+        let link_line = m.links[0].line;
+        let below: Vec<String> = m.page[link_line + 2..]
+            .iter()
+            .map(|l| l.cells.iter().map(|c| c.ch).collect())
+            .collect();
+
+        let link = m.images[0].link;
+        update(
+            &mut m,
+            AppEvent::ImageReady {
+                link,
+                cells: (40, 6),
+                probe: probe(),
+            },
+        );
+
+        assert_eq!(m.images[0].state.rows(), 6);
+        let after: Vec<String> = m.page[link_line + 7..]
+            .iter()
+            .map(|l| l.cells.iter().map(|c| c.ch).collect())
+            .collect();
+        assert_eq!(after, below, "the text below must survive, only moved");
+    }
+
+    #[test]
+    fn a_terminal_that_cannot_draw_gets_a_line_that_says_what_the_picture_is() {
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        update(
+            &mut m,
+            AppEvent::ImageText {
+                link,
+                probe: Some(probe()),
+                reason: "this terminal shows no images".to_string(),
+            },
+        );
+
+        let drawn = flat(&render(&m, 80, 24));
+        assert!(
+            drawn.contains("antenne.png, PNG 640x320, 12.4 kB - this terminal shows no images"),
+            "the fallback must say what the file is: {drawn}"
+        );
+    }
+
+    #[test]
+    fn a_failed_transfer_says_so_without_losing_the_link() {
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        update(
+            &mut m,
+            AppEvent::ImageFailed {
+                link,
+                reason: "request timed out".to_string(),
+            },
+        );
+        let drawn = flat(&render(&m, 80, 24));
+        assert!(drawn.contains("antenne.png: request timed out"), "{drawn}");
+        assert!(drawn.contains("Antenne"), "the link itself must remain");
+    }
+
+    #[test]
+    fn a_queued_picture_shows_that_it_is_coming() {
+        let (m, _) = image_model();
+        let drawn = flat(&render(&m, 80, 24));
+        assert!(drawn.contains("antenne.png: queued"), "{drawn}");
+    }
+
+    #[test]
+    fn following_an_arrived_picture_saves_it_instead_of_fetching_it_again() {
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        update(
+            &mut m,
+            AppEvent::ImageReady {
+                link,
+                cells: (40, 6),
+                probe: probe(),
+            },
+        );
+        m.focus = Some(m.images[0].link);
+
+        let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            effects,
+            vec![Effect::SaveImage {
+                link: m.images[0].link
+            }],
+            "the bytes are already here; a second transfer would be minutes of airtime"
+        );
+
+        let effects = press(&mut m, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(
+            effects,
+            vec![Effect::OpenImage {
+                link: m.images[0].link
+            }]
+        );
+    }
+
+    #[test]
+    fn following_a_picture_that_has_not_arrived_downloads_it() {
+        let (mut m, _) = image_model();
+        m.focus = Some(m.images[0].link);
+        let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let [Effect::Download(target)] = &effects[..] else {
+            panic!("expected the ordinary download path, got {effects:?}");
+        };
+        assert_eq!(target.path, "/file/antenne.png");
+    }
+
+    #[test]
+    fn o_does_nothing_without_a_focused_picture() {
+        let (mut m, _) = image_model();
+        assert!(press(&mut m, KeyCode::Char('o'), KeyModifiers::NONE).is_empty());
+    }
+
+    #[test]
+    fn navigating_away_drops_the_pictures_of_the_page_left_behind() {
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        update(
+            &mut m,
+            AppEvent::ImageReady {
+                link,
+                cells: (40, 6),
+                probe: probe(),
+            },
+        );
+        assert_eq!(m.images.len(), 1);
+
+        // A fresh page with no pictures replaces the slots outright, and the
+        // shell aborts the queue on the Navigate/FetchImages that come with it.
+        update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse("Nur Text.\n"),
+                title: "Text".to_string(),
+            },
+        );
+        assert!(m.images.is_empty());
+    }
+
+    #[test]
+    fn a_picture_scrolled_out_of_view_is_not_drawn_over_the_chrome() {
+        // The status line for a slot above the viewport must not be painted
+        // into the top bar, which is what a naive row calculation would do.
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        update(
+            &mut m,
+            AppEvent::ImageText {
+                link,
+                probe: Some(probe()),
+                reason: "this terminal shows no images".to_string(),
+            },
+        );
+        m.scroll = m.page.len();
+        let buffer = render(&m, 80, 24);
+        let top: String = (0..80)
+            .map(|x| buffer[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            !top.contains("antenne.png"),
+            "a scrolled-away picture must not land on the top bar: {top}"
+        );
+    }
+
+    /// A tiny picture, encoded so the test data cannot drift from what the
+    /// decoder is handed.
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let mut img = ::image::RgbaImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = ::image::Rgba([(x * 8 % 256) as u8, (y * 8 % 256) as u8, 200, 255]);
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, ::image::ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    /// A store that draws with half-blocks, the fallback every colour terminal
+    /// can take. Pinned rather than detected: a test must not depend on which
+    /// terminal happens to be running it.
+    fn halfblock_store() -> ImageStore {
+        ImageStore {
+            // Pinned rather than queried: `halfblocks()` fixes both the
+            // protocol and the font size (10x20), so the assertions below do
+            // not depend on which terminal runs the test.
+            picker: Some(Picker::halfblocks()),
+            backend: Backend::Halfblocks,
+            entries: HashMap::new(),
+            task: None,
+            generation: 0,
+            cache: ImageCache::default(),
+        }
+    }
+
+    #[test]
+    fn a_fetched_picture_is_encoded_and_painted_into_its_reserved_rows() {
+        // The whole draw path, end to end: payload -> probe -> decode ->
+        // half-block encode -> cells in the frame buffer.
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        let mut store = halfblock_store();
+
+        let event = store.accept(link, "antenne.png".to_string(), png_bytes(64, 32), &m);
+        let AppEvent::ImageReady { cells, probe, .. } = &event else {
+            panic!("a valid PNG on a half-block terminal must be drawable, got {event:?}");
+        };
+        assert_eq!((probe.width, probe.height), (64, 32));
+        let (cols, rows) = *cells;
+        assert!(cols > 0 && rows > 0);
+        update(&mut m, event);
+
+        let buffer = render_with_images(&m, &store, 80, 24);
+        // Page line -> screen row: the content region starts below the top bar,
+        // and the picture's rows start one line under its link.
+        let content = regions(Rect::new(0, 0, 80, 24))[1];
+        let first = content.y + (m.links[0].line + 1 - m.scroll) as u16;
+        let left = content.x + m.links[0].col_start as u16;
+        let painted = (0..rows)
+            .flat_map(|y| (0..cols).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let cell = &buffer[(left + x, first + y)];
+                cell.symbol() != " " || cell.bg != Color::Reset
+            })
+            .count();
+        assert_eq!(
+            painted,
+            (cols * rows) as usize,
+            "every reserved cell must carry part of the picture ({cols}x{rows} at \
+             row {first}, col {left})"
+        );
+    }
+
+    #[test]
+    fn rubbish_that_claims_to_be_a_picture_becomes_a_line_of_text() {
+        // The payload comes from somebody else's node. Undecodable bytes must
+        // not panic, and must leave the reader something readable.
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        let mut store = halfblock_store();
+
+        let event = store.accept(link, "antenne.png".to_string(), b"not a png".to_vec(), &m);
+        let AppEvent::ImageText { probe, reason, .. } = &event else {
+            panic!("undecodable bytes must fall back to text, got {event:?}");
+        };
+        assert!(probe.is_none());
+        assert!(reason.contains("decode"), "{reason}");
+        update(&mut m, event);
+        assert!(flat(&render_with_images(&m, &store, 80, 24)).contains("antenne.png"));
+    }
+
+    #[test]
+    fn a_resize_re_encodes_every_held_picture_for_the_new_width() {
+        let (mut m, _) = image_model();
+        let link = m.images[0].link;
+        let mut store = halfblock_store();
+        let event = store.accept(link, "antenne.png".to_string(), png_bytes(640, 320), &m);
+        let wide = match event {
+            AppEvent::ImageReady { cells, .. } => cells,
+            other => panic!("expected a drawable picture, got {other:?}"),
+        };
+        update(&mut m, event);
+
+        update(&mut m, AppEvent::Resize(40, 24));
+        let events = store.reencode_all(&m);
+        let narrow = match events.first() {
+            Some(AppEvent::ImageReady { cells, .. }) => *cells,
+            other => panic!("expected a re-encoded picture, got {other:?}"),
+        };
+        assert!(
+            narrow.0 < wide.0,
+            "a narrower terminal must draw the picture smaller: {narrow:?} vs {wide:?}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_without_a_picker_reports_that_it_shows_no_images() {
+        let (m, _) = image_model();
+        let mut store = ImageStore::default();
+        let event = store.accept(1, "antenne.png".to_string(), png_bytes(8, 8), &m);
+        assert!(matches!(
+            event,
+            AppEvent::ImageText { reason, .. } if reason.contains("no images")
+        ));
+    }
+
+    #[test]
+    fn every_graphics_protocol_encodes_the_same_payload() {
+        // The half-block path is asserted above end to end. This pins that we
+        // drive the other three correctly too: each must accept the payload and
+        // report a drawable size, since a terminal that answers "Kitty" gets
+        // whichever one it named and there is no second chance.
+        let (m, _) = image_model();
+        for protocol in [
+            ProtocolType::Kitty,
+            ProtocolType::Iterm2,
+            ProtocolType::Sixel,
+            ProtocolType::Halfblocks,
+        ] {
+            let mut picker = Picker::halfblocks();
+            picker.set_protocol_type(protocol);
+            let mut store = ImageStore {
+                picker: Some(picker),
+                backend: Backend::Graphics(protocol),
+                entries: HashMap::new(),
+                task: None,
+                generation: 0,
+                cache: ImageCache::default(),
+            };
+            let event = store.accept(1, "antenne.png".to_string(), png_bytes(64, 32), &m);
+            match event {
+                AppEvent::ImageReady { cells, .. } => {
+                    assert!(cells.0 > 0 && cells.1 > 0, "{protocol:?} gave {cells:?}");
+                    assert!(
+                        store.protocol(1).is_some(),
+                        "{protocol:?} must leave something to draw"
+                    );
+                }
+                other => panic!("{protocol:?} must encode a valid PNG, got {other:?}"),
+            }
+        }
+    }
+
+    /// The fetch target the fixture page's picture resolves to.
+    fn image_target() -> Target {
+        Target {
+            dest_hash: [0xab; 16],
+            path: "/file/antenne.png".to_string(),
+            fields: Vec::new(),
+            is_file: true,
+        }
+    }
+
+    #[test]
+    fn a_cached_picture_is_shown_without_a_transfer() {
+        // The whole point of the cache: stepping back to a page must not spend
+        // the airtime again.
+        let (m, effects) = image_model();
+        let [Effect::FetchImages(requests)] = &effects[..] else {
+            panic!("expected one FetchImages effect, got {effects:?}");
+        };
+        let mut store = halfblock_store();
+        store.cache.insert(image_target(), png_bytes(64, 32));
+
+        let (events, pending) = store.take_cached(requests.clone(), &m);
+        assert!(
+            pending.is_empty(),
+            "nothing may be left to fetch: {pending:?}"
+        );
+        assert!(
+            matches!(events[..], [AppEvent::ImageReady { .. }]),
+            "the cached payload must arrive drawable, got {events:?}"
+        );
+        assert!(store.protocol(requests[0].link).is_some());
+    }
+
+    #[test]
+    fn an_uncached_picture_still_has_to_be_fetched() {
+        let (m, effects) = image_model();
+        let [Effect::FetchImages(requests)] = &effects[..] else {
+            panic!("expected one FetchImages effect, got {effects:?}");
+        };
+        let mut store = halfblock_store();
+        // A picture from another node under the same name is a different
+        // picture, and must not be served from this entry.
+        store.cache.insert(
+            Target {
+                dest_hash: [0x11; 16],
+                ..image_target()
+            },
+            png_bytes(64, 32),
+        );
+
+        let (events, pending) = store.take_cached(requests.clone(), &m);
+        assert!(events.is_empty());
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn leaving_a_page_keeps_the_cache_but_drops_the_page_holdings() {
+        let (m, _) = image_model();
+        let mut store = halfblock_store();
+        store.accept(1, "antenne.png".to_string(), png_bytes(64, 32), &m);
+        store.cache.insert(image_target(), png_bytes(64, 32));
+
+        store.reset();
+
+        assert!(
+            store.protocol(1).is_none(),
+            "the page's encoded pictures go with the page"
+        );
+        assert!(
+            store.cache.contains(&image_target()),
+            "the cache is what outlives it"
+        );
+    }
+
+    #[test]
+    fn the_cache_budget_comes_from_the_option() {
+        let store = ImageStore {
+            cache: ImageCache::new(2_000_000),
+            ..halfblock_store()
+        };
+        assert_eq!(store.cache.max_bytes(), 2_000_000);
+        // The default budget is what `--image-cache 10` asks for.
+        assert_eq!(
+            ImageStore::default().cache.max_bytes(),
+            crate::image_cache::DEFAULT_MAX_BYTES
+        );
     }
 }

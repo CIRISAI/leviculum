@@ -226,7 +226,11 @@ void lev_free(struct leviculum_t *node);
   still call `lev_builder_free` on the empty handle. `NULL` on failure.
 - `lev_start` spawns the event loop and brings up interfaces; `lev_stop`
   persists state and tears it down; a stopped node can be started again.
-  `lev_start` on a running node returns `LEV_ERR_CONFIG`.
+  `lev_start` on a running node returns `LEV_ERR_CONFIG`, as does starting a
+  node configured to *serve* a shared instance whose name another daemon on
+  the host already serves — `lev_last_error` then carries the instance name.
+  A node meant to *use* the running daemon should connect as a client
+  instead, not serve.
 - `lev_is_running` returns 1 while the loop runs (0 on `NULL`).
 - `lev_identity_hash_self` writes the node's own 16-byte identity hash.
 - `lev_free` stops a running node and releases it (`lev_free(NULL)` is a
@@ -425,6 +429,13 @@ int  lev_event_dropped_count(const struct lev_event_t *ev, uint64_t *out);
 int  lev_event_msgtype(const struct lev_event_t *ev, uint16_t *out);
 int  lev_event_sequence(const struct lev_event_t *ev, uint16_t *out);
 int  lev_event_is_sender(const struct lev_event_t *ev);
+int  lev_event_interface_id(const struct lev_event_t *ev, uint64_t *out);
+int  lev_event_close_reason(const struct lev_event_t *ev, int *out);
+int  lev_event_delivery_error(const struct lev_event_t *ev, int *out);
+int  lev_event_transfer_size(const struct lev_event_t *ev, uint64_t *out);
+int  lev_event_data_size(const struct lev_event_t *ev, uint64_t *out);
+int  lev_event_segment_index(const struct lev_event_t *ev, uint32_t *out);
+int  lev_event_total_segments(const struct lev_event_t *ev, uint32_t *out);
 ```
 
 - `lev_event_fd` returns the readable fd to add to a `poll`/`epoll`/`select`
@@ -446,42 +457,90 @@ int  lev_event_is_sender(const struct lev_event_t *ev);
   write the message type and sequence of a `LEV_EVENT_LINK_MESSAGE` event. An
   accessor that does not apply to the event type returns `LEV_ERR_INVALID_ARG`.
 - `lev_event_is_sender` returns 1 on the sender side of a resource event
-  (`_PROGRESS`/`_COMPLETED`/`_FAILED`), 0 on the receiver side (or for other
-  events). A sender's `LEV_EVENT_RESOURCE_COMPLETED` (empty data) signals that
-  an outgoing transfer finished; a receiver's carries the data. A node that both
-  sends and receives resources uses this to tell the two apart.
+  (`_PROGRESS`/`_COMPLETED`/`_FAILED`), 0 on the receiver side. A sender's
+  `LEV_EVENT_RESOURCE_COMPLETED` (empty data) signals that an outgoing transfer
+  finished; a receiver's carries the data. A node that both sends and receives
+  resources uses this to tell the two apart. `LEV_EVENT_RESOURCE_STARTED` is not
+  in that list because the engine emits it on the receiver only, so 0 there is
+  the truth rather than a gap. One non-resource event also sets the flag:
+  `LEV_EVENT_LINK_ESTABLISHED` returns 1 for a link this node initiated and 0
+  for an inbound one. Everything else returns 0.
+- `lev_event_interface_id` writes the node-assigned id of the interface an
+  `_ANNOUNCE_RECEIVED`, `_PATH_FOUND` or `_PACKET_RECEIVED` event arrived on.
+  It is an **id, not a position**: resolve it by walking
+  `lev_interface_stats_snapshot` and comparing `lev_interface_stats_id`. It is
+  the same numbering `lev_path_table_entry` reports as `interface_index`.
+- `lev_event_close_reason` writes one of the `LEV_CLOSE_*` constants for a
+  `LEV_EVENT_LINK_CLOSED` event. The reason decides how to reconnect:
+  `LEV_CLOSE_BLACKHOLED` must not be retried at all, `LEV_CLOSE_TIMEOUT` wants
+  the path re-resolved first.
+- `lev_event_delivery_error` writes one of the `LEV_DELIVERY_*` constants for a
+  `LEV_EVENT_DELIVERY_FAILED` event. `_TIMEOUT` and `_LINK_FAILED` mean re-send;
+  `_INVALID_PROOF` means the peer answered with a proof that did not verify, so
+  a re-send produces the same result and the destination's identity needs
+  re-resolving instead.
+- `lev_event_transfer_size` and `lev_event_data_size` write the encrypted
+  transfer size and the uncompressed payload size of a resource, on
+  `LEV_EVENT_RESOURCE_ADVERTISED` (what the accept-or-reject decision turns on)
+  and on `LEV_EVENT_RESOURCE_PROGRESS` (the only place an auto-accepting
+  receiver sees them, since no advertisement is surfaced under `ACCEPT_ALL`).
+- `lev_event_segment_index` and `lev_event_total_segments` write the 1-based
+  position of a `LEV_EVENT_RESOURCE_COMPLETED` segment and how many segments the
+  transfer has. A multi-segment resource fires one completion per segment under
+  the same `resource_hash`, so these are how a receiver orders the chunks and
+  recognises the last one (`segment_index == total_segments`); metadata is
+  present on segment 1 only.
+
+| Constant | Value | Link close reason |
+| --- | --- | --- |
+| `LEV_CLOSE_NORMAL` | 0 | closed deliberately; reconnect freely |
+| `LEV_CLOSE_TIMEOUT` | 1 | handshake did not complete; re-resolve the path |
+| `LEV_CLOSE_INVALID_PROOF` | 2 | a proof did not verify |
+| `LEV_CLOSE_PEER_CLOSED` | 3 | the peer closed it |
+| `LEV_CLOSE_STALE` | 4 | inactive past the keepalive deadline |
+| `LEV_CLOSE_CHANNEL_EXHAUSTED` | 5 | a channel message ran out of retries |
+| `LEV_CLOSE_BLACKHOLED` | 6 | peer is blackholed; **do not retry** |
+| `LEV_CLOSE_OTHER` | 255 | a reason this ABI version does not name |
+
+| Constant | Value | Delivery failure |
+| --- | --- | --- |
+| `LEV_DELIVERY_TIMEOUT` | 0 | no proof before the receipt expired; re-send |
+| `LEV_DELIVERY_LINK_FAILED` | 1 | the carrying link failed; re-send |
+| `LEV_DELIVERY_INVALID_PROOF` | 2 | proof did not verify; re-resolve the identity |
+| `LEV_DELIVERY_OTHER` | 255 | a failure this ABI version does not name |
 
 ### Event types
 
 | Constant | Value | Fields available |
 | --- | --- | --- |
 | `LEV_EVENT_OTHER` | 0 | catch-all for events without a typed projection |
-| `LEV_EVENT_ANNOUNCE_RECEIVED` | 1 | dest_hash, data (app_data) |
-| `LEV_EVENT_PATH_FOUND` | 2 | dest_hash |
+| `LEV_EVENT_ANNOUNCE_RECEIVED` | 1 | dest_hash, data (app_data), interface_id |
+| `LEV_EVENT_PATH_FOUND` | 2 | dest_hash, interface_id |
 | `LEV_EVENT_LINK_REQUEST` | 3 | link_id, dest_hash |
-| `LEV_EVENT_LINK_ESTABLISHED` | 4 | link_id |
-| `LEV_EVENT_LINK_CLOSED` | 5 | link_id |
+| `LEV_EVENT_LINK_ESTABLISHED` | 4 | link_id, dest_hash, is_sender |
+| `LEV_EVENT_LINK_CLOSED` | 5 | link_id, dest_hash, close_reason |
 | `LEV_EVENT_LINK_DATA` | 6 | link_id, data |
-| `LEV_EVENT_PACKET_RECEIVED` | 7 | dest_hash, data |
+| `LEV_EVENT_PACKET_RECEIVED` | 7 | dest_hash, data, interface_id |
 | `LEV_EVENT_CONTROL_OVERFLOW` | 8 | dropped_count |
-| `LEV_EVENT_REQUEST_RECEIVED` | 9 | link_id, request_id, path, data |
-| `LEV_EVENT_RESPONSE_RECEIVED` | 10 | link_id, request_id, data |
+| `LEV_EVENT_REQUEST_RECEIVED` | 9 | link_id, dest_hash, request_id, path, data |
+| `LEV_EVENT_RESPONSE_RECEIVED` | 10 | link_id, request_id, data, metadata |
 | `LEV_EVENT_REQUEST_TIMEOUT` | 11 | link_id, request_id |
-| `LEV_EVENT_RESOURCE_ADVERTISED` | 12 | link_id, resource_hash |
+| `LEV_EVENT_RESOURCE_ADVERTISED` | 12 | link_id, resource_hash, transfer_size, data_size |
 | `LEV_EVENT_RESOURCE_STARTED` | 13 | link_id, resource_hash |
-| `LEV_EVENT_RESOURCE_PROGRESS` | 14 | link_id, resource_hash, progress |
-| `LEV_EVENT_RESOURCE_COMPLETED` | 15 | link_id, resource_hash, data, metadata |
-| `LEV_EVENT_RESOURCE_FAILED` | 16 | link_id, resource_hash |
+| `LEV_EVENT_RESOURCE_PROGRESS` | 14 | link_id, resource_hash, progress, transfer_size, data_size, is_sender |
+| `LEV_EVENT_RESOURCE_COMPLETED` | 15 | link_id, resource_hash, data, metadata, segment_index, total_segments, is_sender |
+| `LEV_EVENT_RESOURCE_FAILED` | 16 | link_id, resource_hash, is_sender |
 | `LEV_EVENT_LINK_IDENTIFIED` | 17 | link_id, data (16-byte identity hash) |
 | `LEV_EVENT_LINK_MESSAGE` | 18 | link_id, data, msgtype, sequence (reliable channel) |
-| `LEV_EVENT_PACKET_PROOF_REQUESTED` | 19 | dest_hash, data (32-byte packet hash) |
+| `LEV_EVENT_PACKET_PROOF_REQUESTED` | 19 | dest_hash, data (32-byte packet hash), interface_id |
 | `LEV_EVENT_LINK_PROOF_REQUESTED` | 20 | link_id, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_DELIVERY_CONFIRMED` | 21 | link_id, data (32-byte packet hash) |
 | `LEV_EVENT_LINK_STALE` | 22 | link_id (link inactive past keepalive) |
 | `LEV_EVENT_LINK_RECOVERED` | 23 | link_id (stale link resumed) |
 | `LEV_EVENT_PATH_LOST` | 24 | dest_hash (path expired) |
 | `LEV_EVENT_PACKET_DELIVERY_CONFIRMED` | 25 | data (16-byte packet hash) |
-| `LEV_EVENT_DELIVERY_FAILED` | 26 | data (16-byte packet hash) |
+| `LEV_EVENT_DELIVERY_FAILED` | 26 | data (16-byte packet hash), delivery_error |
+| `LEV_EVENT_LINK_DELIVERY_FAILED` | 27 | link_id, data (32-byte packet hash) |
 
 ## Diagnostics
 
@@ -505,6 +564,8 @@ int  lev_interface_stats_name(const struct lev_interface_stats_t *table, uintptr
 int  lev_interface_stats_entry(const struct lev_interface_stats_t *table, uintptr_t index,
                                int *online, int *is_local_client,
                                uint64_t *rx_bytes, uint64_t *tx_bytes);
+int  lev_interface_stats_id(const struct lev_interface_stats_t *table, uintptr_t index,
+                            uint64_t *out_id);
 void lev_interface_stats_free(struct lev_interface_stats_t *table);
 ```
 
@@ -528,6 +589,12 @@ void lev_interface_stats_free(struct lev_interface_stats_t *table);
   (variable length), and `lev_interface_stats_entry` reads the scalar fields
   (`online`, `is_local_client`, `rx_bytes`, `tx_bytes`) into out-parameters.
   Both return `LEV_ERR_INVALID_ARG` for an out-of-range index.
+- `lev_interface_stats_id` reads the node-assigned id of the interface at a
+  position. The position is not the identity: the node numbers interfaces as
+  they are registered and never renumbers, so a removed interface leaves a gap.
+  This is the accessor that resolves the ids the rest of the API hands out —
+  `lev_path_table_entry`'s `interface_index` and `lev_event_interface_id` — to an
+  entry whose name and counters can be read.
 
 ## Helpers
 

@@ -35,15 +35,31 @@ const FAILURE_EVENTS: &[&str] = &[
     "LEV_EVENT_LINK_RECOVERED",
     "LEV_EVENT_PATH_LOST",
     "LEV_EVENT_DELIVERY_FAILED",
+    "LEV_EVENT_LINK_DELIVERY_FAILED",
 ];
 
 /// Failure events not triggerable cleanly in-process, each with its reason.
 const UNTRIGGERABLE_EVENTS: &[(&str, &str)] = &[
     (
         "LEV_EVENT_DELIVERY_FAILED",
-        "engine #76 mis-fires this on valid remote-delivery proofs; no clean \
-         invalid-proof trigger is exposed by the C API, so it is documented \
-         rather than tested against buggy behaviour",
+        "needs a peer that answers with an unverifiable proof, or a receipt left \
+         to expire; the C API exposes no way to make either happen on demand. \
+         The engine side is covered instead, by leviculum-core's \
+         an_unverifiable_proof_is_invalid_proof_not_link_failed, and the \
+         projection of its discriminant by \
+         every_delivery_error_reaches_c_as_its_own_constant. (The earlier reason \
+         here said engine #76 mis-fires this on VALID proofs — that was fixed by \
+         the recalled-identity fallback in node/mod.rs and had gone stale.)",
+    ),
+    (
+        "LEV_EVENT_LINK_DELIVERY_FAILED",
+        "needs a link packet's receipt left to expire past its RTT-derived \
+         deadline (max(rtt * 6, TRAFFIC_TIMEOUT_MIN_MS)); the C API exposes no \
+         clock control to make that happen on demand, the same limitation as \
+         LEV_EVENT_DELIVERY_FAILED above. The engine side is covered by \
+         leviculum-core's raw_link_receipt_deadline_is_derived_from_rtt, \
+         raw_link_receipt_can_outlive_the_old_fixed_timeout, and \
+         late_raw_link_proof_is_ignored_after_rtt_deadline.",
     ),
     (
         "LEV_EVENT_LINK_RECOVERED",

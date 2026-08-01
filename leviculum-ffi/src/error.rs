@@ -97,7 +97,12 @@ pub(crate) fn map_error(e: &leviculum_std::Error) -> c_int {
     set_last_error(e.to_string());
     match e {
         Error::Io(_) | Error::Storage(_) => LEV_ERR_IO,
-        Error::Config(_) => LEV_ERR_CONFIG,
+        // A taken instance name is a configuration problem from the
+        // caller's side — the remedy is a different `instance_name`, or
+        // stopping the daemon that holds it — so it shares LEV_ERR_CONFIG
+        // rather than adding a code to the C ABI. The specific sentence
+        // still reaches the caller through the detail string set above.
+        Error::Config(_) | Error::SharedInstanceNameInUse { .. } => LEV_ERR_CONFIG,
         Error::Serialization(_) => LEV_ERR_INVALID_ARG,
         Error::NotRunning => LEV_ERR_NOT_RUNNING,
         // Surface "no path" distinctly so callers can branch on it.

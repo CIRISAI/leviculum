@@ -36,13 +36,14 @@ pub mod remote_status;
 pub mod resource_policy;
 pub mod reticulum;
 pub(crate) mod rpc;
+pub mod socket_hook;
 pub(crate) mod storage;
 pub(crate) mod sync_ext;
 pub mod test_support;
 
 // Re-export commonly used core types for the high-level API
 pub use leviculum_core::node::{DeliveryError, EventClass, LinkStats, NodeEvent};
-pub use leviculum_core::transport::PathTableExport;
+pub use leviculum_core::transport::{InterfaceId, PathTableExport};
 pub use leviculum_core::{
     AnnounceError, Destination, DestinationHash, DestinationType, Direction, Identity,
     LinkCloseReason, LinkError, LinkId, PeerKeys, ProofStrategy, ReceivedAnnounce, SendError,

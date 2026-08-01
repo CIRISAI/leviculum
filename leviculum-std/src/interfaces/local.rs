@@ -296,6 +296,7 @@ fn spawn_local_interface_from_stream(
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Local,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -306,6 +307,33 @@ fn spawn_local_interface_from_stream(
         // immediately.
         ready: super::ReadySignal::ready_immediate(),
     }
+}
+
+/// Name the socket a failed shared-instance connect was aiming at, and, when
+/// nothing was listening there, what to do about it.
+///
+/// The raw error is `Connection refused (os error 111)` with no hint of what
+/// was being connected to, which every client of the shared instance
+/// (`lblogd`, `lnomad`, `lncp`, `lnstatus`) then surfaces verbatim. Naming
+/// the socket also makes an `instance_name` mismatch visible: the socket in
+/// the message is the one the client wanted, so it can be compared against
+/// what the daemon actually listens on. The error kind is preserved so
+/// callers matching on it keep working.
+fn absent_daemon_error(source: io::Error, abstract_name: &str) -> io::Error {
+    // NotFound is the same condition on the non-Linux filesystem-socket path.
+    let nobody_listening = matches!(
+        source.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+    );
+    let message = if nobody_listening {
+        format!(
+            "no local Leviculum daemon reachable over IPC socket \"{abstract_name}\": \
+             is lnsd or rnsd running?"
+        )
+    } else {
+        format!("IPC socket \"{abstract_name}\": {source}")
+    };
+    io::Error::new(source.kind(), message)
 }
 
 /// Connect to an existing shared instance daemon as a client.
@@ -326,7 +354,8 @@ pub(crate) fn spawn_local_client(
 ) -> Result<InterfaceHandle, io::Error> {
     let abstract_name = format!("rns/{}", instance_name);
 
-    let std_stream = connect_local(&abstract_name)?;
+    let std_stream =
+        connect_local(&abstract_name).map_err(|e| absent_daemon_error(e, &abstract_name))?;
     std_stream.set_nonblocking(true)?;
     let stream = LocalStream::from_std(std_stream)?;
 
@@ -351,6 +380,7 @@ pub(crate) fn spawn_local_client(
             bitrate: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Local,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -451,6 +481,43 @@ mod tests {
     fn test_connect(instance_name: &str) -> std::os::unix::net::UnixStream {
         let abstract_name = format!("rns/{}", instance_name);
         connect_local(&abstract_name).unwrap()
+    }
+
+    /// The bare `Connection refused` a failed connect produces says nothing
+    /// about what was being connected to, which turns a missing or
+    /// misnamed daemon into a mystery for every client of the shared
+    /// instance. The message has to name the socket and the fix.
+    #[tokio::test]
+    async fn absent_daemon_error_names_the_socket_and_the_daemons() {
+        let instance_name = format!("no_such_instance_{}", std::process::id());
+        // InterfaceHandle is not Debug, so unwrap the Result by hand.
+        let Err(err) = spawn_local_client(InterfaceId(1), &instance_name, 16) else {
+            panic!("no daemon listens on this name, connecting must fail");
+        };
+
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("rns/{instance_name}")),
+            "must name the socket, so a wrong instance_name is visible: {message}"
+        );
+        assert!(
+            message.contains("lnsd") && message.contains("rnsd"),
+            "must say which daemon to start: {message}"
+        );
+        // The underlying connect error differs by platform — Linux's abstract
+        // namespace refuses an unbound name (ConnectionRefused), while the
+        // filesystem-socket fallback on other Unixes fails to find the path
+        // (NotFound). The invariant is that whichever kind the platform
+        // produced survives the rewrap, not that every platform is Linux.
+        #[cfg(target_os = "linux")]
+        let expected_kind = io::ErrorKind::ConnectionRefused;
+        #[cfg(not(target_os = "linux"))]
+        let expected_kind = io::ErrorKind::NotFound;
+        assert_eq!(
+            err.kind(),
+            expected_kind,
+            "the error kind must survive the rewrap"
+        );
     }
 
     #[tokio::test]

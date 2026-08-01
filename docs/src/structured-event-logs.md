@@ -27,6 +27,71 @@ Records that don't carry an `event = "..."` field are silently
 dropped, so the legacy printf-style `tracing::debug!("[FOO] ...")`
 sites stay valid alongside the converted ones.
 
+## Per-packet journey contract
+
+The packet-level events `PKT_TX`, `PKT_RX`, `PKT_FORWARD`, `PKT_DROP`
+and `DEDUP_DROP` form the journey contract an external collector uses
+to stitch one packet's path across nodes:
+
+- They are emitted on the dedicated tracing target
+  `leviculum_core::pkt` (DEBUG), so a collector can enable exactly this
+  stream via `RUST_LOG=leviculum_core::pkt=debug` without the rest of
+  the transport noise.  The event-log layer sees every record
+  regardless of target.
+- Each carries `ph`, the first 16 hex chars of the dedup packet hash
+  (SHA-256 over the hashable part, which strips `hops` and
+  `transport_id`).  `ph` is therefore stable across hops and across
+  Type1/Type2 header conversion: the same value appears in the
+  sender's `PKT_TX`, every relay's `PKT_RX`/`PKT_FORWARD` and the
+  receiver's `PKT_RX`, or in the `PKT_DROP`/`DEDUP_DROP` where the
+  packet died.
+- `PKT_DROP` renders its `reason` as the kebab-case `DropReason`
+  (`no-path`, `plain-group-multihop`, `forward-max-hops`,
+  `same-interface-relay`, ...).
+- `same-interface-relay` is the one drop reason that reports a
+  DELIBERATE non-forward: on a shared medium a relay's only outbound
+  interface can be the one the packet arrived on, and putting it back on
+  that air is suppressed on purpose.  It is still where the packet died,
+  and a journey that simply stopped at the relay's `PKT_RX` could not be
+  told apart from a lost log line, so the suppression emits a `PKT_DROP`
+  with the arrival interface as `iface_in`.  Seeing it is not an error.
+- `PKT_TX` on a `Broadcast` action reports `iface=bcast`: the sans-I/O
+  core does not know the concrete interface set the driver expands the
+  broadcast to; journeys stitch by `ph`.
+- `PKT_TX` and `PKT_RX` both carry `hops`, but they are counted at
+  different points and the difference is the contract:
+  - `PKT_TX hops` is the hop count of the packet **as transmitted** —
+    the byte that goes on the wire, read from the packed buffer being
+    handed to the driver.
+  - `PKT_RX hops` is the hop count **after receipt**, i.e. after the
+    receiver's increment (`Transport::incoming_hop_count`, mirroring
+    Python `Transport.py:1457`).
+
+  So for one `ph` crossing one radio hop, `rx hops = tx hops + 1`.  A
+  collector reads a journey's DIRECTION from exactly that relation: the
+  node observing the packet at the lower hop count transmitted it, the
+  node at one more heard that transmission.  Without `hops` on
+  `PKT_TX`, a node that ORIGINATES a packet (a firmware node, or a
+  daemon's own announces, path requests and link proofs) contributes no
+  hop count at all and drops out of that relation.
+
+  The relation is deliberately +1 only for a real medium crossing.  Over
+  the local-IPC hop — a `LocalClient` interface, or the uplink to a
+  shared instance — `incoming_hop_count` undoes its own increment, so
+  there `rx hops = tx hops`.  That is Python's behaviour (`Transport.py`
+  :1481-1484) and it is correct: the IPC hop is not a network hop.  A
+  collector pairing on `+1` therefore ignores IPC hops, which is what it
+  should do.
+- The hash is never computed twice for one packet: emission sites
+  reuse the dedup/cache hash where it exists and otherwise hash only
+  while the `leviculum_core::pkt` target is enabled.  With the target
+  disabled the whole contract is zero-cost.
+- Deliberate exclusions: the high-volume overheard drop
+  (`overheard-transport-id`) and IFAC drops stay counter-only
+  (`PKT_DROP_SUMMARY`); announce-pipeline drops (replay, rate-limit,
+  ingress-burst, over-max-hops, blackhole) are covered by the
+  announce event family and the summary counters.
+
 ## Architecture
 
 **All test threads, including tokio multi-thread workers, route

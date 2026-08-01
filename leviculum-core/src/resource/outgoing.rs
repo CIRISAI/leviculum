@@ -34,6 +34,133 @@ use crate::resource::{
 /// (the first segment's resource hash) and the same total `data_size`, matching
 /// Python `RNS.Resource` segmentation so a Python `rncp` receiver reassembles
 /// the file.
+/// The link-derived inputs a resource build needs, detached from the [`Link`]
+/// so the CPU-heavy build (compress + encrypt + hash) can run **outside** the
+/// node lock (leviculum#29). Captured under the lock via
+/// `Link::resource_crypt_params()`, consumed off-lock by
+/// [`prepare_resource_send`](crate::resource::prepare_resource_send);
+/// [`commit_resource_send`](crate::node::NodeCore::commit_resource_send)
+/// re-validates the token key so a mid-build re-key can never ship ciphertext
+/// under a stale key.
+pub struct ResourceCryptParams {
+    pub(crate) active: bool,
+    pub(crate) negotiated_mtu: u32,
+    pub(crate) mdu: usize,
+    pub(crate) token_key: Option<[u8; 64]>,
+}
+
+impl ResourceCryptParams {
+    /// Token-encrypt `plaintext` exactly as [`Link::encrypt`] would: fresh IV
+    /// from `rng`, then `encrypt_token` under the captured link key.
+    pub(crate) fn encrypt(
+        &self,
+        plaintext: &[u8],
+        output: &mut [u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<usize, crate::link::LinkError> {
+        use crate::link::LinkError;
+        let token_key = self.token_key.as_ref().ok_or(LinkError::InvalidState)?;
+        let mut iv = [0u8; 16];
+        rng.fill_bytes(&mut iv);
+        crate::crypto::encrypt_token(token_key, &iv, plaintext, output)
+            .map_err(|_| LinkError::KeyExchangeFailed)
+    }
+}
+
+/// Everything [`prepare_resource_send`] needs, snapshotted under the node lock
+/// by [`NodeCore::resource_send_params`](crate::node::NodeCore::resource_send_params).
+/// Opaque: fields are crate-internal so the capture/commit contract can evolve.
+pub struct ResourceSendParams {
+    pub(crate) crypt: ResourceCryptParams,
+    pub(crate) link_id: crate::link::LinkId,
+    pub(crate) now_ms: u64,
+}
+
+/// A fully-built (compressed + encrypted + hashed) outgoing resource transfer,
+/// produced OFF the node lock by [`prepare_resource_send`] and installed under
+/// a brief lock by
+/// [`NodeCore::commit_resource_send`](crate::node::NodeCore::commit_resource_send).
+pub struct PreparedResourceSend {
+    pub(crate) kind: PreparedSendKind,
+    /// The token key the ciphertext was built under; commit refuses to install
+    /// if the link has re-keyed since (the peer could never decrypt it).
+    pub(crate) token_key: [u8; 64],
+    pub(crate) link_id: crate::link::LinkId,
+    pub(crate) resource_hash: [u8; 32],
+    pub(crate) adv_bytes: Vec<u8>,
+}
+
+pub(crate) enum PreparedSendKind {
+    Single(OutgoingResource),
+    Split {
+        segment1: OutgoingResource,
+        plan: OutgoingSegmentPlan,
+    },
+}
+
+/// Build an outgoing resource transfer WITHOUT touching the node: the bulk
+/// compress + encrypt + full/map hashing runs against the snapshotted
+/// [`ResourceSendParams`], so the caller (the std driver) does the CPU work
+/// outside the node mutex (leviculum#29). Mirrors the single-vs-split logic of
+/// `NodeCore::send_resource` exactly.
+pub fn prepare_resource_send(
+    params: &ResourceSendParams,
+    data: &[u8],
+    metadata: Option<&[u8]>,
+    auto_compress: bool,
+    rng: &mut impl CryptoRngCore,
+) -> Result<PreparedResourceSend, ResourceError> {
+    use crate::resource::RESOURCE_MAX_EFFICIENT_SIZE;
+
+    let token_key = params.crypt.token_key.ok_or(ResourceError::LinkNotActive)?;
+
+    // The split boundary is the combined metadata+data length, matching
+    // Python (`metadata_size + len(data) > MAX_EFFICIENT_SIZE`). The
+    // metadata block is a 3-byte length prefix plus the metadata bytes.
+    let metadata_size = metadata.map(|m| 3 + m.len()).unwrap_or(0);
+    let total_size = metadata_size + data.len();
+
+    if total_size <= RESOURCE_MAX_EFFICIENT_SIZE {
+        let outgoing = OutgoingResource::new(
+            data,
+            metadata,
+            None,
+            &params.crypt,
+            auto_compress,
+            rng,
+            params.now_ms,
+        )?;
+        Ok(PreparedResourceSend {
+            resource_hash: *outgoing.resource_hash(),
+            adv_bytes: outgoing.adv_packet().to_vec(),
+            kind: PreparedSendKind::Single(outgoing),
+            token_key,
+            link_id: params.link_id,
+        })
+    } else {
+        let total_segments = segment_count(total_size);
+        let mut plan = OutgoingSegmentPlan::new(
+            data.to_vec(),
+            metadata.map(|m| m.to_vec()),
+            metadata_size,
+            total_segments,
+            auto_compress,
+        );
+        let segment1 = plan.build_segment(1, &params.crypt, rng, params.now_ms)?;
+        let resource_hash = *segment1.resource_hash();
+        let adv_bytes = segment1.adv_packet().to_vec();
+        // All later segments carry segment 1's resource hash as `o`.
+        plan.set_original_hash(resource_hash);
+        Ok(PreparedResourceSend {
+            resource_hash,
+            adv_bytes,
+            kind: PreparedSendKind::Split { segment1, plan },
+            token_key,
+            link_id: params.link_id,
+        })
+    }
+}
+
 pub(crate) struct SegmentParams {
     /// 1-based index of this segment.
     pub segment_index: u32,
@@ -115,6 +242,11 @@ pub(crate) struct OutgoingResource {
     retries: usize,
     adv_retries: usize,
     last_activity_ms: u64,
+    /// Explicit advertisement timeout for request Resources.
+    ///
+    /// Python passes the request receipt timeout into `Resource(timeout=...)`.
+    /// Generic Resources leave this unset and derive the timeout from Link RTT.
+    advertisement_timeout_ms: Option<u64>,
     request_id: Option<Vec<u8>>,
     adv_packet: Vec<u8>,
     link_mdu: usize,
@@ -135,7 +267,7 @@ impl OutgoingResource {
         data: &[u8],
         metadata: Option<&[u8]>,
         request_id: Option<&[u8]>,
-        link: &Link,
+        crypt: &ResourceCryptParams,
         auto_compress: bool,
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
@@ -144,11 +276,38 @@ impl OutgoingResource {
             data,
             metadata,
             request_id,
-            link,
+            crypt,
             auto_compress,
             rng,
             now_ms,
             false,
+            None,
+            SegmentParams::single(),
+        )
+    }
+
+    /// Create an outgoing request Resource with its request timeout applied to
+    /// the upload advertisement watchdog.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_request(
+        data: &[u8],
+        request_id: &[u8],
+        link: &Link,
+        auto_compress: bool,
+        timeout_ms: u64,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+    ) -> Result<Self, ResourceError> {
+        Self::new_with_flags(
+            data,
+            None,
+            Some(request_id),
+            &link.resource_crypt_params(),
+            auto_compress,
+            rng,
+            now_ms,
+            false,
+            Some(timeout_ms),
             SegmentParams::single(),
         )
     }
@@ -162,7 +321,7 @@ impl OutgoingResource {
     pub(crate) fn new_segment(
         data: &[u8],
         metadata: Option<&[u8]>,
-        link: &Link,
+        crypt: &ResourceCryptParams,
         auto_compress: bool,
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
@@ -172,11 +331,12 @@ impl OutgoingResource {
             data,
             metadata,
             None,
-            link,
+            crypt,
             auto_compress,
             rng,
             now_ms,
             false,
+            None,
             seg,
         )
     }
@@ -193,7 +353,7 @@ impl OutgoingResource {
         data: &[u8],
         metadata: Option<&[u8]>,
         request_id: Option<&[u8]>,
-        link: &Link,
+        crypt: &ResourceCryptParams,
         auto_compress: bool,
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
@@ -202,11 +362,12 @@ impl OutgoingResource {
             data,
             metadata,
             request_id,
-            link,
+            crypt,
             auto_compress,
             rng,
             now_ms,
             true,
+            None,
             SegmentParams::single(),
         )
     }
@@ -216,19 +377,20 @@ impl OutgoingResource {
         data: &[u8],
         metadata: Option<&[u8]>,
         request_id: Option<&[u8]>,
-        link: &Link,
+        crypt: &ResourceCryptParams,
         auto_compress: bool,
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
         is_response: bool,
+        advertisement_timeout_ms: Option<u64>,
         seg: SegmentParams,
     ) -> Result<Self, ResourceError> {
-        if !link.is_active() {
+        if !crypt.active {
             return Err(ResourceError::LinkNotActive);
         }
 
-        let sdu = resource_sdu(link.negotiated_mtu());
-        let link_mdu = link.mdu();
+        let sdu = resource_sdu(crypt.negotiated_mtu);
+        let link_mdu = crypt.mdu;
 
         // Build combined = metadata_prefix + data
         // Python line 264: struct.pack(">I", metadata_size)[1:] + packed_metadata
@@ -295,7 +457,7 @@ impl OutgoingResource {
         // Encrypt via link
         let enc_size = Link::encrypted_size(plaintext.len());
         let mut encrypted = vec![0u8; enc_size];
-        let written = link
+        let written = crypt
             .encrypt(&plaintext, &mut encrypted, rng)
             .map_err(|_| ResourceError::CryptoError)?;
         encrypted.truncate(written);
@@ -414,7 +576,9 @@ impl OutgoingResource {
             encrypted: true,
             compressed,
             split: seg.total_segments > 1,
-            is_request: false,
+            // Python marks a Resource carrying a request_id as a request unless
+            // it was explicitly constructed as a response.
+            is_request: request_id.is_some() && !is_response,
             is_response,
             has_metadata,
         };
@@ -456,6 +620,7 @@ impl OutgoingResource {
             retries: 0,
             adv_retries: 0,
             last_activity_ms: now_ms,
+            advertisement_timeout_ms,
             request_id: request_id.map(|r| r.to_vec()),
             adv_packet,
             link_mdu,
@@ -718,7 +883,10 @@ impl OutgoingResource {
         match self.status {
             ResourceStatus::Advertised => {
                 // Python Resource.py:571: timeout + PROCESSING_GRACE
-                let timeout = rtt_ms.saturating_mul(6) + PROCESSING_GRACE_MS;
+                let timeout = self
+                    .advertisement_timeout_ms
+                    .unwrap_or_else(|| rtt_ms.saturating_mul(6))
+                    .saturating_add(PROCESSING_GRACE_MS);
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.adv_retries += 1;
                     crate::tracing::debug!(
@@ -829,8 +997,11 @@ impl OutgoingResource {
         let rtt_ms = core::cmp::max(rtt_ms, 1);
         match self.status {
             ResourceStatus::Advertised => Some(
-                self.last_activity_ms
-                    .saturating_add(rtt_ms.saturating_mul(6) + PROCESSING_GRACE_MS),
+                self.last_activity_ms.saturating_add(
+                    self.advertisement_timeout_ms
+                        .unwrap_or_else(|| rtt_ms.saturating_mul(6))
+                        .saturating_add(PROCESSING_GRACE_MS),
+                ),
             ),
             ResourceStatus::Transferring => {
                 let timeout_factor = if self.req_received {
@@ -1035,7 +1206,7 @@ impl OutgoingSegmentPlan {
     pub(crate) fn build_segment(
         &self,
         index: u32,
-        link: &Link,
+        crypt: &ResourceCryptParams,
         rng: &mut impl CryptoRngCore,
         now_ms: u64,
     ) -> Result<OutgoingResource, ResourceError> {
@@ -1056,7 +1227,7 @@ impl OutgoingSegmentPlan {
             force_has_metadata: self.metadata_size > 0,
         };
 
-        OutgoingResource::new_segment(slice, metadata, link, self.auto_compress, rng, now_ms, seg)
+        OutgoingResource::new_segment(slice, metadata, crypt, self.auto_compress, rng, now_ms, seg)
     }
 
     /// Advance the plan to the next segment after one has been advertised.
@@ -1112,7 +1283,16 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let data = b"Hello, Resource!";
 
-        let res = OutgoingResource::new(data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let res = OutgoingResource::new(
+            data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         assert_eq!(res.status(), ResourceStatus::Advertised);
         assert_eq!(res.num_parts, 1); // small data = 1 part
@@ -1125,7 +1305,16 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let data = b"Test data for advertisement roundtrip";
 
-        let res = OutgoingResource::new(data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let res = OutgoingResource::new(
+            data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Verify the cached ADV unpacks correctly
         let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
@@ -1138,14 +1327,85 @@ mod tests {
     }
 
     #[test]
+    fn test_request_resource_uses_caller_advertisement_timeout_and_python_flags() {
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+        let request_id = [0x31; crate::constants::TRUNCATED_HASHBYTES];
+        let sent_at_ms = 1_000;
+        let timeout_ms = 275;
+        let mut res = OutgoingResource::new_request(
+            b"large request body",
+            &request_id,
+            &link,
+            true,
+            timeout_ms,
+            &mut rng,
+            sent_at_ms,
+        )
+        .unwrap();
+
+        let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
+        assert!(adv.flags.is_request);
+        assert!(!adv.flags.is_response);
+        assert!(!adv.flags.split);
+        assert_eq!(adv.segment_index, 1);
+        assert_eq!(adv.total_segments, 1);
+        assert_eq!(adv.request_id.as_deref(), Some(request_id.as_slice()));
+
+        let expected_deadline = sent_at_ms + timeout_ms + PROCESSING_GRACE_MS;
+        assert_eq!(res.next_deadline(10_000), Some(expected_deadline));
+        assert!(matches!(
+            res.poll(expected_deadline - 1, 10_000),
+            ResourcePollResult::Nothing
+        ));
+        assert!(matches!(
+            res.poll(expected_deadline, 10_000),
+            ResourcePollResult::RetransmitAdv(_)
+        ));
+    }
+
+    #[test]
+    fn test_response_resource_uses_python_flags() {
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+        let request_id = [0x52; crate::constants::TRUNCATED_HASHBYTES];
+        let res = OutgoingResource::new_response(
+            b"response body",
+            None,
+            Some(&request_id),
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1_000,
+        )
+        .unwrap();
+
+        let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
+        assert!(!adv.flags.is_request);
+        assert!(adv.flags.is_response);
+        assert!(!adv.flags.split);
+        assert_eq!(adv.segment_index, 1);
+        assert_eq!(adv.total_segments, 1);
+        assert_eq!(adv.request_id.as_deref(), Some(request_id.as_slice()));
+    }
+
+    #[test]
     fn test_outgoing_resource_with_metadata() {
         let (link, _) = make_test_link();
         let mut rng = rand_core::OsRng;
         let data = b"data with metadata";
         let metadata = b"some metadata";
 
-        let res =
-            OutgoingResource::new(data, Some(metadata), None, &link, true, &mut rng, 1000).unwrap();
+        let res = OutgoingResource::new(
+            data,
+            Some(metadata),
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
         assert!(adv.flags.has_metadata);
@@ -1157,7 +1417,16 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let data = b"proof test data";
 
-        let mut res = OutgoingResource::new(data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Forge a valid proof: resource_hash + expected_proof
         let mut valid_proof = Vec::new();
@@ -1175,7 +1444,16 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let data = b"proof test data";
 
-        let mut res = OutgoingResource::new(data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Invalid proof
         let bad_proof = [0u8; 64];
@@ -1191,7 +1469,16 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let data = b"timeout test";
 
-        let mut res = OutgoingResource::new(data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Not timed out yet
         let result = res.poll(1000, 100);
@@ -1220,8 +1507,16 @@ mod tests {
         let mut data = vec![0u8; 2000];
         OsRng.fill_bytes(&mut data);
 
-        let mut res =
-            OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
         assert!(res.parts.len() >= 2, "need multi-part resource");
 
         // Build a partial REQ requesting only the first part to keep status=Transferring.
@@ -1281,8 +1576,16 @@ mod tests {
         // Small data, fits in few parts so all get sent in one REQ
         let data = vec![0x42u8; 200];
 
-        let mut res =
-            OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Build full REQ requesting all parts
         let mut req = Vec::new();
@@ -1349,8 +1652,16 @@ mod tests {
         let mut data = vec![0u8; 2000];
         OsRng.fill_bytes(&mut data);
 
-        let mut res =
-            OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
         let total = res.parts.len();
         assert!(total >= 2, "need multi-part resource");
 
@@ -1402,8 +1713,16 @@ mod tests {
         let (link, _) = make_test_link();
         let mut rng = rand_core::OsRng;
         let data = vec![0x42u8; 200];
-        let mut res =
-            OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
         let rh_prefix = {
             let mut s = String::new();
             for b in &res.resource_hash[..4] {
@@ -1455,7 +1774,16 @@ mod tests {
         // Create data large enough for multiple parts
         let data = vec![0x42u8; 2000];
 
-        let res = OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Verify each part's map_hash matches
         for (i, part) in res.parts.iter().enumerate() {
@@ -1471,9 +1799,16 @@ mod tests {
         let data = b"accessor test data";
         let request_id = b"req-42";
 
-        let mut res =
-            OutgoingResource::new(data, None, Some(request_id), &link, true, &mut rng, 1000)
-                .unwrap();
+        let mut res = OutgoingResource::new(
+            data,
+            None,
+            Some(request_id),
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Protocol state fields accessible via accessors
         assert!(res.flags().encrypted);
@@ -1496,8 +1831,16 @@ mod tests {
         let mut rng = rand_core::OsRng;
         let data = vec![0x42u8; 200];
 
-        let mut res =
-            OutgoingResource::new(&data, None, None, &link, true, &mut rng, 1000).unwrap();
+        let mut res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            true,
+            &mut rng,
+            1000,
+        )
+        .unwrap();
 
         // Build full REQ requesting all parts → transition to AwaitingProof
         let mut req = Vec::new();

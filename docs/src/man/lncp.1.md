@@ -36,7 +36,7 @@ In send mode, **lncp** sends *file* to the node identified by *destination* (a 3
 :   Listen for incoming transfer requests.
 
 **-w** *seconds*
-:   Sender timeout before giving up (default: 15).
+:   Time out the fetch or transfer phase after this many seconds, counted from the moment the link is established (link establishment has its own internal budget). There is no timeout by default: slow transports such as LoRa need none, so set this only when you want a hard wall-clock bound.
 
 **-s**, **--save** *dir*
 :   Save received files in the specified directory.
@@ -46,6 +46,9 @@ In send mode, **lncp** sends *file* to the node identified by *destination* (a 3
 
 **-n**, **--no-auth**
 :   Accept requests from anyone (no authentication).
+
+**-a** *hash*
+:   Allow a specific identity hash. May be given more than once.
 
 **-b** *interval*
 :   Announce interval in seconds. -1 = never, 0 = once at startup, N = every N seconds (default: 0).
@@ -57,7 +60,7 @@ In send mode, **lncp** sends *file* to the node identified by *destination* (a 3
 :   Path to identity file to use.
 
 **-S**, **--silent**
-:   Disable transfer progress output.
+:   Fully silent: no progress output and no log output at all, equivalent to **-qq**.
 
 **-C**, **--no-compress**
 :   Disable automatic compression.
@@ -70,6 +73,9 @@ In send mode, **lncp** sends *file* to the node identified by *destination* (a 3
 
 **-j** *path*
 :   Restrict fetch requests to the specified path.
+
+**-P**, **--phy-rates**
+:   Display physical layer transfer rates.
 
 ## EXAMPLES
 

@@ -516,7 +516,7 @@ fn build_announce_for(identity: &Identity, aspect: &str) -> (Vec<u8>, Destinatio
     )
     .expect("create destination");
     let packet = dest
-        .announce(Some(b"parity"), &mut OsRng, now_ms())
+        .announce(Some(b"parity"), &mut OsRng, now_ms(), now_ms() / 1000)
         .expect("create announce");
     let mut raw = [0u8; MTU];
     let size = packet.pack(&mut raw).expect("pack announce");

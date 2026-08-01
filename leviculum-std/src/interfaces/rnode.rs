@@ -1507,6 +1507,7 @@ where
             bitrate: Some(bitrate),
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            kind: leviculum_core::traits::InterfaceKind::Rnode,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -2145,6 +2146,7 @@ pub(crate) fn spawn_rnode_multi_interface(
                 bitrate: Some(bitrate),
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Rnode,
             },
             incoming: incoming_rx,
             outgoing: outgoing_tx,
@@ -2477,6 +2479,102 @@ mod tests {
             .expect("channel must close within 8s of dropping the handle (detach worked)")
             .expect("closed channel open");
 
+        stub.abort();
+        node.stop().await.expect("stop");
+    }
+
+    // Codeberg #136 follow-up: `InterfaceStatusSnapshot.interface_id` exists so
+    // a caller holding a runtime handle can pair it with a snapshot without
+    // matching on the name. That only holds if the id in the snapshot is the
+    // same id the handle reports, which is what this asserts — together with
+    // the `kind` from #140, since both fields are populated from the same
+    // registry entry and a hot-plugged interface is the case that exercises
+    // the dynamic-registration path rather than the config path.
+    #[tokio::test]
+    async fn test_interface_stats_id_pairs_with_runtime_handle() {
+        use crate::driver::ReticulumNodeBuilder;
+
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(true)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync");
+        node.start().await.expect("start");
+
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(port);
+        let halves: std::sync::Mutex<Option<RNodeChannelHalves>> = std::sync::Mutex::new(Some((
+            Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
+            Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+        )));
+        struct MockFactory(std::sync::Mutex<Option<RNodeChannelHalves>>);
+        impl RNodeChannelFactory for MockFactory {
+            fn open(&self) -> RNodeChannelOpenFuture {
+                let taken = self.0.lock().unwrap().take();
+                Box::pin(async move { taken.ok_or_else(|| "channel already opened".into()) })
+            }
+        }
+
+        let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (closed_tx, _closed_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let stub = tokio::spawn(rnode_firmware_stub_signals(peer, cfg_tx, closed_tx));
+
+        let handle = node
+            .spawn_rnode_channel_interface(RNodeChannelConfig {
+                factory: Arc::new(MockFactory(halves)),
+                frequency: 868_000_000,
+                bandwidth: 125_000,
+                tx_power: 17,
+                sf: 7,
+                cr: 5,
+                st_alock: None,
+                lt_alock: None,
+                flow_control: false,
+                buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
+            })
+            .expect("attach must succeed on a running node");
+        tokio::time::timeout(Duration::from_secs(8), cfg_rx.recv())
+            .await
+            .expect("interface must reach configured within 8s")
+            .expect("cfg channel open");
+
+        // The snapshot list must contain exactly the handle's id, and that
+        // entry must be the radio (not some other interface that happened to
+        // land on the same index).
+        let mut entry = None;
+        for _ in 0..80 {
+            entry = node
+                .interface_stats()
+                .into_iter()
+                .find(|e| e.interface_id == handle.id());
+            if entry.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let entry = entry.unwrap_or_else(|| {
+            panic!(
+                "no snapshot carried the handle's id {:?}; snapshots = {:?}",
+                handle.id(),
+                node.interface_stats()
+                    .iter()
+                    .map(|e| (e.interface_id, e.name.clone()))
+                    .collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            entry.kind,
+            leviculum_core::traits::InterfaceKind::Rnode,
+            "the entry paired by id must be the hot-plugged radio"
+        );
+        assert!(
+            entry.name.starts_with("rnode_channel_"),
+            "paired entry name should be the radio's, got {:?}",
+            entry.name
+        );
+
+        handle.detach();
         stub.abort();
         node.stop().await.expect("stop");
     }

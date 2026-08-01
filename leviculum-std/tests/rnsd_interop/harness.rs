@@ -2315,6 +2315,288 @@ impl TestDaemon {
 
         Ok(resources)
     }
+
+    /// Send `RNS.Packet(link, data)` from the Python side and keep the
+    /// PacketReceipt for status polling. Returns `(receipt_id, packet_hash)`.
+    pub async fn send_on_link_tracked(
+        &self,
+        link_hash: &str,
+        data: &[u8],
+    ) -> Result<(String, String), HarnessError> {
+        let result = self
+            .query(
+                "send_on_link_tracked",
+                serde_json::json!({
+                    "link_hash": link_hash,
+                    "data": hex::encode(data),
+                }),
+            )
+            .await?;
+        let receipt_id = result
+            .get("receipt_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HarnessError::ParseError("Missing receipt_id".to_string()))?
+            .to_string();
+        let packet_hash = result
+            .get("packet_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HarnessError::ParseError("Missing packet_hash".to_string()))?
+            .to_string();
+        Ok((receipt_id, packet_hash))
+    }
+
+    /// Poll the status of a tracked PacketReceipt: SENT / DELIVERED / FAILED.
+    pub async fn get_receipt_status(&self, receipt_id: &str) -> Result<String, HarnessError> {
+        let result = self
+            .query(
+                "get_receipt_status",
+                serde_json::json!({ "receipt_id": receipt_id }),
+            )
+            .await?;
+        result
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| HarnessError::ParseError("Missing status".to_string()))
+    }
+
+    /// Issue a Python-side `Link.request()` (non-blocking). `data` must be a
+    /// single msgpack value (Python packs bytes via umsgpack before the call
+    /// site, so pass the raw bytes here; the daemon sends them as `data=`).
+    pub async fn send_link_request(
+        &self,
+        link_hash: &str,
+        path: &str,
+        data: Option<&[u8]>,
+        timeout_secs: Option<f64>,
+    ) -> Result<String, HarnessError> {
+        let mut params = serde_json::json!({
+            "link_hash": link_hash,
+            "path": path,
+        });
+        if let Some(d) = data {
+            params["data"] = serde_json::Value::String(hex::encode(d));
+        }
+        if let Some(t) = timeout_secs {
+            params["timeout"] = serde_json::json!(t);
+        }
+        let result = self.query("send_link_request", params).await?;
+        result
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| HarnessError::ParseError("Missing request_id".to_string()))
+    }
+
+    /// Poll a Python RequestReceipt: returns `(status, response_bytes)`.
+    /// Status is FAILED / SENT / DELIVERED / RECEIVING / READY; the response
+    /// is only present on READY (bytes responses come back verbatim).
+    pub async fn get_request_status(
+        &self,
+        request_id: &str,
+    ) -> Result<(String, Option<Vec<u8>>), HarnessError> {
+        let result = self
+            .query(
+                "get_request_status",
+                serde_json::json!({ "request_id": request_id }),
+            )
+            .await?;
+        let status = result
+            .get("status")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HarnessError::ParseError("Missing status".to_string()))?
+            .to_string();
+        let response = result
+            .get("response")
+            .and_then(|v| v.as_str())
+            .map(|h| hex::decode(h).unwrap_or_default());
+        Ok((status, response))
+    }
+
+    /// Initialize a real Python LXMF client (LXMRouter + delivery identity)
+    /// on this daemon. Returns the delivery destination info.
+    pub async fn lxmf_init(
+        &self,
+        display_name: &str,
+        stamp_cost: Option<u8>,
+    ) -> Result<LxmfClientInfo, HarnessError> {
+        let mut params = serde_json::json!({ "display_name": display_name });
+        if let Some(cost) = stamp_cost {
+            params["stamp_cost"] = serde_json::json!(cost);
+        }
+        let result = self.query("lxmf_init", params).await?;
+        let delivery_hash = result
+            .get("delivery_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HarnessError::ParseError("Missing delivery_hash".to_string()))?
+            .to_string();
+        Ok(LxmfClientInfo { delivery_hash })
+    }
+
+    /// Announce the Python LXMF delivery destination.
+    pub async fn lxmf_announce(&self) -> Result<(), HarnessError> {
+        self.query("lxmf_announce", serde_json::json!({})).await?;
+        Ok(())
+    }
+
+    /// Send an LXMF message from the Python router. `method` is
+    /// "opportunistic" | "direct" | "propagated"; `fields` is an optional
+    /// msgpack-encoded map. Returns the message hash (hex).
+    pub async fn lxmf_send(
+        &self,
+        dest_hash: &str,
+        method: &str,
+        content: &[u8],
+        title: &[u8],
+        fields: Option<&[u8]>,
+    ) -> Result<String, HarnessError> {
+        let mut params = serde_json::json!({
+            "dest_hash": dest_hash,
+            "method": method,
+            "content": hex::encode(content),
+            "title": hex::encode(title),
+        });
+        if let Some(f) = fields {
+            params["fields"] = serde_json::Value::String(hex::encode(f));
+        }
+        let result = self.query("lxmf_send", params).await?;
+        result
+            .get("message_hash")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| HarnessError::ParseError("Missing message_hash".to_string()))
+    }
+
+    /// Poll the Python-side outbound LXMessage state (OUTBOUND / SENT /
+    /// DELIVERED / FAILED / ...).
+    pub async fn lxmf_get_outbound_status(
+        &self,
+        message_hash: &str,
+    ) -> Result<String, HarnessError> {
+        let result = self
+            .query(
+                "lxmf_get_outbound_status",
+                serde_json::json!({ "message_hash": message_hash }),
+            )
+            .await?;
+        result
+            .get("state")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| HarnessError::ParseError("Missing state".to_string()))
+    }
+
+    /// Fetch all LXMF messages the Python router has delivered so far.
+    pub async fn lxmf_get_received(&self) -> Result<Vec<LxmfReceived>, HarnessError> {
+        let result = self
+            .query("lxmf_get_received", serde_json::json!({}))
+            .await?;
+        let arr = match result {
+            serde_json::Value::Array(arr) => arr,
+            _ => return Ok(vec![]),
+        };
+        let mut messages = Vec::new();
+        for item in arr {
+            let hex_field = |key: &str| -> Vec<u8> {
+                item.get(key)
+                    .and_then(|v| v.as_str())
+                    .map(|h| hex::decode(h).unwrap_or_default())
+                    .unwrap_or_default()
+            };
+            messages.push(LxmfReceived {
+                message_hash: item
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                content: hex_field("content"),
+                title: hex_field("title"),
+                fields: hex_field("fields"),
+                source_hash: item
+                    .get("source_hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                destination_hash: item
+                    .get("destination_hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                timestamp: item
+                    .get("timestamp")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                signature_validated: item
+                    .get("signature_validated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                stamp_valid: item.get("stamp_valid").and_then(|v| v.as_bool()),
+                stamp_value: item.get("stamp_value").and_then(|v| v.as_u64()),
+                method: item
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+        Ok(messages)
+    }
+
+    /// Turn this daemon's LXMRouter into a propagation node (the same
+    /// `enable_propagation()` path `lxmd` drives). Returns the propagation
+    /// destination hash (hex).
+    pub async fn lxmf_enable_propagation(&self) -> Result<String, HarnessError> {
+        let result = self
+            .query("lxmf_enable_propagation", serde_json::json!({}))
+            .await?;
+        result
+            .get("propagation_hash")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| HarnessError::ParseError("Missing propagation_hash".to_string()))
+    }
+
+    /// Announce the propagation node destination.
+    pub async fn lxmf_announce_propagation_node(&self) -> Result<(), HarnessError> {
+        self.query("lxmf_announce_propagation_node", serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    /// Point the Python LXMF client at a propagation node (by dest hash hex).
+    /// Errors until the node's identity is known from an announce.
+    pub async fn lxmf_set_propagation_node(&self, dest_hash: &str) -> Result<(), HarnessError> {
+        self.query(
+            "lxmf_set_propagation_node",
+            serde_json::json!({ "dest_hash": dest_hash }),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Python LXMF client info returned by `lxmf_init`.
+#[derive(Debug, Clone)]
+pub struct LxmfClientInfo {
+    /// Delivery destination hash (hex).
+    pub delivery_hash: String,
+}
+
+/// One LXMF message recorded by the Python delivery callback.
+#[derive(Debug, Clone)]
+pub struct LxmfReceived {
+    pub message_hash: String,
+    pub content: Vec<u8>,
+    pub title: Vec<u8>,
+    /// msgpack-encoded fields map (umsgpack.packb of the delivered dict).
+    pub fields: Vec<u8>,
+    pub source_hash: String,
+    pub destination_hash: String,
+    pub timestamp: f64,
+    pub signature_validated: bool,
+    pub stamp_valid: Option<bool>,
+    pub stamp_value: Option<u64>,
+    pub method: String,
 }
 
 impl Drop for TestDaemon {
