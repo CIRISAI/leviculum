@@ -2555,6 +2555,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// 3. Monotonic uptime seconds — degenerate fallback until either of
     ///    the above is available. Never beats a stored path entry on a
     ///    peer, but is monotonic within one boot.
+    ///
+    /// The full source-priority chain (including GNSS) and the rules
+    /// every source obeys live in `docs/src/concepts/time-and-clocks.md`.
     pub fn emission_secs(&self, now_ms: u64) -> u64 {
         let secs = if let Some(wall) = self.clock.wall_unix_secs() {
             wall

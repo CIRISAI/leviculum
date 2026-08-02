@@ -467,6 +467,10 @@ pub const SIGNALING_MODE_MASK: u32 = 0x07;
 pub const SIGNALING_MODE_SHIFT: u32 = 21;
 
 // Random Hash Constants
+//
+// The emission-timestamp constants below implement the source-priority
+// chain and hardening rules of docs/src/concepts/time-and-clocks.md;
+// the concept document is the authoritative rationale.
 /// Size of random portion in random hash (bytes)
 pub const RANDOM_HASH_RANDOM_SIZE: usize = 5;
 

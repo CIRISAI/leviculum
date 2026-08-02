@@ -333,7 +333,8 @@ pub trait Clock {
     /// then falls back to its learned emission timebase
     /// ([`Transport::emission_secs`](crate::transport::Transport::emission_secs)),
     /// seeded from validated received announces or an explicit host
-    /// injection.
+    /// injection. Full source-priority chain and rules:
+    /// `docs/src/concepts/time-and-clocks.md`.
     fn wall_unix_secs(&self) -> Option<u64> {
         None
     }

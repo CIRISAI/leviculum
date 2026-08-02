@@ -10,6 +10,7 @@
 - [Python-RNS compatibility](concepts/python-rns-compatibility.md)
 - [Cryptographic identity and forward secrecy](concepts/identity-and-forward-secrecy.md)
 - [Storage and embedding](concepts/storage-and-embedding.md)
+- [Time and clocks](concepts/time-and-clocks.md)
 
 # User Guide
 
