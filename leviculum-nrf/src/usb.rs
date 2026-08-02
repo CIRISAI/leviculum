@@ -299,6 +299,27 @@ async fn retic_serial_task(
                     let results = deframer.process(&read_buf[..n]);
                     for r in results {
                         if let DeframeResult::Frame(ref data) = r {
+                            // Host-requested reboot (test infrastructure): ACK,
+                            // let the ACK drain, then full system reset. The
+                            // duty-cycle histogram, radio config and queues all
+                            // restart from scratch on the next boot.
+                            if data.as_slice() == crate::lora::RESET_FRAME {
+                                crate::log::log_fmt_critical(
+                                    "[INFO!] ",
+                                    format_args!("[RESET] host-requested reboot"),
+                                );
+                                frame(&crate::lora::RESET_ACK[..], &mut frame_buf);
+                                for chunk in frame_buf.chunks(64) {
+                                    if cdc.write_packet(chunk).await.is_err() {
+                                        log("SER: reset ACK write failed");
+                                        break;
+                                    }
+                                }
+                                // Give the host time to read the ACK off the
+                                // wire before the USB device disappears.
+                                embassy_time::Timer::after(Duration::from_millis(100)).await;
+                                cortex_m::peripheral::SCB::sys_reset();
+                            }
                             // Check for radio config frame (test infrastructure)
                             if data.len() == crate::lora::CONFIG_FRAME_LEN
                                 && data[0] == crate::lora::CONFIG_MAGIC[0]

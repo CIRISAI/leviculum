@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The LNode firmware honours a host-side reboot frame on its control
+  channel and ACKs before resetting, so a test harness can start every
+  run from a defined board state.
+
 - lblogd serves a file area, so a post can carry pictures. Micron has
   no image construct, so `![Mast](mast.jpg)` publishes the file at
   `/files/mast.jpg` on the web and at `/file/mast.jpg` on the mesh, in

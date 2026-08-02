@@ -101,7 +101,8 @@ impl Interface for LoRaInterface {
 // Re-export wire protocol constants from core for use by usb.rs
 pub use leviculum_core::rnode::{
     RADIO_CONFIG_ACK as CONFIG_ACK, RADIO_CONFIG_FRAME_LEN as CONFIG_FRAME_LEN,
-    RADIO_CONFIG_MAGIC as CONFIG_MAGIC,
+    RADIO_CONFIG_MAGIC as CONFIG_MAGIC, RADIO_RESET_ACK as RESET_ACK,
+    RADIO_RESET_FRAME as RESET_FRAME,
 };
 
 pub struct RadioConfig {
