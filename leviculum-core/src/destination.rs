@@ -292,6 +292,13 @@ pub struct Destination {
     /// `create_group_key` or `load_group_key` is called. Only meaningful for
     /// [`DestinationType::Group`].
     group_key: Option<[u8; TOKEN_KEY_SIZE]>,
+
+    /// The app_data a bare `announce(None, ..)` emits (Python `Destination.py`
+    /// `default_app_data`). Updated by every announce carrying explicit
+    /// app_data, so re-announce paths that cannot know the caller's payload
+    /// (interface-up, scheduled re-announces) reproduce the last announce
+    /// instead of stripping it.
+    default_app_data: Option<Vec<u8>>,
 }
 
 impl Destination {
@@ -355,6 +362,7 @@ impl Destination {
             ratchets_enabled: false,
             ratchets_dirty: false,
             group_key: None,
+            default_app_data: None,
         })
     }
 
@@ -911,6 +919,18 @@ impl Destination {
         if self.identity.is_none() {
             return Err(AnnounceError::NoIdentity);
         }
+
+        // Explicit app_data becomes the default; `None` falls back to it
+        // (Python `Destination.py` default_app_data). Re-announce paths pass
+        // `None` and must reproduce the destination's last announce, not
+        // strip it.
+        if let Some(data) = app_data {
+            if self.default_app_data.as_deref() != Some(data) {
+                self.default_app_data = Some(data.to_vec());
+            }
+        }
+        let effective_app_data = self.default_app_data.clone();
+        let app_data = effective_app_data.as_deref();
 
         // Rotate ratchet if needed
         self.rotate_ratchet_if_needed(rng, now_ms);

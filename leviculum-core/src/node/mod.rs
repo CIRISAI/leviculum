@@ -2130,11 +2130,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
         let emission_secs = self.transport.emission_secs(now_ms);
 
-        // Collect destination hashes first to avoid borrow conflict
+        // Collect destination hashes first to avoid borrow conflict. Only
+        // destinations that have announced before (announce cache present)
+        // are re-announced: announcing is the application's decision, and a
+        // synthetic first announce would shadow the app's real one when both
+        // land in the same emission second (the peer drops the later one as a
+        // not-newer path).
         let local_hashes: Vec<crate::destination::DestinationHash> = self
             .destinations
             .keys()
-            .filter(|h| self.transport.has_destination(h.as_bytes()))
+            .filter(|h| {
+                self.transport.has_destination(h.as_bytes())
+                    && self
+                        .transport
+                        .storage()
+                        .get_announce_cache(h.as_bytes())
+                        .is_some()
+            })
             .copied()
             .collect();
 
@@ -7340,6 +7352,126 @@ mod tests {
         );
     }
 
+    /// A destination announced with app_data must be re-announced WITH that
+    /// app_data when a new interface comes up. `handle_interface_up` builds a
+    /// fresh announce; without a remembered default_app_data (Python
+    /// Destination.py `default_app_data`) it emitted an empty-app_data
+    /// announce to the late-connecting peer AND overwrote the announce cache
+    /// with it (so path responses served the stripped announce too). Found
+    /// via the #151 discovery tests: the discovery record travels in
+    /// app_data, and a peer whose connection registered after the announce
+    /// received an empty one that fails validation.
+    #[test]
+    fn test_handle_interface_up_reannounce_keeps_app_data() {
+        use crate::announce::ReceivedAnnounce;
+        use crate::transport::Action;
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().enable_transport(true).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+        let iface = Box::new(MockInterface::new("if0", 1));
+        node.transport.register_interface(iface);
+
+        let identity = Identity::generate(&mut OsRng);
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["appdata"],
+        )
+        .unwrap();
+        let dest_hash = *dest.hash();
+        node.register_destination(dest);
+
+        let app_data = b"discovery-record-payload";
+        let _ = node
+            .announce_destination(&dest_hash, Some(app_data))
+            .unwrap();
+
+        let iface2 = Box::new(MockInterface::new("if1", 2));
+        node.transport.register_interface(iface2);
+        let output = node.handle_interface_up(1);
+
+        let reannounced = output
+            .actions
+            .iter()
+            .find_map(|a| match a {
+                Action::SendPacket { iface, data }
+                    if *iface == crate::transport::InterfaceId(1) =>
+                {
+                    let pkt = crate::packet::Packet::unpack(data).ok()?;
+                    ReceivedAnnounce::from_packet(&pkt).ok()
+                }
+                _ => None,
+            })
+            .expect("handle_interface_up must re-announce on the new interface");
+        assert_eq!(
+            reannounced.app_data(),
+            app_data,
+            "the interface-up re-announce must carry the destination's app_data"
+        );
+
+        // The re-announce also refreshes the announce cache; the cached bytes
+        // must still carry the app_data (they feed path responses).
+        let cached = node
+            .transport
+            .storage()
+            .get_announce_cache(dest_hash.as_bytes())
+            .expect("announce cache populated");
+        let cached_pkt = crate::packet::Packet::unpack(cached).unwrap();
+        let cached_announce = ReceivedAnnounce::from_packet(&cached_pkt).unwrap();
+        assert_eq!(
+            cached_announce.app_data(),
+            app_data,
+            "the announce cache must not be poisoned with a stripped announce"
+        );
+    }
+
+    /// A registered destination that was NEVER announced must not be announced
+    /// by `handle_interface_up`. Announcing is the application's decision
+    /// (Python: a destination is invisible until the app calls `announce`);
+    /// emitting one anyway also shadows the app's real first announce when
+    /// both land in the same emission second — the peer keeps the synthetic
+    /// (empty-app_data) one and drops the real one as a not-newer path.
+    #[test]
+    fn test_handle_interface_up_skips_never_announced_destinations() {
+        use crate::transport::Action;
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().enable_transport(true).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+        let iface = Box::new(MockInterface::new("if0", 1));
+        node.transport.register_interface(iface);
+
+        let identity = Identity::generate(&mut OsRng);
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["silent"],
+        )
+        .unwrap();
+        node.register_destination(dest);
+        // No announce_destination call: the app has not made it visible.
+
+        let output = node.handle_interface_up(0);
+        assert!(
+            !output
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::SendPacket { .. })),
+            "handle_interface_up must not announce a never-announced destination"
+        );
+    }
+
     #[test]
     fn test_handle_interface_up_no_announces_without_destinations() {
         // If no local destinations are registered, handle_interface_up
@@ -7393,6 +7525,7 @@ mod tests {
         .unwrap();
         let dest_hash = *dest.hash();
         node.register_destination(dest);
+        let _ = node.announce_destination(&dest_hash, None).unwrap();
 
         let output = node.handle_interface_up(0);
 
@@ -7550,12 +7683,12 @@ mod tests {
             &["echo"],
         )
         .unwrap();
+        let dest_hash_typed = *dest.hash();
         let dest_hash = dest.hash().into_bytes();
         node.register_destination(dest);
 
         // Do an initial announce to populate the cache
-        let output = node.handle_interface_up(0);
-        let _ = output; // actions dispatched
+        let _ = node.announce_destination(&dest_hash_typed, None).unwrap();
 
         // Grab the cached announce bytes
         let initial_cached = node
@@ -7686,8 +7819,10 @@ mod tests {
             &["echo"],
         )
         .unwrap();
+        let daemon_hash_typed = *daemon_dest.hash();
         let daemon_hash = daemon_dest.hash().into_bytes();
         node.register_destination(daemon_dest);
+        let _ = node.announce_destination(&daemon_hash_typed, None).unwrap();
 
         // Create a client announce by generating a fresh identity and announce,
         // then feeding it through the local client interface path.
