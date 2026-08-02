@@ -1961,4 +1961,227 @@ mod tests {
         assert_eq!(plan.data_range(1).len(), MAX - metadata_size);
         assert_eq!(plan.total_data_size, (metadata_size + data_len) as u64);
     }
+
+    /// #159 tranche 2: pin every generated advertisement field against the
+    /// rule the reference receiver applies to it, with the hashes recomputed
+    /// independently from the DECRYPTED wire stream (never from our stored
+    /// intermediates):
+    ///
+    /// - `t` = length of the encrypted stream; the receiver allocates
+    ///   `total_parts = ceil(t / sdu)` from it (Resource.py:174-190) with
+    ///   `sdu = link.mtu - HEADER_MAXSIZE - IFAC_MIN_SIZE` (:337-338), so `t`,
+    ///   `n`, and our actual part slicing must all agree under that formula.
+    /// - `h` = `full_hash(plaintext + r)` where plaintext is the metadata
+    ///   block + data WITHOUT the 4-byte wire-random prefix (:441 sender,
+    ///   :682-695 receiver: decrypt, strip 4, hash, compare — mismatch means
+    ///   CORRUPT and link teardown).
+    /// - `r` keys the per-part map hashes: `full_hash(part + r)[:4]`
+    ///   (:505-506); the receiver matches every incoming RESOURCE packet
+    ///   purely by these entries (:861-866).
+    /// - metadata rides as a 3-byte BE length + bytes prepended to the data
+    ///   (:266), stripped by the receiver only on segment 1 (:696-704), with
+    ///   the `x` flag bit set.
+    /// - the sender's `expected_proof` = `full_hash(plaintext + h)` (:443)
+    ///   must equal what the receiver's `prove()` computes over its assembled
+    ///   plaintext (:752-755) — pinned here from the decrypted stream and in
+    ///   `incoming.rs` from the receiver side.
+    /// - `f` bit layout `x<<5 | p<<4 | u<<3 | s<<2 | c<<1 | e` (:1259).
+    /// - `i`/`l` are 1-based (:190/:249).
+    ///
+    /// The `o` field is deliberately NOT pinned: the audit found our
+    /// single-segment generator fills `full_hash(plaintext)` where the
+    /// reference fills `h` itself (:444-446) — reported as a defect, fix
+    /// pending its own red-first treatment.
+    #[test]
+    fn advertisement_fields_follow_reference_generation_rules() {
+        use crate::crypto::sha256;
+
+        let (link, peer) = make_test_link();
+        let mut rng = rand_core::OsRng;
+
+        let metadata = b"META";
+        let data: Vec<u8> = (0..2000u32).map(|i| (i * 31 % 251) as u8).collect();
+        let res = OutgoingResource::new(
+            &data,
+            Some(metadata),
+            None,
+            &link.resource_crypt_params(),
+            false,
+            &mut rng,
+            1_000,
+        )
+        .unwrap();
+        let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
+
+        // Decrypt the wire stream the way the receiver does.
+        let mut buf = vec![0u8; res.encrypted_data.len()];
+        let n = peer.decrypt(&res.encrypted_data, &mut buf).unwrap();
+        buf.truncate(n);
+        let plaintext = &buf[RESOURCE_RANDOM_HASH_SIZE..]; // strip wire random
+
+        // Metadata block: 3-byte BE length + bytes, then the data.
+        let mut expected_plaintext = vec![0u8, 0, metadata.len() as u8];
+        expected_plaintext.extend_from_slice(metadata);
+        expected_plaintext.extend_from_slice(&data);
+        assert_eq!(
+            plaintext, expected_plaintext,
+            "decrypted stream must be metadata block + data behind the 4-byte prefix"
+        );
+
+        // h: the receiver's assemble-time acceptance hash.
+        let mut h_input = plaintext.to_vec();
+        h_input.extend_from_slice(&adv.random_hash);
+        assert_eq!(
+            adv.resource_hash,
+            sha256(&h_input),
+            "h must equal full_hash(decrypted plaintext + r): the receiver \
+             rejects the whole transfer as CORRUPT otherwise"
+        );
+
+        // expected_proof: what the receiver's prove() will send back.
+        let mut p_input = plaintext.to_vec();
+        p_input.extend_from_slice(&adv.resource_hash);
+        assert_eq!(
+            res.expected_proof,
+            sha256(&p_input),
+            "expected_proof must equal full_hash(plaintext + h)"
+        );
+
+        // t / n / parts: the receiver's allocation arithmetic.
+        let sdu = crate::constants::MTU
+            - crate::constants::HEADER_MAXSIZE
+            - crate::constants::IFAC_MIN_SIZE;
+        assert_eq!(sdu, 464);
+        assert_eq!(res.sdu(), sdu, "sender sdu must match the receiver formula");
+        assert_eq!(adv.transfer_size as usize, res.encrypted_data.len());
+        let expected_parts = (adv.transfer_size as usize).div_ceil(sdu);
+        assert_eq!(adv.num_parts as usize, expected_parts);
+        assert_eq!(res.parts.len(), expected_parts);
+        for (i, part) in res.parts.iter().enumerate() {
+            let start = i * sdu;
+            let end = core::cmp::min(start + sdu, res.encrypted_data.len());
+            assert_eq!(
+                part[..],
+                res.encrypted_data[start..end],
+                "part {i} must be the sdu-aligned slice of the encrypted stream"
+            );
+        }
+
+        // m: the receiver's part-matching keys.
+        assert_eq!(
+            adv.hashmap_data.len(),
+            expected_parts * RESOURCE_HASHMAP_LEN
+        );
+        for (i, part) in res.parts.iter().enumerate() {
+            let mut m_input = part.clone();
+            m_input.extend_from_slice(&adv.random_hash);
+            assert_eq!(
+                adv.hashmap_data[i * RESOURCE_HASHMAP_LEN..(i + 1) * RESOURCE_HASHMAP_LEN],
+                sha256(&m_input)[..RESOURCE_HASHMAP_LEN],
+                "map hash {i} must equal full_hash(part + r)[:4]"
+            );
+        }
+
+        // d: total uncompressed size including the metadata block.
+        assert_eq!(adv.data_size as usize, expected_plaintext.len());
+
+        // Flags byte and segment fields.
+        assert_eq!(
+            res.flags().to_u8(),
+            0x01 | 0x20,
+            "f must be encrypted | has_metadata under the reference bit layout"
+        );
+        assert_eq!(adv.segment_index, 1, "segment index is 1-based");
+        assert_eq!(adv.total_segments, 1);
+        assert!(adv.request_id.is_none());
+
+        // Request/response resources: u and p bits (Resource.py:1296-1303).
+        let req =
+            OutgoingResource::new_request(b"x", &[0x11; 16], &link, false, 1_000, &mut rng, 1_000)
+                .unwrap();
+        assert_eq!(req.flags().to_u8(), 0x01 | 0x08, "request: e | u");
+        let resp = OutgoingResource::new_response(
+            b"x",
+            None,
+            Some(&[0x11; 16]),
+            &link.resource_crypt_params(),
+            false,
+            &mut rng,
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(resp.flags().to_u8(), 0x01 | 0x10, "response: e | p");
+    }
+
+    /// #159 tranche 2: pin the RESOURCE_HMU reply against the reference
+    /// hashmap segment arithmetic. Both sides index the hashmap in units of
+    /// `HASHMAP_MAX_LEN = floor((Link.MDU - 134) / 4) = 74` — a CLASS constant
+    /// derived from the default MTU, never from the negotiated link MDU
+    /// (Resource.py:1236). When the receiver reports exhaustion with the last
+    /// map hash it knows, the sender locates that part, and the reference
+    /// CANCELS the whole transfer unless the resulting index is an exact
+    /// multiple of 74 (Resource.py:1046-1050); the HMU then carries
+    /// `h + msgpack([segment, next 74 entries])`, which the receiver writes
+    /// at offset `segment * 74` (Resource.py:492-500).
+    #[test]
+    fn hmu_reply_follows_reference_hashmap_segment_arithmetic() {
+        assert_eq!(HASHMAP_MAX_LEN, 74, "protocol constant from default MTU");
+
+        let (link, peer) = make_test_link();
+        let mut rng = rand_core::OsRng;
+
+        // > 74 parts so the advertisement's hashmap is a strict prefix.
+        let data: Vec<u8> = (0..80 * 464u32).map(|i| (i * 17 % 249) as u8).collect();
+        let mut res = OutgoingResource::new(
+            &data,
+            None,
+            None,
+            &link.resource_crypt_params(),
+            false,
+            &mut rng,
+            1_000,
+        )
+        .unwrap();
+        let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
+        assert!(res.parts.len() > HASHMAP_MAX_LEN);
+        assert_eq!(
+            adv.hashmap_data.len(),
+            HASHMAP_MAX_LEN * RESOURCE_HASHMAP_LEN,
+            "the advertisement carries exactly the first hashmap segment"
+        );
+
+        // The receiver's exhaustion report: last advertised map hash is entry
+        // 73; the sender's scan yields part_index 74 — 74 % 74 == 0, the
+        // alignment the reference sender enforces before answering.
+        let last_advertised = &adv.hashmap_data[(HASHMAP_MAX_LEN - 1) * RESOURCE_HASHMAP_LEN..];
+        let mut req = vec![HASHMAP_IS_EXHAUSTED];
+        req.extend_from_slice(last_advertised);
+        req.extend_from_slice(&adv.resource_hash);
+
+        let packets = res.handle_request(&req, &link, &mut rng, 2_000).unwrap();
+        let hmu_wire = packets
+            .iter()
+            .find(|p| p.len() > 18 && p[18] == crate::packet::PacketContext::ResourceHmu as u8)
+            .expect("an exhausted REQ must be answered with an HMU packet");
+
+        let mut buf = vec![0u8; hmu_wire.len()];
+        let n = peer.decrypt(&hmu_wire[19..], &mut buf).unwrap();
+        buf.truncate(n);
+
+        assert_eq!(&buf[..32], &adv.resource_hash, "HMU must lead with h");
+        assert_eq!(buf[32], 0x92, "then msgpack fixarray(2)");
+        assert_eq!(buf[33], 0x01, "segment must be 1: entries 74.. live there");
+        // Remaining entries 74..n as one bin.
+        let remaining = res.parts.len() - HASHMAP_MAX_LEN;
+        assert_eq!(buf[34], 0xC4, "hashmap bytes ride as msgpack bin8");
+        assert_eq!(buf[35] as usize, remaining * RESOURCE_HASHMAP_LEN);
+        for i in 0..remaining {
+            assert_eq!(
+                buf[36 + i * RESOURCE_HASHMAP_LEN..36 + (i + 1) * RESOURCE_HASHMAP_LEN],
+                res.hashmap[HASHMAP_MAX_LEN + i],
+                "HMU entry {i} must be map hash 74+{i}: the receiver writes \
+                 it at offset segment*74 + {i}"
+            );
+        }
+    }
 }

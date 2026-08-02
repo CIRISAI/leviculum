@@ -55,6 +55,8 @@ mod mvr_bidir_transfer;
 mod mvr_diamond_return_path;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_establishment_loss;
+#[cfg(test)]
+mod mvr_generated_field_pins;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_hop_asymmetry;
 #[cfg(test)]
