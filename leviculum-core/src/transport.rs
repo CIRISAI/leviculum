@@ -6568,6 +6568,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Path request format: dest_hash(16) + [transport_id(16)] + tag(16)
         // Minimum: dest_hash(16) + tag(16) = 32 bytes
+        //
+        // Deliberate deviation (#169 audit): Python slices variable-length
+        // tags (`path_request_handler`, Transport.py:2882-2891: tag =
+        // data[32:] or data[16:], truncated to the FIRST 16 bytes) and so
+        // answers 17..31-byte short-tag requests, where we require the
+        // conformant 32/48-byte layouts and take the LAST 16 bytes as tag.
+        // Both stacks emit exactly 32 or 48 bytes (`Transport.request_path`,
+        // Transport.py:2554-2568), so the divergent inputs are only
+        // producible by a non-reference sender; a 16-byte (tagless) request
+        // is ignored by both (Python :2908). The tag is a local dedup key
+        // and re-origination echo, never parsed by peers.
         if data.len() < 32 {
             crate::tracing::trace!(len = data.len(), "Dropped truncated path request");
             return Ok(());
@@ -6728,6 +6739,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Gated on the path table (Python Transport.py:2943): with the path
         // dropped or expired the orphaned cache must not answer; the request
         // falls through to case 3 and re-originates discovery (Codeberg #117).
+        //
+        // Deliberate deviation (#169 audit), the mirror-image edge: a path
+        // entry whose cached announce was EVICTED. Python ignores the request
+        // outright (`get_cached_packet` returns None, Transport.py:2946-2947);
+        // we fall through to case 3/4, so a discovering relay re-originates
+        // the request and a local client's request is still forwarded. An
+        // ordinary hops=0 path-request broadcast is wire-conformant, all
+        // dedup and ingress limits apply, and attempting recovery beats
+        // Python's silence for mesh delivery (deviation rule, P1).
         if self.config.enable_transport && self.storage.get_path(&requested_hash).is_some() {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 let mode = self.interface_mode(interface_index);
@@ -17837,6 +17857,141 @@ mod tests {
                 &["recovery"],
             )
             .unwrap()
+        }
+
+        /// Deliberate-deviation pin (#159 tranche 3): the forward-refreshed
+        /// path expiry feeds the worse-hop announce acceptance comparison.
+        ///
+        /// Our path table keeps a single `expires_ms`. Forwarding refreshes it
+        /// (data forward and link-request forward, mirroring the cull refresh
+        /// at Python Transport.py:990/:1504), and the SAME field is what the
+        /// worse-hop acceptance branch compares against (`now >=
+        /// existing.expires_ms`). Python keeps two fields: the forward refresh
+        /// touches only the cull timestamp (IDX_PT_TIMESTAMP, Transport.py:1636),
+        /// while the acceptance comparison reads the INSERT-TIME expiry
+        /// (IDX_PT_EXPIRES, read at :1784, compared `now >= path_expires` at
+        /// :1793), which is never refreshed.
+        ///
+        /// The stacks diverge exactly when ALL of these hold: the path entry
+        /// is older than the path lifetime, traffic is still actively
+        /// forwarded through us (so our `expires_ms` was refreshed), and a
+        /// HIGHER-hop announce arrives whose emission timestamp is NOT newer
+        /// than the stored timebase (with an unseen random blob). Python
+        /// accepts it — the insert-time expiry has passed — and switches to
+        /// the worse path; we keep the actively-used path. Wire-invisible:
+        /// neither stack emits anything in either case; only the local
+        /// next-hop choice can differ, and only until the destination's next
+        /// real announce. Unreachable at real announce cadences: a
+        /// destination that re-announces more often than the path lifetime
+        /// always presents a NEWER emission, which both stacks accept through
+        /// the shared `announce_emitted > path_timebase` branch — so for the
+        /// divergence to bite, a destination must stay silent for the whole
+        /// path lifetime while its old announce still circulates.
+        ///
+        /// Deviation rule (docs/src/concepts/python-rns-compatibility.md):
+        /// wire format untouched, semantics preserved for every reachable
+        /// input, and keeping an actively-used path instead of displacing it
+        /// with a stale worse-hop announce improves delivery robustness.
+        #[test]
+        fn forward_refreshed_expiry_blocks_worse_hop_acceptance_deliberate_deviation() {
+            use crate::destination::DestinationType;
+            use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+
+            const EMISSION: u64 = 1_700_000_000; // unix seconds, both announces
+
+            let announce_on_if0 = |transport: &mut Transport<MockClock, MemoryStorage>,
+                                   dest: &crate::destination::Destination,
+                                   wire_hops: u8,
+                                   prefix: [u8; 5]| {
+                let raw = make_announce_raw_with_random_hash(
+                    dest,
+                    wire_hops,
+                    &make_random_hash(prefix, EMISSION),
+                );
+                transport.process_incoming(0, &raw).unwrap();
+                transport.drain_actions();
+                transport.drain_events();
+            };
+
+            // Control: with the path expired and NOT refreshed, a worse-hop
+            // announce with the SAME emission and a fresh random blob is
+            // accepted — here both stacks agree, proving the rejection below
+            // is caused by the refresh alone.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let dest = make_test_dest();
+            let dest_hash = dest.hash().into_bytes();
+            let lifetime_ms = transport.config.path_expiry_secs * 1000;
+
+            announce_on_if0(&mut transport, &dest, 2, [0x01; 5]);
+            assert_eq!(
+                transport.storage().get_path(&dest_hash).unwrap().hops,
+                3,
+                "wire hops 2 + receipt increment"
+            );
+
+            transport.clock.advance(lifetime_ms + 5_000); // past insert-time expiry
+            announce_on_if0(&mut transport, &dest, 3, [0x02; 5]);
+            assert_eq!(
+                transport.storage().get_path(&dest_hash).unwrap().hops,
+                4,
+                "expired-and-unrefreshed path must accept the worse-hop announce \
+                 (both stacks agree)"
+            );
+
+            // Deviation: same sequence, but a data forward refreshes
+            // `expires_ms` after the insert-time expiry has passed. The same
+            // worse-hop announce is now REJECTED; Python (comparing the
+            // insert-time IDX_PT_EXPIRES) would accept it.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let dest = make_test_dest();
+            let dest_hash = dest.hash().into_bytes();
+
+            announce_on_if0(&mut transport, &dest, 2, [0x01; 5]);
+            transport.clock.advance(lifetime_ms + 5_000); // past insert-time expiry
+
+            // Active traffic: a data packet from if1 forwarded toward the
+            // destination (path learned on if0) refreshes the path expiry via
+            // the production forward path.
+            let insert_expiry = transport.storage().get_path(&dest_hash).unwrap().expires_ms;
+            let data_packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type2,
+                    context_flag: false,
+                    transport_type: TransportType::Transport,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: 1,
+                transport_id: Some(*transport.identity.hash()),
+                destination_hash: dest_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(b"active traffic".to_vec()),
+            };
+            let mut buf = [0u8; MTU];
+            let len = data_packet.pack(&mut buf).unwrap();
+            transport.process_incoming(1, &buf[..len]).unwrap();
+            transport.drain_actions();
+            let refreshed_expiry = transport.storage().get_path(&dest_hash).unwrap().expires_ms;
+            assert!(
+                refreshed_expiry > insert_expiry,
+                "the forward must have refreshed the expiry for the deviation \
+                 to be exercised"
+            );
+
+            transport.clock.advance(1_000);
+            announce_on_if0(&mut transport, &dest, 3, [0x02; 5]);
+            assert_eq!(
+                transport.storage().get_path(&dest_hash).unwrap().hops,
+                3,
+                "the refreshed expiry must reject the worse-hop same-emission \
+                 announce (Python, reading the insert-time expiry, would accept \
+                 it here — the deliberate deviation this test pins)"
+            );
         }
 
         #[test]
