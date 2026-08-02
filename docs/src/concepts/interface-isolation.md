@@ -35,12 +35,12 @@ budget is exhausted. Concretely:
 
 - **Send-side jitter** — packets are queued, not sent immediately; the
   jitter window is sized from the radio parameters so two nodes do not
-  re-collide (`leviculum-std/src/interfaces/rnode.rs:130`, the
+  re-collide (`leviculum-std/src/interfaces/rnode.rs:360`, the
   `compute_jitter_max_ms` doc comment, and the jitter queue at
-  `:448`).
+  `:780`).
 - **CSMA** — radio-level carrier sensing is handled by the RNode
   firmware; the interface defers collision avoidance to it rather than
-  the core (`leviculum-std/src/interfaces/rnode.rs:451`).
+  the core (`leviculum-std/src/interfaces/rnode.rs:783`).
 - **Airtime backpressure** — a per-interface credit bucket charges
   every send by its airtime cost and signals `BufferFull` rather than
   flooding the serial queue

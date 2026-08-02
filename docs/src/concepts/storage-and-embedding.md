@@ -13,15 +13,20 @@ The core declares its platform needs as traits in
 `leviculum-core/src/traits.rs` and takes implementations from the
 driver:
 
-- **`Clock`** (`traits.rs:162`) — supplies `now_ms()`. The core never
-  calls a system clock; time is handed in. On the host this is wall
-  time; on the nRF52 it is the Embassy timer
-  (`leviculum-nrf/src/clock.rs:8`).
-- **`Storage`** (`traits.rs:196`) — supplies persistence and lookup
+- **`Clock`** (`traits.rs:317`) — supplies the monotonic `now_ms()`
+  and, only where the platform has a real wall clock,
+  `wall_unix_secs()` (default `None`). The core never calls a system
+  clock; time is handed in. `now_ms()` is a timer, not a calendar —
+  on the host it counts milliseconds since process start
+  (`leviculum-std/src/clock.rs:41`), on the nRF52 it is the Embassy
+  timer (`leviculum-nrf/src/clock.rs:8`). Which wire fields need
+  calendar time instead, and where a clockless node gets it, is the
+  subject of [Time and Clocks](time-and-clocks.md).
+- **`Storage`** (`traits.rs:372`) — supplies persistence and lookup
   for every collection the protocol maintains. `flush()` defaults to a
-  no-op (`traits.rs:466`) so a RAM-only backend needs to implement
+  no-op (`traits.rs:671`) so a RAM-only backend needs to implement
   nothing extra.
-- **`Interface`** (`traits.rs:97`) — supplies framing and the wire (see
+- **`Interface`** (`traits.rs:239`) — supplies framing and the wire (see
   [Interface Isolation](interface-isolation.md) and the
   [Interface trait](../architecture.md#interface-trait)).
 
@@ -48,7 +53,7 @@ page before changing the trait surface.
 
 The same `NodeCore` is parameterised over its `Storage`
 implementation, so embedding is a matter of choosing a backend
-(`leviculum-core/src/node/mod.rs:143`,
+(`leviculum-core/src/node/mod.rs:242`,
 `NodeCore<R: CryptoRngCore, C: Clock, S: Storage>`):
 
 | Backend | Where | Behaviour |
