@@ -9,7 +9,8 @@ use alloc::{
     vec::Vec,
 };
 use leviculum_core::{
-    crypto::full_hash, Clock, DestinationHash, LinkId, NodeCore, NodeEvent, Storage, TickOutput,
+    crypto::full_hash, resource::ResourceError, Clock, DestinationHash, LinkId, NodeCore,
+    NodeEvent, Storage, TickOutput,
 };
 use rand_core::CryptoRngCore;
 
@@ -19,8 +20,8 @@ use crate::{
     message::{DeliveryMethod, Field, Message, MessageError, Verification},
     msgpack,
     node::{
-        DeliveryRepresentation, DirectLinkState, InboundRejection, LxmfNode, LxmfNodeError,
-        LxmfNodeEvent,
+        DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection, LxmfNode,
+        LxmfNodeError, LxmfNodeEvent,
     },
     propagation::PropagationError,
     propagation_client::{PropagationTransport, PropagationTransportError},
@@ -104,6 +105,23 @@ pub struct OutboundEntry {
     /// This is persisted so a restored queue never re-encrypts a message after
     /// a propagation stamp has already been generated for its transient ID.
     pub propagation: Option<OutboundPropagation>,
+}
+
+fn record_successful_submission_attempt(
+    entry: &mut OutboundEntry,
+    representation: &Result<DeliveryRepresentation, LxmfNodeError>,
+) {
+    // Python charges direct delivery when it starts path discovery or a new
+    // Link. Submitting a Packet or Resource over that Link remains part of the
+    // same attempt, and reusing an already-active Link does not consume one.
+    // Opportunistic delivery has no Link setup phase, so submission itself is
+    // the attempt boundary.
+    if matches!(
+        representation,
+        Ok(DeliveryRepresentation::OpportunisticPacket)
+    ) {
+        entry.attempts = entry.attempts.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -774,6 +792,20 @@ impl LxmfRouter {
                     });
                 }
             }
+            LxmfNodeEvent::DeliveryFailed {
+                message_id,
+                reason: DeliveryFailure::Resource(ResourceError::Cancelled),
+            } => {
+                if let Some(mut entry) = self.outbound.remove(&message_id) {
+                    self.preemptive_path_requests.remove(&message_id);
+                    self.persistence_dirty = true;
+                    entry.state = MessageState::Rejected;
+                    out.push(RouterEvent::MessageState {
+                        message_id,
+                        state: MessageState::Rejected,
+                    });
+                }
+            }
             LxmfNodeEvent::DeliveryFailed { message_id, .. } => {
                 let mut changed = false;
                 if let Some(entry) = self.outbound.get_mut(&message_id) {
@@ -1127,7 +1159,7 @@ impl LxmfRouter {
 
             match self.node.send(node, &entry.message) {
                 Ok(sent) => {
-                    entry.attempts = entry.attempts.saturating_add(1);
+                    record_successful_submission_attempt(&mut entry, &representation);
                     entry.state = MessageState::Sending;
                     entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                     output.core.merge(sent.core);
@@ -2268,6 +2300,28 @@ mod persistence_tests {
     }
 
     #[test]
+    fn direct_payload_submission_stays_within_the_link_attempt() {
+        let mut router = router(RouterConfig::default());
+        let queued = message(85);
+        let id = queued.message_id;
+        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let entry = router.outbound.get_mut(&id).expect("queued direct message");
+        entry.attempts = 1;
+
+        record_successful_submission_attempt(entry, &Ok(DeliveryRepresentation::DirectPacket));
+        assert_eq!(entry.attempts, 1);
+
+        record_successful_submission_attempt(entry, &Ok(DeliveryRepresentation::DirectResource));
+        assert_eq!(entry.attempts, 1);
+
+        record_successful_submission_attempt(
+            entry,
+            &Ok(DeliveryRepresentation::OpportunisticPacket),
+        );
+        assert_eq!(entry.attempts, 2);
+    }
+
+    #[test]
     fn oversized_opportunistic_fallback_uses_shared_attempt_limit() {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = oversized_opportunistic_message(84);
@@ -2558,6 +2612,37 @@ mod persistence_tests {
         });
         assert_eq!(router.outbound.get(&id).unwrap().progress, 0.75);
         assert_eq!(persistence_request_count(&progress), 1);
+    }
+
+    #[test]
+    fn receiver_cancelled_resource_is_terminally_rejected() {
+        let mut router = router(RouterConfig::default());
+        let queued = message(86);
+        let id = queued.message_id;
+        let _ = router.enqueue(queued, 5_000, 1_700_000_000.0).unwrap();
+        checkpoint(&mut router);
+        router.outbound.get_mut(&id).unwrap().state = MessageState::Sending;
+
+        let mut events = Vec::new();
+        router.handle_node_event(
+            LxmfNodeEvent::DeliveryFailed {
+                message_id: id,
+                reason: DeliveryFailure::Resource(ResourceError::Cancelled),
+            },
+            5_000,
+            1_700_000_001.0,
+            &mut events,
+        );
+
+        assert!(!router.outbound.contains_key(&id));
+        assert!(router.persistence_dirty);
+        assert_eq!(
+            events,
+            vec![RouterEvent::MessageState {
+                message_id: id,
+                state: MessageState::Rejected,
+            }]
+        );
     }
 
     #[test]

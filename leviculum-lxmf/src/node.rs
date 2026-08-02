@@ -870,6 +870,14 @@ impl LxmfNode {
                             message_id: pending.message_id,
                             reason: DeliveryFailure::Resource(*error),
                         });
+                        // Python tears down the Resource's Link before making
+                        // a failed direct transfer eligible for another
+                        // attempt. A receiver cancellation is a rejection and
+                        // keeps the reusable Link alive; LinkClosed needs no
+                        // second teardown.
+                        if !matches!(error, ResourceError::Cancelled | ResourceError::LinkClosed) {
+                            output.core.merge(node.close_link(link_id));
+                        }
                     }
                 } else if self.lxmf_links.contains(link_id) {
                     self.incoming_resources.remove(link_id);
@@ -1634,6 +1642,134 @@ mod tests {
         let replies_to_b = receive(a, to_a, &mut a_events);
         pump(a, b, replies_to_b, &mut a_events, &mut b_events);
         pump(b, a, replies_to_a, &mut b_events, &mut a_events);
+    }
+
+    #[test]
+    fn failed_outgoing_resource_closes_its_direct_link_before_retry() {
+        let mut sender = peer(8);
+        let mut receiver = peer(88);
+        exchange_announces(&mut sender, &mut receiver);
+
+        let mut sender_events = Vec::new();
+        let mut receiver_events = Vec::new();
+        let (state, link_output) = sender
+            .lxmf
+            .ensure_direct_link(&mut sender.node, receiver.destination)
+            .expect("establish direct link");
+        let DirectLinkState::Started(link_id) = state else {
+            panic!("expected a new direct link");
+        };
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(link_output.core.actions),
+            &mut sender_events,
+            &mut receiver_events,
+        );
+        assert!(sender.node.link(&link_id).is_some());
+
+        let message_id = [0x91; 32];
+        let resource_hash = [0x92; 32];
+        sender.lxmf.resources.insert(
+            link_id,
+            PendingResource {
+                message_id,
+                current_resource_hash: resource_hash,
+                completed_size: 0,
+                current_size: 1,
+                total_size: 1,
+            },
+        );
+
+        let output = sender
+            .lxmf
+            .handle_event(
+                &mut sender.node,
+                &NodeEvent::ResourceFailed {
+                    link_id,
+                    resource_hash,
+                    error: ResourceError::Timeout,
+                    is_sender: true,
+                },
+            )
+            .expect("fail outgoing Resource");
+
+        assert!(matches!(
+            output.events.as_slice(),
+            [LxmfNodeEvent::DeliveryFailed {
+                message_id: id,
+                reason: DeliveryFailure::Resource(ResourceError::Timeout),
+            }] if *id == message_id
+        ));
+        assert!(sender.node.link(&link_id).is_none());
+        assert!(output.core.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkClosed {
+                link_id: closed,
+                reason: LinkCloseReason::Normal,
+                ..
+            } if *closed == link_id
+        )));
+    }
+
+    #[test]
+    fn receiver_cancelled_resource_keeps_the_direct_link_reusable() {
+        let mut sender = peer(9);
+        let mut receiver = peer(89);
+        exchange_announces(&mut sender, &mut receiver);
+
+        let mut sender_events = Vec::new();
+        let mut receiver_events = Vec::new();
+        let (state, link_output) = sender
+            .lxmf
+            .ensure_direct_link(&mut sender.node, receiver.destination)
+            .expect("establish direct link");
+        let DirectLinkState::Started(link_id) = state else {
+            panic!("expected a new direct link");
+        };
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(link_output.core.actions),
+            &mut sender_events,
+            &mut receiver_events,
+        );
+
+        let message_id = [0x93; 32];
+        let resource_hash = [0x94; 32];
+        sender.lxmf.resources.insert(
+            link_id,
+            PendingResource {
+                message_id,
+                current_resource_hash: resource_hash,
+                completed_size: 0,
+                current_size: 1,
+                total_size: 1,
+            },
+        );
+
+        let output = sender
+            .lxmf
+            .handle_event(
+                &mut sender.node,
+                &NodeEvent::ResourceFailed {
+                    link_id,
+                    resource_hash,
+                    error: ResourceError::Cancelled,
+                    is_sender: true,
+                },
+            )
+            .expect("reject outgoing Resource");
+
+        assert!(matches!(
+            output.events.as_slice(),
+            [LxmfNodeEvent::DeliveryFailed {
+                message_id: id,
+                reason: DeliveryFailure::Resource(ResourceError::Cancelled),
+            }] if *id == message_id
+        ));
+        assert!(sender.node.link(&link_id).is_some());
+        assert!(output.core.events.is_empty());
     }
 
     #[test]
