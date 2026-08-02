@@ -15239,6 +15239,153 @@ mod tests {
             assert_eq!(transport.emission_secs(now), 1_790_000_000);
         }
 
+        // Codeberg #161 review (B1): what the bounded advance (#160)
+        // actually protects against, measured — this test documents
+        // MEASURED reality, not a target. The per-destination announce
+        // rate limit and the local rebroadcast dedup window do not gate
+        // timebase learning at all: learn_emission_timebase runs on every
+        // signature-valid announce, before both checks (handle_announce
+        // ordering). So an attacker holding N identities is not throttled
+        // across them — N announces from N distinct destinations each
+        // advance the floor by up to EMISSION_LEARN_MAX_ADVANCE_SECS —
+        // and, one step weaker than the #161 review stated, even repeat
+        // announces from ONE destination advance it, because learning sits
+        // before the per-destination rate limit too. The real cap on the
+        // walk rate is announces-per-second on the air, nothing
+        // identity-shaped. If a change gates learning behind either limit,
+        // this test fails and the documented protection level must be
+        // restated consciously.
+        #[test]
+        fn test_timebase_walk_is_capped_per_announce_not_per_identity() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let make_dest = |label: &'static str| {
+                Destination::new(
+                    Some(Identity::generate(&mut OsRng)),
+                    Direction::In,
+                    DestinationType::Single,
+                    "testapp",
+                    &["timebase", label],
+                )
+                .unwrap()
+            };
+
+            // Credible seed from the first peer.
+            let seed = 1_800_000_000;
+            let d0 = make_dest("seed");
+            let a = make_announce_raw_for_dest(&d0, 1, seed);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), seed);
+
+            // Three more identities, all claiming a far-future emission,
+            // all within the same instant (no rate-limit window elapses):
+            // each advances the floor by the full cap.
+            let claim = 1_900_000_000;
+            for (k, label) in [(1u64, "id1"), (2, "id2"), (3, "id3")] {
+                let d = make_dest(label);
+                let a = make_announce_raw_for_dest(&d, 1, claim);
+                transport.process_incoming(0, &a).unwrap();
+                let now = transport.clock.now_ms();
+                assert_eq!(
+                    transport.emission_secs(now),
+                    seed + k * EMISSION_LEARN_MAX_ADVANCE_SECS,
+                    "announce {k} from a fresh identity must advance the floor by the cap"
+                );
+            }
+
+            // Even a REPEAT announce from an already-seen destination
+            // advances the floor again within the same instant: the
+            // per-destination rate limit does not sit in the learning path.
+            let d_repeat = make_dest("id-repeat");
+            for k in 4u64..=5 {
+                let a = make_announce_raw_for_dest(&d_repeat, 1, claim);
+                transport.process_incoming(0, &a).unwrap();
+                let now = transport.clock.now_ms();
+                assert_eq!(
+                    transport.emission_secs(now),
+                    seed + k * EMISSION_LEARN_MAX_ADVANCE_SECS,
+                    "repeat announce from one destination must still advance by the cap"
+                );
+            }
+
+            // The floor was never captured outright.
+            let now = transport.clock.now_ms();
+            assert!(transport.emission_secs(now) < claim);
+        }
+
+        // Codeberg #161 review (B2): however many adoptions occur, the
+        // learned floor cannot pass EMISSION_LEARN_CEILING_SECS. The
+        // bounded advance clamps AT the ceiling (adopted =
+        // emitted.min(current + cap) with emitted <= ceiling), and
+        // over-ceiling emissions are refused outright (pinned in
+        // test_clockless_node_learns_emission_timebase_from_announce), so
+        // the walk of test_timebase_walk_is_capped_per_announce_not_per_
+        // identity terminates at the ceiling. (emission_secs itself may
+        // still exceed the ceiling by monotonic elapsed time on top of the
+        // floor; the claim here is about the adopted floor, asserted with
+        // zero elapsed time.)
+        #[test]
+        fn test_timebase_floor_cannot_pass_learn_ceiling() {
+            use crate::constants::{EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS};
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let make_dest = |label: &'static str| {
+                Destination::new(
+                    Some(Identity::generate(&mut OsRng)),
+                    Direction::In,
+                    DestinationType::Single,
+                    "testapp",
+                    &["timebase", label],
+                )
+                .unwrap()
+            };
+
+            // First adoption just below the ceiling (unbounded first step —
+            // this is the remaining #161 §1 first-adoption window, which the
+            // future build-stamp bound would narrow).
+            let near = EMISSION_LEARN_CEILING_SECS - EMISSION_LEARN_MAX_ADVANCE_SECS / 2;
+            let d0 = make_dest("near");
+            let a = make_announce_raw_for_dest(&d0, 1, near);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), near);
+
+            // An at-ceiling claim advances the floor, but the bounded
+            // advance clamps AT the ceiling, not at current + cap.
+            let d1 = make_dest("cap");
+            let a = make_announce_raw_for_dest(&d1, 1, EMISSION_LEARN_CEILING_SECS);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                EMISSION_LEARN_CEILING_SECS,
+                "the bounded advance must clamp at the ceiling"
+            );
+
+            // No further announce can push past it: an at-ceiling repeat is
+            // not newer than the floor, an above-ceiling claim is refused.
+            let d2 = make_dest("beyond");
+            let a = make_announce_raw_for_dest(&d2, 1, EMISSION_LEARN_CEILING_SECS);
+            transport.process_incoming(0, &a).unwrap();
+            let d3 = make_dest("beyond2");
+            let a = make_announce_raw_for_dest(&d3, 1, EMISSION_LEARN_CEILING_SECS + 1);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                EMISSION_LEARN_CEILING_SECS,
+                "no sequence of adoptions may move the floor past the ceiling"
+            );
+        }
+
         // Codeberg #160: a host injecting nonsense over the config channel
         // must not be able to wedge the timebase or produce a truncating
         // emission either.
