@@ -1,7 +1,7 @@
 # Storage and Embedding
 
 `leviculum-core` is `#![no_std]` with only `alloc`
-(`leviculum-core/src/lib.rs:59`). It contains no I/O, no clock, no
+(`leviculum-core/src/lib.rs:59-70`). It contains no I/O, no clock, no
 filesystem, and no async runtime. That is what lets the *exact same*
 protocol code run on a Linux daemon, a future Android app, and a
 bare-metal nRF52 firmware image. The bridge to the outside world is a

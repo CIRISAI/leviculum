@@ -29,7 +29,7 @@ targets `thumbv7em-none-eabihf`, and uses [Embassy](https://embassy.dev).
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:138`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:237`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -121,7 +121,7 @@ Three things to notice:
    broadcast-exclusion stay consistent.
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice to
-   `dispatch_actions` (`leviculum-core/src/transport.rs:211`). Broadcast
+   `dispatch_actions` (`leviculum-core/src/transport.rs:310`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free.
 
@@ -184,7 +184,7 @@ monotonic.
 ### `Interface`
 
 The **send side** of an interface — `id`, `name`, `mtu`, `is_online`, and the
-non-blocking `try_send` (`leviculum-core/src/traits.rs:97`). The receive side is
+non-blocking `try_send` (`leviculum-core/src/traits.rs:277`). The receive side is
 deliberately *not* in the trait: receiving is platform-specific (an interrupt, a
 DMA buffer, an Embassy channel), and you feed received bytes into the core via
 `handle_packet` yourself. `try_send` returns `InterfaceError::BufferFull`
@@ -211,7 +211,7 @@ impl Interface for MyRadio {
 ```
 
 A constrained medium (LoRa) overrides `next_slot_ms`
-(`leviculum-core/src/traits.rs:150`) to report the next airtime-fit time, so the
+(`leviculum-core/src/traits.rs:305`) to report the next airtime-fit time, so the
 core schedules retries against capacity without knowing any radio physics — the
 [interface-isolation rule](choosing-a-layer.md). For a fast link the default
 ("always ready") is correct.
@@ -222,7 +222,7 @@ Key-value persistence for the path table, link table, announce caches,
 identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:196`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:506`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:711`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
 - `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the

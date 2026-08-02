@@ -27,8 +27,8 @@ matching the stamp width expectation of this path.
 - `expires = now + TICKET_EXPIRY` (`LXMRouter.py:1047`).
 
 An existing inbound ticket with more than `TICKET_RENEW` validity left is reused
-rather than reissued (`LXMRouter.py:1039-1041`), and a new ticket is not issued to
-a destination more often than `TICKET_INTERVAL` (`LXMRouter.py:1028-1033`).
+rather than reissued (`LXMRouter.py:1083-1089`), and a new ticket is not issued to
+a destination more often than `TICKET_INTERVAL` (`LXMRouter.py:1076-1081`).
 
 ## Exchange
 
