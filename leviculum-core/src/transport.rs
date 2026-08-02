@@ -10412,6 +10412,13 @@ mod tests {
             );
         }
 
+        // -------------------------------------------------------------------
+        // #159 tranche 3: transport-layer generated fields. Every pin below
+        // extracts the audited field from the actual wire bytes and re-applies
+        // the rule a Python peer applies to it, so a writer/reader pair that
+        // drifted together stays red (the #155 failure class).
+        // -------------------------------------------------------------------
+
         /// Reshape a Type1 announce raw into the Type2 form a relay emits, so
         /// a chosen next-relay id can be planted in the wire bytes.
         fn announce_as_type2(
@@ -10427,6 +10434,451 @@ mod tests {
             let mut buf = [0u8; 512];
             let len = p.pack(&mut buf).unwrap();
             buf[..len].to_vec()
+        }
+
+        fn type2_data_to(
+            transport_id: [u8; TRUNCATED_HASHBYTES],
+            dest_hash: [u8; TRUNCATED_HASHBYTES],
+            wire_hops: u8,
+            payload: &[u8],
+        ) -> Vec<u8> {
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type2,
+                    context_flag: false,
+                    transport_type: TransportType::Transport,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: wire_hops,
+                transport_id: Some(transport_id),
+                destination_hash: dest_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(payload.to_vec()),
+            };
+            let mut buf = [0u8; 512];
+            let len = packet.pack(&mut buf).unwrap();
+            buf[..len].to_vec()
+        }
+
+        /// #159 tranche 3: pin the two fields the transport REWRITES on a
+        /// forwarded data packet — the hop byte and the transport id.
+        ///
+        /// The reference writes the receipt-incremented hop count into wire
+        /// byte 1 in every forward branch (Transport.py:1567-1581 after the
+        /// `packet.hops += 1` at :1457), and replaces bytes 2..18 with the
+        /// NEXT hop's transport id while more than one hop remains
+        /// (:1567-1570), stripping to HEADER_1 broadcast on the last hop
+        /// (:1571-1576). Peers decide on both: the next relay only processes
+        /// the packet if the transport id names it (:1560), and the taken-hops
+        /// byte feeds the link-table checks (:1656-1668) and the LRPROOF
+        /// `remaining_hops` comparison (#38). Both expectations here are
+        /// recomposed from the wire bytes we fed in, never from the values the
+        /// forwarding code computes.
+        #[test]
+        fn forwarded_data_wire_carries_incremented_hops_and_next_relay_id() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Multi-hop path: announce for D relayed to us by R (its id sits
+            // in the announce wire at bytes 2..18), wire hops 2 -> stored 3.
+            let (raw, dest_relayed) = make_announce_raw(0, PacketContext::None);
+            let relay_id = [0x5Au8; TRUNCATED_HASHBYTES];
+            let t2 = announce_as_type2(&raw, relay_id, 2);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // In-transport data addressed to OUR transport id at wire hops 5.
+            let wire_in = type2_data_to(
+                *transport.identity.hash(),
+                dest_relayed,
+                5,
+                b"tranche3-multi-hop",
+            );
+            transport.process_incoming(1, &wire_in).unwrap();
+            let actions = transport.drain_actions();
+            let fwd = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("multi-hop data must be forwarded toward the path interface");
+
+            assert_eq!(
+                fwd[0] & 0x40,
+                0x40,
+                "more than one hop remaining: HEADER_2 must be kept (Transport.py:1565-1570)"
+            );
+            assert_eq!(
+                fwd[1],
+                wire_in[1] + 1,
+                "forwarded hop byte must be the receipt-incremented count"
+            );
+            assert_eq!(
+                &fwd[2..2 + TRUNCATED_HASHBYTES],
+                &relay_id,
+                "transport id must be rewritten to the next relay the announce named"
+            );
+
+            // Last hop: destination announced directly (wire 0 -> stored 1);
+            // the forward strips transport routing entirely.
+            let (raw_direct, dest_direct) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(0, &raw_direct).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            let wire_in2 = type2_data_to(
+                *transport.identity.hash(),
+                dest_direct,
+                3,
+                b"tranche3-last-hop",
+            );
+            transport.process_incoming(1, &wire_in2).unwrap();
+            let actions = transport.drain_actions();
+            let fwd2 = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("last-hop data must be forwarded to the destination's interface");
+
+            assert_eq!(
+                fwd2[0] & 0x70,
+                0x00,
+                "last hop: HEADER_1 + BROADCAST, transport routing stripped (Transport.py:1571-1576)"
+            );
+            assert_eq!(
+                fwd2[1],
+                wire_in2[1] + 1,
+                "stripped forward still carries the receipt-incremented hop byte"
+            );
+            assert_eq!(
+                &fwd2[2..2 + TRUNCATED_HASHBYTES],
+                &dest_direct,
+                "with the transport field stripped, the destination hash follows the hop byte"
+            );
+        }
+
+        /// #159 tranche 3, deliberate non-behaviour: we DROP in-transport data
+        /// above `max_hops`; the reference forwards it (Transport.py:1560-1583
+        /// contains no hop ceiling for data in transport — only announces are
+        /// gated, at :1750). Deviation-rule justification: no legitimate path
+        /// exceeds PATHFINDER_M=128 because every peer drops announces above
+        /// it, so a data packet above the ceiling is unroutable or looping
+        /// traffic and dropping it only sheds load (Priority 1). Wire and
+        /// semantic compatibility are unaffected: no peer can expect delivery
+        /// along a path that cannot exist. If this test breaks because the
+        /// gate was removed, that is a deliberate reference-parity change and
+        /// this comment is the context for it.
+        #[test]
+        fn data_forward_above_max_hops_is_dropped_as_deliberate_deviation() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let t2 = announce_as_type2(&raw, [0x5Au8; TRUNCATED_HASHBYTES], 2);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // Wire hops 200 -> receipt-incremented 201 > 128.
+            let wire_in = type2_data_to(*transport.identity.hash(), dest_hash, 200, b"over-max");
+            transport.process_incoming(1, &wire_in).unwrap();
+            let actions = transport.drain_actions();
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, Action::SendPacket { .. } | Action::Broadcast { .. })),
+                "data above the hop ceiling must not be forwarded"
+            );
+            assert_eq!(
+                transport.stats().drops_forward_max_hops(),
+                1,
+                "the drop must be accounted as forward-max-hops"
+            );
+        }
+
+        /// #159 tranche 3: pin the hop byte of a plain announce rebroadcast.
+        /// The reference stores the receipt-incremented count when the
+        /// announce is queued (Transport.py:1868) and stamps exactly that
+        /// value on the retransmission (:618 `new_packet.hops =
+        /// announce_entry[4]`). Peers decide their path metric and the
+        /// PATHFINDER_M ceiling from it, and the local-rebroadcast bookkeeping
+        /// compares `packet.hops-1` against it (:1724). The expected value is
+        /// recomposed from the wire byte we fed in.
+        #[test]
+        fn rebroadcast_announce_wire_hop_byte_is_the_receipt_incremented_count() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, _dest) = make_announce_raw(2, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let fwd = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("announce must be rebroadcast");
+
+            assert_eq!(
+                fwd[1],
+                raw[1] + 1,
+                "rebroadcast hop byte must be the stored receipt-incremented count"
+            );
+        }
+
+        /// #159 tranche 3: pin the transport id we stamp when ORIGINATING a
+        /// packet onto a multi-hop path (the Type1 -> Type2 conversion). The
+        /// value must be the relay id the path's announce carried in its own
+        /// wire bytes — that relay only processes the packet if the id names
+        /// it (Transport.py:1560). Expected value recomposed from the announce
+        /// wire we crafted, never from the path table or the identity getter.
+        #[test]
+        fn originated_type2_stamps_the_relays_announced_transport_id() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let relay_id = [0x77u8; TRUNCATED_HASHBYTES];
+            // Wire hops 1 -> stored 2: multi-hop, origination must route via
+            // the relay.
+            let t2 = announce_as_type2(&raw, relay_id, 1);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // Originate a Type1 data packet; send_to_destination converts it.
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: dest_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(b"tranche3-origination".to_vec()),
+            };
+            let mut buf = [0u8; 512];
+            let len = packet.pack(&mut buf).unwrap();
+            transport
+                .send_to_destination(&dest_hash, &buf[..len])
+                .unwrap();
+
+            let actions = transport.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("origination must emit on the path interface");
+
+            assert_eq!(
+                wire[0] & 0x40,
+                0x40,
+                "multi-hop origination must be HEADER_2"
+            );
+            assert_eq!(wire[1], 0, "origination leaves the hop byte at zero");
+            assert_eq!(
+                &wire[2..2 + TRUNCATED_HASHBYTES],
+                &relay_id,
+                "the stamped transport id must be the relay the announce named"
+            );
+            assert_eq!(
+                &wire[2 + TRUNCATED_HASHBYTES..2 + 2 * TRUNCATED_HASHBYTES],
+                &dest_hash,
+                "the destination hash follows the transport id in HEADER_2"
+            );
+        }
+
+        /// Known-answer value from the vendored reference:
+        /// `RNS.Destination.hash(None, "rnstransport", "path", "request")`.
+        const PATH_REQUEST_DEST_KAT: [u8; TRUNCATED_HASHBYTES] = [
+            0x6b, 0x9f, 0x66, 0x01, 0x4d, 0x98, 0x53, 0xfa, 0xab, 0x22, 0x0f, 0xba, 0x47, 0xd0,
+            0x27, 0x61,
+        ];
+
+        /// #159 tranche 3: pin the fields of an ORIGINATED path request.
+        /// Layout per Transport.py:2780-2784: `dest_hash + [transport
+        /// identity hash] + tag`, the middle field present exactly when the
+        /// requester is a transport instance. Peers decide from each field:
+        /// the well-known destination hash routes the packet to
+        /// `path_request_handler` (pinned as a KAT from the vendored
+        /// reference), `dest+tag` feed the duplicate filter (:2893-2898), and
+        /// the transport-instance field is what a responder compares its
+        /// next hop against (:2958). The instance id is closed through the
+        /// wire: it must equal the transport_id bytes of an announce we
+        /// forward, because that is the only way a peer can place it.
+        #[test]
+        fn path_request_wire_matches_reference_layout_and_kat() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Capture our transport instance id from a FORWARDED announce's
+            // wire bytes (never from the identity getter).
+            let (raw, _dest) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let fwd_announce = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("announce must be rebroadcast");
+            let our_wire_instance_id = &fwd_announce[2..2 + TRUNCATED_HASHBYTES];
+
+            let target = [0xD5u8; TRUNCATED_HASHBYTES];
+            let tag = [0xC3u8; TRUNCATED_HASHBYTES];
+            transport.request_path(&target, None, &tag).unwrap();
+            let actions = transport.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("path request must be broadcast");
+
+            assert_eq!(
+                &wire[2..2 + TRUNCATED_HASHBYTES],
+                &PATH_REQUEST_DEST_KAT,
+                "path request must go to the reference's well-known destination"
+            );
+            let payload = &wire[19..];
+            assert_eq!(payload.len(), 48, "transport-instance form is 48 bytes");
+            assert_eq!(&payload[..16], &target, "field 1: requested destination");
+            assert_eq!(
+                &payload[16..32],
+                our_wire_instance_id,
+                "field 2: the same instance id our forwarded announces carry"
+            );
+            assert_eq!(&payload[32..48], &tag, "field 3: the tag, verbatim");
+
+            // A non-transport node omits the instance field
+            // (Transport.py:2784).
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = Identity::generate(&mut OsRng);
+            let config = TransportConfig {
+                enable_transport: false,
+                ..TransportConfig::default()
+            };
+            let mut endpoint =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            let _e0 = endpoint.register_interface(Box::new(MockInterface::new("e0", 1)));
+            endpoint.request_path(&target, None, &tag).unwrap();
+            let actions = endpoint.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("endpoint path request must be broadcast");
+            let payload = &wire[19..];
+            assert_eq!(payload.len(), 32, "endpoint form is dest + tag only");
+            assert_eq!(&payload[..16], &target);
+            assert_eq!(&payload[16..32], &tag);
+        }
+
+        /// #159 tranche 3: pin the tag of a RE-ORIGINATED path request. When a
+        /// transport re-originates discovery for an unknown destination it
+        /// must reuse the tag from the incoming request (Transport.py:
+        /// 3039-3041): every downstream transport dedups on `dest+tag`
+        /// (:2893-2898), so a fresh tag would let the same request loop
+        /// through the mesh. The re-origination is also a fresh packet at
+        /// wire hops 0 (:2787 via RNS.Packet defaults).
+        #[test]
+        fn reoriginated_path_request_reuses_the_incoming_tag_at_hops_zero() {
+            let mut transport = make_transport_enabled();
+            let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            transport.set_interface_mode(idx0, crate::traits::InterfaceMode::Gateway);
+
+            let target = [0xABu8; TRUNCATED_HASHBYTES];
+            let tag = [0x99u8; TRUNCATED_HASHBYTES];
+            let mut data = Vec::new();
+            data.extend_from_slice(&target);
+            data.extend_from_slice(&[0x11u8; TRUNCATED_HASHBYTES]); // requester's instance id
+            data.extend_from_slice(&tag);
+            let request = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: transport.path_request_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            };
+            transport.handle_path_request(request, idx0).unwrap();
+
+            // The re-origination is broadcast excluding the requesting
+            // interface (Python Transport.py:3034-3041 iterates all other
+            // interfaces).
+            let actions = transport.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast {
+                        data,
+                        exclude_iface,
+                        ..
+                    } if *exclude_iface == Some(InterfaceId(idx0)) => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("unknown destination must be re-originated on the other interfaces");
+
+            assert_eq!(
+                &wire[2..2 + TRUNCATED_HASHBYTES],
+                &PATH_REQUEST_DEST_KAT,
+                "re-origination goes to the same well-known destination"
+            );
+            assert_eq!(
+                wire[1], 0,
+                "re-origination is a fresh packet at wire hops 0"
+            );
+            let payload = &wire[19..];
+            assert_eq!(payload.len(), 48);
+            assert_eq!(&payload[..16], &target);
+            assert_eq!(
+                &payload[32..48],
+                &tag,
+                "the incoming tag must ride verbatim so downstream dedup kills loops"
+            );
         }
 
         /// #159 tranche 3 (found missing, fixed red-first in this batch): a
@@ -10508,6 +10960,111 @@ mod tests {
             let parsed = Packet::unpack(&response).unwrap();
             assert_eq!(parsed.flags.packet_type, PacketType::Announce);
             assert_eq!(parsed.context, PacketContext::PathResponse);
+        }
+
+        /// #159 tranche 3: pin the reading-side emission arithmetic for the
+        /// equal-or-fewer-hops branch, at its adverse corner: a stored entry
+        /// whose timebase sits in the FUTURE relative to our clock (a peer
+        /// with a fast clock, or a poisoned value). The reference consults
+        /// ONLY the emission ordering in this branch (Transport.py:1765-1776)
+        /// — unlike the more-hops branch (:1793) it has NO expiry escape — so
+        /// a same-hop announce with an older (i.e. current, correct) emission
+        /// is rejected even after the entry's expiry has passed. Recovery is
+        /// via the cull removing the entry, after which the same announce is
+        /// accepted as a new destination. Both blob timebases are planted
+        /// literally in wire bytes 5..10, never via the emission helpers.
+        #[test]
+        fn same_hop_older_emission_rejected_until_cull_removes_the_entry() {
+            let dest = make_test_dest();
+            let dest_hash = dest.hash().into_bytes();
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Timebase a full year ahead of our clock: still ahead after the
+            // 7-day path expiry has passed, so the emission ordering (not the
+            // expiry) is what the later assertions observe.
+            let now_secs = transport.clock.now_ms() / 1000;
+            let future = now_secs + 31_536_000;
+
+            let raw_future = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([1, 2, 3, 4, 5], future),
+            );
+            transport.process_incoming(0, &raw_future).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+            assert_eq!(transport.hops_to(&dest_hash), Some(2), "entry established");
+
+            // Same-hop announce with a CURRENT emission: older than the
+            // stored timebase, must be rejected. Acceptance is observed via
+            // the PathFound event, which fires only when the table updates.
+            // (The rejected blob is still RECORDED for replay detection —
+            // transport.rs:3914-3924, a deliberate anti-replay extension — so
+            // the blob count is not a rejection indicator.)
+            transport
+                .clock
+                .advance(transport.config().announce_rate_limit_ms + 1);
+            transport.storage_mut().clear_packet_hashes();
+            let now_secs = transport.clock.now_ms() / 1000;
+            let raw_current = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([6, 7, 8, 9, 10], now_secs),
+            );
+            transport.process_incoming(0, &raw_current).unwrap();
+            assert!(
+                !transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PathFound { .. })),
+                "current-emission announce must be rejected against the future timebase"
+            );
+
+            // Advance past the path's expiry WITHOUT polling: the entry is
+            // still present, and the equal-hop branch must STILL reject (no
+            // expiry escape in the reference's :1765-1776 branch).
+            let expires = transport.path(&dest_hash).unwrap().expires_ms;
+            let now = transport.clock.now_ms();
+            transport.clock.advance(expires - now + 1);
+            transport.storage_mut().clear_packet_hashes();
+            let now_secs = transport.clock.now_ms() / 1000;
+            let raw_current2 = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([11, 12, 13, 14, 15], now_secs),
+            );
+            transport.process_incoming(0, &raw_current2).unwrap();
+            assert!(
+                transport.path(&dest_hash).is_some(),
+                "entry still present before the cull"
+            );
+            assert!(
+                !transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PathFound { .. })),
+                "the equal-hop branch has no expiry escape"
+            );
+
+            // The cull removes the expired entry; the same announce is then
+            // accepted as a fresh destination.
+            transport.poll();
+            assert!(
+                transport.path(&dest_hash).is_none(),
+                "cull must remove the expired entry"
+            );
+            transport.storage_mut().clear_packet_hashes();
+            let raw_current3 = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([16, 17, 18, 19, 20], now_secs),
+            );
+            transport.process_incoming(0, &raw_current3).unwrap();
+            assert_eq!(
+                transport.hops_to(&dest_hash),
+                Some(2),
+                "after the cull the destination is learned afresh"
+            );
         }
 
         #[test]
@@ -24505,6 +25062,99 @@ mod tunnel_restore_tests {
         let mut buf = [0u8; MTU];
         let len = packet.pack(&mut buf).unwrap();
         (buf[..len].to_vec(), dest.hash().into_bytes())
+    }
+
+    /// Known-answer value from the vendored reference:
+    /// `RNS.Destination.hash(None, "rnstransport", "tunnel", "synthesize")`.
+    const TUNNEL_SYNTH_DEST_KAT: [u8; TRUNCATED_HASHBYTES] = [
+        0x91, 0xbf, 0x09, 0x10, 0x26, 0x7b, 0x59, 0xb0, 0xe8, 0x64, 0xe0, 0xd4, 0xc9, 0x16, 0x02,
+        0xca,
+    ];
+
+    /// #159 tranche 3: pin the wire fields of the tunnel-synthesize packet we
+    /// GENERATE. The other tests in this module feed `build_synthesize_payload`
+    /// into our own parser, so writer and reader could drift together (the
+    /// #155 failure class); this pin recomposes every expectation
+    /// independently. Reference: the payload is `public_key(64) +
+    /// interface_hash(32) + random_hash(16) + signature(64)` and a Python peer
+    /// slices it at exactly those offsets (Transport.py:2310-2318), verifies
+    /// the signature over the first 112 bytes with the identity loaded from
+    /// the embedded public key (:2319-2324), derives `tunnel_id =
+    /// full_hash(public_key + interface_hash)` (:2314-2315), and drops any
+    /// payload that is not exactly 176 bytes (:2310-2311). The destination
+    /// hash is pinned as a KAT from the vendored reference.
+    #[test]
+    fn tunnel_synthesize_wire_matches_reference_field_layout() {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        let mut t = enabled_transport();
+        let if_a = t.register_interface(Box::new(MockInterface::new("tcp[peer]", 1)));
+
+        let if_hash = [0x33u8; SYNTH_IFHASH_LEN];
+        let rand_hash = [0x7Eu8; SYNTH_RANDHASH_LEN];
+        t.register_tunnel_interface(if_a, if_hash);
+        let advertised_id = t
+            .send_tunnel_synthesize(if_a, &rand_hash)
+            .unwrap()
+            .expect("interface is tunnel-capable");
+
+        let actions = t.drain_actions();
+        let wire = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::SendPacket { iface, data } if iface.0 == if_a => Some(data.clone()),
+                _ => None,
+            })
+            .expect("synthesize must be sent on the registered interface");
+
+        assert_eq!(
+            &wire[2..2 + TRUNCATED_HASHBYTES],
+            &TUNNEL_SYNTH_DEST_KAT,
+            "synthesize must address the reference's well-known control destination"
+        );
+
+        let payload = &wire[19..];
+        assert_eq!(
+            payload.len(),
+            176,
+            "reference length gate (Transport.py:2310)"
+        );
+        let public_key = &payload[..64];
+        let wire_if_hash = &payload[64..96];
+        let wire_rand = &payload[96..112];
+        let signature = &payload[112..176];
+        assert_eq!(
+            wire_if_hash, &if_hash,
+            "interface hash rides at bytes 64..96"
+        );
+        assert_eq!(wire_rand, &rand_hash, "random hash rides at bytes 96..112");
+
+        // Signature verifies over the first 112 bytes with the Ed25519 half
+        // of the EMBEDDED public key — that is all a peer has.
+        let ed_half: [u8; 32] = public_key[32..64].try_into().unwrap();
+        let vk = VerifyingKey::from_bytes(&ed_half)
+            .expect("payload bytes 32..64 must be the Ed25519 verifying key");
+        let sig = Signature::from_bytes(signature.try_into().unwrap());
+        vk.verify(&payload[..112], &sig)
+            .expect("signature must cover public_key + interface_hash + random_hash");
+
+        // The tunnel id a peer derives from the wire bytes must be the one we
+        // recorded as our own advertised id. Recomputed with the hash
+        // primitive directly, not with compute_tunnel_id.
+        let mut id_input = Vec::new();
+        id_input.extend_from_slice(public_key);
+        id_input.extend_from_slice(wire_if_hash);
+        assert_eq!(
+            crate::crypto::sha256(&id_input),
+            advertised_id,
+            "peer-derived tunnel id must match the id we advertised"
+        );
+
+        // Length gate: a truncated payload must not parse (Transport.py:2311).
+        assert!(
+            crate::tunnel::SynthesizePayload::parse(&payload[..175]).is_none(),
+            "a peer drops any synthesize payload that is not exactly 176 bytes"
+        );
     }
 
     #[test]

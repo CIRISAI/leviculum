@@ -928,3 +928,161 @@ fn data_proof_wire_carries_reference_packet_hash_and_signature() {
         .any(|ev| matches!(ev, NodeEvent::LinkDeliveryConfirmed { .. }));
     assert!(confirmed, "initiator must confirm delivery from the proof");
 }
+
+/// #159 tranche 3, settling the open question from the #158 discussion: what
+/// does a node emit when a path request names one of its OWN destinations?
+///
+/// The reference REGENERATES the announce (`Transport.path_request`,
+/// Transport.py:2939-2941 calls `destination.announce(path_response=True)`;
+/// Destination.py:281-307 builds fresh `random_hash` — 5 random bytes + the
+/// current unix-seconds emission — a fresh signature, applies the
+/// `default_app_data` fallback at :289-293, and sets the PATH_RESPONSE
+/// context at :307). Peers decide on each of those: the emission timestamp
+/// orders the path against older entries (Transport.py:1765-1772, the #155
+/// rule), the random half is the replay-dedup key (:1772), the app_data is
+/// what applications read, and the PATH_RESPONSE context suppresses
+/// rebroadcast (:1886).
+///
+/// We match: Transport emits `PathRequestReceived` and NodeCore regenerates
+/// via `dest.announce(None, ..)` (node/mod.rs Block A), where `None` falls
+/// back to the destination's default app data (destination.rs:923-932). Every
+/// expectation below is read from the response wire bytes and compared
+/// against values recomposed from the ORIGINAL announce's wire bytes.
+#[test]
+fn own_destination_path_response_is_a_fresh_regeneration() {
+    use crate::destination::DestinationType as DT;
+    use crate::memory_storage::MemoryStorage;
+    use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+    use crate::traits::Clock;
+
+    // KAT from the vendored reference:
+    // RNS.Destination.hash(None, "rnstransport", "path", "request").
+    const PATH_REQUEST_DEST_KAT: [u8; TRUNCATED_HASHBYTES] = [
+        0x6b, 0x9f, 0x66, 0x01, 0x4d, 0x98, 0x53, 0xfa, 0xab, 0x22, 0x0f, 0xba, 0x47, 0xd0, 0x27,
+        0x61,
+    ];
+
+    let emission_of = |announce_payload: &[u8]| -> u64 {
+        // Type1 announce payload: pk(64) + name(10) + random(10) + sig + app;
+        // emission is random bytes 5..10, big-endian (Destination.py:282).
+        let ts = &announce_payload[79..84];
+        ((ts[0] as u64) << 32)
+            | ((ts[1] as u64) << 24)
+            | ((ts[2] as u64) << 16)
+            | ((ts[3] as u64) << 8)
+            | (ts[4] as u64)
+    };
+
+    let clock = MockClock::new(TEST_TIME_MS);
+    let mut node: NodeCore<OsRng, MockClock, MemoryStorage> =
+        NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+    let iface = node
+        .transport
+        .register_interface(std::boxed::Box::new(MockInterface::new("if0", 0)));
+    node.set_interface_name(iface, String::from("if0"));
+
+    let identity = Identity::generate(&mut OsRng);
+    let dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "fieldpins",
+        &["ownpr"],
+    )
+    .unwrap();
+    let dest_hash = *dest.hash();
+    node.register_destination(dest);
+
+    // t0: the application announces with explicit app data.
+    let app_data = b"own-pr-appdata";
+    let out = node
+        .announce_destination(&dest_hash, Some(app_data))
+        .unwrap();
+    let announce0 = action_data(&out)
+        .into_iter()
+        .next()
+        .expect("announce must be emitted");
+    let payload0 = announce0[19..].to_vec();
+    let random0 = payload0[74..84].to_vec();
+    let sig0 = payload0[84..148].to_vec();
+
+    // t0 + 5s: a peer's path request names our own destination.
+    let now = node.transport().clock().now_ms();
+    node.transport().clock().set(now + 5_000);
+    let mut pr_data = Vec::new();
+    pr_data.extend_from_slice(dest_hash.as_bytes());
+    pr_data.extend_from_slice(&[0xB7u8; TRUNCATED_HASHBYTES]); // tag
+    let request = Packet {
+        flags: PacketFlags {
+            ifac_flag: false,
+            header_type: HeaderType::Type1,
+            context_flag: false,
+            transport_type: TransportType::Broadcast,
+            dest_type: DT::Plain,
+            packet_type: PacketType::Data,
+        },
+        hops: 0,
+        transport_id: None,
+        destination_hash: PATH_REQUEST_DEST_KAT,
+        context: PacketContext::None,
+        data: PacketData::Owned(pr_data),
+    };
+    let mut buf = [0u8; crate::constants::MTU];
+    let len = request.pack(&mut buf).unwrap();
+    let _ = node.handle_packet(InterfaceId(iface), &buf[..len]);
+
+    // The answer is deferred by the path-request grace, then targeted at the
+    // requesting interface.
+    let now = node.transport().clock().now_ms();
+    node.transport()
+        .clock()
+        .set(now + crate::constants::PATH_REQUEST_GRACE_MS + 1);
+    let out = node.handle_timeout();
+    let response = out
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            Action::SendPacket { iface: i, data } if i.0 == iface => Some(data.clone()),
+            _ => None,
+        })
+        .expect("own-destination path response must target the requesting interface");
+
+    let parsed = Packet::unpack(&response).unwrap();
+    assert_eq!(parsed.flags.packet_type, PacketType::Announce);
+    assert_eq!(
+        parsed.context,
+        PacketContext::PathResponse,
+        "peers suppress rebroadcast on this context byte (Transport.py:1886)"
+    );
+    assert_eq!(
+        parsed.flags.header_type,
+        HeaderType::Type1,
+        "an origin's own announce is not transport-routed"
+    );
+    assert_eq!(parsed.hops, 0, "the origin's own hop count is zero");
+
+    let payload1 = &response[19..];
+    let random1 = &payload1[74..84];
+    let sig1 = &payload1[84..148];
+    assert_ne!(
+        random1,
+        &random0[..],
+        "the response must be a fresh emission, not a replay of the cached blob"
+    );
+    assert_eq!(
+        emission_of(payload1),
+        emission_of(&payload0) + 5,
+        "the fresh emission must carry the CURRENT time, 5s after the original"
+    );
+    assert_ne!(
+        sig1,
+        &sig0[..],
+        "a fresh random blob forces a fresh signature"
+    );
+    assert_eq!(
+        &payload1[148..],
+        app_data,
+        "regeneration with `None` must fall back to the announced app data \
+         (default_app_data, Destination.py:289-293)"
+    );
+}
