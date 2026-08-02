@@ -26,7 +26,7 @@ in [Wire Field Semantics](wire-field-semantics.md).
 
 ## One value, one producer
 
-`Transport::emission_secs` (`leviculum-core/src/transport.rs:2574`)
+`Transport::emission_secs` (`leviculum-core/src/transport.rs:2588`)
 is the single point that turns whatever time the platform has into
 the unix-seconds value for wire fields that peers compare across our
 process lifetimes: announce emission timestamps
@@ -101,7 +101,7 @@ serial channel (the radio-config envelope of
 ### 4. Learned from validated announces
 
 The clockless fallback: `learn_emission_timebase`
-(`transport.rs:2662`) adopts the highest emission timestamp seen in
+(`transport.rs:2676`) adopts the highest emission timestamp seen in
 any signature-valid announce as the node's timebase, then advances it
 with the monotonic clock (`transport.rs:2567`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —
@@ -140,7 +140,7 @@ The announce timestamp field holds
 silently drop its high bits on the wire and sort *below* every stored
 path entry — the node instantly loses path replacement everywhere.
 `EMISSION_TIMESTAMP_MAX_SECS`
-(`leviculum-core/src/constants.rs:488`) caps it, enforced at the
+(`leviculum-core/src/constants.rs:498`) caps it, enforced at the
 point of resolution (`transport.rs:2577`) and again at the wire
 producer (`announce.rs:167`), so truncation is unrepresentable
 regardless of which source produced the value. Incident: Codeberg
@@ -151,9 +151,9 @@ regardless of which source produced the value. Incident: Codeberg
 An older emission never regresses the floor (`emitted_secs <=
 current`, `transport.rs:2657`). Adoption is bounded by a plausibility
 window: values above `EMISSION_LEARN_CEILING_SECS`
-(`constants.rs:497`, 2200-01-01) cannot come from a real clock and
+(`constants.rs:507`, 2200-01-01) cannot come from a real clock and
 are refused outright (`transport.rs:2653`); the lower bound
-`EMISSION_PLAUSIBLE_MIN_SECS` (`constants.rs:515`, 2020) separates
+`EMISSION_PLAUSIBLE_MIN_SECS` (`constants.rs:525`, 2020) separates
 real wall clocks from uptime-derived values, which sit orders of
 magnitude apart. Incidents: #160, #161. Pinned at
 `transport.rs:15191` and `:15595`.
@@ -175,7 +175,7 @@ abused downwards. Pinned at `transport.rs:15378` and `:15419`.
 ### Advance after plausibility is bounded — per announce, not per peer
 
 Once the timebase is plausible, one announce may advance it by at
-most `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:529`, one
+most `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:539`, one
 day), so a peer whose clock is decades wrong cannot capture the
 timebase in one announce. State the protection level honestly:
 learning runs before the per-destination announce rate limit and the

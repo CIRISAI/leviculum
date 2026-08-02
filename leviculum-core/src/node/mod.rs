@@ -80,6 +80,8 @@ mod mvr_orphaned_path_cache;
 #[cfg(test)]
 mod mvr_path_response_hops;
 #[cfg(test)]
+mod mvr_pending_local_path_requests;
+#[cfg(test)]
 mod mvr_proof_activity;
 #[cfg(test)]
 mod mvr_request_response_pins;
@@ -2090,6 +2092,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Remove announce-rate config for this interface (Codeberg #67 Stage 2a)
         self.transport.remove_announce_rate_config(iface_idx);
+
+        // Cull pending local path requests waiting to answer on this
+        // interface (Codeberg #171; Python Transport.py:645-655)
+        self.transport
+            .remove_pending_local_path_requests_for_interface(iface_idx);
 
         // Remove local client flag, interface name and HW_MTU
         // (after logging so the name is still available above)

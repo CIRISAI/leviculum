@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A path request for a destination hosted on a shared-instance client
+  is now forwarded to that client and answered with the client's fresh
+  path response instead of only the cached announce (#171).
 - A local destination that has not announced since process start now
   answers its first path request instead of only the retry (#169).
 - A path request from the transport instance that is our own next hop

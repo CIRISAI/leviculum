@@ -49,8 +49,9 @@ use crate::constants::{
     LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX, MAX_QUEUED_ANNOUNCES_PER_INTERFACE,
     MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS,
     PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES, PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS,
-    PATH_REQUEST_MIN_INTERVAL_MS, RATCHET_SIZE, RECEIPT_TIMEOUT_DEFAULT_MS,
-    REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
+    PATH_REQUEST_MIN_INTERVAL_MS, PENDING_LOCAL_PR_EXPIRY_MS, RATCHET_SIZE,
+    RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES,
+    UNKNOWN_BITRATE_ASSUMPTION_BPS,
 };
 
 use crate::announce::{emission_from_random_hash, max_emission_from_blobs, ReceivedAnnounce};
@@ -1283,6 +1284,17 @@ pub struct Transport<C: Clock, S: Storage> {
     /// retry exhaustion, TTL) consumes the held slot.
     held_announce_entries: BTreeMap<[u8; TRUNCATED_HASHBYTES], AnnounceEntry>,
 
+    /// Network interfaces awaiting a local client's fresh PATH_RESPONSE for
+    /// a destination hosted on that client (Codeberg #171; Python
+    /// `Transport.pending_local_path_requests`, Transport.py:2926-2936).
+    /// Keyed by destination hash; value = (requesting interface, expiry ms).
+    /// Consumed in `handle_announce` when the client's PATH_RESPONSE
+    /// arrives (Transport.py:1910-1930). Removal paths: consumption,
+    /// requesting-interface departure (handle_interface_down, mirroring
+    /// Transport.py:645-655), and the `PENDING_LOCAL_PR_EXPIRY_MS` time
+    /// bound in `poll` (deliberate bounded-map deviation, see the constant).
+    pending_local_path_requests: BTreeMap<[u8; TRUNCATED_HASHBYTES], (usize, u64)>,
+
     /// Per-interface announce-rate configuration (Codeberg #67 Stage 2a).
     /// Present only for interfaces that configured at least one
     /// `announce_rate_*` key; absent entries resolve identically to an
@@ -1411,6 +1423,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_ingress_burst: BTreeMap::new(),
             interface_held_announces: BTreeMap::new(),
             held_announce_entries: BTreeMap::new(),
+            pending_local_path_requests: BTreeMap::new(),
             interface_announce_rate_configs: BTreeMap::new(),
             interface_next_slot_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
@@ -2321,6 +2334,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.drain_announce_queues(now);
         self.clean_link_table(now);
         self.clean_path_states();
+        self.expire_pending_local_path_requests(now);
 
         // Codeberg #87: drive the ingress-limit burst state machine on the poll
         // cadence so an active burst clears after its grace window even when no
@@ -3806,9 +3820,29 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
             }
 
+            // A PATH_RESPONSE from a local client that satisfies a pending
+            // external path request is scheduled for ONE immediate
+            // rebroadcast, exactly the reference's local-client announce
+            // shape: retransmit_timeout = now, retries = PATHFINDER_R,
+            // block_rebroadcasts stays False and attached_interface None,
+            // so it fires as a plain announce on all interfaces and reaches
+            // the requester (Codeberg #171; Python Transport.py:1910-1930,
+            // fired by the job loop at :589-622). It bypasses the two rate
+            // gates below like the reference does: announce-rate accounting
+            // skips PATH_RESPONSE context entirely (Transport.py:1837) and
+            // the pending-forward branch checks no rate state — without the
+            // bypass, the cached-answer entry a path request just inserted
+            // (case 2b) would count as "recent" and starve the forward.
+            let forwards_pending_response = is_path_response
+                && from_local
+                && self
+                    .pending_local_path_requests
+                    .remove(&dest_hash)
+                    .is_some();
+
             // Update announce table (skipped when rate-blocked or rate-limited to
             // prevent rebroadcast; path table was already updated above)
-            if !rate_blocked && !rate_limited {
+            if (!rate_blocked && !rate_limited) || forwards_pending_response {
                 self.storage.set_announce(
                     dest_hash,
                     AnnounceEntry {
@@ -3820,12 +3854,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // LOCAL_REBROADCASTS_MAX=2); local-client announces
                         // start at retries=PATHFINDER_R=1 and fire exactly
                         // once. See docs/src/architecture-broadcast-python-parity.md.
-                        retries: if delay_for_local_registration {
+                        retries: if delay_for_local_registration || forwards_pending_response {
                             PATHFINDER_RETRIES
                         } else {
                             0
                         },
-                        retransmit_at_ms: if delay_for_local_registration {
+                        retransmit_at_ms: if forwards_pending_response {
+                            // Immediate one-shot forward of the client's
+                            // fresh PATH_RESPONSE (Transport.py:1917,
+                            // `retransmit_timeout = now`). Displaces the
+                            // cached-answer entry case 2b scheduled for the
+                            // same destination, so the requester gets the
+                            // fresh data instead of the cache.
+                            Some(now)
+                        } else if delay_for_local_registration {
                             // Deferred first broadcast for local client registration
                             Some(now + LOCAL_CLIENT_ANNOUNCE_DELAY_MS)
                         } else if should_rebroadcast {
@@ -3845,7 +3887,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         receiving_interface_index: interface_index,
                         target_interface: None,
                         local_rebroadcasts: 0,
-                        block_rebroadcasts: is_path_response,
+                        // The pending forward goes out as a PLAIN announce:
+                        // the reference leaves block_rebroadcasts False in
+                        // its pending branch (Transport.py:1871/:1910-1930),
+                        // so the scheduler stamps context NONE (:596-597).
+                        block_rebroadcasts: is_path_response && !forwards_pending_response,
                     },
                 );
 
@@ -6604,6 +6650,48 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.held_announce_entries.insert(*dest_hash, existing);
     }
 
+    /// Fresh hops=0 path request bytes for forwarding or re-origination
+    /// (Python `Transport.request_path`, Transport.py:2554-2568: dest_hash
+    /// + own identity hash when transport is enabled + tag).
+    fn build_forwarded_path_request(
+        &self,
+        requested_hash: &[u8; TRUNCATED_HASHBYTES],
+        tag: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Result<Vec<u8>, TransportError> {
+        let pr_data = if self.config.enable_transport {
+            let mut d = Vec::with_capacity(48);
+            d.extend_from_slice(requested_hash);
+            d.extend_from_slice(self.identity.hash());
+            d.extend_from_slice(tag);
+            d
+        } else {
+            let mut d = Vec::with_capacity(32);
+            d.extend_from_slice(requested_hash);
+            d.extend_from_slice(tag);
+            d
+        };
+
+        let fresh_packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: crate::destination::DestinationType::Plain,
+                packet_type: PacketType::Data,
+            },
+            hops: 0,
+            transport_id: None,
+            destination_hash: self.path_request_hash,
+            context: PacketContext::None,
+            data: PacketData::Owned(pr_data),
+        };
+
+        let mut buf = [0u8; crate::constants::MTU];
+        let len = fresh_packet.pack(&mut buf)?;
+        Ok(buf[..len].to_vec())
+    }
+
     fn handle_path_request(
         &mut self,
         packet: Packet,
@@ -6687,6 +6775,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // advances when the policy is off.
         let pr_burst_limited = self.interface_ingress_control(interface_index)
             && self.should_ingress_limit_pr(interface_index);
+
+        // When the requested destination is hosted on one of our
+        // shared-instance clients, remember the requesting interface so the
+        // client's fresh PATH_RESPONSE is forwarded when it arrives
+        // (Codeberg #171; Python Transport.py:2924-2932, consumed at
+        // :1910-1930 in our `handle_announce`). The recency touch mirrors
+        // `Reticulum._used_destination_data` at Transport.py:2932, which
+        // resolves to the local `Identity._used_destination_data` on the
+        // instance that hosts clients.
+        if self.has_local_clients() {
+            let hosted_on_client = self
+                .storage
+                .get_path(&requested_hash)
+                .map(|p| self.is_local_client(p.interface_index))
+                .unwrap_or(false);
+            if hosted_on_client {
+                let now = self.clock.now_ms();
+                self.pending_local_path_requests.insert(
+                    requested_hash,
+                    (interface_index, now + PENDING_LOCAL_PR_EXPIRY_MS),
+                );
+                self.used_destination_data(&requested_hash);
+            }
+        }
 
         // 1. Check if it's a local destination
         if self.local_destinations.contains(&requested_hash) {
@@ -6878,6 +6990,45 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             block_rebroadcasts: true,
                         },
                     );
+
+                    // Cache-retention recency touch, mirroring Python
+                    // Transport.py:3004 (`Identity._used_destination_data`
+                    // unless this node is itself a client of a shared
+                    // instance). Wire-invisible bookkeeping (Codeberg #171
+                    // item 3).
+                    if !self.is_connected_to_shared_instance() {
+                        self.used_destination_data(&requested_hash);
+                    }
+                }
+
+                // Deliberate deviation from the reference's branch order
+                // (Codeberg #171): when the destination is hosted on one of
+                // our local clients, ALSO forward the request to that
+                // client. Python's transport-enabled chain answers from the
+                // cache alone and its local-client forward
+                // (Transport.py:3043-3048) is unreachable once this branch
+                // answered, so the pending entry recorded at :2926-2932
+                // never fires there and the requester keeps stale data for
+                // the path lifetime. The forward is byte-identical to the
+                // reference's non-transport local-client forward; the
+                // client's fresh PATH_RESPONSE then displaces the cached
+                // entry above inside the grace window (see
+                // `handle_announce`), and the cached entry remains the
+                // fallback when the client stays silent. Wire and semantic
+                // compatibility preserved; measurably better than
+                // cache-only, whose stale emission timestamp can lose the
+                // newer-emission comparison at the requester and fail a
+                // request that looks answered (deviation rule,
+                // docs/src/concepts/python-rns-compatibility.md).
+                let hosting_client = self
+                    .storage
+                    .get_path(&requested_hash)
+                    .map(|p| p.interface_index)
+                    .filter(|&idx| self.is_local_client(idx) && idx != interface_index);
+                if let Some(client_iface) = hosting_client {
+                    let fwd = self.build_forwarded_path_request(&requested_hash, &tag)?;
+                    self.record_outgoing_path_request(client_iface);
+                    let _ = self.send_on_interface(client_iface, &fwd);
                 }
                 return Ok(());
             }
@@ -6892,16 +7043,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Transport.py:3022-3026 `return`s without recording a discovery
         // request or forwarding). Answering already-known paths above is
         // never limited, so this drops only the excess recursion.
-        if self.config.enable_transport && !from_local {
+        //
+        // Not gated on `enable_transport` as a whole (Codeberg #171): the
+        // local-client forward inside is Python branch 5
+        // (Transport.py:3043-3048), which the reference reaches with
+        // transport DISABLED — the stock shared-instance `rnsd`
+        // configuration. Only the discovery pieces below are transport-only.
+        if !from_local {
             // Codeberg #104: active recursive path discovery for an unknown
-            // destination happens only when the receiving interface is in a
-            // mode listed in Python `DISCOVER_PATHS_FOR`
+            // destination happens only on a transport node
+            // (Transport.py:2917) and only when the receiving interface is
+            // in a mode listed in Python `DISCOVER_PATHS_FOR`
             // (ACCESS_POINT / GATEWAY / ROAMING), matching Python
             // `Transport.path_request` (Transport.py:2917-2918, 3015). A
             // non-discovering interface (e.g. `Full`) still forwards the
             // request to local clients (Python branch 5, Transport.py:3043-3048)
             // but does not re-originate a recursive network discovery.
-            let discovers = self.interface_mode(interface_index).discovers_paths();
+            let discovers = self.config.enable_transport
+                && self.interface_mode(interface_index).discovers_paths();
 
             // Codeberg #87: abort the recursive discovery when the receiving
             // interface's PR ingress burst limiter is active (Python
@@ -6933,9 +7092,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // `get_discovery_path_request` guard prevents duplicate
                 // re-origination and the #87 PR ingress burst limiter still
                 // gates it via `!pr_burst_limited`.
-                let has_cached_announce_no_path =
-                    self.storage.get_announce_cache(&requested_hash).is_some()
-                        && self.storage.get_path(&requested_hash).is_none();
+                let has_cached_announce_no_path = self.config.enable_transport
+                    && self.storage.get_announce_cache(&requested_hash).is_some()
+                    && self.storage.get_path(&requested_hash).is_none();
                 let active_discovery =
                     (discovers || has_cached_announce_no_path) && !pr_burst_limited;
                 let has_locals = self.has_local_clients();
@@ -6968,37 +7127,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // Build a fresh path request packet with hops=0
                     // (Python Transport.py:2555-2561). Used for both the
                     // recursive network broadcast and the local-client forward.
-                    let pr_data = if self.config.enable_transport {
-                        let mut d = Vec::with_capacity(48);
-                        d.extend_from_slice(&requested_hash);
-                        d.extend_from_slice(self.identity.hash());
-                        d.extend_from_slice(&tag);
-                        d
-                    } else {
-                        let mut d = Vec::with_capacity(32);
-                        d.extend_from_slice(&requested_hash);
-                        d.extend_from_slice(&tag);
-                        d
-                    };
-
-                    let fresh_packet = Packet {
-                        flags: PacketFlags {
-                            ifac_flag: false,
-                            header_type: HeaderType::Type1,
-                            context_flag: false,
-                            transport_type: TransportType::Broadcast,
-                            dest_type: crate::destination::DestinationType::Plain,
-                            packet_type: PacketType::Data,
-                        },
-                        hops: 0,
-                        transport_id: None,
-                        destination_hash: self.path_request_hash,
-                        context: PacketContext::None,
-                        data: PacketData::Owned(pr_data),
-                    };
-
-                    let mut buf = [0u8; crate::constants::MTU];
-                    let len = fresh_packet.pack(&mut buf)?;
+                    let fwd = self.build_forwarded_path_request(&requested_hash, &tag)?;
+                    let buf = fwd.as_slice();
+                    let len = buf.len();
 
                     if active_discovery {
                         self.send_on_all_interfaces_except(interface_index, &buf[..len], None);
@@ -7060,6 +7191,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         Ok(())
+    }
+
+    /// Drop pending local path requests past their lifetime (Codeberg #171).
+    /// The reference has no time bound — it culls only on requesting-
+    /// interface departure (Transport.py:645-655, mirrored in
+    /// `remove_pending_local_path_requests_for_interface`); the bound is the
+    /// deliberate deviation documented at `PENDING_LOCAL_PR_EXPIRY_MS`.
+    fn expire_pending_local_path_requests(&mut self, now: u64) {
+        self.pending_local_path_requests
+            .retain(|_, &mut (_, expires_at_ms)| now < expires_at_ms);
+    }
+
+    /// Cull pending local path requests whose REQUESTING interface has gone
+    /// away (Codeberg #171). Mirrors the reference's only cleanup of
+    /// `pending_local_path_requests` (Transport.py:645-655: entries whose
+    /// interface is no longer in `Transport.interfaces` are popped). Called
+    /// from `handle_interface_down`.
+    pub fn remove_pending_local_path_requests_for_interface(&mut self, interface_index: usize) {
+        self.pending_local_path_requests
+            .retain(|_, &mut (iface, _)| iface != interface_index);
+    }
+
+    /// Test-only visibility into the pending local path request map.
+    #[cfg(test)]
+    pub(crate) fn pending_local_path_request_count(&self) -> usize {
+        self.pending_local_path_requests.len()
     }
 
     // Internal: Periodic Tasks
@@ -7241,10 +7398,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     parsed.transport_id = Some(transport_id);
                 }
 
-                // If block_rebroadcasts, set PathResponse context
-                if block {
-                    parsed.context = PacketContext::PathResponse;
-                }
+                // The scheduler stamps the context afresh, exactly like the
+                // reference job loop (Transport.py:595-597): NONE by
+                // default, PATH_RESPONSE iff block_rebroadcasts. Clearing
+                // matters for the #171 pending forward, whose raw bytes
+                // arrived from the local client WITH PathResponse context
+                // but must go out as a plain announce (block stays false).
+                parsed.context = if block {
+                    PacketContext::PathResponse
+                } else {
+                    PacketContext::None
+                };
 
                 if let Some(target_iface) = target {
                     // Path response: send only to the requesting interface

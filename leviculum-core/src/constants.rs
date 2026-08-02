@@ -179,6 +179,16 @@ pub const DISCOVERY_TIMEOUT_MS: u64 = 30_000;
 /// Each retry sends a fresh path request with a new random tag.
 pub const DISCOVERY_RETRY_INTERVAL_MS: u64 = 5_000;
 
+/// Lifetime of a pending local path request entry (Codeberg #171): a network
+/// interface waiting for a local client's fresh PATH_RESPONSE. The reference
+/// keeps `Transport.pending_local_path_requests` entries until the requesting
+/// interface disappears (Transport.py:645-655); the additional time bound is
+/// a deliberate, wire-invisible deviation that keeps the map bounded when a
+/// client never answers. Sized to Python's `PATH_REQUEST_TIMEOUT = 15`
+/// (Transport.py:79) — the requester itself gives up then, so a later
+/// forward serves nobody.
+pub const PENDING_LOCAL_PR_EXPIRY_MS: u64 = PATH_REQUEST_TIMEOUT_MS;
+
 /// Maximum number of path request dedup tags to retain
 pub const MAX_PATH_REQUEST_TAGS: usize = 32_000;
 
