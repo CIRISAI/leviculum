@@ -8,6 +8,7 @@
 - [Interface isolation](concepts/interface-isolation.md)
 - [Bluetooth interfaces](concepts/bluetooth-interfaces.md)
 - [Python-RNS compatibility](concepts/python-rns-compatibility.md)
+- [Client tools](concepts/client-tools.md)
 - [Cryptographic identity and forward secrecy](concepts/identity-and-forward-secrecy.md)
 - [Storage and embedding](concepts/storage-and-embedding.md)
 - [Time and clocks](concepts/time-and-clocks.md)
