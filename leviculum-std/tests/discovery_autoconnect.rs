@@ -341,6 +341,189 @@ async fn advertised_ifac_record_connects_under_that_ifac() {
     let _ = node_b.stop().await;
 }
 
+/// #151 case 2, end to end, through the production hearing path: the discovery
+/// record advertises NO IFAC material, but A hears the announce over its
+/// IFAC-protected bootstrap client, so the spawned auto-connect client must
+/// inherit the hearing interface's IFAC (the `AutoInterface.py:559-561`
+/// parent-child rule). This exercises the real insert side of the inherit rule
+/// (`record_discovery_announce` -> heard-IFAC map), which the seeded-record
+/// tests bypass.
+///
+/// Proof of authentication: after the bootstrap link is removed, a probe
+/// destination registered on B afterwards can reach A only over the
+/// auto-connected link, and B's backbone server drops unauthenticated traffic
+/// in both directions. Pre-#151 this test is red twice over: without the
+/// inherit rule an IFAC-running A refuses the endpoint entirely, and without
+/// any IFAC on the spawned client the path is never learned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn autoconnect_inherits_ifac_of_hearing_interface() {
+    let bootstrap_port = next_port();
+    let backbone_port = next_port();
+
+    // Node B: bootstrap + backbone TCP servers, both under the operator's
+    // IFAC (one closed network), built through the production config path.
+    let mut b_config = Config::default();
+    for (name, port) in [("Bootstrap", bootstrap_port), ("Backbone", backbone_port)] {
+        b_config.interfaces.insert(
+            name.to_string(),
+            InterfaceConfig {
+                interface_type: "TCPServerInterface".to_string(),
+                listen_ip: Some("127.0.0.1".to_string()),
+                listen_port: Some(port),
+                networkname: Some(IFAC_NETNAME.to_string()),
+                passphrase: Some(IFAC_NETKEY.to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    let b_storage = tempfile::tempdir().expect("tempdir b");
+    let mut node_b = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .config(b_config)
+        .storage_path(b_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build b");
+    node_b.start().await.expect("start b");
+
+    // Node A: an IFAC'd bootstrap client to B (the hearing interface) and
+    // auto-connect enabled. No seeded records: A learns of the backbone only
+    // by hearing B's announce over the protected bootstrap link.
+    let mut a_config = Config::default();
+    a_config.interfaces.insert(
+        "Bootstrap Client".to_string(),
+        InterfaceConfig {
+            interface_type: "TCPClientInterface".to_string(),
+            target_host: Some("127.0.0.1".to_string()),
+            target_port: Some(bootstrap_port),
+            networkname: Some(IFAC_NETNAME.to_string()),
+            passphrase: Some(IFAC_NETKEY.to_string()),
+            ..Default::default()
+        },
+    );
+    let a_storage = tempfile::tempdir().expect("tempdir a");
+    let mut node_a = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .autoconnect_discovered_interfaces(4)
+        .config(a_config)
+        .storage_path(a_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build a");
+    node_a.start().await.expect("start a");
+
+    let bootstrap_up = wait_until(Duration::from_secs(10), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.online && !i.is_local_client)
+    })
+    .await;
+    assert!(bootstrap_up, "bootstrap A->B link did not come online");
+    let bootstrap_id = node_a
+        .interface_stats()
+        .iter()
+        .find(|i| !i.is_local_client && !i.name.starts_with("autoconnect/"))
+        .map(|i| i.interface_id)
+        .expect("bootstrap interface present");
+
+    // B advertises its backbone endpoint. The descriptor carries NO IFAC
+    // fields — exactly what our own advertisement path publishes
+    // (discovery.rs sets ifac_netname: None) — so only inheritance can
+    // protect the spawned client.
+    let disco_identity = Identity::generate(&mut rand_core::OsRng);
+    let disco_dest = Destination::new(
+        Some(disco_identity),
+        Direction::In,
+        DestinationType::Single,
+        "rnstransport",
+        &["discovery", "interface"],
+    )
+    .expect("discovery destination");
+    let disco_hash = *disco_dest.hash();
+    node_b.register_destination(disco_dest);
+    let descriptor = InterfaceDescriptor {
+        interface_type: "TCPServerInterface".to_string(),
+        name: Some("B Protected Backbone".to_string()),
+        reachable_on: Some("127.0.0.1".to_string()),
+        port: Some(backbone_port as u64),
+        ..Default::default()
+    };
+    let transport_id = [0xB1u8; 16];
+    let app_data = build_announce_app_data(&descriptor, &transport_id, true, &mut rand_core::OsRng)
+        .expect("build discovery announce app_data");
+
+    // Announce until A has heard it (over the IFAC'd bootstrap) and spawned
+    // the auto-connect client. An IFAC-running A without the inherit rule
+    // refuses the endpoint here (fail closed), so this wait itself is the
+    // first red assertion pre-#151.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut auto_connected = false;
+    while Instant::now() < deadline {
+        node_b
+            .announce_destination(&disco_hash, Some(&app_data))
+            .await
+            .expect("announce discovery record");
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name.starts_with("autoconnect/") && i.online)
+        {
+            auto_connected = true;
+            break;
+        }
+    }
+    assert!(
+        auto_connected,
+        "A did not auto-connect the heard endpoint under inherited IFAC; \
+         interfaces = {:?}",
+        node_a.interface_stats()
+    );
+
+    // Remove the bootstrap link; from here on, only the auto-connected link
+    // remains, and it only carries traffic if it inherited the IFAC.
+    node_a
+        .remove_interface(bootstrap_id)
+        .expect("remove bootstrap interface");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let probe_identity = Identity::generate(&mut rand_core::OsRng);
+    let probe_dest = Destination::new(
+        Some(probe_identity),
+        Direction::In,
+        DestinationType::Single,
+        "test151",
+        &["inherit", "probe"],
+    )
+    .expect("probe destination");
+    let probe_hash = *probe_dest.hash();
+    node_b.register_destination(probe_dest);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut path_learned = false;
+    while Instant::now() < deadline {
+        node_b
+            .announce_destination(&probe_hash, None)
+            .await
+            .expect("announce probe");
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if node_a.has_path(&probe_hash) {
+            path_learned = true;
+            break;
+        }
+    }
+    assert!(
+        path_learned,
+        "A never learned B's probe path over the auto-connected link; the \
+         spawned client did not inherit the hearing interface's IFAC \
+         (Codeberg #151)"
+    );
+
+    let _ = node_a.stop().await;
+    let _ = node_b.stop().await;
+}
+
 /// #151 case 3, end to end: this node runs IFAC (an operator-configured UDP
 /// interface), the seeded record offers no IFAC material, and no hearing
 /// interface can be inherited from (the record was read from disk). The

@@ -4032,7 +4032,13 @@ fn record_discovery_announce(
         ),
     };
     let Some(di) = parsed else {
-        tracing::debug!("discovery: announce on discovery destination failed validation");
+        tracing::debug!(
+            "discovery: announce on discovery destination failed validation \
+             dest={} app_data_len={} iface={}",
+            announce.destination_hash(),
+            announce.app_data().len(),
+            interface_index,
+        );
         return;
     };
 
