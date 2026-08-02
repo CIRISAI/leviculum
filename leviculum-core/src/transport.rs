@@ -1174,6 +1174,10 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `Clock::wall_unix_secs` provides real wall time.
     emission_floor: Option<(u64, u64)>,
 
+    /// Whether the once-per-process operator warning about an implausible
+    /// own wall clock has fired (Codeberg #161).
+    own_wall_clock_warned: bool,
+
     /// Well-known hash for path request destination (rnstransport.path.request)
     path_request_hash: [u8; TRUNCATED_HASHBYTES],
 
@@ -1375,6 +1379,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             last_path_snapshot_ms: 0,
             last_path_entries_dump_ms: 0,
             emission_floor: None,
+            own_wall_clock_warned: false,
             path_request_hash,
             tunnel_synthesize_hash,
             // announce_cache: migrated to Storage
@@ -2567,6 +2572,34 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // #160). Saturating here makes that unrepresentable regardless of
         // which source produced the value.
         secs.min(EMISSION_TIMESTAMP_MAX_SECS)
+    }
+
+    /// [`emission_secs`](Self::emission_secs) for an announce we are about
+    /// to emit, plus a once-per-process operator warning when the platform
+    /// wall clock is implausible (Codeberg #161): a dead RTC or a restored
+    /// snapshot makes every announce we send poison our entries in other
+    /// people's path tables (the #155 failure mode), and without this
+    /// warning the operator has no way to notice from the affected node.
+    ///
+    /// The returned value is `emission_secs` unchanged: Python-RNS fills
+    /// the field from `time.time()` unvalidated (Destination.py:282), so
+    /// bounding or withholding it would desynchronise us from a network
+    /// that does not validate — we warn, we never alter.
+    pub fn announce_emission_secs(&mut self, now_ms: u64) -> u64 {
+        if !self.own_wall_clock_warned {
+            if let Some(wall) = self.clock.wall_unix_secs() {
+                if !(EMISSION_PLAUSIBLE_MIN_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&wall) {
+                    self.own_wall_clock_warned = true;
+                    crate::tracing::warn!(
+                        wall_unix_secs = wall,
+                        "This node's wall clock is implausible (dead RTC, restored snapshot, \
+                         or missing NTP?). Announces carry it verbatim and will degrade this \
+                         node's entries in peers' path tables until the system clock is fixed"
+                    );
+                }
+            }
+        }
+        self.emission_secs(now_ms)
     }
 
     /// Inject wall-clock unix time from the host (Codeberg #155).
@@ -15488,6 +15521,72 @@ mod tests {
                 far_future,
                 "an implausibly high own wall clock must be emitted verbatim (Destination.py:282)"
             );
+        }
+
+        // Codeberg #161 review §3: when our OWN wall clock is implausible
+        // (below EMISSION_PLAUSIBLE_MIN_SECS or above the learn ceiling),
+        // the announce-emission path warns the operator exactly once — a
+        // dead RTC or restored snapshot pollutes peers' path tables and is
+        // otherwise invisible from the affected node — and the emitted
+        // value is UNCHANGED by the warning (the C1 pin above holds through
+        // this path too; warning locally is the only response that is not a
+        // semantic deviation from the reference).
+        #[test]
+        fn test_implausible_own_wall_clock_warns_once_and_leaves_emission_unchanged() {
+            struct FixedWallClock(Option<u64>);
+            impl Clock for FixedWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    self.0
+                }
+            }
+            let make = |wall: Option<u64>| {
+                Transport::new(
+                    TransportConfig::default(),
+                    FixedWallClock(wall),
+                    MemoryStorage::with_defaults(),
+                    Identity::generate(&mut OsRng),
+                )
+            };
+
+            // Dead-RTC clock: warning fires on the first announce emission,
+            // and only there; the value is emitted verbatim both times.
+            let dead_rtc = 946_684_800;
+            let mut t = make(Some(dead_rtc));
+            assert!(!t.own_wall_clock_warned);
+            assert_eq!(t.announce_emission_secs(0), dead_rtc);
+            assert!(
+                t.own_wall_clock_warned,
+                "the operator warning must fire for an implausibly low own wall clock"
+            );
+            assert_eq!(
+                t.announce_emission_secs(0),
+                dead_rtc,
+                "the warning must not change emission behaviour"
+            );
+
+            // Above the ceiling: also warned.
+            let mut t = make(Some(
+                crate::constants::EMISSION_LEARN_CEILING_SECS + 1_000_000,
+            ));
+            let _ = t.announce_emission_secs(0);
+            assert!(
+                t.own_wall_clock_warned,
+                "the operator warning must fire for an implausibly high own wall clock"
+            );
+
+            // A plausible wall clock never warns.
+            let mut t = make(Some(1_790_000_000));
+            assert_eq!(t.announce_emission_secs(0), 1_790_000_000);
+            assert!(!t.own_wall_clock_warned);
+
+            // A clockless platform never warns: its uptime-seconds fallback
+            // is the documented #155 state, not an operator fault.
+            let mut t = make(None);
+            let _ = t.announce_emission_secs(0);
+            assert!(!t.own_wall_clock_warned);
         }
 
         // Codeberg #161 §3 (contested assertion — deliberate NON-behaviour):

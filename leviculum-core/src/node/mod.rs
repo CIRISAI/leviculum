@@ -576,7 +576,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // 15s periodic announce or a discovery retry. No interfaces exist at
         // build time, so this only populates the cache; the actual path
         // response is regenerated fresh by the PathRequestReceived handler.
-        let emission_secs = self.transport.emission_secs(now_ms);
+        let emission_secs = self.transport.announce_emission_secs(now_ms);
         if let Some(dest) = self.destinations.get_mut(&hash) {
             if let Ok(packet) = dest.announce(None, &mut self.rng, now_ms, emission_secs) {
                 let mut buf = [0u8; crate::constants::MTU];
@@ -683,7 +683,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         interface_index: Option<usize>,
     ) -> Result<crate::transport::TickOutput, AnnounceError> {
         let now_ms = self.transport.clock().now_ms();
-        let emission_secs = self.transport.emission_secs(now_ms);
+        let emission_secs = self.transport.announce_emission_secs(now_ms);
 
         let dest = self
             .destinations
@@ -1736,7 +1736,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Clone hashes to avoid borrow conflict with self
         let hashes: Vec<DestinationHash> = self.mgmt_destinations.clone();
-        let emission_secs = self.transport.emission_secs(now_ms);
+        let emission_secs = self.transport.announce_emission_secs(now_ms);
         for dest_hash in &hashes {
             // Installed announce-suppression policy: skip silently. Borrows
             // announce_control only; released before destinations.get_mut.
@@ -2128,7 +2128,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// seen them (Block D).
     pub fn handle_interface_up(&mut self, interface_index: usize) -> crate::transport::TickOutput {
         let now_ms = self.transport.clock().now_ms();
-        let emission_secs = self.transport.emission_secs(now_ms);
+        let emission_secs = self.transport.announce_emission_secs(now_ms);
 
         // Collect destination hashes first to avoid borrow conflict. Only
         // destinations that have announced before (announce cache present)
@@ -2746,7 +2746,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // instead of serving cached bytes. Transport set up a deferred AnnounceEntry
                 // with the 400ms grace period, we replace its raw_packet with fresh bytes.
                 let now_ms = self.transport.clock().now_ms();
-                let emission_secs = self.transport.emission_secs(now_ms);
+                let emission_secs = self.transport.announce_emission_secs(now_ms);
                 if let Some(dest) = self
                     .destinations
                     .get_mut(&DestinationHash::new(destination_hash))
