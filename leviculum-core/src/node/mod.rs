@@ -56,6 +56,8 @@ mod mvr_diamond_return_path;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_establishment_loss;
 #[cfg(test)]
+mod mvr_first_path_request;
+#[cfg(test)]
 mod mvr_generated_field_pins;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_hop_asymmetry;
@@ -571,23 +573,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
         if self.next_mgmt_announce_ms.is_none() {
             self.next_mgmt_announce_ms = Some(now_ms + MGMT_ANNOUNCE_INITIAL_DELAY_MS);
-        }
-
-        // Seed the announce cache now so the FIRST path request for this local
-        // destination can be answered immediately, rather than waiting for the
-        // 15s periodic announce or a discovery retry. No interfaces exist at
-        // build time, so this only populates the cache; the actual path
-        // response is regenerated fresh by the PathRequestReceived handler.
-        let emission_secs = self.transport.announce_emission_secs(now_ms);
-        if let Some(dest) = self.destinations.get_mut(&hash) {
-            if let Ok(packet) = dest.announce(None, &mut self.rng, now_ms, emission_secs) {
-                let mut buf = [0u8; crate::constants::MTU];
-                if let Ok(len) = packet.pack(&mut buf) {
-                    self.transport
-                        .storage_mut()
-                        .set_announce_cache(hash.into_bytes(), buf[..len].to_vec());
-                }
-            }
         }
 
         crate::tracing::info!("Remote management responder at <{}> active", hash);
@@ -2749,9 +2734,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 destination_hash,
                 requesting_interface,
             } => {
-                // Block A: Generate a fresh announce (new signature, current app_data)
-                // instead of serving cached bytes. Transport set up a deferred AnnounceEntry
-                // with the 400ms grace period, we replace its raw_packet with fresh bytes.
+                // Block A: answer from the destination itself with a freshly
+                // generated announce (new signature, current app_data), never
+                // from cached bytes. The reference regenerates unconditionally
+                // (Transport.path_request, Transport.py:2938-2941 calls
+                // `destination.announce(path_response=True)`), so the response
+                // must not depend on announce history: it used to piggyback on
+                // an AnnounceEntry that Transport only set up when an
+                // announce-cache entry existed, which left the FIRST path
+                // request after process start unanswered (Codeberg #169).
                 let now_ms = self.transport.clock().now_ms();
                 let emission_secs = self.transport.announce_emission_secs(now_ms);
                 if let Some(dest) = self
@@ -2763,23 +2754,35 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             let mut buf = [0u8; crate::constants::MTU];
                             if let Ok(len) = packet.pack(&mut buf) {
                                 let fresh_raw = buf[..len].to_vec();
-                                // Update announce_cache with fresh bytes
+                                // Keep the announce cache current: it is the
+                                // identity-recall source, not the data source
+                                // for this response.
                                 self.transport
                                     .storage_mut()
                                     .set_announce_cache(destination_hash, fresh_raw.clone());
-                                // Update the AnnounceEntry that Transport already set up
-                                if let Some(entry) = self
-                                    .transport
-                                    .storage_mut()
-                                    .get_announce_mut(&destination_hash)
-                                {
-                                    entry.raw_packet = fresh_raw;
-                                    entry.hops = 0; // Local destination
-                                    crate::tracing::debug!(
-                                        "Fresh path response generated for <{}>",
-                                        HexShort(&destination_hash),
-                                    );
-                                }
+                                // Schedule the deferred path response, targeted
+                                // at the requesting interface after the
+                                // path-request grace.
+                                self.transport.storage_mut().set_announce(
+                                    destination_hash,
+                                    crate::storage_types::AnnounceEntry {
+                                        timestamp_ms: now_ms,
+                                        hops: 0, // Local destination
+                                        retries: 0,
+                                        retransmit_at_ms: Some(
+                                            now_ms + crate::constants::PATH_REQUEST_GRACE_MS,
+                                        ),
+                                        raw_packet: fresh_raw,
+                                        receiving_interface_index: requesting_interface,
+                                        target_interface: Some(requesting_interface),
+                                        local_rebroadcasts: 0,
+                                        block_rebroadcasts: true,
+                                    },
+                                );
+                                crate::tracing::debug!(
+                                    "Fresh path response generated for <{}>",
+                                    HexShort(&destination_hash),
+                                );
                             }
                         }
                         Err(e) => {
@@ -2791,7 +2794,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     }
                 }
-                let _ = requesting_interface; // used by Transport for target_interface
                 self.events.push(NodeEvent::PathRequestReceived {
                     destination_hash: DestinationHash::new(destination_hash),
                 });

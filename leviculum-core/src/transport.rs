@@ -6568,6 +6568,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Path request format: dest_hash(16) + [transport_id(16)] + tag(16)
         // Minimum: dest_hash(16) + tag(16) = 32 bytes
+        //
+        // Deliberate deviation (#169 audit): Python slices variable-length
+        // tags (`path_request_handler`, Transport.py:2882-2891: tag =
+        // data[32:] or data[16:], truncated to the FIRST 16 bytes) and so
+        // answers 17..31-byte short-tag requests, where we require the
+        // conformant 32/48-byte layouts and take the LAST 16 bytes as tag.
+        // Both stacks emit exactly 32 or 48 bytes (`Transport.request_path`,
+        // Transport.py:2554-2568), so the divergent inputs are only
+        // producible by a non-reference sender; a 16-byte (tagless) request
+        // is ignored by both (Python :2908). The tag is a local dedup key
+        // and re-origination echo, never parsed by peers.
         if data.len() < 32 {
             crate::tracing::trace!(len = data.len(), "Dropped truncated path request");
             return Ok(());
@@ -6639,39 +6650,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 HexShort(&requested_hash),
                 self.iface_name(interface_index)
             );
-            // Emit event so NodeCore generates a FRESH announce (Block A).
-            // NodeCore will update the AnnounceEntry's raw_packet with fresh bytes
-            // (new signature, current app_data) before the deferred rebroadcast fires.
+            // Emit event so NodeCore builds the response from the destination
+            // itself: it generates a FRESH announce (new signature, current
+            // app_data) and schedules the deferred, targeted AnnounceEntry
+            // (Block A). The reference regenerates unconditionally
+            // (Transport.py:2938-2941), so the answer must not be gated on
+            // announce history — a cache-gated schedule here left the FIRST
+            // path request after process start unanswered (Codeberg #169).
             self.events.push(TransportEvent::PathRequestReceived {
                 destination_hash: requested_hash,
                 requesting_interface: interface_index,
             });
-            // Schedule deferred path response only if we have a cached announce.
-            // Without a cache, there's nothing to rebroadcast. NodeCore will
-            // generate a fresh announce in response to the PathRequestReceived
-            // event, which populates the cache for future requests.
-            if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
-                let now = self.clock.now_ms();
-                let hops = Packet::unpack(&cached_raw).map(|p| p.hops).unwrap_or(0);
-                crate::tracing::debug!(
-                    "Setting up deferred path response for local dest <{}>",
-                    HexShort(&requested_hash)
-                );
-                self.storage.set_announce(
-                    requested_hash,
-                    AnnounceEntry {
-                        timestamp_ms: now,
-                        hops,
-                        retries: 0,
-                        retransmit_at_ms: Some(now + PATH_REQUEST_GRACE_MS),
-                        raw_packet: cached_raw,
-                        receiving_interface_index: interface_index,
-                        target_interface: Some(interface_index),
-                        local_rebroadcasts: 0,
-                        block_rebroadcasts: true,
-                    },
-                );
-            }
             return Ok(());
         }
 
@@ -6750,6 +6739,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Gated on the path table (Python Transport.py:2943): with the path
         // dropped or expired the orphaned cache must not answer; the request
         // falls through to case 3 and re-originates discovery (Codeberg #117).
+        //
+        // Deliberate deviation (#169 audit), the mirror-image edge: a path
+        // entry whose cached announce was EVICTED. Python ignores the request
+        // outright (`get_cached_packet` returns None, Transport.py:2946-2947);
+        // we fall through to case 3/4, so a discovering relay re-originates
+        // the request and a local client's request is still forwarded. An
+        // ordinary hops=0 path-request broadcast is wire-conformant, all
+        // dedup and ingress limits apply, and attempting recovery beats
+        // Python's silence for mesh delivery (deviation rule, P1).
         if self.config.enable_transport && self.storage.get_path(&requested_hash).is_some() {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 let mode = self.interface_mode(interface_index);
@@ -13002,25 +13000,37 @@ mod tests {
             );
         }
 
-        // Stage 7: Auto re-announce on local path request
+        // Stage 7 / Codeberg #169: a path request for a local destination is
+        // answered by NodeCore (Block A), which regenerates a fresh announce
+        // from the destination itself and schedules the deferred, targeted
+        // response. The transport layer only signals via PathRequestReceived —
+        // it must NOT schedule anything from the announce cache, whether the
+        // cache holds an entry or not. The cache-gated schedule this replaces
+        // left the FIRST request for a never-announced destination unanswered
+        // (#169), because NodeCore only refreshed an entry Transport had
+        // already created. End-to-end coverage lives at the NodeCore layer:
+        // node::mvr_first_path_request (no prior announce) and
+        // mvr_generated_field_pins::own_destination_path_response_is_a_fresh_regeneration
+        // (post-announce).
         #[test]
-        fn test_path_request_local_dest_schedules_rebroadcast() {
+        fn test_path_request_local_dest_with_cache_does_not_schedule() {
             let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
 
             let dest_hash = [0x42; TRUNCATED_HASHBYTES];
             transport.register_destination(dest_hash);
 
-            // Populate announce cache for this destination (simulate prior announce)
+            // Populate announce cache (simulate prior announce). The cache is
+            // an identity-recall source, not the path-response data source.
             let (raw, _) = make_announce_raw(0, PacketContext::None);
             transport.storage_mut().set_announce_cache(dest_hash, raw);
 
-            // Send path request
+            // Build and send path request
             let path_req_hash = transport.path_request_hash;
             let mut data = Vec::new();
             data.extend_from_slice(&dest_hash);
-            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]); // transport_id
-            data.extend_from_slice(&[0xCC; TRUNCATED_HASHBYTES]); // tag
+            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]);
+            data.extend_from_slice(&[0xCC; TRUNCATED_HASHBYTES]);
 
             let packet = Packet {
                 flags: PacketFlags {
@@ -13042,59 +13052,37 @@ mod tests {
             let len = packet.pack(&mut buf).unwrap();
             transport.process_incoming(0, &buf[..len]).unwrap();
 
-            // Should still emit PathRequestReceived event
+            // Event emitted
             let events: Vec<_> = transport.drain_events().collect();
             assert!(
                 events
                     .iter()
                     .any(|e| matches!(e, TransportEvent::PathRequestReceived { .. })),
-                "Should emit PathRequestReceived event"
+                "Must emit PathRequestReceived"
             );
 
-            // AND should schedule a rebroadcast from the cache
-            let entry = transport
-                .storage()
-                .get_announce(&dest_hash)
-                .expect("Should schedule announce rebroadcast from cache");
-            assert_eq!(
-                entry.target_interface,
-                Some(0),
-                "Local dest path response should target the requesting interface"
-            );
-
-            // Advance clock and poll to verify targeted SendPacket
-            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
-            transport.poll();
-
-            let actions = transport.drain_actions();
-            let sends: Vec<_> = actions
-                .iter()
-                .filter_map(|a| match a {
-                    Action::SendPacket { iface, data } => Some((iface, data)),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                sends.len(),
-                1,
-                "Should emit exactly one SendPacket for local dest path response"
-            );
-            assert_eq!(
-                sends[0].0 .0, 0,
-                "SendPacket must target the requesting interface (0)"
-            );
-
-            let broadcasts: Vec<_> = actions
-                .iter()
-                .filter(|a| matches!(a, Action::Broadcast { .. }))
-                .collect();
+            // Transport must not schedule from the cache; NodeCore owns the
+            // response and builds it from the destination, not from the cache.
             assert!(
-                broadcasts.is_empty(),
-                "Local dest path response should not broadcast"
+                transport.storage().get_announce(&dest_hash).is_none(),
+                "Transport must not create an AnnounceEntry for a local-destination \
+                 path request; NodeCore Block A schedules the fresh response"
+            );
+
+            // And no immediate answer either: the response is deferred and
+            // NodeCore-generated.
+            let actions = transport.drain_actions();
+            assert!(
+                actions
+                    .iter()
+                    .all(|a| !matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
+                "No transport-level answer for a local-destination path request"
             );
         }
 
-        // Issue #13: Deferred path response with no cached announce
+        // Issue #13 / #169: with no cached announce the transport layer
+        // likewise only emits the event; before #169 this test doubled as a
+        // pin of the (defective) cache precondition.
         #[test]
         fn test_path_request_local_dest_no_cache_no_announce_entry() {
             let mut transport = make_transport_enabled();
@@ -13102,7 +13090,7 @@ mod tests {
 
             let dest_hash = [0x42; TRUNCATED_HASHBYTES];
             transport.register_destination(dest_hash);
-            // NO announce cache set, this is the bug trigger
+            // NO announce cache set: the never-announced-since-start state.
 
             // Build path request
             let path_req_hash = transport.path_request_hash;
@@ -13142,81 +13130,13 @@ mod tests {
                 "Must emit PathRequestReceived"
             );
 
-            // announce table must NOT have an entry (no cache = nothing to rebroadcast)
+            // No transport-level scheduling; NodeCore Block A answers.
             assert!(
                 transport.storage().get_announce(&dest_hash).is_none(),
-                "Must not create AnnounceEntry when no announce cache exists"
+                "Transport must not create an AnnounceEntry; NodeCore schedules \
+                 the fresh response"
             );
         }
-
-        #[test]
-        fn test_path_request_local_dest_with_cache_creates_entry() {
-            let mut transport = make_transport_enabled();
-            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
-
-            let dest_hash = [0x42; TRUNCATED_HASHBYTES];
-            transport.register_destination(dest_hash);
-
-            // Populate announce cache
-            let (raw, _) = make_announce_raw(0, PacketContext::None);
-            transport
-                .storage_mut()
-                .set_announce_cache(dest_hash, raw.clone());
-
-            // Build and send path request
-            let path_req_hash = transport.path_request_hash;
-            let mut data = Vec::new();
-            data.extend_from_slice(&dest_hash);
-            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]);
-            data.extend_from_slice(&[0xCC; TRUNCATED_HASHBYTES]);
-
-            let packet = Packet {
-                flags: PacketFlags {
-                    ifac_flag: false,
-                    header_type: HeaderType::Type1,
-                    context_flag: false,
-                    transport_type: TransportType::Broadcast,
-                    dest_type: crate::destination::DestinationType::Plain,
-                    packet_type: PacketType::Data,
-                },
-                hops: 0,
-                transport_id: None,
-                destination_hash: path_req_hash,
-                context: PacketContext::None,
-                data: PacketData::Owned(data),
-            };
-
-            let mut buf = [0u8; 500];
-            let len = packet.pack(&mut buf).unwrap();
-            transport.process_incoming(0, &buf[..len]).unwrap();
-
-            // Event emitted
-            let events: Vec<_> = transport.drain_events().collect();
-            assert!(
-                events
-                    .iter()
-                    .any(|e| matches!(e, TransportEvent::PathRequestReceived { .. })),
-                "Must emit PathRequestReceived"
-            );
-
-            // AnnounceEntry created with correct data
-            let entry = transport
-                .storage()
-                .get_announce(&dest_hash)
-                .expect("Must create AnnounceEntry when cache exists");
-            assert!(!entry.raw_packet.is_empty(), "raw_packet must not be empty");
-            assert_eq!(
-                entry.raw_packet, raw,
-                "raw_packet must match cached announce"
-            );
-            assert_eq!(
-                entry.target_interface,
-                Some(0),
-                "must target requesting interface"
-            );
-            assert!(entry.block_rebroadcasts, "must block rebroadcasts");
-        }
-
         #[test]
         fn test_announce_rebroadcast_empty_packet_is_silent() {
             let mut transport = make_transport_enabled();
@@ -15400,10 +15320,11 @@ mod tests {
         #[test]
         fn test_path_request_for_local_destination() {
             // When a node receives a path request for one of its own registered
-            // destinations and has a cached announce, it should:
-            // 1. Emit PathRequestReceived event
-            // 2. Schedule a targeted announce rebroadcast (not forward the request)
-            // 3. NOT forward the path request to other interfaces
+            // destinations, the transport layer should:
+            // 1. Emit PathRequestReceived event (NodeCore Block A regenerates
+            //    and schedules the targeted response, Codeberg #169)
+            // 2. NOT forward the path request to other interfaces
+            // 3. NOT schedule anything itself, cached announce or not
             let mut transport = make_transport_enabled();
             let net_iface = transport.register_interface(Box::new(MockInterface::new("net0", 1)));
             let _net_iface2 = transport.register_interface(Box::new(MockInterface::new("net1", 2)));
@@ -15515,35 +15436,15 @@ mod tests {
                 "Should NOT forward path request for local destination"
             );
 
-            // 3. Should have scheduled a targeted announce rebroadcast in the announce table
+            // 3. Should NOT have scheduled anything at the transport layer,
+            // despite the populated cache: NodeCore Block A builds the
+            // response from the destination itself (Codeberg #169). The
+            // deferred targeted send is pinned end-to-end in
+            // node::mvr_first_path_request and mvr_generated_field_pins.
             assert!(
-                transport.storage().get_announce(&dest_hash).is_some(),
-                "Should have scheduled announce rebroadcast for local destination"
-            );
-            let entry = transport.storage().get_announce(&dest_hash).unwrap();
-            assert_eq!(
-                entry.target_interface,
-                Some(net_iface),
-                "Announce rebroadcast should target the requesting interface"
-            );
-            assert!(
-                entry.block_rebroadcasts,
-                "Announce rebroadcast should block further rebroadcasts"
-            );
-
-            // 4. After grace period, the announce should produce a SendPacket action
-            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1000);
-            transport.poll();
-            let actions = transport.drain_actions();
-            let has_send = actions.iter().any(|a| {
-                matches!(
-                    a,
-                    Action::SendPacket { iface, .. } if *iface == InterfaceId(net_iface)
-                )
-            });
-            assert!(
-                has_send,
-                "After grace period, should send path response to requesting interface"
+                transport.storage().get_announce(&dest_hash).is_none(),
+                "Transport must not schedule a local-destination path response; \
+                 NodeCore Block A owns it"
             );
         }
 
@@ -17956,6 +17857,141 @@ mod tests {
                 &["recovery"],
             )
             .unwrap()
+        }
+
+        /// Deliberate-deviation pin (#159 tranche 3): the forward-refreshed
+        /// path expiry feeds the worse-hop announce acceptance comparison.
+        ///
+        /// Our path table keeps a single `expires_ms`. Forwarding refreshes it
+        /// (data forward and link-request forward, mirroring the cull refresh
+        /// at Python Transport.py:990/:1504), and the SAME field is what the
+        /// worse-hop acceptance branch compares against (`now >=
+        /// existing.expires_ms`). Python keeps two fields: the forward refresh
+        /// touches only the cull timestamp (IDX_PT_TIMESTAMP, Transport.py:1636),
+        /// while the acceptance comparison reads the INSERT-TIME expiry
+        /// (IDX_PT_EXPIRES, read at :1784, compared `now >= path_expires` at
+        /// :1793), which is never refreshed.
+        ///
+        /// The stacks diverge exactly when ALL of these hold: the path entry
+        /// is older than the path lifetime, traffic is still actively
+        /// forwarded through us (so our `expires_ms` was refreshed), and a
+        /// HIGHER-hop announce arrives whose emission timestamp is NOT newer
+        /// than the stored timebase (with an unseen random blob). Python
+        /// accepts it — the insert-time expiry has passed — and switches to
+        /// the worse path; we keep the actively-used path. Wire-invisible:
+        /// neither stack emits anything in either case; only the local
+        /// next-hop choice can differ, and only until the destination's next
+        /// real announce. Unreachable at real announce cadences: a
+        /// destination that re-announces more often than the path lifetime
+        /// always presents a NEWER emission, which both stacks accept through
+        /// the shared `announce_emitted > path_timebase` branch — so for the
+        /// divergence to bite, a destination must stay silent for the whole
+        /// path lifetime while its old announce still circulates.
+        ///
+        /// Deviation rule (docs/src/concepts/python-rns-compatibility.md):
+        /// wire format untouched, semantics preserved for every reachable
+        /// input, and keeping an actively-used path instead of displacing it
+        /// with a stale worse-hop announce improves delivery robustness.
+        #[test]
+        fn forward_refreshed_expiry_blocks_worse_hop_acceptance_deliberate_deviation() {
+            use crate::destination::DestinationType;
+            use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
+
+            const EMISSION: u64 = 1_700_000_000; // unix seconds, both announces
+
+            let announce_on_if0 = |transport: &mut Transport<MockClock, MemoryStorage>,
+                                   dest: &crate::destination::Destination,
+                                   wire_hops: u8,
+                                   prefix: [u8; 5]| {
+                let raw = make_announce_raw_with_random_hash(
+                    dest,
+                    wire_hops,
+                    &make_random_hash(prefix, EMISSION),
+                );
+                transport.process_incoming(0, &raw).unwrap();
+                transport.drain_actions();
+                transport.drain_events();
+            };
+
+            // Control: with the path expired and NOT refreshed, a worse-hop
+            // announce with the SAME emission and a fresh random blob is
+            // accepted — here both stacks agree, proving the rejection below
+            // is caused by the refresh alone.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let dest = make_test_dest();
+            let dest_hash = dest.hash().into_bytes();
+            let lifetime_ms = transport.config.path_expiry_secs * 1000;
+
+            announce_on_if0(&mut transport, &dest, 2, [0x01; 5]);
+            assert_eq!(
+                transport.storage().get_path(&dest_hash).unwrap().hops,
+                3,
+                "wire hops 2 + receipt increment"
+            );
+
+            transport.clock.advance(lifetime_ms + 5_000); // past insert-time expiry
+            announce_on_if0(&mut transport, &dest, 3, [0x02; 5]);
+            assert_eq!(
+                transport.storage().get_path(&dest_hash).unwrap().hops,
+                4,
+                "expired-and-unrefreshed path must accept the worse-hop announce \
+                 (both stacks agree)"
+            );
+
+            // Deviation: same sequence, but a data forward refreshes
+            // `expires_ms` after the insert-time expiry has passed. The same
+            // worse-hop announce is now REJECTED; Python (comparing the
+            // insert-time IDX_PT_EXPIRES) would accept it.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let dest = make_test_dest();
+            let dest_hash = dest.hash().into_bytes();
+
+            announce_on_if0(&mut transport, &dest, 2, [0x01; 5]);
+            transport.clock.advance(lifetime_ms + 5_000); // past insert-time expiry
+
+            // Active traffic: a data packet from if1 forwarded toward the
+            // destination (path learned on if0) refreshes the path expiry via
+            // the production forward path.
+            let insert_expiry = transport.storage().get_path(&dest_hash).unwrap().expires_ms;
+            let data_packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type2,
+                    context_flag: false,
+                    transport_type: TransportType::Transport,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: 1,
+                transport_id: Some(*transport.identity.hash()),
+                destination_hash: dest_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(b"active traffic".to_vec()),
+            };
+            let mut buf = [0u8; MTU];
+            let len = data_packet.pack(&mut buf).unwrap();
+            transport.process_incoming(1, &buf[..len]).unwrap();
+            transport.drain_actions();
+            let refreshed_expiry = transport.storage().get_path(&dest_hash).unwrap().expires_ms;
+            assert!(
+                refreshed_expiry > insert_expiry,
+                "the forward must have refreshed the expiry for the deviation \
+                 to be exercised"
+            );
+
+            transport.clock.advance(1_000);
+            announce_on_if0(&mut transport, &dest, 3, [0x02; 5]);
+            assert_eq!(
+                transport.storage().get_path(&dest_hash).unwrap().hops,
+                3,
+                "the refreshed expiry must reject the worse-hop same-emission \
+                 announce (Python, reading the insert-time expiry, would accept \
+                 it here — the deliberate deviation this test pins)"
+            );
         }
 
         #[test]
