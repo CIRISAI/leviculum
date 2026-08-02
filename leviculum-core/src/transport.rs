@@ -15438,6 +15438,127 @@ mod tests {
             );
         }
 
+        // Codeberg #161 §3 (contested assertion — deliberate NON-behaviour):
+        // a std node's own wall clock is NOT plausibility-bounded on
+        // emission. Python-RNS fills the wire field from time.time()
+        // unvalidated (reference Destination.py:282), so bounding,
+        // substituting, or withholding the value on our side would
+        // desynchronise our announces from a network that does not
+        // validate it. If a change makes this test fail, that change is a
+        // semantic deviation from the reference, not an improvement; the
+        // correct response to an implausible OWN clock is the local
+        // operator warning (#161 review §3), never an altered emission.
+        // Only the 40-bit wire-representability clamp applies (see
+        // test_emission_secs_saturates_at_wire_field_max).
+        #[test]
+        fn test_own_wall_clock_is_not_plausibility_bounded_on_emission() {
+            struct FixedWallClock(u64);
+            impl Clock for FixedWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    Some(self.0)
+                }
+            }
+            let make = |wall: u64| {
+                Transport::new(
+                    TransportConfig::default(),
+                    FixedWallClock(wall),
+                    MemoryStorage::with_defaults(),
+                    Identity::generate(&mut OsRng),
+                )
+            };
+
+            // 2000-01-01, the classic dead-RTC reset value: far below
+            // EMISSION_PLAUSIBLE_MIN_SECS, emitted verbatim.
+            let dead_rtc = 946_684_800;
+            assert!(dead_rtc < crate::constants::EMISSION_PLAUSIBLE_MIN_SECS);
+            assert_eq!(
+                make(dead_rtc).emission_secs(0),
+                dead_rtc,
+                "an implausibly low own wall clock must be emitted verbatim (Destination.py:282)"
+            );
+
+            // Above the learn ceiling but wire-representable: also verbatim.
+            let far_future = crate::constants::EMISSION_LEARN_CEILING_SECS + 1_000_000;
+            assert!(far_future < crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
+            assert_eq!(
+                make(far_future).emission_secs(0),
+                far_future,
+                "an implausibly high own wall clock must be emitted verbatim (Destination.py:282)"
+            );
+        }
+
+        // Codeberg #161 §3 (contested assertion — deliberate NON-behaviour):
+        // incoming emission timestamps are NOT plausibility-checked on path
+        // acceptance; ordering is per-destination comparison only, exactly
+        // Python-RNS `announce_emitted > path_timebase` (reference
+        // Transport.py:1772 and :1809). Both directions matter: a clockless
+        // peer's uptime-seconds announce must enter the path table (that is
+        // how a #155 node is reachable at all), and an absurdly high
+        // emission must win the newer-emission comparison rather than be
+        // rejected. Python peers accept both, so filtering here would only
+        // desynchronise our path tables from every other node's view of the
+        // same announces. The plausibility gate exists for TIMEBASE
+        // learning only (pinned in
+        // test_clockless_node_learns_emission_timebase_from_announce).
+        #[test]
+        fn test_incoming_emission_not_plausibility_checked_on_acceptance() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            // Facet 1: an implausibly LOW emission (a clockless peer's
+            // uptime seconds) is accepted for a new destination.
+            let dest_low = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["accept", "low"],
+            )
+            .unwrap();
+            let a = make_announce_raw_for_dest(&dest_low, 1, 42);
+            transport.process_incoming(0, &a).unwrap();
+            assert_eq!(
+                transport.hops_to(&dest_low.hash().into_bytes()),
+                Some(2),
+                "an uptime-seconds emission must enter the path table (Transport.py:1772)"
+            );
+
+            // Facet 2: an implausibly HIGH emission (above the learn
+            // ceiling, at the wire max) wins the newer-emission comparison
+            // for an existing path — even from a worse-hop announce.
+            let dest_high = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["accept", "high"],
+            )
+            .unwrap();
+            let dest_high_hash = dest_high.hash().into_bytes();
+            let a = make_announce_raw_for_dest(&dest_high, 1, 1_800_000_000);
+            transport.process_incoming(0, &a).unwrap();
+            assert_eq!(transport.hops_to(&dest_high_hash), Some(2));
+
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let a = make_announce_raw_for_dest(
+                &dest_high,
+                3,
+                crate::constants::EMISSION_TIMESTAMP_MAX_SECS,
+            );
+            transport.process_incoming(0, &a).unwrap();
+            assert_eq!(
+                transport.hops_to(&dest_high_hash),
+                Some(4),
+                "an absurdly high emission must still win the newer-emission \
+                 comparison (Transport.py:1809), not be rejected as implausible"
+            );
+        }
+
         // Codeberg #63 mvr: replicate the link_failure_recovery flip shape
         // (scenario log 2026-06-11, alice/bob path tables).  A FRESH direct
         // 1-hop entry, then two worse-hop (2-hop) relay announces:
