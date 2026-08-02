@@ -43,9 +43,13 @@ pub(super) fn build(
     let listen_addr: SocketAddr = format!("{}:{}", listen_ip, listen_port)
         .parse()
         .map_err(|e| Error::Config(format!("UDPInterface invalid listen address: {}", e)))?;
-    // `forward_ip` may hold several comma-separated addresses (Rust-only
-    // extension); each outgoing datagram goes to every one of them.
-    let forward_addrs =
+    // `forward_ip` may hold several comma-separated entries (Rust-only
+    // extension); each outgoing datagram goes to every one of them. Each
+    // entry is an address or a hostname (Codeberg #148) — hostnames are
+    // resolved by the interface at runtime, so a name that does not resolve
+    // is an interface-level error here, not a config error, matching rnsd
+    // (Python defers the lookup to sendto).
+    let forward_targets =
         crate::interfaces::udp::parse_forward_addrs(forward_ip, config.forward_port).map_err(
             |e| match e {
                 crate::interfaces::udp::ForwardAddrError::MissingPort => {
@@ -59,12 +63,12 @@ pub(super) fn build(
 
     let iface_name = format!("udp_{}", idx);
     let id = InterfaceId(idx);
-    let forward_desc = forward_addrs
+    let forward_desc = forward_targets
         .iter()
-        .map(|a| a.to_string())
+        .map(|t| t.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    let handle = spawn_udp_interface(id, iface_name, listen_addr, forward_addrs)?;
+    let handle = spawn_udp_interface(id, iface_name, listen_addr, forward_targets)?;
     tracing::info!(
         "UDP interface listening on {}, forwarding to {}",
         listen_addr,

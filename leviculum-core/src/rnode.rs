@@ -93,6 +93,9 @@ pub const CMD_MCU: u8 = 0x49;
 pub const CMD_FW_VERSION: u8 = 0x50;
 /// Hard reset / reset notification
 pub const CMD_RESET: u8 = 0x55;
+/// Confirmation byte the RNode firmware requires as CMD_RESET payload
+/// before it reboots (RNode_Firmware Framing.h `CMD_RESET_BYTE`).
+pub const CMD_RESET_BYTE: u8 = 0xF8;
 
 // ---------------------------------------------------------------------------
 // Multi-interface data commands
@@ -893,6 +896,25 @@ pub const RADIO_CONFIG_FRAME_LEN: usize = 21;
 
 /// ACK payload sent by T114 after applying radio config.
 pub const RADIO_CONFIG_ACK: [u8; 3] = [0xA4, 0xA4, 0x01];
+
+/// Host-to-board reboot request on the same magic-prefixed control channel
+/// as the radio-config frame: the RNode protocol's `CMD_RESET` +
+/// `CMD_RESET_BYTE` pair inside our magic envelope. The board ACKs with
+/// [`RADIO_RESET_ACK`] and then performs a full system reset, which starts
+/// the duty-cycle histogram, the radio configuration and all queues from
+/// scratch.
+///
+/// This frame exists only on the USB host-to-modem control channel; it is
+/// never carried on the mesh. It cannot swallow peer traffic either: a
+/// valid Reticulum wire packet is at least 19 bytes (2 header, 16 address,
+/// 1 context), so a 4-byte HDLC payload can never be one, and a Python
+/// peer's SerialInterface never emits it — an rnsd-driven LNode simply
+/// never sees the frame.
+pub const RADIO_RESET_FRAME: [u8; 4] = [0xA4, 0xA4, CMD_RESET, CMD_RESET_BYTE];
+
+/// ACK the board writes back immediately before rebooting, so the host can
+/// tell "reset accepted" apart from "firmware predates the reset frame".
+pub const RADIO_RESET_ACK: [u8; 3] = [0xA4, 0xA4, 0x02];
 
 /// Parsed radio config from the wire format.
 /// All values are in human-readable units (Hz, denominator).
@@ -2670,6 +2692,23 @@ mod tests {
         assert_eq!(&frame[0..2], &RADIO_CONFIG_MAGIC);
         let parsed = parse_radio_config(&frame[2..]).unwrap();
         assert_eq!(parsed, cfg);
+    }
+
+    /// The reset frame is pinned byte-for-byte: periculum drives it against
+    /// flashed firmware, so the two sides must agree without a shared build.
+    /// It must also stay distinguishable from every other frame on the
+    /// control channel by (magic, length) alone — that pair is the firmware's
+    /// entire dispatch.
+    #[test]
+    fn radio_reset_frame_is_pinned_and_unambiguous() {
+        assert_eq!(RADIO_RESET_FRAME, [0xA4, 0xA4, 0x55, 0xF8]);
+        assert_eq!(RADIO_RESET_ACK, [0xA4, 0xA4, 0x02]);
+        assert_ne!(RADIO_RESET_FRAME.len(), RADIO_CONFIG_FRAME_LEN);
+        assert_ne!(RADIO_RESET_FRAME.len(), RADIO_CONFIG_ACK.len());
+        assert_ne!(RADIO_RESET_ACK, RADIO_CONFIG_ACK);
+        // Too short to ever be a valid Reticulum packet (>= 19 bytes), so
+        // consuming it can never swallow mesh traffic.
+        assert!(RADIO_RESET_FRAME.len() < 19);
     }
 
     #[test]

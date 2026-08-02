@@ -26,6 +26,11 @@ documented in
 which records what Python does for every broadcast mechanism so the
 Rust core can match it.
 
+Semantic compatibility is decided field by field: what a peer
+*decides* from a value we generate is part of the contract, even when
+the byte layout is right. The audit method and testing rule for that
+are in [Wire Field Semantics](wire-field-semantics.md).
+
 ## Level 2: drop-in daemon and tooling
 
 `lnsd` shares two interfaces with Python's `rnsd`:

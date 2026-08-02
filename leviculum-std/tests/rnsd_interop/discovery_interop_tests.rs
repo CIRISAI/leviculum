@@ -733,3 +733,115 @@ async fn test_python_discovers_lnsd_encrypted_announcer() {
     node_match.stop().await.expect("stop matching node");
     node_mismatch.stop().await.expect("stop mismatched node");
 }
+
+// =========================================================================
+// Codeberg #151: a Python rnsd publishes its backbone's IFAC in the discovery
+// announce (`publish_ifac`), and our lnsd auto-connects UNDER that IFAC.
+// =========================================================================
+
+/// The Python daemon's discoverable backbone server runs IFAC and publishes
+/// netname/netkey in its (real) discovery announce. Our node hears it over an
+/// open bootstrap link, persists the record WITH the IFAC material, and
+/// auto-connects the backbone under the derived IFAC.
+///
+/// The proof that the spawned client actually authenticates is path learning
+/// with the bootstrap link REMOVED: a destination registered on the daemon and
+/// announced only after the removal can reach our node exclusively over the
+/// IFAC-protected auto-connected link, and Python drops unauthenticated
+/// traffic on that interface in both directions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lnsd_autoconnects_python_ifac_published_backbone() {
+    const NETNAME: &str = "iface151net";
+    const PASSPHRASE: &str = "iface151key";
+
+    let (daemon, backbone_port) =
+        TestDaemon::start_discoverable_backbone_ifac("IfacBackbone", NETNAME, PASSPHRASE)
+            .await
+            .expect("start IFAC backbone daemon");
+
+    let storage = temp_storage("disco_ifac_auto", "node");
+    let mut node = build_connected_node(&daemon, &storage, None, 4).await;
+
+    // The bootstrap TCP client is the only non-local interface right now;
+    // remember it so it can be removed once the auto-connect is up.
+    let bootstrap_id = node
+        .interface_stats()
+        .iter()
+        .find(|i| !i.is_local_client && !i.name.starts_with("autoconnect/"))
+        .map(|i| i.interface_id)
+        .expect("bootstrap interface present");
+
+    // The REAL Python announcer publishes the backbone's IFAC keys in the
+    // record (Discovery.py `get_interface_announce_data`, publish_ifac).
+    let record_with_ifac = drive_discovery_until(&daemon, Duration::from_secs(30), || {
+        read_discovered_records(storage.path()).iter().any(|r| {
+            r.name == "IfacBackbone"
+                && r.port == Some(backbone_port as u64)
+                && r.ifac_netname.as_deref() == Some(NETNAME)
+                && r.ifac_netkey.as_deref() == Some(PASSPHRASE)
+        })
+    })
+    .await;
+    assert!(
+        record_with_ifac,
+        "the persisted record must carry the published IFAC netname/netkey; \
+         records = {:?}",
+        read_discovered_records(storage.path())
+            .iter()
+            .map(|r| (
+                r.name.clone(),
+                r.ifac_netname.clone(),
+                r.ifac_netkey.clone()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    // The auto-connect spawns from that record.
+    let auto_connected = drive_discovery_until(&daemon, Duration::from_secs(30), || {
+        node.interface_stats()
+            .iter()
+            .any(|i| i.name.starts_with("autoconnect/") && i.online)
+    })
+    .await;
+    assert!(
+        auto_connected,
+        "lnsd did not auto-connect the IFAC-published Python endpoint; \
+         interfaces = {:?}",
+        node.interface_stats()
+    );
+
+    // Remove the open bootstrap link, then have the daemon announce a fresh
+    // destination: the only remaining route is the IFAC-protected
+    // auto-connected link, so learning this path proves the spawned client
+    // carries the record's IFAC (Python silently drops unauthenticated
+    // packets on that interface).
+    node.remove_interface(bootstrap_id)
+        .expect("remove bootstrap interface");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let probe = daemon
+        .register_destination("test151", &["probe"])
+        .await
+        .expect("register post-detach destination");
+    let probe_hash = dest_hash_from_hex(&probe.hash);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut path_learned = false;
+    while Instant::now() < deadline {
+        let _ = daemon.announce_destination(&probe.hash, b"").await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if node.has_path(&probe_hash) {
+            path_learned = true;
+            break;
+        }
+    }
+    assert!(
+        path_learned,
+        "the post-detach path must arrive over the IFAC-protected \
+         auto-connected link; the spawned client is not authenticating \
+         against Python (Codeberg #151); interfaces = {:?}",
+        node.interface_stats()
+    );
+
+    node.stop().await.expect("stop node");
+}

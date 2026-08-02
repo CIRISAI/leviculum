@@ -72,8 +72,9 @@ const INTENTIONALLY_UNPROJECTED: &[Unprojected] = &[
     Unprojected {
         variant: "RequestReceived",
         field: "requested_at",
-        why: "the core's own arrival clock, used for timeout accounting; it \
-              shares no epoch with a C caller, which timestamps on receipt",
+        why: "the requester's claimed epoch timestamp (Codeberg #164), \
+              unvalidated peer input the core never does arithmetic on; a C \
+              app that wants a trustworthy time timestamps on receipt",
     },
     Unprojected {
         variant: "ResourceTransferStarted",

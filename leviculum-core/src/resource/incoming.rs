@@ -1250,4 +1250,106 @@ mod tests {
             Ok(_) => panic!("expected Err, got Ok"),
         }
     }
+
+    /// #159 tranche 2: pin the exhausted RESOURCE_REQ we generate as a
+    /// receiver. When the window reaches past the known hashmap, the request
+    /// must carry `HASHMAP_IS_EXHAUSTED` plus the LAST map hash we know
+    /// (Resource.py:966-969: `hashmap[hashmap_height-1]`). The sender scans
+    /// for that hash, and the reference CANCELS the whole transfer unless the
+    /// resulting part index is an exact multiple of `HASHMAP_MAX_LEN = 74`
+    /// (Resource.py:1046-1050) — so after consuming a full advertisement
+    /// segment of 74 entries, the hash we report must be entry 73, nothing
+    /// else.
+    #[test]
+    fn exhausted_request_reports_the_last_known_hash_at_a_segment_boundary() {
+        use crate::resource::HASHMAP_MAX_LEN;
+
+        // 100-part resource, advertisement carries the first 74 map hashes.
+        let mut hashmap_data = Vec::new();
+        for i in 0..HASHMAP_MAX_LEN as u8 {
+            hashmap_data.extend_from_slice(&[i, i, i, i]);
+        }
+        let mut adv = make_test_adv(100, hashmap_data);
+        adv.transfer_size = 100 * 464;
+
+        let (mut incoming, first_req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1_000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
+
+        // The initial request must NOT claim exhaustion: the window's hashes
+        // are all known.
+        assert_eq!(first_req[0], HASHMAP_IS_NOT_EXHAUSTED);
+
+        // All 74 known parts received; the next window starts at part 74,
+        // whose map hash is unknown.
+        for i in 0..HASHMAP_MAX_LEN {
+            incoming.parts[i] = Some(vec![0u8; 1]);
+        }
+        let req = incoming.build_request();
+
+        assert_eq!(req[0], HASHMAP_IS_EXHAUSTED);
+        let boundary = HASHMAP_MAX_LEN as u8 - 1;
+        assert_eq!(
+            &req[1..1 + RESOURCE_HASHMAP_LEN],
+            &[boundary, boundary, boundary, boundary],
+            "the reported hash must be entry 73: the sender resolves it to \
+             part index 74, the only value that passes the reference's \
+             `part_index % 74 == 0` sequencing gate"
+        );
+        assert_eq!(
+            &req[1 + RESOURCE_HASHMAP_LEN..1 + RESOURCE_HASHMAP_LEN + 32],
+            &adv.resource_hash,
+        );
+        assert_eq!(
+            req.len(),
+            1 + RESOURCE_HASHMAP_LEN + 32,
+            "no part hashes can be requested past the known hashmap"
+        );
+        assert!(incoming.waiting_for_hmu);
+    }
+
+    /// #159 tranche 2: pin the completion proof we generate as a receiver:
+    /// `h + full_hash(assembled_plaintext + h)` (Resource.py:752-758), where
+    /// the assembled plaintext still INCLUDES the metadata block (prove()
+    /// runs on `self.data` before the metadata strip touches only a local).
+    /// The sender compares bytes 32.. against its precomputed
+    /// `full_hash(plaintext + h)` and completes the transfer only on
+    /// equality (Resource.py:782-786) — the sender-side half of this pin
+    /// lives in `outgoing.rs`
+    /// (`advertisement_fields_follow_reference_generation_rules`).
+    #[test]
+    fn completion_proof_follows_reference_formula() {
+        use crate::crypto::sha256;
+
+        let adv = make_test_adv(1, vec![0x11, 0x22, 0x33, 0x44]);
+        let (mut incoming, _req) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1_000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
+
+        let assembled = b"\x00\x00\x04METAactual data".to_vec();
+        incoming.assembled_with_metadata = Some(assembled.clone());
+
+        let proof = incoming.build_proof().unwrap();
+        assert_eq!(proof.len(), 64, "proof is h(32) + proof hash(32)");
+        assert_eq!(&proof[..32], &adv.resource_hash, "proof must lead with h");
+        let mut p_input = assembled;
+        p_input.extend_from_slice(&adv.resource_hash);
+        assert_eq!(
+            &proof[32..],
+            &sha256(&p_input),
+            "proof hash must equal full_hash(assembled-with-metadata + h)"
+        );
+    }
 }

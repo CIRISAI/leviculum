@@ -27,7 +27,7 @@ destination and use this payload order so existing nodes answer it.
 
 A node that holds a path answers by re-emitting the destination's cached announce
 with the packet context set to `PATH_RESPONSE` (0x0B) instead of `NONE`
-(`Transport.py:2943-2972`). The announce data is byte-identical to an ordinary
+(`Transport.py:595-596`). The announce data is byte-identical to an ordinary
 announce (see [Announce](05-announce.md)); only the context differs, and the
 rebroadcast is marked so it is not propagated further.
 

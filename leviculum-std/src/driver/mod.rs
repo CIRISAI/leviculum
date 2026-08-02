@@ -387,6 +387,73 @@ fn apply_runtime_ifac(config: &InterfaceConfig, handles: &mut [InterfaceHandle])
     }
 }
 
+/// Hearing-interface IFAC per discovered endpoint (Codeberg #151):
+/// `discovery_hash` -> the [`IfacConfig`](leviculum_core::ifac::IfacConfig) of
+/// the interface the endpoint's discovery announce was last heard on under
+/// IFAC protection.
+type HeardIfacMap =
+    BTreeMap<[u8; leviculum_core::discovery::STAMP_SIZE], leviculum_core::ifac::IfacConfig>;
+
+/// IFAC resolution for an auto-connected discovered endpoint (Codeberg #151).
+enum AutoConnectIfac {
+    /// No IFAC anywhere: connect unauthenticated (open-network behaviour).
+    Open,
+    /// Spawn the client under this IFAC (boxed: the variant is much larger
+    /// than the others, clippy `large_enum_variant`).
+    Protected(Box<leviculum_core::ifac::IfacConfig>),
+    /// Do not connect at all (fail closed), for the named reason.
+    Refused { reason: &'static str },
+}
+
+/// Resolve the IFAC an auto-connected discovered TCP client must carry
+/// (Codeberg #151, fail closed):
+///
+/// 1. The discovery record advertises `ifac_netname`/`ifac_netkey` -> use them
+///    (Python `InterfaceDiscovery.autoconnect` passes both to `_add_interface`,
+///    which derives the key with the interface-default IFAC size — 16 for
+///    Backbone/TCP).
+/// 2. Otherwise inherit the IFAC of the interface the announce was heard on
+///    (the parent-child rule of `AutoInterface.py:559-561`: what is found
+///    through a protected interface is spoken to under the same protection).
+/// 3. Neither resolves but this node has operator-configured IFAC -> refuse.
+///    An operator who closed their network must not get an open link opened
+///    beside it by an automatism.
+/// 4. No IFAC anywhere -> connect open, like today.
+fn resolve_autoconnect_ifac(
+    rec_netname: Option<&str>,
+    rec_netkey: Option<&str>,
+    heard_on: Option<&leviculum_core::ifac::IfacConfig>,
+    operator_ifac_present: bool,
+) -> AutoConnectIfac {
+    if rec_netname.is_some() || rec_netkey.is_some() {
+        // Python publishes the pair together (discovery_publish_ifac), but a
+        // single present field still identifies a protected endpoint, and
+        // `_add_interface` derives from whichever is set.
+        return match leviculum_core::ifac::IfacConfig::new(
+            rec_netname,
+            rec_netkey,
+            leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
+        ) {
+            Ok(cfg) => AutoConnectIfac::Protected(Box::new(cfg)),
+            // The record claims protection we cannot derive: never fall back
+            // to an open connection to a peer that declared itself closed.
+            Err(_) => AutoConnectIfac::Refused {
+                reason: "the record advertises IFAC material we cannot derive a key from",
+            },
+        };
+    }
+    if let Some(parent) = heard_on {
+        return AutoConnectIfac::Protected(Box::new(parent.clone()));
+    }
+    if operator_ifac_present {
+        return AutoConnectIfac::Refused {
+            reason: "this node runs IFAC, but the record advertises none and the announce \
+                     was not heard on an IFAC-protected interface",
+        };
+    }
+    AutoConnectIfac::Open
+}
+
 /// Build an [`AnnounceRateConfig`] from interface configuration, applying
 /// Python's validation and coupling (Reticulum.py:798-821). Returns `None`
 /// when no `announce_rate_*` key was set (an absent entry resolves identically
@@ -3000,6 +3067,24 @@ async fn run_event_loop(
         core.clone_ifac_configs()
     };
 
+    // #151: per discovered endpoint, the IFAC of the interface its discovery
+    // announce was last heard on under IFAC protection. Feeds the inherit rule
+    // of `resolve_autoconnect_ifac`. In-memory only: after a restart the
+    // hearing interface is unknown again, so an IFAC-requiring endpoint fails
+    // closed until its next announce is heard (safe by design).
+    let mut discovery_heard_ifac: HeardIfacMap = BTreeMap::new();
+    // Interface ids ever spawned by the auto-connect spawner. Used to exclude
+    // discovery-sourced IFAC registrations from the "does the operator run
+    // IFAC on this node" check (a peer's advertised key must not close an
+    // otherwise open node), and never pruned (ids are monotonic and tiny).
+    let mut autoconnect_spawned_ids: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    // Endpoints already warned about as refused (fail closed), so the 1 s
+    // auto-connect poll does not spam the log. Keyed by discovery_hash.
+    let mut autoconnect_refused_warned: std::collections::BTreeSet<
+        [u8; leviculum_core::discovery::STAMP_SIZE],
+    > = std::collections::BTreeSet::new();
+
     // Runtime auto-connect (Codeberg #32, sub-task b). The manager owns the
     // spawn/register/teardown lifecycle; `poll` runs periodically off the live
     // discovered-interface registry. `None` when disabled (cap 0) or when there
@@ -3102,6 +3187,7 @@ async fn run_event_loop(
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
+                            &mut discovery_heard_ifac,
                         );
                     }
                     RecvEvent::Disconnected(iface_id) => {
@@ -3119,6 +3205,7 @@ async fn run_event_loop(
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
+                            &mut discovery_heard_ifac,
                         );
                         // Clear retry queue for disconnected interface. The legacy
                         // is_interface_congested flag was removed in Phase F;
@@ -3183,6 +3270,7 @@ async fn run_event_loop(
                     remote_mgmt.as_ref(),
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
+                    &mut discovery_heard_ifac,
                 );
             }
 
@@ -3216,6 +3304,7 @@ async fn run_event_loop(
                     remote_mgmt.as_ref(),
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
+                    &mut discovery_heard_ifac,
                 );
 
                 // Advance next_poll based on next_deadline_ms
@@ -3249,6 +3338,7 @@ async fn run_event_loop(
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
+                            &mut discovery_heard_ifac,
                         );
                     }
                     // Bounded graceful flush: dispatch only pushes onto the
@@ -3321,7 +3411,7 @@ async fn run_event_loop(
                         let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
-                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
+                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac);
                 }
             }
 
@@ -3342,7 +3432,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac);
             }
 
             // Branch 6b: Tunnel synthesize initiation (Codeberg #64).
@@ -3356,7 +3446,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref());
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac);
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
@@ -3388,6 +3478,12 @@ async fn run_event_loop(
                     let now_unix = crate::discovery::now_unix_secs();
                     let live = crate::discovery::list_discovered_interfaces(storage_root, now_unix);
 
+                    // #151: operator-configured IFAC = any registered IFAC
+                    // that did not arrive via this spawner (whose IFAC can be
+                    // discovery-sourced and must not close an open node).
+                    let operator_ifac_present = ifac_configs
+                        .keys()
+                        .any(|k| !autoconnect_spawned_ids.contains(k));
                     let mut spawner = AutoConnectLiveSpawner {
                         next_id: &autoconnect_wiring.next_id,
                         new_iface_tx: &autoconnect_wiring.new_iface_tx,
@@ -3396,6 +3492,10 @@ async fn run_event_loop(
                         outbound_socket_hook: autoconnect_wiring.outbound_socket_hook.clone(),
                         online: &iface_online_map,
                         teardown_ids: Vec::new(),
+                        heard_ifac: &discovery_heard_ifac,
+                        operator_ifac_present,
+                        spawned_ids: &mut autoconnect_spawned_ids,
+                        refused_warned: &mut autoconnect_refused_warned,
                     };
                     manager.poll(&live, now_unix, &mut spawner);
                     let teardown_ids = spawner.teardown_ids;
@@ -3422,6 +3522,7 @@ async fn run_event_loop(
                             remote_mgmt.as_ref(),
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
+                            &mut discovery_heard_ifac,
                         );
                         retry_queues.remove(&iface_id.0);
                         registry.remove(iface_id);
@@ -3493,6 +3594,7 @@ async fn run_event_loop(
                                     remote_mgmt.as_ref(),
                                     discovery_storage.as_deref(),
                                     discovery_network_identity.as_deref(),
+                                    &mut discovery_heard_ifac,
                                 );
                             }
                             Err(e) => {
@@ -3525,10 +3627,49 @@ struct AutoConnectLiveSpawner<'a> {
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     online: &'a InterfaceOnlineMap,
     teardown_ids: Vec<InterfaceId>,
+    /// #151: hearing-interface IFAC per discovered endpoint (inherit rule).
+    heard_ifac: &'a HeardIfacMap,
+    /// #151: whether any operator-configured IFAC exists on this node
+    /// (discovery-sourced IFAC on auto-connected clients excluded).
+    operator_ifac_present: bool,
+    /// #151: ids of every interface this spawner path ever spawned.
+    spawned_ids: &'a mut std::collections::BTreeSet<usize>,
+    /// #151: endpoints already warned about as refused (fail closed).
+    refused_warned: &'a mut std::collections::BTreeSet<[u8; leviculum_core::discovery::STAMP_SIZE]>,
 }
 
 impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
-    fn spawn_tcp_client(&mut self, name: &str, host: &str, port: u16) -> Option<InterfaceId> {
+    fn spawn_tcp_client(
+        &mut self,
+        name: &str,
+        host: &str,
+        port: u16,
+        rec: &leviculum_core::discovery::DiscoveredInterfaceRecord,
+    ) -> Option<InterfaceId> {
+        // #151: resolve the IFAC this client must carry BEFORE any socket
+        // work; a refusal (fail closed) must not open a connection at all.
+        let ifac = match resolve_autoconnect_ifac(
+            rec.ifac_netname.as_deref(),
+            rec.ifac_netkey.as_deref(),
+            self.heard_ifac.get(&rec.discovery_hash),
+            self.operator_ifac_present,
+        ) {
+            AutoConnectIfac::Open => None,
+            AutoConnectIfac::Protected(cfg) => Some(*cfg),
+            AutoConnectIfac::Refused { reason } => {
+                if self.refused_warned.insert(rec.discovery_hash) {
+                    tracing::warn!(
+                        "discovery: NOT auto-connecting {} \"{}\" at {}:{}: {} (fail closed)",
+                        rec.interface_type,
+                        rec.name,
+                        host,
+                        port,
+                        reason,
+                    );
+                }
+                return None;
+            }
+        };
         // Fast path: a literal IP endpoint (the common discovery case) parses
         // without touching the resolver. Fall back to a name lookup otherwise.
         let addr: SocketAddr = match format!("{host}:{port}").parse() {
@@ -3539,7 +3680,7 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             self.next_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         );
-        let handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
+        let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
             id,
             name: name.to_string(),
             addr,
@@ -3559,6 +3700,22 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             shutdown: None,
             outbound_socket_hook: self.outbound_socket_hook.clone(),
         });
+        // #151: carry the resolved IFAC on the handle; the dynamic-
+        // registration branch applies `info.ifac` to core + ifac_configs
+        // exactly like a server-accepted child (the fc1bae4 mechanism).
+        if let Some(cfg) = ifac {
+            tracing::info!(
+                "discovery: auto-connect \"{}\" carries IFAC ({})",
+                rec.name,
+                if rec.ifac_netname.is_some() || rec.ifac_netkey.is_some() {
+                    "advertised by the discovered peer"
+                } else {
+                    "inherited from the hearing interface"
+                },
+            );
+            handle.info.ifac = Some(cfg);
+        }
+        self.spawned_ids.insert(id.0);
         // Register with the running loop; the `new_interface_rx` branch does
         // the map/announce bookkeeping on the next iteration.
         self.new_iface_tx.try_send(handle).ok()?;
@@ -3640,6 +3797,7 @@ fn dispatch_output(
     remote_mgmt: Option<&RemoteMgmtResponder>,
     discovery_storage: Option<&Path>,
     discovery_network_identity: Option<&leviculum_core::Identity>,
+    discovery_heard_ifac: &mut HeardIfacMap,
 ) {
     // Drain retry queues before dispatching new actions
     let drain_now_ms = inner.lock_recover().now_ms();
@@ -3769,12 +3927,19 @@ fn dispatch_output(
     // the mgmt responder, so it works in daemon mode (no app event sink).
     if let Some(storage_root) = discovery_storage {
         for event in &output.events {
-            if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if let NodeEvent::AnnounceReceived {
+                announce,
+                interface_index,
+            } = event
+            {
                 record_discovery_announce(
                     inner,
                     storage_root,
                     announce,
                     discovery_network_identity,
+                    *interface_index,
+                    ifac_configs,
+                    discovery_heard_ifac,
                 );
             }
         }
@@ -3819,6 +3984,7 @@ fn dispatch_output(
             // Management responses carry no announces; no discovery persistence.
             None,
             None,
+            discovery_heard_ifac,
         );
     }
 }
@@ -3830,11 +3996,15 @@ fn dispatch_output(
 ///
 /// Non-discovery announces (the overwhelming majority) are rejected by the
 /// name-hash compare before any parsing, so this stays cheap on the hot path.
+#[allow(clippy::too_many_arguments)]
 fn record_discovery_announce(
     inner: &Arc<Mutex<StdNodeCore>>,
     storage_root: &Path,
     announce: &leviculum_core::ReceivedAnnounce,
     network_identity: Option<&leviculum_core::Identity>,
+    interface_index: usize,
+    ifac_configs: &BTreeMap<usize, leviculum_core::ifac::IfacConfig>,
+    heard_ifac: &mut HeardIfacMap,
 ) {
     use leviculum_core::discovery::{APP_NAME, DEFAULT_STAMP_VALUE, DISCOVERY_ASPECTS};
 
@@ -3862,9 +4032,24 @@ fn record_discovery_announce(
         ),
     };
     let Some(di) = parsed else {
-        tracing::debug!("discovery: announce on discovery destination failed validation");
+        tracing::debug!(
+            "discovery: announce on discovery destination failed validation \
+             dest={} app_data_len={} iface={}",
+            announce.destination_hash(),
+            announce.app_data().len(),
+            interface_index,
+        );
         return;
     };
+
+    // #151: remember the hearing interface's IFAC so an auto-connect to this
+    // endpoint can inherit it (AutoInterface.py:559-561 parent-child rule).
+    // Insert-only: once an endpoint was found through a protected interface,
+    // a later sighting on an open interface must not downgrade it to an open
+    // auto-connect (fail closed on ambiguity).
+    if let Some(cfg) = ifac_configs.get(&interface_index) {
+        heard_ifac.insert(di.discovery_hash, cfg.clone());
+    }
 
     let hops = inner
         .lock_recover()
@@ -4269,6 +4454,234 @@ mod tests {
         assert!(handles[0].info.ifac.is_none());
     }
 
+    /// Codeberg #151: the decided IFAC semantics for auto-connected discovered
+    /// endpoints, in precedence order: advertised material wins, then the
+    /// hearing interface's IFAC is inherited, then a node running IFAC refuses
+    /// (fail closed), and a fully open node keeps connecting openly.
+    #[test]
+    fn autoconnect_ifac_resolution_follows_decided_semantics() {
+        use leviculum_core::ifac::IfacConfig;
+
+        let advertised = IfacConfig::new(
+            Some("closednet"),
+            Some("closedkey"),
+            leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
+        )
+        .expect("valid");
+        let parent = IfacConfig::new(Some("parentnet"), Some("parentkey"), 24).expect("valid");
+
+        // 1. Record-advertised IFAC protects the client, derived at the
+        //    Backbone/TCP default size like Python `_add_interface`.
+        match resolve_autoconnect_ifac(Some("closednet"), Some("closedkey"), None, false) {
+            AutoConnectIfac::Protected(c) => {
+                assert_eq!(c.identity().hash(), advertised.identity().hash())
+            }
+            _ => panic!("advertised IFAC must protect the spawned client"),
+        }
+        // ... and takes precedence over the hearing interface's IFAC.
+        match resolve_autoconnect_ifac(Some("closednet"), Some("closedkey"), Some(&parent), true) {
+            AutoConnectIfac::Protected(c) => {
+                assert_eq!(c.identity().hash(), advertised.identity().hash())
+            }
+            _ => panic!("advertised IFAC must win over inheritance"),
+        }
+
+        // 2. No advertised IFAC -> inherit the hearing interface's config
+        //    verbatim (including its non-default size).
+        match resolve_autoconnect_ifac(None, None, Some(&parent), true) {
+            AutoConnectIfac::Protected(c) => {
+                assert_eq!(c.identity().hash(), parent.identity().hash())
+            }
+            _ => panic!("hearing-interface IFAC must be inherited"),
+        }
+
+        // 3. Nothing resolves but the operator runs IFAC -> refuse, named.
+        match resolve_autoconnect_ifac(None, None, None, true) {
+            AutoConnectIfac::Refused { reason } => assert!(!reason.is_empty()),
+            _ => panic!("IFAC-running node must fail closed"),
+        }
+
+        // 4. Open network -> unchanged open behaviour.
+        assert!(matches!(
+            resolve_autoconnect_ifac(None, None, None, false),
+            AutoConnectIfac::Open
+        ));
+    }
+
+    /// Codeberg #151 spawner-level fixture: a live spawner wired to test
+    /// channels, driven with a synthetic discovery record.
+    struct SpawnerFixture {
+        next_id: Arc<AtomicUsize>,
+        new_iface_tx: mpsc::Sender<InterfaceHandle>,
+        new_iface_rx: mpsc::Receiver<InterfaceHandle>,
+        reconnect_tx: mpsc::Sender<InterfaceId>,
+        _reconnect_rx: mpsc::Receiver<InterfaceId>,
+        online: crate::interfaces::InterfaceOnlineMap,
+        heard_ifac: HeardIfacMap,
+        spawned_ids: std::collections::BTreeSet<usize>,
+        refused_warned: std::collections::BTreeSet<[u8; 32]>,
+    }
+
+    impl SpawnerFixture {
+        fn new() -> Self {
+            let (new_iface_tx, new_iface_rx) = mpsc::channel(4);
+            let (reconnect_tx, _reconnect_rx) = mpsc::channel(4);
+            Self {
+                next_id: Arc::new(AtomicUsize::new(100)),
+                new_iface_tx,
+                new_iface_rx,
+                reconnect_tx,
+                _reconnect_rx,
+                online: Arc::new(Mutex::new(BTreeMap::new())),
+                heard_ifac: BTreeMap::new(),
+                spawned_ids: std::collections::BTreeSet::new(),
+                refused_warned: std::collections::BTreeSet::new(),
+            }
+        }
+
+        fn spawn(
+            &mut self,
+            rec: &leviculum_core::discovery::DiscoveredInterfaceRecord,
+            operator_ifac_present: bool,
+        ) -> Option<InterfaceId> {
+            use crate::autoconnect::AutoConnectSpawner as _;
+            let mut spawner = AutoConnectLiveSpawner {
+                next_id: &self.next_id,
+                new_iface_tx: &self.new_iface_tx,
+                reconnect_tx: &self.reconnect_tx,
+                corrupt_every: None,
+                outbound_socket_hook: None,
+                online: &self.online,
+                teardown_ids: Vec::new(),
+                heard_ifac: &self.heard_ifac,
+                operator_ifac_present,
+                spawned_ids: &mut self.spawned_ids,
+                refused_warned: &mut self.refused_warned,
+            };
+            spawner.spawn_tcp_client(
+                &format!("autoconnect/{}", rec.name),
+                rec.reachable_on.as_deref().unwrap(),
+                rec.port.unwrap() as u16,
+                rec,
+            )
+        }
+    }
+
+    fn discovered_tcp_record(
+        ifac_netname: Option<&str>,
+        ifac_netkey: Option<&str>,
+        seed: u8,
+    ) -> leviculum_core::discovery::DiscoveredInterfaceRecord {
+        use leviculum_core::discovery::{DiscoveredInterface, DiscoveredInterfaceRecord};
+        let di = DiscoveredInterface {
+            interface_type: "TCPServerInterface".to_string(),
+            transport: true,
+            name: format!("peer-{seed}"),
+            transport_id: [seed; 16],
+            network_id: [seed; 16],
+            value: 20,
+            stamp: [seed; 32],
+            latitude: None,
+            longitude: None,
+            height: None,
+            reachable_on: Some("127.0.0.1".to_string()),
+            port: Some(4965),
+            frequency: None,
+            bandwidth: None,
+            spreadingfactor: None,
+            codingrate: None,
+            ifac_netname: ifac_netname.map(str::to_string),
+            ifac_netkey: ifac_netkey.map(str::to_string),
+            discovery_hash: [seed; 32],
+        };
+        DiscoveredInterfaceRecord::from_discovered(&di, 1, 1000.0, 1000.0, 1000.0, 0)
+    }
+
+    /// #151 case 1: a record advertising netname/netkey -> the spawned client
+    /// handle carries the derived IFAC (red before the fix: no IFAC at all on
+    /// the auto-connect spawn path).
+    #[tokio::test]
+    async fn autoconnect_spawn_carries_record_ifac() {
+        let mut fx = SpawnerFixture::new();
+        let rec = discovered_tcp_record(Some("closednet"), Some("closedkey"), 1);
+
+        let id = fx.spawn(&rec, false).expect("spawn succeeds");
+        let handle = fx.new_iface_rx.try_recv().expect("handle registered");
+        assert_eq!(handle.info.id, id);
+        let expected = leviculum_core::ifac::IfacConfig::new(
+            Some("closednet"),
+            Some("closedkey"),
+            leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
+        )
+        .expect("valid");
+        let got = handle
+            .info
+            .ifac
+            .as_ref()
+            .expect("spawned client must carry the advertised IFAC");
+        assert_eq!(got.identity().hash(), expected.identity().hash());
+    }
+
+    /// #151 case 2: no IFAC in the record -> the client inherits the IFAC of
+    /// the interface the announce was heard on.
+    #[tokio::test]
+    async fn autoconnect_spawn_inherits_hearing_interface_ifac() {
+        let mut fx = SpawnerFixture::new();
+        let rec = discovered_tcp_record(None, None, 2);
+        let parent =
+            leviculum_core::ifac::IfacConfig::new(Some("parentnet"), None, 16).expect("valid");
+        fx.heard_ifac.insert(rec.discovery_hash, parent.clone());
+
+        fx.spawn(&rec, true).expect("spawn succeeds");
+        let handle = fx.new_iface_rx.try_recv().expect("handle registered");
+        let got = handle
+            .info
+            .ifac
+            .as_ref()
+            .expect("spawned client must inherit the hearing interface's IFAC");
+        assert_eq!(got.identity().hash(), parent.identity().hash());
+    }
+
+    /// #151 case 3: IFAC configured on this node, but the record offers none
+    /// and the hearing interface had none -> NO interface is spawned (fail
+    /// closed), and the refusal is observable (warn-once bookkeeping).
+    #[tokio::test]
+    async fn autoconnect_spawn_fails_closed_without_resolvable_ifac() {
+        let mut fx = SpawnerFixture::new();
+        let rec = discovered_tcp_record(None, None, 3);
+
+        assert!(
+            fx.spawn(&rec, true).is_none(),
+            "IFAC-running node must not auto-connect an unresolvable endpoint"
+        );
+        assert!(
+            fx.new_iface_rx.try_recv().is_err(),
+            "no interface handle may be registered on refusal"
+        );
+        assert!(
+            fx.refused_warned.contains(&rec.discovery_hash),
+            "the refusal must be recorded (named-reason warn emitted once)"
+        );
+        assert!(fx.spawned_ids.is_empty());
+    }
+
+    /// #151 case 4: open network (no IFAC anywhere) -> unchanged behaviour,
+    /// the client spawns without IFAC. Guards against fixing fail-closed by
+    /// breaking discovery for open meshes.
+    #[tokio::test]
+    async fn autoconnect_spawn_stays_open_on_open_node() {
+        let mut fx = SpawnerFixture::new();
+        let rec = discovered_tcp_record(None, None, 4);
+
+        fx.spawn(&rec, false)
+            .expect("open node keeps auto-connecting");
+        let handle = fx.new_iface_rx.try_recv().expect("handle registered");
+        assert!(
+            handle.info.ifac.is_none(),
+            "open-network auto-connect must stay unauthenticated"
+        );
+    }
+
     /// Codeberg #67 Stage 2a: build_announce_rate_config mirrors Python's
     /// validation (Reticulum.py:798-821): target kept only when > 0, a set
     /// target defaults an unset penalty/grace to 0, and no keys → None.
@@ -4503,6 +4916,7 @@ mod tests {
             None,
             None,
             None,
+            &mut BTreeMap::new(),
         );
     }
 
@@ -4584,6 +4998,7 @@ mod tests {
             None,
             None,
             None,
+            &mut BTreeMap::new(),
         );
 
         let ev = rx

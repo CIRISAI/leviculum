@@ -57,7 +57,7 @@ use ratatui::widgets::{
 use ratatui::{Frame, Terminal};
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
-use ratatui_image::Resize;
+use ratatui_image::{FilterType, Resize};
 use tokio::sync::{mpsc, Mutex};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -70,7 +70,7 @@ use crate::browser::{self, BrowserOptions};
 use crate::color::{rgb_to_ansi256, ColorDepth};
 use crate::discovery::{DiscoveredNode, NomadNodeRegistry};
 use crate::fetch::Session;
-use crate::image::{Backend, ImageSlot, Probe, SlotState, MAX_IMAGE_ROWS, MAX_INLINE_IMAGES};
+use crate::image::{Backend, ImageSlot, Probe, SlotState, MAX_INLINE_IMAGES};
 use crate::image_cache::ImageCache;
 use crate::page_cache::{CacheEntry, PageCache};
 use crate::render::{
@@ -5590,15 +5590,27 @@ impl ImageStore {
             return Err("no payload".to_string());
         };
         let decoded = crate::image::decode(&entry.bytes)?;
-        let max_rows = MAX_IMAGE_ROWS.min(model.viewport().max(4) as u16 - 2);
+        // Cell geometry and the row ceiling are both backend-dependent: a
+        // graphics protocol paints the cell's full pixel box, half-blocks
+        // carry one pixel across and two down whatever the font says.
         let cells = crate::image::fit_cells(
             (probe.width, probe.height),
-            picker.font_size(),
+            self.backend.cell_pixels(picker.font_size()),
             model.width.min(u16::MAX as usize) as u16,
-            max_rows,
+            self.backend.max_rows(model.viewport()),
         );
         let size = Size::new(cells.0, cells.1);
-        let sliced = SlicedProtocol::new_with_resize(picker, decoded, size, Resize::Fit(None))
+        // `Fit` never enlarges, and it measures "large enough" in font-size
+        // pixels. On the half-block path that silently undoes the sizing
+        // above: a 300x300 portrait is only 38x19 cells of font box, so the
+        // protocol would shrink back to that and paint 38x38 half-block
+        // pixels. `Scale` honours the area we asked for, which is where the
+        // resolution lives when a cell carries one pixel across and two down.
+        let resize = match self.backend {
+            Backend::Halfblocks => Resize::Scale(Some(FilterType::Triangle)),
+            _ => Resize::Fit(None),
+        };
+        let sliced = SlicedProtocol::new_with_resize(picker, decoded, size, resize)
             .map_err(|e| format!("cannot draw: {e}"))?;
         entry.protocol = Some(sliced);
         Ok(cells)
@@ -11803,6 +11815,59 @@ Text unter dem Bild.
         assert_eq!(
             ImageStore::default().cache.max_bytes(),
             crate::image_cache::DEFAULT_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn a_photo_on_half_blocks_uses_the_page_width_not_the_font_box() {
+        // The regression this guards: sizing a half-block picture by the
+        // terminal's font box drew a 300x300 portrait as 38x38 half-block
+        // pixels — "gigantic pixels", unrecognisable. A cell carries one pixel
+        // across and two down, so the picture must instead grow to the page
+        // width, and `Resize::Scale` must keep the protocol at that size.
+        let (mut m, _) = image_model();
+        let mut store = halfblock_store();
+
+        let event = store.accept(1, "portrait.jpg".to_string(), png_bytes(300, 300), &m);
+        let AppEvent::ImageReady { cells, .. } = &event else {
+            panic!("a valid PNG must be drawable on half-blocks, got {event:?}");
+        };
+        let (cols, rows) = *cells;
+        assert!(
+            cols as usize >= m.width - 2,
+            "a photo must use the page width on half-blocks, got {cols} of {}",
+            m.width
+        );
+        assert!(
+            cols > 38,
+            "38 columns is the font-box fit this bug produced; got {cols}"
+        );
+        // Square source, square picture: the height follows the aspect ratio
+        // in half-block geometry (one pixel across, two down).
+        assert_eq!(
+            rows * 2,
+            cols,
+            "a square picture must stay square: {cols}x{rows} cells"
+        );
+
+        // And the protocol really occupies that area rather than shrinking
+        // back to the font box, which is what `Resize::Fit` did. The event has
+        // to be folded first: until the slot is Ready, the reserved rows carry
+        // the status line, not the picture.
+        update(&mut m, event);
+        let buffer = render_with_images(&m, &store, 80, 24);
+        let content = regions(Rect::new(0, 0, 80, 24))[1];
+        let first = content.y + (m.links[0].line + 1 - m.scroll) as u16;
+        let left = content.x + m.links[0].col_start as u16;
+        let painted = (0..cols)
+            .filter(|x| {
+                let c = &buffer[(left + x, first)];
+                c.symbol() != " " || c.bg != Color::Reset
+            })
+            .count();
+        assert_eq!(
+            painted, cols as usize,
+            "the picture's first row must be painted across its full width"
         );
     }
 }

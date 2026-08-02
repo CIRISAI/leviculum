@@ -467,6 +467,10 @@ pub const SIGNALING_MODE_MASK: u32 = 0x07;
 pub const SIGNALING_MODE_SHIFT: u32 = 21;
 
 // Random Hash Constants
+//
+// The emission-timestamp constants below implement the source-priority
+// chain and hardening rules of docs/src/concepts/time-and-clocks.md;
+// the concept document is the authoritative rationale.
 /// Size of random portion in random hash (bytes)
 pub const RANDOM_HASH_RANDOM_SIZE: usize = 5;
 
@@ -475,6 +479,54 @@ pub const RANDOM_HASH_TIMESTAMP_SIZE: usize = 5;
 
 /// Offset into timestamp bytes (skip high bytes)
 pub const RANDOM_HASH_TIMESTAMP_OFFSET: usize = 3;
+
+/// Highest emission value the announce random-hash timestamp field can
+/// carry: `2^(8*RANDOM_HASH_TIMESTAMP_SIZE) - 1`. Anything larger silently
+/// drops its high bits in the wire copy, so the emitted value collapses to
+/// near zero and sorts below every stored path entry (Codeberg #160); all
+/// emission producers saturate here.
+pub const EMISSION_TIMESTAMP_MAX_SECS: u64 = (1 << (8 * RANDOM_HASH_TIMESTAMP_SIZE)) - 1;
+
+/// Upper bound on emission timestamps a clockless node adopts as its
+/// timebase, whether learned from an announce or injected by the host
+/// (Codeberg #160): 2200-01-01T00:00:00Z. Must sit decades above any wall
+/// clock the deployment can ever legitimately see (~174 years from 2026),
+/// yet so far below [`EMISSION_TIMESTAMP_MAX_SECS`] that a floor at the
+/// ceiling plus any achievable uptime cannot reach the field's truncation
+/// point (~34,600 years of margin).
+pub const EMISSION_LEARN_CEILING_SECS: u64 = 7_258_118_400;
+
+/// Lower plausibility bound on emission timebases (Codeberg #161):
+/// 1_600_000_000 = 2020-09-13T12:26:40Z, kept a round number. It only has
+/// to separate two populations that sit orders of magnitude apart: real
+/// wall clocks in any deployment running this stack are past 2026 (and a
+/// battery-backed RTC set at device manufacture cannot predate the
+/// stack's existence), while uptime-derived values cannot reach it — 1.6e9
+/// seconds is ~50.7 years of continuous uptime. A learned floor BELOW this
+/// bound is treated as if none existed, so one credible announce recovers
+/// the node in a single unbounded step instead of the
+/// [`EMISSION_LEARN_MAX_ADVANCE_SECS`]-per-announce crawl (#161 §1: ~429
+/// days at a 30 min LoRa cadence); `set_wall_time_unix_secs` refuses
+/// injections below it for the same reason. Deriving this bound (and a
+/// tighter ceiling) from the firmware build timestamp would narrow the
+/// remaining first-adoption window considerably and stays future work
+/// (#161 §1); a constant needs no build plumbing and covers the routine
+/// trigger — adopting a rebooting peer's uptime seconds — today.
+pub const EMISSION_PLAUSIBLE_MIN_SECS: u64 = 1_600_000_000;
+
+/// Once a clockless node has an emission timebase, a single announce may
+/// advance it at most this far (Codeberg #160). Legitimate forward
+/// corrections after the first adoption are bounded by peer clock skew
+/// (minutes) plus our monotonic drift (~50 ppm, under half an hour per year
+/// of isolation), so a day covers them with orders-of-magnitude headroom —
+/// while a peer whose clock is decades wrong needs tens of thousands of
+/// rate-limited announces instead of one to drag the timebase there.
+/// Adoption is deliberately unbounded while the current timebase sits
+/// below [`EMISSION_PLAUSIBLE_MIN_SECS`]: a node booting at uptime
+/// seconds (Codeberg #155) — or one that adopted a rebooting peer's
+/// uptime seconds as its first floor (Codeberg #161 §1) — must climb to
+/// real unix time in one step.
+pub const EMISSION_LEARN_MAX_ADVANCE_SECS: u64 = 86_400;
 
 // BLE Interface Constants (Columba Protocol v2.2)
 /// Reticulum BLE GATT service UUID

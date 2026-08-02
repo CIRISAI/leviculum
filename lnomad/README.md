@@ -191,6 +191,13 @@ node that receives the identify sees a `remote_identity` on your requests and
 can attribute what you submit to you, which is what NomadNet's
 `identify_on_connect` does.
 
+### Tables
+
+A micron `` `t `` table renders with box-drawing separators, columns sized to
+their visible width. A cell is inline micron, so a style, a colour or a link
+inside one renders (and a link in a cell is followable like any other); a
+literal `|` written `\|` stays part of its cell.
+
 ### Pictures
 
 Micron has no image construct, so a page can only link to a picture in its
@@ -212,6 +219,14 @@ How it is drawn depends on what the terminal answered when asked at startup:
 The last row is the point of the ladder: a reader on a terminal that can show
 nothing still learns that a picture is there, what it is and how big it is, and
 can still save or open it.
+
+Half-blocks are sized differently from a graphics protocol, and deliberately: a
+cell carries one pixel across and two down, so every extra column and row is
+extra resolution. A picture there fills the page width and may run past the
+bottom of the screen (up to two screenfuls) rather than being fitted into the
+font-size box a graphics protocol would use — the same 300x300 portrait is
+38x38 pixels the fitted way and 78x78 this way. It is still coarse; a terminal
+with Sixel or the Kitty protocol is what makes a photograph a photograph.
 
 A page's pictures are fetched **after** the page is on screen, one at a time,
 never more than eight from any one page. Nothing waits for a picture, `Esc`

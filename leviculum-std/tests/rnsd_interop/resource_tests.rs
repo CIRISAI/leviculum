@@ -204,6 +204,16 @@ async fn wait_for_python_resource(
     daemon: &TestDaemon,
     timeout: Duration,
 ) -> Vec<crate::harness::ReceivedResource> {
+    wait_for_python_resources(daemon, 1, timeout).await
+}
+
+/// Poll `get_received_resources` until at least `min_count` resources with
+/// status "complete" appear, or until timeout. Returns the completed list.
+async fn wait_for_python_resources(
+    daemon: &TestDaemon,
+    min_count: usize,
+    timeout: Duration,
+) -> Vec<crate::harness::ReceivedResource> {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         if let Ok(resources) = daemon.get_received_resources().await {
@@ -211,7 +221,7 @@ async fn wait_for_python_resource(
                 .into_iter()
                 .filter(|r| r.status == "complete")
                 .collect();
-            if !complete.is_empty() {
+            if complete.len() >= min_count {
                 return complete;
             }
         }
@@ -258,6 +268,63 @@ async fn test_rust_sends_resource_python_receives() {
     );
     assert_eq!(received[0].data, data, "Data should match");
     assert!(received[0].metadata.is_none(), "Metadata should be None");
+}
+
+/// TEST 1b (Codeberg #165): Rust sends the SAME payload twice over one link;
+/// a real Python receiver must deliver the exact bytes both times.
+///
+/// The reference receiver keys its on-disk reassembly file by the
+/// advertisement's `o`, appends to it in mode "ab" and unlinks only on
+/// success (Resource.py:199/:708/:744). Our generator used to fill a
+/// deterministic content hash as `o`, so two transfers of identical content
+/// shared one path — a leftover file (crash or raised callback between
+/// append and unlink) would be appended to and delivered doubled. `o` is now
+/// the salted per-transfer hash: both transfers land in distinct files and
+/// each must deliver exactly the sent bytes. The corrupting arrangement
+/// itself (a leftover surviving between append and unlink) cannot be staged
+/// through a live receiver, so the salted-`o` rule is pinned red-first at
+/// core level (`advertisement_fields_follow_reference_generation_rules`);
+/// this test is the end-to-end acceptance that the new `o` interoperates.
+#[tokio::test]
+async fn test_rust_sends_identical_payload_twice_python_receives_both_intact() {
+    let (
+        rust_node,
+        mut event_rx,
+        py_initiator,
+        _py_relay,
+        link_id,
+        _py_link_hash,
+        _dest_hash,
+        _storage,
+    ) = setup_link(true).await;
+
+    // Position-dependent bytes so any doubling or truncation changes content.
+    let data: Vec<u8> = (0..2048u32).map(|i| (i % 251) as u8).collect();
+
+    for round in 1..=2u32 {
+        rust_node
+            .send_resource(&link_id, &data, None, true)
+            .await
+            .expect("send_resource should succeed");
+        assert!(
+            wait_for_resource_sender_completed(&mut event_rx, &link_id, Duration::from_secs(30))
+                .await,
+            "Rust sender should get ResourceCompleted (round {round})"
+        );
+    }
+
+    let received = wait_for_python_resources(&py_initiator, 2, Duration::from_secs(30)).await;
+    assert_eq!(
+        received.len(),
+        2,
+        "Python should receive both transfers as separate resources"
+    );
+    for (i, resource) in received.iter().enumerate() {
+        assert_eq!(
+            resource.data, data,
+            "transfer {i} must deliver exactly the sent bytes (never doubled)"
+        );
+    }
 }
 
 /// TEST 2: Python sends a small resource (512 bytes), Rust receives it.

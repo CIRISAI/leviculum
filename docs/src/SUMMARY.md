@@ -10,6 +10,10 @@
 - [Python-RNS compatibility](concepts/python-rns-compatibility.md)
 - [Cryptographic identity and forward secrecy](concepts/identity-and-forward-secrecy.md)
 - [Storage and embedding](concepts/storage-and-embedding.md)
+- [Time and clocks](concepts/time-and-clocks.md)
+- [Wire field semantics](concepts/wire-field-semantics.md)
+- [Regulatory airtime](concepts/regulatory-airtime.md)
+- [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 
 # User Guide
 

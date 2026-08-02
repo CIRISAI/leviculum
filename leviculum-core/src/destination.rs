@@ -292,6 +292,13 @@ pub struct Destination {
     /// `create_group_key` or `load_group_key` is called. Only meaningful for
     /// [`DestinationType::Group`].
     group_key: Option<[u8; TOKEN_KEY_SIZE]>,
+
+    /// The app_data a bare `announce(None, ..)` emits (Python `Destination.py`
+    /// `default_app_data`). Updated by every announce carrying explicit
+    /// app_data, so re-announce paths that cannot know the caller's payload
+    /// (interface-up, scheduled re-announces) reproduce the last announce
+    /// instead of stripping it.
+    default_app_data: Option<Vec<u8>>,
 }
 
 impl Destination {
@@ -355,6 +362,7 @@ impl Destination {
             ratchets_enabled: false,
             ratchets_dirty: false,
             group_key: None,
+            default_app_data: None,
         })
     }
 
@@ -911,6 +919,18 @@ impl Destination {
         if self.identity.is_none() {
             return Err(AnnounceError::NoIdentity);
         }
+
+        // Explicit app_data becomes the default; `None` falls back to it
+        // (Python `Destination.py` default_app_data). Re-announce paths pass
+        // `None` and must reproduce the destination's last announce, not
+        // strip it.
+        if let Some(data) = app_data {
+            if self.default_app_data.as_deref() != Some(data) {
+                self.default_app_data = Some(data.to_vec());
+            }
+        }
+        let effective_app_data = self.default_app_data.clone();
+        let app_data = effective_app_data.as_deref();
 
         // Rotate ratchet if needed
         self.rotate_ratchet_if_needed(rng, now_ms);
@@ -1859,6 +1879,201 @@ mod tests {
         let second_ratchet = dest.current_ratchet_public().unwrap();
         assert_ne!(first_ratchet, second_ratchet);
         assert_eq!(announce2.ratchet().unwrap(), &second_ratchet);
+    }
+
+    /// #159 tranche 1: pin the SEMANTICS of the generated `name_hash` and the
+    /// derived destination hash against values computed by the vendored Python
+    /// reference, not merely against our own reader. A peer recomputes
+    /// `truncated_hash(name_hash + truncated_hash(public_key))` from the
+    /// announce and drops it on mismatch (`Identity.validate_announce`; our
+    /// `ReceivedAnnounce::validate`), so these exact bytes decide announce
+    /// acceptance mesh-wide.
+    ///
+    /// Reference vectors generated 2026-08-02 by executing the vendored
+    /// `reference/Reticulum` (RNS importable, values confirmed by
+    /// `RNS.Destination.expand_name` / `RNS.Destination.hash` /
+    /// `RNS.Identity.full_hash`):
+    ///
+    /// ```text
+    /// full_hash("audit.kat.field")[:10]        = 836710f8649dd9fed860
+    /// full_hash("audit.käse".utf8)[:10]        = 921ee2ed9768519128dd
+    /// pub = bytes(range(64))
+    /// full_hash(pub)[:16]                      = fdeab9acf3710362bd2658cdc9a29e8f
+    /// full_hash(name_hash + id_hash)[:16]      = f000a6e0bcdb026f6dbc6eed918fab21
+    /// ```
+    ///
+    /// Pinned rules (Destination.py:120/:130/:189): the name-hash material is
+    /// the dot-joined `app_name.aspects` WITHOUT the identity hexhash
+    /// (`expand_name(None, ...)`), encoded as UTF-8; the destination hash
+    /// appends the 16-byte identity hash to the 10-byte name hash.
+    #[test]
+    fn announce_name_and_destination_hash_match_python_reference() {
+        let name_hash = Destination::compute_name_hash("audit", &["kat", "field"]);
+        assert_eq!(
+            name_hash,
+            [0x83, 0x67, 0x10, 0xf8, 0x64, 0x9d, 0xd9, 0xfe, 0xd8, 0x60],
+            "name_hash must match the Python reference value"
+        );
+
+        // Non-ASCII aspect: Python hashes the UTF-8 encoding of the name.
+        assert_eq!(
+            Destination::compute_name_hash("audit", &["käse"]),
+            [0x92, 0x1e, 0xe2, 0xed, 0x97, 0x68, 0x51, 0x91, 0x28, 0xdd],
+            "name_hash must hash the UTF-8 bytes of the full name"
+        );
+
+        // Identity hash: truncated_hash over the 64-byte X25519||Ed25519 key.
+        let mut pubkey = [0u8; 64];
+        for (i, b) in pubkey.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let identity_hash = truncated_hash(&pubkey);
+        assert_eq!(
+            identity_hash,
+            [
+                0xfd, 0xea, 0xb9, 0xac, 0xf3, 0x71, 0x03, 0x62, 0xbd, 0x26, 0x58, 0xcd, 0xc9, 0xa2,
+                0x9e, 0x8f
+            ],
+            "identity hash must match the Python reference value"
+        );
+
+        let dest_hash = Destination::compute_destination_hash(&name_hash, &identity_hash);
+        assert_eq!(
+            dest_hash.as_bytes(),
+            &[
+                0xf0, 0x00, 0xa6, 0xe0, 0xbc, 0xdb, 0x02, 0x6f, 0x6d, 0xbc, 0x6e, 0xed, 0x91, 0x8f,
+                0xab, 0x21
+            ],
+            "destination hash must match the Python reference value"
+        );
+    }
+
+    /// #159 tranche 1: pin the announce signature's covered bytes by
+    /// reconstructing them INDEPENDENTLY from the wire bytes, in the exact
+    /// order the reference composes them (Destination.py:297-298:
+    /// `hash + public_key + name_hash + random_hash + ratchet [+ app_data]`),
+    /// and verifying with raw Ed25519 against the key half at payload bytes
+    /// 32..64. A Python peer rejects the announce if any field is missing,
+    /// reordered, or the Ed25519 half sits elsewhere — the existing
+    /// `verify_signature` tests share `build_signed_data` with the writer and
+    /// would stay green if writer and reader drifted together (the #155
+    /// failure class).
+    #[test]
+    fn announce_signature_covers_reference_byte_order_on_the_wire() {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        for with_ratchet in [false, true] {
+            let identity = Identity::generate(&mut OsRng);
+            let mut dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "audit",
+                &["sig"],
+            )
+            .unwrap();
+            if with_ratchet {
+                dest.enable_ratchets(&mut OsRng, TEST_TIME_MS).unwrap();
+            }
+
+            let app_data = b"sig-audit";
+            let packet = dest
+                .announce(
+                    Some(app_data),
+                    &mut OsRng,
+                    TEST_TIME_MS,
+                    TEST_TIME_MS / 1000,
+                )
+                .unwrap();
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).unwrap();
+            let wire = &buf[..len];
+
+            // Type1 wire layout: flags(1) + hops(1) + dest_hash(16) + context(1).
+            let header_dest_hash = &wire[2..18];
+            let payload = &wire[19..];
+
+            // Reference payload layout (Destination.py:301):
+            // public_key(64) + name_hash(10) + random_hash(10) + [ratchet(32)]
+            // + signature(64) + app_data.
+            let (ratchet, signature, wire_app_data): (&[u8], &[u8], &[u8]) = if with_ratchet {
+                (&payload[84..116], &payload[116..180], &payload[180..])
+            } else {
+                (&[], &payload[84..148], &payload[148..])
+            };
+            assert_eq!(wire_app_data, app_data, "app_data must ride verbatim");
+
+            let mut signed = Vec::new();
+            signed.extend_from_slice(header_dest_hash);
+            signed.extend_from_slice(&payload[..64]); // public_key
+            signed.extend_from_slice(&payload[64..74]); // name_hash
+            signed.extend_from_slice(&payload[74..84]); // random_hash
+            signed.extend_from_slice(ratchet);
+            signed.extend_from_slice(wire_app_data);
+
+            let ed25519_half: [u8; 32] = payload[32..64].try_into().unwrap();
+            let vk = VerifyingKey::from_bytes(&ed25519_half)
+                .expect("payload bytes 32..64 must be the Ed25519 verifying key");
+            let sig = Signature::from_bytes(signature.try_into().unwrap());
+            vk.verify(&signed, &sig).unwrap_or_else(|_| {
+                panic!("reference-composed signed data must verify (with_ratchet={with_ratchet})")
+            });
+
+            // The pin must bite: dropping the destination hash from the front
+            // (what a writer forgetting the header hash would sign) must fail.
+            assert!(
+                vk.verify(&signed[16..], &sig).is_err(),
+                "signature must actually cover the destination hash"
+            );
+        }
+    }
+
+    /// #159 tranche 1: pin the dedup semantics of the random half of the
+    /// announce `random_hash`. A peer keeps the last 64 announce blobs per
+    /// destination and refuses to re-adopt a path whose 10-byte blob it has
+    /// already seen (Transport.py:1772/1797/1810, MAX_RANDOM_BLOBS at :98) —
+    /// two same-second announces with equal blobs would make every peer treat
+    /// the second one as a replay. So consecutive emissions in the SAME
+    /// emission second must differ in the random half (bytes 0..5) while the
+    /// timestamp half (bytes 5..10, pinned by the #155/#160/#161 chain) stays
+    /// equal.
+    #[test]
+    fn announce_random_blob_is_a_fresh_dedup_key_each_emission() {
+        let identity = Identity::generate(&mut OsRng);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "audit",
+            &["blob"],
+        )
+        .unwrap();
+
+        let emission_secs = TEST_TIME_MS / 1000;
+        let blob = |dest: &mut Destination| -> [u8; crate::constants::RANDOM_HASHBYTES] {
+            let packet = dest
+                .announce(None, &mut OsRng, TEST_TIME_MS, emission_secs)
+                .unwrap();
+            let mut buf = [0u8; 500];
+            let _ = packet.pack(&mut buf).unwrap();
+            // random_hash on the wire: header(19) + public_key(64) + name_hash(10).
+            buf[19 + 74..19 + 84].try_into().unwrap()
+        };
+
+        let first = blob(&mut dest);
+        let second = blob(&mut dest);
+
+        assert_ne!(
+            first[..5],
+            second[..5],
+            "same-second announces must carry distinct dedup blobs"
+        );
+        assert_eq!(
+            first[5..],
+            second[5..],
+            "timestamp half must be identical for the same emission second"
+        );
+        assert_ne!(first, second, "the full 10-byte peer dedup key must differ");
     }
 
     // Proof Strategy Tests

@@ -84,12 +84,12 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:1537` | `rnstatus`-style counters |
 | `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:1857` | Relay mode flag |
 
-The stable, curated facade `leviculum_std::api` (`leviculum-std/src/api/mod.rs:55`
-`NodeBuilder` / `:206` `Node`) re-projects this surface with core internals
+The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:57`),
+`Node` (`leviculum-std/src/api/mod.rs:215`) — re-projects this surface with core internals
 hidden; it is what `leviculum-ffi` wraps. Notable facade-only helpers:
 `api::generate_identity()` (`api/mod.rs:30`), `api::version()` (`api/mod.rs:37`),
 `api::version_string()` (`api/mod.rs:46`), and `Node::connect_with_key`
-(`api/mod.rs:329`) / `Node::accept_link` (`api/mod.rs:345`).
+(`api/mod.rs:428`) / `Node::accept_link` (`api/mod.rs:444`).
 
 ### `LinkHandle`
 
@@ -246,7 +246,7 @@ IFAC wrapping handled in core, so every driver gets it for free.
 `fn new(bytes: [u8; TRUNCATED_HASHBYTES]) -> Self` (`destination.rs:162`),
 `fn as_bytes(&self) -> &[u8; TRUNCATED_HASHBYTES]` (`destination.rs:167`),
 `fn into_bytes(self) -> [u8; TRUNCATED_HASHBYTES]` (`destination.rs:172`).
-`Direction` (`destination.rs:130`) and `DestinationType` (`destination.rs:102`)
+`Direction` (`destination.rs:148`) and `DestinationType` (`destination.rs:120`)
 are the small enums passed to `Destination::new`. Packets are constructed
 internally (`leviculum_core::packet::Packet`); applications work with
 destinations and links, not raw packets.
@@ -262,7 +262,7 @@ The three abstractions you implement to run the core on a platform. Defined in
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
 | `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:97` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:506`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:711`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
 `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`, `heapless`-backed

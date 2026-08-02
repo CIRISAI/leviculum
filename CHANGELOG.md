@@ -9,13 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A path request from the transport instance that is our own next hop
+  toward the requested destination is no longer answered, matching the
+  reference's loop-avoidance rule (#168).
+- The resource advertisement `o` field carries the salted per-transfer
+  hash like the reference, so a Python receiver can no longer append
+  two transfers of identical content into one reassembly file (#165).
+- Request timestamps carry epoch seconds from the emission timebase
+  instead of process uptime, so a Python peer's request handlers see a
+  real `requested_at` (#164).
+
+- UDPInterface accepts a hostname in `forward_ip` like rnsd, resolves
+  it at runtime with periodic re-resolution, and reports resolution
+  failures as interface errors instead of config errors (#148).
 - Announces now carry wall-clock unix time in the emission timestamp
   instead of process uptime, so Python peers order our paths correctly
   and a restarted node reclaims its own path entries (#155). Clockless
   nodes (LNode) learn the timebase from received announces or a host
   injection.
+- The learned emission timebase refuses implausible values, a single
+  announce can only advance an existing timebase by a bounded step,
+  and emitted timestamps saturate at the 40-bit field maximum, so a
+  crafted or wrong-clock announce can no longer capture a clockless
+  node's timebase or truncate its emissions (#160).
 
 ### Added
+
+- The LNode firmware honours a host-side reboot frame on its control
+  channel and ACKs before resetting, so a test harness can start every
+  run from a defined board state.
 
 - lblogd serves a file area, so a post can carry pictures. Micron has
   no image construct, so `![Mast](mast.jpg)` publishes the file at
@@ -33,6 +55,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fetched pictures are kept in a byte-bounded in-memory LRU cache, so a
   revisit costs no airtime: `--image-cache <megabytes>` (default 10, `0`
   disables). Memory only, never disk.
+- A Markdown table in a post becomes a micron `` `t `` table instead of
+  plaintext rows: header, the alignment row micron reads as the second
+  line, then the data rows, with a literal `|` in a cell escaped as the
+  reference parser expects.
+
+### Fixed
+
+- lnomad sizes a half-block picture by half-block geometry. A cell there
+  carries one pixel across and two down, but the fit was measured against
+  the terminal's font box, so a 300x300 portrait was drawn as 38x38
+  pixels — recognisable as nothing. It now fills the page width (78x78
+  for that portrait), may run up to two screenfuls tall since height is
+  resolution on that backend, and asks the protocol for that area with
+  `Resize::Scale`, which `Resize::Fit` had been quietly undoing.
+- lnomad renders a table cell's contents as the inline micron they are.
+  Cells were pushed to the screen as plain text, so a style, a colour or
+  a link inside one showed its markup — `` `B333code`b `` instead of
+  `code` — and the column was sized to the markup rather than to the
+  text. Each cell is now parsed and flattened, as the reference does by
+  re-parsing every formatted row line, which also makes a link in a cell
+  followable and sizes columns by visible width. An escaped `\|` splits
+  no column and loses its backslash.
 
 ## [0.8.0] - 2026-08-01
 

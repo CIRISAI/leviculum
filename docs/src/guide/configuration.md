@@ -6,31 +6,31 @@ accepts, and the two share the shared-instance IPC socket so client
 tools (`rnstatus`, `rncp`, `lnstest diag`, Sideband, Nomadnet) attach to
 either daemon without changes. Keys `lnsd` does not implement are
 tolerated, not rejected — an unknown key never makes `lnsd` refuse a
-config a current `rnsd` would load (`ini_config.rs:193-198`).
+config a current `rnsd` would load (`ini_config.rs:303-308`).
 
 ## File location and lookup order
 
 Pass an explicit config directory with `--config DIR` (`lnsd.rs`,
 `-c/--config`). With no flag, `lnsd` resolves the directory using the
-same order as Python Reticulum (`config.rs:360-391`):
+same order as Python Reticulum (`config.rs:668-685`):
 
 1. `/etc/reticulum` — if `/etc/reticulum/config` exists
 2. `$HOME/.config/reticulum` — if that directory's `config` exists
 3. `$HOME/.reticulum` — fallback, used even if absent
 
 The config *file* is always named `config` inside that directory
-(`config.rs:369-371`). The storage directory defaults to
+(`config.rs:687-689`). The storage directory defaults to
 `<config_dir>/storage` and can be overridden with `--storage`
 (`lnsd.rs`, `-s/--storage`).
 
 This order is why the Debian package can install a system-wide config
 under `/etc/reticulum` and have Python clients connect to the live
-daemon with no extra flags (`config.rs:354-359`).
+daemon with no extra flags (`config.rs:674-678`).
 
 ## INI vs TOML detection
 
 `lnsd` accepts both the Python INI format and native TOML. Detection is
-by content, not just extension (`config.rs:315-338`):
+by content, not just extension (`config.rs:630-656`):
 
 - An explicit `.toml` extension forces TOML.
 - A file containing `[[` (the ConfigObj subsection marker Python uses
@@ -40,33 +40,33 @@ by content, not just extension (`config.rs:315-338`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is read
-as `false` (`ini_config.rs:255-257`).
+as `false` (`ini_config.rs:609-614`).
 
 ## The `[reticulum]` section
 
 Core daemon settings. Every key below is parsed in
-`ini_config.rs:153-199`; defaults come from `config.rs:137-155`.
+`ini_config.rs:215-310`; defaults come from `config.rs:199-224`.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `enable_transport` | bool | `true` | Route announces and serve paths for other peers. `lnsd` defaults this to `true` (it is a daemon); the Python *library* default is `false`. (`config.rs:27-28`, `140`) |
-| `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `141`) |
-| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:32-35`, `142`; key `share_instance` → `shared_instance`, `ini_config.rs:158-159`) |
-| `instance_name` | string | `default` | Names the shared-instance socket: `\0rns/<instance_name>`. Use a unique name to run two daemons side by side. (`config.rs:36-39`, `143`; `ini_config.rs:161-163`) |
-| `shared_instance_type` | `unix`/`tcp` | unset | Parsed for `rnsd` compatibility. Only `tcp`/`unix` are stored; `tcp` clears `shared_instance_socket` (tcp disables AF_UNIX upstream). `lnsd` currently serves only the abstract AF_UNIX socket. (`config.rs:40-47`; `ini_config.rs:164-173`, `126-128`) |
-| `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:48-53`; `ini_config.rs:174-176`) |
-| `respond_to_probes` | bool | `false` | Answer `rnprobe` requests by signing a proof for each probe packet. (`config.rs:54-60`, `146`; `ini_config.rs:177-179`) |
-| `remote_management_enabled` | bool | `false` | Enable remote management. (`config.rs:61-63`, `147`; `ini_config.rs:180-182`) |
+| `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `141`; `ini_config.rs:257-259`) |
+| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:32-35`, `142`; key `share_instance` → `shared_instance`, `ini_config.rs:220-222`) |
+| `instance_name` | string | `default` | Names the shared-instance socket: `\0rns/<instance_name>`. Use a unique name to run two daemons side by side. (`config.rs:36-39`, `143`; `ini_config.rs:223-225`) |
+| `shared_instance_type` | `unix`/`tcp` | unset | Parsed for `rnsd` compatibility. Only `tcp`/`unix` are stored; `tcp` clears `shared_instance_socket` (tcp disables AF_UNIX upstream). `lnsd` currently serves only the abstract AF_UNIX socket. (`config.rs:40-47`; `ini_config.rs:226-235`, `179-181`) |
+| `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:48-53`; `ini_config.rs:236-238`) |
+| `respond_to_probes` | bool | `false` | Answer `rnprobe` requests by signing a proof for each probe packet. (`config.rs:54-60`, `146`; `ini_config.rs:251-253`) |
+| `remote_management_enabled` | bool | `false` | Enable remote management. (`config.rs:61-63`, `147`; `ini_config.rs:263-267`) |
 | `storage_path` | path | unset | Storage path, relative to the config dir or absolute. (`config.rs:64-66`, `148`) |
-| `flush_interval` | u64 (sec) | `3600` | Seconds between periodic storage flushes. Crash protection only — normal shutdown always flushes. (`config.rs:67-73`, `149`; `ini_config.rs:183-187`) |
+| `flush_interval` | u64 (sec) | `3600` | Seconds between periodic storage flushes. Crash protection only — normal shutdown always flushes. (`config.rs:67-73`, `149`; `ini_config.rs:275-279`) |
 | `control_channel_capacity` | usize | `256` | Capacity of the lossless control-plane event channel (announces, paths, link/resource lifecycle). Raise on servers under heavy announce load. (`config.rs:74-82`, `150`) |
 | `data_channel_capacity` | usize | `128` | Capacity of the droppable data-plane event channel; full means normal backpressure (silent drop). (`config.rs:83-90`, `151`) |
-| `keepalive_interval` | u64 (sec) | unset | Override link keepalive interval. When set, every link uses this interval and the stale-link timeout scales with it (stale after twice the keepalive). Local timing only, no wire change. Useful for slow links. (`config.rs:91-98`, `152`; `ini_config.rs:188-192`) |
+| `keepalive_interval` | u64 (sec) | unset | Override link keepalive interval. When set, every link uses this interval and the stale-link timeout scales with it (stale after twice the keepalive). Local timing only, no wire change. Useful for slow links. (`config.rs:91-98`, `152`; `ini_config.rs:280-287`) |
 
-`use_implicit_proof`, `storage_path`, `control_channel_capacity`, and
+`storage_path`, `control_channel_capacity`, and
 `data_channel_capacity` are read from TOML only; they have no INI key in
-`apply_reticulum_key` (`ini_config.rs:155-199` parses just the nine keys
-above) and are best set in a TOML config or left at their defaults.
+`apply_reticulum_key` (`ini_config.rs:215-310`) and are best set in a
+TOML config or left at their defaults.
 `storage_path` is also settable from the command line via `lnsd --storage`.
 
 `flush_interval` and `keepalive_interval` are Leviculum tuning
@@ -151,7 +151,7 @@ defaults are in `config.rs:259-305`.
 |-----|------|---------|---------|
 | `listen_ip` | string | unset | Local bind address. (`ini_config.rs:207`) |
 | `listen_port` | u16 | unset | Local bind port. (`ini_config.rs:208`) |
-| `forward_ip` | string | unset | Broadcast/forward address. (`ini_config.rs:211`) |
+| `forward_ip` | string | unset | Broadcast/forward address or hostname. Names are resolved at runtime and re-resolved periodically; a resolution failure is a logged interface error, not a config error. (`ini_config.rs:211`) |
 | `forward_port` | u16 | unset | Broadcast/forward port. (`ini_config.rs:212`) |
 
 ### AutoInterface (`AutoInterface`)

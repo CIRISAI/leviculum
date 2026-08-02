@@ -43,13 +43,14 @@ use alloc::vec::Vec;
 
 use crate::constants::{
     ANNOUNCE_RATE_LIMIT_MS, DEFAULT_ANNOUNCE_CAP_PERCENT, DISCOVERY_RETRY_INTERVAL_MS,
-    DISCOVERY_TIMEOUT_MS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS, JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS,
-    LOCAL_CLIENT_ANNOUNCE_DELAY_MS, LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX,
-    MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU,
-    PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
-    PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS, RATCHET_SIZE,
-    RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES,
-    UNKNOWN_BITRATE_ASSUMPTION_BPS,
+    DISCOVERY_TIMEOUT_MS, EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS,
+    EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
+    JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS, LOCAL_CLIENT_ANNOUNCE_DELAY_MS,
+    LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX, MAX_QUEUED_ANNOUNCES_PER_INTERFACE,
+    MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS,
+    PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES, PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS,
+    PATH_REQUEST_MIN_INTERVAL_MS, RATCHET_SIZE, RECEIPT_TIMEOUT_DEFAULT_MS,
+    REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
 };
 
 use crate::announce::{emission_from_random_hash, max_emission_from_blobs, ReceivedAnnounce};
@@ -1173,6 +1174,10 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `Clock::wall_unix_secs` provides real wall time.
     emission_floor: Option<(u64, u64)>,
 
+    /// Whether the once-per-process operator warning about an implausible
+    /// own wall clock has fired (Codeberg #161).
+    own_wall_clock_warned: bool,
+
     /// Well-known hash for path request destination (rnstransport.path.request)
     path_request_hash: [u8; TRUNCATED_HASHBYTES],
 
@@ -1374,6 +1379,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             last_path_snapshot_ms: 0,
             last_path_entries_dump_ms: 0,
             emission_floor: None,
+            own_wall_clock_warned: false,
             path_request_hash,
             tunnel_synthesize_hash,
             // announce_cache: migrated to Storage
@@ -2549,16 +2555,54 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// 3. Monotonic uptime seconds — degenerate fallback until either of
     ///    the above is available. Never beats a stored path entry on a
     ///    peer, but is monotonic within one boot.
+    ///
+    /// The full source-priority chain (including GNSS) and the rules
+    /// every source obeys live in `docs/src/concepts/time-and-clocks.md`.
     pub fn emission_secs(&self, now_ms: u64) -> u64 {
-        if let Some(wall) = self.clock.wall_unix_secs() {
-            return wall;
-        }
-        match self.emission_floor {
-            Some((floor_secs, floor_at_ms)) => {
-                floor_secs + now_ms.saturating_sub(floor_at_ms) / 1000
+        let secs = if let Some(wall) = self.clock.wall_unix_secs() {
+            wall
+        } else {
+            match self.emission_floor {
+                Some((floor_secs, floor_at_ms)) => {
+                    floor_secs.saturating_add(now_ms.saturating_sub(floor_at_ms) / 1000)
+                }
+                None => now_ms / 1000,
             }
-            None => now_ms / 1000,
+        };
+        // The wire field holds 8*RANDOM_HASH_TIMESTAMP_SIZE bits; a larger
+        // value would drop its high bits on emission and sort our next
+        // announce below our own stored entries on every peer (Codeberg
+        // #160). Saturating here makes that unrepresentable regardless of
+        // which source produced the value.
+        secs.min(EMISSION_TIMESTAMP_MAX_SECS)
+    }
+
+    /// [`emission_secs`](Self::emission_secs) for an announce we are about
+    /// to emit, plus a once-per-process operator warning when the platform
+    /// wall clock is implausible (Codeberg #161): a dead RTC or a restored
+    /// snapshot makes every announce we send poison our entries in other
+    /// people's path tables (the #155 failure mode), and without this
+    /// warning the operator has no way to notice from the affected node.
+    ///
+    /// The returned value is `emission_secs` unchanged: Python-RNS fills
+    /// the field from `time.time()` unvalidated (Destination.py:282), so
+    /// bounding or withholding it would desynchronise us from a network
+    /// that does not validate — we warn, we never alter.
+    pub fn announce_emission_secs(&mut self, now_ms: u64) -> u64 {
+        if !self.own_wall_clock_warned {
+            if let Some(wall) = self.clock.wall_unix_secs() {
+                if !(EMISSION_PLAUSIBLE_MIN_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&wall) {
+                    self.own_wall_clock_warned = true;
+                    crate::tracing::warn!(
+                        wall_unix_secs = wall,
+                        "This node's wall clock is implausible (dead RTC, restored snapshot, \
+                         or missing NTP?). Announces carry it verbatim and will degrade this \
+                         node's entries in peers' path tables until the system clock is fixed"
+                    );
+                }
+            }
         }
+        self.emission_secs(now_ms)
     }
 
     /// Inject wall-clock unix time from the host (Codeberg #155).
@@ -2568,19 +2612,65 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// no-op in effect on platforms whose `Clock::wall_unix_secs` already
     /// returns real wall time, which always takes precedence.
     pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64) {
+        // Same plausibility window as learned adoption (Codeberg #160,
+        // #161): above the ceiling no real clock can sit and the floor
+        // would wedge there; below the minimum (a boot script racing NTP,
+        // a controller with its own dead clock) the injection would seed
+        // the implausibly-low floor of #161 §1 through the front door —
+        // and unlike a learned announce, an injection CLAIMS to know wall
+        // time, so a value no real clock can hold is self-refuting.
+        if !(EMISSION_PLAUSIBLE_MIN_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&unix_secs) {
+            crate::tracing::warn!(unix_secs, "Refused implausible wall-time injection");
+            return;
+        }
         self.emission_floor = Some((unix_secs, self.clock.now_ms()));
     }
 
     /// Learn the emission timebase from a validated announce's emission
     /// timestamp (Codeberg #155). Only meaningful without a wall clock;
     /// only ever moves the timebase forward.
+    ///
+    /// `validate()` proves only that the announce signs itself, so this
+    /// field is arbitrary input from anyone in radio range (Codeberg #160).
+    /// Hardening, in order: values past [`EMISSION_LEARN_CEILING_SECS`]
+    /// cannot come from a real clock and are refused outright; adoption is
+    /// unbounded while the current timebase sits below
+    /// [`EMISSION_PLAUSIBLE_MIN_SECS`], so a node booting at uptime
+    /// seconds — or one that adopted a rebooting peer's uptime seconds
+    /// (Codeberg #161 §1) — reaches real unix time in one step; once the
+    /// timebase is plausible, every adoption may advance it by at most
+    /// [`EMISSION_LEARN_MAX_ADVANCE_SECS`], so a peer with a badly wrong
+    /// clock cannot capture it in one announce.
+    ///
+    /// Unlike the persisted offset in microReticulum (which the #155
+    /// commit message overstated as the same pattern), the learned floor
+    /// is in-memory only: after a reboot a clockless node emits uptime
+    /// seconds again until the first validated announce re-seeds it.
     fn learn_emission_timebase(&mut self, emitted_secs: u64, now_ms: u64) {
         if self.clock.wall_unix_secs().is_some() {
             return;
         }
-        if emitted_secs > self.emission_secs(now_ms) {
-            self.emission_floor = Some((emitted_secs, now_ms));
+        if emitted_secs > EMISSION_LEARN_CEILING_SECS {
+            return;
         }
+        let current = self.emission_secs(now_ms);
+        if emitted_secs <= current {
+            return;
+        }
+        // Unbounded while implausible, bounded once plausible. "Implausible"
+        // covers both no-floor-yet (current = uptime seconds, #155) and a
+        // floor captured below any value a real clock can produce (#161 §1);
+        // in both cases one credible announce must recover the node in a
+        // single step. The `emitted_secs <= current` guard above keeps the
+        // floor from ever moving down, so the unbounded branch cannot be
+        // abused downwards — the only way to sit below the bound is never
+        // to have heard a credible timestamp.
+        let adopted = if current < EMISSION_PLAUSIBLE_MIN_SECS {
+            emitted_secs
+        } else {
+            emitted_secs.min(current.saturating_add(EMISSION_LEARN_MAX_ADVANCE_SECS))
+        };
+        self.emission_floor = Some((adopted, now_ms));
     }
 
     /// Return all path table entries for RPC export.
@@ -6497,6 +6587,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut tag = [0u8; TRUNCATED_HASHBYTES];
         tag.copy_from_slice(&data[tag_start..]);
 
+        // Extract the requesting transport instance id, present exactly when
+        // the payload is longer than two hashes (Python `path_request_handler`,
+        // Transport.py:2877-2880). Used below to suppress answering a request
+        // that came from our own next hop toward the destination.
+        let requestor_transport_id: Option<[u8; TRUNCATED_HASHBYTES]> =
+            if data.len() > TRUNCATED_HASHBYTES * 2 {
+                let mut id = [0u8; TRUNCATED_HASHBYTES];
+                id.copy_from_slice(&data[TRUNCATED_HASHBYTES..TRUNCATED_HASHBYTES * 2]);
+                Some(id)
+            } else {
+                None
+            };
+
         // Track incoming path-request frequency on the receiving interface
         // (Codeberg #67 Stage 2a). Mirrors Python Transport.py:2895
         // `packet.receiving_interface.received_path_request()`, which records
@@ -6582,6 +6685,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Transport.path_table`): a dropped or expired path must not be answered
         // from the orphaned announce cache; the request falls through to case 4
         // and is forwarded instead (Codeberg #117).
+        // Never answer a cached-path request whose requesting transport
+        // instance IS our next hop toward the destination (Python
+        // Transport.py:2958-2965, Codeberg #168): it asked because its own
+        // path failed, and an answer would advertise a route that leads
+        // straight back through it. Applies to both cached-path answer
+        // branches (2a and 2b) — in Python the check sits in the shared
+        // cached-path arm. A direct path (no transport_id in the announce)
+        // has no next-hop id to match, so it is never suppressed.
+        let next_hop_is_requestor = match (
+            requestor_transport_id,
+            self.storage
+                .get_path(&requested_hash)
+                .and_then(|p| p.next_hop),
+        ) {
+            (Some(req), Some(nh)) => req == nh,
+            _ => false,
+        };
+        if next_hop_is_requestor {
+            crate::tracing::debug!(
+                "Not answering path request for <{}> on {}, next hop is the requestor",
+                HexShort(&requested_hash),
+                self.iface_name(interface_index)
+            );
+            return Ok(());
+        }
+
         if from_local && self.storage.get_path(&requested_hash).is_some() {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 // Convert cached Header1 announce to Header2 with the daemon's
@@ -9992,6 +10121,187 @@ mod tests {
             );
         }
 
+        /// #159 tranche 1: pin the routing semantics of the `transport_id` we
+        /// WRITE into a forwarded announce. A peer stores that value as
+        /// `received_from` — its next hop toward the destination
+        /// (Transport.py:1715-1716) — and later addresses HEADER_2 data
+        /// packets to exactly that hash, which our inbound filter must accept
+        /// (Transport.py:1193-1196; `transport.rs` overheard filter). The pin
+        /// closes the loop THROUGH THE WIRE: the id is extracted from the
+        /// rebroadcast bytes, never from our own identity getter, so an
+        /// announced-vs-accepted split cannot stay green (#155 failure class).
+        #[test]
+        fn forwarded_announce_transport_id_is_the_hash_we_answer_to() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // A neighbour's own announce (wire hops 0) arrives on if0; the
+            // receipt increment stores it at 1 hop, so the rebroadcast must be
+            // transport-routed (Type2) per Transport.py:612-614/1970-1977.
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_events();
+            transport.drain_actions();
+
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let fwd = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("relay must rebroadcast the announce");
+
+            let parsed = Packet::unpack(&fwd).unwrap();
+            assert_eq!(
+                parsed.flags.header_type,
+                HeaderType::Type2,
+                "forwarded announce must be transport-routed"
+            );
+            assert_eq!(parsed.flags.transport_type, TransportType::Transport);
+            let announced_tid = parsed
+                .transport_id
+                .expect("forwarded announce must carry a transport id");
+
+            let type2_data = |tid: [u8; TRUNCATED_HASHBYTES], payload: &[u8]| -> Vec<u8> {
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type2,
+                        context_flag: false,
+                        transport_type: TransportType::Transport,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 1,
+                    transport_id: Some(tid),
+                    destination_hash: dest_hash,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(payload.to_vec()),
+                };
+                let mut buf = [0u8; 500];
+                let len = packet.pack(&mut buf).unwrap();
+                buf[..len].to_vec()
+            };
+
+            // Data addressed to the ANNOUNCED id must pass the overheard
+            // filter and be relayed toward the destination.
+            let forwarded_before = transport.stats().packets_forwarded;
+            transport
+                .process_incoming(1, &type2_data(announced_tid, b"payload-1"))
+                .unwrap();
+            assert_eq!(
+                transport.stats().drops_overheard_transport_id,
+                0,
+                "data addressed to the announced transport id must not be dropped as overheard"
+            );
+            assert!(
+                transport.stats().packets_forwarded > forwarded_before,
+                "data addressed to the announced transport id must be relayed"
+            );
+
+            // Control: any other id in the same packet is overheard traffic.
+            let mut other_tid = announced_tid;
+            other_tid[0] ^= 0xff;
+            transport
+                .process_incoming(1, &type2_data(other_tid, b"payload-2"))
+                .unwrap();
+            assert_eq!(
+                transport.stats().drops_overheard_transport_id,
+                1,
+                "the acceptance above must be due to the id, not a missing filter"
+            );
+        }
+
+        /// #159 tranche 1: pin the wire form of a targeted path response.
+        /// Peers decide on each of these generated fields: context
+        /// PATH_RESPONSE → a receiving transport does NOT rebroadcast it
+        /// (Transport.py:1886) and exempts it from announce-rate limiting
+        /// (:1838); HEADER_2 + our transport id → the requester records us as
+        /// next hop (:1715-1716, :2001-2004); the hop byte carries the STORED
+        /// path count (:2956, :2009), which becomes the requester's path
+        /// metric. Existing tests pin the targeting (one SendPacket to the
+        /// requester); this pins the bytes those decisions read.
+        #[test]
+        fn path_response_wire_carries_python_path_response_semantics() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Announce at wire hops 2 → stored path count 3 after the receipt
+            // increment.
+            let (raw, dest_hash) = make_announce_raw(2, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // Keep the announce cache and path, drop the rebroadcast schedule.
+            for key in transport.storage().announce_keys() {
+                transport.storage_mut().remove_announce(&key);
+            }
+            transport.storage_mut().clear_packet_hashes();
+
+            let mut data = Vec::new();
+            data.extend_from_slice(&dest_hash);
+            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]); // tag
+            let request = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: transport.path_request_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            };
+            transport.handle_path_request(request, 0).unwrap();
+
+            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
+            transport.poll();
+
+            let actions = transport.drain_actions();
+            let response = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("path response must be sent to the requesting interface");
+
+            let parsed = Packet::unpack(&response).unwrap();
+            assert_eq!(parsed.flags.packet_type, PacketType::Announce);
+            assert_eq!(
+                parsed.context,
+                PacketContext::PathResponse,
+                "peers suppress rebroadcast/rate-limiting on this context byte"
+            );
+            assert_eq!(
+                parsed.flags.header_type,
+                HeaderType::Type2,
+                "path response must be transport-routed"
+            );
+            assert_eq!(parsed.flags.transport_type, TransportType::Transport);
+            assert_eq!(
+                parsed.transport_id,
+                Some(*transport.identity.hash()),
+                "requester must learn US as next hop toward the destination"
+            );
+            assert_eq!(
+                parsed.hops, 3,
+                "hop byte must carry the stored path count (wire 2 + receipt increment)"
+            );
+        }
+
         #[test]
         fn test_path_response_not_rebroadcasted() {
             let mut transport = make_transport_enabled();
@@ -10099,6 +10409,661 @@ mod tests {
             assert!(
                 broadcasts.is_empty(),
                 "Path response should not be broadcast"
+            );
+        }
+
+        // -------------------------------------------------------------------
+        // #159 tranche 3: transport-layer generated fields. Every pin below
+        // extracts the audited field from the actual wire bytes and re-applies
+        // the rule a Python peer applies to it, so a writer/reader pair that
+        // drifted together stays red (the #155 failure class).
+        // -------------------------------------------------------------------
+
+        /// Reshape a Type1 announce raw into the Type2 form a relay emits, so
+        /// a chosen next-relay id can be planted in the wire bytes.
+        fn announce_as_type2(
+            raw: &[u8],
+            transport_id: [u8; TRUNCATED_HASHBYTES],
+            hops: u8,
+        ) -> Vec<u8> {
+            let mut p = Packet::unpack(raw).unwrap();
+            p.flags.header_type = HeaderType::Type2;
+            p.flags.transport_type = TransportType::Transport;
+            p.transport_id = Some(transport_id);
+            p.hops = hops;
+            let mut buf = [0u8; 512];
+            let len = p.pack(&mut buf).unwrap();
+            buf[..len].to_vec()
+        }
+
+        fn type2_data_to(
+            transport_id: [u8; TRUNCATED_HASHBYTES],
+            dest_hash: [u8; TRUNCATED_HASHBYTES],
+            wire_hops: u8,
+            payload: &[u8],
+        ) -> Vec<u8> {
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type2,
+                    context_flag: false,
+                    transport_type: TransportType::Transport,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: wire_hops,
+                transport_id: Some(transport_id),
+                destination_hash: dest_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(payload.to_vec()),
+            };
+            let mut buf = [0u8; 512];
+            let len = packet.pack(&mut buf).unwrap();
+            buf[..len].to_vec()
+        }
+
+        /// #159 tranche 3: pin the two fields the transport REWRITES on a
+        /// forwarded data packet — the hop byte and the transport id.
+        ///
+        /// The reference writes the receipt-incremented hop count into wire
+        /// byte 1 in every forward branch (Transport.py:1567-1581 after the
+        /// `packet.hops += 1` at :1457), and replaces bytes 2..18 with the
+        /// NEXT hop's transport id while more than one hop remains
+        /// (:1567-1570), stripping to HEADER_1 broadcast on the last hop
+        /// (:1571-1576). Peers decide on both: the next relay only processes
+        /// the packet if the transport id names it (:1560), and the taken-hops
+        /// byte feeds the link-table checks (:1656-1668) and the LRPROOF
+        /// `remaining_hops` comparison (#38). Both expectations here are
+        /// recomposed from the wire bytes we fed in, never from the values the
+        /// forwarding code computes.
+        #[test]
+        fn forwarded_data_wire_carries_incremented_hops_and_next_relay_id() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Multi-hop path: announce for D relayed to us by R (its id sits
+            // in the announce wire at bytes 2..18), wire hops 2 -> stored 3.
+            let (raw, dest_relayed) = make_announce_raw(0, PacketContext::None);
+            let relay_id = [0x5Au8; TRUNCATED_HASHBYTES];
+            let t2 = announce_as_type2(&raw, relay_id, 2);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // In-transport data addressed to OUR transport id at wire hops 5.
+            let wire_in = type2_data_to(
+                *transport.identity.hash(),
+                dest_relayed,
+                5,
+                b"tranche3-multi-hop",
+            );
+            transport.process_incoming(1, &wire_in).unwrap();
+            let actions = transport.drain_actions();
+            let fwd = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("multi-hop data must be forwarded toward the path interface");
+
+            assert_eq!(
+                fwd[0] & 0x40,
+                0x40,
+                "more than one hop remaining: HEADER_2 must be kept (Transport.py:1565-1570)"
+            );
+            assert_eq!(
+                fwd[1],
+                wire_in[1] + 1,
+                "forwarded hop byte must be the receipt-incremented count"
+            );
+            assert_eq!(
+                &fwd[2..2 + TRUNCATED_HASHBYTES],
+                &relay_id,
+                "transport id must be rewritten to the next relay the announce named"
+            );
+
+            // Last hop: destination announced directly (wire 0 -> stored 1);
+            // the forward strips transport routing entirely.
+            let (raw_direct, dest_direct) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(0, &raw_direct).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            let wire_in2 = type2_data_to(
+                *transport.identity.hash(),
+                dest_direct,
+                3,
+                b"tranche3-last-hop",
+            );
+            transport.process_incoming(1, &wire_in2).unwrap();
+            let actions = transport.drain_actions();
+            let fwd2 = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("last-hop data must be forwarded to the destination's interface");
+
+            assert_eq!(
+                fwd2[0] & 0x70,
+                0x00,
+                "last hop: HEADER_1 + BROADCAST, transport routing stripped (Transport.py:1571-1576)"
+            );
+            assert_eq!(
+                fwd2[1],
+                wire_in2[1] + 1,
+                "stripped forward still carries the receipt-incremented hop byte"
+            );
+            assert_eq!(
+                &fwd2[2..2 + TRUNCATED_HASHBYTES],
+                &dest_direct,
+                "with the transport field stripped, the destination hash follows the hop byte"
+            );
+        }
+
+        /// #159 tranche 3, deliberate non-behaviour: we DROP in-transport data
+        /// above `max_hops`; the reference forwards it (Transport.py:1560-1583
+        /// contains no hop ceiling for data in transport — only announces are
+        /// gated, at :1750). Deviation-rule justification: no legitimate path
+        /// exceeds PATHFINDER_M=128 because every peer drops announces above
+        /// it, so a data packet above the ceiling is unroutable or looping
+        /// traffic and dropping it only sheds load (Priority 1). Wire and
+        /// semantic compatibility are unaffected: no peer can expect delivery
+        /// along a path that cannot exist. If this test breaks because the
+        /// gate was removed, that is a deliberate reference-parity change and
+        /// this comment is the context for it.
+        #[test]
+        fn data_forward_above_max_hops_is_dropped_as_deliberate_deviation() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let t2 = announce_as_type2(&raw, [0x5Au8; TRUNCATED_HASHBYTES], 2);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // Wire hops 200 -> receipt-incremented 201 > 128.
+            let wire_in = type2_data_to(*transport.identity.hash(), dest_hash, 200, b"over-max");
+            transport.process_incoming(1, &wire_in).unwrap();
+            let actions = transport.drain_actions();
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, Action::SendPacket { .. } | Action::Broadcast { .. })),
+                "data above the hop ceiling must not be forwarded"
+            );
+            assert_eq!(
+                transport.stats().drops_forward_max_hops(),
+                1,
+                "the drop must be accounted as forward-max-hops"
+            );
+        }
+
+        /// #159 tranche 3: pin the hop byte of a plain announce rebroadcast.
+        /// The reference stores the receipt-incremented count when the
+        /// announce is queued (Transport.py:1868) and stamps exactly that
+        /// value on the retransmission (:618 `new_packet.hops =
+        /// announce_entry[4]`). Peers decide their path metric and the
+        /// PATHFINDER_M ceiling from it, and the local-rebroadcast bookkeeping
+        /// compares `packet.hops-1` against it (:1724). The expected value is
+        /// recomposed from the wire byte we fed in.
+        #[test]
+        fn rebroadcast_announce_wire_hop_byte_is_the_receipt_incremented_count() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, _dest) = make_announce_raw(2, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let fwd = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("announce must be rebroadcast");
+
+            assert_eq!(
+                fwd[1],
+                raw[1] + 1,
+                "rebroadcast hop byte must be the stored receipt-incremented count"
+            );
+        }
+
+        /// #159 tranche 3: pin the transport id we stamp when ORIGINATING a
+        /// packet onto a multi-hop path (the Type1 -> Type2 conversion). The
+        /// value must be the relay id the path's announce carried in its own
+        /// wire bytes — that relay only processes the packet if the id names
+        /// it (Transport.py:1560). Expected value recomposed from the announce
+        /// wire we crafted, never from the path table or the identity getter.
+        #[test]
+        fn originated_type2_stamps_the_relays_announced_transport_id() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let relay_id = [0x77u8; TRUNCATED_HASHBYTES];
+            // Wire hops 1 -> stored 2: multi-hop, origination must route via
+            // the relay.
+            let t2 = announce_as_type2(&raw, relay_id, 1);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // Originate a Type1 data packet; send_to_destination converts it.
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: dest_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(b"tranche3-origination".to_vec()),
+            };
+            let mut buf = [0u8; 512];
+            let len = packet.pack(&mut buf).unwrap();
+            transport
+                .send_to_destination(&dest_hash, &buf[..len])
+                .unwrap();
+
+            let actions = transport.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("origination must emit on the path interface");
+
+            assert_eq!(
+                wire[0] & 0x40,
+                0x40,
+                "multi-hop origination must be HEADER_2"
+            );
+            assert_eq!(wire[1], 0, "origination leaves the hop byte at zero");
+            assert_eq!(
+                &wire[2..2 + TRUNCATED_HASHBYTES],
+                &relay_id,
+                "the stamped transport id must be the relay the announce named"
+            );
+            assert_eq!(
+                &wire[2 + TRUNCATED_HASHBYTES..2 + 2 * TRUNCATED_HASHBYTES],
+                &dest_hash,
+                "the destination hash follows the transport id in HEADER_2"
+            );
+        }
+
+        /// Known-answer value from the vendored reference:
+        /// `RNS.Destination.hash(None, "rnstransport", "path", "request")`.
+        const PATH_REQUEST_DEST_KAT: [u8; TRUNCATED_HASHBYTES] = [
+            0x6b, 0x9f, 0x66, 0x01, 0x4d, 0x98, 0x53, 0xfa, 0xab, 0x22, 0x0f, 0xba, 0x47, 0xd0,
+            0x27, 0x61,
+        ];
+
+        /// #159 tranche 3: pin the fields of an ORIGINATED path request.
+        /// Layout per Transport.py:2780-2784: `dest_hash + [transport
+        /// identity hash] + tag`, the middle field present exactly when the
+        /// requester is a transport instance. Peers decide from each field:
+        /// the well-known destination hash routes the packet to
+        /// `path_request_handler` (pinned as a KAT from the vendored
+        /// reference), `dest+tag` feed the duplicate filter (:2893-2898), and
+        /// the transport-instance field is what a responder compares its
+        /// next hop against (:2958). The instance id is closed through the
+        /// wire: it must equal the transport_id bytes of an announce we
+        /// forward, because that is the only way a peer can place it.
+        #[test]
+        fn path_request_wire_matches_reference_layout_and_kat() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Capture our transport instance id from a FORWARDED announce's
+            // wire bytes (never from the identity getter).
+            let (raw, _dest) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let fwd_announce = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("announce must be rebroadcast");
+            let our_wire_instance_id = &fwd_announce[2..2 + TRUNCATED_HASHBYTES];
+
+            let target = [0xD5u8; TRUNCATED_HASHBYTES];
+            let tag = [0xC3u8; TRUNCATED_HASHBYTES];
+            transport.request_path(&target, None, &tag).unwrap();
+            let actions = transport.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("path request must be broadcast");
+
+            assert_eq!(
+                &wire[2..2 + TRUNCATED_HASHBYTES],
+                &PATH_REQUEST_DEST_KAT,
+                "path request must go to the reference's well-known destination"
+            );
+            let payload = &wire[19..];
+            assert_eq!(payload.len(), 48, "transport-instance form is 48 bytes");
+            assert_eq!(&payload[..16], &target, "field 1: requested destination");
+            assert_eq!(
+                &payload[16..32],
+                our_wire_instance_id,
+                "field 2: the same instance id our forwarded announces carry"
+            );
+            assert_eq!(&payload[32..48], &tag, "field 3: the tag, verbatim");
+
+            // A non-transport node omits the instance field
+            // (Transport.py:2784).
+            let clock = MockClock::new(TEST_TIME_MS);
+            let identity = Identity::generate(&mut OsRng);
+            let config = TransportConfig {
+                enable_transport: false,
+                ..TransportConfig::default()
+            };
+            let mut endpoint =
+                Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+            let _e0 = endpoint.register_interface(Box::new(MockInterface::new("e0", 1)));
+            endpoint.request_path(&target, None, &tag).unwrap();
+            let actions = endpoint.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("endpoint path request must be broadcast");
+            let payload = &wire[19..];
+            assert_eq!(payload.len(), 32, "endpoint form is dest + tag only");
+            assert_eq!(&payload[..16], &target);
+            assert_eq!(&payload[16..32], &tag);
+        }
+
+        /// #159 tranche 3: pin the tag of a RE-ORIGINATED path request. When a
+        /// transport re-originates discovery for an unknown destination it
+        /// must reuse the tag from the incoming request (Transport.py:
+        /// 3039-3041): every downstream transport dedups on `dest+tag`
+        /// (:2893-2898), so a fresh tag would let the same request loop
+        /// through the mesh. The re-origination is also a fresh packet at
+        /// wire hops 0 (:2787 via RNS.Packet defaults).
+        #[test]
+        fn reoriginated_path_request_reuses_the_incoming_tag_at_hops_zero() {
+            let mut transport = make_transport_enabled();
+            let idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            transport.set_interface_mode(idx0, crate::traits::InterfaceMode::Gateway);
+
+            let target = [0xABu8; TRUNCATED_HASHBYTES];
+            let tag = [0x99u8; TRUNCATED_HASHBYTES];
+            let mut data = Vec::new();
+            data.extend_from_slice(&target);
+            data.extend_from_slice(&[0x11u8; TRUNCATED_HASHBYTES]); // requester's instance id
+            data.extend_from_slice(&tag);
+            let request = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: transport.path_request_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            };
+            transport.handle_path_request(request, idx0).unwrap();
+
+            // The re-origination is broadcast excluding the requesting
+            // interface (Python Transport.py:3034-3041 iterates all other
+            // interfaces).
+            let actions = transport.drain_actions();
+            let wire = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast {
+                        data,
+                        exclude_iface,
+                        ..
+                    } if *exclude_iface == Some(InterfaceId(idx0)) => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("unknown destination must be re-originated on the other interfaces");
+
+            assert_eq!(
+                &wire[2..2 + TRUNCATED_HASHBYTES],
+                &PATH_REQUEST_DEST_KAT,
+                "re-origination goes to the same well-known destination"
+            );
+            assert_eq!(
+                wire[1], 0,
+                "re-origination is a fresh packet at wire hops 0"
+            );
+            let payload = &wire[19..];
+            assert_eq!(payload.len(), 48);
+            assert_eq!(&payload[..16], &target);
+            assert_eq!(
+                &payload[32..48],
+                &tag,
+                "the incoming tag must ride verbatim so downstream dedup kills loops"
+            );
+        }
+
+        /// #159 tranche 3 (found missing, fixed red-first in this batch): a
+        /// path request whose transport-instance field names OUR NEXT HOP for
+        /// the requested destination must not be answered
+        /// (Transport.py:2958-2965). The requestor asked because its own path
+        /// failed; answering would advertise a route that leads straight back
+        /// through it. The control half proves suppression is due to the id,
+        /// not a missing answer path.
+        #[test]
+        fn path_request_from_our_next_hop_is_not_answered() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let next_hop_id = [0x4Eu8; TRUNCATED_HASHBYTES];
+            let t2 = announce_as_type2(&raw, next_hop_id, 1);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+            // Keep the announce cache and path, drop the rebroadcast schedule.
+            for key in transport.storage().announce_keys() {
+                transport.storage_mut().remove_announce(&key);
+            }
+            transport.storage_mut().clear_packet_hashes();
+
+            let pr_dest = transport.path_request_hash;
+            let request_with =
+                move |requestor: [u8; TRUNCATED_HASHBYTES], tag: [u8; TRUNCATED_HASHBYTES]| {
+                    let mut data = Vec::new();
+                    data.extend_from_slice(&dest_hash);
+                    data.extend_from_slice(&requestor);
+                    data.extend_from_slice(&tag);
+                    Packet {
+                        flags: PacketFlags {
+                            ifac_flag: false,
+                            header_type: HeaderType::Type1,
+                            context_flag: false,
+                            transport_type: TransportType::Broadcast,
+                            dest_type: DestinationType::Plain,
+                            packet_type: PacketType::Data,
+                        },
+                        hops: 0,
+                        transport_id: None,
+                        destination_hash: pr_dest,
+                        context: PacketContext::None,
+                        data: PacketData::Owned(data),
+                    }
+                };
+
+            // Request from the next hop itself: no answer.
+            let req = request_with(next_hop_id, [0xA1u8; TRUNCATED_HASHBYTES]);
+            transport.handle_path_request(req, 1).unwrap();
+            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
+            transport.poll();
+            let actions = transport.drain_actions();
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    Action::SendPacket { iface, .. } if iface.0 == 1
+                )),
+                "a path request from our own next hop must not be answered"
+            );
+
+            // Control: any other requestor gets the cached-path answer.
+            let req = request_with([0x2Bu8; TRUNCATED_HASHBYTES], [0xA2u8; TRUNCATED_HASHBYTES]);
+            transport.handle_path_request(req, 1).unwrap();
+            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let response = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("a request from a third party must be answered from the cached path");
+            let parsed = Packet::unpack(&response).unwrap();
+            assert_eq!(parsed.flags.packet_type, PacketType::Announce);
+            assert_eq!(parsed.context, PacketContext::PathResponse);
+        }
+
+        /// #159 tranche 3: pin the reading-side emission arithmetic for the
+        /// equal-or-fewer-hops branch, at its adverse corner: a stored entry
+        /// whose timebase sits in the FUTURE relative to our clock (a peer
+        /// with a fast clock, or a poisoned value). The reference consults
+        /// ONLY the emission ordering in this branch (Transport.py:1765-1776)
+        /// — unlike the more-hops branch (:1793) it has NO expiry escape — so
+        /// a same-hop announce with an older (i.e. current, correct) emission
+        /// is rejected even after the entry's expiry has passed. Recovery is
+        /// via the cull removing the entry, after which the same announce is
+        /// accepted as a new destination. Both blob timebases are planted
+        /// literally in wire bytes 5..10, never via the emission helpers.
+        #[test]
+        fn same_hop_older_emission_rejected_until_cull_removes_the_entry() {
+            let dest = make_test_dest();
+            let dest_hash = dest.hash().into_bytes();
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Timebase a full year ahead of our clock: still ahead after the
+            // 7-day path expiry has passed, so the emission ordering (not the
+            // expiry) is what the later assertions observe.
+            let now_secs = transport.clock.now_ms() / 1000;
+            let future = now_secs + 31_536_000;
+
+            let raw_future = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([1, 2, 3, 4, 5], future),
+            );
+            transport.process_incoming(0, &raw_future).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+            assert_eq!(transport.hops_to(&dest_hash), Some(2), "entry established");
+
+            // Same-hop announce with a CURRENT emission: older than the
+            // stored timebase, must be rejected. Acceptance is observed via
+            // the PathFound event, which fires only when the table updates.
+            // (The rejected blob is still RECORDED for replay detection —
+            // transport.rs:3914-3924, a deliberate anti-replay extension — so
+            // the blob count is not a rejection indicator.)
+            transport
+                .clock
+                .advance(transport.config().announce_rate_limit_ms + 1);
+            transport.storage_mut().clear_packet_hashes();
+            let now_secs = transport.clock.now_ms() / 1000;
+            let raw_current = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([6, 7, 8, 9, 10], now_secs),
+            );
+            transport.process_incoming(0, &raw_current).unwrap();
+            assert!(
+                !transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PathFound { .. })),
+                "current-emission announce must be rejected against the future timebase"
+            );
+
+            // Advance past the path's expiry WITHOUT polling: the entry is
+            // still present, and the equal-hop branch must STILL reject (no
+            // expiry escape in the reference's :1765-1776 branch).
+            let expires = transport.path(&dest_hash).unwrap().expires_ms;
+            let now = transport.clock.now_ms();
+            transport.clock.advance(expires - now + 1);
+            transport.storage_mut().clear_packet_hashes();
+            let now_secs = transport.clock.now_ms() / 1000;
+            let raw_current2 = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([11, 12, 13, 14, 15], now_secs),
+            );
+            transport.process_incoming(0, &raw_current2).unwrap();
+            assert!(
+                transport.path(&dest_hash).is_some(),
+                "entry still present before the cull"
+            );
+            assert!(
+                !transport
+                    .drain_events()
+                    .any(|e| matches!(e, TransportEvent::PathFound { .. })),
+                "the equal-hop branch has no expiry escape"
+            );
+
+            // The cull removes the expired entry; the same announce is then
+            // accepted as a fresh destination.
+            transport.poll();
+            assert!(
+                transport.path(&dest_hash).is_none(),
+                "cull must remove the expired entry"
+            );
+            transport.storage_mut().clear_packet_hashes();
+            let raw_current3 = make_announce_raw_with_random_hash(
+                &dest,
+                1,
+                &make_random_hash([16, 17, 18, 19, 20], now_secs),
+            );
+            transport.process_incoming(0, &raw_current3).unwrap();
+            assert_eq!(
+                transport.hops_to(&dest_hash),
+                Some(2),
+                "after the cull the destination is learned afresh"
             );
         }
 
@@ -14966,6 +15931,26 @@ mod tests {
                 transport.emission_secs(now) >= 1_800_000_005,
                 "an older announce emission must not regress the timebase"
             );
+
+            // Codeberg #160: an emission above the learn ceiling must be
+            // refused outright — adopting it would wedge the timebase and,
+            // once the floor advances past 2^40, truncate the next emitted
+            // value to near zero.
+            let prev = transport.emission_secs(now);
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let a3 =
+                make_announce_raw_for_dest(&dest, 1, crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
+            transport.process_incoming(0, &a3).unwrap();
+            let now = transport.clock.now_ms();
+            let cur = transport.emission_secs(now);
+            assert!(
+                cur < crate::constants::EMISSION_LEARN_CEILING_SECS,
+                "an over-ceiling emission must not be adopted (got {cur})"
+            );
+            assert!(
+                cur > prev,
+                "the next emitted value must stay strictly greater after the refusal"
+            );
         }
 
         // Codeberg #155: a host that knows wall time can seed the emission
@@ -14981,6 +15966,618 @@ mod tests {
                 transport.emission_secs(now),
                 1_790_000_003,
                 "injected wall time must seed the timebase and advance monotonically"
+            );
+        }
+
+        // Codeberg #155: timebase learning runs BEFORE the own-destination
+        // echo drop, on purpose. After a reboot, a clockless node's own
+        // still-circulating pre-restart announce is exactly the value its
+        // next announce must exceed for Python peers to accept the path
+        // update — so the echo must re-seed the timebase even though the
+        // announce itself is then dropped and never enters the path table.
+        // (#160 confirmed this ordering as "correct for the restart case
+        // #155 solves"; this pin keeps a later refactor from hoisting the
+        // echo drop above the learning call.)
+        #[test]
+        fn test_own_announce_echo_reseeds_timebase_before_echo_drop() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            // Our own destination, registered as local — as after a reboot,
+            // when the identity persisted but the timebase did not.
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase", "own"],
+            )
+            .unwrap();
+            let dest_hash = dest.hash().into_bytes();
+            transport.register_destination(dest_hash);
+
+            // Our pre-restart announce comes back from a neighbour.
+            let a = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_000,
+                "own-announce echo must re-seed the timebase (learning before echo drop)"
+            );
+            assert_eq!(
+                transport.hops_to(&dest_hash),
+                None,
+                "the echo itself must still be dropped, never stored as a path"
+            );
+        }
+
+        // Codeberg #160: once a timebase exists, a single announce may
+        // advance it by at most EMISSION_LEARN_MAX_ADVANCE_SECS. A peer
+        // whose clock is merely set wrong (year 2100 here, ~4.1e9 — well
+        // below both 2^40 and the learn ceiling) must not capture every
+        // clockless node in range in one announce.
+        #[test]
+        fn test_clockless_timebase_advance_is_bounded_after_first_adoption() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase"],
+            )
+            .unwrap();
+
+            // First adoption: real unix time.
+            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            transport.process_incoming(0, &a1).unwrap();
+            let now = transport.clock.now_ms();
+            let prev = transport.emission_secs(now);
+            assert_eq!(prev, 1_800_000_000);
+
+            // Year-2100 emission from a misconfigured peer.
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let a2 = make_announce_raw_for_dest(&dest, 1, 4_102_444_800);
+            transport.process_incoming(0, &a2).unwrap();
+            let now = transport.clock.now_ms();
+            let cur = transport.emission_secs(now);
+            assert!(
+                cur < 4_102_444_800,
+                "a wrong-clock announce must not capture the timebase (got {cur})"
+            );
+            assert!(
+                cur >= prev + EMISSION_LEARN_MAX_ADVANCE_SECS,
+                "the bounded advance must still move the timebase forward by the cap"
+            );
+            assert!(
+                cur <= prev + EMISSION_LEARN_MAX_ADVANCE_SECS + ANNOUNCE_RATE_LIMIT_MS / 1000 + 1,
+                "the advance must not exceed the cap plus elapsed clock time"
+            );
+        }
+
+        // Codeberg #160: the FIRST adoption is deliberately unbounded — a
+        // clockless node boots at uptime seconds and must climb to real
+        // unix time in a single step, or the #155 restart fix is dead.
+        // Only SUBSEQUENT adoptions are bounded.
+        #[test]
+        fn test_clockless_first_timebase_adoption_is_unbounded() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase"],
+            )
+            .unwrap();
+
+            // The jump this pins is far beyond the bounded-advance cap.
+            let now = transport.clock.now_ms();
+            assert!(1_800_000_000 - now / 1000 > EMISSION_LEARN_MAX_ADVANCE_SECS);
+
+            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            transport.process_incoming(0, &a1).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_000,
+                "first adoption must be unbounded: uptime secs to real unix time in one step"
+            );
+        }
+
+        // Codeberg #161 §1: a clockless node whose floor sits at an
+        // implausibly LOW value (the realistic trigger: two LNodes reboot
+        // together, one adopts the other's post-reboot uptime-seconds
+        // announce) must climb to a credible unix timestamp in ONE
+        // adoption. Before the fix the bounded advance (#160) applied to
+        // any existing floor, so recovery crawled at one day per announce
+        // — 20602 announces / ~429 days at a 30 min LoRa cadence — a
+        // regression against the one-step self-correction that existed
+        // before a88d172.
+        #[test]
+        fn test_implausibly_low_floor_recovers_in_one_adoption() {
+            use crate::constants::EMISSION_PLAUSIBLE_MIN_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let identity_b = Identity::generate(&mut OsRng);
+            let dest_b = Destination::new(
+                Some(identity_b),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase"],
+            )
+            .unwrap();
+
+            // Peer B is itself freshly rebooted and clockless: its announce
+            // carries its uptime seconds. We adopt it as our first floor —
+            // unbounded and with no reason for suspicion (#161 §1).
+            let peer_uptime_secs = 5_000;
+            assert!(peer_uptime_secs < EMISSION_PLAUSIBLE_MIN_SECS);
+            let a1 = make_announce_raw_for_dest(&dest_b, 1, peer_uptime_secs);
+            transport.process_incoming(0, &a1).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                peer_uptime_secs,
+                "the implausible first adoption itself is still accepted (we cannot \
+                 distinguish it at adoption time; recoverability is the fix)"
+            );
+
+            // A wall-clocked peer comes into range with a credible unix
+            // timestamp. One adoption must recover the node completely.
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let identity_c = Identity::generate(&mut OsRng);
+            let dest_c = Destination::new(
+                Some(identity_c),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase", "walled"],
+            )
+            .unwrap();
+            let a2 = make_announce_raw_for_dest(&dest_c, 1, 1_800_000_000);
+            transport.process_incoming(0, &a2).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_000,
+                "a floor below EMISSION_PLAUSIBLE_MIN_SECS must be treated as if \
+                 absent: one credible announce recovers the node in a single step"
+            );
+        }
+
+        // Codeberg #161 (review, uncovered point 1): `set_wall_time_unix_secs`
+        // must refuse an implausibly LOW injection with the same bound. A
+        // boot script racing NTP, or a controller with its own dead clock,
+        // would otherwise seed a near-zero floor through the front door —
+        // and unlike a learned announce, a host injection CLAIMS to know
+        // wall time, so a value no real clock can hold is self-refuting.
+        #[test]
+        fn test_implausibly_low_wall_time_injection_is_refused() {
+            let mut transport = make_transport_enabled();
+
+            // Clock near unix epoch: pre-NTP boot value.
+            transport.set_wall_time_unix_secs(1_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                now / 1000,
+                "an implausibly low wall-time injection must be ignored"
+            );
+
+            // Even a merely stale value below the bound (2017) is refused.
+            transport.set_wall_time_unix_secs(1_500_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), now / 1000);
+
+            // A sane injection afterwards still works.
+            transport.set_wall_time_unix_secs(1_790_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), 1_790_000_000);
+        }
+
+        // Codeberg #161 review (B1): what the bounded advance (#160)
+        // actually protects against, measured — this test documents
+        // MEASURED reality, not a target. The per-destination announce
+        // rate limit and the local rebroadcast dedup window do not gate
+        // timebase learning at all: learn_emission_timebase runs on every
+        // signature-valid announce, before both checks (handle_announce
+        // ordering). So an attacker holding N identities is not throttled
+        // across them — N announces from N distinct destinations each
+        // advance the floor by up to EMISSION_LEARN_MAX_ADVANCE_SECS —
+        // and, one step weaker than the #161 review stated, even repeat
+        // announces from ONE destination advance it, because learning sits
+        // before the per-destination rate limit too. The real cap on the
+        // walk rate is announces-per-second on the air, nothing
+        // identity-shaped. If a change gates learning behind either limit,
+        // this test fails and the documented protection level must be
+        // restated consciously.
+        #[test]
+        fn test_timebase_walk_is_capped_per_announce_not_per_identity() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let make_dest = |label: &'static str| {
+                Destination::new(
+                    Some(Identity::generate(&mut OsRng)),
+                    Direction::In,
+                    DestinationType::Single,
+                    "testapp",
+                    &["timebase", label],
+                )
+                .unwrap()
+            };
+
+            // Credible seed from the first peer.
+            let seed = 1_800_000_000;
+            let d0 = make_dest("seed");
+            let a = make_announce_raw_for_dest(&d0, 1, seed);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), seed);
+
+            // Three more identities, all claiming a far-future emission,
+            // all within the same instant (no rate-limit window elapses):
+            // each advances the floor by the full cap.
+            let claim = 1_900_000_000;
+            for (k, label) in [(1u64, "id1"), (2, "id2"), (3, "id3")] {
+                let d = make_dest(label);
+                let a = make_announce_raw_for_dest(&d, 1, claim);
+                transport.process_incoming(0, &a).unwrap();
+                let now = transport.clock.now_ms();
+                assert_eq!(
+                    transport.emission_secs(now),
+                    seed + k * EMISSION_LEARN_MAX_ADVANCE_SECS,
+                    "announce {k} from a fresh identity must advance the floor by the cap"
+                );
+            }
+
+            // Even a REPEAT announce from an already-seen destination
+            // advances the floor again within the same instant: the
+            // per-destination rate limit does not sit in the learning path.
+            let d_repeat = make_dest("id-repeat");
+            for k in 4u64..=5 {
+                let a = make_announce_raw_for_dest(&d_repeat, 1, claim);
+                transport.process_incoming(0, &a).unwrap();
+                let now = transport.clock.now_ms();
+                assert_eq!(
+                    transport.emission_secs(now),
+                    seed + k * EMISSION_LEARN_MAX_ADVANCE_SECS,
+                    "repeat announce from one destination must still advance by the cap"
+                );
+            }
+
+            // The floor was never captured outright.
+            let now = transport.clock.now_ms();
+            assert!(transport.emission_secs(now) < claim);
+        }
+
+        // Codeberg #161 review (B2): however many adoptions occur, the
+        // learned floor cannot pass EMISSION_LEARN_CEILING_SECS. The
+        // bounded advance clamps AT the ceiling (adopted =
+        // emitted.min(current + cap) with emitted <= ceiling), and
+        // over-ceiling emissions are refused outright (pinned in
+        // test_clockless_node_learns_emission_timebase_from_announce), so
+        // the walk of test_timebase_walk_is_capped_per_announce_not_per_
+        // identity terminates at the ceiling. (emission_secs itself may
+        // still exceed the ceiling by monotonic elapsed time on top of the
+        // floor; the claim here is about the adopted floor, asserted with
+        // zero elapsed time.)
+        #[test]
+        fn test_timebase_floor_cannot_pass_learn_ceiling() {
+            use crate::constants::{EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS};
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let make_dest = |label: &'static str| {
+                Destination::new(
+                    Some(Identity::generate(&mut OsRng)),
+                    Direction::In,
+                    DestinationType::Single,
+                    "testapp",
+                    &["timebase", label],
+                )
+                .unwrap()
+            };
+
+            // First adoption just below the ceiling (unbounded first step —
+            // this is the remaining #161 §1 first-adoption window, which the
+            // future build-stamp bound would narrow).
+            let near = EMISSION_LEARN_CEILING_SECS - EMISSION_LEARN_MAX_ADVANCE_SECS / 2;
+            let d0 = make_dest("near");
+            let a = make_announce_raw_for_dest(&d0, 1, near);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), near);
+
+            // An at-ceiling claim advances the floor, but the bounded
+            // advance clamps AT the ceiling, not at current + cap.
+            let d1 = make_dest("cap");
+            let a = make_announce_raw_for_dest(&d1, 1, EMISSION_LEARN_CEILING_SECS);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                EMISSION_LEARN_CEILING_SECS,
+                "the bounded advance must clamp at the ceiling"
+            );
+
+            // No further announce can push past it: an at-ceiling repeat is
+            // not newer than the floor, an above-ceiling claim is refused.
+            let d2 = make_dest("beyond");
+            let a = make_announce_raw_for_dest(&d2, 1, EMISSION_LEARN_CEILING_SECS);
+            transport.process_incoming(0, &a).unwrap();
+            let d3 = make_dest("beyond2");
+            let a = make_announce_raw_for_dest(&d3, 1, EMISSION_LEARN_CEILING_SECS + 1);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                EMISSION_LEARN_CEILING_SECS,
+                "no sequence of adoptions may move the floor past the ceiling"
+            );
+        }
+
+        // Codeberg #160: a host injecting nonsense over the config channel
+        // must not be able to wedge the timebase or produce a truncating
+        // emission either.
+        #[test]
+        fn test_absurd_wall_time_injection_is_refused() {
+            let mut transport = make_transport_enabled();
+
+            transport.set_wall_time_unix_secs(1u64 << 50);
+            let now = transport.clock.now_ms();
+            let e = transport.emission_secs(now);
+            assert_eq!(
+                e,
+                now / 1000,
+                "an over-ceiling wall-time injection must be ignored"
+            );
+            assert!(e <= crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
+
+            // A sane injection afterwards still works.
+            transport.set_wall_time_unix_secs(1_790_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), 1_790_000_000);
+        }
+
+        // Codeberg #160: even a platform wall clock past the 40-bit wire
+        // maximum must never make emission_secs return a value the field
+        // cannot represent — the clamp sits at the point of use, so
+        // truncation is unrepresentable regardless of the value's source.
+        #[test]
+        fn test_emission_secs_saturates_at_wire_field_max() {
+            struct AbsurdWallClock;
+            impl Clock for AbsurdWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    Some(u64::MAX)
+                }
+            }
+
+            let transport = Transport::new(
+                TransportConfig::default(),
+                AbsurdWallClock,
+                MemoryStorage::with_defaults(),
+                Identity::generate(&mut OsRng),
+            );
+            assert_eq!(
+                transport.emission_secs(0),
+                crate::constants::EMISSION_TIMESTAMP_MAX_SECS,
+                "emission_secs must saturate at the wire field maximum"
+            );
+        }
+
+        // Codeberg #161 §3 (contested assertion — deliberate NON-behaviour):
+        // a std node's own wall clock is NOT plausibility-bounded on
+        // emission. Python-RNS fills the wire field from time.time()
+        // unvalidated (reference Destination.py:282), so bounding,
+        // substituting, or withholding the value on our side would
+        // desynchronise our announces from a network that does not
+        // validate it. If a change makes this test fail, that change is a
+        // semantic deviation from the reference, not an improvement; the
+        // correct response to an implausible OWN clock is the local
+        // operator warning (#161 review §3), never an altered emission.
+        // Only the 40-bit wire-representability clamp applies (see
+        // test_emission_secs_saturates_at_wire_field_max).
+        #[test]
+        fn test_own_wall_clock_is_not_plausibility_bounded_on_emission() {
+            struct FixedWallClock(u64);
+            impl Clock for FixedWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    Some(self.0)
+                }
+            }
+            let make = |wall: u64| {
+                Transport::new(
+                    TransportConfig::default(),
+                    FixedWallClock(wall),
+                    MemoryStorage::with_defaults(),
+                    Identity::generate(&mut OsRng),
+                )
+            };
+
+            // 2000-01-01, the classic dead-RTC reset value: far below
+            // EMISSION_PLAUSIBLE_MIN_SECS, emitted verbatim.
+            let dead_rtc = 946_684_800;
+            assert!(dead_rtc < crate::constants::EMISSION_PLAUSIBLE_MIN_SECS);
+            assert_eq!(
+                make(dead_rtc).emission_secs(0),
+                dead_rtc,
+                "an implausibly low own wall clock must be emitted verbatim (Destination.py:282)"
+            );
+
+            // Above the learn ceiling but wire-representable: also verbatim.
+            let far_future = crate::constants::EMISSION_LEARN_CEILING_SECS + 1_000_000;
+            assert!(far_future < crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
+            assert_eq!(
+                make(far_future).emission_secs(0),
+                far_future,
+                "an implausibly high own wall clock must be emitted verbatim (Destination.py:282)"
+            );
+        }
+
+        // Codeberg #161 review §3: when our OWN wall clock is implausible
+        // (below EMISSION_PLAUSIBLE_MIN_SECS or above the learn ceiling),
+        // the announce-emission path warns the operator exactly once — a
+        // dead RTC or restored snapshot pollutes peers' path tables and is
+        // otherwise invisible from the affected node — and the emitted
+        // value is UNCHANGED by the warning (the C1 pin above holds through
+        // this path too; warning locally is the only response that is not a
+        // semantic deviation from the reference).
+        #[test]
+        fn test_implausible_own_wall_clock_warns_once_and_leaves_emission_unchanged() {
+            struct FixedWallClock(Option<u64>);
+            impl Clock for FixedWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    self.0
+                }
+            }
+            let make = |wall: Option<u64>| {
+                Transport::new(
+                    TransportConfig::default(),
+                    FixedWallClock(wall),
+                    MemoryStorage::with_defaults(),
+                    Identity::generate(&mut OsRng),
+                )
+            };
+
+            // Dead-RTC clock: warning fires on the first announce emission,
+            // and only there; the value is emitted verbatim both times.
+            let dead_rtc = 946_684_800;
+            let mut t = make(Some(dead_rtc));
+            assert!(!t.own_wall_clock_warned);
+            assert_eq!(t.announce_emission_secs(0), dead_rtc);
+            assert!(
+                t.own_wall_clock_warned,
+                "the operator warning must fire for an implausibly low own wall clock"
+            );
+            assert_eq!(
+                t.announce_emission_secs(0),
+                dead_rtc,
+                "the warning must not change emission behaviour"
+            );
+
+            // Above the ceiling: also warned.
+            let mut t = make(Some(
+                crate::constants::EMISSION_LEARN_CEILING_SECS + 1_000_000,
+            ));
+            let _ = t.announce_emission_secs(0);
+            assert!(
+                t.own_wall_clock_warned,
+                "the operator warning must fire for an implausibly high own wall clock"
+            );
+
+            // A plausible wall clock never warns.
+            let mut t = make(Some(1_790_000_000));
+            assert_eq!(t.announce_emission_secs(0), 1_790_000_000);
+            assert!(!t.own_wall_clock_warned);
+
+            // A clockless platform never warns: its uptime-seconds fallback
+            // is the documented #155 state, not an operator fault.
+            let mut t = make(None);
+            let _ = t.announce_emission_secs(0);
+            assert!(!t.own_wall_clock_warned);
+        }
+
+        // Codeberg #161 §3 (contested assertion — deliberate NON-behaviour):
+        // incoming emission timestamps are NOT plausibility-checked on path
+        // acceptance; ordering is per-destination comparison only, exactly
+        // Python-RNS `announce_emitted > path_timebase` (reference
+        // Transport.py:1772 and :1809). Both directions matter: a clockless
+        // peer's uptime-seconds announce must enter the path table (that is
+        // how a #155 node is reachable at all), and an absurdly high
+        // emission must win the newer-emission comparison rather than be
+        // rejected. Python peers accept both, so filtering here would only
+        // desynchronise our path tables from every other node's view of the
+        // same announces. The plausibility gate exists for TIMEBASE
+        // learning only (pinned in
+        // test_clockless_node_learns_emission_timebase_from_announce).
+        #[test]
+        fn test_incoming_emission_not_plausibility_checked_on_acceptance() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            // Facet 1: an implausibly LOW emission (a clockless peer's
+            // uptime seconds) is accepted for a new destination.
+            let dest_low = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["accept", "low"],
+            )
+            .unwrap();
+            let a = make_announce_raw_for_dest(&dest_low, 1, 42);
+            transport.process_incoming(0, &a).unwrap();
+            assert_eq!(
+                transport.hops_to(&dest_low.hash().into_bytes()),
+                Some(2),
+                "an uptime-seconds emission must enter the path table (Transport.py:1772)"
+            );
+
+            // Facet 2: an implausibly HIGH emission (above the learn
+            // ceiling, at the wire max) wins the newer-emission comparison
+            // for an existing path — even from a worse-hop announce.
+            let dest_high = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["accept", "high"],
+            )
+            .unwrap();
+            let dest_high_hash = dest_high.hash().into_bytes();
+            let a = make_announce_raw_for_dest(&dest_high, 1, 1_800_000_000);
+            transport.process_incoming(0, &a).unwrap();
+            assert_eq!(transport.hops_to(&dest_high_hash), Some(2));
+
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let a = make_announce_raw_for_dest(
+                &dest_high,
+                3,
+                crate::constants::EMISSION_TIMESTAMP_MAX_SECS,
+            );
+            transport.process_incoming(0, &a).unwrap();
+            assert_eq!(
+                transport.hops_to(&dest_high_hash),
+                Some(4),
+                "an absurdly high emission must still win the newer-emission \
+                 comparison (Transport.py:1809), not be rejected as implausible"
             );
         }
 
@@ -23465,6 +25062,99 @@ mod tunnel_restore_tests {
         let mut buf = [0u8; MTU];
         let len = packet.pack(&mut buf).unwrap();
         (buf[..len].to_vec(), dest.hash().into_bytes())
+    }
+
+    /// Known-answer value from the vendored reference:
+    /// `RNS.Destination.hash(None, "rnstransport", "tunnel", "synthesize")`.
+    const TUNNEL_SYNTH_DEST_KAT: [u8; TRUNCATED_HASHBYTES] = [
+        0x91, 0xbf, 0x09, 0x10, 0x26, 0x7b, 0x59, 0xb0, 0xe8, 0x64, 0xe0, 0xd4, 0xc9, 0x16, 0x02,
+        0xca,
+    ];
+
+    /// #159 tranche 3: pin the wire fields of the tunnel-synthesize packet we
+    /// GENERATE. The other tests in this module feed `build_synthesize_payload`
+    /// into our own parser, so writer and reader could drift together (the
+    /// #155 failure class); this pin recomposes every expectation
+    /// independently. Reference: the payload is `public_key(64) +
+    /// interface_hash(32) + random_hash(16) + signature(64)` and a Python peer
+    /// slices it at exactly those offsets (Transport.py:2310-2318), verifies
+    /// the signature over the first 112 bytes with the identity loaded from
+    /// the embedded public key (:2319-2324), derives `tunnel_id =
+    /// full_hash(public_key + interface_hash)` (:2314-2315), and drops any
+    /// payload that is not exactly 176 bytes (:2310-2311). The destination
+    /// hash is pinned as a KAT from the vendored reference.
+    #[test]
+    fn tunnel_synthesize_wire_matches_reference_field_layout() {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        let mut t = enabled_transport();
+        let if_a = t.register_interface(Box::new(MockInterface::new("tcp[peer]", 1)));
+
+        let if_hash = [0x33u8; SYNTH_IFHASH_LEN];
+        let rand_hash = [0x7Eu8; SYNTH_RANDHASH_LEN];
+        t.register_tunnel_interface(if_a, if_hash);
+        let advertised_id = t
+            .send_tunnel_synthesize(if_a, &rand_hash)
+            .unwrap()
+            .expect("interface is tunnel-capable");
+
+        let actions = t.drain_actions();
+        let wire = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::SendPacket { iface, data } if iface.0 == if_a => Some(data.clone()),
+                _ => None,
+            })
+            .expect("synthesize must be sent on the registered interface");
+
+        assert_eq!(
+            &wire[2..2 + TRUNCATED_HASHBYTES],
+            &TUNNEL_SYNTH_DEST_KAT,
+            "synthesize must address the reference's well-known control destination"
+        );
+
+        let payload = &wire[19..];
+        assert_eq!(
+            payload.len(),
+            176,
+            "reference length gate (Transport.py:2310)"
+        );
+        let public_key = &payload[..64];
+        let wire_if_hash = &payload[64..96];
+        let wire_rand = &payload[96..112];
+        let signature = &payload[112..176];
+        assert_eq!(
+            wire_if_hash, &if_hash,
+            "interface hash rides at bytes 64..96"
+        );
+        assert_eq!(wire_rand, &rand_hash, "random hash rides at bytes 96..112");
+
+        // Signature verifies over the first 112 bytes with the Ed25519 half
+        // of the EMBEDDED public key — that is all a peer has.
+        let ed_half: [u8; 32] = public_key[32..64].try_into().unwrap();
+        let vk = VerifyingKey::from_bytes(&ed_half)
+            .expect("payload bytes 32..64 must be the Ed25519 verifying key");
+        let sig = Signature::from_bytes(signature.try_into().unwrap());
+        vk.verify(&payload[..112], &sig)
+            .expect("signature must cover public_key + interface_hash + random_hash");
+
+        // The tunnel id a peer derives from the wire bytes must be the one we
+        // recorded as our own advertised id. Recomputed with the hash
+        // primitive directly, not with compute_tunnel_id.
+        let mut id_input = Vec::new();
+        id_input.extend_from_slice(public_key);
+        id_input.extend_from_slice(wire_if_hash);
+        assert_eq!(
+            crate::crypto::sha256(&id_input),
+            advertised_id,
+            "peer-derived tunnel id must match the id we advertised"
+        );
+
+        // Length gate: a truncated payload must not parse (Transport.py:2311).
+        assert!(
+            crate::tunnel::SynthesizePayload::parse(&payload[..175]).is_none(),
+            "a peer drops any synthesize payload that is not exactly 176 bytes"
+        );
     }
 
     #[test]
