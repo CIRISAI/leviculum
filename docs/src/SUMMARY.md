@@ -13,6 +13,7 @@
 - [Time and clocks](concepts/time-and-clocks.md)
 - [Wire field semantics](concepts/wire-field-semantics.md)
 - [Regulatory airtime](concepts/regulatory-airtime.md)
+- [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 
 # User Guide
 
