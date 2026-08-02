@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- lnomad sizes a half-block picture by half-block geometry. A cell there
+  carries one pixel across and two down, but the fit was measured against
+  the terminal's font box, so a 300x300 portrait was drawn as 38x38
+  pixels — recognisable as nothing. It now fills the page width (78x78
+  for that portrait), may run up to two screenfuls tall since height is
+  resolution on that backend, and asks the protocol for that area with
+  `Resize::Scale`, which `Resize::Fit` had been quietly undoing.
 - lnomad renders a table cell's contents as the inline micron they are.
   Cells were pushed to the screen as plain text, so a style, a colour or
   a link inside one showed its markup — `` `B333code`b `` instead of

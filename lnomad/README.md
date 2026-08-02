@@ -220,6 +220,14 @@ The last row is the point of the ladder: a reader on a terminal that can show
 nothing still learns that a picture is there, what it is and how big it is, and
 can still save or open it.
 
+Half-blocks are sized differently from a graphics protocol, and deliberately: a
+cell carries one pixel across and two down, so every extra column and row is
+extra resolution. A picture there fills the page width and may run past the
+bottom of the screen (up to two screenfuls) rather than being fitted into the
+font-size box a graphics protocol would use — the same 300x300 portrait is
+38x38 pixels the fitted way and 78x78 this way. It is still coarse; a terminal
+with Sixel or the Kitty protocol is what makes a photograph a photograph.
+
 A page's pictures are fetched **after** the page is on screen, one at a time,
 never more than eight from any one page. Nothing waits for a picture, `Esc`
 cancels the queue, and leaving the page drops it. Over LoRa this matters: a
