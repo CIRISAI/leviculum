@@ -168,10 +168,11 @@ pub(crate) struct SegmentParams {
     pub total_segments: u32,
     /// Shared `o` advertisement field for the whole transfer.
     ///
-    /// `None` for a single-segment resource, which keeps the legacy content
-    /// hash of the combined payload. `Some(h)` pins the split-resource group
-    /// key to the first segment's resource hash (what a Python receiver uses as
-    /// the on-disk reassembly filename).
+    /// `None` for a fresh resource (single-segment, or segment 1 of a split),
+    /// which carries its own salted resource hash as `o` like the reference
+    /// (Resource.py:445-446). `Some(h)` pins a later segment to segment 1's
+    /// resource hash — the per-transfer group key a Python receiver uses as
+    /// the on-disk reassembly filename.
     pub original_hash: Option<[u8; 32]>,
     /// Total logical stream size (`metadata_size + full data size`) for the `d`
     /// advertisement field. `None` uses this segment's own combined length
@@ -412,14 +413,6 @@ impl OutgoingResource {
 
         let uncompressed_size = combined.len() as u64;
 
-        // Legacy content hash over the unencrypted combined data. Used as the
-        // `o` advertisement field for single-segment resources (preserves
-        // existing behaviour). Split resources instead pin `o` to segment 1's
-        // resource hash (decided after the collision loop below).
-        let content_hash_full = full_hash(&combined);
-        let mut content_hash = [0u8; 32];
-        content_hash.copy_from_slice(&content_hash_full);
-
         // Try compression
         #[allow(unused_mut)]
         let mut compressed = false;
@@ -543,13 +536,14 @@ impl OutgoingResource {
 
         // Decide the shared `o` field now that resource_hash is final.
         // - explicit override: a later segment carrying segment 1's hash.
-        // - split, no override: segment 1 of a split resource -> its own hash
-        //   (matches Python, which sets original_hash = self.hash).
-        // - single segment: legacy content hash (unchanged behaviour).
+        // - no override: a fresh resource carries its own salted hash, like
+        //   Python's `original_hash = self.hash` (Resource.py:445-446). Never
+        //   a deterministic content hash: the receiver keys its on-disk
+        //   reassembly file by `o` and appends, so a repeatable value lets two
+        //   transfers of identical content share one path (Codeberg #165).
         let original_hash = match seg.original_hash {
             Some(h) => h,
-            None if seg.total_segments > 1 => resource_hash,
-            None => content_hash,
+            None => resource_hash,
         };
 
         // Advertisement `d` field: total logical size across all segments
@@ -1987,11 +1981,12 @@ mod tests {
     ///   `incoming.rs` from the receiver side.
     /// - `f` bit layout `x<<5 | p<<4 | u<<3 | s<<2 | c<<1 | e` (:1259).
     /// - `i`/`l` are 1-based (:190/:249).
-    ///
-    /// The `o` field is deliberately NOT pinned: the audit found our
-    /// single-segment generator fills `full_hash(plaintext)` where the
-    /// reference fills `h` itself (:444-446) — reported as a defect, fix
-    /// pending its own red-first treatment.
+    /// - `o` = `h` itself for every fresh resource (:440-448) — the SALTED
+    ///   per-transfer hash, never a deterministic content hash. The receiver
+    ///   keys its on-disk reassembly file by `o` (:199), appends in mode
+    ///   "ab" (:708) and unlinks only on success (:744), so a repeatable `o`
+    ///   lets two transfers of identical content share one path and deliver
+    ///   doubled data (Codeberg #165).
     #[test]
     fn advertisement_fields_follow_reference_generation_rules() {
         use crate::crypto::sha256;
@@ -2085,6 +2080,32 @@ mod tests {
         // d: total uncompressed size including the metadata block.
         assert_eq!(adv.data_size as usize, expected_plaintext.len());
 
+        // o: the reference sets original_hash = self.hash for a fresh
+        // resource (Resource.py:440-448), so `o` carries the r-salted
+        // per-transfer hash — the receiver's reassembly-file key (:199).
+        assert_eq!(
+            adv.original_hash, adv.resource_hash,
+            "o must be the salted resource hash for a fresh single-segment \
+             resource, never a deterministic content hash (Codeberg #165)"
+        );
+        let res2 = OutgoingResource::new(
+            &data,
+            Some(metadata),
+            None,
+            &link.resource_crypt_params(),
+            false,
+            &mut rng,
+            1_000,
+        )
+        .unwrap();
+        let adv2 = ResourceAdvertisement::unpack(res2.adv_packet()).unwrap();
+        assert_ne!(
+            adv.original_hash, adv2.original_hash,
+            "two transfers of identical content must not share o: a Python \
+             receiver keys its on-disk reassembly file by o and appends, so \
+             a shared path can deliver doubled data (Codeberg #165)"
+        );
+
         // Flags byte and segment fields.
         assert_eq!(
             res.flags().to_u8(),
@@ -2111,6 +2132,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resp.flags().to_u8(), 0x01 | 0x10, "response: e | p");
+    }
+
+    /// #165: pin the `o` chain of a split transfer against the reference.
+    /// Segment 1 of a fresh split resource carries its own salted hash as `o`
+    /// (Resource.py:445-446), and every later segment inherits segment 1's
+    /// value verbatim (:772 `original_hash=self.original_hash`) — the Python
+    /// receiver groups all segments of one transfer into one reassembly file
+    /// by this key (:199).
+    #[test]
+    fn split_segments_share_segment1_salted_hash_as_o() {
+        let (link, _) = make_test_link();
+        let mut rng = rand_core::OsRng;
+
+        let data: Vec<u8> = (0..MAX + 1).map(|i| (i % 251) as u8).collect();
+        let total_segments = segment_count(data.len());
+        assert_eq!(total_segments, 2);
+        let mut plan = OutgoingSegmentPlan::new(data, None, 0, total_segments, false);
+
+        let seg1 = plan
+            .build_segment(1, &link.resource_crypt_params(), &mut rng, 1_000)
+            .unwrap();
+        let adv1 = ResourceAdvertisement::unpack(seg1.adv_packet()).unwrap();
+        assert_eq!(
+            adv1.original_hash, adv1.resource_hash,
+            "segment 1 of a fresh split resource must carry its own salted \
+             hash as o (Resource.py:445-446)"
+        );
+
+        plan.set_original_hash(*seg1.resource_hash());
+        let seg2 = plan
+            .build_segment(2, &link.resource_crypt_params(), &mut rng, 2_000)
+            .unwrap();
+        let adv2 = ResourceAdvertisement::unpack(seg2.adv_packet()).unwrap();
+        assert_ne!(
+            adv2.resource_hash, adv1.resource_hash,
+            "each segment has its own per-segment hash"
+        );
+        assert_eq!(
+            adv2.original_hash, adv1.resource_hash,
+            "later segments must inherit segment 1's o verbatim: the \
+             receiver's per-transfer group key (Resource.py:199/:772)"
+        );
     }
 
     /// #159 tranche 2: pin the RESOURCE_HMU reply against the reference
