@@ -1271,6 +1271,18 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
     interface_held_announces: BTreeMap<usize, BTreeMap<[u8; TRUNCATED_HASHBYTES], HeldAnnounce>>,
 
+    /// Announce-table entries temporarily displaced by a scheduled path
+    /// response (Codeberg #170; Python `Transport.held_announces`,
+    /// Transport.py:117). The path-request handler holds any in-flight
+    /// entry before inserting the response entry (Transport.py:2991-2999);
+    /// the scheduler reinserts it when the displacing entry fires
+    /// (Transport.py:630-633), so the targeted response precedes the
+    /// restored rebroadcast. Bounded transitively: an entry is only added
+    /// while the announce table carries a live entry for the same
+    /// destination, and every scheduler-side exit of that entry (fire,
+    /// retry exhaustion, TTL) consumes the held slot.
+    held_announce_entries: BTreeMap<[u8; TRUNCATED_HASHBYTES], AnnounceEntry>,
+
     /// Per-interface announce-rate configuration (Codeberg #67 Stage 2a).
     /// Present only for interfaces that configured at least one
     /// `announce_rate_*` key; absent entries resolve identically to an
@@ -1398,6 +1410,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_outgoing_pr_times: BTreeMap::new(),
             interface_ingress_burst: BTreeMap::new(),
             interface_held_announces: BTreeMap::new(),
+            held_announce_entries: BTreeMap::new(),
             interface_announce_rate_configs: BTreeMap::new(),
             interface_next_slot_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
@@ -6559,6 +6572,38 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
     /// Compute deterministic jitter from a hash seed
     /// Handle a path request packet
+    /// Hold the in-flight announce-table entry for `dest_hash` before a path
+    /// response displaces it (Codeberg #170). The reference holds any
+    /// existing entry when it inserts the response entry (Transport.py:
+    /// 2991-2999) and reinserts it once the response has fired
+    /// (Transport.py:630-633), so the targeted response goes out first and
+    /// the network-wide rebroadcast afterwards.
+    ///
+    /// Deliberate deviation from the reference's overwrite semantics: a
+    /// genuine pending rebroadcast (`block_rebroadcasts == false`) already
+    /// occupying the held slot is never displaced by a path-response entry.
+    /// Python overwrites `held_announces[dest]` on every request, so a
+    /// second request inside one grace window replaces the held network-wide
+    /// rebroadcast with the first request's targeted response and the mesh
+    /// never learns the path. Keeping the rebroadcast serves strictly more
+    /// peers: the restored broadcast goes on all interfaces, so it reaches
+    /// the first requester's interface too. Wire format untouched;
+    /// measurably better propagation (deviation rule,
+    /// docs/src/concepts/python-rns-compatibility.md). Pinned in
+    /// `mvr_announce_hold::second_request_in_grace_keeps_held_rebroadcast`.
+    pub(crate) fn hold_displaced_announce(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) {
+        let existing = match self.storage.get_announce(dest_hash) {
+            Some(entry) => entry.clone(),
+            None => return,
+        };
+        if let Some(held) = self.held_announce_entries.get(dest_hash) {
+            if !held.block_rebroadcasts && existing.block_rebroadcasts {
+                return;
+            }
+        }
+        self.held_announce_entries.insert(*dest_hash, existing);
+    }
+
     fn handle_path_request(
         &mut self,
         packet: Packet,
@@ -6814,6 +6859,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         .get_path(&requested_hash)
                         .map(|p| p.hops)
                         .unwrap_or_else(|| cached_packet.hops.saturating_add(1));
+                    // Hold any in-flight rebroadcast entry before the
+                    // response entry displaces it (Codeberg #170; Python
+                    // Transport.py:2991-2999). Reinserted by the scheduler
+                    // when the response fires.
+                    self.hold_displaced_announce(&requested_hash);
                     self.storage.set_announce(
                         requested_hash,
                         AnnounceEntry {
@@ -7124,6 +7174,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         for hash in to_remove {
             self.storage.remove_announce(&hash);
+            // Codeberg #170: an entry retired here (retry limit, local
+            // rebroadcast limit) may have displaced a held entry that never
+            // got its fire-time reinsertion. Reinsert instead of leaking it —
+            // the reference leaves such entries stranded in `held_announces`
+            // (its reinsertion only runs at fire time, Transport.py:630-633),
+            // losing the held rebroadcast; delivering it is strictly better
+            // propagation (deviation rule).
+            if let Some(held) = self.held_announce_entries.remove(&hash) {
+                self.storage.set_announce(hash, held);
+            }
         }
 
         // Apply deferrals: slide retransmit_at forward without touching
@@ -7239,8 +7299,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // If TTL exceeded, remove from announce table
                 if parsed.hops > self.config.max_hops {
                     self.storage.remove_announce(&dest_hash);
+                    // Codeberg #170: consume the held slot here too (see the
+                    // to_remove loop above for why this beats the
+                    // reference's fire-time-only reinsertion).
+                    if let Some(held) = self.held_announce_entries.remove(&dest_hash) {
+                        self.storage.set_announce(dest_hash, held);
+                    }
                     continue;
                 }
+            }
+
+            // The entry has fired. If it displaced a held entry, the held
+            // entry now takes its place wholesale — the reference reinserts
+            // at fire time (Transport.py:630-633), discarding the fired
+            // path-response entry instead of rescheduling it. The held
+            // entry keeps its own schedule, so a due time that expired
+            // while held fires on the next pass: response first, restored
+            // rebroadcast after (Codeberg #170).
+            if let Some(held) = self.held_announce_entries.remove(&dest_hash) {
+                self.storage.set_announce(dest_hash, held);
+                continue;
             }
 
             // Update announce table entry, schedule next retransmit with
