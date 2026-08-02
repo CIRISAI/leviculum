@@ -10079,6 +10079,187 @@ mod tests {
             );
         }
 
+        /// #159 tranche 1: pin the routing semantics of the `transport_id` we
+        /// WRITE into a forwarded announce. A peer stores that value as
+        /// `received_from` — its next hop toward the destination
+        /// (Transport.py:1715-1716) — and later addresses HEADER_2 data
+        /// packets to exactly that hash, which our inbound filter must accept
+        /// (Transport.py:1193-1196; `transport.rs` overheard filter). The pin
+        /// closes the loop THROUGH THE WIRE: the id is extracted from the
+        /// rebroadcast bytes, never from our own identity getter, so an
+        /// announced-vs-accepted split cannot stay green (#155 failure class).
+        #[test]
+        fn forwarded_announce_transport_id_is_the_hash_we_answer_to() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // A neighbour's own announce (wire hops 0) arrives on if0; the
+            // receipt increment stores it at 1 hop, so the rebroadcast must be
+            // transport-routed (Type2) per Transport.py:612-614/1970-1977.
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_events();
+            transport.drain_actions();
+
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let fwd = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Broadcast { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("relay must rebroadcast the announce");
+
+            let parsed = Packet::unpack(&fwd).unwrap();
+            assert_eq!(
+                parsed.flags.header_type,
+                HeaderType::Type2,
+                "forwarded announce must be transport-routed"
+            );
+            assert_eq!(parsed.flags.transport_type, TransportType::Transport);
+            let announced_tid = parsed
+                .transport_id
+                .expect("forwarded announce must carry a transport id");
+
+            let type2_data = |tid: [u8; TRUNCATED_HASHBYTES], payload: &[u8]| -> Vec<u8> {
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type2,
+                        context_flag: false,
+                        transport_type: TransportType::Transport,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 1,
+                    transport_id: Some(tid),
+                    destination_hash: dest_hash,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(payload.to_vec()),
+                };
+                let mut buf = [0u8; 500];
+                let len = packet.pack(&mut buf).unwrap();
+                buf[..len].to_vec()
+            };
+
+            // Data addressed to the ANNOUNCED id must pass the overheard
+            // filter and be relayed toward the destination.
+            let forwarded_before = transport.stats().packets_forwarded;
+            transport
+                .process_incoming(1, &type2_data(announced_tid, b"payload-1"))
+                .unwrap();
+            assert_eq!(
+                transport.stats().drops_overheard_transport_id,
+                0,
+                "data addressed to the announced transport id must not be dropped as overheard"
+            );
+            assert!(
+                transport.stats().packets_forwarded > forwarded_before,
+                "data addressed to the announced transport id must be relayed"
+            );
+
+            // Control: any other id in the same packet is overheard traffic.
+            let mut other_tid = announced_tid;
+            other_tid[0] ^= 0xff;
+            transport
+                .process_incoming(1, &type2_data(other_tid, b"payload-2"))
+                .unwrap();
+            assert_eq!(
+                transport.stats().drops_overheard_transport_id,
+                1,
+                "the acceptance above must be due to the id, not a missing filter"
+            );
+        }
+
+        /// #159 tranche 1: pin the wire form of a targeted path response.
+        /// Peers decide on each of these generated fields: context
+        /// PATH_RESPONSE → a receiving transport does NOT rebroadcast it
+        /// (Transport.py:1886) and exempts it from announce-rate limiting
+        /// (:1838); HEADER_2 + our transport id → the requester records us as
+        /// next hop (:1715-1716, :2001-2004); the hop byte carries the STORED
+        /// path count (:2956, :2009), which becomes the requester's path
+        /// metric. Existing tests pin the targeting (one SendPacket to the
+        /// requester); this pins the bytes those decisions read.
+        #[test]
+        fn path_response_wire_carries_python_path_response_semantics() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // Announce at wire hops 2 → stored path count 3 after the receipt
+            // increment.
+            let (raw, dest_hash) = make_announce_raw(2, PacketContext::None);
+            transport.process_incoming(0, &raw).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // Keep the announce cache and path, drop the rebroadcast schedule.
+            for key in transport.storage().announce_keys() {
+                transport.storage_mut().remove_announce(&key);
+            }
+            transport.storage_mut().clear_packet_hashes();
+
+            let mut data = Vec::new();
+            data.extend_from_slice(&dest_hash);
+            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]); // tag
+            let request = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Plain,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: transport.path_request_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(data),
+            };
+            transport.handle_path_request(request, 0).unwrap();
+
+            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
+            transport.poll();
+
+            let actions = transport.drain_actions();
+            let response = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("path response must be sent to the requesting interface");
+
+            let parsed = Packet::unpack(&response).unwrap();
+            assert_eq!(parsed.flags.packet_type, PacketType::Announce);
+            assert_eq!(
+                parsed.context,
+                PacketContext::PathResponse,
+                "peers suppress rebroadcast/rate-limiting on this context byte"
+            );
+            assert_eq!(
+                parsed.flags.header_type,
+                HeaderType::Type2,
+                "path response must be transport-routed"
+            );
+            assert_eq!(parsed.flags.transport_type, TransportType::Transport);
+            assert_eq!(
+                parsed.transport_id,
+                Some(*transport.identity.hash()),
+                "requester must learn US as next hop toward the destination"
+            );
+            assert_eq!(
+                parsed.hops, 3,
+                "hop byte must carry the stored path count (wire 2 + receipt increment)"
+            );
+        }
+
         #[test]
         fn test_path_response_not_rebroadcasted() {
             let mut transport = make_transport_enabled();
