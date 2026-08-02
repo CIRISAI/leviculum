@@ -15091,6 +15091,51 @@ mod tests {
             );
         }
 
+        // Codeberg #155: timebase learning runs BEFORE the own-destination
+        // echo drop, on purpose. After a reboot, a clockless node's own
+        // still-circulating pre-restart announce is exactly the value its
+        // next announce must exceed for Python peers to accept the path
+        // update — so the echo must re-seed the timebase even though the
+        // announce itself is then dropped and never enters the path table.
+        // (#160 confirmed this ordering as "correct for the restart case
+        // #155 solves"; this pin keeps a later refactor from hoisting the
+        // echo drop above the learning call.)
+        #[test]
+        fn test_own_announce_echo_reseeds_timebase_before_echo_drop() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            // Our own destination, registered as local — as after a reboot,
+            // when the identity persisted but the timebase did not.
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase", "own"],
+            )
+            .unwrap();
+            let dest_hash = dest.hash().into_bytes();
+            transport.register_destination(dest_hash);
+
+            // Our pre-restart announce comes back from a neighbour.
+            let a = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_000,
+                "own-announce echo must re-seed the timebase (learning before echo drop)"
+            );
+            assert_eq!(
+                transport.hops_to(&dest_hash),
+                None,
+                "the echo itself must still be dropped, never stored as a path"
+            );
+        }
+
         // Codeberg #160: once a timebase exists, a single announce may
         // advance it by at most EMISSION_LEARN_MAX_ADVANCE_SECS. A peer
         // whose clock is merely set wrong (year 2100 here, ~4.1e9 — well
