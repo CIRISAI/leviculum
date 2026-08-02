@@ -6639,39 +6639,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 HexShort(&requested_hash),
                 self.iface_name(interface_index)
             );
-            // Emit event so NodeCore generates a FRESH announce (Block A).
-            // NodeCore will update the AnnounceEntry's raw_packet with fresh bytes
-            // (new signature, current app_data) before the deferred rebroadcast fires.
+            // Emit event so NodeCore builds the response from the destination
+            // itself: it generates a FRESH announce (new signature, current
+            // app_data) and schedules the deferred, targeted AnnounceEntry
+            // (Block A). The reference regenerates unconditionally
+            // (Transport.py:2938-2941), so the answer must not be gated on
+            // announce history — a cache-gated schedule here left the FIRST
+            // path request after process start unanswered (Codeberg #169).
             self.events.push(TransportEvent::PathRequestReceived {
                 destination_hash: requested_hash,
                 requesting_interface: interface_index,
             });
-            // Schedule deferred path response only if we have a cached announce.
-            // Without a cache, there's nothing to rebroadcast. NodeCore will
-            // generate a fresh announce in response to the PathRequestReceived
-            // event, which populates the cache for future requests.
-            if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
-                let now = self.clock.now_ms();
-                let hops = Packet::unpack(&cached_raw).map(|p| p.hops).unwrap_or(0);
-                crate::tracing::debug!(
-                    "Setting up deferred path response for local dest <{}>",
-                    HexShort(&requested_hash)
-                );
-                self.storage.set_announce(
-                    requested_hash,
-                    AnnounceEntry {
-                        timestamp_ms: now,
-                        hops,
-                        retries: 0,
-                        retransmit_at_ms: Some(now + PATH_REQUEST_GRACE_MS),
-                        raw_packet: cached_raw,
-                        receiving_interface_index: interface_index,
-                        target_interface: Some(interface_index),
-                        local_rebroadcasts: 0,
-                        block_rebroadcasts: true,
-                    },
-                );
-            }
             return Ok(());
         }
 
@@ -13002,25 +12980,37 @@ mod tests {
             );
         }
 
-        // Stage 7: Auto re-announce on local path request
+        // Stage 7 / Codeberg #169: a path request for a local destination is
+        // answered by NodeCore (Block A), which regenerates a fresh announce
+        // from the destination itself and schedules the deferred, targeted
+        // response. The transport layer only signals via PathRequestReceived —
+        // it must NOT schedule anything from the announce cache, whether the
+        // cache holds an entry or not. The cache-gated schedule this replaces
+        // left the FIRST request for a never-announced destination unanswered
+        // (#169), because NodeCore only refreshed an entry Transport had
+        // already created. End-to-end coverage lives at the NodeCore layer:
+        // node::mvr_first_path_request (no prior announce) and
+        // mvr_generated_field_pins::own_destination_path_response_is_a_fresh_regeneration
+        // (post-announce).
         #[test]
-        fn test_path_request_local_dest_schedules_rebroadcast() {
+        fn test_path_request_local_dest_with_cache_does_not_schedule() {
             let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
 
             let dest_hash = [0x42; TRUNCATED_HASHBYTES];
             transport.register_destination(dest_hash);
 
-            // Populate announce cache for this destination (simulate prior announce)
+            // Populate announce cache (simulate prior announce). The cache is
+            // an identity-recall source, not the path-response data source.
             let (raw, _) = make_announce_raw(0, PacketContext::None);
             transport.storage_mut().set_announce_cache(dest_hash, raw);
 
-            // Send path request
+            // Build and send path request
             let path_req_hash = transport.path_request_hash;
             let mut data = Vec::new();
             data.extend_from_slice(&dest_hash);
-            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]); // transport_id
-            data.extend_from_slice(&[0xCC; TRUNCATED_HASHBYTES]); // tag
+            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]);
+            data.extend_from_slice(&[0xCC; TRUNCATED_HASHBYTES]);
 
             let packet = Packet {
                 flags: PacketFlags {
@@ -13042,59 +13032,37 @@ mod tests {
             let len = packet.pack(&mut buf).unwrap();
             transport.process_incoming(0, &buf[..len]).unwrap();
 
-            // Should still emit PathRequestReceived event
+            // Event emitted
             let events: Vec<_> = transport.drain_events().collect();
             assert!(
                 events
                     .iter()
                     .any(|e| matches!(e, TransportEvent::PathRequestReceived { .. })),
-                "Should emit PathRequestReceived event"
+                "Must emit PathRequestReceived"
             );
 
-            // AND should schedule a rebroadcast from the cache
-            let entry = transport
-                .storage()
-                .get_announce(&dest_hash)
-                .expect("Should schedule announce rebroadcast from cache");
-            assert_eq!(
-                entry.target_interface,
-                Some(0),
-                "Local dest path response should target the requesting interface"
-            );
-
-            // Advance clock and poll to verify targeted SendPacket
-            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
-            transport.poll();
-
-            let actions = transport.drain_actions();
-            let sends: Vec<_> = actions
-                .iter()
-                .filter_map(|a| match a {
-                    Action::SendPacket { iface, data } => Some((iface, data)),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                sends.len(),
-                1,
-                "Should emit exactly one SendPacket for local dest path response"
-            );
-            assert_eq!(
-                sends[0].0 .0, 0,
-                "SendPacket must target the requesting interface (0)"
-            );
-
-            let broadcasts: Vec<_> = actions
-                .iter()
-                .filter(|a| matches!(a, Action::Broadcast { .. }))
-                .collect();
+            // Transport must not schedule from the cache; NodeCore owns the
+            // response and builds it from the destination, not from the cache.
             assert!(
-                broadcasts.is_empty(),
-                "Local dest path response should not broadcast"
+                transport.storage().get_announce(&dest_hash).is_none(),
+                "Transport must not create an AnnounceEntry for a local-destination \
+                 path request; NodeCore Block A schedules the fresh response"
+            );
+
+            // And no immediate answer either: the response is deferred and
+            // NodeCore-generated.
+            let actions = transport.drain_actions();
+            assert!(
+                actions
+                    .iter()
+                    .all(|a| !matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
+                "No transport-level answer for a local-destination path request"
             );
         }
 
-        // Issue #13: Deferred path response with no cached announce
+        // Issue #13 / #169: with no cached announce the transport layer
+        // likewise only emits the event; before #169 this test doubled as a
+        // pin of the (defective) cache precondition.
         #[test]
         fn test_path_request_local_dest_no_cache_no_announce_entry() {
             let mut transport = make_transport_enabled();
@@ -13102,7 +13070,7 @@ mod tests {
 
             let dest_hash = [0x42; TRUNCATED_HASHBYTES];
             transport.register_destination(dest_hash);
-            // NO announce cache set, this is the bug trigger
+            // NO announce cache set: the never-announced-since-start state.
 
             // Build path request
             let path_req_hash = transport.path_request_hash;
@@ -13142,81 +13110,13 @@ mod tests {
                 "Must emit PathRequestReceived"
             );
 
-            // announce table must NOT have an entry (no cache = nothing to rebroadcast)
+            // No transport-level scheduling; NodeCore Block A answers.
             assert!(
                 transport.storage().get_announce(&dest_hash).is_none(),
-                "Must not create AnnounceEntry when no announce cache exists"
+                "Transport must not create an AnnounceEntry; NodeCore schedules \
+                 the fresh response"
             );
         }
-
-        #[test]
-        fn test_path_request_local_dest_with_cache_creates_entry() {
-            let mut transport = make_transport_enabled();
-            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
-
-            let dest_hash = [0x42; TRUNCATED_HASHBYTES];
-            transport.register_destination(dest_hash);
-
-            // Populate announce cache
-            let (raw, _) = make_announce_raw(0, PacketContext::None);
-            transport
-                .storage_mut()
-                .set_announce_cache(dest_hash, raw.clone());
-
-            // Build and send path request
-            let path_req_hash = transport.path_request_hash;
-            let mut data = Vec::new();
-            data.extend_from_slice(&dest_hash);
-            data.extend_from_slice(&[0xBB; TRUNCATED_HASHBYTES]);
-            data.extend_from_slice(&[0xCC; TRUNCATED_HASHBYTES]);
-
-            let packet = Packet {
-                flags: PacketFlags {
-                    ifac_flag: false,
-                    header_type: HeaderType::Type1,
-                    context_flag: false,
-                    transport_type: TransportType::Broadcast,
-                    dest_type: crate::destination::DestinationType::Plain,
-                    packet_type: PacketType::Data,
-                },
-                hops: 0,
-                transport_id: None,
-                destination_hash: path_req_hash,
-                context: PacketContext::None,
-                data: PacketData::Owned(data),
-            };
-
-            let mut buf = [0u8; 500];
-            let len = packet.pack(&mut buf).unwrap();
-            transport.process_incoming(0, &buf[..len]).unwrap();
-
-            // Event emitted
-            let events: Vec<_> = transport.drain_events().collect();
-            assert!(
-                events
-                    .iter()
-                    .any(|e| matches!(e, TransportEvent::PathRequestReceived { .. })),
-                "Must emit PathRequestReceived"
-            );
-
-            // AnnounceEntry created with correct data
-            let entry = transport
-                .storage()
-                .get_announce(&dest_hash)
-                .expect("Must create AnnounceEntry when cache exists");
-            assert!(!entry.raw_packet.is_empty(), "raw_packet must not be empty");
-            assert_eq!(
-                entry.raw_packet, raw,
-                "raw_packet must match cached announce"
-            );
-            assert_eq!(
-                entry.target_interface,
-                Some(0),
-                "must target requesting interface"
-            );
-            assert!(entry.block_rebroadcasts, "must block rebroadcasts");
-        }
-
         #[test]
         fn test_announce_rebroadcast_empty_packet_is_silent() {
             let mut transport = make_transport_enabled();
@@ -15400,10 +15300,11 @@ mod tests {
         #[test]
         fn test_path_request_for_local_destination() {
             // When a node receives a path request for one of its own registered
-            // destinations and has a cached announce, it should:
-            // 1. Emit PathRequestReceived event
-            // 2. Schedule a targeted announce rebroadcast (not forward the request)
-            // 3. NOT forward the path request to other interfaces
+            // destinations, the transport layer should:
+            // 1. Emit PathRequestReceived event (NodeCore Block A regenerates
+            //    and schedules the targeted response, Codeberg #169)
+            // 2. NOT forward the path request to other interfaces
+            // 3. NOT schedule anything itself, cached announce or not
             let mut transport = make_transport_enabled();
             let net_iface = transport.register_interface(Box::new(MockInterface::new("net0", 1)));
             let _net_iface2 = transport.register_interface(Box::new(MockInterface::new("net1", 2)));
@@ -15515,35 +15416,15 @@ mod tests {
                 "Should NOT forward path request for local destination"
             );
 
-            // 3. Should have scheduled a targeted announce rebroadcast in the announce table
+            // 3. Should NOT have scheduled anything at the transport layer,
+            // despite the populated cache: NodeCore Block A builds the
+            // response from the destination itself (Codeberg #169). The
+            // deferred targeted send is pinned end-to-end in
+            // node::mvr_first_path_request and mvr_generated_field_pins.
             assert!(
-                transport.storage().get_announce(&dest_hash).is_some(),
-                "Should have scheduled announce rebroadcast for local destination"
-            );
-            let entry = transport.storage().get_announce(&dest_hash).unwrap();
-            assert_eq!(
-                entry.target_interface,
-                Some(net_iface),
-                "Announce rebroadcast should target the requesting interface"
-            );
-            assert!(
-                entry.block_rebroadcasts,
-                "Announce rebroadcast should block further rebroadcasts"
-            );
-
-            // 4. After grace period, the announce should produce a SendPacket action
-            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1000);
-            transport.poll();
-            let actions = transport.drain_actions();
-            let has_send = actions.iter().any(|a| {
-                matches!(
-                    a,
-                    Action::SendPacket { iface, .. } if *iface == InterfaceId(net_iface)
-                )
-            });
-            assert!(
-                has_send,
-                "After grace period, should send path response to requesting interface"
+                transport.storage().get_announce(&dest_hash).is_none(),
+                "Transport must not schedule a local-destination path response; \
+                 NodeCore Block A owns it"
             );
         }
 

@@ -79,7 +79,7 @@ carries UTC date and time in every fix.
 
 ### 3. Host injection
 
-`Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:677`
+`Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:662`
 → `transport.rs:2614`), for deployments where a clockless node has a
 host that does know wall time — e.g. a control frame on the LNode
 serial channel (the radio-config envelope of
