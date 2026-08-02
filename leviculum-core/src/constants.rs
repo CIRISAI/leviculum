@@ -492,15 +492,36 @@ pub const EMISSION_TIMESTAMP_MAX_SECS: u64 = (1 << (8 * RANDOM_HASH_TIMESTAMP_SI
 /// point (~34,600 years of margin).
 pub const EMISSION_LEARN_CEILING_SECS: u64 = 7_258_118_400;
 
+/// Lower plausibility bound on emission timebases (Codeberg #161):
+/// 1_600_000_000 = 2020-09-13T12:26:40Z, kept a round number. It only has
+/// to separate two populations that sit orders of magnitude apart: real
+/// wall clocks in any deployment running this stack are past 2026 (and a
+/// battery-backed RTC set at device manufacture cannot predate the
+/// stack's existence), while uptime-derived values cannot reach it — 1.6e9
+/// seconds is ~50.7 years of continuous uptime. A learned floor BELOW this
+/// bound is treated as if none existed, so one credible announce recovers
+/// the node in a single unbounded step instead of the
+/// [`EMISSION_LEARN_MAX_ADVANCE_SECS`]-per-announce crawl (#161 §1: ~429
+/// days at a 30 min LoRa cadence); `set_wall_time_unix_secs` refuses
+/// injections below it for the same reason. Deriving this bound (and a
+/// tighter ceiling) from the firmware build timestamp would narrow the
+/// remaining first-adoption window considerably and stays future work
+/// (#161 §1); a constant needs no build plumbing and covers the routine
+/// trigger — adopting a rebooting peer's uptime seconds — today.
+pub const EMISSION_PLAUSIBLE_MIN_SECS: u64 = 1_600_000_000;
+
 /// Once a clockless node has an emission timebase, a single announce may
 /// advance it at most this far (Codeberg #160). Legitimate forward
 /// corrections after the first adoption are bounded by peer clock skew
 /// (minutes) plus our monotonic drift (~50 ppm, under half an hour per year
 /// of isolation), so a day covers them with orders-of-magnitude headroom —
 /// while a peer whose clock is decades wrong needs tens of thousands of
-/// rate-limited announces instead of one to drag the timebase there. The
-/// FIRST adoption is deliberately unbounded: a node booting at uptime
-/// seconds must climb to real unix time in one step (Codeberg #155).
+/// rate-limited announces instead of one to drag the timebase there.
+/// Adoption is deliberately unbounded while the current timebase sits
+/// below [`EMISSION_PLAUSIBLE_MIN_SECS`]: a node booting at uptime
+/// seconds (Codeberg #155) — or one that adopted a rebooting peer's
+/// uptime seconds as its first floor (Codeberg #161 §1) — must climb to
+/// real unix time in one step.
 pub const EMISSION_LEARN_MAX_ADVANCE_SECS: u64 = 86_400;
 
 // BLE Interface Constants (Columba Protocol v2.2)

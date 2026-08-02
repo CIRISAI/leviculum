@@ -44,13 +44,13 @@ use alloc::vec::Vec;
 use crate::constants::{
     ANNOUNCE_RATE_LIMIT_MS, DEFAULT_ANNOUNCE_CAP_PERCENT, DISCOVERY_RETRY_INTERVAL_MS,
     DISCOVERY_TIMEOUT_MS, EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS,
-    EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS, JITTER_AIRTIME_FACTOR,
-    LINK_TIMEOUT_MS, LOCAL_CLIENT_ANNOUNCE_DELAY_MS, LOCAL_CLIENT_DEST_EXPIRY_MS,
-    LOCAL_REBROADCASTS_MAX, MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND,
-    MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
-    PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS, RATCHET_SIZE,
-    RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES,
-    UNKNOWN_BITRATE_ASSUMPTION_BPS,
+    EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
+    JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS, LOCAL_CLIENT_ANNOUNCE_DELAY_MS,
+    LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX, MAX_QUEUED_ANNOUNCES_PER_INTERFACE,
+    MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS,
+    PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES, PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS,
+    PATH_REQUEST_MIN_INTERVAL_MS, RATCHET_SIZE, RECEIPT_TIMEOUT_DEFAULT_MS,
+    REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
 };
 
 use crate::announce::{emission_from_random_hash, max_emission_from_blobs, ReceivedAnnounce};
@@ -2576,10 +2576,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// no-op in effect on platforms whose `Clock::wall_unix_secs` already
     /// returns real wall time, which always takes precedence.
     pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64) {
-        // Same ceiling as learned adoption (Codeberg #160): a value no real
-        // clock can produce would wedge the timebase there forever, since
-        // the floor never moves backwards.
-        if unix_secs > EMISSION_LEARN_CEILING_SECS {
+        // Same plausibility window as learned adoption (Codeberg #160,
+        // #161): above the ceiling no real clock can sit and the floor
+        // would wedge there; below the minimum (a boot script racing NTP,
+        // a controller with its own dead clock) the injection would seed
+        // the implausibly-low floor of #161 §1 through the front door —
+        // and unlike a learned announce, an injection CLAIMS to know wall
+        // time, so a value no real clock can hold is self-refuting.
+        if !(EMISSION_PLAUSIBLE_MIN_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&unix_secs) {
             crate::tracing::warn!(unix_secs, "Refused implausible wall-time injection");
             return;
         }
@@ -2593,11 +2597,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// `validate()` proves only that the announce signs itself, so this
     /// field is arbitrary input from anyone in radio range (Codeberg #160).
     /// Hardening, in order: values past [`EMISSION_LEARN_CEILING_SECS`]
-    /// cannot come from a real clock and are refused outright; the first
-    /// adoption is unbounded so a node booting at uptime seconds reaches
-    /// real unix time in one step; every later adoption may advance the
-    /// timebase by at most [`EMISSION_LEARN_MAX_ADVANCE_SECS`], so a peer
-    /// with a badly wrong clock cannot capture it in one announce.
+    /// cannot come from a real clock and are refused outright; adoption is
+    /// unbounded while the current timebase sits below
+    /// [`EMISSION_PLAUSIBLE_MIN_SECS`], so a node booting at uptime
+    /// seconds — or one that adopted a rebooting peer's uptime seconds
+    /// (Codeberg #161 §1) — reaches real unix time in one step; once the
+    /// timebase is plausible, every adoption may advance it by at most
+    /// [`EMISSION_LEARN_MAX_ADVANCE_SECS`], so a peer with a badly wrong
+    /// clock cannot capture it in one announce.
     ///
     /// Unlike the persisted offset in microReticulum (which the #155
     /// commit message overstated as the same pattern), the learned floor
@@ -2614,12 +2621,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if emitted_secs <= current {
             return;
         }
-        let adopted = match self.emission_floor {
-            // First adoption: unbounded, or a clockless node could never
-            // climb from uptime seconds to real unix time (#155).
-            None => emitted_secs,
-            // Subsequent adoptions: bounded advance (#160).
-            Some(_) => emitted_secs.min(current.saturating_add(EMISSION_LEARN_MAX_ADVANCE_SECS)),
+        // Unbounded while implausible, bounded once plausible. "Implausible"
+        // covers both no-floor-yet (current = uptime seconds, #155) and a
+        // floor captured below any value a real clock can produce (#161 §1);
+        // in both cases one credible announce must recover the node in a
+        // single step. The `emitted_secs <= current` guard above keeps the
+        // floor from ever moving down, so the unbounded branch cannot be
+        // abused downwards — the only way to sit below the bound is never
+        // to have heard a credible timestamp.
+        let adopted = if current < EMISSION_PLAUSIBLE_MIN_SECS {
+            emitted_secs
+        } else {
+            emitted_secs.min(current.saturating_add(EMISSION_LEARN_MAX_ADVANCE_SECS))
         };
         self.emission_floor = Some((adopted, now_ms));
     }
@@ -15129,6 +15142,101 @@ mod tests {
                 1_800_000_000,
                 "first adoption must be unbounded: uptime secs to real unix time in one step"
             );
+        }
+
+        // Codeberg #161 §1: a clockless node whose floor sits at an
+        // implausibly LOW value (the realistic trigger: two LNodes reboot
+        // together, one adopts the other's post-reboot uptime-seconds
+        // announce) must climb to a credible unix timestamp in ONE
+        // adoption. Before the fix the bounded advance (#160) applied to
+        // any existing floor, so recovery crawled at one day per announce
+        // — 20602 announces / ~429 days at a 30 min LoRa cadence — a
+        // regression against the one-step self-correction that existed
+        // before a88d172.
+        #[test]
+        fn test_implausibly_low_floor_recovers_in_one_adoption() {
+            use crate::constants::EMISSION_PLAUSIBLE_MIN_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+            let identity_b = Identity::generate(&mut OsRng);
+            let dest_b = Destination::new(
+                Some(identity_b),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase"],
+            )
+            .unwrap();
+
+            // Peer B is itself freshly rebooted and clockless: its announce
+            // carries its uptime seconds. We adopt it as our first floor —
+            // unbounded and with no reason for suspicion (#161 §1).
+            let peer_uptime_secs = 5_000;
+            assert!(peer_uptime_secs < EMISSION_PLAUSIBLE_MIN_SECS);
+            let a1 = make_announce_raw_for_dest(&dest_b, 1, peer_uptime_secs);
+            transport.process_incoming(0, &a1).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                peer_uptime_secs,
+                "the implausible first adoption itself is still accepted (we cannot \
+                 distinguish it at adoption time; recoverability is the fix)"
+            );
+
+            // A wall-clocked peer comes into range with a credible unix
+            // timestamp. One adoption must recover the node completely.
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            let identity_c = Identity::generate(&mut OsRng);
+            let dest_c = Destination::new(
+                Some(identity_c),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase", "walled"],
+            )
+            .unwrap();
+            let a2 = make_announce_raw_for_dest(&dest_c, 1, 1_800_000_000);
+            transport.process_incoming(0, &a2).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                1_800_000_000,
+                "a floor below EMISSION_PLAUSIBLE_MIN_SECS must be treated as if \
+                 absent: one credible announce recovers the node in a single step"
+            );
+        }
+
+        // Codeberg #161 (review, uncovered point 1): `set_wall_time_unix_secs`
+        // must refuse an implausibly LOW injection with the same bound. A
+        // boot script racing NTP, or a controller with its own dead clock,
+        // would otherwise seed a near-zero floor through the front door —
+        // and unlike a learned announce, a host injection CLAIMS to know
+        // wall time, so a value no real clock can hold is self-refuting.
+        #[test]
+        fn test_implausibly_low_wall_time_injection_is_refused() {
+            let mut transport = make_transport_enabled();
+
+            // Clock near unix epoch: pre-NTP boot value.
+            transport.set_wall_time_unix_secs(1_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                now / 1000,
+                "an implausibly low wall-time injection must be ignored"
+            );
+
+            // Even a merely stale value below the bound (2017) is refused.
+            transport.set_wall_time_unix_secs(1_500_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), now / 1000);
+
+            // A sane injection afterwards still works.
+            transport.set_wall_time_unix_secs(1_790_000_000);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), 1_790_000_000);
         }
 
         // Codeberg #160: a host injecting nonsense over the config channel
