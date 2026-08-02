@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The resource advertisement `o` field carries the salted per-transfer
   hash like the reference, so a Python receiver can no longer append
   two transfers of identical content into one reassembly file (#165).
+- Request timestamps carry epoch seconds from the emission timebase
+  instead of process uptime, so a Python peer's request handlers see a
+  real `requested_at` (#164).
 
 - UDPInterface accepts a hostname in `forward_ip` like rnsd, resolves
   it at runtime with periodic re-resolution, and reports resolution

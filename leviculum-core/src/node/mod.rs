@@ -1019,9 +1019,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Compute path_hash
         let path_hash = crate::crypto::truncated_hash(path.as_bytes());
 
-        // Compute timestamp (seconds since epoch, float64)
+        // Timestamp (seconds since epoch, float64): Python fills time.time()
+        // (Link.py:490) and hands it to every request handler as requested_at.
+        // Sourced from the #155 emission timebase — wall clock where the
+        // platform has one, learned timebase as the clockless fallback
+        // (Codeberg #164).
         let now_ms = self.transport.clock().now_ms();
-        let timestamp = now_ms as f64 / 1000.0;
+        let timestamp = self.transport.emission_secs(now_ms) as f64;
 
         // Build msgpack: fixarray(3) + float64(timestamp) + bin(path_hash) + data_or_nil
         let mut packed = Vec::new();
@@ -1125,7 +1129,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         let path_hash = crate::crypto::truncated_hash(path.as_bytes());
-        let timestamp = now_ms as f64 / 1000.0;
+        // Same epoch-seconds source as send_request (Codeberg #164).
+        let timestamp = self.transport.emission_secs(now_ms) as f64;
         let mut packed = Vec::new();
         write_fixarray_header(&mut packed, 3);
         write_float64(&mut packed, timestamp);

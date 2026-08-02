@@ -5,13 +5,11 @@
 //! re-applies the rule a Python peer applies to it (`reference/Reticulum`,
 //! cited per test), so a writer/reader pair that drifted together stays red
 //! (the #155 failure class). Announce-layer fields are tranche 1 (c8609b4);
-//! the emission-timestamp chain is #155/#160/#161.
-//!
-//! Fields deliberately NOT pinned here because the audit found them WRONG
-//! (a fix wants its own red-first treatment, see the #159 tranche-2 report):
-//! - the REQUEST payload timestamp (element 0): Python fills `time.time()`
-//!   epoch seconds (Link.py:490), we fill monotonic process-uptime seconds.
-//! - the single-segment advertisement `o` field (see resource layer notes).
+//! the emission-timestamp chain is #155/#160/#161. The two fields the audit
+//! found WRONG are pinned since their fixes landed: the REQUEST payload
+//! timestamp (element 0, epoch seconds via the #155 timebase, Codeberg #164)
+//! here, and the advertisement `o` field (Codeberg #165) in the resource
+//! layer.
 
 extern crate std;
 
@@ -467,9 +465,12 @@ fn establish(
 /// `[timestamp, truncated_hash(path), data]` (Link.py:489-491); the peer
 /// dispatches on element 1 against its registered path hashes (Link.py:861).
 ///
-/// Element 0 (the timestamp) is deliberately NOT value-pinned: the audit
-/// found it carries process uptime where the reference puts epoch seconds
-/// (found WRONG, reported separately). Only its float64 form is asserted.
+/// Element 0 is `time.time()` in the reference (Link.py:490) — epoch
+/// seconds, handed to every registered request handler as `requested_at`
+/// (Link.py:878-880). Pinned here through the #155 emission-timebase
+/// machinery: with a known wall timebase the wire float must carry epoch
+/// seconds, never process uptime (Codeberg #164) — an uptime value sits far
+/// below `EMISSION_PLAUSIBLE_MIN_SECS` and fails the bound.
 #[test]
 fn request_wire_pins_reference_request_semantics() {
     let (mut responder, dest_hash, signing_key) = make_responder("req");
@@ -484,6 +485,10 @@ fn request_wire_pins_reference_request_semantics() {
         dest_hash,
         signing_key,
     );
+
+    // Seed the #155 wall timebase (the MockClock itself is clockless).
+    const WALL_SECS: u64 = 1_700_000_000;
+    initiator.transport.set_wall_time_unix_secs(WALL_SECS);
 
     // One msgpack bin value as request data.
     let mut req_data = Vec::new();
@@ -510,6 +515,19 @@ fn request_wire_pins_reference_request_semantics() {
         plaintext[1], 0xCB,
         "element 0 must be a msgpack float64 timestamp"
     );
+    // Element 0 value: epoch seconds from the #155 timebase, exactly the
+    // seeded floor here (the MockClock does not advance). Process uptime —
+    // today's bug shape — sits below EMISSION_PLAUSIBLE_MIN_SECS and fails.
+    let ts = f64::from_be_bytes(plaintext[2..10].try_into().unwrap());
+    assert!(
+        ts >= crate::constants::EMISSION_PLAUSIBLE_MIN_SECS as f64,
+        "element 0 must carry epoch seconds like the reference's time.time() \
+         (Link.py:490), not process uptime (Codeberg #164): got {ts}"
+    );
+    assert_eq!(
+        ts, WALL_SECS as f64,
+        "element 0 must come from the #155 emission timebase"
+    );
     // Element 1: bin8(16) truncated path hash — the peer's dispatch key.
     assert_eq!(&plaintext[10..12], &[0xC4, 0x10]);
     assert_eq!(
@@ -529,14 +547,91 @@ fn request_wire_pins_reference_request_semantics() {
                 request_id: rid,
                 path,
                 data,
+                requested_at,
                 ..
-            } => Some((*rid, path.clone(), data.clone())),
+            } => Some((*rid, path.clone(), data.clone(), *requested_at)),
             _ => None,
         })
         .expect("responder must dispatch the request");
     assert_eq!(received.0, request_id);
     assert_eq!(received.1, "/echo");
     assert_eq!(received.2, req_data);
+    assert_eq!(
+        received.3, ts,
+        "the handler's requested_at must be the wire timestamp verbatim, \
+         like the reference (Link.py:878-880)"
+    );
+}
+
+/// #164, resource path: `send_request_resource` fills the same payload
+/// element 0, so a request too large for a single packet must also carry
+/// epoch seconds from the #155 timebase. Pinned through the peer's actual
+/// dispatch: the full ADV/REQ/part/proof exchange runs sans-I/O and the
+/// responder's `RequestReceived.requested_at` — documented "seconds since
+/// epoch" — must sit at the seeded wall timebase, not at process uptime.
+#[test]
+fn request_resource_timestamp_carries_epoch_seconds() {
+    let (mut responder, dest_hash, signing_key) = make_responder("req");
+    let r_iface = add_iface(&mut responder, "r0");
+    let mut initiator = make_initiator();
+    let i_iface = add_iface(&mut initiator, "i0");
+    let (caller_id, _resp_id) = establish(
+        &mut initiator,
+        i_iface,
+        &mut responder,
+        r_iface,
+        dest_hash,
+        signing_key,
+    );
+
+    const WALL_SECS: u64 = 1_700_000_000;
+    initiator.transport.set_wall_time_unix_secs(WALL_SECS);
+
+    // One msgpack bin value, larger than the link MDU.
+    let mut req_data = Vec::new();
+    crate::resource::msgpack::write_bin(&mut req_data, &std::vec![0x5a_u8; 1_400]);
+
+    let (request_id, out) = {
+        let (rid, _hash, out) = initiator
+            .send_request_resource(&caller_id, "/echo", Some(&req_data), None)
+            .unwrap();
+        (rid, out)
+    };
+
+    // Ping-pong the resource transfer to completion.
+    let mut for_responder = action_data(&out);
+    let mut received = None;
+    for _ in 0..16 {
+        if for_responder.is_empty() {
+            break;
+        }
+        let (back, events) = deliver_collect(&mut responder, r_iface, for_responder);
+        received = received.or_else(|| {
+            events.iter().find_map(|ev| match ev {
+                NodeEvent::RequestReceived {
+                    request_id: rid,
+                    requested_at,
+                    ..
+                } => Some((*rid, *requested_at)),
+                _ => None,
+            })
+        });
+        let (fwd, _) = deliver_collect(&mut initiator, i_iface, back);
+        for_responder = fwd;
+    }
+
+    let (rid, requested_at) = received.expect("responder must dispatch the resource-borne request");
+    assert_eq!(rid, request_id);
+    assert!(
+        requested_at >= crate::constants::EMISSION_PLAUSIBLE_MIN_SECS as f64,
+        "requested_at must carry epoch seconds like the reference's \
+         time.time() (Link.py:490), not process uptime (Codeberg #164): \
+         got {requested_at}"
+    );
+    assert_eq!(
+        requested_at, WALL_SECS as f64,
+        "requested_at must come from the #155 emission timebase"
+    );
 }
 
 /// #159 tranche 2: pin the RESPONSE wire: msgpack `[request_id, response]`
