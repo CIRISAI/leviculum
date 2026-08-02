@@ -19,6 +19,10 @@ self-consistent — process uptime — restarts from zero on every reboot
 and loses that comparison forever: the node keeps announcing, and no
 peer ever updates its path entry again (Codeberg #155). Obtaining
 real time is a protocol obligation, not a platform convenience.
+#155 is one instance of a general failure class — a generated field
+that is self-consistent between our writer and our reader and means
+something else to a peer; the class and the audit method for it are
+in [Wire Field Semantics](wire-field-semantics.md).
 
 ## One value, one producer
 
