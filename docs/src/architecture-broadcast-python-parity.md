@@ -268,6 +268,23 @@ path-response is specifically addressed to the path-requester
 rather than broadcast. In our Rust code this corresponds to
 the `target_interface: Some(idx)` branch at `transport.rs:4055-4070`.
 
+### Held announces during path-response scheduling
+
+Inserting the path-response entry into `announce_table` would
+overwrite an announce for the same destination still waiting in
+its rebroadcast grace. Python holds any such entry in
+`Transport.held_announces` before the insertion
+(`Transport.py:2991-2999`) and reinserts it when the response
+entry fires in the retry loop (`Transport.py:630-633`), so the
+targeted response goes out first and the network-wide
+rebroadcast afterwards. The Rust counterpart is
+`hold_displaced_announce` plus the reinsertion sites in
+`check_announce_rebroadcasts` (Codeberg #170), with one
+declared deviation: a held network-wide rebroadcast is never
+displaced by a later path-response entry, where Python
+overwrites the held slot on every request and can lose the
+rebroadcast to back-to-back requests.
+
 ## 6. Link-request
 
 ### Trigger

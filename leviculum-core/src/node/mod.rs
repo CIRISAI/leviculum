@@ -48,6 +48,8 @@ mod link_management;
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
 // (absent under `--no-default-features`, e.g. the core-no-tracing CI gate).
 #[cfg(test)]
+mod mvr_announce_hold;
+#[cfg(test)]
 mod mvr_app_proof_ingress_iface;
 #[cfg(test)]
 mod mvr_bidir_transfer;
@@ -2762,7 +2764,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                     .set_announce_cache(destination_hash, fresh_raw.clone());
                                 // Schedule the deferred path response, targeted
                                 // at the requesting interface after the
-                                // path-request grace.
+                                // path-request grace. Hold any pending entry
+                                // first (Codeberg #170; Python Transport.py:
+                                // 2991-2999): a second request inside the
+                                // grace window must not clobber the response
+                                // the first request scheduled.
+                                self.transport.hold_displaced_announce(&destination_hash);
                                 self.transport.storage_mut().set_announce(
                                     destination_hash,
                                     crate::storage_types::AnnounceEntry {
