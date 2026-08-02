@@ -6587,6 +6587,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut tag = [0u8; TRUNCATED_HASHBYTES];
         tag.copy_from_slice(&data[tag_start..]);
 
+        // Extract the requesting transport instance id, present exactly when
+        // the payload is longer than two hashes (Python `path_request_handler`,
+        // Transport.py:2877-2880). Used below to suppress answering a request
+        // that came from our own next hop toward the destination.
+        let requestor_transport_id: Option<[u8; TRUNCATED_HASHBYTES]> =
+            if data.len() > TRUNCATED_HASHBYTES * 2 {
+                let mut id = [0u8; TRUNCATED_HASHBYTES];
+                id.copy_from_slice(&data[TRUNCATED_HASHBYTES..TRUNCATED_HASHBYTES * 2]);
+                Some(id)
+            } else {
+                None
+            };
+
         // Track incoming path-request frequency on the receiving interface
         // (Codeberg #67 Stage 2a). Mirrors Python Transport.py:2895
         // `packet.receiving_interface.received_path_request()`, which records
@@ -6672,6 +6685,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Transport.path_table`): a dropped or expired path must not be answered
         // from the orphaned announce cache; the request falls through to case 4
         // and is forwarded instead (Codeberg #117).
+        // Never answer a cached-path request whose requesting transport
+        // instance IS our next hop toward the destination (Python
+        // Transport.py:2958-2965, Codeberg #168): it asked because its own
+        // path failed, and an answer would advertise a route that leads
+        // straight back through it. Applies to both cached-path answer
+        // branches (2a and 2b) — in Python the check sits in the shared
+        // cached-path arm. A direct path (no transport_id in the announce)
+        // has no next-hop id to match, so it is never suppressed.
+        let next_hop_is_requestor = match (
+            requestor_transport_id,
+            self.storage
+                .get_path(&requested_hash)
+                .and_then(|p| p.next_hop),
+        ) {
+            (Some(req), Some(nh)) => req == nh,
+            _ => false,
+        };
+        if next_hop_is_requestor {
+            crate::tracing::debug!(
+                "Not answering path request for <{}> on {}, next hop is the requestor",
+                HexShort(&requested_hash),
+                self.iface_name(interface_index)
+            );
+            return Ok(());
+        }
+
         if from_local && self.storage.get_path(&requested_hash).is_some() {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 // Convert cached Header1 announce to Header2 with the daemon's
@@ -10371,6 +10410,104 @@ mod tests {
                 broadcasts.is_empty(),
                 "Path response should not be broadcast"
             );
+        }
+
+        /// Reshape a Type1 announce raw into the Type2 form a relay emits, so
+        /// a chosen next-relay id can be planted in the wire bytes.
+        fn announce_as_type2(
+            raw: &[u8],
+            transport_id: [u8; TRUNCATED_HASHBYTES],
+            hops: u8,
+        ) -> Vec<u8> {
+            let mut p = Packet::unpack(raw).unwrap();
+            p.flags.header_type = HeaderType::Type2;
+            p.flags.transport_type = TransportType::Transport;
+            p.transport_id = Some(transport_id);
+            p.hops = hops;
+            let mut buf = [0u8; 512];
+            let len = p.pack(&mut buf).unwrap();
+            buf[..len].to_vec()
+        }
+
+        /// #159 tranche 3 (found missing, fixed red-first in this batch): a
+        /// path request whose transport-instance field names OUR NEXT HOP for
+        /// the requested destination must not be answered
+        /// (Transport.py:2958-2965). The requestor asked because its own path
+        /// failed; answering would advertise a route that leads straight back
+        /// through it. The control half proves suppression is due to the id,
+        /// not a missing answer path.
+        #[test]
+        fn path_request_from_our_next_hop_is_not_answered() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let next_hop_id = [0x4Eu8; TRUNCATED_HASHBYTES];
+            let t2 = announce_as_type2(&raw, next_hop_id, 1);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+            // Keep the announce cache and path, drop the rebroadcast schedule.
+            for key in transport.storage().announce_keys() {
+                transport.storage_mut().remove_announce(&key);
+            }
+            transport.storage_mut().clear_packet_hashes();
+
+            let pr_dest = transport.path_request_hash;
+            let request_with =
+                move |requestor: [u8; TRUNCATED_HASHBYTES], tag: [u8; TRUNCATED_HASHBYTES]| {
+                    let mut data = Vec::new();
+                    data.extend_from_slice(&dest_hash);
+                    data.extend_from_slice(&requestor);
+                    data.extend_from_slice(&tag);
+                    Packet {
+                        flags: PacketFlags {
+                            ifac_flag: false,
+                            header_type: HeaderType::Type1,
+                            context_flag: false,
+                            transport_type: TransportType::Broadcast,
+                            dest_type: DestinationType::Plain,
+                            packet_type: PacketType::Data,
+                        },
+                        hops: 0,
+                        transport_id: None,
+                        destination_hash: pr_dest,
+                        context: PacketContext::None,
+                        data: PacketData::Owned(data),
+                    }
+                };
+
+            // Request from the next hop itself: no answer.
+            let req = request_with(next_hop_id, [0xA1u8; TRUNCATED_HASHBYTES]);
+            transport.handle_path_request(req, 1).unwrap();
+            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
+            transport.poll();
+            let actions = transport.drain_actions();
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    Action::SendPacket { iface, .. } if iface.0 == 1
+                )),
+                "a path request from our own next hop must not be answered"
+            );
+
+            // Control: any other requestor gets the cached-path answer.
+            let req = request_with([0x2Bu8; TRUNCATED_HASHBYTES], [0xA2u8; TRUNCATED_HASHBYTES]);
+            transport.handle_path_request(req, 1).unwrap();
+            transport.clock.advance(PATH_REQUEST_GRACE_MS + 1);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let response = actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.clone()),
+                    _ => None,
+                })
+                .expect("a request from a third party must be answered from the cached path");
+            let parsed = Packet::unpack(&response).unwrap();
+            assert_eq!(parsed.flags.packet_type, PacketType::Announce);
+            assert_eq!(parsed.context, PacketContext::PathResponse);
         }
 
         #[test]

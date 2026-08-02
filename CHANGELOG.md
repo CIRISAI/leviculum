@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A path request from the transport instance that is our own next hop
+  toward the requested destination is no longer answered, matching the
+  reference's loop-avoidance rule (#168).
 - The resource advertisement `o` field carries the salted per-transfer
   hash like the reference, so a Python receiver can no longer append
   two transfers of identical content into one reassembly file (#165).
