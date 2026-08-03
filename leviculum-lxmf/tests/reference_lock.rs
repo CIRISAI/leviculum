@@ -14,7 +14,7 @@ use std::{
 const LXMF_VERSION: &str = "1.1.0";
 const LXMF_HEAD: &str = "795fdaa2b0777c13033787d933d1afc94a2377cb";
 const VECTOR_FIXTURE_SHA256: &str =
-    "fe6fc968ab46c577d4be427a0e4cfb73adbcf2dc330e4a916852d0fbe3389f77";
+    "b8347fde27e57684d818732dc292de08e7879e0f9376d1b5eaff1935b164ec18";
 
 const REFERENCE_FILES: &[(&str, &str)] = &[
     (

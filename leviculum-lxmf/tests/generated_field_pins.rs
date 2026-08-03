@@ -520,3 +520,123 @@ fn propagation_upload_envelope_matches_the_reference_shape() {
         "the entry length covers message and stamp"
     );
 }
+
+/// The advertised stamp cost is emitted only inside the reference's
+/// `0 < cost < 255` window; 0 and 255 are sent as "no cost" (Codeberg #181).
+///
+/// Reference: `get_announce_app_data` (LXMRouter.py:1042-1045) builds
+/// `stamp_cost = None` and overwrites it only `if delivery_destination
+/// .stamp_cost > 0 and delivery_destination.stamp_cost < 255`. The same window
+/// sits one layer earlier in `set_inbound_stamp_cost` (LXMRouter.py:378-393),
+/// which stores `None` for `< 1` and returns `True`, but *refuses* `>= 255` and
+/// returns `False` without touching the stored value.
+///
+/// What a peer DECIDES: `LXMFDeliveryAnnounceHandler.received_announce`
+/// (Handlers.py:17-18) reads the field with `stamp_cost_from_app_data` and
+/// hands it to `update_stamp_cost` (LXMRouter.py:1027-1029), which stores it
+/// with no bound of its own. It is later passed straight into
+/// `LXStamper.generate_stamp` (LXMessage.py:320), whose search loop
+/// (LXStamper.py:199) runs until `stamp_valid` holds. At cost 255 the target is
+/// `1 << 1`, so the loop needs a 256-bit digest of 0, 1 or 2 and never
+/// terminates. One announce from us therefore wedges the outbound queue of
+/// every Python peer holding a message for our destination, with nothing in
+/// their logs naming us. That is why the reference declines to send the value
+/// rather than trusting the reader to bound it.
+///
+/// Expected bytes come from the reference's own emitter and its own decoder,
+/// recorded in `VEC-ANN-STAMP-COST-WINDOW` by `gen_vectors.py` — the vector
+/// calls `LXMRouter.get_announce_app_data` and `stamp_cost_from_app_data`
+/// directly, so nothing about the window is rebuilt in Rust.
+///
+/// What this test cannot catch:
+/// - Byte equality at six points does not prove the guard is a range test.
+///   A lookup table over exactly `{None, 0, 1, 8, 254, 255}` would pass, and
+///   so would `<= 254` written as `< 255` — the two are the same predicate on
+///   `u8`, which is precisely why the boundary is pinned at 254 and 255 rather
+///   than described.
+/// - It says nothing about what we do with an inbound 255; that is the read
+///   side, pinned separately in `router.rs`
+///   (`hostile_announced_stamp_cost_is_not_mined`).
+/// - As in the stamp-target pin above, a `<=`/`<` flip inside the digest
+///   comparison is invisible here: this field never reaches that comparison.
+#[test]
+fn announced_stamp_cost_stays_inside_the_reference_window() {
+    use leviculum_lxmf::announce::{DeliveryAnnounce, StampCostRefused};
+
+    let display_name = hex_fixture("VEC-ANN-STAMP-COST-WINDOW", "display_name_hex");
+
+    for (cost, key) in [
+        (None, "none"),
+        (Some(0), "0"),
+        (Some(1), "1"),
+        (Some(8), "8"),
+        (Some(254), "254"),
+        (Some(255), "255"),
+    ] {
+        let announce = DeliveryAnnounce {
+            display_name: Some(display_name.clone()),
+            stamp_cost: cost,
+            compression_supported: true,
+        };
+        assert_eq!(
+            hex::encode(announce.encode()),
+            common::fixture("VEC-ANN-STAMP-COST-WINDOW", &format!("emit_{key}_hex")),
+            "cost {cost:?} must produce the reference's own announce bytes"
+        );
+
+        // What the reference's decoder reads back from exactly those bytes.
+        let peer_reads = common::fixture("VEC-ANN-STAMP-COST-WINDOW", &format!("peer_reads_{key}"));
+        assert_eq!(
+            peer_reads,
+            match cost {
+                Some(cost) if cost > 0 && cost < 255 => cost.to_string(),
+                _ => "null".to_string(),
+            },
+            "cost {cost:?}: the reference decoder's view of our bytes"
+        );
+
+        // The checked constructor mirrors `set_inbound_stamp_cost`: it maps
+        // 0 to "no cost" and accepts, and refuses 255 outright.
+        let accepted = common::fixture(
+            "VEC-ANN-STAMP-COST-WINDOW",
+            &format!("setter_accepts_{key}"),
+        ) == "true";
+        let constructed = DeliveryAnnounce::new(Some(display_name.clone()), cost);
+        assert_eq!(
+            constructed.is_ok(),
+            accepted,
+            "cost {cost:?}: constructor acceptance must match set_inbound_stamp_cost"
+        );
+        if let Ok(constructed) = constructed {
+            let stored =
+                common::fixture("VEC-ANN-STAMP-COST-WINDOW", &format!("setter_stores_{key}"));
+            assert_eq!(
+                constructed
+                    .stamp_cost
+                    .map_or_else(|| "null".to_string(), |cost| cost.to_string()),
+                stored,
+                "cost {cost:?}: constructor must store what the setter stores"
+            );
+        } else {
+            assert_eq!(constructed.unwrap_err(), StampCostRefused(255));
+        }
+    }
+
+    // The pin bites: emitting the caller's byte verbatim is what we did before
+    // #181, and it is not what the reference emits. Recomposed here as
+    // fixarray(3) || bin8 "Alice" || uint8 255 || fixarray(1) || 0.
+    let mut unclamped = vec![0x93, 0xc4, display_name.len() as u8];
+    unclamped.extend_from_slice(&display_name);
+    unclamped.extend_from_slice(&[0xcc, 0xff, 0x91, 0x00]);
+    assert_ne!(
+        hex::encode(&unclamped),
+        common::fixture("VEC-ANN-STAMP-COST-WINDOW", "emit_255_hex"),
+        "the naive encoding must differ from the reference's, or the pin is vacuous"
+    );
+    assert_eq!(
+        hex::encode(&unclamped),
+        // Same recomposition against cost 254, which the reference *does* send,
+        // proves the byte layout above is right and only the value differs.
+        common::fixture("VEC-ANN-STAMP-COST-WINDOW", "emit_254_hex").replace("ccfe", "ccff"),
+    );
+}

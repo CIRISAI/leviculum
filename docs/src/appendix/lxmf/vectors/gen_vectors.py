@@ -37,6 +37,7 @@ from RNS.vendor import umsgpack as msgpack
 import LXMF
 from LXMF.LXMessage import LXMessage
 from LXMF.LXMPeer import LXMPeer
+from LXMF.LXMRouter import LXMRouter
 from LXMF import (
     compression_support_from_app_data,
     display_name_from_app_data,
@@ -630,6 +631,55 @@ def gen_announce_vectors():
             compression_support_from_app_data(app_data)
         ),
     })
+
+    # The reference's advertised-stamp-cost window, taken from the reference's
+    # own emitter and its own decoder rather than rebuilt here.
+    #
+    # `get_announce_app_data` (LXMRouter.py:1042-1045) writes the cost only when
+    # `0 < cost < 255` and writes None otherwise, so 0 and 255 are indis-
+    # tinguishable on the wire from "no cost". `set_inbound_stamp_cost`
+    # (LXMRouter.py:378-393) applies the same window one layer earlier and makes
+    # the refusal visible: `< 1` is accepted and stored as None (returns True),
+    # `>= 255` is refused outright (returns False, previous value untouched).
+    #
+    # `LXMRouter.__new__` skips `__init__`; both methods read nothing but
+    # `self.delivery_destinations`, so this exercises the genuine reference code
+    # without a live RNS instance.
+    router = LXMRouter.__new__(LXMRouter)
+    src_id, _ = make_identities()
+    window_destination = RNS.Destination(
+        src_id, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery"
+    )
+    window_destination.display_name = "Alice"
+    router.delivery_destinations = {window_destination.hash: window_destination}
+
+    window = {
+        "id": "VEC-ANN-STAMP-COST-WINDOW",
+        "title": "Advertised stamp cost is only emitted for 0 < cost < 255",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:1042-1045 (emit); LXMRouter.py:378-393 (setter)",
+        "structure": "emit_<cost>_hex = get_announce_app_data() with that cost "
+                     "assigned; peer_reads_<cost> = stamp_cost_from_app_data() "
+                     "of those bytes; setter_accepts_<cost> = "
+                     "set_inbound_stamp_cost() return value",
+        "display_name_hex": window_destination.display_name.encode("utf-8").hex(),
+    }
+    for cost in [None, 0, 1, 8, 254, 255]:
+        key = "none" if cost is None else str(cost)
+        # Assign the attribute directly, the way a caller storing an
+        # unvalidated configuration value would, so the emitter's own window is
+        # what is being measured.
+        window_destination.stamp_cost = cost
+        emitted = router.get_announce_app_data(window_destination.hash)
+        window[f"emit_{key}_hex"] = emitted.hex()
+        window[f"peer_reads_{key}"] = stamp_cost_from_app_data(emitted)
+        # Then the setter, from a known-clear state, for its return value.
+        window_destination.stamp_cost = None
+        window[f"setter_accepts_{key}"] = bool(
+            router.set_inbound_stamp_cost(window_destination.hash, cost)
+        )
+        window[f"setter_stores_{key}"] = window_destination.stamp_cost
+    add(window)
 
     # Propagation announce app_data (7-element list) per
     # LXMRouter.get_propagation_node_app_data (LXMRouter.py:306-318).

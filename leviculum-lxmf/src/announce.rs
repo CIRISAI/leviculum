@@ -6,6 +6,36 @@ use crate::msgpack;
 
 pub const SF_COMPRESSION: u64 = 0x00;
 
+/// A stamp cost the reference refuses to advertise (Codeberg #181).
+///
+/// `LXMRouter.set_inbound_stamp_cost` (LXMRouter.py:378-393) returns `False`
+/// for any cost `>= 255` and leaves the destination's cost untouched. Only 255
+/// is representable in a `u8`, so that is the only value this carries; the
+/// field is kept so the error prints what was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StampCostRefused(pub u8);
+
+impl core::fmt::Display for StampCostRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "stamp cost {} is outside the announceable window 0 < cost < 255",
+            self.0
+        )
+    }
+}
+
+/// The value `get_announce_app_data` would put in the stamp-cost slot.
+///
+/// Reference: LXMRouter.py:1042-1045 starts from `stamp_cost = None` and
+/// overwrites it only when `stamp_cost > 0 and stamp_cost < 255`. A peer reads
+/// this field with no bound of its own (Handlers.py:17-18, LXMRouter.py:1029)
+/// and mines against it (LXMessage.py:320, LXStamper.py:199), so the refusal to
+/// send an unmineable value is the writer's responsibility alone.
+fn advertised_stamp_cost(stamp_cost: Option<u8>) -> Option<u8> {
+    stamp_cost.filter(|cost| *cost > 0 && *cost < 255)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryAnnounce {
     pub display_name: Option<Vec<u8>>,
@@ -14,6 +44,30 @@ pub struct DeliveryAnnounce {
 }
 
 impl DeliveryAnnounce {
+    /// Build a delivery announce, refusing a stamp cost the reference would not
+    /// advertise.
+    ///
+    /// Mirrors `LXMRouter.set_inbound_stamp_cost` (LXMRouter.py:378-393)
+    /// exactly: `None` and 0 are accepted and stored as "no cost", 1..=254 are
+    /// stored as given, and 255 is refused. Prefer this over the struct
+    /// literal: it is where a caller learns that its configured cost will never
+    /// reach the wire. [`Self::encode`] applies the same window regardless, so
+    /// a value assigned to the field directly cannot escape it either — the
+    /// reference guards both layers the same way.
+    pub fn new(
+        display_name: Option<Vec<u8>>,
+        stamp_cost: Option<u8>,
+    ) -> Result<Self, StampCostRefused> {
+        if stamp_cost == Some(255) {
+            return Err(StampCostRefused(255));
+        }
+        Ok(Self {
+            display_name,
+            stamp_cost: advertised_stamp_cost(stamp_cost),
+            compression_supported: true,
+        })
+    }
+
     /// Encode the current three-element delivery announce format.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -23,7 +77,7 @@ impl DeliveryAnnounce {
         } else {
             msgpack::nil(&mut out);
         }
-        if let Some(cost) = self.stamp_cost {
+        if let Some(cost) = advertised_stamp_cost(self.stamp_cost) {
             msgpack::uint(&mut out, cost as u64);
         } else {
             msgpack::nil(&mut out);
@@ -114,6 +168,12 @@ impl DeliveryAnnounce {
 }
 
 /// Compatibility wrapper retaining the original small API.
+///
+/// Infallible: a stamp cost outside the reference's `0 < cost < 255` window is
+/// encoded as "no cost" without telling the caller, exactly as
+/// `get_announce_app_data` does (LXMRouter.py:1042-1045). Use
+/// [`DeliveryAnnounce::new`] when the caller needs to learn that its cost was
+/// refused.
 pub fn delivery(display_name: Option<&[u8]>, stamp_cost: Option<u8>) -> Vec<u8> {
     DeliveryAnnounce {
         display_name: display_name.map(<[u8]>::to_vec),
