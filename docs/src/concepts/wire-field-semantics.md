@@ -163,7 +163,8 @@ link and resource layers (tranche 2, pins in
 `leviculum-core/src/node/mvr_generated_field_pins.rs` and the resource
 modules), the transport layer (tranche 3, pins in the same two files),
 and LXMF (tranche 4, pins in
-`leviculum-lxmf/tests/generated_field_pins.rs`).
+`leviculum-lxmf/tests/generated_field_pins.rs` and
+`leviculum-lxmf/tests/wall_clock_producer.rs`).
 
 Tranche 2 found two fields that failed the audit and were fixed
 red-first: the request timestamp carried process uptime (#164) and the
@@ -172,8 +173,11 @@ the salted per-transfer hash (#165). Tranche 3 found four routing
 defects (#168, #169, #170, #172). Tranche 4 found that the announced
 LXMF stamp cost was not clamped to the reference's `0 < cost < 255`
 window (#181, fixed red-first, and the origin of question 3 above),
-and that the LXMF crate resolves none of its wall-clock wire fields
-through `Transport::emission_secs`.
+and that the LXMF crate resolved none of its wall-clock wire fields
+through `Transport::emission_secs` — it took them from a caller
+parameter instead (#182, fixed: the router now resolves them from the
+`NodeCore` it holds, and refuses to issue a ticket whose expiry it
+knows a peer will discard).
 
 The recurring lesson across all four: the offenders were timestamps and
 identifier-derivation order, never framing. Nothing that round-trips

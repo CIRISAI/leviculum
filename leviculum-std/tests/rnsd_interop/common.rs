@@ -44,6 +44,16 @@ impl Clock for TestClock {
             .unwrap()
             .as_millis() as u64
     }
+    /// Answer the wall clock like `leviculum_std::clock::SystemClock` does, so
+    /// `Transport::emission_secs` — the one producer every cross-lifetime wire
+    /// field draws from (Codeberg #155, #182) — resolves at source 1 rather
+    /// than falling through to uptime seconds.
+    fn wall_unix_secs(&self) -> Option<u64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs())
+    }
 }
 
 /// Get current time in milliseconds (convenience for tests)

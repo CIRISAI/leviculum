@@ -219,6 +219,13 @@ pub enum RouterError {
     PropagationNodeUnavailable,
     PropagationStampUnavailable,
     StaleStampRequest,
+    /// The node's timebase is below the plausibility floor, so it has no wall
+    /// clock and has learned none: it can only produce uptime seconds.
+    ///
+    /// Returned instead of writing a wire field a peer evaluates against its
+    /// own clock and silently discards (Codeberg #182). See
+    /// [`LxmfRouter::issue_ticket_field`].
+    NoWallClock,
     Node(LxmfNodeError),
     Message(MessageError),
     Propagation(PropagationError),
@@ -298,6 +305,35 @@ struct RestoredRouterState {
     processed_ids: BTreeMap<[u8; 32], f64>,
     tickets: TicketStore,
     ignored: BTreeSet<[u8; 16]>,
+}
+
+/// The unix-seconds value every LXMF wire field with cross-lifetime semantics
+/// is written from (Codeberg #182).
+///
+/// LXMF has three such fields — the message timestamp, the ticket expiry and
+/// the propagation upload timestamp — and `docs/src/concepts/time-and-clocks.md`
+/// ("One value, one producer") binds them to `Transport::emission_secs`, which
+/// [`NodeCore::emission_secs`] exposes. Every public router entry point that
+/// needs wall time resolves it here from the `NodeCore` it is already handed,
+/// so no caller can supply a monotonic or invented value; the parameter this
+/// replaces was the #155 failure mode one crate up.
+///
+/// Two consequences worth knowing. The value has one-second granularity,
+/// where the reference writes `time.time()` with fractional seconds — nothing
+/// a peer decides looks below one second, and this is the same granularity
+/// the announce emission field already has. And the router's own caches
+/// (`clean`, the stamp-cost and delivered/processed ID windows) are aged on
+/// this value, so a clockless node whose timebase jumps from uptime seconds
+/// to real unix time expires them all in one pass, exactly as a Python node
+/// does across a large NTP step. The effect is a lost dedup window, not a
+/// wire-visible one.
+fn emission_secs<R, C, S>(node: &NodeCore<R, C, S>) -> f64
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    node.emission_secs() as f64
 }
 
 fn unpack_local<R, C, S>(
@@ -389,15 +425,39 @@ impl LxmfRouter {
     /// ticket-stamped reply. The returned field must be inserted before
     /// [`Message::create`], since fields are covered by the message ID and
     /// signature.
-    pub fn issue_ticket_field<R: CryptoRngCore>(
+    ///
+    /// The expiry is `emission_secs + TICKET_EXPIRY`, from the one producer
+    /// (see [`emission_secs`]). It is the only LXMF field a peer *discards* on
+    /// its own clock: `if time.time() < expires`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1854`), silently, with no reply and
+    /// no log naming us.
+    ///
+    /// Because of that silence this call REFUSES with [`RouterError::NoWallClock`]
+    /// when the node's timebase is below the plausibility floor
+    /// (`NodeCore::has_plausible_wall_clock`, i.e. uptime seconds on a
+    /// clockless node that has learned no announce timebase yet). Issuing
+    /// anyway would produce a ticket every Python peer drops while two
+    /// leviculum nodes accept each other's happily — self-consistent between
+    /// our writer and our reader, wrong to a peer, which is Codeberg #155
+    /// exactly. A named error is a diagnosis; a discarded ticket is a mystery.
+    /// This is a refusal to *issue*, never a filter on what we accept: a
+    /// peer's ticket is remembered and used regardless of our own clock.
+    pub fn issue_ticket_field<R, C, S, G>(
         &mut self,
+        node: &NodeCore<R, C, S>,
         destination: [u8; 16],
-        now_unix: f64,
-        rng: &mut R,
-    ) -> Result<(Option<Field>, RouterOutput), RouterError> {
-        if !now_unix.is_finite() {
-            return Err(RouterError::CorruptSnapshot);
+        rng: &mut G,
+    ) -> Result<(Option<Field>, RouterOutput), RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+        G: CryptoRngCore,
+    {
+        if !node.has_plausible_wall_clock() {
+            return Err(RouterError::NoWallClock);
         }
+        let now_unix = emission_secs(node);
         let before = self.tickets.entry_count();
         let mut probe = self.tickets.clone();
         let ticket = probe.issue(destination, now_unix, rng);
@@ -456,12 +516,65 @@ impl LxmfRouter {
         }
         Ok(self.finish_output(RouterOutput::default()))
     }
-    pub fn enqueue(
+    /// Build and sign an outbound message from this router's own delivery
+    /// identity, stamping the timestamp from the one producer.
+    ///
+    /// [`Message::create`] stays available for offline composition (paper
+    /// messages, vectors, decoded-and-rebuilt messages) and necessarily takes
+    /// the timestamp explicitly — it has no node and no clock. This is the
+    /// path for a message we are about to send, and it is the only one that
+    /// cannot be handed a monotonic value by mistake (Codeberg #182).
+    ///
+    /// Unlike [`Self::issue_ticket_field`] this does NOT refuse an implausible
+    /// clock. The reference writes `self.timestamp = time.time()` unvalidated
+    /// (`reference/LXMF/LXMF/LXMessage.py:357`) and no peer discards a message
+    /// on it — it is read back at :797 and displayed. Withholding the message
+    /// would be a far worse failure than a mis-sorted one, and matches the
+    /// "We do not validate our own clock" rule in
+    /// `docs/src/concepts/time-and-clocks.md`.
+    pub fn create_message<R, C, S>(
+        &self,
+        node: &NodeCore<R, C, S>,
+        destination_hash: [u8; 16],
+        title: Vec<u8>,
+        content: Vec<u8>,
+        fields: Vec<Field>,
+        method: DeliveryMethod,
+    ) -> Result<Message, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let source_hash = self.node.delivery_destination_hash();
+        let source = node
+            .destination(&source_hash)
+            .and_then(|destination| destination.identity())
+            .ok_or(RouterError::NotFound)?;
+        Ok(Message::create(
+            destination_hash,
+            source_hash.into_bytes(),
+            source,
+            emission_secs(node),
+            title,
+            content,
+            fields,
+            method,
+        )?)
+    }
+
+    pub fn enqueue<R, C, S>(
         &mut self,
+        node: &NodeCore<R, C, S>,
         mut message: Message,
-        now_ms: u64,
-        now_unix: f64,
-    ) -> Result<RouterOutput, RouterError> {
+    ) -> Result<RouterOutput, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let now_ms = node.now_ms();
+        let now_unix = emission_secs(node);
         if message.method == DeliveryMethod::Paper {
             return Err(RouterError::UnsupportedMethod);
         }
@@ -571,22 +684,29 @@ impl LxmfRouter {
 
     /// Attach the result of a detached recipient-stamp request after checking
     /// that its message and advertised cost are still current.
-    pub fn set_outbound_stamp_result(
+    pub fn set_outbound_stamp_result<R, C, S>(
         &mut self,
+        node: &NodeCore<R, C, S>,
         request: &DeliveryStampRequest,
         stamp: Vec<u8>,
-        now_ms: u64,
-        now_unix: f64,
-    ) -> Result<RouterOutput, RouterError> {
+    ) -> Result<RouterOutput, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let now_unix = emission_secs(node);
         let current = self
             .outbound
             .get(&request.message_id)
             .filter(|entry| entry.message.stamp.is_none())
-            .and_then(|entry| self.outbound_stamp_cost(&entry.message.destination_hash, now_unix));
+            .and_then(|entry| {
+                self.outbound_stamp_cost_at(&entry.message.destination_hash, now_unix)
+            });
         if current != Some(request.target_cost) {
             return Err(RouterError::StaleStampRequest);
         }
-        self.set_outbound_stamp(&request.message_id, stamp, now_ms)
+        self.set_outbound_stamp(&request.message_id, stamp, node.now_ms())
     }
 
     /// Return the detached work request needed by an external propagation
@@ -608,13 +728,19 @@ impl LxmfRouter {
     /// The request contains no router or NodeCore borrow and can safely run on
     /// a cooperative executor, a WASM worker, Rayon, or dedicated hardware
     /// while receive processing continues.
-    pub fn outbound_stamp_request(
+    pub fn outbound_stamp_request<R, C, S>(
         &self,
+        node: &NodeCore<R, C, S>,
         id: &[u8; 32],
-        now_unix: f64,
-    ) -> Option<DeliveryStampRequest> {
+    ) -> Option<DeliveryStampRequest>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
         let entry = self.outbound.get(id)?;
-        let target_cost = self.outbound_stamp_cost(&entry.message.destination_hash, now_unix)?;
+        let target_cost =
+            self.outbound_stamp_cost_at(&entry.message.destination_hash, emission_secs(node))?;
         (entry.message.stamp.is_none() && target_cost > 0).then_some(DeliveryStampRequest {
             message_id: *id,
             target_cost,
@@ -694,7 +820,22 @@ impl LxmfRouter {
     /// bits is already unreachable in practice; only the strictly
     /// non-terminating case is removed. Bounding the work for legal costs is a
     /// scheduling question (cancellation, deadlines), not a compatibility one.
-    pub fn outbound_stamp_cost(&self, destination: &[u8; 16], now_unix: f64) -> Option<u8> {
+    pub fn outbound_stamp_cost<R, C, S>(
+        &self,
+        node: &NodeCore<R, C, S>,
+        destination: &[u8; 16],
+    ) -> Option<u8>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        self.outbound_stamp_cost_at(destination, emission_secs(node))
+    }
+
+    /// [`Self::outbound_stamp_cost`] at an already-resolved timebase, for the
+    /// internal paths that took one wall-clock reading for the whole operation.
+    fn outbound_stamp_cost_at(&self, destination: &[u8; 16], now_unix: f64) -> Option<u8> {
         self.outbound_stamp_costs
             .get(destination)
             .filter(|(seen, _, _)| now_unix - *seen <= STAMP_COST_EXPIRY as f64)
@@ -706,13 +847,13 @@ impl LxmfRouter {
         &mut self,
         node: &mut NodeCore<R, C, S>,
         event: &NodeEvent,
-        now_unix: f64,
     ) -> Result<RouterOutput, RouterError>
     where
         R: CryptoRngCore,
         C: Clock,
         S: Storage,
     {
+        let now_unix = emission_secs(node);
         let node_output = self.node.handle_event(node, event)?;
         let mut output = RouterOutput {
             core: node_output.core,
@@ -1061,13 +1202,13 @@ impl LxmfRouter {
     pub fn tick<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
-        now_unix: f64,
     ) -> Result<RouterOutput, RouterError>
     where
         R: CryptoRngCore,
         C: Clock,
         S: Storage,
     {
+        let now_unix = emission_secs(node);
         let now_ms = node.now_ms();
         let mut output = RouterOutput::default();
         if let Some(mut propagation) = self.propagation.take() {
@@ -1127,7 +1268,7 @@ impl LxmfRouter {
                 .message
                 .stamp
                 .is_none()
-                .then(|| self.outbound_stamp_cost(&entry.message.destination_hash, now_unix))
+                .then(|| self.outbound_stamp_cost_at(&entry.message.destination_hash, now_unix))
                 .flatten()
                 .filter(|cost| *cost > 0)
             {
@@ -1882,11 +2023,20 @@ mod persistence_tests {
         storage::MemoryLxmfStorage,
     };
 
+    /// Wall time for the whole test module. The router resolves every
+    /// wall-clock field through `Transport::emission_secs` (Codeberg #182), so
+    /// the injection point for LXMF time is the platform clock, not a
+    /// parameter on the call.
+    const TEST_WALL_UNIX: u64 = 1_700_000_000;
+
     struct TestClock(Cell<u64>);
 
     impl Clock for TestClock {
         fn now_ms(&self) -> u64 {
             self.0.get()
+        }
+        fn wall_unix_secs(&self) -> Option<u64> {
+            Some(TEST_WALL_UNIX)
         }
     }
 
@@ -2010,7 +2160,7 @@ mod persistence_tests {
             .find(|event| matches!(event, NodeEvent::AnnounceReceived { .. }))
             .expect("remote announce event");
         let _ = router
-            .handle_event(node, &announce_event, 1_700_000_000.0)
+            .handle_event(node, &announce_event)
             .expect("remember remote announce");
         destination_hash
     }
@@ -2055,10 +2205,10 @@ mod persistence_tests {
     }
 
     fn populated_router(config: RouterConfig) -> LxmfRouter {
-        let mut router = router(config);
+        let (mut router, node) = router_and_node(config);
         let queued = message(40);
         let queued_id = queued.message_id;
-        let _ = router.enqueue(queued, 12_345, 1_700_000_000.25).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let outbound = router.outbound.get_mut(&queued_id).unwrap();
         outbound.state = MessageState::Sending;
         outbound.attempts = 3;
@@ -2246,11 +2396,11 @@ mod persistence_tests {
             .expect("announce event");
 
         let output = router
-            .handle_event(&mut node, &announce_event, 1_700_000_000.0)
+            .handle_event(&mut node, &announce_event)
             .expect("handle delivery announce");
 
         assert_eq!(
-            router.outbound_stamp_cost(destination_hash.as_bytes(), 1_700_000_000.0),
+            router.outbound_stamp_cost(&node, destination_hash.as_bytes()),
             Some(9)
         );
         assert_eq!(persistence_request_count(&output), 1);
@@ -2294,7 +2444,7 @@ mod persistence_tests {
             .find(|event| matches!(event, NodeEvent::AnnounceReceived { .. }))
             .expect("announce event");
         let _ = router
-            .handle_event(&mut node, &announce_event, 1_700_000_000.0)
+            .handle_event(&mut node, &announce_event)
             .expect("handle delivery announce");
 
         // The peer's 255 was decoded and cached, and is then withheld.
@@ -2307,7 +2457,7 @@ mod persistence_tests {
             "the announced value is stored verbatim; only the accessor filters"
         );
         assert_eq!(
-            router.outbound_stamp_cost(destination_hash.as_bytes(), 1_700_000_000.0),
+            router.outbound_stamp_cost(&node, destination_hash.as_bytes()),
             None
         );
 
@@ -2325,10 +2475,10 @@ mod persistence_tests {
         )
         .expect("message");
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
-        assert_eq!(router.outbound_stamp_request(&id, 1_700_000_000.0), None);
+        let _ = router.enqueue(&node, queued).unwrap();
+        assert_eq!(router.outbound_stamp_request(&node, &id), None);
         let output = router
-            .tick(&mut node, 1_700_000_001.0)
+            .tick(&mut node)
             .expect("tick with a hostile cost cached");
         assert!(
             !output
@@ -2347,7 +2497,7 @@ mod persistence_tests {
             Some((1_700_000_000.0, Some(255), true))
         );
         assert_eq!(
-            router.outbound_stamp_cost(destination_hash.as_bytes(), 1_700_000_000.0),
+            router.outbound_stamp_cost(&node, destination_hash.as_bytes()),
             Some(254)
         );
     }
@@ -2357,10 +2507,10 @@ mod persistence_tests {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = message(71);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         checkpoint(&mut router);
 
-        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
         let entry = router.outbound.get(&id).expect("retry remains queued");
         assert_eq!(entry.attempts, 1);
         assert_eq!(entry.next_attempt_ms, 1_000 + DELIVERY_RETRY_WAIT_MS);
@@ -2372,12 +2522,12 @@ mod persistence_tests {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = message(72);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let entry = router.outbound.get_mut(&id).expect("queued direct message");
         entry.attempts = MAX_DELIVERY_ATTEMPTS;
         entry.next_attempt_ms = 1_000;
 
-        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
 
         assert!(!router.outbound.contains_key(&id));
         assert!(output.events.iter().any(|event| matches!(
@@ -2392,13 +2542,13 @@ mod persistence_tests {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = message(83);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let entry = router.outbound.get_mut(&id).expect("queued direct message");
         entry.attempts = MAX_DELIVERY_ATTEMPTS;
         entry.state = MessageState::Sending;
         entry.next_attempt_ms = 1_000;
 
-        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
         let entry = router
             .outbound
             .get(&id)
@@ -2421,10 +2571,10 @@ mod persistence_tests {
 
     #[test]
     fn direct_payload_submission_stays_within_the_link_attempt() {
-        let mut router = router(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let queued = message(85);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let entry = router.outbound.get_mut(&id).expect("queued direct message");
         entry.attempts = 1;
 
@@ -2446,7 +2596,7 @@ mod persistence_tests {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = oversized_opportunistic_message(84);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let entry = router
             .outbound
             .get_mut(&id)
@@ -2454,7 +2604,7 @@ mod persistence_tests {
         entry.attempts = MAX_DELIVERY_ATTEMPTS;
         entry.next_attempt_ms = 1_000;
 
-        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
 
         assert!(!router.outbound.contains_key(&id));
         assert!(output.events.iter().any(|event| matches!(
@@ -2471,7 +2621,7 @@ mod persistence_tests {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = oversized_opportunistic_message(85);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let entry = router
             .outbound
             .get_mut(&id)
@@ -2480,7 +2630,7 @@ mod persistence_tests {
         entry.state = MessageState::Sending;
         entry.next_attempt_ms = 1_000;
 
-        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
         let entry = router
             .outbound
             .get(&id)
@@ -2506,7 +2656,7 @@ mod persistence_tests {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
         let queued = message(82);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
 
         let output = router
             .cancel(&mut node, &id)
@@ -2526,9 +2676,9 @@ mod persistence_tests {
         let mut queued = message(73);
         queued.method = DeliveryMethod::Opportunistic;
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
 
-        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
         let entry = router.outbound.get(&id).expect("message remains queued");
         assert_eq!(entry.attempts, 0);
         assert!(router.preemptive_path_requests.contains(&id));
@@ -2542,11 +2692,11 @@ mod persistence_tests {
 
     #[test]
     fn opportunistic_submission_matches_python_sent_state() {
-        let (mut router, _node) = router_and_node(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let mut queued = message(79);
         queued.method = DeliveryMethod::Opportunistic;
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let mut events = Vec::new();
 
         router.handle_node_event(
@@ -2572,18 +2722,16 @@ mod persistence_tests {
         let mut queued = message(75);
         queued.destination_hash = destination.into_bytes();
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
 
-        let _ = router.tick(&mut node, 1_700_000_001.0).expect("start link");
+        let _ = router.tick(&mut node).expect("start link");
         let entry = router.outbound.get(&id).expect("message remains queued");
         assert_eq!(entry.attempts, 1);
         assert_eq!(entry.next_attempt_ms, 1_000 + DELIVERY_RETRY_WAIT_MS);
 
         router.next_job_ms = 1_000;
         router.outbound.get_mut(&id).unwrap().next_attempt_ms = 1_000;
-        let _ = router
-            .tick(&mut node, 1_700_000_002.0)
-            .expect("observe pending link");
+        let _ = router.tick(&mut node).expect("observe pending link");
         let entry = router.outbound.get(&id).expect("message remains queued");
         assert_eq!(entry.attempts, 1);
         assert_eq!(entry.next_attempt_ms, 1_000 + PROCESSING_INTERVAL_MS);
@@ -2591,12 +2739,12 @@ mod persistence_tests {
 
     #[test]
     fn direct_link_establishment_wakes_waiting_message_without_an_attempt() {
-        let (mut router, _node) = router_and_node(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let destination = DestinationHash::new([0x76; 16]);
         let mut queued = message(76);
         queued.destination_hash = destination.into_bytes();
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let entry = router.outbound.get_mut(&id).unwrap();
         entry.attempts = 1;
         entry.next_attempt_ms = 1_000 + DELIVERY_RETRY_WAIT_MS;
@@ -2630,9 +2778,9 @@ mod persistence_tests {
         let mut queued = message(77);
         queued.destination_hash = destination.into_bytes();
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
 
-        let output = router.tick(&mut node, 1_700_000_001.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
         let entry = router.outbound.get(&id).expect("message remains queued");
         assert_eq!(entry.attempts, 1);
         assert_eq!(entry.next_attempt_ms, 1_000 + PATH_REQUEST_WAIT_MS);
@@ -2649,7 +2797,7 @@ mod persistence_tests {
         let destination = DestinationHash::new([0x78; 16]);
         let mut queued = message(78);
         queued.destination_hash = destination.into_bytes();
-        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         let event = NodeEvent::LinkClosed {
             link_id: LinkId::new([0x79; 16]),
             reason: leviculum_core::LinkCloseReason::PeerClosed,
@@ -2658,7 +2806,7 @@ mod persistence_tests {
         };
 
         let output = router
-            .handle_event(&mut node, &event, 1_700_000_001.0)
+            .handle_event(&mut node, &event)
             .expect("handle direct link close");
         assert!(output
             .core
@@ -2668,7 +2816,7 @@ mod persistence_tests {
 
         router.outbound.clear();
         let output = router
-            .handle_event(&mut node, &event, 1_700_000_002.0)
+            .handle_event(&mut node, &event)
             .expect("handle idle link close");
         assert!(!output
             .core
@@ -2681,7 +2829,7 @@ mod persistence_tests {
     fn idle_scheduler_tick_does_not_request_a_checkpoint() {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
 
-        let output = router.tick(&mut node, 1_700_000_000.0).expect("tick");
+        let output = router.tick(&mut node).expect("tick");
 
         assert_eq!(router.next_job_ms, 1_000 + PROCESSING_INTERVAL_MS);
         assert_eq!(persistence_request_count(&output), 0);
@@ -2689,10 +2837,10 @@ mod persistence_tests {
 
     #[test]
     fn delivery_failure_and_progress_each_request_a_checkpoint() {
-        let mut router = router(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let queued = message(72);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 5_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         checkpoint(&mut router);
         router.outbound.get_mut(&id).unwrap().state = MessageState::Sending;
 
@@ -2702,7 +2850,7 @@ mod persistence_tests {
                 message_id: id,
                 reason: DeliveryFailure::DirectPacketTimeout,
             },
-            5_000,
+            node.now_ms(),
             1_700_000_001.0,
             &mut failure_events,
         );
@@ -2712,7 +2860,10 @@ mod persistence_tests {
         });
         let entry = router.outbound.get(&id).unwrap();
         assert_eq!(entry.state, MessageState::Outbound);
-        assert_eq!(entry.next_attempt_ms, 5_000 + DELIVERY_RETRY_WAIT_MS);
+        assert_eq!(
+            entry.next_attempt_ms,
+            node.now_ms() + DELIVERY_RETRY_WAIT_MS
+        );
         assert_eq!(persistence_request_count(&failure), 1);
         checkpoint(&mut router);
 
@@ -2736,10 +2887,10 @@ mod persistence_tests {
 
     #[test]
     fn receiver_cancelled_resource_is_terminally_rejected() {
-        let mut router = router(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let queued = message(86);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 5_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
         checkpoint(&mut router);
         router.outbound.get_mut(&id).unwrap().state = MessageState::Sending;
 
@@ -2794,8 +2945,8 @@ mod persistence_tests {
 
     #[test]
     fn failed_checkpoint_remains_dirty_until_a_successful_retry() {
-        let mut router = router(RouterConfig::default());
-        let _ = router.enqueue(message(73), 1_000, 1_700_000_000.0).unwrap();
+        let (mut router, node) = router_and_node(RouterConfig::default());
+        let _ = router.enqueue(&node, message(73)).unwrap();
         let mut full = MemoryLxmfStorage::new(0);
         assert_eq!(
             router.persist(&mut full),
@@ -2833,31 +2984,31 @@ mod persistence_tests {
 
     #[test]
     fn propagated_requires_a_selected_client_node_and_paper_uses_its_own_api() {
-        let mut router = router(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let mut propagated = message(41);
         propagated.method = DeliveryMethod::Propagated;
         assert!(matches!(
-            router.enqueue(propagated, 1_000, 1_700_000_000.0),
+            router.enqueue(&node, propagated),
             Err(RouterError::PropagationNodeUnavailable)
         ));
 
         let mut paper = message(42);
         paper.method = DeliveryMethod::Paper;
         assert!(matches!(
-            router.enqueue(paper, 1_000, 1_700_000_000.0),
+            router.enqueue(&node, paper),
             Err(RouterError::UnsupportedMethod)
         ));
     }
 
     #[test]
     fn queued_outbound_accepts_both_stamp_lengths_and_becomes_due() {
-        let mut router = router(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         router.next_job_ms = 90_000;
 
         for (seed, length, now_ms) in [(43, 16, 1_200), (44, 32, 1_100)] {
             let queued = message(seed);
             let id = queued.message_id;
-            let _ = router.enqueue(queued, 80_000, 1_700_000_000.0).unwrap();
+            let _ = router.enqueue(&node, queued).unwrap();
 
             let output = router
                 .set_outbound_stamp(&id, vec![seed; length], now_ms)
@@ -2876,10 +3027,10 @@ mod persistence_tests {
 
     #[test]
     fn invalid_queued_stamp_is_rejected_without_mutating_entry() {
-        let mut router = router(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let queued = message(45);
         let id = queued.message_id;
-        let _ = router.enqueue(queued, 5_000, 1_700_000_000.0).unwrap();
+        let _ = router.enqueue(&node, queued).unwrap();
 
         assert!(matches!(
             router.set_outbound_stamp(&id, vec![0xaa; 31], 1_000),
@@ -2887,40 +3038,33 @@ mod persistence_tests {
         ));
         let entry = router.outbound.get(&id).expect("queued entry");
         assert!(entry.message.stamp.is_none());
-        assert_eq!(entry.next_attempt_ms, 5_000);
+        assert_eq!(entry.next_attempt_ms, node.now_ms());
     }
 
     #[test]
     fn detached_delivery_stamp_result_rejects_a_changed_cost() {
-        let mut router = router(RouterConfig::default());
+        let (mut router, node) = router_and_node(RouterConfig::default());
         let queued = message(46);
         let message_id = queued.message_id;
         let destination = queued.destination_hash;
         router.insert_bounded_stamp_cost(destination, (1_700_000_000.0, Some(8), false));
-        let _ = router
-            .enqueue(queued, 1_000, 1_700_000_000.0)
-            .expect("queue message");
+        let _ = router.enqueue(&node, queued).expect("queue message");
         let stale = router
-            .outbound_stamp_request(&message_id, 1_700_000_001.0)
+            .outbound_stamp_request(&node, &message_id)
             .expect("detached request");
 
         router.insert_bounded_stamp_cost(destination, (1_700_000_002.0, Some(9), false));
         assert!(matches!(
-            router.set_outbound_stamp_result(
-                &stale,
-                vec![0x46; STAMP_SIZE],
-                2_000,
-                1_700_000_002.0,
-            ),
+            router.set_outbound_stamp_result(&node, &stale, vec![0x46; STAMP_SIZE]),
             Err(RouterError::StaleStampRequest)
         ));
         assert!(router.outbound[&message_id].message.stamp.is_none());
 
         let current = router
-            .outbound_stamp_request(&message_id, 1_700_000_002.0)
+            .outbound_stamp_request(&node, &message_id)
             .expect("updated request");
         let _ = router
-            .set_outbound_stamp_result(&current, vec![0x47; STAMP_SIZE], 2_001, 1_700_000_002.0)
+            .set_outbound_stamp_result(&node, &current, vec![0x47; STAMP_SIZE])
             .expect("attach current result");
         assert_eq!(
             router.outbound[&message_id].message.stamp.as_deref(),
@@ -3039,14 +3183,14 @@ mod persistence_tests {
 
     #[test]
     fn issued_ticket_stamp_is_accepted_synchronously_even_without_pow() {
-        let mut router = router(RouterConfig {
+        let (mut router, node) = router_and_node(RouterConfig {
             enforce_stamps: true,
             inbound_stamp_cost: Some(20),
             ..RouterConfig::default()
         });
         let remote_hash = [0x61; 16];
         let (field, output) = router
-            .issue_ticket_field(remote_hash, 1_700_000_000.0, &mut OsRng)
+            .issue_ticket_field(&node, remote_hash, &mut OsRng)
             .expect("issue reply ticket");
         assert_eq!(persistence_request_count(&output), 1);
         let field = field.expect("ticket is due");
@@ -3105,7 +3249,7 @@ mod persistence_tests {
         let message_id = outbound.message_id;
 
         let _ = router
-            .enqueue(outbound, node.now_ms(), 1_700_000_000.0)
+            .enqueue(&node, outbound)
             .expect("queue ticket-stamped propagation message");
 
         let entry = router.outbound.get(&message_id).expect("queued entry");
@@ -3216,7 +3360,7 @@ mod persistence_tests {
         outbound.method = DeliveryMethod::Propagated;
         let message_id = outbound.message_id;
         let _ = router
-            .enqueue(outbound, 50_000, 1_700_000_000.0)
+            .enqueue(&node, outbound)
             .expect("queue propagated message");
         let mut unstamped_lxmf = router.outbound[&message_id]
             .message

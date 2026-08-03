@@ -48,6 +48,11 @@ impl Clock for TestClock {
     fn now_ms(&self) -> u64 {
         self.0.get()
     }
+    /// The router derives every wall-clock field from `Transport::emission_secs`
+    /// (Codeberg #182), so wall time is injected through the platform clock.
+    fn wall_unix_secs(&self) -> Option<u64> {
+        Some(NOW_UNIX as u64)
+    }
 }
 
 type TestNode = NodeCore<OsRng, TestClock, MemoryStorage>;
@@ -111,7 +116,7 @@ impl Sender {
         while let Some(event) = events.pop_front() {
             let follow_up = self
                 .router
-                .handle_event(&mut self.node, &event, NOW_UNIX)
+                .handle_event(&mut self.node, &event)
                 .expect("router handles NodeCore event");
             self.events.extend(follow_up.events);
             actions.extend(follow_up.core.actions);
@@ -139,7 +144,7 @@ impl Sender {
     }
 
     fn tick(&mut self) -> Vec<Vec<u8>> {
-        let output = self.router.tick(&mut self.node, NOW_UNIX).expect("tick");
+        let output = self.router.tick(&mut self.node).expect("tick");
         self.absorb_router(output)
     }
 
@@ -315,7 +320,7 @@ fn queue_and_submit(
     let id = message.message_id;
     let output = sender
         .router
-        .enqueue(message, sender.node.now_ms(), NOW_UNIX)
+        .enqueue(&sender.node, message)
         .expect("enqueue direct message");
     let packets = sender.absorb_router(output);
     pump(sender, receiver, packets);
@@ -403,7 +408,6 @@ fn a_retryable_outgoing_resource_failure_tears_down_its_direct_link() {
                 error: ResourceError::Timeout,
                 is_sender: true,
             },
-            NOW_UNIX,
         )
         .expect("router handles the failed outgoing Resource");
     let _ = sender.absorb_router(output);
@@ -441,7 +445,6 @@ fn a_receiver_cancelled_resource_is_rejected_and_keeps_the_link() {
                 error: ResourceError::Cancelled,
                 is_sender: true,
             },
-            NOW_UNIX,
         )
         .expect("router handles the receiver's cancel");
     let _ = sender.absorb_router(output);

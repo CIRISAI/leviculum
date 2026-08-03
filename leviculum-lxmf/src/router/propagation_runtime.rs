@@ -891,7 +891,9 @@ impl PropagationRuntime {
         let recipient_stamp_cost = router
             .outbound
             .get(&message_id)
-            .and_then(|entry| router.outbound_stamp_cost(&entry.message.destination_hash, now_unix))
+            .and_then(|entry| {
+                router.outbound_stamp_cost_at(&entry.message.destination_hash, now_unix)
+            })
             .filter(|cost| *cost > 0);
         if let Some(target_cost) = recipient_stamp_cost {
             if router

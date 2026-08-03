@@ -36,6 +36,48 @@ new wire field with cross-lifetime semantics draws from it too —
 never from the monotonic `Clock::now_ms`, which is a timer, not a
 calendar.
 
+**Crates layered on `NodeCore` reach the same producer, they do not
+take a parameter.** `NodeCore::emission_secs` exposes it; LXMF's three
+cross-lifetime fields — the message timestamp, the ticket expiry and
+the propagation upload timestamp — resolve through it inside the
+router (`leviculum-lxmf/src/router.rs`, Codeberg #182). They used to
+arrive as a `now_unix: f64` argument on `enqueue`, `tick`,
+`handle_event` and `issue_ticket_field`, which is the #155 shape with
+the defect moved into the caller: nothing about the signature stops a
+clockless node from passing uptime seconds. An API that cannot be
+called wrongly beats a doc comment warning about it. Pinned at
+`leviculum-lxmf/tests/wall_clock_producer.rs`, structurally (no public
+router entry point takes an `f64`) as well as by value.
+
+### Refuse a field the peer discards in silence
+
+The producer carries no plausibility guarantee — on a clockless node
+with nothing learned it is uptime seconds, and that is *correct*
+behaviour for it (see the non-behaviours below: we never alter our own
+emission). What changes with the field is whether emitting a known-bad
+value is better than emitting nothing.
+
+Split on what the peer does with it:
+
+- **The peer discards the field, silently.** Refuse, with a named
+  error. The LXMF ticket expiry is the case: a peer keeps a ticket
+  only while `time.time() < expires` on its own clock
+  (`reference/LXMF/LXMF/LXMRouter.py:1854`) and says nothing when it
+  does not. `LxmfRouter::issue_ticket_field` returns
+  `RouterError::NoWallClock` below
+  [`EMISSION_PLAUSIBLE_MIN_SECS`](#the-timebase-never-moves-backwards-and-adoption-is-windowed)
+  rather than issue one. A named error is a diagnosis; a discarded
+  ticket is a mystery that surfaces months later as "replies from this
+  peer are slow".
+- **The peer decides nothing on it.** Emit it. The LXMF message
+  timestamp (displayed and sorted, `LXMessage.py:357` unvalidated) and
+  the propagation upload timestamp (bound and dropped,
+  `LXMRouter.py:2238-2240`) both stay. Withholding a message because
+  our clock is wrong is a far worse failure than a mis-sorted one.
+
+The refusal is always on *writing*, never on reading: a peer's ticket
+is remembered and used regardless of the state of our own clock.
+
 ## The source priority chain
 
 `emission_secs` resolves its value in this order. For each source:

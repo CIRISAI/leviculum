@@ -40,13 +40,6 @@ use leviculum_std::interfaces::hdlc::{DeframeResult, Deframer};
 use crate::common::{connect_to_daemon, send_framed, TestClock};
 use crate::harness::{LxmfReceived, TestDaemon};
 
-fn now_unix() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
-}
-
 /// Msgpack-encode a byte slice as one bin value.
 fn msgpack_bin(data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -156,7 +149,7 @@ impl LxmfClient {
             for event in output.events {
                 let routed = self
                     .router
-                    .handle_event(&mut self.node, &event, now_unix())
+                    .handle_event(&mut self.node, &event)
                     .expect("router handle_event");
                 self.events.extend(
                     routed
@@ -184,10 +177,9 @@ impl LxmfClient {
                 .generate_with(&mut stamper)
                 .await
                 .expect("stamp generation");
-            let now_ms = self.node.now_ms();
             let output = self
                 .router
-                .set_outbound_stamp_result(&request, stamp.to_vec(), now_ms, now_unix())
+                .set_outbound_stamp_result(&self.node, &request, stamp.to_vec())
                 .expect("set_outbound_stamp_result");
             self.absorb(output).await;
         }
@@ -215,10 +207,7 @@ impl LxmfClient {
 
         let output = self.node.handle_timeout();
         self.absorb_core(output).await;
-        let output = self
-            .router
-            .tick(&mut self.node, now_unix())
-            .expect("router tick");
+        let output = self.router.tick(&mut self.node).expect("router tick");
         self.absorb(output).await;
     }
 
@@ -259,23 +248,22 @@ impl LxmfClient {
         fields: Vec<(i64, Vec<u8>)>,
         method: DeliveryMethod,
     ) -> [u8; 32] {
-        let message = Message::create(
-            destination,
-            self.delivery_hash,
-            &self.identity,
-            now_unix(),
-            title.to_vec(),
-            content.to_vec(),
-            fields,
-            method,
-        )
-        .expect("Message::create");
-        let message_id = message.message_id;
-        let now_ms = self.node.now_ms();
-        let output = self
+        // Both the timestamp and the queue's wall-clock state come from the
+        // router's own producer (Codeberg #182); this test no longer has a
+        // clock of its own to get wrong.
+        let message = self
             .router
-            .enqueue(message, now_ms, now_unix())
-            .expect("enqueue");
+            .create_message(
+                &self.node,
+                destination,
+                title.to_vec(),
+                content.to_vec(),
+                fields,
+                method,
+            )
+            .expect("create_message");
+        let message_id = message.message_id;
+        let output = self.router.enqueue(&self.node, message).expect("enqueue");
         self.absorb(output).await;
         message_id
     }

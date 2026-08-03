@@ -31,6 +31,12 @@ impl Clock for TestClock {
     fn now_ms(&self) -> u64 {
         self.0.get()
     }
+    /// The router resolves every wall-clock field through
+    /// `Transport::emission_secs` (Codeberg #182), so the test seam for LXMF
+    /// time is the platform clock, not a parameter.
+    fn wall_unix_secs(&self) -> Option<u64> {
+        Some(NOW_UNIX as u64)
+    }
 }
 
 type TestNode = NodeCore<OsRng, TestClock, MemoryStorage>;
@@ -86,7 +92,7 @@ impl ClientHarness {
         while let Some(event) = events.pop_front() {
             let follow_up = self
                 .router
-                .handle_event(&mut self.node, &event, NOW_UNIX)
+                .handle_event(&mut self.node, &event)
                 .expect("client handles NodeCore event");
             self.events.extend(follow_up.events);
             actions.extend(follow_up.core.actions);
@@ -393,11 +399,11 @@ fn configured_propagation_node_without_a_path_is_selected_and_requested() {
     .expect("signed LXMF message");
     let message_id = message.message_id;
     let _ = router
-        .enqueue(message, core.now_ms(), NOW_UNIX)
+        .enqueue(&core, message)
         .expect("queue before propagation path exists");
 
     let output = router
-        .tick(&mut core, NOW_UNIX)
+        .tick(&mut core)
         .expect("request missing propagation path");
     assert!(
         !output.core.actions.is_empty(),
@@ -454,7 +460,7 @@ fn orphaned_propagation_metadata_requests_once_then_is_recreated_by_announce() {
         .is_none());
 
     let first = router
-        .tick(&mut client_node, NOW_UNIX)
+        .tick(&mut client_node)
         .expect("request orphan refresh");
     assert!(
         !first.core.actions.is_empty(),
@@ -463,7 +469,7 @@ fn orphaned_propagation_metadata_requests_once_then_is_recreated_by_announce() {
     assert!(router.known_propagation_node(&server_hash).is_none());
 
     let second = router
-        .tick(&mut client_node, NOW_UNIX)
+        .tick(&mut client_node)
         .expect("orphan is not requested again");
     assert!(second.core.actions.is_empty(), "orphan request is one-shot");
 
@@ -528,9 +534,7 @@ fn propagation_metadata_without_cached_announce_requests_once_even_with_identity
         .get_announce_cache(server_hash.as_bytes())
         .is_none());
 
-    let first = router
-        .tick(&mut core, NOW_UNIX)
-        .expect("request missing announce");
+    let first = router.tick(&mut core).expect("request missing announce");
     assert!(
         !first.core.actions.is_empty(),
         "missing cached announce emits a path request"
@@ -538,7 +542,7 @@ fn propagation_metadata_without_cached_announce_requests_once_even_with_identity
     assert!(router.known_propagation_node(&server_hash).is_none());
 
     let second = router
-        .tick(&mut core, NOW_UNIX)
+        .tick(&mut core)
         .expect("removed metadata stays removed");
     assert!(second.core.actions.is_empty(), "request remains one-shot");
 }
@@ -595,12 +599,12 @@ fn incomplete_restored_propagation_path_is_removed_before_recovery_request() {
     )
     .expect("signed LXMF message");
     let _ = router
-        .enqueue(message, core.now_ms(), NOW_UNIX)
+        .enqueue(&core, message)
         .expect("queue with incomplete restored propagation state");
 
     assert!(core.has_path(&preferred));
     let output = router
-        .tick(&mut core, NOW_UNIX)
+        .tick(&mut core)
         .expect("replace incomplete path and request a fresh announce");
 
     assert!(!core.has_path(&preferred));
@@ -810,13 +814,13 @@ fn router_encrypts_stamps_uploads_and_marks_a_propagated_message_sent() {
     let message_id = message.message_id;
     let queued = client
         .router
-        .enqueue(message, client.node.now_ms(), NOW_UNIX)
+        .enqueue(&client.node, message)
         .expect("queue propagated message");
     assert!(client.absorb_router(queued).is_empty());
 
     let prepared = client
         .router
-        .tick(&mut client.node, NOW_UNIX)
+        .tick(&mut client.node)
         .expect("prepare upload");
     let to_sink = client.absorb_router(prepared);
     let request = client
@@ -845,7 +849,7 @@ fn router_encrypts_stamps_uploads_and_marks_a_propagated_message_sent() {
         .next_attempt_ms = client.node.now_ms();
     let repeated = client
         .router
-        .tick(&mut client.node, NOW_UNIX)
+        .tick(&mut client.node)
         .expect("re-emit detached propagation stamp request");
     assert!(repeated.events.iter().any(|event| matches!(
         event,
@@ -870,7 +874,7 @@ fn router_encrypts_stamps_uploads_and_marks_a_propagated_message_sent() {
         .attempts;
     let connecting = client
         .router
-        .tick(&mut client.node, NOW_UNIX)
+        .tick(&mut client.node)
         .expect("establish propagation link");
     assert_eq!(
         client
@@ -891,10 +895,7 @@ fn router_encrypts_stamps_uploads_and_marks_a_propagated_message_sent() {
         .get(&message_id)
         .expect("connected message")
         .attempts;
-    let submitted = client
-        .router
-        .tick(&mut client.node, NOW_UNIX)
-        .expect("submit upload");
+    let submitted = client.router.tick(&mut client.node).expect("submit upload");
     assert_eq!(
         client
             .router
@@ -1046,7 +1047,7 @@ fn assert_upload_failure_closes_link(reason: PropagationUploadFailure) {
     let message_id = message.message_id;
     let queued = client
         .router
-        .enqueue(message, client.node.now_ms(), NOW_UNIX)
+        .enqueue(&client.node, message)
         .expect("queue propagated message");
     assert!(client.absorb_router(queued).is_empty());
     {

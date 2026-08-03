@@ -2393,6 +2393,35 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.clock().now_ms()
     }
 
+    /// The unix-seconds value for any wire field a peer compares across our
+    /// process lifetimes (Codeberg #155, #164, #182).
+    ///
+    /// This is [`crate::transport::Transport::emission_secs`] — the single
+    /// producer named in `docs/src/concepts/time-and-clocks.md`, "One value,
+    /// one producer" — exposed so crates layered on `NodeCore` reach the same
+    /// source-priority chain (platform wall clock, learned announce timebase,
+    /// host injection, uptime) instead of taking a wall-clock parameter from
+    /// their caller. Never derive such a field from [`Self::now_ms`], which is
+    /// a timer and restarts at zero on every reboot.
+    ///
+    /// The value carries no plausibility guarantee: on a clockless node with
+    /// nothing learned yet it is uptime seconds. A caller that would produce a
+    /// field a peer silently discards should gate on
+    /// [`Self::has_plausible_wall_clock`] first.
+    pub fn emission_secs(&self) -> u64 {
+        self.transport.emission_secs(self.now_ms())
+    }
+
+    /// Whether [`Self::emission_secs`] sits above the timebase plausibility
+    /// floor ([`crate::constants::EMISSION_PLAUSIBLE_MIN_SECS`]).
+    ///
+    /// False means the node has no wall clock and has learned no timebase, so
+    /// the value is uptime seconds: fine for a field only we compare, wrong
+    /// for one a peer evaluates against its own clock.
+    pub fn has_plausible_wall_clock(&self) -> bool {
+        self.emission_secs() >= crate::constants::EMISSION_PLAUSIBLE_MIN_SECS
+    }
+
     /// Return all path table entries for RPC export.
     pub fn path_table_entries(&self) -> Vec<crate::transport::PathTableExport> {
         self.transport.path_table_entries()

@@ -18,13 +18,13 @@ impl LxmfRouter {
         &mut self,
         node: &NodeCore<R, C, S>,
         uri: &str,
-        now_unix: f64,
     ) -> Result<RouterOutput, RouterError>
     where
         R: CryptoRngCore,
         C: Clock,
         S: Storage,
     {
+        let now_unix = super::emission_secs(node);
         let paper = PaperMessage::from_uri(uri)?;
         if paper.destination_hash() != self.node.delivery_destination_hash().as_bytes() {
             return Err(PaperError::WrongDestination.into());
