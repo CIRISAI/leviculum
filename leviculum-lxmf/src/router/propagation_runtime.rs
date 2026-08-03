@@ -974,7 +974,6 @@ impl PropagationRuntime {
             if let Some(entry) = router.outbound.get_mut(&message_id) {
                 entry.next_attempt_ms = now_ms.saturating_add(super::PROCESSING_INTERVAL_MS);
             }
-            router.persistence_dirty = true;
             output
                 .events
                 .push(RouterEvent::PropagationStampPending(request));
