@@ -156,6 +156,16 @@ impl<R: CryptoRngCore, Y: Yield> CooperativeStamper<R, Y> {
             self.rng.fill_bytes(&mut stamp);
             return Ok(stamp);
         }
+        // At cost 255 the reference's target is `1 << 1` (LXStamper.py:74), so
+        // the search below needs a 256-bit digest of 0, 1 or 2 and never
+        // returns. The reference never announces such a cost
+        // (LXMRouter.py:1042-1045), so refusing it here cannot affect a
+        // conforming peer; see `LxmfRouter::outbound_stamp_cost`, which is the
+        // primary guard. Validation is unaffected: checking a stamp at any cost
+        // is a single hash.
+        if cost == 255 {
+            return Err(StampError::InvalidCost);
+        }
         let base = self.workblock_hasher(material, rounds).await;
         let mut tries = 0usize;
         loop {
@@ -309,6 +319,41 @@ mod tests {
                 0x95, 0xe6, 0x6c, 0xe4, 0x08, 0xbc, 0xb4, 0x51, 0x34, 0xe0, 0x8d, 0x15, 0x9c, 0x51,
                 0xe1, 0xf4,
             ]
+        );
+    }
+
+    /// Generation refuses the one cost whose search cannot terminate, while
+    /// validation at that cost stays available (Codeberg #181).
+    ///
+    /// `stamp_valid` (LXStamper.py:73-77) computes `target = 1 << 256-cost`, so
+    /// at 255 a valid stamp needs a digest of 0, 1 or 2. The reference never
+    /// announces that cost (LXMRouter.py:1042-1045), so refusing it costs no
+    /// conforming peer anything. 254 is inside the announceable window and must
+    /// still be attempted, which is what keeps this from becoming an arbitrary
+    /// ceiling.
+    ///
+    /// What this test cannot catch: it does not show that 254 is attempted,
+    /// because that search does not finish. The legal side of the boundary is
+    /// pinned instead by `router::persistence_tests::
+    /// hostile_announced_stamp_cost_is_not_mined`, which asserts that
+    /// `outbound_stamp_cost` still yields `Some(254)`.
+    #[cfg(feature = "pow")]
+    #[test]
+    fn generation_refuses_the_non_terminating_cost() {
+        use super::{CooperativeStamper, StampError};
+        use rand_core::OsRng;
+
+        let mut stamper = CooperativeStamper::cooperative(OsRng);
+        assert_eq!(
+            futures::executor::block_on(stamper.generate(b"material", 255, 1)),
+            Err(StampError::InvalidCost)
+        );
+        // Validation is a single hash at any cost and stays available, so an
+        // inbound stamp claimed at 255 is still checked (and rejected) rather
+        // than erroring out.
+        assert_eq!(
+            futures::executor::block_on(stamper.validate_stamp(b"material", &[0; 32], 255, 1)),
+            Ok(None)
         );
     }
 }

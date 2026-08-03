@@ -653,11 +653,35 @@ impl LxmfRouter {
         self.set_outbound_propagation_stamp(&request.message_id, stamp, now_ms)
     }
 
+    /// The unexpired stamp cost a peer announced for `destination`, restricted
+    /// to the window the reference is willing to announce (Codeberg #181).
+    ///
+    /// The reference applies no bound on the read side: `received_announce`
+    /// (Handlers.py:17-18) stores whatever `stamp_cost_from_app_data` returned
+    /// and `get_stamp` (LXMessage.py:320) feeds it to `generate_stamp`, whose
+    /// search loop (LXStamper.py:199) runs until `stamp_valid` holds. At cost
+    /// 255 the target is `1 << 1` and the loop never terminates, so a single
+    /// hostile or buggy announce wedges the sender's outbound queue.
+    ///
+    /// Filtering here is a deviation under the rule in `CLAUDE.md`. It is
+    /// wire-invisible (we send nothing different), semantically invisible (the
+    /// reference's own emitter refuses to announce 0 or 255, so no conforming
+    /// peer can be on the receiving end of the change), and it removes an
+    /// unbounded loop reachable from the network — Priority 1. The bound is
+    /// exactly the reference's emit window and not a lower, "sane" ceiling:
+    /// refusing a legal cost of, say, 40 would be observable, because that peer
+    /// would then reject every message we send it as unstamped.
+    ///
+    /// This does not make stamp generation bounded. Any cost above roughly 40
+    /// bits is already unreachable in practice; only the strictly
+    /// non-terminating case is removed. Bounding the work for legal costs is a
+    /// scheduling question (cancellation, deadlines), not a compatibility one.
     pub fn outbound_stamp_cost(&self, destination: &[u8; 16], now_unix: f64) -> Option<u8> {
         self.outbound_stamp_costs
             .get(destination)
             .filter(|(seen, _, _)| now_unix - *seen <= STAMP_COST_EXPIRY as f64)
             .and_then(|(_, cost, _)| *cost)
+            .filter(|cost| *cost > 0 && *cost < 255)
     }
 
     pub fn handle_event<R, C, S>(
@@ -2198,6 +2222,102 @@ mod persistence_tests {
             Some(9)
         );
         assert_eq!(persistence_request_count(&output), 1);
+    }
+
+    /// A peer announcing a cost the reference itself would never announce does
+    /// not get us mining forever (Codeberg #181, read side).
+    ///
+    /// The app_data here is hand-built, because our own encoder can no longer
+    /// produce it: only a non-conforming or hostile peer emits `0xcc 0xff` in
+    /// the stamp-cost slot. Python's `received_announce` (Handlers.py:17-18)
+    /// stores that 255 unbounded and `get_stamp` (LXMessage.py:320) hands it to
+    /// `generate_stamp`, whose loop (LXStamper.py:199) cannot terminate at that
+    /// cost. We drop it instead; see `outbound_stamp_cost` for the deviation
+    /// argument.
+    ///
+    /// What this test cannot catch: it proves no stamp is requested, not that
+    /// stamping is bounded. A legal cost of 200 would still be mined until the
+    /// heat death of the universe — that is a scheduling concern, not a
+    /// compatibility one, and deliberately not addressed here.
+    #[test]
+    fn hostile_announced_stamp_cost_is_not_mined() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let identity = identity_from(73);
+        let mut destination =
+            LxmfNode::delivery_destination(identity).expect("remote delivery destination");
+        // fixarray(3) || bin8 "remote" || uint8 255 || fixarray(1) || 0
+        let app_data = alloc::vec![
+            0x93, 0xc4, 0x06, b'r', b'e', b'm', b'o', b't', b'e', 0xcc, 0xff, 0x91, 0x00
+        ];
+        let packet = destination
+            .announce(Some(&app_data), &mut OsRng, 1_000, 1_000 / 1000)
+            .expect("delivery announce");
+        let destination_hash = *destination.hash();
+        let mut packed = alloc::vec![0; packet.packed_size()];
+        let length = packet.pack(&mut packed).expect("pack announce");
+        let announce_event = node
+            .handle_packet(InterfaceId(0), &packed[..length])
+            .events
+            .into_iter()
+            .find(|event| matches!(event, NodeEvent::AnnounceReceived { .. }))
+            .expect("announce event");
+        let _ = router
+            .handle_event(&mut node, &announce_event, 1_700_000_000.0)
+            .expect("handle delivery announce");
+
+        // The peer's 255 was decoded and cached, and is then withheld.
+        assert_eq!(
+            router
+                .outbound_stamp_costs
+                .get(destination_hash.as_bytes())
+                .and_then(|(_, cost, _)| *cost),
+            Some(255),
+            "the announced value is stored verbatim; only the accessor filters"
+        );
+        assert_eq!(
+            router.outbound_stamp_cost(destination_hash.as_bytes(), 1_700_000_000.0),
+            None
+        );
+
+        // End to end: a message queued for that peer never enters stamp work.
+        let source = identity_from(74);
+        let queued = Message::create(
+            destination_hash.into_bytes(),
+            [74; 16],
+            &source,
+            1_700_000_000.25,
+            b"title".to_vec(),
+            b"content".to_vec(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let id = queued.message_id;
+        let _ = router.enqueue(queued, 1_000, 1_700_000_000.0).unwrap();
+        assert_eq!(router.outbound_stamp_request(&id, 1_700_000_000.0), None);
+        let output = router
+            .tick(&mut node, 1_700_000_001.0)
+            .expect("tick with a hostile cost cached");
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|event| matches!(event, RouterEvent::StampPending(_))),
+            "no stamp work may be requested for an unannounceable cost"
+        );
+
+        // The pin bites: the same announce one bit lower is mined normally.
+        assert_eq!(
+            router.outbound_stamp_costs.insert(
+                destination_hash.into_bytes(),
+                (1_700_000_000.0, Some(254), true)
+            ),
+            Some((1_700_000_000.0, Some(255), true))
+        );
+        assert_eq!(
+            router.outbound_stamp_cost(destination_hash.as_bytes(), 1_700_000_000.0),
+            Some(254)
+        );
     }
 
     #[test]
