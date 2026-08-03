@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A re-originated recursive path request now honours the per-interface
   egress limit, so an interface already saturated with path requests is
   skipped instead of carrying every one (#172).
+- Creating a destination with a dot in `app_name` or an aspect is
+  rejected like the reference, closing a destination-hash collision
+  (#163).
+- A corrupt discovery record is warned about once per record instead of
+  on every scan pass (#157).
 - A path request for a destination hosted on a shared-instance client
   is now forwarded to that client and answered with the client's fresh
   path response instead of only the cached announce (#171).
