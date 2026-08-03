@@ -32,24 +32,82 @@ non-timestamp values. The full story of where wall time comes from is
 in [Time and Clocks](time-and-clocks.md); this page is about the
 class, not the instance.
 
-## The audit method: three questions per generated field
+## The audit method: four questions per generated field
 
 For every field we **generate** (not fields we merely echo back),
-answer three questions, each with a citation:
+answer four questions, each with a citation:
 
-1. **What does the reference put there?** File and line into
-   `reference/Reticulum` (and `reference/LXMF` where applicable).
-2. **What does a peer DECIDE from it?** Ordering, acceptance, expiry,
+1. **What does a peer DECIDE from it?** Ordering, acceptance, expiry,
    deduplication, routing — the rule the value feeds, not the byte
-   layout it sits in.
-3. **Does our value satisfy that rule under adverse conditions?**
+   layout it sits in. Ask this one first: it partitions the surface.
+   A field no peer decides anything from needs only a shape check,
+   and the answer tells you which adverse conditions in question 4
+   are worth constructing.
+2. **What does the reference put there?** File and line into
+   `reference/Reticulum` (and `reference/LXMF` where applicable).
+3. **What does the reference DECLINE to put there, and why?** Some
+   guards live only in the writer, and their absence produces a
+   well-formed field that harms the reader.
+4. **Does our value satisfy that rule under adverse conditions?**
    Process restart, absence of a clock, long uptime, the field at its
    representable limit, a peer that has been up much longer or much
    shorter than we have.
 
-Question 2 is the one our old tests never asked. A field whose
+Question 1 is the one our old tests never asked. A field whose
 encoding round-trips perfectly can still fail the decision rule — the
 #155 timestamp round-tripped for months.
+
+### Question 3: the refusal is part of the contract
+
+Codeberg #181 is the worked example, and it is a different shape from
+#155: not a wrong value, but a missing **refusal to send** a value.
+Questions 1 and 2 both pass on it. What a peer decides is clear (mine
+a stamp at the announced cost) and what the reference puts there is
+the configured cost — we wrote the same field, with the same meaning,
+from the same source. Only question 3 finds it.
+
+`LXMRouter.get_announce_app_data` (`LXMRouter.py:1033-1052`) starts
+from `stamp_cost = None` and overwrites it only when
+`0 < cost < 255`. The reader applies no bound of its own: the
+announced cost is stored unvalidated
+(`update_stamp_cost`, `LXMRouter.py:1027-1032`) and passed straight to
+`LXStamper.generate_stamp` (`LXMessage.py:320`), whose search loop
+(`LXStamper.py:199`) runs until a digest meets `1 << 256-cost`. At 255
+that never happens. We announced whatever `u8` the caller passed, so
+one announce from us could wedge every Python peer's outbound queue
+for our destination — with nothing in their logs naming us.
+
+Two rules generalise from it:
+
+- **A guard in the writer implies no guard in the reader.** When the
+  reference validates on write, look for the matching check on read.
+  If it is not there, the write-side guard is load-bearing, and
+  omitting it is not a cosmetic deviation.
+- **The same refusal usually appears twice.** #181's window sits both
+  at the emit boundary and one layer earlier in
+  `set_inbound_stamp_cost` (`LXMRouter.py:378-393`), where the refusal
+  is visible in the return value. Mirroring both is what lets a caller
+  learn, without weakening the boundary that actually protects peers.
+
+Symmetry is worth asking about but is not automatic: our read side
+now drops an announced 255 (`leviculum-lxmf/src/router.rs:656-687`)
+although the reference does not, because that deviation is invisible
+on the wire and to any conforming peer, and removes an unbounded loop
+reachable from the network.
+
+### Working the method
+
+- **Grep the reference for the field's read sites before writing the
+  test.** The decision rule is in the reader, not the writer, and it
+  is routinely in a different file from the one that emits the field.
+- **Extend `gen_vectors.py` rather than hand-writing expected bytes.**
+  Expected values then come from the reference's own emitter and its
+  own decoder. Hand-written bytes encode the auditor's belief about
+  the reference, which is the thing under test.
+- **Check the reference submodule's actual HEAD before auditing
+  against it.** Auditing against a remembered version produces
+  confident findings about code that is not what we ship. The pinned
+  commits are asserted by `leviculum-lxmf/tests/reference_lock.rs`.
 
 ## The testing rule: pin the meaning, recomposed independently
 
@@ -112,14 +170,16 @@ red-first: the request timestamp carried process uptime (#164) and the
 resource advertisement sent a content hash where the reference sends
 the salted per-transfer hash (#165). Tranche 3 found four routing
 defects (#168, #169, #170, #172). Tranche 4 found that the announced
-LXMF stamp cost is not clamped to the reference's `0 < cost < 255`
-window, and that the LXMF crate resolves none of its wall-clock wire
-fields through `Transport::emission_secs`.
+LXMF stamp cost was not clamped to the reference's `0 < cost < 255`
+window (#181, fixed red-first, and the origin of question 3 above),
+and that the LXMF crate resolves none of its wall-clock wire fields
+through `Transport::emission_secs`.
 
 The recurring lesson across all four: the offenders were timestamps and
 identifier-derivation order, never framing. Nothing that round-trips
 was ever wrong; everything that a *peer compared against a value from
-another machine* was worth checking.
+another machine* was worth checking — and, from #181, everything the
+reference deliberately declines to send.
 
 ## See also
 

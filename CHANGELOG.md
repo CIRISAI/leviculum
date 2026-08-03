@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An announced LXMF stamp cost outside the reference's `0 < cost < 255`
+  window is no longer sent, and an announced 255 from a peer is no
+  longer mined; both would run forever (#181).
 - A re-originated recursive path request now honours the per-interface
   egress limit, so an interface already saturated with path requests is
   skipped instead of carrying every one (#172).
