@@ -12,9 +12,14 @@
 //! re-sighting preserves the original `discovered` and increments `heard_count`.
 //! `list_discovered_interfaces` mirrors Python `list_discovered_interfaces`: it
 //! drops records past `THRESHOLD_REMOVE` (and unknown types) from disk, then
-//! returns the survivors sorted by `(status_code, value, last_heard)` desc.
+//! returns the survivors sorted by `(status_code, value, last_heard)` desc. An
+//! undecodable record is skipped and warned about once per record identity
+//! rather than on every pass (Codeberg #157).
 
+use std::collections::BTreeMap;
+use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::discovery::DiscoveredInterface;
@@ -142,6 +147,26 @@ pub(crate) fn persist_discovered(
     Ok(())
 }
 
+/// Corrupt records already warned about, keyed by path, holding a fingerprint
+/// of the bytes that were warned about (Codeberg #157).
+///
+/// A scan runs on every `rnstatus`-style query and on the autoconnect cadence,
+/// so an undecodable record used to emit one warning per pass and fill the log
+/// indefinitely. The key is the record's identity, not a global flag: a second,
+/// different corrupt record still gets its own warning, and a record whose
+/// bytes change (rewritten by a peer stack, repaired, or corrupted a different
+/// way) warns again because the fingerprint no longer matches.
+static WARNED_CORRUPT: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+
+/// Fingerprint of a record's raw bytes, used only to detect that a
+/// still-undecodable file has *changed* since the warning. Not a security
+/// property, so the std hasher is enough.
+fn record_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// List persisted discovered interfaces, dropping expired/unknown records from
 /// disk, sorted by `(status_code, value, last_heard)` descending (Python
 /// `list_discovered_interfaces`). `now` is the query wall-clock (Unix seconds).
@@ -156,6 +181,10 @@ pub(crate) fn list_discovered_interfaces(
     };
 
     let mut records: Vec<DiscoveredInterfaceRecord> = Vec::new();
+    // Corrupt records met on THIS pass, so the suppression table can forget the
+    // ones that are gone (a record deleted and later recreated corrupt warns
+    // again, as it should). Bounded by the number of corrupt files on disk.
+    let mut corrupt_this_pass: BTreeMap<PathBuf, u64> = BTreeMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         // Skip our own `.tmp` scratch files and any subdirectories.
@@ -169,7 +198,22 @@ pub(crate) fn list_discovered_interfaces(
         let record = match DiscoveredInterfaceRecord::decode_msgpack(&bytes) {
             Some(r) => r,
             None => {
-                tracing::warn!("discovery: corrupt record {}, skipping", path.display());
+                // Skipped, not unlinked. The reference logs and continues too
+                // (`Discovery.py:442-445`); only its explicit `should_remove`
+                // cases unlink (`:423-425`). Our decoder is the stricter of the
+                // two — it requires fields Python's `msgpack.unpackb` never
+                // looks at — so deleting here would destroy records a Python
+                // `rnsd` still serves out of the storage directory both stacks
+                // share (Codeberg #157).
+                let fingerprint = record_fingerprint(&bytes);
+                let already_warned = WARNED_CORRUPT
+                    .lock()
+                    .map(|w| w.get(&path) == Some(&fingerprint))
+                    .unwrap_or(false);
+                if !already_warned {
+                    tracing::warn!("discovery: corrupt record {}, skipping", path.display());
+                }
+                corrupt_this_pass.insert(path, fingerprint);
                 continue;
             }
         };
@@ -180,6 +224,15 @@ pub(crate) fn list_discovered_interfaces(
             continue;
         }
         records.push(record);
+    }
+
+    // Replace the suppression entries for THIS directory with what the pass
+    // actually saw. Scoped to `dir` so a concurrent scan of another storage
+    // root (the unit tests, a second daemon instance) cannot silence or
+    // re-arm someone else's records.
+    if let Ok(mut warned) = WARNED_CORRUPT.lock() {
+        warned.retain(|p, _| p.parent() != Some(dir.as_path()));
+        warned.extend(corrupt_this_pass);
     }
 
     // Sort by (status_code, value, last_heard) descending. status_code derives
@@ -262,6 +315,77 @@ mod tests {
         let dir = discovery_dir(td.path());
         let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
         assert!(remaining.is_empty(), "expired record unlinked from disk");
+    }
+
+    /// Codeberg #157: a corrupt record used to be re-warned on every scan, so
+    /// one bad file filled the log indefinitely. Both states are observed, per
+    /// `docs/src/concepts/evidence-and-honesty.md`: the FIRST scan still warns
+    /// (a suppression that suppresses everything is worse than the noise), and
+    /// a SECOND, different corrupt record still gets its own warning — which a
+    /// global "already warned" flag would swallow.
+    #[test]
+    fn corrupt_record_warns_once_per_record() {
+        let capture = crate::test_support::warn_capture::register_warn_capture();
+        let td = tempfile::tempdir().unwrap();
+        let dir = discovery_dir(td.path());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = dir.join("aa00000000000000000000000000000000000000000000000000000000000001");
+        std::fs::write(&first, b"this is not msgpack").unwrap();
+        let first_str = first.display().to_string();
+
+        let list = list_discovered_interfaces(td.path(), 1000.0);
+        assert!(list.is_empty(), "a corrupt record is not listed");
+        assert_eq!(
+            capture.snapshot().matches(&first_str).count(),
+            1,
+            "the first sighting of a corrupt record must warn"
+        );
+
+        for _ in 0..3 {
+            let _ = list_discovered_interfaces(td.path(), 1000.0);
+        }
+        assert_eq!(
+            capture.snapshot().matches(&first_str).count(),
+            1,
+            "the same corrupt record must not warn again on later scans"
+        );
+
+        // A second, different corrupt record still gets its own warning.
+        let second = dir.join("bb00000000000000000000000000000000000000000000000000000000000002");
+        std::fs::write(&second, b"also not msgpack").unwrap();
+        let second_str = second.display().to_string();
+        let _ = list_discovered_interfaces(td.path(), 1000.0);
+        assert_eq!(
+            capture.snapshot().matches(&second_str).count(),
+            1,
+            "a different corrupt record must warn on its own"
+        );
+        assert_eq!(
+            capture.snapshot().matches(&first_str).count(),
+            1,
+            "the already-warned record stays silent while the new one warns"
+        );
+    }
+
+    /// Codeberg #157: the corrupt record is skipped, not unlinked. The
+    /// reference leaves it in place too (`Discovery.py:442-445` logs and
+    /// continues; only the explicit `should_remove` cases at `:423-425`
+    /// unlink), and our decoder is stricter than Python's — a record missing a
+    /// field we require but Python does not decodes fine for `rnsd`. Deleting
+    /// it would destroy a record the other stack still serves out of the
+    /// storage directory the two share.
+    #[test]
+    fn corrupt_record_is_skipped_not_unlinked() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = discovery_dir(td.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cc00000000000000000000000000000000000000000000000000000000000003");
+        std::fs::write(&path, b"not msgpack either").unwrap();
+
+        let list = list_discovered_interfaces(td.path(), 1000.0);
+        assert!(list.is_empty());
+        assert!(path.exists(), "a corrupt record is left on disk");
     }
 
     #[test]

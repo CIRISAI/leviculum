@@ -55,10 +55,11 @@ pub fn init_tracing_with_event_log() {
         let event_layer = crate::event_log::layer();
         // Plain-WARN capture for tests that assert on an ordinary
         // `tracing::warn!` message (Codeberg #38's LRPROOF asymmetry
-        // line).  Filtered to `leviculum_core` WARN so the per-handle
+        // line, Codeberg #157's corrupt-discovery-record line).  Filtered
+        // to `leviculum_core` / `leviculum_std` WARN so the per-handle
         // buffers stay small; inert until a test registers a handle.
         let warn_capture_layer = crate::test_support::warn_capture::layer()
-            .with_filter(EnvFilter::new("leviculum_core=warn"));
+            .with_filter(EnvFilter::new("leviculum_core=warn,leviculum_std=warn"));
         Registry::default()
             .with(fmt_layer)
             .with(event_layer)
