@@ -832,6 +832,30 @@ fn router_encrypts_stamps_uploads_and_marks_a_propagated_message_sent() {
     assert_eq!(request.target_cost, 0);
     pump_upload(&mut client, &mut sink, to_sink, Vec::new());
 
+    // Re-emitting the same detached work lets a host recover after an
+    // interrupted calculation, but advancing that derived retry cursor alone
+    // must not request another identical durable checkpoint.
+    client.router.persistence_dirty = false;
+    client.router.next_job_ms = client.node.now_ms();
+    client
+        .router
+        .outbound
+        .get_mut(&message_id)
+        .expect("queued message")
+        .next_attempt_ms = client.node.now_ms();
+    let repeated = client
+        .router
+        .tick(&mut client.node, NOW_UNIX)
+        .expect("re-emit detached propagation stamp request");
+    assert!(repeated.events.iter().any(|event| matches!(
+        event,
+        RouterEvent::PropagationStampPending(repeated) if *repeated == request
+    )));
+    assert!(!repeated
+        .events
+        .iter()
+        .any(|event| matches!(event, RouterEvent::PersistenceRequested)));
+
     let propagation_stamp = [0x5a; 32];
     let stamped = client
         .router
