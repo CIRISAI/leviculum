@@ -69,6 +69,37 @@ packed_payload:
                                                       ^^ key = -1
 ```
 
+## VEC-MSG-TICKET (frozen) — ticket-stamped message, five-element payload
+
+The only deterministic stamped message: an outbound ticket yields
+`truncated_hash(ticket || message_id)` instead of a mined proof of work, and the
+carried `FIELD_TICKET` value is the `[expires, ticket]` list `generate_ticket`
+returns. `outbound_ticket = 101112…1f`, carried ticket secret `202122…2f`,
+`expires = 1700000000.0 + TICKET_EXPIRY`.
+(`LXMessage.py:355-388,293-302`; `LXMRouter.py:1096-1100,1770-1772`)
+
+```
+packed_payload:
+95cb41d954fc40000000c40154c4087469636b65746564
+810c92cb41d95be820000000c410202122232425262728292a2b2c2d2e2f
+c41054f9096872188db445566721224cca74
+  95                      array(5)  <- stamp present
+  cb 41d954fc40000000     timestamp 1700000000.0
+  c4 01 54                title bin(1) = "T"
+  c4 08 7469636b65746564  content bin(8) = "ticketed"
+  81 0c 92 …              fields {FIELD_TICKET: [expires, ticket]}
+     92                     array(2)
+     cb 41d95be820000000   expires 1701814400.0
+     c4 10 202122…2f       ticket bin(16)
+  c4 10 54f909…a74        stamp bin(16) = truncated_hash(ticket || message_id)
+
+message_id  = 190d522017c991b7e74bd958faadfc780dced409514904e6f7fd514b4a84d974
+stamp_value = 256 (COST_TICKET)
+```
+
+The message ID and the signature are computed over the **four**-element payload;
+the stamp is appended afterwards and is covered by neither.
+
 ## VEC-MSG-3 (frozen) — unpack + verify of VEC-MSG-1
 
 After making the source identity recallable, `unpack_from_bytes` of VEC-MSG-1

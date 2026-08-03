@@ -34,7 +34,7 @@ Proof column: `vector` (a `[VEC-...]`), `computed` (derivation shown), `quoted`
 | `set_title/content_*`, `*_as_string` | 190-205 | N | 03 | vector VEC-MSG-1/3 |
 | `set_fields/get_fields` | 212-218 | N | 03, 04 | vectors VEC-MSG-2/VEC-MSG-NEGATIVE-FIELD |
 | `validate_stamp` | 270 | N | 07 | vector VEC-STAMP-1 |
-| `get_stamp` | 293 | N | 07 | quoted |
+| `get_stamp` | 293 | N | 07 | vector VEC-MSG-TICKET (ticket branch) |
 | `get_propagation_stamp` | 326 | N | 07, 10 | vector VEC-STAMP-PN |
 | `pack` | 352 | N | 03, 05 | vector VEC-MSG-1/2 |
 | `__as_packet` | 623 | N | 05, 06 | vector VEC-DLV-OPP/DIRECT |
@@ -87,7 +87,7 @@ Proof column: `vector` (a `[VEC-...]`), `computed` (derivation shown), `quoted`
 |-----------|-----------|-------|---------|-------|
 | `get_propagation_node_announce_metadata`, `get_propagation_node_app_data` | 302-319 | N | 09 | vector VEC-ANN-PROPAGATION |
 | `get_announce_app_data` | 986 | N | 09 | vector VEC-ANN-DELIVERY |
-| `generate_ticket`, `remember_ticket`, `get_outbound_ticket*` | 1025-1086 | N | 08 | quoted |
+| `generate_ticket`, `remember_ticket`, `get_outbound_ticket*` | 1025-1086 | N | 08 | vector VEC-MSG-TICKET (FIELD_TICKET value) |
 | `message_get_request/list_response/get_response` | 1427-1591 | N | 10 | quoted |
 | `offer_request`, `propagation_packet`, `propagation_resource_concluded`, `lxmf_propagation`, `ingest_lxm_uri` | 2110-2392 | N | 10 | quoted |
 | `lxmf_delivery` | 1732 | N | 06 | quoted |

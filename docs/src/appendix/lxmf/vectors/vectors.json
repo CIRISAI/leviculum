@@ -122,6 +122,42 @@
       "representation": 1
     },
     {
+      "id": "VEC-MSG-TICKET",
+      "title": "Ticket-stamped message (five-element payload)",
+      "kind": "frozen",
+      "citation": "LXMessage.py:355-388,293-302; LXMRouter.py:1096-1100,1770-1772",
+      "inputs": {
+        "timestamp": 1700000000.0,
+        "title": "T",
+        "content": "ticketed",
+        "outbound_ticket_hex": "101112131415161718191a1b1c1d1e1f",
+        "field_ticket_expires": 1701814400.0,
+        "field_ticket_secret_hex": "202122232425262728292a2b2c2d2e2f",
+        "desired_method": "DIRECT"
+      },
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03caba34748775d2f00a91827e07e0bb394958d62d1312b953798c1fe7a9081dac7a2cf9714e0969db69f4e7240acbc354617bfd30d90f5a3cb6e110e0ff89b6d0795cb41d954fc40000000c40154c4087469636b65746564810c92cb41d95be820000000c410202122232425262728292a2b2c2d2e2fc41054f9096872188db445566721224cca74",
+      "packed_len": 167,
+      "parts": {
+        "destination_hash": "cf0b2a4a8d2a0b6978b71290da7cc80e",
+        "source_hash": "fae321c442e3c9bdcd7a3e79d850e03c",
+        "signature": "aba34748775d2f00a91827e07e0bb394958d62d1312b953798c1fe7a9081dac7a2cf9714e0969db69f4e7240acbc354617bfd30d90f5a3cb6e110e0ff89b6d07",
+        "packed_payload": "95cb41d954fc40000000c40154c4087469636b65746564810c92cb41d95be820000000c410202122232425262728292a2b2c2d2e2fc41054f9096872188db445566721224cca74"
+      },
+      "unstamped_payload_msgpack_hex": "94cb41d954fc40000000c40154c4087469636b65746564810c92cb41d95be820000000c410202122232425262728292a2b2c2d2e2f",
+      "stamped_payload_msgpack_hex": "95cb41d954fc40000000c40154c4087469636b65746564810c92cb41d95be820000000c410202122232425262728292a2b2c2d2e2fc41054f9096872188db445566721224cca74",
+      "hashed_part_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03c94cb41d954fc40000000c40154c4087469636b65746564810c92cb41d95be820000000c410202122232425262728292a2b2c2d2e2f",
+      "message_id_hex": "190d522017c991b7e74bd958faadfc780dced409514904e6f7fd514b4a84d974",
+      "signed_part_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03c94cb41d954fc40000000c40154c4087469636b65746564810c92cb41d95be820000000c410202122232425262728292a2b2c2d2e2f190d522017c991b7e74bd958faadfc780dced409514904e6f7fd514b4a84d974",
+      "signature_hex": "aba34748775d2f00a91827e07e0bb394958d62d1312b953798c1fe7a9081dac7a2cf9714e0969db69f4e7240acbc354617bfd30d90f5a3cb6e110e0ff89b6d07",
+      "signature_valid": true,
+      "stamp_hex": "54f9096872188db445566721224cca74",
+      "stamp_len": 16,
+      "stamp_value": 256,
+      "ticket_field_msgpack_hex": "92cb41d95be820000000c410202122232425262728292a2b2c2d2e2f",
+      "stamp_excluded_from_message_id": true,
+      "note": "payload[4] is the stamp; message_id and signature are computed over the four-element payload only."
+    },
+    {
       "id": "VEC-MSG-3",
       "title": "Unpack + signature verification round trip of VEC-MSG-1",
       "kind": "frozen",

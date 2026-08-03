@@ -70,6 +70,13 @@ DST_PRV = bytes(range(64, 128))
 # senders use time.time(); the spec marks this field as wall-clock.
 FIXED_TIMESTAMP = 1700000000.0
 
+# Pinned ticket material. Real issuers use os.urandom(TICKET_LENGTH) and
+# time.time()+TICKET_EXPIRY (LXMRouter.py:1095-1097); both are wall-clock or
+# entropy in the live protocol and are frozen here so the vector reproduces.
+TICKET_SECRET = bytes(range(0x10, 0x20))
+INBOUND_TICKET_SECRET = bytes(range(0x20, 0x30))
+TICKET_EXPIRES = FIXED_TIMESTAMP + LXMessage.TICKET_EXPIRY
+
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
 )
@@ -271,6 +278,74 @@ def gen_message_vectors():
         "message_id_hex": m_negative.message_id.hex(),
         "method": m_negative.method,
         "representation": m_negative.representation,
+    })
+
+    # VEC-MSG-TICKET: the only message shape where the payload carries five
+    # elements. It pins three separable semantics in one set of reference
+    # bytes:
+    #   * the stamp is appended to the payload AFTER the message ID and the
+    #     signature are computed, so neither covers it (LXMessage.py:362-375);
+    #   * an outbound ticket produces the 16-byte stamp
+    #     truncated_hash(ticket || message_id) (LXMessage.py:299-302);
+    #   * an issued ticket travels in FIELD_TICKET as [expires, ticket], the
+    #     list generate_ticket() returns (LXMRouter.py:1096-1100, :1772).
+    # Ticket stamps are the only deterministic stamp: a proof-of-work stamp is
+    # a random search result and cannot be a frozen vector.
+    ticket_fields = {0x0C: [TICKET_EXPIRES, INBOUND_TICKET_SECRET]}
+    src_t, dst_t = delivery_destinations(RNS.Destination.OUT)
+    m_ticket = LXMessage(dst_t, src_t, content=b"ticketed", title=b"T",
+                         fields=ticket_fields, desired_method=LXMessage.DIRECT)
+    m_ticket.timestamp = FIXED_TIMESTAMP
+    m_ticket.outbound_ticket = TICKET_SECRET
+    m_ticket.defer_stamp = False
+    m_ticket.pack()
+    unstamped_payload = [FIXED_TIMESTAMP, b"T", b"ticketed", ticket_fields]
+    ticket_hashed_part = (
+        dst_t.hash + src_t.hash + msgpack.packb(unstamped_payload)
+    )
+    ticket_msg_hash = RNS.Identity.full_hash(ticket_hashed_part)
+    ticket_signed_part = ticket_hashed_part + ticket_msg_hash
+    add({
+        "id": "VEC-MSG-TICKET",
+        "title": "Ticket-stamped message (five-element payload)",
+        "kind": "frozen",
+        "citation": "LXMessage.py:355-388,293-302; LXMRouter.py:1096-1100,1770-1772",
+        "inputs": {
+            "timestamp": FIXED_TIMESTAMP,
+            "title": "T",
+            "content": "ticketed",
+            "outbound_ticket_hex": TICKET_SECRET.hex(),
+            "field_ticket_expires": TICKET_EXPIRES,
+            "field_ticket_secret_hex": INBOUND_TICKET_SECRET.hex(),
+            "desired_method": "DIRECT",
+        },
+        "packed_hex": m_ticket.packed.hex(),
+        "packed_len": len(m_ticket.packed),
+        "parts": split_packed(m_ticket.packed),
+        "unstamped_payload_msgpack_hex": msgpack.packb(unstamped_payload).hex(),
+        "stamped_payload_msgpack_hex": msgpack.packb(
+            unstamped_payload + [m_ticket.stamp]
+        ).hex(),
+        "hashed_part_hex": ticket_hashed_part.hex(),
+        "message_id_hex": m_ticket.message_id.hex(),
+        "signed_part_hex": ticket_signed_part.hex(),
+        "signature_hex": m_ticket.signature.hex(),
+        "signature_valid": src_t.identity.validate(
+            m_ticket.signature, ticket_signed_part
+        ),
+        "stamp_hex": m_ticket.stamp.hex(),
+        "stamp_len": len(m_ticket.stamp),
+        "stamp_value": m_ticket.stamp_value,
+        "ticket_field_msgpack_hex": msgpack.packb(
+            [TICKET_EXPIRES, INBOUND_TICKET_SECRET]
+        ).hex(),
+        "stamp_excluded_from_message_id": (
+            m_ticket.message_id == ticket_msg_hash
+        ),
+        "note": (
+            "payload[4] is the stamp; message_id and signature are computed "
+            "over the four-element payload only."
+        ),
     })
 
     # VEC-MSG-3: unpack round trip proves the offsets + verification path.

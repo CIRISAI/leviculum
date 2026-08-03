@@ -99,15 +99,27 @@ plausibility-check incoming emission timestamps — pinned with their
 
 The systematic sweep over every generated field is Codeberg #159 —
 the issue, not this page, is the source of truth for its state. As of
-2026-08-02: the announce layer is done (tranche 1, pins in
-`leviculum-core/src/destination.rs` and `transport.rs`), and the link
-and resource layers are done (tranche 2, pins in
-`leviculum-core/src/node/mvr_generated_field_pins.rs` and the
-resource modules). Tranche 2 found two fields that failed the audit
-and were fixed red-first: the request timestamp carried process
-uptime (#164) and the resource advertisement sent a content hash
-where the reference sends the salted per-transfer hash (#165). The
-transport and LXMF layers are open.
+2026-08-03 all four tranches are done: the announce layer (tranche 1,
+pins in `leviculum-core/src/destination.rs` and `transport.rs`), the
+link and resource layers (tranche 2, pins in
+`leviculum-core/src/node/mvr_generated_field_pins.rs` and the resource
+modules), the transport layer (tranche 3, pins in the same two files),
+and LXMF (tranche 4, pins in
+`leviculum-lxmf/tests/generated_field_pins.rs`).
+
+Tranche 2 found two fields that failed the audit and were fixed
+red-first: the request timestamp carried process uptime (#164) and the
+resource advertisement sent a content hash where the reference sends
+the salted per-transfer hash (#165). Tranche 3 found four routing
+defects (#168, #169, #170, #172). Tranche 4 found that the announced
+LXMF stamp cost is not clamped to the reference's `0 < cost < 255`
+window, and that the LXMF crate resolves none of its wall-clock wire
+fields through `Transport::emission_secs`.
+
+The recurring lesson across all four: the offenders were timestamps and
+identifier-derivation order, never framing. Nothing that round-trips
+was ever wrong; everything that a *peer compared against a value from
+another machine* was worth checking.
 
 ## See also
 
