@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- One direct LXMF delivery cycle now consumes one delivery attempt
+  instead of two, and a failed outgoing Resource tears its link down
+  before the retry; a receiver's cancel is terminal and keeps the link
+  (#179, contributed by nilu96).
+- A repeated propagation stamp request no longer writes an identical
+  router snapshot every processing interval (#179, contributed by
+  nilu96).
 - An announced LXMF stamp cost outside the reference's `0 < cost < 255`
   window is no longer sent, and an announced 255 from a peer is no
   longer mined; both would run forever (#181).
