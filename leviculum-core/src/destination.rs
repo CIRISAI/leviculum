@@ -58,6 +58,12 @@ pub enum DestinationError {
     NoGroupKey,
     /// Supplied GROUP key has an unsupported length (must be 64 bytes)
     InvalidGroupKeyLength,
+    /// `app_name` contains a dot, the dotted-name separator (Codeberg #163,
+    /// Python `Destination.py:102`/`:151`)
+    DotInAppName,
+    /// An aspect contains a dot, the dotted-name separator (Codeberg #163,
+    /// Python `Destination.py:106`)
+    DotInAspect,
 }
 
 impl core::fmt::Display for DestinationError {
@@ -98,6 +104,12 @@ impl core::fmt::Display for DestinationError {
             }
             DestinationError::InvalidGroupKeyLength => {
                 write!(f, "GROUP key must be 64 bytes")
+            }
+            DestinationError::DotInAppName => {
+                write!(f, "Dots can't be used in app names")
+            }
+            DestinationError::DotInAspect => {
+                write!(f, "Dots can't be used in aspects")
             }
         }
     }
@@ -314,6 +326,8 @@ impl Destination {
     /// # Errors
     /// * `PlainCannotHaveIdentity` - PLAIN destinations cannot have an identity
     /// * `OutboundRequiresIdentity` - SINGLE/GROUP OUT destinations require an identity
+    /// * `DotInAppName` / `DotInAspect` - a name component contains the dotted-name
+    ///   separator (Codeberg #163)
     pub fn new(
         identity: Option<Identity>,
         direction: Direction,
@@ -321,6 +335,14 @@ impl Destination {
         app_name: &str,
         aspects: &[&str],
     ) -> Result<Self, DestinationError> {
+        // A dot is the separator of the dotted-name form, so a dot inside a
+        // component makes two different (app_name, aspects) tuples expand to
+        // the same full name and collide on the same destination hash. The
+        // reference rejects the input before anything else, in both
+        // `expand_name` (Destination.py:102, :106) and `__init__`
+        // (Destination.py:151) (Codeberg #163).
+        Self::validate_name_components(app_name, aspects)?;
+
         // PLAIN destinations cannot have an identity (per Python Reticulum spec)
         if dest_type == DestinationType::Plain && identity.is_some() {
             return Err(DestinationError::PlainCannotHaveIdentity);
@@ -826,9 +848,37 @@ impl Destination {
         Ok(out)
     }
 
+    /// Reject a dot in `app_name` or in any aspect (Codeberg #163).
+    ///
+    /// Mirrors the reference's two `ValueError`s in `Destination.expand_name`
+    /// (`reference/Reticulum/RNS/Destination.py:102` for the app name, `:106`
+    /// for each aspect; `__init__` repeats the app-name check at `:151`).
+    /// Public so callers assembling names from runtime input can validate
+    /// before reaching [`Self::compute_name_hash`], which stays infallible for
+    /// the compile-time-constant well-known names it is used with in-tree.
+    pub fn validate_name_components(
+        app_name: &str,
+        aspects: &[&str],
+    ) -> Result<(), DestinationError> {
+        if app_name.contains('.') {
+            return Err(DestinationError::DotInAppName);
+        }
+        for aspect in aspects {
+            if aspect.contains('.') {
+                return Err(DestinationError::DotInAspect);
+            }
+        }
+        Ok(())
+    }
+
     /// Compute the name hash from app_name and aspects.
     ///
     /// The name hash is the first 10 bytes of SHA256(app_name.aspect1.aspect2...).
+    ///
+    /// Does not validate the components: the reference's equivalent
+    /// (`Destination.expand_name`) raises on a dot, but every in-tree caller
+    /// passes compile-time-constant well-known names. Validate runtime-supplied
+    /// components with [`Self::validate_name_components`] first (Codeberg #163).
     pub fn compute_name_hash(app_name: &str, aspects: &[&str]) -> [u8; NAME_HASHBYTES] {
         let mut full_name = String::from(app_name);
         for aspect in aspects {
@@ -1375,6 +1425,79 @@ mod tests {
             result,
             Err(DestinationError::PlainCannotHaveIdentity)
         ));
+    }
+
+    /// Codeberg #163: a dot inside `app_name` or an aspect is the dotted-name
+    /// separator, so two different `(app_name, aspects)` tuples would expand to
+    /// the same full name and collide on the same name hash — and therefore the
+    /// same destination hash. The reference rejects the input instead, raising
+    /// `ValueError("Dots can't be used in app names")` /
+    /// `ValueError("Dots can't be used in aspects")`
+    /// (`reference/Reticulum/RNS/Destination.py:102`, `:106`, and again at
+    /// `:151` in `__init__`). Our analogue of a raised exception is an `Err`
+    /// return from the only constructor.
+    #[test]
+    fn dotted_app_name_or_aspect_is_rejected_like_the_reference() {
+        let identity = Identity::generate(&mut OsRng);
+        assert!(matches!(
+            Destination::new(
+                Some(identity.clone()),
+                Direction::In,
+                DestinationType::Single,
+                "test.app",
+                &["echo"],
+            ),
+            Err(DestinationError::DotInAppName)
+        ));
+        assert!(matches!(
+            Destination::new(
+                Some(identity.clone()),
+                Direction::In,
+                DestinationType::Single,
+                "test",
+                &["echo.reply"],
+            ),
+            Err(DestinationError::DotInAspect)
+        ));
+        // Second aspect too: the reference checks every aspect in its loop.
+        assert!(matches!(
+            Destination::new(
+                Some(identity.clone()),
+                Direction::In,
+                DestinationType::Single,
+                "test",
+                &["echo", "re.ply"],
+            ),
+            Err(DestinationError::DotInAspect)
+        ));
+        // The check must not reject legitimate names.
+        assert!(Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "test",
+            &["echo", "reply"],
+        )
+        .is_ok());
+    }
+
+    /// Codeberg #163: the collision the rejection prevents. Without it,
+    /// `("a.b", ["c"])` and `("a", ["b", "c"])` expand to the same full name
+    /// `a.b.c` (`Destination.py:104-107`) and therefore produce the same
+    /// destination hash for the same identity.
+    #[test]
+    fn dotted_components_would_collide_on_the_same_destination_hash() {
+        let identity = Identity::generate(&mut OsRng);
+        let split = Destination::compute_name_hash("a", &["b", "c"]);
+        let merged = Destination::compute_name_hash("a.b", &["c"]);
+        assert_eq!(
+            split, merged,
+            "the dotted form collides — which is why the constructor rejects it"
+        );
+        assert_eq!(
+            Destination::compute_destination_hash(&split, identity.hash()),
+            Destination::compute_destination_hash(&merged, identity.hash()),
+        );
     }
 
     #[test]
