@@ -479,6 +479,10 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // Reticulum.py:768-769). An explicit value overrides the medium-class
         // default; unset (None) resolves per medium at registration.
         "ingress_control" => iface.ingress_control = Some(parse_bool(value)),
+        // Egress control (Codeberg #172, Python `egress_control`,
+        // Reticulum.py:770-771). Off unless set, matching
+        // `Interface.EGRESS_CONTROL = False`.
+        "egress_control" => iface.egress_control = Some(parse_bool(value)),
         // Announce-rate keys (Codeberg #92). Parsed as unsigned, so a
         // negative value fails to parse and stays None; Python's >0 (target) /
         // >=0 (grace, penalty) validation is applied later in the driver.
@@ -975,6 +979,31 @@ mod tests {
             "unset RNode resolves ingress control ON"
         );
         assert!(ingress_control_default_for_type("RNodeInterface"));
+    }
+
+    /// Codeberg #172: `egress_control` is an rnsd config key
+    /// (Reticulum.py:770-771), so a drop-in config must parse it. Unset means
+    /// off, matching `Interface.EGRESS_CONTROL = False` — there is no
+    /// medium-class default for this one.
+    #[test]
+    fn test_parse_egress_control_key() {
+        let on = parse_ini(
+            "[interfaces]\n  [[If]]\n    type = TCPClientInterface\n    egress_control = yes\n",
+        )
+        .unwrap();
+        assert_eq!(on.interfaces.get("If").unwrap().egress_control, Some(true));
+
+        let off = parse_ini(
+            "[interfaces]\n  [[If]]\n    type = RNodeInterface\n    egress_control = no\n",
+        )
+        .unwrap();
+        assert_eq!(
+            off.interfaces.get("If").unwrap().egress_control,
+            Some(false)
+        );
+
+        let unset = parse_ini("[interfaces]\n  [[If]]\n    type = RNodeInterface\n").unwrap();
+        assert_eq!(unset.interfaces.get("If").unwrap().egress_control, None);
     }
 
     #[test]

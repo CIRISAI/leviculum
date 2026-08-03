@@ -115,6 +115,11 @@ const IC_PR_BURST_FREQ_NEW_HZ: f64 = 3.0;
 /// Path-request ingress burst threshold (Hz) for established interfaces
 /// (Python IC_PR_BURST_FREQ).
 const IC_PR_BURST_FREQ_HZ: f64 = 8.0;
+/// Outgoing path-request egress threshold (Hz) above which an interface with
+/// egress control enabled stops carrying re-originated path requests
+/// (Python EC_PR_FREQ = 5, Interface.py:86; consumed by
+/// `Interface.should_egress_limit_pr`, Interface.py:188-196).
+const EC_PR_FREQ_HZ: f64 = 5.0;
 /// Grace/hold window (ms) an active announce or path-request burst must persist
 /// before it may clear (Python IC_BURST_HOLD = 15 s).
 const IC_BURST_HOLD_MS: u64 = 15 * 1000;
@@ -1219,6 +1224,15 @@ pub struct Transport<C: Clock, S: Storage> {
     /// request burst limiter runs for a given interface.
     interface_ingress_control: BTreeMap<usize, bool>,
 
+    /// Per-interface egress-control enable flag (Codeberg #172; Python
+    /// `Interface.egress_control`, Reticulum.py:770-771/911, Interface.py:86-87).
+    /// Keyed by interface index. A missing entry means DISABLED, matching the
+    /// reference default (`Interface.EGRESS_CONTROL = False`), so only
+    /// interfaces an operator switched on are stored. Read by
+    /// [`Transport::should_egress_limit_pr`] to decide whether a re-originated
+    /// path request may leave over this interface.
+    interface_egress_control: BTreeMap<usize, bool>,
+
     /// Hardware MTU per interface (for link MTU negotiation).
     /// Keyed by interface index. Set by driver at registration, removed on interface down.
     interface_hw_mtus: BTreeMap<usize, u32>,
@@ -1413,6 +1427,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_modes: BTreeMap::new(),
             interface_kinds: BTreeMap::new(),
             interface_ingress_control: BTreeMap::new(),
+            interface_egress_control: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
             shared_instance_interface: None,
@@ -5453,7 +5468,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.send_on_interface(idx, &buf[..len])
             }
             None => {
-                self.record_outgoing_path_request_broadcast(None);
+                // No egress limit here: the reference applies it only to
+                // RE-ORIGINATED recursive requests (Transport.py:3036-3037),
+                // not to a request this node raises for itself.
+                self.record_outgoing_path_request_broadcast(None, &[]);
                 self.send_on_all_interfaces(&buf[..len]);
                 Ok(())
             }
@@ -5619,6 +5637,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .get(&id)
             .copied()
             .unwrap_or(true)
+    }
+
+    // Public: Interface Egress-Control API (Codeberg #172)
+    /// Set whether path-request egress limiting runs for an interface (called
+    /// by the driver at registration from the `egress_control` config key).
+    /// DISABLED is the baseline (Python `Interface.EGRESS_CONTROL = False`), so
+    /// only an enabled flag is stored, keeping the map sparse.
+    pub fn set_interface_egress_control(&mut self, id: usize, enabled: bool) {
+        if enabled {
+            self.interface_egress_control.insert(id, true);
+        } else {
+            self.interface_egress_control.remove(&id);
+        }
+    }
+
+    /// Whether egress control is enabled for an interface (disabled when unset,
+    /// matching the reference default).
+    pub fn interface_egress_control(&self, id: usize) -> bool {
+        self.interface_egress_control
+            .get(&id)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Propagation mode for an interface (`Full` when unset).
@@ -6136,13 +6176,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// `record_outgoing_announce_broadcast`). `except` is the interface the
     /// request arrived on when re-originating, or `None` for a locally
     /// originated broadcast that goes to every interface.
-    fn record_outgoing_path_request_broadcast(&mut self, except: Option<usize>) {
+    /// `also_skip` lists interfaces the broadcast did not actually reach —
+    /// currently the egress-limited ones (Codeberg #172). Recording a send that
+    /// never happened would feed the limiter its own phantom traffic.
+    fn record_outgoing_path_request_broadcast(
+        &mut self,
+        except: Option<usize>,
+        also_skip: &[usize],
+    ) {
         let now = self.clock.now_ms();
         let ifaces: Vec<usize> = self
             .interface_names
             .keys()
             .copied()
-            .filter(|&i| Some(i) != except)
+            .filter(|&i| Some(i) != except && !also_skip.contains(&i))
             .collect();
         for iface in ifaces {
             let deque = self.interface_outgoing_pr_times.entry(iface).or_default();
@@ -6295,6 +6342,33 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// Path-request egress-limit gate (Codeberg #172; Python
+    /// `Interface.should_egress_limit_pr`, Interface.py:188-196).
+    ///
+    /// Unlike the ingress limiters this holds no burst state: the reference
+    /// compares the interface's OUTGOING path-request frequency against
+    /// `ec_pr_freq` on every call and additionally requires at least
+    /// [`IC_BURST_MIN_SAMPLES`] samples in the deque, so a couple of stray
+    /// sends can never gate an interface. Reading the frequency pops one
+    /// decayed sample, exactly as in Python (`outgoing_pr_frequency`).
+    ///
+    /// The `ec_pr_freq` per-interface override (Reticulum.py:784-785) is not
+    /// plumbed; the constant threshold is the reference default.
+    fn should_egress_limit_pr(&mut self, iface: usize) -> bool {
+        if !self.interface_egress_control(iface) {
+            return false;
+        }
+        let now = self.clock.now_ms();
+        let Some(deque) = self.interface_outgoing_pr_times.get_mut(&iface) else {
+            return false;
+        };
+        // Python reads the frequency first (Interface.py:191) and only then
+        // checks the deque length (Interface.py:194), so the length is the
+        // post-decay-pop one.
+        let op_freq = Self::deque_frequency(deque, now, 1);
+        op_freq > EC_PR_FREQ_HZ && deque.len() >= IC_BURST_MIN_SAMPLES
+    }
+
     /// Enqueue an ingress-limited announce for later release (Codeberg #87;
     /// Python `Interface.hold_announce`, Interface.py:228-232).
     ///
@@ -6443,6 +6517,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_ingress_burst.remove(&iface);
         self.interface_held_announces.remove(&iface);
         self.interface_ingress_control.remove(&iface);
+        self.interface_egress_control.remove(&iface);
     }
 
     // Public: Announce-Rate Config API (Codeberg #67 Stage 2a)
@@ -6602,6 +6677,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         data: &[u8],
         known_hash: Option<[u8; 32]>,
     ) {
+        self.send_on_all_interfaces_except_many(except_index, &[], data, known_hash)
+    }
+
+    /// As [`Self::send_on_all_interfaces_except`], but skipping further
+    /// interfaces as well (the egress-limited ones, Codeberg #172).
+    fn send_on_all_interfaces_except_many(
+        &mut self,
+        except_index: usize,
+        also_except: &[usize],
+        data: &[u8],
+        known_hash: Option<[u8; 32]>,
+    ) {
         // Cache outbound packet hash so echoes returning via shared-medium
         // relay are dropped by the dedup check in process_incoming().
         // Matches Python Transport.py:1168-1169 and send_on_all_interfaces().
@@ -6611,9 +6698,31 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.push_broadcast(
             data.to_vec(),
             Some(InterfaceId(except_index)),
-            Vec::new(),
+            also_except.iter().map(|&i| InterfaceId(i)).collect(),
             Some(ph8(&cache_hash)),
         );
+    }
+
+    /// Interfaces that must not carry a re-originated path request right now
+    /// (Codeberg #172; Python `Transport.py:3036-3037` skips exactly those
+    /// interfaces inside its per-interface loop).
+    ///
+    /// Only interfaces with egress control switched ON are examined: for the
+    /// others `should_egress_limit_pr` returns `False` before reading any
+    /// frequency in the reference too (Interface.py:189), so this iteration
+    /// order has no observable difference — and notably does not trigger the
+    /// decay pop on interfaces the operator never enabled.
+    fn egress_limited_path_request_ifaces(&mut self, except: usize) -> Vec<usize> {
+        let candidates: Vec<usize> = self
+            .interface_egress_control
+            .keys()
+            .copied()
+            .filter(|&i| i != except)
+            .collect();
+        candidates
+            .into_iter()
+            .filter(|&i| self.should_egress_limit_pr(i))
+            .collect()
     }
 
     /// Compute deterministic jitter from a hash seed
@@ -6940,6 +7049,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Codeberg #104: a roaming-mode interface waits an extra
                 // PATH_REQUEST_RG grace on top of the base grace, letting more
                 // well-connected peers answer first (Python Transport.py:2988-2989).
+                //
+                // Deliberate non-behaviour (Codeberg #172): the reference ALSO
+                // skips the grace entirely when the next hop toward the
+                // destination is on a local-client interface
+                // (Transport.py:2978-2981). We keep the full grace there,
+                // because that is exactly the case where the destination's own
+                // host is about to answer for itself: #171 forwards the request
+                // to that client and its fresh PATH_RESPONSE displaces this
+                // cached entry inside the window, so the requester learns the
+                // current emission timestamp instead of the cached one. Pinned
+                // with the full argument in
+                // `node/mvr_pending_local_path_requests.rs`
+                // (`client_hosted_destination_keeps_the_response_grace`).
                 let grace = if mode == InterfaceMode::Roaming {
                     PATH_REQUEST_GRACE_MS + crate::constants::PATH_REQUEST_RG_MS
                 } else {
@@ -7131,14 +7253,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     let buf = fwd.as_slice();
                     let len = buf.len();
 
+                    // Per-interface egress limit before re-originating
+                    // (Codeberg #172; Python Transport.py:3036-3037). The
+                    // recorded outgoing path-request frequency (#67 Stage 2a)
+                    // finally has its consumer: an interface already carrying
+                    // more than EC_PR_FREQ path requests per second is skipped
+                    // for this one, and the request still goes out everywhere
+                    // else. Off unless the operator enabled `egress_control`,
+                    // matching the reference default.
+                    let egress_limited = self.egress_limited_path_request_ifaces(interface_index);
+                    for &iface in &egress_limited {
+                        crate::tracing::debug!(
+                            dest = %HexShort(&requested_hash),
+                            iface = %self.iface_name(iface),
+                            "Not sending recursive path request, egress limiting active"
+                        );
+                    }
+
                     if active_discovery {
-                        self.send_on_all_interfaces_except(interface_index, &buf[..len], None);
+                        self.send_on_all_interfaces_except_many(
+                            interface_index,
+                            &egress_limited,
+                            &buf[..len],
+                            None,
+                        );
                         // Outgoing path-request frequency for the re-originated
                         // request (Codeberg #67 Stage 2a). The broadcast plus the
                         // local-client forward below cover every registered
                         // interface except the requester, so a single broadcast
                         // record matches.
-                        self.record_outgoing_path_request_broadcast(Some(interface_index));
+                        self.record_outgoing_path_request_broadcast(
+                            Some(interface_index),
+                            &egress_limited,
+                        );
                     }
 
                     // Forward to local clients. In discovery mode this mirrors
@@ -7146,11 +7293,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // clients (Transport.py:2808-2813); in non-discovery mode it
                     // is Python branch 5 (Transport.py:3043-3048).
                     if has_locals {
+                        // The egress limit applies to local-client interfaces
+                        // too: Python's loop (Transport.py:3033-3041) runs over
+                        // every interface, local clients included.
                         let local_ifaces: Vec<usize> = self
                             .local_client_interfaces
                             .iter()
                             .copied()
-                            .filter(|&id| id != interface_index)
+                            .filter(|&id| id != interface_index && !egress_limited.contains(&id))
                             .collect();
                         for client_iface in local_ifaces {
                             if !active_discovery {
@@ -7878,10 +8028,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     "Retrying discovery path request for <{}>",
                     HexShort(&dest_hash)
                 );
-                self.send_on_all_interfaces_except(requesting_iface, &buf[..len], None);
+                // The retry re-originates the same recursive discovery, so it
+                // obeys the same per-interface egress limit as the original
+                // (Codeberg #172; Python Transport.py:3036-3037). Without it a
+                // saturated interface would be hammered by the retry cadence
+                // even while the first-pass re-origination skipped it.
+                let egress_limited = self.egress_limited_path_request_ifaces(requesting_iface);
+                self.send_on_all_interfaces_except_many(
+                    requesting_iface,
+                    &egress_limited,
+                    &buf[..len],
+                    None,
+                );
                 // Outgoing path-request frequency for the discovery retry
                 // (Codeberg #67 Stage 2a).
-                self.record_outgoing_path_request_broadcast(Some(requesting_iface));
+                self.record_outgoing_path_request_broadcast(
+                    Some(requesting_iface),
+                    &egress_limited,
+                );
             }
         }
 
@@ -22225,7 +22389,7 @@ mod tests {
         #[test]
         fn outgoing_pr_broadcast_except_tracks_all_but_one() {
             let mut transport = make_transport();
-            transport.record_outgoing_path_request_broadcast(Some(0));
+            transport.record_outgoing_path_request_broadcast(Some(0), &[]);
             assert!(transport.interface_outgoing_pr_times.contains_key(&1));
             assert!(!transport.interface_outgoing_pr_times.contains_key(&0));
         }
@@ -22233,7 +22397,7 @@ mod tests {
         #[test]
         fn outgoing_pr_broadcast_none_tracks_all() {
             let mut transport = make_transport();
-            transport.record_outgoing_path_request_broadcast(None);
+            transport.record_outgoing_path_request_broadcast(None, &[]);
             assert!(transport.interface_outgoing_pr_times.contains_key(&0));
             assert!(transport.interface_outgoing_pr_times.contains_key(&1));
         }
@@ -22942,6 +23106,132 @@ mod tests {
                 broadcasts >= 1,
                 "an unburst path request must re-originate a discovery broadcast"
             );
+        }
+
+        // --- Egress limiting of re-originated path requests (Codeberg #172) ---
+
+        /// Drive `iface`'s OUTGOING path-request deque to `count` samples
+        /// `spacing_ms` apart, leaving the clock one spacing past the last.
+        fn flood_outgoing_path_requests(
+            transport: &mut Transport<MockClock, MemoryStorage>,
+            iface: usize,
+            count: usize,
+            spacing_ms: u64,
+        ) {
+            for _ in 0..count {
+                transport.record_outgoing_path_request(iface);
+                transport.clock.advance(spacing_ms);
+            }
+        }
+
+        /// Codeberg #172: the reference applies a per-interface egress limit
+        /// before re-originating a recursive path request
+        /// (`Transport.py:3036-3037` -> `Interface.should_egress_limit_pr`,
+        /// `Interface.py:188-196`). We recorded the outgoing path-request
+        /// frequency (#67 Stage 2a) but nothing consumed it, so a saturated
+        /// interface still carried every re-originated request.
+        #[test]
+        fn egress_limited_interface_is_excluded_from_reoriginated_path_request() {
+            let mut transport = make_transport();
+            transport.set_interface_mode(NET_IFACE, InterfaceMode::Gateway);
+            // Egress control is off by default (Python EGRESS_CONTROL = False);
+            // an operator switches it on per interface.
+            transport.set_interface_egress_control(1, true);
+            flood_outgoing_path_requests(&mut transport, 1, 8, 100);
+            assert!(
+                transport.should_egress_limit_pr(1),
+                "8 outgoing path requests in 0.8 s is 10 Hz, over the 5 Hz threshold"
+            );
+
+            transport.drain_actions();
+            let samples_before = transport.interface_outgoing_pr_times[&1].len();
+            let packet = make_path_request(&transport, 1);
+            transport.handle_path_request(packet, NET_IFACE).unwrap();
+            let actions = transport.drain_actions();
+            let excluded: Vec<_> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Broadcast { exclude_ifaces, .. } => Some(exclude_ifaces.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                excluded.len(),
+                1,
+                "the request must still be re-originated on the unlimited interfaces"
+            );
+            assert!(
+                excluded[0].contains(&InterfaceId(1)),
+                "the egress-limited interface must not carry the re-originated request"
+            );
+            // The limiter must not feed itself a send it never made.
+            assert_eq!(
+                transport.interface_outgoing_pr_times[&1].len(),
+                samples_before,
+                "a suppressed send must not record an outgoing path-request sample"
+            );
+        }
+
+        /// The default must match the reference's: egress control OFF, so an
+        /// interface at the same frequency carries the request. Without this
+        /// the exclusion above could pass while excluding everything.
+        #[test]
+        fn egress_control_off_by_default_carries_the_reoriginated_path_request() {
+            let mut transport = make_transport();
+            transport.set_interface_mode(NET_IFACE, InterfaceMode::Gateway);
+            assert!(
+                !transport.interface_egress_control(1),
+                "unset egress control must read as disabled (Interface.EGRESS_CONTROL = False)"
+            );
+            flood_outgoing_path_requests(&mut transport, 1, 8, 100);
+            assert!(!transport.should_egress_limit_pr(1));
+
+            transport.drain_actions();
+            let packet = make_path_request(&transport, 2);
+            transport.handle_path_request(packet, NET_IFACE).unwrap();
+            let actions = transport.drain_actions();
+            let excluded: Vec<_> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Broadcast { exclude_ifaces, .. } => Some(exclude_ifaces.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(excluded.len(), 1);
+            assert!(
+                excluded[0].is_empty(),
+                "with egress control off no interface may be excluded"
+            );
+        }
+
+        /// Both states of the gate itself, per
+        /// `docs/src/concepts/evidence-and-honesty.md`: an enabled interface
+        /// below the threshold, or with too few samples, is NOT limited.
+        #[test]
+        fn egress_limit_needs_both_the_frequency_and_the_sample_floor() {
+            let mut transport = make_transport();
+            transport.set_interface_egress_control(1, true);
+            // 8 samples but only ~1.6 Hz: under EC_PR_FREQ.
+            flood_outgoing_path_requests(&mut transport, 1, 8, 600);
+            assert!(
+                !transport.should_egress_limit_pr(1),
+                "below the 5 Hz threshold there is no egress limit"
+            );
+
+            let mut transport = make_transport();
+            transport.set_interface_egress_control(1, true);
+            // 4 samples at 40 Hz: over the threshold but under the
+            // IC_BURST_MIN_SAMPLES floor Python applies (Interface.py:194).
+            flood_outgoing_path_requests(&mut transport, 1, 4, 25);
+            assert!(
+                !transport.should_egress_limit_pr(1),
+                "fewer than IC_BURST_MIN_SAMPLES samples must not gate the interface"
+            );
+
+            // An interface that has sent nothing at all is never limited.
+            let mut transport = make_transport();
+            transport.set_interface_egress_control(1, true);
+            assert!(!transport.should_egress_limit_pr(1));
         }
 
         // --- Threshold is age-driven, NOT announce_rate-config driven ---

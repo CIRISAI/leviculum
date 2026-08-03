@@ -558,3 +558,73 @@ fn client_disconnect_after_request_still_answers_from_cache() {
         "with the client gone, the pending entry drains via the time bound"
     );
 }
+
+/// Deliberate non-behaviour, pinned per
+/// `docs/src/concepts/wire-field-semantics.md` ("deliberate non-behaviours
+/// get pins too"): we do NOT skip the response grace when the next hop
+/// toward the requested destination sits on a local-client interface.
+///
+/// The reference does skip it. `Transport.path_request` checks
+/// `Transport.is_local_client_interface(Transport.next_hop_interface(
+/// destination_hash))` and sets `retransmit_timeout = now`, logging
+/// "destination is on a local client interface, rebroadcasting immediately"
+/// (Transport.py:2978-2981). We apply the full `PATH_REQUEST_GRACE` in that
+/// case, exactly as for any other next hop (Codeberg #172).
+///
+/// Why the deviation is the better behaviour here, and not merely different:
+/// this is precisely the case in which the destination's own host — our
+/// shared-instance client — is about to answer for itself. #171 forwards the
+/// request to that client, and the client's fresh PATH_RESPONSE displaces the
+/// cached entry inside the grace window; the sibling test
+/// `network_request_for_client_destination_gets_the_clients_fresh_response`
+/// pins that the requester then gets the FRESH announce and not the stale
+/// cached copy. Firing immediately would put the cached copy on the wire
+/// first, whose older emission timestamp can lose the newer-emission
+/// comparison at the requester (#155) and fail a request that looks
+/// answered. The deviation rule holds on all three counts: the packet is
+/// byte-identical (timing only), the requester is still answered far inside
+/// its path-request timeout, and it measurably improves what the requester
+/// ends up believing.
+///
+/// If a later change makes the grace unnecessary here, this test is the
+/// place to argue with — not a silent edit.
+#[test]
+fn client_hosted_destination_keeps_the_response_grace() {
+    let (mut node, net, client) = make_shared_instance(true);
+    let dest = make_client_destination();
+    let dest_hash = dest.hash().into_bytes();
+    register_client_destination(&mut node, client, &dest);
+
+    let mut actions: Vec<Action> = Vec::new();
+    let out = node.handle_packet(InterfaceId(net), &make_path_request(&dest_hash, 0xD7));
+    actions.extend(out.actions);
+
+    // Inside the grace nothing has answered yet. With the reference's
+    // `retransmit_timeout = now` the cached copy would already be out.
+    let now = node.transport().clock().now_ms();
+    node.transport()
+        .clock()
+        .set(now + PATH_REQUEST_GRACE_MS - 10);
+    let out = node.handle_timeout();
+    actions.extend(out.actions);
+    let early = emissions_reaching(&actions, net, &dest_hash);
+    assert!(
+        early.is_empty(),
+        "the answer for a client-hosted destination waits out the grace; \
+         emissions already sent toward the requester: {early:?}"
+    );
+
+    // Past the grace it does fire — the check above could go red, it is not
+    // a check that can never fail (evidence-and-honesty).
+    let now = node.transport().clock().now_ms();
+    node.transport().clock().set(now + 20);
+    let out = node.handle_timeout();
+    actions.extend(out.actions);
+    let late = emissions_reaching(&actions, net, &dest_hash);
+    assert_eq!(
+        late,
+        std::vec![CACHED_EMISSION_SECS],
+        "once the grace elapsed with no fresh client response, the cached \
+         answer serves the requester"
+    );
+}

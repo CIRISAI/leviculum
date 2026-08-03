@@ -1336,6 +1336,16 @@ impl ReticulumNode {
                 if !ingress_on {
                     tracing::info!("Interface {} ingress control: off", idx);
                 }
+                // Egress control (Codeberg #172). Off unless the operator sets
+                // `egress_control`, matching the reference default
+                // (`Interface.EGRESS_CONTROL = False`). No medium-class default
+                // here: the reference has none either, and switching it on by
+                // guess would silently drop path requests.
+                let egress_on = iface_config.egress_control.unwrap_or(false);
+                core.set_interface_egress_control(idx, egress_on);
+                if egress_on {
+                    tracing::info!("Interface {} egress control: on", idx);
+                }
             }
 
             let transport_enabled = core.transport_config().enable_transport;

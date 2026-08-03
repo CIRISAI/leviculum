@@ -413,6 +413,18 @@ pub struct InterfaceConfig {
     #[serde(default)]
     pub ingress_control: Option<bool>,
 
+    // Egress control (Codeberg #172). Python: `egress_control` config key
+    // (Reticulum.py:770-771, applied at :911), default False
+    // (`Interface.EGRESS_CONTROL`).
+    /// Enable the path-request egress limiter for this interface (Python
+    /// `egress_control`). When on, a re-originated recursive path request is
+    /// not sent over this interface while its outgoing path-request frequency
+    /// is above the reference's `ec_pr_freq` threshold. `None` means off, the
+    /// reference default; there is no medium-class default, so an operator
+    /// opts in exactly as with `rnsd`.
+    #[serde(default)]
+    pub egress_control: Option<bool>,
+
     // IFAC (Interface Access Code)
     /// Network name for IFAC authentication
     pub networkname: Option<String>,
@@ -572,6 +584,7 @@ impl Default for InterfaceConfig {
             announce_rate_grace: None,
             announce_cap: None,
             ingress_control: None,
+            egress_control: None,
             networkname: None,
             passphrase: None,
             ifac_size: None,

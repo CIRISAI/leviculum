@@ -1955,6 +1955,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_ingress_control(id)
     }
 
+    /// Set whether the path-request egress limiter runs for an interface
+    /// (Codeberg #172, Python `egress_control`). Off unless the operator
+    /// enabled it, matching the reference default.
+    pub fn set_interface_egress_control(&mut self, id: usize, enabled: bool) {
+        self.transport.set_interface_egress_control(id, enabled);
+    }
+
+    /// Whether egress control is enabled for an interface (disabled when unset).
+    pub fn interface_egress_control(&self, id: usize) -> bool {
+        self.transport.interface_egress_control(id)
+    }
+
     /// Clone all IFAC configurations (for passing to dispatch_actions outside the lock).
     pub fn clone_ifac_configs(
         &self,

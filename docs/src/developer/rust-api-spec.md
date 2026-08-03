@@ -246,7 +246,7 @@ IFAC wrapping handled in core, so every driver gets it for free.
 `fn new(bytes: [u8; TRUNCATED_HASHBYTES]) -> Self` (`destination.rs:162`),
 `fn as_bytes(&self) -> &[u8; TRUNCATED_HASHBYTES]` (`destination.rs:167`),
 `fn into_bytes(self) -> [u8; TRUNCATED_HASHBYTES]` (`destination.rs:172`).
-`Direction` (`destination.rs:148`) and `DestinationType` (`destination.rs:120`)
+`Direction` (`destination.rs:160`) and `DestinationType` (`destination.rs:132`)
 are the small enums passed to `Destination::new`. Packets are constructed
 internally (`leviculum_core::packet::Packet`); applications work with
 destinations and links, not raw packets.
