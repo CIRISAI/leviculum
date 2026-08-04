@@ -658,6 +658,15 @@ pub struct InterfaceStatEntry {
     /// Number of ingress-limited announces currently held for later release on
     /// this interface (Codeberg #87; Python len(Interface.held_announces)).
     pub held_announces: usize,
+    /// What the interface reports about its own medium, or `None` for a medium
+    /// with no airtime to account for (Codeberg #190). See [`LinkProfile`].
+    ///
+    /// Reported so a client tool two hops from the radio can ask the daemon
+    /// that owns it: `bitrate_bps` is the interface's own on-air rate, which
+    /// Python reports in the same `bitrate` key
+    /// (`RNodeInterface.updateBitrate`, RNodeInterface.py:693-696), and the
+    /// jitter ceiling has no reference equivalent.
+    pub link_profile: Option<LinkProfile>,
 }
 
 /// What an interface reports about the medium it drives.
@@ -6722,6 +6731,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     pr_burst_active,
                     pr_burst_activated,
                     held_announces,
+                    link_profile: self.interface_link_profiles.get(&id).copied(),
                 }
             })
             .collect()

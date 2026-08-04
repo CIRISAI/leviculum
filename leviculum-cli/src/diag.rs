@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use leviculum_std::config::{Config, InterfaceConfig};
 
+use crate::daemon_rpc::{resolve_authkey, resolve_instance_name};
+
 /// Placeholder substituted for redacted secret values.
 const REDACTED: &str = "<redacted>";
 
@@ -145,15 +147,8 @@ pub async fn build_bundle(opts: &DiagOptions) -> String {
 
     // --- Daemon view (RPC) ---
     section_header(&mut out, "Daemon view (shared-instance RPC)");
-    let instance_name = opts
-        .instance_name
-        .clone()
-        .or_else(|| {
-            loaded_config
-                .as_ref()
-                .map(|c| c.reticulum.instance_name.clone())
-        })
-        .unwrap_or_else(|| "default".to_string());
+    let instance_name =
+        resolve_instance_name(opts.instance_name.as_deref(), loaded_config.as_ref());
     let _ = writeln!(out, "instance name: {instance_name}");
     let _ = writeln!(out, "RPC socket:    \\0rns/{instance_name}/rpc");
     if opts.no_rpc {
@@ -293,41 +288,6 @@ fn render_interface_config(out: &mut String, iface: &InterfaceConfig) {
 // ---------------------------------------------------------------------------
 // RPC / daemon view
 // ---------------------------------------------------------------------------
-
-/// Resolve the daemon's RPC authkey: `SHA256(storage/transport_identity)`.
-///
-/// Tries `{config_dir}/storage/transport_identity` first (the path `lnsd`
-/// always uses unless `--storage` was given), then the config's
-/// `storage_path` if set. The 64-byte file is hashed and discarded — its
-/// bytes never leave this function.
-fn resolve_authkey(
-    config_dir: &Path,
-    config: Option<&Config>,
-) -> Result<([u8; 32], PathBuf), String> {
-    let mut candidates: Vec<PathBuf> = vec![config_dir.join("storage").join("transport_identity")];
-    if let Some(sp) = config.and_then(|c| c.reticulum.storage_path.as_ref()) {
-        candidates.push(sp.join("transport_identity"));
-    }
-    let mut errors = Vec::new();
-    for path in &candidates {
-        match std::fs::read(path) {
-            Ok(bytes) if bytes.len() == 64 => {
-                use sha2::Digest;
-                let digest = sha2::Sha256::digest(&bytes);
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&digest);
-                return Ok((key, path.clone()));
-            }
-            Ok(bytes) => errors.push(format!(
-                "{}: unexpected size {} (expected 64)",
-                path.display(),
-                bytes.len()
-            )),
-            Err(e) => errors.push(format!("{}: {e}", path.display())),
-        }
-    }
-    Err(errors.join("; "))
-}
 
 async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8; 32]) {
     // interface_stats

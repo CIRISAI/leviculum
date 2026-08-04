@@ -56,6 +56,8 @@ Options:
 **--mode** *mode*
 :   Which phases to run: all, link, packet, ratchet-basic, ratchet-enforced, bulk-transfer, ratchet-rotation (default: all).
 
+Every single-packet phase waits for what is still in flight before it reads the receive counter. On a radio link that wait must be sized from the link, and the tool has no radio of its own, so give it the global **-c**/**--config** pointing at the config directory of the daemon that owns the radio: it reads that daemon's `interface_stats` and sizes each window from the reported on-air bitrate and pre-TX jitter ceiling. Without it — or against a daemon reporting no radio — the phases keep a fixed wait, and the run prints which state it is in.
+
 ### lnstest diag
 
 Collect a self-contained diagnostic bundle from a running **lnsd** (or **rnsd**) for attaching to bug reports: versions/build, the secret-redacted config and configured interfaces, the daemon's live view via the shared-instance RPC (interface stats, path table, link count), best-effort system info, and an event-log pointer. Printed to stdout by default. Use the global **-c**/**--config** to point at the daemon's config directory.

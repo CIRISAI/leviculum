@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 use tokio::io::AsyncBufReadExt;
 
+mod daemon_rpc;
 mod diag;
 mod selftest;
 
@@ -340,7 +341,10 @@ fn skip_msgpack_element(data: &[u8]) -> Option<&[u8]> {
 #[command(name = "lnstest")]
 #[command(author, version = env!("LEVICULUM_VERSION"), about = "Reticulum test and diagnostics tool")]
 struct Args {
-    /// Configuration file path
+    /// Config directory of the daemon to ask (the one `lnsd --config` was
+    /// given). `diag` reads its config and identity from here; `selftest`
+    /// uses it to ask that daemon for the link profile its drain windows are
+    /// sized from. Without it, `selftest` falls back to fixed waits.
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
@@ -1081,6 +1085,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mode,
                 args.corrupt_every,
                 discovery_timeout,
+                args.config,
             )
             .await?;
         }

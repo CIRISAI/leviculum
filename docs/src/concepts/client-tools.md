@@ -94,6 +94,17 @@ the union: transport's routable interfaces plus the listeners the daemon
 runs. Transport stays free of listener rows, which it would otherwise try
 to send on.
 
+Codeberg #190 was the same shape one field down. A radio row's `bitrate`
+answered with the per-medium `BITRATE_GUESS` — 10 Mbit/s, TCP's — because the
+key was filled only from a configured `bitrate`, and a radio configures none.
+Python fills it from the interface itself, which for an RNode is the on-air
+rate derived from the radio settings (`RNodeInterface.updateBitrate`,
+RNodeInterface.py:693-696). The precedence is now Python's, in Python's order:
+a configured `bitrate` first (`if configured_bitrate: interface.bitrate =
+configured_bitrate`, Reticulum.py:887), else the interface's own rate for its
+medium, else the guess. Nothing failed while it was wrong; a client asking how
+fast the air is simply got an answer about a different medium.
+
 ### What appears, and under what name
 
 The name is the interface's identity to a script, so each row reproduces the
@@ -140,6 +151,17 @@ drifts:
 - **Extra and missing keys**: ours adds `announce_queue` and `peers`, the
   reference adds `autoconnect_source`. Pinned exactly by
   `assert_daemon_stats_parity`.
+- **`tx_jitter_max`** (Codeberg #190): the ceiling, in seconds, of the
+  randomised pre-TX delay an interface draws against before a frame goes on
+  the air. The reference has no equivalent — Python's `RNodeInterface` leaves
+  medium access to the RNode firmware's CSMA and holds no such attribute, so
+  nothing in `get_interface_stats` (Reticulum.py:1326-1470) reports it. Purely
+  additive: `rnstatus` reads every field by name (`ifstat["name"]`,
+  rnstatus.py:391; `if "<key>" in ifstat` for the optional ones) and never
+  enumerates an interface dict, so an unknown key is not read. Emitted only
+  where the concept applies, the way Python gates `airtime_short` and friends
+  on `hasattr`, which is why it does not appear in the TCP-only rows the
+  parity matrix compares.
 - **An IPC client's `short_name` index** mirrors the reference's live-client
   count at accept time (`LocalInterface.py:441/355`), so the labels of two
   daemons agree only when their clients connected and left in the same order.

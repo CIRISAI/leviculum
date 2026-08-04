@@ -19,7 +19,7 @@ Commands:
   help        Print this message or the help of the given subcommand(s)
 
 Options:
-  -c, --config <CONFIG>                Configuration file path
+  -c, --config <CONFIG>                Config directory of the daemon to ask
   -v, --verbose                        Enable verbose logging
       --corrupt-every <CORRUPT_EVERY>  Corrupt ~1 byte per N bytes on TCP write (fault injection)
   -h, --help                           Print help
@@ -27,8 +27,11 @@ Options:
 ```
 
 `-c/--config`, `-v/--verbose`, and `--corrupt-every` are global flags
-available on every subcommand. `--corrupt-every` is a fault-injection
-tool for testing and should be left off in normal use.
+available on every subcommand. `--config` names a daemon's *config
+directory* — the one `lnsd --config` was given — not a file: `diag` and
+`selftest` both read the config and the identity under it to reach that
+daemon's shared instance. `--corrupt-every` is a fault-injection tool for
+testing and should be left off in normal use.
 
 ## identity
 
@@ -108,7 +111,7 @@ Arguments:
   <ADDR>  Address of the rnsd to connect to (host:port)
 
 Options:
-  -c, --config <CONFIG>      Configuration file path
+  -c, --config <CONFIG>      Config directory of the daemon to ask
       --identity <IDENTITY>  Path to identity file (default: generate ephemeral)
 ```
 
@@ -157,7 +160,7 @@ Arguments:
 
 Options:
   -c, --config <CONFIG>
-          Configuration file path
+          Config directory of the daemon to ask
       --duration <DURATION>
           Test duration in seconds [default: 180]
       --rate <RATE>
@@ -182,6 +185,40 @@ lnstest selftest 192.0.2.10:4965
 lnstest selftest --mode link --duration 60 192.0.2.10:4965 192.0.2.11:4965
 ```
 
+### Sizing the drain window on a slow link
+
+Every single-packet phase waits for what is still in flight before it
+reads the receive counter. On a radio link that wait has to be sized
+from the link: ten 147-byte frames over a 2734 bps LoRa link need five
+seconds of air, and a fixed sleep shorter than that counts the frames
+still on the air as lost.
+
+The tool has no radio of its own — it is a TCP client, usually two hops
+from one — so it asks the daemon that owns the radio. Give it that
+daemon's config directory:
+
+```sh
+lnstest -c /root/.reticulum selftest 127.0.0.1:4242 peer:4242 --mode ratchet-basic
+```
+
+It resolves the shared instance from that directory, reads
+`interface_stats`, and sizes each phase's window from the reported
+on-air bitrate and pre-TX jitter ceiling of the most constraining radio
+interface. The run says which state it is in, on its own line:
+
+```text
+[selftest] Link sizing: the daemon's `RNodeInterface[/dev/ttyUSB0]` (2734 bps, jitter ceiling 2926 ms)
+[selftest] Phase 6: drain budget from the daemon's `RNodeInterface[…]` (2734 bps, …): \
+10 frames x 147B at 2734 bps = 6.1s air (payload 5.1s +20% preamble/header/medium access) \
++ 2.9s handover (interface pre-TX jitter ceiling) = 9.1s
+```
+
+Without `-c`, against a daemon that reports no radio, or against one
+that does not report a jitter ceiling (a Python `rnsd`, or an older
+`lnsd`), it degrades rather than guessing: the reason is printed on the
+same line, and the phase falls back to the fixed wait, or to the
+airtime term alone when only the ceiling is missing.
+
 ## diag
 
 Collect a self-contained diagnostic bundle from a running daemon for bug
@@ -195,7 +232,7 @@ Usage: lnstest diag [OPTIONS]
 
 Options:
   -c, --config <CONFIG>
-          Configuration file path
+          Config directory of the daemon to ask
       --output <OUTPUT>
           Write the bundle to this path instead of stdout
       --instance-name <INSTANCE_NAME>

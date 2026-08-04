@@ -536,6 +536,161 @@ struct DrainBudget {
     detail: String,
 }
 
+/// The link profile a phase sizes its drain budget from, and where it came
+/// from — printed with every budget, because a number whose provenance is not
+/// in the log cannot be checked afterwards.
+#[derive(Clone)]
+struct LinkSizing {
+    profile: Option<leviculum_core::transport::LinkProfile>,
+    origin: String,
+}
+
+impl LinkSizing {
+    /// Nothing to size from, and the reason why.
+    fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            profile: None,
+            origin: reason.into(),
+        }
+    }
+}
+
+/// Pick the profile that describes the air a phase's frames have to cross.
+///
+/// The tool's own next hop wins when it has one — that is a node sitting
+/// directly on the radio, and nothing describes its link better. In the
+/// normal deployment the tool is a TCP client two hops from the radio and its
+/// next hop has no airtime at all, so the daemon's answer is what is left.
+fn link_sizing(
+    local_next_hop: Option<leviculum_core::transport::LinkProfile>,
+    from_daemon: &LinkSizing,
+) -> LinkSizing {
+    match local_next_hop {
+        Some(profile) if profile.bitrate_bps > 0 => LinkSizing {
+            profile: Some(profile),
+            origin: "this node's own next-hop interface".to_string(),
+        },
+        _ => from_daemon.clone(),
+    }
+}
+
+/// Read a link profile out of an `interface_stats` payload.
+///
+/// The payload is the shared-instance dict `rnsd` serves too, so this reads
+/// what both stacks report and tolerates what only one of them does:
+///
+/// - `bitrate` on a radio row is the interface's own on-air rate on both
+///   stacks (Python `RNodeInterface.updateBitrate`, RNodeInterface.py:693-696,
+///   reported through Reticulum.py:1421-1423).
+/// - `tx_jitter_max` is ours alone (Codeberg #190). A payload without it —
+///   from `rnsd`, or from an `lnsd` older than this change — yields a profile
+///   with no handover term rather than an error: the frames' own airtime is
+///   still derived, which is a better bound than the fixed sleep it replaces,
+///   and the caller says in its log that the handover went unaccounted.
+///
+/// Radio rows are the ones carrying `airtime_short`, which both stacks emit
+/// only for an RNode interface (Reticulum.py:1371-1372 gates it on
+/// `hasattr(interface, "r_airtime_short")`). Of those, the most constraining —
+/// lowest bitrate — is chosen: a burst is bounded by the slowest air it has to
+/// cross, and picking the fastest would under-size the window, which is the
+/// failure this whole derivation exists to remove.
+fn link_profile_from_interface_stats(
+    stats: &serde_json::Value,
+) -> Result<(leviculum_core::transport::LinkProfile, String), String> {
+    let interfaces = stats
+        .get("interfaces")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "payload carries no `interfaces` array".to_string())?;
+
+    let mut best: Option<(u32, Option<u64>, String)> = None;
+    for iface in interfaces {
+        // A radio row, by the key both stacks gate on the radio itself.
+        if iface.get("airtime_short").is_none() {
+            continue;
+        }
+        let Some(bitrate) = iface.get("bitrate").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if bitrate == 0 || bitrate > u32::MAX as u64 {
+            continue;
+        }
+        // Seconds on the wire, milliseconds in the profile. Absent on any
+        // daemon that does not report a pre-TX contention bound.
+        let jitter_ms = iface
+            .get("tx_jitter_max")
+            .and_then(|v| v.as_f64())
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| (s * 1000.0) as u64);
+        let name = iface
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unnamed>")
+            .to_string();
+        let bitrate = bitrate as u32;
+        if best.as_ref().is_none_or(|(b, _, _)| bitrate < *b) {
+            best = Some((bitrate, jitter_ms, name));
+        }
+    }
+
+    let Some((bitrate_bps, tx_jitter_max_ms, name)) = best else {
+        return Err("the daemon reports no radio interface with a usable bitrate".to_string());
+    };
+    let origin = match tx_jitter_max_ms {
+        Some(ms) => format!("the daemon's `{name}` ({bitrate_bps} bps, jitter ceiling {ms} ms)"),
+        None => format!(
+            "the daemon's `{name}` ({bitrate_bps} bps; it reports no pre-TX jitter \
+             ceiling, so the handover goes unaccounted)"
+        ),
+    };
+    Ok((
+        leviculum_core::transport::LinkProfile {
+            bitrate_bps,
+            tx_jitter_max_ms,
+        },
+        origin,
+    ))
+}
+
+/// Ask the daemon that owns the radio what its link looks like.
+///
+/// Every failure is a reason, never an abort: the tool still runs, on the
+/// fixed fallback wait, and says in its log which state it is in.
+async fn daemon_link_sizing(config_dir: Option<&std::path::Path>) -> LinkSizing {
+    let Some(dir) = config_dir else {
+        return LinkSizing::unavailable(
+            "no -c/--config given, so the daemon that owns the radio was not asked",
+        );
+    };
+    let access = match crate::daemon_rpc::DaemonAccess::resolve(Some(dir), None) {
+        Ok(a) => a,
+        Err(e) => {
+            return LinkSizing::unavailable(format!(
+                "cannot reach the daemon's shared instance under {}: {e}",
+                dir.display()
+            ));
+        }
+    };
+    let stats = match access.query("interface_stats").await {
+        Ok(v) => v,
+        Err(e) => {
+            return LinkSizing::unavailable(format!(
+                "interface_stats query to instance `{}` failed: {e}",
+                access.instance_name
+            ));
+        }
+    };
+    match link_profile_from_interface_stats(&stats) {
+        Ok((profile, origin)) => LinkSizing {
+            profile: Some(profile),
+            origin,
+        },
+        Err(e) => LinkSizing::unavailable(format!(
+            "instance `{}` answered, but {e}",
+            access.instance_name
+        )),
+    }
+}
+
 /// Size the drain window for `frames` frames of `wire_bytes` each over the
 /// link `profile` describes.
 ///
@@ -563,8 +718,7 @@ fn drain_budget(
             return DrainBudget {
                 total: fallback,
                 detail: format!(
-                    "next hop reports no on-air bitrate (no airtime to account for); \
-                     fixed {:.1}s",
+                    "no on-air bitrate to price airtime against; fixed {:.1}s",
                     fallback.as_secs_f64()
                 ),
             };
@@ -613,7 +767,7 @@ async fn drain_single_packets(
     label: &str,
     expected: u64,
     wire_bytes: usize,
-    profile: Option<leviculum_core::transport::LinkProfile>,
+    sizing: &LinkSizing,
     fallback: std::time::Duration,
 ) -> u64 {
     let received_at_end = {
@@ -621,8 +775,11 @@ async fn drain_single_packets(
         st.sp_recv_a + st.sp_recv_b
     };
     let outstanding = expected.saturating_sub(received_at_end);
-    let budget = drain_budget(outstanding, wire_bytes, profile, fallback);
-    println!("[selftest] {label}: drain budget {}", budget.detail);
+    let budget = drain_budget(outstanding, wire_bytes, sizing.profile, fallback);
+    println!(
+        "[selftest] {label}: drain budget from {}: {}",
+        sizing.origin, budget.detail
+    );
 
     let deadline = Instant::now() + budget.total;
     loop {
@@ -673,6 +830,7 @@ pub async fn run_selftest(
     mode: &str,
     corrupt_every: Option<u64>,
     discovery_timeout_secs: u64,
+    config_dir: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let run_link = mode == "all" || mode == "link";
     let run_packet = mode == "all" || mode == "packet";
@@ -717,6 +875,13 @@ pub async fn run_selftest(
         println!("[selftest] Fault injection: --corrupt-every {n} (deferred until after Phase 2)");
         disable_fault_injection();
     }
+
+    // The numbers a single-packet phase sizes its drain window from live on the
+    // daemon, not here: this tool is a TCP client two hops from the radio and
+    // its own next hop has no airtime at all (Codeberg #190). Ask once, up
+    // front, and say which state the run is in either way.
+    let daemon_sizing = daemon_link_sizing(config_dir.as_deref()).await;
+    println!("[selftest] Link sizing: {}", daemon_sizing.origin);
 
     // TCP pre-check
     tokio::time::timeout(
@@ -1319,7 +1484,7 @@ pub async fn run_selftest(
             "Phase 8",
             sp_expected,
             sp_wire_bytes,
-            node_a.next_hop_link_profile(&dest_hash_b),
+            &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
             std::time::Duration::from_secs(5),
         )
         .await;
@@ -1425,7 +1590,7 @@ pub async fn run_selftest(
                 &format!("Ratchet {mode}"),
                 msg_count * 2,
                 wire_bytes,
-                node_a.next_hop_link_profile(&dest_hash_b),
+                &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
                 std::time::Duration::from_secs(10),
             )
             .await;
@@ -1550,7 +1715,7 @@ pub async fn run_selftest(
                 "Ratchet rotation pre-rotation",
                 10,
                 wire_bytes,
-                node_a.next_hop_link_profile(&dest_hash_b),
+                &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
                 std::time::Duration::from_secs(5),
             )
             .await;
@@ -1637,7 +1802,7 @@ pub async fn run_selftest(
                     "Ratchet rotation post-rotation",
                     10,
                     wire_bytes,
-                    node_a.next_hop_link_profile(&dest_hash_b),
+                    &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
                     std::time::Duration::from_secs(5),
                 )
                 .await;
@@ -2011,6 +2176,222 @@ mod tests {
             std::time::Duration::from_secs(5),
         );
         assert_eq!(budget.total, std::time::Duration::from_millis(5_160));
+    }
+
+    // Reading the daemon's answer (Codeberg #190)
+    //
+    // The payload is the shared-instance dict `rnsd` serves too, so the read
+    // side is exercised against all three shapes it can arrive in: ours with
+    // the key, a daemon without it, and one with no radio at all.
+
+    /// One `interface_stats` interface row, as JSON.
+    fn iface_row(name: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "name": name,
+            "type": "TCPClientInterface",
+            "bitrate": 10_000_000u64,
+            "status": true,
+        });
+        for (k, v) in extra.as_object().expect("object").iter() {
+            row[k] = v.clone();
+        }
+        row
+    }
+
+    fn stats_with(rows: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({ "interfaces": rows })
+    }
+
+    /// The engaged state: a daemon of ours, reporting the radio's own on-air
+    /// bitrate and the jitter ceiling it draws against.
+    #[test]
+    fn a_radio_row_with_the_jitter_key_yields_the_full_profile() {
+        let stats = stats_with(vec![
+            iface_row(
+                "TCPServerInterface[lo/127.0.0.1:4242]",
+                serde_json::json!({}),
+            ),
+            iface_row(
+                "RNodeInterface[radio]",
+                serde_json::json!({
+                    "type": "RNodeInterface",
+                    "bitrate": 2734u64,
+                    "airtime_short": 0.0,
+                    "tx_jitter_max": 2.926,
+                }),
+            ),
+        ]);
+        let (profile, origin) =
+            link_profile_from_interface_stats(&stats).expect("a radio row is present");
+        assert_eq!(profile.bitrate_bps, 2734);
+        assert_eq!(profile.tx_jitter_max_ms, Some(2926));
+        assert!(origin.contains("RNodeInterface[radio]"), "{origin}");
+    }
+
+    /// The tolerance Codeberg #183 was about, on this payload: a daemon that
+    /// does not carry the key — `rnsd`, or an `lnsd` older than this change —
+    /// must still yield the airtime term, not an error and not a made-up
+    /// handover.
+    #[test]
+    fn a_radio_row_without_the_jitter_key_still_yields_the_airtime_term() {
+        let stats = stats_with(vec![iface_row(
+            "RNodeInterface[radio]",
+            serde_json::json!({
+                "type": "RNodeInterface",
+                "bitrate": 2734u64,
+                "airtime_short": 0.0,
+            }),
+        )]);
+        let (profile, origin) =
+            link_profile_from_interface_stats(&stats).expect("a radio row is present");
+        assert_eq!(profile.bitrate_bps, 2734);
+        assert_eq!(profile.tx_jitter_max_ms, None);
+        assert!(
+            origin.contains("no pre-TX jitter"),
+            "the log must say the handover went unaccounted: {origin}"
+        );
+        // And the budget that comes out of it is the airtime alone — derived,
+        // not the fixed fallback.
+        let budget = drain_budget(
+            10,
+            MEASURED_FRAME_BYTES,
+            Some(profile),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(budget.total, std::time::Duration::from_millis(5_160));
+    }
+
+    /// No radio on the far side of the RPC at all: a reason, and the caller
+    /// keeps its fixed wait. Not a panic, and not a budget computed off a TCP
+    /// interface's 10 Mbps guess, which would size the window to nothing.
+    #[test]
+    fn a_daemon_with_no_radio_is_a_reason_not_a_bogus_profile() {
+        let stats = stats_with(vec![
+            iface_row(
+                "TCPServerInterface[lo/127.0.0.1:4242]",
+                serde_json::json!({}),
+            ),
+            iface_row(
+                "Shared Instance[rns/default]",
+                serde_json::json!({"type": "LocalServerInterface", "bitrate": 1_000_000_000u64}),
+            ),
+        ]);
+        let err = link_profile_from_interface_stats(&stats).expect_err("no radio row");
+        assert!(err.contains("no radio interface"), "{err}");
+    }
+
+    /// Malformed payloads are reasons too. A tool that panics on a daemon's
+    /// answer cannot report on the daemon.
+    #[test]
+    fn a_payload_without_the_interfaces_array_is_a_reason() {
+        for shape in [
+            serde_json::json!({}),
+            serde_json::json!({"interfaces": 7}),
+            serde_json::json!("not a dict"),
+        ] {
+            let err = link_profile_from_interface_stats(&shape).expect_err("{shape}");
+            assert!(err.contains("`interfaces`"), "{err}");
+        }
+    }
+
+    /// A zero or absent bitrate on a radio row is not a link profile: dividing
+    /// by it is the nonsense the fallback exists to avoid.
+    #[test]
+    fn a_radio_row_with_no_usable_bitrate_is_skipped() {
+        let stats = stats_with(vec![iface_row(
+            "RNodeInterface[radio]",
+            serde_json::json!({
+                "type": "RNodeInterface",
+                "bitrate": 0u64,
+                "airtime_short": 0.0,
+                "tx_jitter_max": 2.926,
+            }),
+        )]);
+        assert!(link_profile_from_interface_stats(&stats).is_err());
+    }
+
+    /// Two radios: the burst is bounded by the slowest air it has to cross, so
+    /// that is the one the window is sized from.
+    #[test]
+    fn the_most_constraining_radio_is_the_one_chosen() {
+        let stats = stats_with(vec![
+            iface_row(
+                "RNodeInterface[fast]",
+                serde_json::json!({
+                    "type": "RNodeInterface",
+                    "bitrate": 5468u64,
+                    "airtime_short": 0.0,
+                    "tx_jitter_max": 1.463,
+                }),
+            ),
+            iface_row(
+                "RNodeInterface[slow]",
+                serde_json::json!({
+                    "type": "RNodeInterface",
+                    "bitrate": 366u64,
+                    "airtime_short": 0.0,
+                    "tx_jitter_max": 21.857,
+                }),
+            ),
+        ]);
+        let (profile, origin) = link_profile_from_interface_stats(&stats).expect("radio rows");
+        assert_eq!(profile.bitrate_bps, 366);
+        assert!(origin.contains("RNodeInterface[slow]"), "{origin}");
+    }
+
+    /// A node sitting directly on the radio keeps its own answer; everything
+    /// else takes the daemon's.
+    #[test]
+    fn the_local_next_hop_wins_when_it_has_airtime_of_its_own() {
+        let from_daemon = LinkSizing {
+            profile: Some(MEASURED_LINK),
+            origin: "the daemon".to_string(),
+        };
+        let local = LinkProfile {
+            bitrate_bps: 366,
+            tx_jitter_max_ms: Some(21_857),
+        };
+        assert_eq!(
+            link_sizing(Some(local), &from_daemon).profile,
+            Some(local),
+            "a next hop with airtime of its own describes the link best"
+        );
+        assert_eq!(
+            link_sizing(None, &from_daemon).profile,
+            Some(MEASURED_LINK),
+            "a TCP next hop must defer to the daemon that owns the radio"
+        );
+        assert_eq!(
+            link_sizing(
+                Some(LinkProfile {
+                    bitrate_bps: 0,
+                    tx_jitter_max_ms: None
+                }),
+                &from_daemon
+            )
+            .profile,
+            Some(MEASURED_LINK),
+            "a next hop reporting no bitrate is not an answer"
+        );
+    }
+
+    /// Both engagement states of the tool's own entry point, without a daemon:
+    /// no config dir, and a config dir no daemon owns. Each is a stated reason
+    /// and a fixed wait.
+    #[tokio::test]
+    async fn the_sizing_query_degrades_to_a_stated_reason() {
+        let none = daemon_link_sizing(None).await;
+        assert!(none.profile.is_none());
+        assert!(none.origin.contains("-c/--config"), "{}", none.origin);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let absent = daemon_link_sizing(Some(tmp.path())).await;
+        assert!(absent.profile.is_none());
+        assert!(
+            absent.origin.contains("cannot reach the daemon"),
+            "{}",
+            absent.origin
+        );
     }
 
     #[test]

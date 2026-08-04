@@ -326,6 +326,10 @@ struct StatRow {
     /// Reported name of the listener this interface was spawned by, if any.
     parent_name: Option<String>,
     radio: Option<crate::interfaces::RadioStats>,
+    /// Ceiling of the randomised delay this interface adds before it puts a
+    /// frame on the air, in milliseconds; `None` for a medium that transmits
+    /// as soon as it is asked (Codeberg #190).
+    tx_jitter_max_ms: Option<u64>,
 }
 
 /// Serialise one row into the Python `interface_stats` per-interface dict.
@@ -450,6 +454,29 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         fields.extend(radio_stat_fields(r));
     }
 
+    // Codeberg #190: `tx_jitter_max` — the ceiling of the randomised pre-TX
+    // delay the interface draws against before a frame goes on the air.
+    //
+    // No reference equivalent: Python's RNodeInterface leaves medium access to
+    // the RNode firmware's CSMA and holds no such attribute, so nothing in
+    // `get_interface_stats` (Reticulum.py:1326-1470) reports it. Adding the key
+    // is therefore an additive deviation, and a benign one: the reference
+    // reader looks every field up by name (`ifstat["name"]`, rnstatus.py:391,
+    // and `if "<key>" in ifstat` for the optional ones) and never enumerates
+    // the dict — there is no `.keys()` or `.items()` over an interface entry
+    // anywhere in rnstatus.py — so an unknown key is simply not read.
+    //
+    // Seconds as a float, because every other time-valued key in this dict is
+    // seconds (announce_rate_target, burst_activated), and emitted only where
+    // the concept applies, exactly as Python gates `airtime_short` and friends
+    // on `hasattr`. A medium that transmits when asked carries no key at all.
+    if let Some(ms) = row.tx_jitter_max_ms {
+        fields.push((
+            pickle_str_key("tx_jitter_max"),
+            pickle_float(ms as f64 / 1000.0),
+        ));
+    }
+
     pickle_dict(fields)
 }
 
@@ -572,12 +599,21 @@ pub(crate) fn build_interface_stats(
         // Codeberg #25: latest RNode radio stats (None for non-radio interfaces).
         let radio = counters_map.get(&entry.id).and_then(|c| c.radio_stats());
 
-        // Bitrate reporting (Codeberg #93). A configured `bitrate` (fed into the
-        // announce cap) overrides the per-type BITRATE_GUESS, matching Python's
-        // `configured_bitrate` override (Reticulum.py:887/1421-1423). Unset falls
-        // back to the medium default guess.
+        // Bitrate reporting (Codeberg #93/#190). Python's precedence, in the
+        // order it applies them: a configured `bitrate` overrides everything
+        // (`if configured_bitrate: interface.bitrate = configured_bitrate`,
+        // Reticulum.py:887); otherwise the interface's own rate for its medium,
+        // which for a radio is the on-air bitrate it derives from its radio
+        // settings (`RNodeInterface.updateBitrate`, RNodeInterface.py:693-696);
+        // otherwise the per-medium BITRATE_GUESS. Reticulum.py:1421-1423 then
+        // reports whichever survived as `bitrate`.
+        //
+        // The middle term used to be missing, so a radio row answered with the
+        // TCP guess — a query about a different world than the one the daemon
+        // runs, the shape of Codeberg #177.
         let bitrate = entry
             .configured_bitrate
+            .or(entry.link_profile.map(|p| p.bitrate_bps))
             .map(|bps| bps as i64)
             .unwrap_or_else(|| default_bitrate(&itype));
 
@@ -620,6 +656,7 @@ pub(crate) fn build_interface_stats(
                 .and_then(|p| inv.listeners().find(|(id, _)| *id == p))
                 .map(|(_, l)| l.identity.name.clone()),
             radio,
+            tx_jitter_max_ms: entry.link_profile.and_then(|p| p.tx_jitter_max_ms),
         });
     }
 
@@ -657,6 +694,9 @@ pub(crate) fn build_interface_stats(
             ifac_size_bits: listener.ifac_size_bits,
             parent_name: None,
             radio: None,
+            // A listener carries no packets, so it has no medium access of its
+            // own to bound; the spawned connection is the row that would.
+            tx_jitter_max_ms: None,
         });
     }
 
@@ -1603,6 +1643,178 @@ mod tests {
         assert_eq!(get("cpu_temp"), Some(Value::I64(25)));
         assert_eq!(get("battery_state"), Some(Value::String("charging".into())));
         assert_eq!(get("battery_percent"), Some(Value::I64(85)));
+    }
+
+    /// Codeberg #190: what a client tool two hops from the radio has to be
+    /// able to read off the shared-instance payload.
+    ///
+    /// Three rows, one per case the reader must handle:
+    ///
+    /// - a radio with a pre-TX contention bound reports its own on-air bitrate
+    ///   (Python `RNodeInterface.updateBitrate`, RNodeInterface.py:693-696) and
+    ///   the ceiling, in seconds like every other time-valued key here;
+    /// - a medium with airtime but no contention bound reports the bitrate and
+    ///   no ceiling key at all, exactly as Python gates its optional keys on
+    ///   `hasattr`;
+    /// - a medium with neither keeps the BITRATE_GUESS and carries no ceiling.
+    #[test]
+    fn build_interface_stats_reports_the_link_profile_of_each_medium() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::transport::LinkProfile;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-link-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        core.set_interface_name(0, "RNodeInterface[/dev/ttyUSB0]".into());
+        core.register_interface_link_profile(
+            0,
+            LinkProfile {
+                bitrate_bps: 2734,
+                tx_jitter_max_ms: Some(2926),
+            },
+        );
+        core.set_interface_name(1, "SerialInterface[/dev/ttyUSB1]".into());
+        core.register_interface_link_profile(
+            1,
+            LinkProfile {
+                bitrate_bps: 115_200,
+                tx_jitter_max_ms: None,
+            },
+        );
+        core.set_interface_name(2, "tcp_client_0".into());
+
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let value = build_interface_stats(
+            &mut core,
+            std::time::Instant::now(),
+            &stats,
+            &online,
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            0,
+        );
+
+        let Value::Dict(top) = value else {
+            panic!("interface_stats must be a dict")
+        };
+        let Value::List(list) = top
+            .get(&HashableValue::String("interfaces".into()))
+            .expect("interfaces key")
+        else {
+            panic!("interfaces must be a list")
+        };
+        assert_eq!(list.len(), 3);
+        let field = |row: &Value, k: &str| -> Option<Value> {
+            let Value::Dict(d) = row else {
+                panic!("interface entry must be a dict")
+            };
+            d.get(&HashableValue::String(k.into())).cloned()
+        };
+        let row_named = |name: &str| -> Value {
+            list.iter()
+                .find(|r| field(r, "name") == Some(Value::String(name.into())))
+                .unwrap_or_else(|| panic!("no row named {name}"))
+                .clone()
+        };
+
+        let radio = row_named("RNodeInterface[/dev/ttyUSB0]");
+        assert_eq!(
+            field(&radio, "bitrate"),
+            Some(Value::I64(2734)),
+            "a radio must report its own on-air bitrate, not the TCP guess"
+        );
+        assert_eq!(
+            field(&radio, "tx_jitter_max"),
+            Some(Value::F64(2.926)),
+            "the jitter ceiling is reported in seconds"
+        );
+
+        let serial = row_named("SerialInterface[/dev/ttyUSB1]");
+        assert_eq!(field(&serial, "bitrate"), Some(Value::I64(115_200)));
+        assert!(
+            field(&serial, "tx_jitter_max").is_none(),
+            "a medium that transmits when asked carries no ceiling key"
+        );
+
+        let tcp = row_named("tcp_client_0");
+        assert_eq!(
+            field(&tcp, "bitrate"),
+            Some(Value::I64(crate::interfaces::tcp::TCP_BITRATE_GUESS)),
+            "no profile keeps the per-medium BITRATE_GUESS"
+        );
+        assert!(field(&tcp, "tx_jitter_max").is_none());
+    }
+
+    /// A configured `bitrate` still overrides the interface's own rate, which
+    /// is the order Python applies them in
+    /// (`if configured_bitrate: interface.bitrate = configured_bitrate`,
+    /// Reticulum.py:887). Codeberg #190 added the middle term below it, not
+    /// above it.
+    #[test]
+    fn a_configured_bitrate_still_outranks_the_interfaces_own_rate() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::transport::LinkProfile;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-bitrate-order-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        core.set_interface_name(0, "RNodeInterface[/dev/ttyUSB0]".into());
+        core.register_interface_link_profile(
+            0,
+            LinkProfile {
+                bitrate_bps: 2734,
+                tx_jitter_max_ms: Some(2926),
+            },
+        );
+        core.register_interface_bitrate(0, 9600);
+
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let value = build_interface_stats(
+            &mut core,
+            std::time::Instant::now(),
+            &stats,
+            &online,
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            0,
+        );
+        let Value::Dict(top) = value else {
+            panic!("dict")
+        };
+        let Value::List(list) = top
+            .get(&HashableValue::String("interfaces".into()))
+            .expect("interfaces key")
+        else {
+            panic!("list")
+        };
+        let Value::Dict(row) = &list[0] else {
+            panic!("dict")
+        };
+        assert_eq!(
+            row.get(&HashableValue::String("bitrate".into())),
+            Some(&Value::I64(9600))
+        );
+        assert_eq!(
+            row.get(&HashableValue::String("tx_jitter_max".into())),
+            Some(&Value::F64(2.926)),
+            "overriding the bitrate must not hide the contention bound"
+        );
     }
 
     /// Codeberg #177: a listener carries no packets and therefore has no
