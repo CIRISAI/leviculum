@@ -11,6 +11,7 @@ use serde_pickle::value::{HashableValue, Value};
 use super::error::RpcError;
 use super::pickle::*;
 use crate::driver::StdNodeCore;
+use crate::interfaces::inventory::SharedInventory;
 use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
 
 /// Dispatch an RPC request against node state and return the pickle-encoded response.
@@ -21,6 +22,7 @@ pub(super) fn handle_request(
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
+    inventory: &SharedInventory,
     auto_peer_count: usize,
     discovery_storage: Option<&std::path::Path>,
     codec: Codec,
@@ -32,6 +34,7 @@ pub(super) fn handle_request(
             start_time,
             iface_stats_map,
             iface_online_map,
+            inventory,
             auto_peer_count,
         ),
         RpcRequest::GetLinkCount => pickle_int(core.active_link_count() as i64),
@@ -228,6 +231,15 @@ fn ar_value(v: Option<u32>) -> Value {
     }
 }
 
+/// An optional integer field: the value, or Python's `None` when the reference
+/// interface has no such attribute at all.
+fn opt_int(v: Option<i64>) -> Value {
+    match v {
+        Some(v) => pickle_int(v),
+        None => pickle_none(),
+    }
+}
+
 /// Build the RNode radio-stats key/value entries for one interface's
 /// `interface_stats` dict (Codeberg #25).
 ///
@@ -276,14 +288,199 @@ fn radio_stat_fields(r: &crate::interfaces::RadioStats) -> Vec<(HashableValue, V
     fields
 }
 
+/// One row of the reported interface inventory.
+///
+/// Both row sources fill the same struct, so every row necessarily carries the
+/// same key set: a listener reported out of the driver's inventory cannot
+/// silently grow or lose a field relative to a routable interface reported out
+/// of transport.
+struct StatRow {
+    /// Reporting order (see `InterfaceInventory::sort_key`).
+    sort_key: (u8, usize),
+    /// Python `str(interface)`.
+    name: String,
+    /// Python `interface.name`.
+    short_name: String,
+    /// Python `type(interface).__name__`.
+    itype: String,
+    rxb: u64,
+    txb: u64,
+    rxs: f64,
+    txs: f64,
+    status: bool,
+    mode: u8,
+    bitrate: i64,
+    clients: Option<i64>,
+    peers: Option<i64>,
+    incoming_announce_frequency: f64,
+    outgoing_announce_frequency: f64,
+    incoming_pr_frequency: f64,
+    outgoing_pr_frequency: f64,
+    announce_rate: (Option<u32>, Option<u32>, Option<u32>),
+    burst_active: bool,
+    burst_activated: u64,
+    pr_burst_active: bool,
+    pr_burst_activated: u64,
+    held_announces: usize,
+    ifac_size_bits: Option<i64>,
+    /// Reported name of the listener this interface was spawned by, if any.
+    parent_name: Option<String>,
+    radio: Option<crate::interfaces::RadioStats>,
+}
+
+/// Serialise one row into the Python `interface_stats` per-interface dict.
+fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
+    let mut fields = vec![
+        (pickle_str_key("name"), pickle_str(&row.name)),
+        (pickle_str_key("short_name"), pickle_str(&row.short_name)),
+        (
+            pickle_str_key("hash"),
+            pickle_bytes(&compute_interface_hash(&row.name)),
+        ),
+        (pickle_str_key("type"), pickle_str(&row.itype)),
+        (pickle_str_key("rxb"), pickle_int(row.rxb as i64)),
+        (pickle_str_key("txb"), pickle_int(row.txb as i64)),
+        (pickle_str_key("rxs"), pickle_float(row.rxs)),
+        (pickle_str_key("txs"), pickle_float(row.txs)),
+        // status: real `Interface::is_online()` (Codeberg #56). Source of
+        // truth is `iface_online_map`, populated by the driver on register
+        // and cleared on disconnect. Missing entry → fall back to `true`
+        // (preserves the pre-fix behavior for any caller-side mismatch).
+        (pickle_str_key("status"), pickle_bool(row.status)),
+        // mode: real Reticulum propagation mode (Codeberg #91), carried
+        // per-interface by transport from the parsed config and reported
+        // as the Python `Interface.MODE_*` value so rnstatus/lnstatus print
+        // the right label (Utilities/rnstatus.py:421-427).
+        (pickle_str_key("mode"), pickle_int(row.mode as i64)),
+        (pickle_str_key("bitrate"), pickle_int(row.bitrate)),
+        (pickle_str_key("clients"), opt_int(row.clients)),
+        (pickle_str_key("peers"), opt_int(row.peers)),
+        (
+            pickle_str_key("incoming_announce_frequency"),
+            pickle_float(row.incoming_announce_frequency),
+        ),
+        (
+            pickle_str_key("outgoing_announce_frequency"),
+            pickle_float(row.outgoing_announce_frequency),
+        ),
+        // Codeberg #67 Stage 2a: incoming/outgoing_pr_frequency are now real,
+        // measured from per-interface path-request deques (Python
+        // ip_freq_deque / op_freq_deque). They read 0.0 on an under-filled
+        // deque, matching Interface.incoming_pr_frequency()/
+        // outgoing_pr_frequency() (Interface.py:301-321).
+        (
+            pickle_str_key("incoming_pr_frequency"),
+            pickle_float(row.incoming_pr_frequency),
+        ),
+        (
+            pickle_str_key("outgoing_pr_frequency"),
+            pickle_float(row.outgoing_pr_frequency),
+        ),
+        // Codeberg #67 Stage 2a: announce_rate_target/penalty/grace now carry
+        // the real per-interface config (Reticulum.py:798-833). Unset keys
+        // fall back to the Python interface defaults (target=3600 s,
+        // penalty=0 s, grace=5) when transport is enabled, and stay None when
+        // transport is disabled. rnstatus renders the `(t:.../p:.../g:...)`
+        // suffix only when target is truthy (rnstatus.py:556-563).
+        (
+            pickle_str_key("announce_rate_target"),
+            ar_value(row.announce_rate.0),
+        ),
+        (
+            pickle_str_key("announce_rate_penalty"),
+            ar_value(row.announce_rate.1),
+        ),
+        (
+            pickle_str_key("announce_rate_grace"),
+            ar_value(row.announce_rate.2),
+        ),
+        // burst_active/activated + pr_burst_active/activated: real ingress
+        //   limiter burst state (Codeberg #87), read from the per-interface
+        //   IngressBurstState (Python ic_burst_active/ic_burst_activated and
+        //   ic_pr_burst_active/ic_pr_burst_activated, Interface.py:115-118).
+        //   Idle interfaces read False / 0. rnstatus only reads *_activated
+        //   when the matching *_active is truthy (rnstatus.py:565-573), so an
+        //   idle interface renders no burst suffix.
+        //   The core records activation on its monotonic clock; Python
+        //   reports time.time() and rnstatus renders `now - activated` as
+        //   the burst duration (rnstatus.py:566), so convert to epoch
+        //   seconds here. Idle stays the int 0 (Python's initial value).
+        (
+            pickle_str_key("burst_active"),
+            pickle_bool(row.burst_active),
+        ),
+        (
+            pickle_str_key("burst_activated"),
+            activation_to_epoch(epoch_base, row.burst_activated),
+        ),
+        (
+            pickle_str_key("pr_burst_active"),
+            pickle_bool(row.pr_burst_active),
+        ),
+        (
+            pickle_str_key("pr_burst_activated"),
+            activation_to_epoch(epoch_base, row.pr_burst_activated),
+        ),
+        (
+            pickle_str_key("held_announces"),
+            pickle_int(row.held_announces as i64),
+        ),
+        (pickle_str_key("announce_queue"), pickle_none()),
+        (pickle_str_key("ifac_signature"), pickle_none()),
+        (pickle_str_key("ifac_size"), opt_int(row.ifac_size_bits)),
+        (pickle_str_key("ifac_netname"), pickle_none()),
+    ];
+
+    // Python emits the parent keys only for an interface that HAS a parent
+    // (Reticulum.py:1342-1344), so a listener or a static interface carries
+    // neither key. The hash is the parent's own `hash`, which is what makes
+    // the link followable.
+    if let Some(parent) = &row.parent_name {
+        fields.push((pickle_str_key("parent_interface_name"), pickle_str(parent)));
+        fields.push((
+            pickle_str_key("parent_interface_hash"),
+            pickle_bytes(&compute_interface_hash(parent)),
+        ));
+    }
+
+    // Codeberg #25: RNode radio stats. Emitted only for radio interfaces
+    // (Python gates each key on hasattr(interface, "r_*"), which is true
+    // only for RNodeInterface).
+    if let Some(r) = &row.radio {
+        fields.extend(radio_stat_fields(r));
+    }
+
+    pickle_dict(fields)
+}
+
+/// Bitrate an interface reports when the config sets none: the per-medium
+/// `BITRATE_GUESS` of the reference class (TCPInterface.py:452,
+/// LocalInterface.py:431).
+fn default_bitrate(itype: &str) -> i64 {
+    if itype.starts_with("Local") {
+        crate::interfaces::local::LOCAL_BITRATE
+    } else {
+        crate::interfaces::tcp::TCP_BITRATE_GUESS
+    }
+}
+
 /// Build the `interface_stats` response dict matching Python's format.
 /// `core` is mutable because frequency reads pop decayed samples, exactly
 /// like Python's get_interface_stats (Python parity, Codeberg #67/#87).
+///
+/// The reported inventory is the union of two collections (Codeberg #177):
+/// transport's routable interfaces, and the driver's listeners — the
+/// shared-instance server and every configured server listener, which carry no
+/// packets and therefore never enter transport. Python has one collection for
+/// both (`RNS.Transport.interfaces`, Reticulum.py:1334), so reporting only the
+/// routable half answered a monitoring query about a different world than the
+/// one the daemon runs.
 pub(crate) fn build_interface_stats(
     core: &mut StdNodeCore,
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
+    inventory: &SharedInventory,
     auto_peer_count: usize,
 ) -> Value {
     let stats = core.interface_stats();
@@ -294,25 +491,46 @@ pub(crate) fn build_interface_stats(
     let counters_map = iface_stats_map.lock_recover();
     let online_map = iface_online_map.lock_recover();
     let ifac_configs = core.clone_ifac_configs();
-
-    // Count local clients for the "clients" field on LocalInterface
-    let local_client_count = stats.iter().filter(|e| e.is_local_client).count();
+    let inv = inventory.lock_recover();
 
     let mut total_rxb: u64 = 0;
     let mut total_txb: u64 = 0;
     let mut total_rxs: f64 = 0.0;
     let mut total_txs: f64 = 0.0;
 
-    let mut iface_list = Vec::new();
-    for entry in &stats {
-        // Skip local client interfaces from the stats display
-        // (Python also hides the LocalClientInterface from rnstatus)
-        if entry.is_local_client {
-            continue;
-        }
+    // Aggregates a listener reports for the connections it spawned, keyed by
+    // listener id: Python's parent counters (TCPInterface.py:306-308/327-329)
+    // and `clients` (TCPInterface.py:496-497 / LocalInterface.py:463).
+    #[derive(Default)]
+    struct ChildAggregate {
+        clients: i64,
+        rxb: u64,
+        txb: u64,
+        rxs: f64,
+        txs: f64,
+        ia_freq: f64,
+        oa_freq: f64,
+        ip_freq: f64,
+        op_freq: f64,
+    }
+    let mut aggregates: std::collections::BTreeMap<usize, ChildAggregate> =
+        std::collections::BTreeMap::new();
 
-        let iface_hash = compute_interface_hash(&entry.name);
-        let itype = interface_type(entry.kind, &entry.name);
+    let mut rows: Vec<StatRow> = Vec::new();
+    for entry in &stats {
+        // Presentation identity: spawned interfaces carry the reference
+        // display name their listener gave them; everything else falls back to
+        // the driver's internal interface name.
+        let identity_of = inv.identity(entry.id);
+        let name = identity_of
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| entry.name.clone());
+        let short = identity_of
+            .map(|i| i.short_name.clone())
+            .unwrap_or_else(|| short_name(&entry.name));
+        let itype = identity_of
+            .map(|i| i.type_name.to_string())
+            .unwrap_or_else(|| interface_type(entry.kind, &entry.name));
 
         // Read byte counters and compute speeds from the shared counters
         let (rxb, txb, rxs, txs) = counters_map
@@ -327,10 +545,29 @@ pub(crate) fn build_interface_stats(
                 )
             })
             .unwrap_or((0, 0, 0.0, 0.0));
-        total_rxb += rxb;
-        total_txb += txb;
-        total_rxs += rxs;
-        total_txs += txs;
+
+        // Totals stay what they were: the traffic-bearing, non-local
+        // interfaces. Local IPC clients and (below) listeners are excluded, so
+        // adding their rows cannot double-count a byte.
+        if !entry.is_local_client {
+            total_rxb += rxb;
+            total_txb += txb;
+            total_rxs += rxs;
+            total_txs += txs;
+        }
+
+        if let Some(parent) = identity_of.and_then(|i| i.parent) {
+            let agg = aggregates.entry(parent).or_default();
+            agg.clients += 1;
+            agg.rxb += rxb;
+            agg.txb += txb;
+            agg.rxs += rxs;
+            agg.txs += txs;
+            agg.ia_freq += entry.incoming_announce_frequency;
+            agg.oa_freq += entry.outgoing_announce_frequency;
+            agg.ip_freq += entry.incoming_pr_frequency;
+            agg.op_freq += entry.outgoing_pr_frequency;
+        }
 
         // Codeberg #25: latest RNode radio stats (None for non-radio interfaces).
         let radio = counters_map.get(&entry.id).and_then(|c| c.radio_stats());
@@ -339,152 +576,92 @@ pub(crate) fn build_interface_stats(
         // announce cap) overrides the per-type BITRATE_GUESS, matching Python's
         // `configured_bitrate` override (Reticulum.py:887/1421-1423). Unset falls
         // back to the medium default guess.
-        let bitrate = match entry.configured_bitrate {
-            Some(bps) => pickle_int(bps as i64),
-            None => match itype.as_str() {
-                "LocalInterface" => pickle_int(1_000_000_000),
-                _ => pickle_int(10_000_000),
-            },
-        };
+        let bitrate = entry
+            .configured_bitrate
+            .map(|bps| bps as i64)
+            .unwrap_or_else(|| default_bitrate(&itype));
 
-        // Clients field: only meaningful for LocalInterface server
-        let clients = if itype == "LocalInterface" {
-            pickle_int(local_client_count as i64)
-        } else {
-            pickle_none()
-        };
-
-        // Peers field: only meaningful for AutoInterface
-        let peers = if itype == "AutoInterface" {
-            pickle_int(auto_peer_count as i64)
-        } else {
-            pickle_none()
-        };
-
-        let mut iface_fields = vec![
-            (pickle_str_key("name"), pickle_str(&entry.name)),
-            (
-                pickle_str_key("short_name"),
-                pickle_str(&short_name(&entry.name)),
+        rows.push(StatRow {
+            sort_key: inv.sort_key(entry.id),
+            name,
+            short_name: short,
+            // Peers field: only meaningful for AutoInterface
+            peers: (itype == "AutoInterface").then_some(auto_peer_count as i64),
+            // A spawned connection reports no client count of its own; only a
+            // listener does (filled from `aggregates` below).
+            clients: None,
+            itype,
+            rxb,
+            txb,
+            rxs,
+            txs,
+            status: online_map.get(&entry.id).copied().unwrap_or(true),
+            mode: entry.mode.as_u8(),
+            bitrate,
+            incoming_announce_frequency: entry.incoming_announce_frequency,
+            outgoing_announce_frequency: entry.outgoing_announce_frequency,
+            incoming_pr_frequency: entry.incoming_pr_frequency,
+            outgoing_pr_frequency: entry.outgoing_pr_frequency,
+            announce_rate: (
+                entry.announce_rate_target,
+                entry.announce_rate_penalty,
+                entry.announce_rate_grace,
             ),
-            (pickle_str_key("hash"), pickle_bytes(&iface_hash)),
-            (pickle_str_key("type"), pickle_str(&itype)),
-            (pickle_str_key("rxb"), pickle_int(rxb as i64)),
-            (pickle_str_key("txb"), pickle_int(txb as i64)),
-            (pickle_str_key("rxs"), pickle_float(rxs)),
-            (pickle_str_key("txs"), pickle_float(txs)),
-            // status: real `Interface::is_online()` (Codeberg #56). Source of
-            // truth is `iface_online_map`, populated by the driver on register
-            // and cleared on disconnect. Missing entry → fall back to `true`
-            // (preserves the pre-fix behavior for any caller-side mismatch).
-            (
-                pickle_str_key("status"),
-                pickle_bool(online_map.get(&entry.id).copied().unwrap_or(true)),
-            ),
-            // mode: real Reticulum propagation mode (Codeberg #91), carried
-            // per-interface by transport from the parsed config and reported
-            // as the Python `Interface.MODE_*` value so rnstatus/lnstatus print
-            // the right label (Utilities/rnstatus.py:421-427).
-            (
-                pickle_str_key("mode"),
-                pickle_int(entry.mode.as_u8() as i64),
-            ),
-            (pickle_str_key("bitrate"), bitrate),
-            (pickle_str_key("clients"), clients),
-            (pickle_str_key("peers"), peers),
-            (
-                pickle_str_key("incoming_announce_frequency"),
-                pickle_float(entry.incoming_announce_frequency),
-            ),
-            (
-                pickle_str_key("outgoing_announce_frequency"),
-                pickle_float(entry.outgoing_announce_frequency),
-            ),
-            // Codeberg #67 Stage 2a: incoming/outgoing_pr_frequency are now real,
-            // measured from per-interface path-request deques (Python
-            // ip_freq_deque / op_freq_deque). They read 0.0 on an under-filled
-            // deque, matching Interface.incoming_pr_frequency()/
-            // outgoing_pr_frequency() (Interface.py:301-321).
-            (
-                pickle_str_key("incoming_pr_frequency"),
-                pickle_float(entry.incoming_pr_frequency),
-            ),
-            (
-                pickle_str_key("outgoing_pr_frequency"),
-                pickle_float(entry.outgoing_pr_frequency),
-            ),
-            // Codeberg #67 Stage 2a: announce_rate_target/penalty/grace now carry
-            // the real per-interface config (Reticulum.py:798-833). Unset keys
-            // fall back to the Python interface defaults (target=3600 s,
-            // penalty=0 s, grace=5) when transport is enabled, and stay None when
-            // transport is disabled. rnstatus renders the `(t:.../p:.../g:...)`
-            // suffix only when target is truthy (rnstatus.py:556-563).
-            (
-                pickle_str_key("announce_rate_target"),
-                ar_value(entry.announce_rate_target),
-            ),
-            (
-                pickle_str_key("announce_rate_penalty"),
-                ar_value(entry.announce_rate_penalty),
-            ),
-            (
-                pickle_str_key("announce_rate_grace"),
-                ar_value(entry.announce_rate_grace),
-            ),
-            // burst_active/activated + pr_burst_active/activated: real ingress
-            //   limiter burst state (Codeberg #87), read from the per-interface
-            //   IngressBurstState (Python ic_burst_active/ic_burst_activated and
-            //   ic_pr_burst_active/ic_pr_burst_activated, Interface.py:115-118).
-            //   Idle interfaces read False / 0. rnstatus only reads *_activated
-            //   when the matching *_active is truthy (rnstatus.py:565-573), so an
-            //   idle interface renders no burst suffix.
-            //   The core records activation on its monotonic clock; Python
-            //   reports time.time() and rnstatus renders `now - activated` as
-            //   the burst duration (rnstatus.py:566), so convert to epoch
-            //   seconds here. Idle stays the int 0 (Python's initial value).
-            (
-                pickle_str_key("burst_active"),
-                pickle_bool(entry.burst_active),
-            ),
-            (
-                pickle_str_key("burst_activated"),
-                activation_to_epoch(epoch_base, entry.burst_activated),
-            ),
-            (
-                pickle_str_key("pr_burst_active"),
-                pickle_bool(entry.pr_burst_active),
-            ),
-            (
-                pickle_str_key("pr_burst_activated"),
-                activation_to_epoch(epoch_base, entry.pr_burst_activated),
-            ),
-            (
-                pickle_str_key("held_announces"),
-                pickle_int(entry.held_announces as i64),
-            ),
-            (pickle_str_key("announce_queue"), pickle_none()),
-            (pickle_str_key("ifac_signature"), pickle_none()),
-            (
-                pickle_str_key("ifac_size"),
-                match ifac_configs.get(&entry.id) {
-                    Some(cfg) => pickle_int((cfg.ifac_size() * 8) as i64),
-                    None => pickle_none(),
-                },
-            ),
-            (pickle_str_key("ifac_netname"), pickle_none()),
-        ];
-
-        // Codeberg #25: RNode radio stats. Emitted only for radio interfaces
-        // (Python gates each key on hasattr(interface, "r_*"), which is true
-        // only for RNodeInterface).
-        if let Some(r) = radio {
-            iface_fields.extend(radio_stat_fields(&r));
-        }
-
-        let iface_dict = pickle_dict(iface_fields);
-
-        iface_list.push(iface_dict);
+            burst_active: entry.burst_active,
+            burst_activated: entry.burst_activated,
+            pr_burst_active: entry.pr_burst_active,
+            pr_burst_activated: entry.pr_burst_activated,
+            held_announces: entry.held_announces,
+            ifac_size_bits: ifac_configs
+                .get(&entry.id)
+                .map(|cfg| (cfg.ifac_size() * 8) as i64),
+            parent_name: identity_of
+                .and_then(|i| i.parent)
+                .and_then(|p| inv.listeners().find(|(id, _)| *id == p))
+                .map(|(_, l)| l.identity.name.clone()),
+            radio,
+        });
     }
+
+    // Listener rows. They carry no packets themselves, so every traffic value
+    // is the aggregate of the connections they spawned, plus what already
+    // departed. Burst/held state stays empty because the reference keeps it on
+    // the spawned interface: a listener only collects frequency samples
+    // (TCPInterface.py:634-644, LocalInterface.py:484-494).
+    for (id, listener) in inv.listeners() {
+        let agg = aggregates.remove(&id).unwrap_or_default();
+        rows.push(StatRow {
+            sort_key: inv.sort_key(id),
+            name: listener.identity.name.clone(),
+            short_name: listener.identity.short_name.clone(),
+            itype: listener.identity.type_name.to_string(),
+            rxb: listener.departed_rxb + agg.rxb,
+            txb: listener.departed_txb + agg.txb,
+            rxs: agg.rxs,
+            txs: agg.txs,
+            status: true,
+            mode: listener.mode.as_u8(),
+            bitrate: listener.bitrate,
+            clients: Some(agg.clients),
+            peers: None,
+            incoming_announce_frequency: agg.ia_freq,
+            outgoing_announce_frequency: agg.oa_freq,
+            incoming_pr_frequency: agg.ip_freq,
+            outgoing_pr_frequency: agg.op_freq,
+            announce_rate: listener.announce_rate,
+            burst_active: false,
+            burst_activated: 0,
+            pr_burst_active: false,
+            pr_burst_activated: 0,
+            held_announces: 0,
+            ifac_size_bits: listener.ifac_size_bits,
+            parent_name: None,
+            radio: None,
+        });
+    }
+
+    rows.sort_by_key(|r| r.sort_key);
+    let iface_list: Vec<Value> = rows.iter().map(|r| row_fields(r, epoch_base)).collect();
 
     let mut entries = vec![
         (pickle_str_key("interfaces"), pickle_list(iface_list)),
@@ -848,12 +1025,17 @@ fn identity_data_unretain(core: &mut StdNodeCore, identity_hash: &[u8]) -> Value
 }
 
 // Helpers
-/// Compute a 16-byte interface hash from its name (matches Python Identity.full_hash).
-fn compute_interface_hash(name: &str) -> [u8; 16] {
+/// Interface hash: SHA-256 of the interface's reported name, which is exactly
+/// Python `Interface.get_hash()` = `Identity.full_hash(str(interface))`
+/// (Interface.py). Full 32 bytes, not truncated: the hash is how a script
+/// keys an interface (and how `parent_interface_hash` points at its listener),
+/// so it has to be the same value a Python `rnsd` reports for the same
+/// interface (Codeberg #177).
+fn compute_interface_hash(name: &str) -> [u8; 32] {
     use sha2::Digest;
     let hash = sha2::Sha256::digest(name.as_bytes());
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&hash[..16]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hash);
     out
 }
 
@@ -893,7 +1075,10 @@ fn interface_type(kind: InterfaceKind, name: &str) -> String {
         InterfaceKind::Serial => "SerialInterface",
         InterfaceKind::Rnode => "RNodeInterface",
         InterfaceKind::Kiss => "KISSInterface",
-        InterfaceKind::Local => "LocalInterface",
+        // Python has no `LocalInterface` class: an accepted IPC connection is
+        // a LocalClientInterface, and the shared-instance server (reported out
+        // of the inventory, never through this fallback) a LocalServerInterface.
+        InterfaceKind::Local => "LocalClientInterface",
         InterfaceKind::Pipe => "PipeInterface",
         InterfaceKind::Auto => "AutoInterface",
         // Not `ChannelInterface`: Python's `RNS.Channel` is an unrelated
@@ -918,7 +1103,7 @@ fn interface_type_from_name(name: &str) -> String {
     } else if name.starts_with("udp") || name.starts_with("UDP") {
         "UDPInterface".to_string()
     } else if name.starts_with("local") || name.starts_with("Local") {
-        "LocalInterface".to_string()
+        "LocalClientInterface".to_string()
     } else {
         "Interface".to_string()
     }
@@ -1063,7 +1248,7 @@ mod tests {
                 "TCPServerInterface",
             ),
             (InterfaceKind::Udp, "udp_0", "UDPInterface"),
-            (InterfaceKind::Local, "Local[lnsd]", "LocalInterface"),
+            (InterfaceKind::Local, "Local[lnsd]", "LocalClientInterface"),
             (InterfaceKind::Auto, "auto/eth0/abcd", "AutoInterface"),
             // Byte-channel names are caller-supplied, so a name the heuristic
             // would misread must not override the registered kind.
@@ -1086,7 +1271,9 @@ mod tests {
         let h1 = compute_interface_hash("test");
         let h2 = compute_interface_hash("test");
         assert_eq!(h1, h2);
-        assert_ne!(h1, [0u8; 16]);
+        assert_ne!(h1, [0u8; 32]);
+        // Full-length Identity.full_hash, byte-comparable with the reference.
+        assert_eq!(h1.len(), 32);
     }
 
     #[test]
@@ -1139,8 +1326,18 @@ mod tests {
                     identity_hash: vec![0x22u8; 16],
                 },
             ] {
-                let bytes = handle_request(&req, &mut core, start, &stats, &online, 0, None, codec)
-                    .unwrap();
+                let bytes = handle_request(
+                    &req,
+                    &mut core,
+                    start,
+                    &stats,
+                    &online,
+                    &crate::interfaces::inventory::InterfaceInventory::shared(),
+                    0,
+                    None,
+                    codec,
+                )
+                .unwrap();
                 let value = decode(&bytes, codec);
                 assert!(
                     matches!(value, Value::Bool(false)),
@@ -1179,7 +1376,18 @@ mod tests {
             }
         };
         let dispatch = |core: &mut StdNodeCore, req: &RpcRequest, codec: Codec| -> Value {
-            let bytes = handle_request(req, core, start, &stats, &online, 0, None, codec).unwrap();
+            let bytes = handle_request(
+                req,
+                core,
+                start,
+                &stats,
+                &online,
+                &crate::interfaces::inventory::InterfaceInventory::shared(),
+                0,
+                None,
+                codec,
+            )
+            .unwrap();
             decode(&bytes, codec)
         };
 
@@ -1367,7 +1575,14 @@ mod tests {
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(0usize, counters)])));
         let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
 
-        let value = build_interface_stats(&mut core, std::time::Instant::now(), &stats, &online, 0);
+        let value = build_interface_stats(
+            &mut core,
+            std::time::Instant::now(),
+            &stats,
+            &online,
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            0,
+        );
 
         let Value::Dict(top) = value else {
             panic!("interface_stats must be a dict")
@@ -1388,6 +1603,162 @@ mod tests {
         assert_eq!(get("cpu_temp"), Some(Value::I64(25)));
         assert_eq!(get("battery_state"), Some(Value::String("charging".into())));
         assert_eq!(get("battery_percent"), Some(Value::I64(85)));
+    }
+
+    /// Codeberg #177: a listener carries no packets and therefore has no
+    /// transport entry, but it must still be reported — under the reference
+    /// name, aggregating its children, and pointed at by them.
+    #[test]
+    fn build_interface_stats_reports_listeners_and_their_children() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::inventory::{InterfaceIdentity, InterfaceInventory, ListenerRow};
+        use crate::interfaces::{InterfaceCounters, InterfaceOnlineMap, InterfaceStatsMap};
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::traits::InterfaceMode;
+        use std::collections::BTreeMap;
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-listener-rows-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        // Only the accepted connection is a routable interface; the listener
+        // that spawned it never enters transport.
+        core.set_interface_name(7, "tcp_server/127.0.0.1:40000".into());
+        core.set_interface_kind(7, InterfaceKind::Tcp);
+
+        let counters = Arc::new(InterfaceCounters::new());
+        counters.rx_bytes.store(500, Ordering::Relaxed);
+        counters.tx_bytes.store(90, Ordering::Relaxed);
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(7usize, counters)])));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::from([(7usize, true)])));
+
+        let listener_name = "TCPServerInterface[Srv/127.0.0.1:4242]";
+        let inventory = InterfaceInventory::shared();
+        {
+            let mut inv = inventory.lock_recover();
+            inv.add_listener(
+                0,
+                ListenerRow {
+                    identity: InterfaceIdentity {
+                        name: listener_name.into(),
+                        short_name: "Srv".into(),
+                        type_name: "TCPServerInterface",
+                        parent: None,
+                    },
+                    bitrate: 10_000_000,
+                    mode: InterfaceMode::default(),
+                    announce_rate: (Some(3600), Some(0), Some(5)),
+                    ifac_size_bits: None,
+                    // 100 bytes already carried by a client that left.
+                    departed_rxb: 100,
+                    departed_txb: 10,
+                },
+            );
+            inv.add_spawned(
+                7,
+                InterfaceIdentity {
+                    name: "TCPInterface[Client on Srv/127.0.0.1:40000]".into(),
+                    short_name: "Client on Srv".into(),
+                    type_name: "TCPClientInterface",
+                    parent: Some(0),
+                },
+            );
+        }
+
+        let value = build_interface_stats(
+            &mut core,
+            std::time::Instant::now(),
+            &stats,
+            &online,
+            &inventory,
+            0,
+        );
+
+        let Value::Dict(top) = value else {
+            panic!("interface_stats must be a dict")
+        };
+        let Some(Value::List(list)) = top
+            .get(&HashableValue::String("interfaces".into()))
+            .cloned()
+        else {
+            panic!("interfaces must be a list")
+        };
+        assert_eq!(list.len(), 2, "listener + spawned connection");
+        let row = |i: usize| -> BTreeMap<HashableValue, Value> {
+            match &list[i] {
+                Value::Dict(d) => d.clone(),
+                other => panic!("interface entry must be a dict, got {other:?}"),
+            }
+        };
+        let field = |d: &BTreeMap<HashableValue, Value>, k: &str| -> Option<Value> {
+            d.get(&HashableValue::String(k.into())).cloned()
+        };
+
+        // Listener first (lower id), then its child.
+        let listener = row(0);
+        let child = row(1);
+        assert_eq!(
+            field(&listener, "name"),
+            Some(Value::String(listener_name.into()))
+        );
+        assert_eq!(
+            field(&listener, "type"),
+            Some(Value::String("TCPServerInterface".into()))
+        );
+        assert_eq!(field(&listener, "clients"), Some(Value::I64(1)));
+        // Live child plus the bytes banked from the departed one.
+        assert_eq!(field(&listener, "rxb"), Some(Value::I64(600)));
+        assert_eq!(field(&listener, "txb"), Some(Value::I64(100)));
+        assert_eq!(
+            field(&listener, "parent_interface_name"),
+            None,
+            "a listener has no parent"
+        );
+
+        assert_eq!(
+            field(&child, "name"),
+            Some(Value::String(
+                "TCPInterface[Client on Srv/127.0.0.1:40000]".into()
+            ))
+        );
+        assert_eq!(
+            field(&child, "short_name"),
+            Some(Value::String("Client on Srv".into()))
+        );
+        assert_eq!(
+            field(&child, "type"),
+            Some(Value::String("TCPClientInterface".into()))
+        );
+        assert_eq!(field(&child, "clients"), Some(Value::None));
+        assert_eq!(
+            field(&child, "parent_interface_name"),
+            Some(Value::String(listener_name.into()))
+        );
+        assert_eq!(
+            field(&child, "parent_interface_hash"),
+            Some(Value::Bytes(compute_interface_hash(listener_name).to_vec())),
+            "the parent link must resolve to the listener's own hash"
+        );
+        assert_eq!(
+            field(&listener, "hash"),
+            field(&child, "parent_interface_hash")
+        );
+
+        // Totals count the packet-carrying interface once: the listener's
+        // aggregate must not be added on top.
+        assert_eq!(
+            top.get(&HashableValue::String("rxb".into())),
+            Some(&Value::I64(500))
+        );
+        assert_eq!(
+            top.get(&HashableValue::String("txb".into())),
+            Some(&Value::I64(90))
+        );
     }
 
     // Codeberg #140: the reported interface type must come from the transport
@@ -1420,7 +1791,14 @@ mod tests {
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(0usize, counters)])));
         let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
 
-        let value = build_interface_stats(&mut core, std::time::Instant::now(), &stats, &online, 0);
+        let value = build_interface_stats(
+            &mut core,
+            std::time::Instant::now(),
+            &stats,
+            &online,
+            &crate::interfaces::inventory::InterfaceInventory::shared(),
+            0,
+        );
 
         let Value::Dict(top) = value else {
             panic!("interface_stats must be a dict")

@@ -83,15 +83,18 @@
 //! The daemon parity comparison does not silently normalize structural gaps;
 //! it asserts them EXACTLY so any drift (vendor bump, our refactor) fails:
 //!
-//!   * interface list shape: rnsd lists Shared Instance + TCP listener +
-//!     spawned connection (+ one LocalClientInterface while rnstatus itself
-//!     is connected); lnsd lists only the spawned TCP connection;
+//!   * interface list shape: IDENTICAL since Codeberg #177 - both daemons
+//!     list Shared Instance + TCP listener + spawned connection + one
+//!     LocalClientInterface while the sampling rnstatus is connected. The
+//!     whole-inventory comparison lives in
+//!     `status_inventory_parity_across_daemons`;
 //!   * per-interface key set: ours adds announce_queue/peers, Python adds
-//!     autoconnect_source (+ parent_interface_name/hash on spawned entries);
+//!     autoconnect_source;
 //!   * top-level rss: Python reports the daemon process RSS, ours reports
 //!     null;
-//!   * interface identity fields (name/short_name/hash/type string) encode
-//!     per-daemon naming and are compared per daemon, never across.
+//!   * interface identity fields carry per-daemon values (instance name,
+//!     listen port) and are therefore compared per daemon here; their
+//!     cross-daemon comparison, templated, is the inventory test's job.
 //!
 //! Marked #[ignore]: spawns Python daemons and tooling. Run with:
 //!
@@ -450,14 +453,16 @@ async fn run_status(client: StatusClient, daemon: &ParityDaemon, args: &[&str]) 
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// rnstatus connects to the daemon as a full shared-instance client, so on
-/// rnsd its own LocalClientInterface appears in the stats while it runs
-/// (observer footprint). Wait until that footprint is gone before the next
-/// sample, so sequential samples always read the same client-free state.
+/// rnstatus connects to the daemon as a full shared-instance client, so its
+/// own LocalClientInterface appears in the stats while it runs (observer
+/// footprint). Wait until that footprint is gone before the next sample, so
+/// sequential samples always read the same client-free state.
+///
+/// Applies to BOTH daemons: rnstatus is a shared-instance client of `lnsd`
+/// exactly as it is of `rnsd` (it fails to bind the instance socket and falls
+/// back to LocalClientInterface, Reticulum.py:418-425), so once lnsd reports
+/// its accepted IPC clients (Codeberg #177) the footprint is symmetric.
 async fn wait_observer_gone(daemon: &ParityDaemon) {
-    if daemon.stack != Stack::Rnsd {
-        return;
-    }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let stats = daemon.stats().await;
@@ -470,7 +475,8 @@ async fn wait_observer_gone(daemon: &ParityDaemon) {
         }
         assert!(
             Instant::now() < deadline,
-            "rnsd still lists {leftovers} LocalClientInterface entries 15 s after the client exited"
+            "{} still lists {leftovers} LocalClientInterface entries 15 s after the client exited",
+            daemon.stack.label()
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -655,16 +661,25 @@ fn any_burst(stats: &Value) -> bool {
     ifaces(stats).iter().any(|i| boolean(i, "burst_active"))
 }
 
-/// The traffic-bearing interface: on lnsd the only entry, on rnsd the
-/// spawned per-connection entry. Selected as the non-local entry with the
-/// highest rxb, which is unambiguous because exactly one interface ever
-/// receives the injected frames.
+/// True for a listener row (shared-instance server, TCP server listener): the
+/// reference gives exactly those a `clients` count and leaves it None on every
+/// interface that carries packets itself (Reticulum.py:1337-1340).
+fn is_listener(iface: &Value) -> bool {
+    iface.get("clients").is_some_and(|c| c.is_number())
+}
+
+/// The traffic-bearing interface: on both daemons the spawned per-connection
+/// entry. Selected as the non-local, non-listener entry with the highest rxb,
+/// which is unambiguous because exactly one interface ever receives the
+/// injected frames. Listeners are excluded explicitly: they aggregate their
+/// children's bytes, so the highest-rxb row would otherwise be ambiguous
+/// between a listener and its single child.
 fn traffic_iface(stats: &Value) -> Value {
     ifaces(stats)
         .into_iter()
         .filter(|i| {
             let t = i.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            t != "LocalServerInterface" && t != "LocalClientInterface"
+            t != "LocalServerInterface" && t != "LocalClientInterface" && !is_listener(i)
         })
         .max_by_key(|i| num(i, "rxb") as u64)
         .expect("no traffic interface in stats")
@@ -842,7 +857,11 @@ fn scrub_client_sample(stats: &mut Value, client: StatusClient, stack: Stack) {
     }
     stats["rss"] = Value::Null;
 
-    let expect_self = matches!((stack, client), (Stack::Rnsd, StatusClient::Rnstatus));
+    // rnstatus connects to EITHER daemon as a shared-instance client, so its
+    // own LocalClientInterface row is expected on both since Codeberg #177;
+    // lnstatus talks RPC only and is never in the list.
+    let _ = stack;
+    let expect_self = client == StatusClient::Rnstatus;
     if let Some(list) = stats.get_mut("interfaces").and_then(|v| v.as_array_mut()) {
         let before = list.len();
         list.retain(|i| i["type"] != "LocalClientInterface");
@@ -979,6 +998,62 @@ fn normalize_status_text(text: &str) -> String {
         .join("\n")
 }
 
+/// Remove the sampling client's OWN shared-instance connection from an `-a`
+/// render, and assert the footprint is exactly what the observer model
+/// predicts while doing it.
+///
+/// `rnstatus` reaches a daemon by connecting to its shared instance as a
+/// client (Reticulum.py:418-425), so with `-a` it sees one extra
+/// `LocalInterface[...]` block: itself. `lnstatus` talks RPC only and sees
+/// none. This is the same observer asymmetry the `-j` scrub pins exactly
+/// (see `scrub_client_sample`), and the only thing that can differ between
+/// the two clients' `-a` renders of one frozen daemon.
+fn strip_observer_footprint(text: &str, expected_blocks: usize, who: &str) -> String {
+    // Per-client rate suffix on the Shared Instance block: rnstatus counts
+    // itself as a client and therefore renders `<HZ>/c` there, lnstatus does
+    // not. Same footprint, expressed as a rate instead of a row; the exact
+    // client count it comes from is pinned by the -j scrub. Only the Shared
+    // Instance block is touched - the TCP listener's `/c` suffix counts real
+    // peers and is compared as-is.
+    let re_per_client = Regex::new(r"\s*\d+(?:\.\d+)?\s*[munµKMGTPEZY]?Hz/[cp]\s*$").unwrap();
+    let mut out: Vec<String> = Vec::new();
+    let mut removed = 0usize;
+    let mut skipping = false;
+    let mut in_shared_instance = false;
+    for line in text.lines() {
+        if skipping {
+            // An interface block's body lines are indented four spaces.
+            if line.starts_with("    ") {
+                continue;
+            }
+            skipping = false;
+        }
+        if line.starts_with(" LocalInterface[") {
+            skipping = true;
+            removed += 1;
+            // Drop the blank separator that introduced the block.
+            if out.last().is_some_and(|l| l.is_empty()) {
+                out.pop();
+            }
+            continue;
+        }
+        if !line.starts_with("    ") {
+            in_shared_instance = line.starts_with(" Shared Instance[");
+        }
+        if in_shared_instance && line.starts_with("    ") {
+            out.push(re_per_client.replace(line, "").trim_end().to_string());
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    assert_eq!(
+        removed, expected_blocks,
+        "{who}: expected {expected_blocks} own shared-instance connection(s) in the -a render, \
+         found {removed}:\n{text}"
+    );
+    out.join("\n")
+}
+
 /// Extract the held-announce count a client rendered (from its -A output).
 fn parse_held(text: &str) -> Option<u64> {
     let re = Regex::new(r"Held\s+: (\d+) announce").unwrap();
@@ -1111,10 +1186,15 @@ async fn status_parity_matrix_2x2() {
     // against the RPC snapshot before the text normalization blanks it.
     let (lnsd_texts, rnsd_texts) = tokio::join!(
         async {
-            let rn = run_status(StatusClient::Rnstatus, &lnsd, &["-A"]).await;
+            // `-a`: the burst lives on the SPAWNED connection, which both
+            // clients hide by default (the `TCPInterface[Client` name prefix,
+            // rnstatus.py:393-401) since lnsd names it like the reference
+            // (Codeberg #177). The held substance is only renderable with the
+            // hidden interfaces shown.
+            let rn = run_status(StatusClient::Rnstatus, &lnsd, &["-a", "-A"]).await;
             wait_observer_gone(&lnsd).await;
-            let ln = run_status(StatusClient::Lnstatus, &lnsd, &["-A"]).await;
-            let lb = run_status(StatusClient::Lnstatus, &lnsd, &["-B"]).await;
+            let ln = run_status(StatusClient::Lnstatus, &lnsd, &["-a", "-A"]).await;
+            let lb = run_status(StatusClient::Lnstatus, &lnsd, &["-a", "-B"]).await;
             (rn, ln, lb)
         },
         async {
@@ -1125,11 +1205,11 @@ async fn status_parity_matrix_2x2() {
         }
     );
 
-    // lnsd shows the traffic interface directly: both clients must render
-    // the held count and the burst suffix. Tolerance of 2 on the parsed
-    // count vs the RPC snapshot covers a release schedule that starts while
-    // a client is still sampling under extreme load; the burst itself
-    // cannot clear that fast (frequency decay plus 15 s hold).
+    // With the spawned connection shown, both clients must render the held
+    // count and the burst suffix. Tolerance of 2 on the parsed count vs the
+    // RPC snapshot covers a release schedule that starts while a client is
+    // still sampling under extreme load; the burst itself cannot clear that
+    // fast (frequency decay plus 15 s hold).
     let (rn_l, ln_l, lnsd_burst_filter) = &lnsd_texts;
     for (who, text) in [("rnstatus", rn_l), ("lnstatus", ln_l)] {
         let held = parse_held(text).unwrap_or_else(|| {
@@ -1144,15 +1224,19 @@ async fn status_parity_matrix_2x2() {
             "{who} on lnsd must render the burst suffix during the burst, got:\n{text}"
         );
     }
+    // Strip BEFORE normalizing: the normalizer collapses whitespace on the
+    // lines it touches, which would erase the indentation the block scanner
+    // uses to find a block's body.
     assert_eq!(
-        normalize_status_text(rn_l),
-        normalize_status_text(ln_l),
-        "during-burst -A render parity on lnsd"
+        normalize_status_text(&strip_observer_footprint(rn_l, 1, "rnstatus")),
+        normalize_status_text(&strip_observer_footprint(ln_l, 0, "lnstatus")),
+        "during-burst -a -A render parity on lnsd"
     );
-    // -B (burst filter) must show the bursting interface on lnsd.
+    // -B (burst filter) must show the bursting interface on lnsd, under the
+    // reference name it now carries.
     assert!(
-        lnsd_burst_filter.contains("tcp_server"),
-        "lnstatus -B on lnsd must list the bursting interface, got:\n{lnsd_burst_filter}"
+        lnsd_burst_filter.contains("TCPInterface[Client on Parity TCP Server 0/"),
+        "lnstatus -a -B on lnsd must list the bursting interface, got:\n{lnsd_burst_filter}"
     );
 
     // On rnsd the burst lives on the spawned connection entry, which
@@ -1459,6 +1543,252 @@ async fn status_parity_matrix_2x2() {
     let _ = std::fs::remove_dir_all(r_dir);
 }
 
+// =========================================================================
+// Full-inventory parity (Codeberg #177)
+// =========================================================================
+
+/// One inventory row reduced to its IDENTITY: what a monitoring script keys
+/// on. Volatile and per-daemon values (byte counters, hashes, ports, instance
+/// name) are templated out by [`templated_inventory`]; what remains must be
+/// equal across daemons, name included.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InventoryRow {
+    type_name: String,
+    name: String,
+    short_name: String,
+    parent_name: Option<String>,
+    clients: Option<i64>,
+}
+
+impl std::fmt::Display for InventoryRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:<21} name={:<58} short_name={:<32} parent={:<40} clients={:?}",
+            self.type_name,
+            self.name,
+            format!("{:?}", self.short_name),
+            self.parent_name.as_deref().unwrap_or("-"),
+            self.clients
+        )
+    }
+}
+
+/// Read the daemon's FULL interface inventory through the reference client and
+/// reduce it to templated identity rows.
+///
+/// `rnstatus -j` dumps the raw `interface_stats` dict without applying the
+/// display filter (rnstatus.py:344-357), so this sees hidden rows too - the
+/// inventory, not the rendering.
+///
+/// Templating replaces exactly the values that CANNOT be equal across two
+/// daemons running side by side, and nothing else:
+///   * the daemon's instance name -> `<INSTANCE>` (each daemon needs its own
+///     shared-instance socket);
+///   * its configured listen port -> `<LISTEN_PORT>` (each needs its own);
+///   * any remaining `:<port>` -> `<EPHEMERAL>` (kernel-assigned client ports);
+///   * the leading `<n>@` of an IPC client's short_name -> `<N>@` (the
+///     reference labels a client with the live client count at accept time;
+///     see the pinned deviation in the test that uses this).
+async fn templated_inventory(daemon: &ParityDaemon) -> Vec<InventoryRow> {
+    let raw = run_status(StatusClient::Rnstatus, daemon, &["-j"]).await;
+    let stats: Value = serde_json::from_str(raw.trim())
+        .unwrap_or_else(|e| panic!("rnstatus -j on {} not JSON: {e}", daemon.stack.label()));
+
+    let ephemeral = Regex::new(r":\d+").unwrap();
+    let client_index = Regex::new(r"^\d+@").unwrap();
+    let template = |s: &str| -> String {
+        let s = s.replace(&daemon.instance_name, "<INSTANCE>");
+        let s = s.replace(&format!(":{}", daemon.tcp_port), ":<LISTEN_PORT>");
+        let s = ephemeral.replace_all(&s, ":<EPHEMERAL>").into_owned();
+        client_index.replace(&s, "<N>@").into_owned()
+    };
+
+    let mut rows: Vec<InventoryRow> = ifaces(&stats)
+        .iter()
+        .map(|i| InventoryRow {
+            type_name: i["type"].as_str().unwrap_or("?").to_string(),
+            name: template(i["name"].as_str().unwrap_or("?")),
+            short_name: template(i["short_name"].as_str().unwrap_or("?")),
+            parent_name: i
+                .get("parent_interface_name")
+                .and_then(|p| p.as_str())
+                .map(template),
+            clients: i.get("clients").and_then(|c| c.as_i64()),
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn render_inventory(rows: &[InventoryRow]) -> String {
+    if rows.is_empty() {
+        return "    (no interfaces reported)".to_string();
+    }
+    rows.iter()
+        .map(|r| format!("    {r}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_inventory_parity(lnsd: &[InventoryRow], rnsd: &[InventoryRow], phase: &str) {
+    assert_eq!(
+        lnsd,
+        rnsd,
+        "\nINVENTORY PARITY ({phase}): the same reference client was told about \
+         different worlds.\nlnsd:\n{}\nrnsd:\n{}\n",
+        render_inventory(lnsd),
+        render_inventory(rnsd),
+    );
+}
+
+/// Whole-inventory drop-in parity (Codeberg #177).
+///
+/// The 2x2 matrix compares the TRAFFIC-BEARING interface field by field, which
+/// is why a difference in the interface LIST stayed green: a monitoring script
+/// written against `rnsd` got an empty answer from `lnsd` where it expected
+/// three rows, and the query still succeeded. This test compares the full
+/// inventory - every row, its type, its name, its short_name, its parent link
+/// and its client count - through the SAME reference client against both
+/// daemons, in the two states an operator actually looks at:
+///
+///   1. idle: no peer connected, only the daemon's own listeners plus the
+///      sampling client itself;
+///   2. one connected TCP peer, waited for by the path it announces (a state
+///      both stacks reach observably, never a sleep).
+///
+/// Deliberate, pinned deviations (see `docs/src/concepts/client-tools.md`):
+///   * an IPC client's `short_name` carries a connection index that the
+///     reference derives from the LIVE client count at accept time
+///     (LocalInterface.py:441); ours mirrors that, but the index is templated
+///     here so the assertion does not depend on connect/disconnect ordering
+///     between the two daemons;
+///   * `clients` on a `TCPServerInterface` counts live spawned connections on
+///     both stacks, and is compared exactly.
+#[tokio::test]
+#[ignore = "spawns Python daemons and tooling; run via --include-ignored after the tier3"]
+async fn status_inventory_parity_across_daemons() {
+    init_tracing();
+
+    let lnsd = ParityDaemon::start(Stack::Lnsd).await;
+    let rnsd = ParityDaemon::start(Stack::Rnsd).await;
+
+    // ---- Phase 1: idle. ----
+    // Both daemons are freshly started and have never been sampled, so the
+    // only IPC client either can report is the rnstatus run doing the
+    // sampling.
+    let idle_l = templated_inventory(&lnsd).await;
+    let idle_r = templated_inventory(&rnsd).await;
+    assert_inventory_parity(&idle_l, &idle_r, "idle, no peer connected");
+
+    // The reference inventory of this config, spelled out so the test pins
+    // the CONTENT and not merely the agreement of two possibly-empty lists.
+    let expected_idle = vec![
+        InventoryRow {
+            type_name: "LocalClientInterface".into(),
+            name: "LocalInterface[rns/<INSTANCE>]".into(),
+            short_name: "<N>@\0rns/<INSTANCE>".into(),
+            parent_name: Some("Shared Instance[rns/<INSTANCE>]".into()),
+            clients: None,
+        },
+        InventoryRow {
+            type_name: "LocalServerInterface".into(),
+            name: "Shared Instance[rns/<INSTANCE>]".into(),
+            short_name: "Reticulum".into(),
+            parent_name: None,
+            clients: Some(1),
+        },
+        InventoryRow {
+            type_name: "TCPServerInterface".into(),
+            name: "TCPServerInterface[Parity TCP Server 0/127.0.0.1:<LISTEN_PORT>]".into(),
+            short_name: "Parity TCP Server 0".into(),
+            parent_name: None,
+            clients: Some(0),
+        },
+    ];
+    assert_eq!(
+        idle_r,
+        expected_idle,
+        "\nthe reference inventory itself changed:\n{}\n",
+        render_inventory(&idle_r)
+    );
+    assert_eq!(
+        idle_l,
+        expected_idle,
+        "\nlnsd idle inventory:\n{}\n",
+        render_inventory(&idle_l)
+    );
+
+    // ---- Phase 2: one connected TCP peer. ----
+    // Wait out the phase-1 sampling client on both sides so the observer
+    // footprint is identical again, then connect one peer per daemon and
+    // announce one identity into each; the learned path is the observable
+    // state that says the connection is a registered interface on both.
+    wait_observer_gone(&lnsd).await;
+    wait_observer_gone(&rnsd).await;
+
+    let mut injectors = Injectors {
+        lnsd: connect_injector(&lnsd).await,
+        rnsd: connect_injector(&rnsd).await,
+    };
+    let identity = Identity::generate(&mut OsRng);
+    let (frame, dest) = build_announce_for(&identity, "inventory");
+    injectors.send_both(&frame).await;
+    let dest_hex = hex::encode(dest.as_bytes());
+    for daemon in [&lnsd, &rnsd] {
+        wait_paths(
+            daemon,
+            "peer announce processed (connection is a registered interface)",
+            Duration::from_secs(15),
+            |p| p.contains(&dest_hex),
+        )
+        .await;
+    }
+
+    let peer_l = templated_inventory(&lnsd).await;
+    let peer_r = templated_inventory(&rnsd).await;
+    assert_inventory_parity(&peer_l, &peer_r, "one connected TCP peer");
+
+    let spawned = InventoryRow {
+        type_name: "TCPClientInterface".into(),
+        name: "TCPInterface[Client on Parity TCP Server 0/127.0.0.1:<EPHEMERAL>]".into(),
+        short_name: "Client on Parity TCP Server 0".into(),
+        parent_name: Some("TCPServerInterface[Parity TCP Server 0/127.0.0.1:<LISTEN_PORT>]".into()),
+        clients: None,
+    };
+    assert!(
+        peer_r.contains(&spawned),
+        "\nthe reference naming of a spawned connection changed:\n{}\n",
+        render_inventory(&peer_r)
+    );
+    assert!(
+        peer_l.contains(&spawned),
+        "\nlnsd must name a spawned connection like the reference:\n{}\n",
+        render_inventory(&peer_l)
+    );
+    // The listener now reports its one client on both stacks.
+    for (label, rows) in [("lnsd", &peer_l), ("rnsd", &peer_r)] {
+        let listener = rows
+            .iter()
+            .find(|r| r.type_name == "TCPServerInterface")
+            .unwrap_or_else(|| {
+                panic!("{label} lists no TCP listener:\n{}", render_inventory(rows))
+            });
+        assert_eq!(
+            listener.clients,
+            Some(1),
+            "{label}: the listener must count its spawned connection"
+        );
+    }
+
+    drop(injectors);
+    let (l_dir, r_dir) = (lnsd.config_dir.clone(), rnsd.config_dir.clone());
+    drop(lnsd);
+    drop(rnsd);
+    let _ = std::fs::remove_dir_all(l_dir);
+    let _ = std::fs::remove_dir_all(r_dir);
+}
+
 async fn connect_injector(daemon: &ParityDaemon) -> TcpStream {
     connect_injector_port(daemon, daemon.tcp_port).await
 }
@@ -1483,13 +1813,14 @@ async fn connect_injector_port(daemon: &ParityDaemon, port: u16) -> TcpStream {
 // Multi-interface sort / -a parity (complements the single-interface 2x2)
 // =========================================================================
 
-/// Non-local visible interface entries (the spawned per-connection ones).
+/// The spawned per-connection entries (what `-a` reveals and what the sort
+/// flags order): non-local, and not a listener.
 fn visible_ifaces(stats: &Value) -> Vec<Value> {
     ifaces(stats)
         .into_iter()
         .filter(|i| {
             let t = i.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            t != "LocalServerInterface" && t != "LocalClientInterface"
+            t != "LocalServerInterface" && t != "LocalClientInterface" && !is_listener(i)
         })
         .collect()
 }
@@ -1588,10 +1919,14 @@ async fn lnstatus_rnstatus_multi_interface_sort_parity() {
     ];
     for flags in flag_sets {
         let rn = run_status(StatusClient::Rnstatus, &lnsd, flags).await;
+        wait_observer_gone(&lnsd).await;
         let ln = run_status(StatusClient::Lnstatus, &lnsd, flags).await;
+        // The name filter selects by interface name, so it removes the
+        // observer's own `LocalInterface[...]` row before the render does.
+        let observer_rows = usize::from(!flags.contains(&"tcp"));
         assert_eq!(
-            normalize_idle_text(&rn),
-            normalize_idle_text(&ln),
+            normalize_idle_text(&strip_observer_footprint(&rn, observer_rows, "rnstatus")),
+            normalize_idle_text(&strip_observer_footprint(&ln, 0, "lnstatus")),
             "multi-interface render parity for flags {flags:?} on lnsd\nrnstatus:\n{rn}\nlnstatus:\n{ln}"
         );
     }
@@ -1658,21 +1993,20 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         t.sort();
         t
     };
-    assert_eq!(
-        type_counts(on_lnsd),
-        vec!["TCPServerInterface"],
-        "lnsd must expose exactly the spawned traffic connection"
-    );
-    assert_eq!(
-        type_counts(on_rnsd),
-        vec![
-            "LocalClientInterface",
-            "LocalServerInterface",
-            "TCPClientInterface",
-            "TCPServerInterface"
-        ],
-        "rnsd must expose shared instance + listener + spawned connection + the sampling client"
-    );
+    let expected_shape = vec![
+        "LocalClientInterface",
+        "LocalServerInterface",
+        "TCPClientInterface",
+        "TCPServerInterface",
+    ];
+    for (label, stats) in [("lnsd", on_lnsd), ("rnsd", on_rnsd)] {
+        assert_eq!(
+            type_counts(stats),
+            expected_shape,
+            "{label} must expose shared instance + listener + spawned connection \
+             + the sampling client (Codeberg #177)"
+        );
+    }
 
     let (tl, tr) = (traffic_iface(on_lnsd), traffic_iface(on_rnsd));
 
@@ -1692,18 +2026,30 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         ours_only == ours_only_full || ours_only == ours_only_queued,
         "unexpected lnsd-only interface_stats keys: {ours_only:?}"
     );
+    // `parent_interface_name`/`parent_interface_hash` are emitted by BOTH
+    // stacks since Codeberg #177 (the spawned connection points at its
+    // listener), so `autoconnect_source` is all that is left on the Python
+    // side. Its value is asserted below rather than merely tolerated.
     assert_eq!(
         python_only,
-        [
-            "autoconnect_source",
-            "parent_interface_name",
-            "parent_interface_hash"
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect(),
+        ["autoconnect_source"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         "unexpected rnsd-only interface_stats keys"
     );
+    for (label, t) in [("lnsd", &tl), ("rnsd", &tr)] {
+        let parent = t["parent_interface_name"].as_str().unwrap_or_default();
+        assert!(
+            parent.starts_with("TCPServerInterface[Parity TCP Server 0/"),
+            "{label}: the spawned connection must point at its listener, got {parent:?}"
+        );
+        assert_eq!(
+            t["parent_interface_hash"].as_str().map(|h| h.len()),
+            Some(64),
+            "{label}: parent_interface_hash must be the listener's full 32-byte hash"
+        );
+    }
 
     // Exact-equal stats on the traffic interface. All of these are frozen
     // (freeze predicate) or static config, so numeric equality is exact.
@@ -1781,17 +2127,37 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
 /// lnsd), the "our stack is sane" cell of the matrix. Every range is
 /// defined, not "looks sane".
 fn assert_full_stack_sane(stats: &Value) {
+    // Shared instance + TCP listener + the spawned traffic connection.
+    // lnstatus samples over RPC only, so no client row of its own
+    // (Codeberg #177).
     let ifs = ifaces(stats);
-    assert_eq!(ifs.len(), 1, "one traffic interface expected");
-    let t = &ifs[0];
-    assert_eq!(t["type"], "TCPServerInterface");
+    let names: Vec<&str> = ifs
+        .iter()
+        .map(|i| i["name"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(
+        ifs.len(),
+        3,
+        "shared instance + listener + traffic connection expected, got {names:?}"
+    );
+    let t = traffic_iface(stats);
+    let t = &t;
+    assert_eq!(t["type"], "TCPClientInterface");
+    assert!(
+        t["name"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("TCPInterface[Client on Parity TCP Server 0/"),
+        "spawned connection must carry the reference name, got {:?}",
+        t["name"]
+    );
     assert_eq!(t["status"], Value::Bool(true), "interface must be up");
     assert_eq!(num(t, "mode"), 1.0, "MODE_FULL");
     assert_eq!(num(t, "bitrate"), 10_000_000.0, "TCP bitrate guess");
     assert_eq!(
         t["hash"].as_str().map(|h| h.len()),
-        Some(32),
-        "interface hash must be 16 bytes hex"
+        Some(64),
+        "interface hash must be the full 32-byte Identity.full_hash, hex"
     );
     assert!(num(t, "rxb") > 0.0, "traffic was received");
     assert!(num(t, "txb") > 0.0, "path responses were sent");
@@ -1815,14 +2181,25 @@ fn assert_full_stack_sane(stats: &Value) {
     );
     let up = num(stats, "transport_uptime");
     assert!(up > 0.0 && up < 3600.0, "implausible uptime {up}");
+    // Totals count the traffic-bearing interface once: the listener rows
+    // aggregate the same bytes for display and must not double-count them.
     assert_eq!(
         num(stats, "rxb"),
         num(t, "rxb"),
-        "totals equal the single interface"
+        "totals equal the single traffic interface"
     );
     assert_eq!(
         num(stats, "txb"),
         num(t, "txb"),
-        "totals equal the single interface"
+        "totals equal the single traffic interface"
     );
+    // The listener reports exactly what its one child carried (Python keeps
+    // the parent counters in step with the child's, TCPInterface.py:306-329).
+    let listener = ifaces(stats)
+        .into_iter()
+        .find(|i| i["type"] == "TCPServerInterface")
+        .expect("listener row");
+    assert_eq!(num(&listener, "rxb"), num(t, "rxb"));
+    assert_eq!(num(&listener, "txb"), num(t, "txb"));
+    assert_eq!(num(&listener, "clients"), 1.0, "one connected peer");
 }

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `interface_stats` reports the listeners the daemon runs (shared
+  instance, TCP server) next to its routable interfaces, and names every
+  accepted connection like the reference does (#177).
 - Signing an LXMF message with a `NaN` or infinite timestamp is refused
   (#184).
 - The LXMF router resolves wall time from `NodeCore::emission_secs`

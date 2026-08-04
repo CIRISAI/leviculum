@@ -236,6 +236,10 @@ impl ReticulumNodeBuilder {
     /// This listens for incoming connections from other Reticulum nodes.
     pub fn add_tcp_server(mut self, addr: SocketAddr) -> Self {
         self.interfaces.push(InterfaceConfig {
+            // A config file names its interfaces; the programmatic API does
+            // not, so fall back to the type name the way an operator would
+            // (the name shows up in `TCPServerInterface[<name>/<ip>:<port>]`).
+            name: "TCP Server".to_string(),
             interface_type: "TCPServerInterface".to_string(),
             listen_ip: Some(addr.ip().to_string()),
             listen_port: Some(addr.port()),
@@ -263,12 +267,14 @@ impl ReticulumNodeBuilder {
         encrypt: bool,
     ) -> Self {
         let ip = addr.ip().to_string();
+        let name = name.into();
         self.interfaces.push(InterfaceConfig {
+            name: name.clone(),
             interface_type: "TCPServerInterface".to_string(),
             listen_ip: Some(ip.clone()),
             listen_port: Some(addr.port()),
             discoverable: true,
-            discovery_name: Some(name.into()),
+            discovery_name: Some(name),
             reachable_on: Some(ip),
             discovery_encrypt: encrypt,
             discovery_announce_interval_secs: Some(announce_interval_secs),
@@ -742,8 +748,15 @@ impl ReticulumNodeBuilder {
         // `push_next_slot_ms`'s `now_ms` share a frame.
         crate::interfaces::init_clock_anchor(clock.start_instant());
 
-        // Merge interface configs from file
+        // Merge interface configs from file. The parsed map is keyed by
+        // section name, so flattening it drops the ordering the config file
+        // had; sorting by name puts it back on a defined footing (the
+        // reported inventory is ordered by interface id, which follows this
+        // order) instead of leaving it to HashMap iteration, which differs
+        // run to run. Deviation from Python, which keeps file order
+        // (configobj is ordered); pinned in `interfaces_are_ordered_by_name`.
         let mut interfaces = config.interfaces.into_values().collect::<Vec<_>>();
+        interfaces.sort_by(|a, b| a.name.cmp(&b.name));
         interfaces.extend(self.interfaces);
 
         // Channel-backed RNode interfaces (factory closures, not file-config).

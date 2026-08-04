@@ -15,6 +15,7 @@ pub(crate) mod byte_channel;
 pub use byte_channel::ByteChannelHandle;
 pub mod hdlc;
 pub(crate) mod i2p;
+pub(crate) mod inventory;
 pub(crate) mod kiss;
 pub(crate) mod local;
 pub(crate) mod netdevice;

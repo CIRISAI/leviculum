@@ -42,6 +42,12 @@ pub(super) struct InterfaceBuildCtx<'a> {
     pub storage_path: Option<PathBuf>,
     /// Applied to each TCP client's connect socket before it dials.
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    /// Reporting-side interface inventory (Codeberg #177): listeners register
+    /// themselves here because they never become routable interfaces.
+    pub inventory: crate::interfaces::inventory::SharedInventory,
+    /// Whether transport is enabled, which decides the announce-rate defaults
+    /// a listener reports (Reticulum.py:830-833).
+    pub transport_enabled: bool,
 }
 
 /// Outcome of building one configured interface section.
@@ -67,7 +73,7 @@ pub(super) fn build_interface(
 ) -> Result<Built, Error> {
     match config.interface_type.as_str() {
         "TCPClientInterface" => tcp::build_client(idx, config, ctx),
-        "TCPServerInterface" => tcp::build_server(config, ctx),
+        "TCPServerInterface" => tcp::build_server(idx, config, ctx),
         "UDPInterface" => udp::build(idx, config, ctx),
         "AutoInterface" => auto::build(config, ctx, auto_peer_count),
         "RNodeInterface" => rnode::build(idx, config, ctx),

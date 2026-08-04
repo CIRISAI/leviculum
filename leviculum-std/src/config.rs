@@ -226,6 +226,13 @@ impl Default for ReticulumConfig {
 /// Interface configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceConfig {
+    /// The config section name (`[[My TCP Server]]`), which is Python's
+    /// `interface.name` and part of the interface's reported identity:
+    /// `TCPServerInterface[<name>/<ip>:<port>]`, `Client on <name>`
+    /// (Reticulum.py:874-907, TCPInterface.py:522/577/672). Empty for
+    /// programmatically built interfaces that never name themselves.
+    #[serde(default)]
+    pub name: String,
     /// Interface type
     #[serde(rename = "type")]
     pub interface_type: String,
@@ -533,6 +540,7 @@ impl Default for InterfaceConfig {
     /// care about and fill the rest with `..Default::default()`.
     fn default() -> Self {
         Self {
+            name: String::new(),
             interface_type: String::new(),
             enabled: true,
             mode: None,

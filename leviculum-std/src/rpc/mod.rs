@@ -36,6 +36,7 @@ use tokio::net::UnixListener as RpcListener;
 use tokio::net::UnixStream as RpcStream;
 
 use crate::driver::{AutoPeerCount, StdNodeCore};
+use crate::interfaces::inventory::SharedInventory;
 use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
 use connection::{read_message, server_handshake, write_message};
 use error::RpcError;
@@ -108,6 +109,7 @@ pub(crate) fn spawn_rpc_server(
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
+    inventory: SharedInventory,
     auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
 ) -> Result<(), std::io::Error> {
@@ -127,6 +129,7 @@ pub(crate) fn spawn_rpc_server(
             start_time,
             iface_stats_map,
             iface_online_map,
+            inventory,
             auto_peer_count,
             discovery_storage,
         )
@@ -145,6 +148,7 @@ async fn rpc_accept_loop(
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
+    inventory: SharedInventory,
     auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
 ) {
@@ -160,6 +164,7 @@ async fn rpc_accept_loop(
         let core = Arc::clone(&core);
         let stats_map = Arc::clone(&iface_stats_map);
         let online_map = Arc::clone(&iface_online_map);
+        let inventory = Arc::clone(&inventory);
         let peer_count = auto_peer_count.clone();
         let discovery_storage = discovery_storage.clone();
         tokio::spawn(async move {
@@ -170,6 +175,7 @@ async fn rpc_accept_loop(
                 start_time,
                 &stats_map,
                 &online_map,
+                &inventory,
                 &peer_count,
                 discovery_storage.as_deref(),
             )
@@ -190,6 +196,7 @@ async fn handle_rpc_connection(
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
     iface_online_map: &InterfaceOnlineMap,
+    inventory: &SharedInventory,
     auto_peer_count: &AutoPeerCount,
     discovery_storage: Option<&std::path::Path>,
 ) -> Result<(), RpcError> {
@@ -209,6 +216,7 @@ async fn handle_rpc_connection(
             start_time,
             iface_stats_map,
             iface_online_map,
+            inventory,
             peer_count,
             discovery_storage,
             codec,
@@ -534,6 +542,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -653,6 +662,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -715,6 +725,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -774,6 +785,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -880,6 +892,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -909,6 +922,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -945,6 +959,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -1055,6 +1070,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
         )
@@ -1117,6 +1133,7 @@ mod tests {
             start_time,
             empty_stats_map(),
             empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             Some(td.path().to_path_buf()),
         )
@@ -1186,6 +1203,7 @@ mod tests {
                 start_time,
                 empty_stats_map(),
                 Arc::clone(&online_map),
+                crate::interfaces::inventory::InterfaceInventory::shared(),
                 AutoPeerCount::default(),
                 None,
             )

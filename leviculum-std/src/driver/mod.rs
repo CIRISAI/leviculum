@@ -827,6 +827,16 @@ pub struct ReticulumNode {
     /// handler so the `interface_stats.status` field reflects the real
     /// `is_online()` of each interface (Codeberg #56).
     iface_online_map: InterfaceOnlineMap,
+    /// Reporting-side interface inventory (Codeberg #177): the listeners this
+    /// daemon runs, plus the reference display identity of the connections
+    /// they spawn. Transport holds only interfaces it can route packets on,
+    /// so listeners live here and nowhere else; `interface_stats` reports the
+    /// union of the two, which is the collection a Python `rnsd` reports.
+    inventory: crate::interfaces::inventory::SharedInventory,
+    /// Live shared-instance client count, shared with the local accept loop.
+    /// The reference labels an accepted IPC client with this count at accept
+    /// time (LocalInterface.py:441/355).
+    local_client_count: Arc<AtomicUsize>,
     /// Per-interface readiness signals, keyed by interface index.
     /// Populated by `start()` once interfaces are spawned.  Read by
     /// [`wait_for_interface_ready`](Self::wait_for_interface_ready)
@@ -974,6 +984,8 @@ impl ReticulumNode {
             start_time: std::time::Instant::now(),
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             iface_online_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
+            inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+            local_client_count: Arc::new(AtomicUsize::new(0)),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             runtime: None,
             new_iface_tx: None,
@@ -1390,6 +1402,8 @@ impl ReticulumNode {
         };
         let iface_stats_map = Arc::clone(&self.iface_stats_map);
         let iface_online_map = Arc::clone(&self.iface_online_map);
+        let inventory = Arc::clone(&self.inventory);
+        let local_client_count = Arc::clone(&self.local_client_count);
         let flush_interval_secs = self.flush_interval_secs;
 
         // Remote-management `/status` responder (Codeberg #86). Enabled when the
@@ -1406,6 +1420,7 @@ impl ReticulumNode {
                 RemoteMgmtResponder::new(
                     Arc::clone(&self.iface_stats_map),
                     Arc::clone(&self.iface_online_map),
+                    Arc::clone(&self.inventory),
                     self.start_time,
                     self.auto_peer_count.clone(),
                 )
@@ -1452,6 +1467,8 @@ impl ReticulumNode {
                 },
                 iface_stats_map,
                 iface_online_map,
+                inventory,
+                local_client_count,
                 flush_interval_secs,
                 remote_mgmt,
                 discovery_storage,
@@ -1522,6 +1539,8 @@ impl ReticulumNode {
                 corrupt_every: self.corrupt_every,
                 storage_path: self.storage_path.clone(),
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
+                inventory: Arc::clone(&self.inventory),
+                transport_enabled: self.is_transport_enabled(),
             };
             for (idx, config) in self.interfaces.iter().enumerate() {
                 if !config.enabled {
@@ -1604,11 +1623,19 @@ impl ReticulumNode {
 
         // Start local (shared instance) server if enabled
         if let Some(ref instance_name) = self.share_instance_name {
+            // The shared-instance server carries no packets either, so it
+            // takes an id from the same allocator and lives in the reporting
+            // inventory only (Codeberg #177). Allocated here, before any
+            // client can connect, so it precedes every spawned interface.
+            let server_id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::interfaces::local::spawn_local_server(
                 instance_name,
                 next_id.clone(),
                 new_iface_tx.clone(),
                 crate::interfaces::local::LOCAL_DEFAULT_BUFFER_SIZE,
+                server_id,
+                Arc::clone(&self.inventory),
+                Arc::clone(&self.local_client_count),
             )
             .map_err(|e| match e.kind() {
                 // A name collision is the one bind failure with a remedy
@@ -1651,6 +1678,7 @@ impl ReticulumNode {
                 self.start_time,
                 Arc::clone(&self.iface_stats_map),
                 Arc::clone(&self.iface_online_map),
+                Arc::clone(&self.inventory),
                 self.auto_peer_count.clone(),
                 Some(self.discovery_storage_root()),
             ) {
@@ -1984,6 +2012,8 @@ impl ReticulumNode {
             corrupt_every: self.corrupt_every,
             storage_path: self.storage_path.clone(),
             outbound_socket_hook: self.outbound_socket_hook.clone(),
+            inventory: Arc::clone(&self.inventory),
+            transport_enabled: self.is_transport_enabled(),
         };
 
         let built = {
@@ -3025,6 +3055,54 @@ async fn recv_any(
     .await
 }
 
+/// Retire a spawned interface from the reporting inventory (Codeberg #177).
+///
+/// Called on every disconnect path, BEFORE the counters are dropped from
+/// `iface_stats_map`, so the bytes the connection carried stay banked on its
+/// listener. The reference gets this for free: a spawned interface increments
+/// its parent's `rxb`/`txb` alongside its own (TCPInterface.py:306-308,
+/// 327-329) and the parent outlives it, so a listener's totals never fall when
+/// a client goes away. Ours has to move them explicitly.
+///
+/// A departing shared-instance client also frees its slot in the live client
+/// count, which is what the reference labels the NEXT client with
+/// (LocalInterface.py:355/441).
+fn retire_from_inventory(
+    inventory: &crate::interfaces::inventory::SharedInventory,
+    iface_stats_map: &InterfaceStatsMap,
+    local_client_count: &Arc<AtomicUsize>,
+    iface_id: usize,
+) {
+    let (rxb, txb) = {
+        let stats = iface_stats_map.lock_recover();
+        stats
+            .get(&iface_id)
+            .map(|c| {
+                (
+                    c.rx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                    c.tx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .unwrap_or((0, 0))
+    };
+    let mut inv = inventory.lock_recover();
+    let was_local_client = inv
+        .identity(iface_id)
+        .is_some_and(|i| i.type_name == "LocalClientInterface");
+    inv.remove_spawned(iface_id, rxb, txb);
+    drop(inv);
+    if was_local_client {
+        // `fetch_update` rather than `fetch_sub`: an unmatched retire (a
+        // client removed twice through two disconnect paths) must not wrap the
+        // counter to usize::MAX and label every later client from there.
+        let _ = local_client_count.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |n| Some(n.saturating_sub(1)),
+        );
+    }
+}
+
 /// Run the internal event loop (sans-I/O architecture)
 ///
 /// The driver owns the interfaces and acts as the I/O bridge between the
@@ -3037,6 +3115,8 @@ async fn run_event_loop(
     channels: EventLoopChannels,
     iface_stats_map: InterfaceStatsMap,
     iface_online_map: InterfaceOnlineMap,
+    inventory: crate::interfaces::inventory::SharedInventory,
+    local_client_count: Arc<AtomicUsize>,
     flush_interval_secs: u64,
     remote_mgmt: Option<RemoteMgmtResponder>,
     discovery_storage: Option<PathBuf>,
@@ -3251,6 +3331,12 @@ async fn run_event_loop(
                         if !registry.remove(iface_id) {
                             pending_removals.insert(iface_id);
                         }
+                        retire_from_inventory(
+                            &inventory,
+                            &iface_stats_map,
+                            &local_client_count,
+                            iface_id.0,
+                        );
                         {
                             let mut stats = iface_stats_map.lock_recover();
                             stats.remove(&iface_id.0);
@@ -3536,6 +3622,12 @@ async fn run_event_loop(
                         );
                         retry_queues.remove(&iface_id.0);
                         registry.remove(iface_id);
+                        retire_from_inventory(
+                            &inventory,
+                            &iface_stats_map,
+                            &local_client_count,
+                            iface_id.0,
+                        );
                         {
                             let mut stats = iface_stats_map.lock_recover();
                             stats.remove(&iface_id.0);

@@ -18,7 +18,9 @@ use leviculum_core::transport::InterfaceId;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
+use super::inventory::{self as inventory_names, InterfaceIdentity, ListenerRow, SharedInventory};
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
+use crate::sync_ext::MutexRecover;
 
 // Platform IPC transport. Unix domain sockets on Unix; TCP loopback on Windows,
 // matching Python-RNS, which falls back to 127.0.0.1 (AF_INET) when AF_UNIX is
@@ -203,6 +205,10 @@ pub(crate) const LOCAL_DEFAULT_BUFFER_SIZE: usize = 4096;
 /// Hardware MTU for local interfaces (same as TCP, local IPC).
 const LOCAL_HW_MTU: u32 = 262_144;
 
+/// Bitrate a shared-instance interface reports: 1 Gbps, as the reference sets
+/// on both the server and every accepted client (LocalInterface.py:431).
+pub(crate) const LOCAL_BITRATE: i64 = 1_000_000_000;
+
 /// Frame buffer multiplier (accounts for HDLC escaping overhead)
 const FRAME_BUFFER_MULTIPLIER: usize = 2;
 
@@ -215,6 +221,11 @@ const READ_BUFFER_MULTIPLIER: usize = 4;
 /// async accept loop. Each accepted connection becomes an `InterfaceHandle`
 /// sent to the event loop via `new_interface_tx`.
 ///
+/// The shared-instance server itself carries no packets, so it never becomes
+/// a routable interface; like a TCP listener it is announced to the reporting
+/// inventory (Codeberg #177), and every accepted IPC client registers its
+/// reference display identity there.
+///
 /// The accept loop exits when the event loop drops `new_interface_rx`
 /// (detected via `Sender::closed()`).
 pub(crate) fn spawn_local_server(
@@ -222,6 +233,9 @@ pub(crate) fn spawn_local_server(
     next_id: Arc<AtomicUsize>,
     new_interface_tx: mpsc::Sender<InterfaceHandle>,
     buffer_size: usize,
+    server_id: usize,
+    inventory: SharedInventory,
+    live_clients: Arc<AtomicUsize>,
 ) -> Result<(), io::Error> {
     // Build abstract socket name: "rns/{instance_name}"
     let abstract_name = format!("rns/{}", instance_name);
@@ -232,7 +246,28 @@ pub(crate) fn spawn_local_server(
 
     tracing::info!("Local server listening on socket {}", abstract_name);
 
-    let client_counter = Arc::new(AtomicUsize::new(0));
+    inventory.lock_recover().add_listener(
+        server_id,
+        ListenerRow {
+            identity: InterfaceIdentity {
+                name: inventory_names::shared_instance_name(&abstract_name),
+                // Python names the shared-instance server "Reticulum"
+                // (LocalInterface.py:391).
+                short_name: "Reticulum".to_string(),
+                type_name: "LocalServerInterface",
+                parent: None,
+            },
+            bitrate: LOCAL_BITRATE,
+            mode: leviculum_core::traits::InterfaceMode::default(),
+            // The reference pins all three to None on this interface
+            // (LocalInterface.py:427-429), unlike a config interface.
+            announce_rate: (None, None, None),
+            ifac_size_bits: None,
+            departed_rxb: 0,
+            departed_txb: 0,
+        },
+    );
+
     let instance_name_owned = abstract_name.clone();
 
     tokio::spawn(async move {
@@ -242,8 +277,25 @@ pub(crate) fn spawn_local_server(
                     match result {
                         Ok((stream, _peer_addr)) => {
                             let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
-                            let client_num = client_counter.fetch_add(1, Ordering::Relaxed);
+                            // Python labels an accepted client with the LIVE
+                            // client count at accept time (LocalInterface.py:441
+                            // with the matching `clients -= 1` on teardown,
+                            // LocalInterface.py:355), so the counter has to be
+                            // the live one, not a monotonic connection index.
+                            let client_num = live_clients.fetch_add(1, Ordering::Relaxed);
                             let name = format!("Local[{}]/{}", instance_name_owned, client_num);
+                            inventory.lock_recover().add_spawned(
+                                id.0,
+                                InterfaceIdentity {
+                                    name: inventory_names::local_client_name(&instance_name_owned),
+                                    short_name: inventory_names::local_client_short_name(
+                                        client_num,
+                                        &instance_name_owned,
+                                    ),
+                                    type_name: "LocalClientInterface",
+                                    parent: Some(server_id),
+                                },
+                            );
                             let handle = spawn_local_interface_from_stream(
                                 id, name.clone(), stream, buffer_size,
                             );
@@ -473,6 +525,25 @@ async fn local_interface_task(
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    /// `spawn_local_server` with a private reporting inventory and client
+    /// counter, for tests that only exercise the socket itself.
+    fn spawn_test_local_server(
+        instance_name: &str,
+        next_id: Arc<AtomicUsize>,
+        tx: mpsc::Sender<InterfaceHandle>,
+        buffer_size: usize,
+    ) -> Result<(), io::Error> {
+        spawn_local_server(
+            instance_name,
+            next_id,
+            tx,
+            buffer_size,
+            0,
+            crate::interfaces::inventory::InterfaceInventory::shared(),
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
     use super::*;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -527,7 +598,7 @@ mod tests {
 
         // Use a unique instance name to avoid conflicts
         let instance_name = format!("test_{}", std::process::id());
-        spawn_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
+        spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect as a local client
         let std_stream = test_connect(&instance_name);
@@ -552,7 +623,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
 
         let instance_name = format!("test_rt_{}", std::process::id());
-        spawn_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
+        spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect
         let std_stream = test_connect(&instance_name);
@@ -615,7 +686,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
 
         let instance_name = format!("test_disc_{}", std::process::id());
-        spawn_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
+        spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect and immediately drop
         let std_stream = test_connect(&instance_name);
@@ -645,7 +716,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
 
         let instance_name = format!("test_multi_{}", std::process::id());
-        spawn_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
+        spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Connect two clients
         let std1 = test_connect(&instance_name);
@@ -677,7 +748,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
 
         let instance_name = format!("test_client_{}", std::process::id());
-        spawn_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
+        spawn_test_local_server(&instance_name, next_id.clone(), tx, 16).unwrap();
 
         // Give server time to bind
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -775,9 +846,9 @@ mod tests {
         let name_a = format!("test_collide_a_{base}");
         let name_b = format!("test_collide_b_{base}");
 
-        spawn_local_server(&name_a, next_id.clone(), tx1, 16).expect("first instance binds");
+        spawn_test_local_server(&name_a, next_id.clone(), tx1, 16).expect("first instance binds");
         // A second instance under a different name must not hit AddrInUse.
-        spawn_local_server(&name_b, next_id.clone(), tx2, 16)
+        spawn_test_local_server(&name_b, next_id.clone(), tx2, 16)
             .expect("second instance under a different name must bind");
 
         // Sanity: reusing the first name does collide (proves the bind is real).
@@ -793,7 +864,7 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         {
             let (tx3, _rx3) = mpsc::channel::<InterfaceHandle>(4);
-            let dup = spawn_local_server(&name_a, next_id, tx3, 16);
+            let dup = spawn_test_local_server(&name_a, next_id, tx3, 16);
             assert!(
                 dup.is_err(),
                 "re-binding the same instance name must fail with AddrInUse"

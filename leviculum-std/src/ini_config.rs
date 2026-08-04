@@ -180,6 +180,14 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         reticulum.shared_instance_socket = None;
     }
 
+    // Carry the section name into the interface itself: it is Python's
+    // `interface.name` and part of every interface's reported identity
+    // (Codeberg #177), and the map key alone is lost the moment the
+    // interfaces are flattened for the driver.
+    for (name, iface) in interfaces.iter_mut() {
+        iface.name = name.clone();
+    }
+
     // Filter out unsupported interface types
     let supported: HashMap<String, InterfaceConfig> = interfaces
         .into_iter()

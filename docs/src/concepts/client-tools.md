@@ -22,7 +22,7 @@ per reference tool. The honest current state, as of 2026-08:
 | Reference tool | Counterpart | State |
 |---|---|---|
 | `rnsd` | `lnsd` | Shipped. Drop-in at IPC and config level; see [Python-RNS Compatibility](python-rns-compatibility.md). |
-| `rnstatus` | `lnstatus` | Shipped. Local-mode output is byte-parity-pinned against the reference by the 2×2 matrix `status_parity_matrix_2x2` (`status_parity_tests.rs:1000`); Periculum wiring is Codeberg #174. |
+| `rnstatus` | `lnstatus` | Shipped. Local-mode output is byte-parity-pinned against the reference by the 2×2 matrix `status_parity_matrix_2x2` (`status_parity_tests.rs:1075`), the reported inventory by `status_inventory_parity_across_daemons` (`status_parity_tests.rs:1670`); Periculum wiring is Codeberg #174. |
 | `rncp` | `lncp` | Shipped (send, fetch, listen). |
 | `rnprobe` | — | Missing; filed as Codeberg #173. |
 | `rnpath` | — | Missing; filed as Codeberg #173. |
@@ -73,6 +73,76 @@ protocol work measures against. When the reference tool's own output
 changes between versions, the bridge parsers in Periculum absorb it —
 compatibility of meaning, not a frozen byte format, per
 [Wire Field Semantics](wire-field-semantics.md).
+
+## Drop-in is about the answer, not just the query
+
+A client tool asks a daemon a question. Drop-in means the answer describes
+the same world, not merely that the query succeeded — and an answer about a
+different world is the hardest kind of difference to notice, because nothing
+fails.
+
+Codeberg #177 was exactly that. `rnstatus` against `rnsd` listed three
+interfaces; against `lnsd` it listed none, and the query returned cleanly
+both times. The cause was structural: our `interface_stats` was assembled
+from `Transport`'s routing map — the interfaces the core can *send packets
+on* — while a Python `rnsd` reports `RNS.Transport.interfaces`, everything
+`Reticulum` runs (`Reticulum.py:1334`). Listeners carry no packets, so they
+were in no collection at all on our side, and their absence was the symptom.
+The reporting inventory now lives in the driver
+(`leviculum-std/src/interfaces/inventory.rs`) and `interface_stats` reports
+the union: transport's routable interfaces plus the listeners the daemon
+runs. Transport stays free of listener rows, which it would otherwise try
+to send on.
+
+### What appears, and under what name
+
+The name is the interface's identity to a script, so each row reproduces the
+reference `__str__` exactly:
+
+| Row | Name | `short_name` | `type` | Reference |
+|---|---|---|---|---|
+| shared-instance server | `Shared Instance[rns/<instance>]` | `Reticulum` | `LocalServerInterface` | LocalInterface.py:391, 496-498 |
+| an accepted IPC client | `LocalInterface[rns/<instance>]` | `<n>@\0rns/<instance>` | `LocalClientInterface` | LocalInterface.py:372-374, 441 |
+| a TCP listener | `TCPServerInterface[<section>/<ip>:<port>]` | `<section>` | `TCPServerInterface` | TCPInterface.py:666-672 |
+| a connection it accepted | `TCPInterface[Client on <section>/<ip>:<port>]` | `Client on <section>` | `TCPClientInterface` | TCPInterface.py:443-449, 577 |
+
+`<section>` is the config section name (`[[My TCP Server]]`), which is
+Python's `interface.name`; it is carried on `InterfaceConfig::name` because
+flattening the parsed config used to drop it. A spawned row also carries
+`parent_interface_name` / `parent_interface_hash` pointing at its listener
+(`Reticulum.py:1342-1344`), and `hash` is the full 32-byte
+`Identity.full_hash(str(interface))` on both stacks, so a script may key
+interfaces by hash across daemons. A listener reports `clients` (its live
+spawned count) and its children's byte totals, including those of children
+that have since disconnected — the reference gets the latter for free by
+incrementing the parent counter alongside the child's
+(`TCPInterface.py:306-308`).
+
+### Pinned deviations
+
+Each is a decision, not an accident, and each has a test that fails if it
+drifts:
+
+- **A listener's frequency fields are the sum of its live children's**, where
+  the reference keeps a deque on the listener itself
+  (`TCPInterface.py:634-644`). Identical at rest (both read exactly 0, which
+  is what the frozen comparisons assert) and equal in aggregate under load;
+  they can differ while a child that contributed samples has already
+  disconnected.
+- **Interfaces other than the four rows above still report our internal
+  name** (`tcp_client_0`, `rnode_0`, `auto/eth0/…`) rather than the
+  reference's `TCPInterface[<section>/<host>:<port>]` family. A script that
+  keys on those names still sees an unfamiliar identity; the drop-in gap is
+  narrowed, not closed.
+- **Config interfaces are ordered by section name**, not config-file order:
+  the parsed config is a map keyed by section name, so file order is not
+  recoverable. Deterministic run to run, which HashMap iteration was not.
+- **Extra and missing keys**: ours adds `announce_queue` and `peers`, the
+  reference adds `autoconnect_source`. Pinned exactly by
+  `assert_daemon_stats_parity`.
+- **An IPC client's `short_name` index** mirrors the reference's live-client
+  count at accept time (`LocalInterface.py:441/355`), so the labels of two
+  daemons agree only when their clients connected and left in the same order.
 
 ## Exceeding is allowed and wanted
 

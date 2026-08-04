@@ -1,17 +1,18 @@
 //! TCP client and server interface builders.
 
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig,
+    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpServerConfig,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use leviculum_core::transport::InterfaceId;
 
-use super::super::build_ifac_config;
+use super::super::{build_announce_rate_config, build_ifac_config};
 use super::{Built, InterfaceBuildCtx};
 
 pub(super) fn build_client(
@@ -67,6 +68,7 @@ pub(super) fn build_client(
 }
 
 pub(super) fn build_server(
+    idx: usize,
     config: &InterfaceConfig,
     ctx: &InterfaceBuildCtx<'_>,
 ) -> Result<Built, Error> {
@@ -102,14 +104,26 @@ pub(super) fn build_server(
         .as_deref()
         .and_then(leviculum_core::traits::InterfaceMode::from_config_str)
         .unwrap_or_default();
-    spawn_tcp_server(
-        addr,
-        ctx.next_id.clone(),
-        ctx.new_iface_tx.clone(),
+    // The listener never becomes a routable interface, so `idx` — the config
+    // index, which the id allocator skips for exactly this reason — is free to
+    // identify it in the reporting inventory (Codeberg #177). Ids there and in
+    // transport come from the same space, so a listener id can never collide
+    // with a spawned child's.
+    spawn_tcp_server(TcpServerConfig {
+        bind_addr: addr,
+        section: config.name.clone(),
+        next_id: ctx.next_id.clone(),
+        new_interface_tx: ctx.new_iface_tx.clone(),
         buffer_size,
-        ctx.corrupt_every,
+        corrupt_every: ctx.corrupt_every,
         ifac,
         mode,
-    )?;
+        listener_id: idx,
+        inventory: Arc::clone(&ctx.inventory),
+        announce_rate: leviculum_core::transport::resolve_announce_rate(
+            build_announce_rate_config(config).as_ref(),
+            ctx.transport_enabled,
+        ),
+    })?;
     Ok(Built::SelfManaged)
 }

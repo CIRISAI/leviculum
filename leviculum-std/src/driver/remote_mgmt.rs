@@ -30,6 +30,7 @@ use leviculum_core::{RequestError, TickOutput};
 use serde_pickle::value::Value;
 
 use super::StdNodeCore;
+use crate::interfaces::inventory::SharedInventory;
 use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
 
 /// The request path served by the remote-management responder.
@@ -46,6 +47,10 @@ pub(crate) struct RemoteMgmtResponder {
     iface_stats_map: InterfaceStatsMap,
     /// Per-interface online status (same map the RPC server reads).
     iface_online_map: InterfaceOnlineMap,
+    /// Reporting-side interface inventory (same one the RPC server reads), so
+    /// a remote `rnstatus -R` is told about the same listeners as a local one
+    /// (Codeberg #177).
+    inventory: SharedInventory,
     /// Node start time, for the `transport_uptime` field.
     start_time: Instant,
     /// Aggregated AutoInterface peer count across all sections, for the
@@ -57,12 +62,14 @@ impl RemoteMgmtResponder {
     pub(crate) fn new(
         iface_stats_map: InterfaceStatsMap,
         iface_online_map: InterfaceOnlineMap,
+        inventory: SharedInventory,
         start_time: Instant,
         auto_peer_count: super::AutoPeerCount,
     ) -> Self {
         Self {
             iface_stats_map,
             iface_online_map,
+            inventory,
             start_time,
             auto_peer_count,
         }
@@ -99,6 +106,7 @@ impl RemoteMgmtResponder {
             self.start_time,
             &self.iface_stats_map,
             &self.iface_online_map,
+            &self.inventory,
             auto_peer_count,
         );
         let mut items = vec![stats];

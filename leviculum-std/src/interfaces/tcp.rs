@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::inventory::{self as inventory_names, InterfaceIdentity, ListenerRow, SharedInventory};
 use super::{IncomingPacket, InterfaceCounters, InterfaceInfo, OutgoingPacket, ReadySignal};
+use crate::sync_ext::MutexRecover;
 use leviculum_core::constants::MTU;
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::transport::InterfaceId;
@@ -23,6 +25,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
 use super::InterfaceHandle;
+
+/// Python `TCPServerInterface.BITRATE_GUESS` (TCPInterface.py:452/652), the
+/// bitrate a TCP interface reports when the config sets none.
+pub(crate) const TCP_BITRATE_GUESS: i64 = 10_000_000;
 
 /// Default channel buffer size for TCP interfaces.
 /// Used for both incoming and outgoing channels.
@@ -296,23 +302,75 @@ pub(crate) fn spawn_tcp_interface<A: ToSocketAddrs>(
 /// an async accept loop. Each accepted connection becomes an
 /// `InterfaceHandle` sent to the event loop via `new_interface_tx`.
 ///
+/// The listener itself carries no packets, so it never becomes a routable
+/// interface; it is announced to the reporting inventory instead (Codeberg
+/// #177), which is what `interface_stats` reports it out of, and every
+/// accepted connection registers its reference display identity there before
+/// the handle is sent on.
+///
 /// The accept loop exits when the event loop drops `new_interface_rx`
 /// (detected via `Sender::closed()`).
-pub(crate) fn spawn_tcp_server(
-    bind_addr: SocketAddr,
-    next_id: Arc<AtomicUsize>,
-    new_interface_tx: mpsc::Sender<InterfaceHandle>,
-    buffer_size: usize,
-    corrupt_every: Option<u64>,
-    ifac: Option<leviculum_core::ifac::IfacConfig>,
-    mode: leviculum_core::traits::InterfaceMode,
-) -> Result<(), io::Error> {
+pub(crate) struct TcpServerConfig {
+    pub bind_addr: SocketAddr,
+    /// Config section name — Python `interface.name`, which appears in both
+    /// the listener's and every spawned connection's reported name.
+    pub section: String,
+    pub next_id: Arc<AtomicUsize>,
+    pub new_interface_tx: mpsc::Sender<InterfaceHandle>,
+    pub buffer_size: usize,
+    pub corrupt_every: Option<u64>,
+    pub ifac: Option<leviculum_core::ifac::IfacConfig>,
+    pub mode: leviculum_core::traits::InterfaceMode,
+    /// Inventory id reserved for this listener (its config index) plus the
+    /// shared inventory the accept loop registers spawned children in.
+    pub listener_id: usize,
+    pub inventory: SharedInventory,
+    /// Resolved `announce_rate_target/penalty/grace` of the listener.
+    pub announce_rate: (Option<u32>, Option<u32>, Option<u32>),
+}
+
+pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error> {
+    let TcpServerConfig {
+        bind_addr,
+        section,
+        next_id,
+        new_interface_tx,
+        buffer_size,
+        corrupt_every,
+        ifac,
+        mode,
+        listener_id,
+        inventory,
+        announce_rate,
+    } = config;
+
     // Bind synchronously so errors propagate to the caller immediately
     let std_listener = std::net::TcpListener::bind(bind_addr)?;
     std_listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(std_listener)?;
 
-    tracing::info!("TCP server listening on {}", bind_addr);
+    // The bound address is what Python reports (`self.bind_ip`/`bind_port`),
+    // which matters for a wildcard or port-0 bind.
+    let bound = listener.local_addr().unwrap_or(bind_addr);
+    tracing::info!("TCP server listening on {}", bound);
+
+    inventory.lock_recover().add_listener(
+        listener_id,
+        ListenerRow {
+            identity: InterfaceIdentity {
+                name: inventory_names::tcp_listener_name(&section, bound),
+                short_name: section.clone(),
+                type_name: "TCPServerInterface",
+                parent: None,
+            },
+            bitrate: TCP_BITRATE_GUESS,
+            mode,
+            announce_rate,
+            ifac_size_bits: ifac.as_ref().map(|c| (c.ifac_size() * 8) as i64),
+            departed_rxb: 0,
+            departed_txb: 0,
+        },
+    );
 
     tokio::spawn(async move {
         loop {
@@ -322,6 +380,17 @@ pub(crate) fn spawn_tcp_server(
                         Ok((stream, peer_addr)) => {
                             let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
                             let name = format!("tcp_server/{}", peer_addr);
+                            inventory.lock_recover().add_spawned(
+                                id.0,
+                                InterfaceIdentity {
+                                    name: inventory_names::tcp_spawned_name(&section, peer_addr),
+                                    short_name: inventory_names::tcp_spawned_short_name(&section),
+                                    // Python spawns a TCPClientInterface for an
+                                    // accepted connection (TCPInterface.py:578).
+                                    type_name: "TCPClientInterface",
+                                    parent: Some(listener_id),
+                                },
+                            );
                             stream.set_nodelay(true).ok();
                             apply_liveness_options(&stream).ok();
                             let mut handle = spawn_tcp_interface_from_stream(
@@ -1244,15 +1313,19 @@ mod tests {
         let bound_addr = std_listener.local_addr().unwrap();
         drop(std_listener); // free the port for spawn_tcp_server
 
-        spawn_tcp_server(
-            bound_addr,
-            next_id.clone(),
-            tx,
-            16,
-            None,
-            None,
-            leviculum_core::traits::InterfaceMode::default(),
-        )
+        spawn_tcp_server(TcpServerConfig {
+            bind_addr: bound_addr,
+            section: "Test Server".to_string(),
+            next_id: next_id.clone(),
+            new_interface_tx: tx,
+            buffer_size: 16,
+            corrupt_every: None,
+            ifac: None,
+            mode: leviculum_core::traits::InterfaceMode::default(),
+            listener_id: 99,
+            inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+            announce_rate: (None, None, None),
+        })
         .unwrap();
 
         // Connect a raw TCP client
@@ -1284,15 +1357,19 @@ mod tests {
         let bound_addr = std_listener.local_addr().unwrap();
         drop(std_listener);
 
-        spawn_tcp_server(
-            bound_addr,
-            next_id.clone(),
-            tx,
-            16,
-            None,
-            None,
-            InterfaceMode::AccessPoint,
-        )
+        spawn_tcp_server(TcpServerConfig {
+            bind_addr: bound_addr,
+            section: "Test Server".to_string(),
+            next_id: next_id.clone(),
+            new_interface_tx: tx,
+            buffer_size: 16,
+            corrupt_every: None,
+            ifac: None,
+            mode: InterfaceMode::AccessPoint,
+            listener_id: 99,
+            inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+            announce_rate: (None, None, None),
+        })
         .unwrap();
 
         let _client = tokio::net::TcpStream::connect(bound_addr).await.unwrap();

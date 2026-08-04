@@ -154,6 +154,30 @@ const DEFAULT_AR_PENALTY: u32 = 0;
 /// Default announce-rate grace count (Python Interface.DEFAULT_AR_GRACE).
 const DEFAULT_AR_GRACE: u32 = 5;
 
+/// Resolve the announce-rate values to report for one interface, applying the
+/// transport-enabled default fill (Python Reticulum.py:830-833). With transport
+/// disabled and the key unset the value stays `None`, matching a real Python
+/// daemon so rnstatus renders no `(t:.../p:.../g:...)` suffix.
+///
+/// Free function because interfaces that carry no packets (listeners) are
+/// reported without ever entering transport's routing map, and their reporting
+/// side has to resolve the same values from the same rules.
+pub fn resolve_announce_rate(
+    cfg: Option<&AnnounceRateConfig>,
+    transport_enabled: bool,
+) -> (Option<u32>, Option<u32>, Option<u32>) {
+    let (mut target, mut penalty, mut grace) = match cfg {
+        Some(c) => (c.target, c.penalty, c.grace),
+        None => (None, None, None),
+    };
+    if transport_enabled {
+        target.get_or_insert(DEFAULT_AR_TARGET);
+        penalty.get_or_insert(DEFAULT_AR_PENALTY);
+        grace.get_or_insert(DEFAULT_AR_GRACE);
+    }
+    (target, penalty, grace)
+}
+
 // Sans-I/O Types
 /// Opaque interface identifier
 ///
@@ -6533,24 +6557,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_announce_rate_configs.remove(&id);
     }
 
-    /// Resolve the announce-rate values to emit for one interface, applying the
-    /// transport-enabled default fill (Python Reticulum.py:826-829). With
-    /// transport disabled and the key unset the value stays `None`, matching a
-    /// real Python daemon so rnstatus renders no `(t:.../p:.../g:...)` suffix.
+    /// Resolve the announce-rate values to emit for one interface. Thin
+    /// forwarder to the free [`resolve_announce_rate`], which reporting code
+    /// outside transport (a listener has no transport entry to read them from)
+    /// shares so both answer from one implementation.
     fn resolve_announce_rate(
         cfg: Option<&AnnounceRateConfig>,
         transport_enabled: bool,
     ) -> (Option<u32>, Option<u32>, Option<u32>) {
-        let (mut target, mut penalty, mut grace) = match cfg {
-            Some(c) => (c.target, c.penalty, c.grace),
-            None => (None, None, None),
-        };
-        if transport_enabled {
-            target.get_or_insert(DEFAULT_AR_TARGET);
-            penalty.get_or_insert(DEFAULT_AR_PENALTY);
-            grace.get_or_insert(DEFAULT_AR_GRACE);
-        }
-        (target, penalty, grace)
+        resolve_announce_rate(cfg, transport_enabled)
     }
 
     // Public: Interface Stats (for RPC)

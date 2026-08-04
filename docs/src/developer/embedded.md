@@ -29,7 +29,7 @@ targets `thumbv7em-none-eabihf`, and uses [Embassy](https://embassy.dev).
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:237`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:263`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -121,7 +121,7 @@ Three things to notice:
    broadcast-exclusion stay consistent.
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice to
-   `dispatch_actions` (`leviculum-core/src/transport.rs:310`). Broadcast
+   `dispatch_actions` (`leviculum-core/src/transport.rs:340`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free.
 
