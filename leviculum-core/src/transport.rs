@@ -660,6 +660,33 @@ pub struct InterfaceStatEntry {
     pub held_announces: usize,
 }
 
+/// What an interface reports about the medium it drives.
+///
+/// The carrier's quirks belong to the interface; the rest of the stack does
+/// not model them. This is the read-only inverse of that rule: a caller that
+/// needs to know how long a burst takes to reach the air — a diagnostic
+/// sizing a delivery window, not a scheduler — asks the interface through
+/// this record rather than pasting a measured constant that is only true for
+/// one set of radio settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkProfile {
+    /// On-air bitrate in bits per second, as the interface derived it from
+    /// its own settings (LoRa: spreading factor, coding rate, bandwidth).
+    ///
+    /// Prices payload symbols only. Preamble, explicit header and whatever
+    /// medium-access delay the carrier imposes are on top; a caller pricing a
+    /// frame has to allow for them.
+    pub bitrate_bps: u32,
+    /// Ceiling, in milliseconds, of the randomised delay the interface adds
+    /// before it transmits, or `None` for interfaces that transmit as soon as
+    /// they are asked.
+    ///
+    /// On a shared half-duplex medium this is the interface's own bound on
+    /// how long one of two peers that enqueue together can be held back
+    /// before its first frame goes out.
+    pub tx_jitter_max_ms: Option<u64>,
+}
+
 /// Exported path table entry for RPC reporting.
 #[derive(Debug, Clone)]
 pub struct PathTableExport {
@@ -1261,6 +1288,19 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Keyed by interface index. Set by driver at registration, removed on interface down.
     interface_hw_mtus: BTreeMap<usize, u32>,
 
+    /// What each interface says about the medium it drives: the on-air
+    /// bitrate it derived from its own settings, and the ceiling of the
+    /// pre-TX jitter it applies before it puts a frame on the air. Keyed by
+    /// interface index, written by the driver at registration.
+    ///
+    /// Read-only backchannel: nothing in transport schedules on it. It exists
+    /// so a diagnostic can ask the interface how long a burst takes to drain
+    /// instead of assuming a number, which is the interface-isolation rule
+    /// applied to measurement rather than to scheduling. Distinct from
+    /// `interface_announce_caps`, whose bitrate comes from the `bitrate`
+    /// config key and drives announce bandwidth capping.
+    interface_link_profiles: BTreeMap<usize, LinkProfile>,
+
     /// Set of interface indices that are local IPC clients (shared instance).
     /// Used for: announce forwarding, transport override, path request routing.
     /// Removal path: removed in handle_interface_down via set_local_client(id, false).
@@ -1453,6 +1493,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_ingress_control: BTreeMap::new(),
             interface_egress_control: BTreeMap::new(),
             interface_hw_mtus: BTreeMap::new(),
+            interface_link_profiles: BTreeMap::new(),
             local_client_interfaces: BTreeSet::new(),
             shared_instance_interface: None,
             interface_incoming_announce_times: BTreeMap::new(),
@@ -5849,6 +5890,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Get the registered HW_MTU for a specific interface index.
     pub(crate) fn interface_hw_mtu(&self, id: usize) -> Option<u32> {
         self.interface_hw_mtus.get(&id).copied()
+    }
+
+    // Public: Interface link-profile API
+    /// Record what an interface reports about its own medium (called by the
+    /// driver at registration). See [`LinkProfile`].
+    pub fn register_interface_link_profile(&mut self, id: usize, profile: LinkProfile) {
+        self.interface_link_profiles.insert(id, profile);
+    }
+
+    /// Drop an interface's link profile (called during handle_interface_down
+    /// cleanup).
+    pub fn remove_interface_link_profile(&mut self, id: usize) {
+        self.interface_link_profiles.remove(&id);
+    }
+
+    /// The link profile of the next-hop interface toward a destination, or
+    /// `None` when no path is known or that interface reports no bitrate
+    /// (TCP, UDP, Local — media without an airtime cost).
+    pub(crate) fn next_hop_link_profile(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Option<LinkProfile> {
+        let path = self.storage.get_path(dest_hash)?;
+        self.interface_link_profiles
+            .get(&path.interface_index)
+            .copied()
     }
 
     // Public: IFAC Config API
@@ -24828,6 +24895,69 @@ mod tests {
             rendered.contains("1000"),
             "expected ready_at_ms in Display output, got {rendered:?}"
         );
+    }
+
+    /// The link-profile backchannel resolves through the path's interface,
+    /// so a caller asking "what does the link toward this destination look
+    /// like" gets the answer for the interface that actually carries it —
+    /// not for whichever interface happens to be registered first.
+    #[test]
+    fn next_hop_link_profile_resolves_via_the_paths_interface() {
+        use crate::storage_types::PathEntry;
+        use crate::test_utils::test_transport;
+        let mut t = test_transport();
+        let dest = [0xC1; TRUNCATED_HASHBYTES];
+        let now = t.clock.now_ms();
+
+        t.register_interface_link_profile(
+            0,
+            LinkProfile {
+                bitrate_bps: 5468,
+                tx_jitter_max_ms: Some(1463),
+            },
+        );
+        t.register_interface_link_profile(
+            1,
+            LinkProfile {
+                bitrate_bps: 2734,
+                tx_jitter_max_ms: Some(2926),
+            },
+        );
+        t.storage_mut().set_path(
+            dest,
+            PathEntry {
+                hops: 1,
+                expires_ms: now + 1_000_000,
+                interface_index: 1,
+                random_blobs: Vec::new(),
+                next_hop: None,
+            },
+        );
+
+        let profile = t.next_hop_link_profile(&dest).expect("profile for path");
+        assert_eq!(profile.bitrate_bps, 2734);
+        assert_eq!(profile.tx_jitter_max_ms, Some(2926));
+
+        // An interface that goes down stops answering for its paths rather
+        // than leaving a stale figure behind for the next caller to size on.
+        t.remove_interface_link_profile(1);
+        assert_eq!(t.next_hop_link_profile(&dest), None);
+    }
+
+    /// No path, no profile: the lookup is per-destination, and an unknown
+    /// destination has no link to describe.
+    #[test]
+    fn next_hop_link_profile_is_none_without_a_path() {
+        use crate::test_utils::test_transport;
+        let mut t = test_transport();
+        t.register_interface_link_profile(
+            0,
+            LinkProfile {
+                bitrate_bps: 2734,
+                tx_jitter_max_ms: Some(2926),
+            },
+        );
+        assert_eq!(t.next_hop_link_profile(&[0xC2; TRUNCATED_HASHBYTES]), None);
     }
 
     /// Setter + getter round-trip for the interface_next_slot_ms

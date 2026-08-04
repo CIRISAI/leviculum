@@ -274,6 +274,7 @@ pub(crate) fn spawn_udp_interface_with_opts(
             hw_mtu: Some(1064),
             is_local_client: false,
             bitrate: None,
+            tx_jitter_max_ms: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Udp,

@@ -482,17 +482,18 @@ async fn send_single_msg(
     start_time: Instant,
     state: &SharedState,
     is_a: bool,
-) {
+) -> Option<usize> {
     let now_ms = start_time.elapsed().as_millis() as u64;
     let msg = build_message(dir, seq, now_ms);
-    match endpoint.send(&msg).await {
-        Ok(_hash) => {
+    match endpoint.send_measured(&msg).await {
+        Ok((_hash, wire_len)) => {
             let mut st = state.stats.lock().unwrap();
             if is_a {
                 st.sp_sent_a += 1;
             } else {
                 st.sp_sent_b += 1;
             }
+            return Some(wire_len);
         }
         Err(_) => {
             let mut st = state.stats.lock().unwrap();
@@ -502,6 +503,149 @@ async fn send_single_msg(
                 st.sp_send_fails_b += 1;
             }
         }
+    }
+    None
+}
+
+// Drain Budget
+//
+// How long a burst of single packets needs before the far side can be
+// counted. Derived from what the link reports about itself: a fixed sleep
+// sized for one set of radio settings is wrong at every other one, and reads
+// as packet loss when it expires early (Codeberg #190).
+
+/// The share of a frame's on-air cost that the interface's reported bitrate
+/// does not price, in permille.
+///
+/// The bitrate an interface derives from its radio settings counts payload
+/// symbols. Preamble, explicit header and the medium-access delay the carrier
+/// imposes before each frame are on top of it. Measured on the T-Beam pair of
+/// Codeberg #190 at 2734 bps: a 147-byte frame occupies 502 ms against 430 ms
+/// of payload symbols (1.17x), a 225-byte announce 750 ms against 658 ms
+/// (1.14x). 1200 permille covers the measured spread with a small reserve.
+///
+/// Deliberately not larger. A budget that is merely generous passes every
+/// test and hides the next window bug; this one is meant to expire when the
+/// link genuinely fails to keep up.
+const FRAME_OVERHEAD_PERMILLE: u64 = 1_200;
+
+/// A delivery budget with the arithmetic that produced it, so the run's log
+/// carries the derivation and not just the number.
+struct DrainBudget {
+    total: std::time::Duration,
+    detail: String,
+}
+
+/// Size the drain window for `frames` frames of `wire_bytes` each over the
+/// link `profile` describes.
+///
+/// `air + handover`, where `air` is the frames' own on-air cost at the
+/// interface's reported bitrate and `handover` is the interface's own pre-TX
+/// jitter ceiling: on a shared half-duplex medium both peers enqueue their
+/// bursts within the same few hundred milliseconds, and whichever radio loses
+/// the contention waits out a jitter draw before its first frame goes out.
+/// That delay has no closed form, but the interface bounds it, so the bound
+/// is what we ask for — it moves with the radio settings, which a pasted
+/// constant does not.
+///
+/// Falls back to `fallback` when the next hop reports no link profile: TCP,
+/// UDP and Local have no airtime to account for, and nothing measured here
+/// applies to them.
+fn drain_budget(
+    frames: u64,
+    wire_bytes: usize,
+    profile: Option<leviculum_core::transport::LinkProfile>,
+    fallback: std::time::Duration,
+) -> DrainBudget {
+    let profile = match profile {
+        Some(p) if p.bitrate_bps > 0 => p,
+        _ => {
+            return DrainBudget {
+                total: fallback,
+                detail: format!(
+                    "next hop reports no on-air bitrate (no airtime to account for); \
+                     fixed {:.1}s",
+                    fallback.as_secs_f64()
+                ),
+            };
+        }
+    };
+
+    let payload_ms = (wire_bytes as u64) * 8 * 1000 / profile.bitrate_bps as u64;
+    let per_frame_ms = payload_ms * FRAME_OVERHEAD_PERMILLE / 1000;
+    let air_ms = per_frame_ms * frames;
+    let handover_ms = profile.tx_jitter_max_ms.unwrap_or(0);
+
+    DrainBudget {
+        total: std::time::Duration::from_millis(air_ms + handover_ms),
+        detail: format!(
+            "{frames} frames x {wire_bytes}B at {} bps = {:.1}s air \
+             (payload {:.1}s +{}% preamble/header/medium access) + {:.1}s handover \
+             (interface pre-TX jitter ceiling) = {:.1}s",
+            profile.bitrate_bps,
+            air_ms as f64 / 1000.0,
+            (payload_ms * frames) as f64 / 1000.0,
+            FRAME_OVERHEAD_PERMILLE / 10 - 100,
+            handover_ms as f64 / 1000.0,
+            (air_ms + handover_ms) as f64 / 1000.0,
+        ),
+    }
+}
+
+/// Hold a single-packet phase open until its frames have drained, then return
+/// how many are still outstanding.
+///
+/// The budget is sized for the frames that are actually still in flight when
+/// the send loop ends — `expected` minus what the far sides have already
+/// accounted for — and runs from that moment. A burst leaves nearly all of
+/// them outstanding and gets the full window; a phase that sent below the
+/// link's capacity leaves one or two and gets a short one. The same rule
+/// therefore fits both without either being told which it is.
+///
+/// The count can only over-estimate what is left (receptions are counted as
+/// they land, never retracted), so the budget errs toward waiting rather than
+/// toward cutting a train off.
+///
+/// Prints the derivation, and on expiry says what the expiry means. Returns 0
+/// when everything drained.
+async fn drain_single_packets(
+    state: &SharedState,
+    label: &str,
+    expected: u64,
+    wire_bytes: usize,
+    profile: Option<leviculum_core::transport::LinkProfile>,
+    fallback: std::time::Duration,
+) -> u64 {
+    let received_at_end = {
+        let st = state.stats.lock().unwrap();
+        st.sp_recv_a + st.sp_recv_b
+    };
+    let outstanding = expected.saturating_sub(received_at_end);
+    let budget = drain_budget(outstanding, wire_bytes, profile, fallback);
+    println!("[selftest] {label}: drain budget {}", budget.detail);
+
+    let deadline = Instant::now() + budget.total;
+    loop {
+        let received = {
+            let st = state.stats.lock().unwrap();
+            st.sp_recv_a + st.sp_recv_b
+        };
+        if received >= expected {
+            return 0;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            let left = expected - received;
+            println!(
+                "[selftest] {label}: budget expired with {left} of {expected} outstanding — \
+                 the link did not deliver within its own computed budget ({:.1}s); this \
+                 bounds delivery from below, it is not a loss count",
+                budget.total.as_secs_f64(),
+            );
+            return left;
+        }
+        let step = std::time::Duration::from_millis(100).min(deadline - now);
+        tokio::time::sleep(step).await;
     }
 }
 
@@ -1090,6 +1234,7 @@ pub async fn run_selftest(
         let mut sp_last_recv_a = 0u64;
         let mut sp_last_recv_b = 0u64;
         let mut sp_zero_recv_streak = 0u32;
+        let mut sp_wire_bytes = 0usize;
 
         let phase8_start = Instant::now();
         let phase8_end = phase8_start + std::time::Duration::from_secs(duration);
@@ -1107,9 +1252,17 @@ pub async fn run_selftest(
             let health_due = tokio::time::Instant::now() >= next_health;
 
             if send_due {
-                send_single_msg(&ep_a, "ab", sp_seq_a, start_time, &state, true).await;
+                if let Some(n) =
+                    send_single_msg(&ep_a, "ab", sp_seq_a, start_time, &state, true).await
+                {
+                    sp_wire_bytes = sp_wire_bytes.max(n);
+                }
                 sp_seq_a += 1;
-                send_single_msg(&ep_b, "ba", sp_seq_b, start_time, &state, false).await;
+                if let Some(n) =
+                    send_single_msg(&ep_b, "ba", sp_seq_b, start_time, &state, false).await
+                {
+                    sp_wire_bytes = sp_wire_bytes.max(n);
+                }
                 sp_seq_b += 1;
                 next_send =
                     tokio::time::Instant::now() + std::time::Duration::from_millis(interval_ms);
@@ -1154,8 +1307,22 @@ pub async fn run_selftest(
             }
         }
 
-        // Brief drain period
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // Let what is still in flight land before the counter is read. At a
+        // send rate above the link's capacity this phase ends with most of
+        // its frames still queued, and a fixed wait counts them as lost.
+        let sp_expected = {
+            let st = state.stats.lock().unwrap();
+            st.sp_sent_a + st.sp_sent_b
+        };
+        drain_single_packets(
+            &state,
+            "Phase 8",
+            sp_expected,
+            sp_wire_bytes,
+            node_a.next_hop_link_profile(&dest_hash_b),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
     }
 
     // Ratchet Phases
@@ -1241,14 +1408,27 @@ pub async fn run_selftest(
                 st.sp_corrupt = 0;
             }
 
+            let mut wire_bytes = 0usize;
             for seq in 0..msg_count {
-                send_single_msg(&ep_a, "ab", seq, start_time, &state, true).await;
-                send_single_msg(&ep_b, "ba", seq, start_time, &state, false).await;
+                if let Some(n) = send_single_msg(&ep_a, "ab", seq, start_time, &state, true).await {
+                    wire_bytes = wire_bytes.max(n);
+                }
+                if let Some(n) = send_single_msg(&ep_b, "ba", seq, start_time, &state, false).await
+                {
+                    wire_bytes = wire_bytes.max(n);
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
 
-            // Wait for delivery
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            drain_single_packets(
+                &state,
+                &format!("Ratchet {mode}"),
+                msg_count * 2,
+                wire_bytes,
+                node_a.next_hop_link_profile(&dest_hash_b),
+                std::time::Duration::from_secs(10),
+            )
+            .await;
 
             let (total_sent, total_recv, corrupt) = {
                 let st = state.stats.lock().unwrap();
@@ -1354,12 +1534,26 @@ pub async fn run_selftest(
             }
 
             // Pre-rotation exchange
+            let mut wire_bytes = 0usize;
             for seq in 0..5u64 {
-                send_single_msg(&ep_a, "ab", seq, start_time, &state, true).await;
-                send_single_msg(&ep_b, "ba", seq, start_time, &state, false).await;
+                if let Some(n) = send_single_msg(&ep_a, "ab", seq, start_time, &state, true).await {
+                    wire_bytes = wire_bytes.max(n);
+                }
+                if let Some(n) = send_single_msg(&ep_b, "ba", seq, start_time, &state, false).await
+                {
+                    wire_bytes = wire_bytes.max(n);
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            drain_single_packets(
+                &state,
+                "Ratchet rotation pre-rotation",
+                10,
+                wire_bytes,
+                node_a.next_hop_link_profile(&dest_hash_b),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
 
             let pre_recv = {
                 let st = state.stats.lock().unwrap();
@@ -1424,12 +1618,29 @@ pub async fn run_selftest(
                     st.sp_corrupt = 0;
                 }
 
+                let mut wire_bytes = 0usize;
                 for seq in 100..105u64 {
-                    send_single_msg(&ep_a, "ab", seq, start_time, &state, true).await;
-                    send_single_msg(&ep_b, "ba", seq, start_time, &state, false).await;
+                    if let Some(n) =
+                        send_single_msg(&ep_a, "ab", seq, start_time, &state, true).await
+                    {
+                        wire_bytes = wire_bytes.max(n);
+                    }
+                    if let Some(n) =
+                        send_single_msg(&ep_b, "ba", seq, start_time, &state, false).await
+                    {
+                        wire_bytes = wire_bytes.max(n);
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                drain_single_packets(
+                    &state,
+                    "Ratchet rotation post-rotation",
+                    10,
+                    wire_bytes,
+                    node_a.next_hop_link_profile(&dest_hash_b),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
 
                 let (post_sent, post_recv, post_corrupt) = {
                     let st = state.stats.lock().unwrap();
@@ -1655,6 +1866,152 @@ async fn cleanup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use leviculum_core::transport::LinkProfile;
+
+    /// The link Codeberg #190 was measured on: a T-Beam pair at 2734 bps
+    /// with a 2926 ms pre-TX jitter ceiling, carrying 147-byte frames.
+    const MEASURED_LINK: LinkProfile = LinkProfile {
+        bitrate_bps: 2734,
+        tx_jitter_max_ms: Some(2926),
+    };
+    const MEASURED_FRAME_BYTES: usize = 147;
+
+    /// Regression for the ratchet-rotation window: the fixed 5 s sleep gave
+    /// the pre-rotation burst a 6.0 s window where 7.5-7.7 s was needed, so
+    /// exactly the five frames of whichever radio transmitted second were
+    /// counted as lost, in run after run.
+    ///
+    /// The window the phase now gets is its 1.0 s send loop (5 rounds x
+    /// 200 ms) plus a budget for whatever the far sides have not accounted
+    /// for when the loop ends. Both bounds of that budget are checked: the
+    /// worst case, where nothing landed during the loop, must still be close
+    /// to the requirement — a budget that clears everything cannot fail when
+    /// the next window bug arrives.
+    #[test]
+    fn rotation_window_clears_the_measured_requirement_without_padding_it() {
+        const SEND_LOOP: f64 = 1.0;
+        for outstanding in [8, 9, 10] {
+            let budget = drain_budget(
+                outstanding,
+                MEASURED_FRAME_BYTES,
+                Some(MEASURED_LINK),
+                std::time::Duration::from_secs(5),
+            );
+            let window = SEND_LOOP + budget.total.as_secs_f64();
+            assert!(
+                window >= 7.7,
+                "window {window:.2}s ({outstanding} outstanding) is under the \
+                 7.5-7.7s measured on this link"
+            );
+            assert!(
+                window <= 10.0,
+                "window {window:.2}s ({outstanding} outstanding) pads the 7.7s \
+                 requirement by more than the stated margin"
+            );
+        }
+    }
+
+    /// Same for the basic/enforced burst: 20 frames against a fixed 10 s
+    /// sleep inside a 12.0 s window, where 11.7-12.8 s was needed. That one
+    /// was marginal rather than deterministic, which is why it read as
+    /// 15-18 of 20 instead of a clean half.
+    #[test]
+    fn basic_burst_window_clears_the_measured_requirement() {
+        const SEND_LOOP: f64 = 2.0;
+        for outstanding in [16, 18, 20] {
+            let budget = drain_budget(
+                outstanding,
+                MEASURED_FRAME_BYTES,
+                Some(MEASURED_LINK),
+                std::time::Duration::from_secs(10),
+            );
+            let window = SEND_LOOP + budget.total.as_secs_f64();
+            assert!(
+                window >= 12.8,
+                "window {window:.2}s ({outstanding} outstanding) is under the \
+                 11.7-12.8s measured on this link"
+            );
+            assert!(
+                window <= 17.0,
+                "window {window:.2}s ({outstanding} outstanding) is padded past \
+                 the margin"
+            );
+        }
+    }
+
+    /// The point of deriving it: a window sized for a fast radio must not be
+    /// what a slow radio gets. At SF12 both terms grow, and the budget grows
+    /// with them.
+    #[test]
+    fn budget_scales_with_the_radio_settings() {
+        let fast = drain_budget(
+            10,
+            MEASURED_FRAME_BYTES,
+            Some(LinkProfile {
+                bitrate_bps: 5468,
+                tx_jitter_max_ms: Some(1463),
+            }),
+            std::time::Duration::from_secs(5),
+        );
+        let slow = drain_budget(
+            10,
+            MEASURED_FRAME_BYTES,
+            Some(LinkProfile {
+                bitrate_bps: 366,
+                tx_jitter_max_ms: Some(21_857),
+            }),
+            std::time::Duration::from_secs(5),
+        );
+        assert!(
+            slow.total > fast.total * 4,
+            "SF12 budget {:?} must dwarf the SF7 budget {:?}",
+            slow.total,
+            fast.total
+        );
+    }
+
+    /// A medium with no airtime to account for keeps the legacy fixed wait:
+    /// none of the arithmetic above describes TCP.
+    #[test]
+    fn budget_falls_back_when_the_next_hop_reports_no_bitrate() {
+        let fallback = std::time::Duration::from_secs(10);
+        assert_eq!(
+            drain_budget(20, 147, None, fallback).total,
+            fallback,
+            "no profile must keep the fixed wait"
+        );
+        assert_eq!(
+            drain_budget(
+                20,
+                147,
+                Some(LinkProfile {
+                    bitrate_bps: 0,
+                    tx_jitter_max_ms: None
+                }),
+                fallback
+            )
+            .total,
+            fallback,
+            "a zero bitrate must not divide the budget to nothing"
+        );
+    }
+
+    /// An interface that does not jitter its transmissions contributes no
+    /// handover term rather than a made-up one.
+    #[test]
+    fn budget_without_a_jitter_ceiling_is_airtime_only() {
+        let budget = drain_budget(
+            10,
+            MEASURED_FRAME_BYTES,
+            Some(LinkProfile {
+                bitrate_bps: 2734,
+                tx_jitter_max_ms: None,
+            }),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(budget.total, std::time::Duration::from_millis(5_160));
+    }
 
     #[test]
     fn test_build_parse_roundtrip() {

@@ -92,9 +92,9 @@ This section is the foundation; everything else is judged against it.
   in `core/src`.
 - The application boundary is `NodeCore<R: CryptoRngCore, C: Clock, S: Storage>`
   (`node/mod.rs:139`):
-  - inbound bytes: `handle_packet(iface, &[u8]) -> TickOutput` (`node/mod.rs:1002`)
-  - maintenance tick: `handle_timeout() -> TickOutput` (`node/mod.rs:1094`)
-  - scheduling hint: `next_deadline() -> Option<u64>` (`node/mod.rs:1125`)
+  - inbound bytes: `handle_packet(iface, &[u8]) -> TickOutput` (`node/mod.rs:1028`)
+  - maintenance tick: `handle_timeout() -> TickOutput` (`node/mod.rs:1120`)
+  - scheduling hint: `next_deadline() -> Option<u64>` (`node/mod.rs:1151`)
   - every send method returns `TickOutput` instead of doing I/O.
 - `TickOutput { actions: Vec<Action>, events: Vec<NodeEvent> }` (`transport.rs:138`);
   `Action = SendPacket{iface,data} | Broadcast{data,exclude_iface}`
@@ -119,7 +119,7 @@ This section is the foundation; everything else is judged against it.
 | Announce / learn peers | Yes; `ReceivedAnnounce` exposes keys, app_data, ratchet, to_identity | `announce.rs:263` |
 | Link: connect / accept / send / identify / close | Yes via NodeCore orchestration | `link_management.rs:185,276,449`, `node/mod.rs:574` |
 | Link inbound (request/established/message/closed) | Yes via events | `event.rs:84,94,105,121` |
-| Resource: send / accept / progress / complete | Yes via `NodeCore::send_resource` etc. | `node/mod.rs:826,898` |
+| Resource: send / accept / progress / complete | Yes via `NodeCore::send_resource` etc. | `node/mod.rs:852,898` |
 
 ### 2.3 Gaps in the core API we will hit
 

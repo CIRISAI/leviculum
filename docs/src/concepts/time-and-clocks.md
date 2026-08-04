@@ -26,12 +26,12 @@ in [Wire Field Semantics](wire-field-semantics.md).
 
 ## One value, one producer
 
-`Transport::emission_secs` (`leviculum-core/src/transport.rs:2627`)
+`Transport::emission_secs` (`leviculum-core/src/transport.rs:2668`)
 is the single point that turns whatever time the platform has into
 the unix-seconds value for wire fields that peers compare across our
 process lifetimes: announce emission timestamps
 (`leviculum-core/src/announce.rs:156`) and request timestamps
-(`leviculum-core/src/node/mod.rs:1028`, `:1133`, Codeberg #164). Any
+(`leviculum-core/src/node/mod.rs:1054`, `:1133`, Codeberg #164). Any
 new wire field with cross-lifetime semantics draws from it too —
 never from the monotonic `Clock::now_ms`, which is a timer, not a
 calendar.
@@ -88,7 +88,7 @@ what it costs, when it is unavailable, what it guarantees.
 `Clock::wall_unix_secs` (`leviculum-core/src/traits.rs:338`). On std
 platforms `SystemClock` answers from `SystemTime`
 (`leviculum-std/src/clock.rs:45`) — effectively the OS's NTP-managed
-clock. When it answers, it always wins (`transport.rs:2562`).
+clock. When it answers, it always wins (`transport.rs:2603`).
 
 - **Cost:** none.
 - **Unavailable:** on MCUs without an RTC. The LNode's
@@ -122,7 +122,7 @@ carries UTC date and time in every fix.
 ### 3. Host injection
 
 `Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:662`
-→ `transport.rs:2614`), for deployments where a clockless node has a
+→ `transport.rs:2655`), for deployments where a clockless node has a
 host that does know wall time — e.g. a control frame on the LNode
 serial channel (the radio-config envelope of
 `leviculum-core/src/rnode.rs`).
@@ -132,7 +132,7 @@ serial channel (the radio-config envelope of
 - **Unavailable:** standalone nodes with no host attached.
 - **Guarantees:** host-clock quality, but plausibility-gated: values
   outside `[EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_LEARN_CEILING_SECS]`
-  are refused (`transport.rs:2622`, pinned at `transport.rs:15481`
+  are refused (`transport.rs:2663`, pinned at `transport.rs:15548`
   and `:15655`), because an injection *claims* to know wall time, so
   a value no real clock can hold is self-refuting. A no-op in effect
   on platforms whose `wall_unix_secs` already answers.
@@ -143,13 +143,13 @@ serial channel (the radio-config envelope of
 ### 4. Learned from validated announces
 
 The clockless fallback: `learn_emission_timebase`
-(`transport.rs:2715`) adopts the highest emission timestamp seen in
+(`transport.rs:2756`) adopts the highest emission timestamp seen in
 any signature-valid announce as the node's timebase, then advances it
-with the monotonic clock (`transport.rs:2567`). This includes the
+with the monotonic clock (`transport.rs:2608`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —
 learning deliberately runs before the own-destination echo drop, so a
 rebooted node re-seeds past exactly the value its next announce must
-exceed (pinned at `transport.rs:15288`).
+exceed (pinned at `transport.rs:15355`).
 
 - **Cost:** nothing — no hardware, no host.
 - **Unavailable:** on a mesh where no participant has a clock, or
@@ -163,7 +163,7 @@ exceed (pinned at `transport.rs:15288`).
 
 ### 5. Uptime seconds
 
-`now_ms / 1000` (`transport.rs:2569`). Monotonic within one boot,
+`now_ms / 1000` (`transport.rs:2610`). Monotonic within one boot,
 loses every cross-restart comparison. This is the state every
 clockless node is *born* in, and it is acceptable only as a
 transient while the chain works upward. **A firmware that can offer
@@ -183,27 +183,27 @@ silently drop its high bits on the wire and sort *below* every stored
 path entry — the node instantly loses path replacement everywhere.
 `EMISSION_TIMESTAMP_MAX_SECS`
 (`leviculum-core/src/constants.rs:498`) caps it, enforced at the
-point of resolution (`transport.rs:2577`) and again at the wire
+point of resolution (`transport.rs:2618`) and again at the wire
 producer (`announce.rs:167`), so truncation is unrepresentable
 regardless of which source produced the value. Incident: Codeberg
-#160. Pinned at `transport.rs:15679`.
+#160. Pinned at `transport.rs:15746`.
 
 ### The timebase never moves backwards, and adoption is windowed
 
 An older emission never regresses the floor (`emitted_secs <=
-current`, `transport.rs:2657`). Adoption is bounded by a plausibility
+current`, `transport.rs:2698`). Adoption is bounded by a plausibility
 window: values above `EMISSION_LEARN_CEILING_SECS`
 (`constants.rs:507`, 2200-01-01) cannot come from a real clock and
-are refused outright (`transport.rs:2653`); the lower bound
+are refused outright (`transport.rs:2694`); the lower bound
 `EMISSION_PLAUSIBLE_MIN_SECS` (`constants.rs:525`, 2020) separates
 real wall clocks from uptime-derived values, which sit orders of
 magnitude apart. Incidents: #160, #161. Pinned at
-`transport.rs:15191` and `:15595`.
+`transport.rs:15258` and `:15662`.
 
 ### The FIRST adoption is unbounded while the timebase is implausible
 
 While the current timebase sits below `EMISSION_PLAUSIBLE_MIN_SECS`,
-adoption is deliberately unbounded (`transport.rs:2668`): a node
+adoption is deliberately unbounded (`transport.rs:2709`): a node
 booting at uptime seconds — or one that adopted a rebooting peer's
 uptime seconds as its first floor — must climb to real unix time in
 one step. **Capping this was a real regression** (#161 §1): with the
@@ -212,7 +212,7 @@ crawled at one day per announce — about 20 602 announces, ~429 days
 at a 30-minute LoRa cadence — where a single credible announce used
 to recover the node instantly. Do not re-introduce that cap. The
 no-backwards guard above keeps the unbounded branch from being
-abused downwards. Pinned at `transport.rs:15378` and `:15419`.
+abused downwards. Pinned at `transport.rs:15445` and `:15486`.
 
 ### Advance after plausibility is bounded — per announce, not per peer
 
@@ -225,8 +225,8 @@ rebroadcast dedup, so *N announces advance the floor by N × cap*
 regardless of how many identities or destinations they came from.
 The real cap on the walk rate is announces-per-second on the air —
 nothing identity-shaped. This measured reality is pinned at
-`transport.rs:15521`; the walk terminates at the learn ceiling,
-pinned at `transport.rs:15595`.
+`transport.rs:15588`; the walk terminates at the learn ceiling,
+pinned at `transport.rs:15662`.
 
 ### We do not validate our own clock, or incoming timestamps
 
@@ -238,8 +238,8 @@ Two deliberate non-behaviours, both reference parity:
   a network that does not validate. The correct response to an
   implausible own clock (dead RTC, restored snapshot) is a
   once-per-process operator warning
-  (`Transport::announce_emission_secs`, `transport.rs:2591`) — never
-  an altered emission. Pinned at `transport.rs:15716` and `:15764`.
+  (`Transport::announce_emission_secs`, `transport.rs:2632`) — never
+  an altered emission. Pinned at `transport.rs:15783` and `:15831`.
 - **Incoming emission timestamps are not plausibility-checked on
   path acceptance.** Ordering is per-destination comparison only,
   exactly `announce_emitted > path_timebase`
@@ -248,7 +248,7 @@ Two deliberate non-behaviours, both reference parity:
   reachable at all), and an absurdly high emission must win the
   newer-emission comparison. Python peers accept both; filtering
   would only desynchronise our path tables from every other node's
-  view of the same announces. Pinned at `transport.rs:15835`.
+  view of the same announces. Pinned at `transport.rs:15902`.
 
 The plausibility window exists for *timebase learning* and *host
 injection* only — never for emission or acceptance.
@@ -282,7 +282,7 @@ problem starts with "what did this node think the time was, and who
 told it" — without provenance, a wrong timestamp in a peer's path
 table cannot be attributed to a dead RTC, a lying neighbour, or a
 boot-order race. Today the only breadcrumb is the once-per-process
-implausible-own-clock warning (`transport.rs:2596`); exposing the
+implausible-own-clock warning (`transport.rs:2637`); exposing the
 current source and its origin (status RPC, control-channel query) is
 part of implementing this concept on each platform.
 

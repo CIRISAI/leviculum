@@ -388,6 +388,14 @@ pub(crate) struct InterfaceInfo {
     /// On-air bitrate in bits/sec (e.g., LoRa ~5468 bps for SF7/CR5/BW125kHz).
     /// `None` for interfaces without a fixed bitrate (TCP, UDP).
     pub bitrate: Option<u32>,
+    /// Ceiling of the randomised pre-TX jitter this interface applies before
+    /// putting a frame on the air, in milliseconds. `None` for interfaces that
+    /// transmit as soon as they are asked (TCP, UDP, Local, Serial).
+    ///
+    /// Reported so a caller can size a delivery window from the interface's
+    /// own contention bound; nothing schedules on it. Travels to transport as
+    /// part of [`leviculum_core::transport::LinkProfile`].
+    pub tx_jitter_max_ms: Option<u64>,
     /// IFAC config inherited from the parent interface (e.g., TCP server listener).
     /// When a TCP server accepts a connection, the child interface inherits the
     /// parent's IFAC config so that IFAC verification/application works on the
@@ -593,6 +601,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,

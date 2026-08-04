@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `lnstest selftest` sizes its single-packet delivery window from the
+  link's own bitrate and pre-TX jitter ceiling instead of a fixed sleep,
+  and reports an expiry as a budget expiry rather than as loss (#190).
 - `interface_stats` reports the listeners the daemon runs (shared
   instance, TCP server) next to its routable interfaces, and names every
   accepted connection like the reference does (#177).

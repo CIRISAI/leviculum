@@ -1477,6 +1477,10 @@ where
     let name = ctx.name.clone();
     let task_counters = Arc::clone(&counters);
     let bitrate = rnode::compute_bitrate(ctx.radio.sf, ctx.radio.cr, ctx.radio.bandwidth);
+    // Copied out before `ctx` moves into the task: the handle reports the
+    // same pre-TX jitter ceiling the TX loop actually draws against, rather
+    // than recomputing it and risking the two drifting apart.
+    let tx_jitter_max_ms = ctx.jitter_max_ms;
 
     tokio::spawn(async move {
         let run = rnode_reconnect_task(ctx, connect, incoming_tx, outgoing_rx, task_counters);
@@ -1505,6 +1509,7 @@ where
             hw_mtu: Some(rnode::HW_MTU as u32),
             is_local_client: false,
             bitrate: Some(bitrate),
+            tx_jitter_max_ms: Some(tx_jitter_max_ms),
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Rnode,
@@ -2144,6 +2149,7 @@ pub(crate) fn spawn_rnode_multi_interface(
                 hw_mtu: Some(rnode::HW_MTU as u32),
                 is_local_client: false,
                 bitrate: Some(bitrate),
+                tx_jitter_max_ms: Some(compute_jitter_max_ms(sub.sf, sub.bandwidth)),
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Rnode,

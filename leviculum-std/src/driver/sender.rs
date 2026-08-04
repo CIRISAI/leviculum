@@ -84,6 +84,29 @@ impl PacketSender {
             .map_err(|_| Error::NotRunning)?;
         Ok(packet_hash)
     }
+
+    /// [`send`](Self::send), additionally reporting the packed wire length of
+    /// the frame handed to transport.
+    ///
+    /// The payload a caller passes in does not predict what goes on the air:
+    /// header, ephemeral key, token overhead and block padding are added by
+    /// the stack. A caller pricing airtime against an interface's bitrate
+    /// needs the wire length, so it asks for it rather than reconstructing
+    /// the encryption arithmetic.
+    pub async fn send_measured(
+        &self,
+        data: &[u8],
+    ) -> Result<([u8; TRUNCATED_HASHBYTES], usize), Error> {
+        let (packet_hash, wire_len, output) = {
+            let mut core = self.inner.lock_recover();
+            core.send_single_packet_measured(&self.dest_hash, data)?
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok((packet_hash, wire_len))
+    }
 }
 
 #[cfg(test)]

@@ -1260,6 +1260,16 @@ impl ReticulumNode {
                     }
                     if let Some(bitrate) = handle.info.bitrate {
                         tracing::info!("Interface {} bitrate: {} bps", handle.info.name, bitrate);
+                        // Read-only backchannel (no scheduling reads it): what
+                        // this interface says about its own medium, so a caller
+                        // sizing a delivery window can ask instead of assuming.
+                        core.register_interface_link_profile(
+                            handle.info.id.0,
+                            leviculum_core::transport::LinkProfile {
+                                bitrate_bps: bitrate,
+                                tx_jitter_max_ms: handle.info.tx_jitter_max_ms,
+                            },
+                        );
                     }
                     stats.insert(handle.info.id.0, Arc::clone(&handle.counters));
                     online.insert(handle.info.id.0, true);
@@ -2475,6 +2485,21 @@ impl ReticulumNode {
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Option<[u8; 32]> {
         self.inner.lock_recover().known_remote_ratchet(dest_hash)
+    }
+
+    /// What the next-hop interface toward `dest_hash` reports about its own
+    /// medium — on-air bitrate and pre-TX jitter ceiling.
+    ///
+    /// `None` when no path is known or that interface reports no bitrate
+    /// (TCP, UDP, Local: media with no airtime cost to account for). See
+    /// [`leviculum_core::transport::LinkProfile`].
+    pub fn next_hop_link_profile(
+        &self,
+        dest_hash: &leviculum_core::DestinationHash,
+    ) -> Option<leviculum_core::transport::LinkProfile> {
+        self.inner
+            .lock_recover()
+            .next_hop_link_profile(dest_hash.as_bytes())
     }
 
     /// Get the number of known paths
@@ -4512,6 +4537,7 @@ mod tests {
                     hw_mtu: None,
                     is_local_client: false,
                     bitrate: None,
+                    tx_jitter_max_ms: None,
                     ifac,
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Udp,
@@ -5059,6 +5085,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5584,6 +5611,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5633,6 +5661,7 @@ mod tests {
                     hw_mtu: None,
                     is_local_client: false,
                     bitrate: None,
+                    tx_jitter_max_ms: None,
                     ifac: None,
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5699,6 +5728,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5720,6 +5750,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5770,6 +5801,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5839,6 +5871,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5859,6 +5892,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5931,6 +5965,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -5983,6 +6018,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -6035,6 +6071,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,

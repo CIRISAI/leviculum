@@ -99,6 +99,7 @@ pub(crate) fn spawn_pipe_interface(mut config: PipeInterfaceConfig) -> Interface
             hw_mtu: Some(PIPE_HW_MTU),
             is_local_client: false,
             bitrate: None,
+            tx_jitter_max_ms: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Pipe,

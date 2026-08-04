@@ -81,10 +81,10 @@ A path learned from a path response therefore inherits the responder's STORED co
 measured one. Staleness propagates through this channel.
 
 leviculum matches this as of 2026-07-10 (D3, fixed on branch `path-response-hops`). When a transport
-node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6074`)
+node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6141`)
 it now emits `self.storage.get_path(&requested_hash).map(|p| p.hops)`, the receipt-incremented stored
 count, exactly as `:2956` does. It previously emitted `cached_packet.hops`, the AS-RECEIVED wire byte
-(`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:1620`
+(`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:1661`
 touches only the in-memory packet). That value is `stored - 1`, so every peer learning through our
 transport path response was one hop short, and the deficit COMPOUNDED on each re-learn through a
 leviculum transport. Case 1 (local dest) and case 2a (local-client answer, explicit `+1`) were already
@@ -175,24 +175,24 @@ Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 
 | Rule | Reference | leviculum | Verdict |
 |------|-----------|-----------|---------|
-| Receipt increment | `:1457` | `transport.rs:1588` | matches |
-| IPC exception, instance side | `:1482` | `transport.rs:1592` | matches |
-| IPC exception, client side | `:1484` | `transport.rs:1592` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
-| Announce rebroadcast | `:2009` | `transport.rs:6235` | matches |
-| Path table store | `:1868`, `:2014` | `transport.rs:3140` | matches |
-| Path acceptance | `:1765`, `:2371` | `transport.rs:3082` (`should_update`) | matches |
-| Path-response hop emission | `:2956` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6074` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
+| Receipt increment | `:1498` | `transport.rs:1629` | matches |
+| IPC exception, instance side | `:1523` | `transport.rs:1633` | matches |
+| IPC exception, client side | `:1525` | `transport.rs:1633` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
+| Announce rebroadcast | `:2050` | `transport.rs:6302` | matches |
+| Path table store | `:1909`, `:2055` | `transport.rs:3181` | matches |
+| Path acceptance | `:1806`, `:2412` | `transport.rs:3123` (`should_update`) | matches |
+| Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6141` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
-| LRPROOF relay check | `:2174-2206` (single `== remaining_hops`, drop else; the `:1656` disjunction is gated OUT for LRPROOF at `:1646`) | `transport.rs:3746`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
-| Healing, no path | `:710` | `transport.rs:6688` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:717` | `transport.rs:6692` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
-| Healing, destination direct | `:726` | `transport.rs:6699` | matches |
-| Healing, initiator direct (`taken_hops == 1`) | `:748` | `transport.rs:6711` | matches |
+| LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:3787`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
+| Healing, no path | `:737` | `transport.rs:6755` | matches |
+| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:6759` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, destination direct | `:753` | `transport.rs:6766` | matches |
+| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:6778` | matches |
 
 ### The deliberate deviation, and its cost
 
 On a mismatch we log a warning and REWRITE the forwarded proof's hop count to the frozen value, so
-that a strict Python client accepts it (`transport.rs:3770`, commit `5d0833d7`). It buys
+that a strict Python client accepts it (`transport.rs:3811`, commit `5d0833d7`). It buys
 interoperability today: without it, NomadNet cannot establish a link through our relay.
 
 It also costs three things:

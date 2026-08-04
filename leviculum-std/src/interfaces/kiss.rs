@@ -426,6 +426,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
             hw_mtu: Some(KISS_HW_MTU),
             is_local_client: false,
             bitrate: None,
+            tx_jitter_max_ms: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Kiss,

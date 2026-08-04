@@ -57,7 +57,7 @@ requires level), and state who closes the fd (the library, never the app).
 `LEV_IDENTITY_PUB_LEN 64` is not a single 64 byte public key. Verified against
 `constants.rs:88`: `IDENTITY_KEY_SIZE = X25519_KEY_SIZE + ED25519_KEY_SIZE = 64`,
 so it is two 32 byte keys (X25519 encryption pub, then Ed25519 signing pub).
-`lev_connect` needs only the Ed25519 half. `driver/mod.rs:1358-1359` documents
+`lev_connect` needs only the Ed25519 half. `driver/mod.rs:1368-1359` documents
 the signing key as bytes 32..64 of `public_key_bytes()`. A C author given a 64
 byte blob and a `connect` taking a signing key has no way to know it must pass
 the second half. Rename to `LEV_IDENTITY_KEY_LEN 64`, add

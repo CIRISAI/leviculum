@@ -774,6 +774,32 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         dest_hash: &DestinationHash,
         data: &[u8],
     ) -> Result<([u8; TRUNCATED_HASHBYTES], crate::transport::TickOutput), send::SendError> {
+        self.send_single_packet_measured(dest_hash, data)
+            .map(|(hash, _wire_len, output)| (hash, output))
+    }
+
+    /// [`send_single_packet`](Self::send_single_packet), additionally
+    /// reporting the packed wire length of the frame that was handed to
+    /// transport.
+    ///
+    /// The wire length is the only figure from which a caller can price the
+    /// frame's airtime against an interface's reported bitrate: the payload
+    /// it passed in says nothing about the header, the ephemeral key, the
+    /// token overhead or the block padding the stack adds on top. Callers
+    /// that need to size a delivery budget (`lnstest selftest`) ask for it
+    /// here rather than reconstructing the encryption arithmetic.
+    pub fn send_single_packet_measured(
+        &mut self,
+        dest_hash: &DestinationHash,
+        data: &[u8],
+    ) -> Result<
+        (
+            [u8; TRUNCATED_HASHBYTES],
+            usize,
+            crate::transport::TickOutput,
+        ),
+        send::SendError,
+    > {
         // Build a data packet
         use crate::destination::DestinationType;
         use crate::packet::{
@@ -820,7 +846,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .create_receipt(&buf[..len], dest_hash.into_bytes());
 
         let output = self.process_events_and_actions();
-        Ok((packet_hash, output))
+        Ok((packet_hash, len, output))
     }
 
     /// Send a proof for a received single packet (`ProofStrategy::App`)
@@ -2117,6 +2143,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
+        self.transport.remove_interface_link_profile(iface_idx);
 
         // Emit the InterfaceDown event
         self.events.push(NodeEvent::InterfaceDown(iface_idx));
@@ -2448,6 +2475,31 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
     ) -> Option<u32> {
         self.transport.next_hop_interface_bitrate(hash)
+    }
+
+    /// Record what an interface reports about its own medium. Called by the
+    /// driver at interface registration; see
+    /// [`crate::transport::LinkProfile`].
+    pub fn register_interface_link_profile(
+        &mut self,
+        id: usize,
+        profile: crate::transport::LinkProfile,
+    ) {
+        self.transport.register_interface_link_profile(id, profile);
+    }
+
+    /// Drop an interface's link profile.
+    pub fn remove_interface_link_profile(&mut self, id: usize) {
+        self.transport.remove_interface_link_profile(id);
+    }
+
+    /// The link profile of the next-hop interface toward a destination, or
+    /// `None` when no path is known or that interface reports no bitrate.
+    pub fn next_hop_link_profile(
+        &self,
+        hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+    ) -> Option<crate::transport::LinkProfile> {
+        self.transport.next_hop_link_profile(hash)
     }
 
     /// Remove a path entry by destination hash. Returns true if found.
