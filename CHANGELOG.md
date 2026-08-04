@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Signing an LXMF message with a `NaN` or infinite timestamp is refused
+  (#184).
 - The LXMF router resolves wall time from `NodeCore::emission_secs`
   instead of a `now_unix` parameter, and refuses to issue a ticket on a
   node with no plausible clock (#182).

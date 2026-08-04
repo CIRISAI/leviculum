@@ -45,6 +45,8 @@ pub enum MessageError {
     WrongDestination,
     /// `payload[0]` was not a MessagePack number we can carry as an `f64`.
     InvalidTimestamp,
+    /// A caller asked us to sign a timestamp that is `NaN` or infinite.
+    NonFiniteTimestamp,
 }
 impl From<msgpack::Error> for MessageError {
     fn from(_: msgpack::Error) -> Self {
@@ -90,6 +92,9 @@ impl Message {
         fields: Vec<Field>,
         method: DeliveryMethod,
     ) -> Result<Self, MessageError> {
+        if !timestamp.is_finite() {
+            return Err(MessageError::NonFiniteTimestamp);
+        }
         for (_, v) in &fields {
             let mut p = 0;
             msgpack::skip(v, &mut p).map_err(|_| MessageError::InvalidField)?;

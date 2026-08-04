@@ -20,7 +20,7 @@ use leviculum_lxmf::constants::{
 use leviculum_lxmf::propagation::PropagationUpload;
 use leviculum_lxmf::stamp::ticket_stamp;
 use leviculum_lxmf::ticket::{Ticket, TicketStore};
-use leviculum_lxmf::{DeliveryMethod, Message};
+use leviculum_lxmf::{DeliveryMethod, Message, MessageError};
 use rand_core::OsRng;
 
 fn source_identity() -> Identity {
@@ -187,6 +187,8 @@ fn message_timestamp_is_always_msgpack_float64() {
     // do too. Pinned as a deliberate non-behaviour: this crate has no clock of
     // its own and applies no plausibility window to the caller's value, mirroring
     // `docs/src/concepts/time-and-clocks.md`, "We do not validate our own clock".
+    // The one exception is the finiteness refusal below, which is not a
+    // plausibility window: it excludes values that are not times at all.
     let uptime_stamped = Message::create(
         [1; 16],
         [2; 16],
@@ -199,6 +201,76 @@ fn message_timestamp_is_always_msgpack_float64() {
     )
     .expect("an implausible timestamp is not refused");
     assert_eq!(uptime_stamped.timestamp, 42.0);
+}
+
+/// We refuse to sign a timestamp that is `NaN` or infinite. Codeberg #184.
+///
+/// This pin replaces the tranche-4 pin that recorded the opposite as
+/// deliberate. What changed is the argument, not the reference: the reference
+/// still writes `time.time()` with no validation (LXMessage.py:357), and
+/// `time.time()` cannot be non-finite, so the reference's silence on this is
+/// not a decision we are deviating from — it is a case its writer cannot
+/// produce.
+///
+/// Question 1 of the audit method, answered against the pinned snapshot: LXMF
+/// core decides *nothing* from an inbound message's timestamp. It stores it
+/// (`message.timestamp = timestamp`, LXMessage.py:797) and hands it to the
+/// application; the propagation store weights and expires entries by the
+/// *receive* time instead (`get_weight`, LXMRouter.py:1056-1067, and the store
+/// filename, :1150-1158). The decision rule therefore lives in a client we
+/// cannot cite, and the only thing every client does with the field is order
+/// and display by it. A `NaN` makes both meaningless: every comparison against
+/// it is False in both directions, so it sorts arbitrarily and non-transitively
+/// and no "newer than" test can ever select it. We cannot bound the damage,
+/// which is the argument for not emitting it.
+///
+/// The refusal is wire-invisible — there is no value a conforming peer expects
+/// from us that we now withhold — and it costs no caller anything: since
+/// Codeberg #182 the router resolves the field from `NodeCore::emission_secs`,
+/// a `u64`, so our own path cannot produce a non-finite value at all. It also
+/// settles a split the crate had been carrying: `Ticket::from_field_value` and
+/// the `TicketStore` lookups already refused non-finite values, while
+/// `Message::create` did not.
+///
+/// The read side stays permissive on purpose — see
+/// `foreign_payload_encodings.rs`, `implausible_but_numeric_timestamps_are_accepted`.
+/// Refusing to emit a value costs no peer anything; refusing to accept one
+/// costs the sender its message, which is the Codeberg #183 defect class.
+#[test]
+fn a_non_finite_message_timestamp_is_never_signed() {
+    for timestamp in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            Message::create(
+                [1; 16],
+                [2; 16],
+                &source_identity(),
+                timestamp,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                DeliveryMethod::Direct,
+            )
+            .unwrap_err(),
+            MessageError::NonFiniteTimestamp,
+            "a non-finite timestamp must be refused by name, not silently packed"
+        );
+    }
+
+    // The refusal is exactly the non-finite set: the extremes of the finite
+    // range still pass, so this is not a plausibility window in disguise.
+    for timestamp in [f64::MIN, f64::MAX, -0.0, f64::MIN_POSITIVE] {
+        assert!(Message::create(
+            [1; 16],
+            [2; 16],
+            &source_identity(),
+            timestamp,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .is_ok());
+    }
 }
 
 /// A ticket travels as `[expires, ticket]` and a peer keeps it only while

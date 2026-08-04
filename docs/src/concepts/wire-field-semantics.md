@@ -129,6 +129,27 @@ Two rules generalise:
   encoder's opinion for the sender's bytes. It is invisible while
   every peer encodes as we do, and silent when one does not.
 
+### Refuse on write, accept on read
+
+The two sides are not symmetric, and treating them as one rule is
+what produces an inconsistent codebase. Refusing to *emit* a value
+costs no peer anything: nothing conforming expects it, so the refusal
+is wire-invisible. Refusing to *accept* one costs the sender its
+message. So:
+
+- A value we cannot bound the effect of goes in the writer's refusal
+  set. Codeberg #184 put the non-finite message timestamps there: a
+  `NaN` compares False against everything, so it orders arbitrarily at
+  any peer that sorts by it, and we cannot cite what a client does
+  with it because the decision rule lives outside the reference.
+- The same value is still accepted on read, because a peer that sent
+  it has already made its choice and dropping the message adds nothing.
+- The exception is a value that becomes a **bound on our own
+  behaviour** — a ticket expiry we store, a snapshot field we restore.
+  There the reader refuses too, because accepting it hands an
+  unbounded quantity to a comparison that governs our resource use
+  (`Ticket::from_field_value`, `leviculum-lxmf/src/ticket.rs`).
+
 ### Working the method
 
 - **Grep the reference for the field's read sites before writing the
@@ -214,13 +235,16 @@ parameter instead (#182, fixed: the router now resolves them from the
 knows a peer will discard).
 
 Working tranche 4 also turned the method around and asked the mirror
-question above, which produced one more: we refused every
+question above, which produced two more: we refused every
 `payload[0]` that was not float64 and re-hashed the payload instead
 of keeping the received bytes (#183, fixed red-first, and the origin
-of that section). Its pins are in
-`leviculum-lxmf/tests/foreign_payload_encodings.rs`, backed by
-`VEC-MSG-FOREIGN-*` vectors that record the reference decoder's own
-verdict.
+of that section), and `Message::create` signed `NaN` and `±Inf`
+timestamps while a dozen other sites in the same crate refused them
+(#184, resolved by refusing on write and continuing to accept on
+read). Pins for both are in
+`leviculum-lxmf/tests/foreign_payload_encodings.rs` and
+`generated_field_pins.rs`, backed by `VEC-MSG-FOREIGN-*` vectors that
+record the reference decoder's own verdict.
 
 The recurring lesson across all four: the offenders were timestamps and
 identifier-derivation order, never framing. Nothing that round-trips
