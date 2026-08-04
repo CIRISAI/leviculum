@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An LXMF message whose timestamp is any msgpack number, not only
+  float64, is accepted, and an unstamped payload is hashed as received
+  instead of re-encoded; both dropped messages from writers other than
+  Python LXMF (#183).
 - One direct LXMF delivery cycle now consumes one delivery attempt
   instead of two, and a failed outgoing Resource tears its link down
   before the retry; a receiver's cancel is terminal and keeps the link

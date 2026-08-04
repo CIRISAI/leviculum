@@ -95,6 +95,40 @@ although the reference does not, because that deviation is invisible
 on the wire and to any conforming peer, and removes an unbounded loop
 reachable from the network.
 
+## The mirror question: what do we refuse to read?
+
+The four questions above are asked of fields we *generate*. They
+cannot find the mirror defect, which is being **stricter than the
+reference on the read path**: refusing a value the reference accepts.
+Nothing in a generated-field audit reaches it, and interop testing
+against Python does not either, because Python only ever produces the
+form we already accept. The defect surfaces only against a third
+implementation — reticulum-kt, microReticulum, a hand-rolled encoder —
+and it surfaces as silence: the message is dropped, and the sender
+sees a peer that never answers.
+
+Codeberg #183 is the worked example. LXMF writes `time.time()`, so
+`payload[0]` from a Python peer is always msgpack float64, and our
+decoder demanded the `0xcb` marker. The reference performs no type
+check at all — `timestamp = unpacked_payload[0]` (`LXMessage.py:766`)
+— so an integer second delivers on Python and was refused by us. The
+same audit found the second half: the reference hashes the payload
+bytes it *received* when there is no stamp (`packed_payload`, `:753`,
+`:762`), while we re-encoded canonically before hashing, so even a
+timestamp we decoded correctly would have failed its own signature.
+
+Two rules generalise:
+
+- **The read side has a contract too, and it is the reference's
+  accept set, not its output set.** What Python's writer emits is a
+  subset of what Python's reader takes. Auditing only against the
+  writer measures the wrong boundary. Read the reference's *decoder*
+  and enumerate what it lets through.
+- **Where the reference's reader keeps received bytes, keep them.**
+  Re-deriving a value that a signature or hash covers substitutes our
+  encoder's opinion for the sender's bytes. It is invisible while
+  every peer encodes as we do, and silent when one does not.
+
 ### Working the method
 
 - **Grep the reference for the field's read sites before writing the
@@ -179,11 +213,21 @@ parameter instead (#182, fixed: the router now resolves them from the
 `NodeCore` it holds, and refuses to issue a ticket whose expiry it
 knows a peer will discard).
 
+Working tranche 4 also turned the method around and asked the mirror
+question above, which produced one more: we refused every
+`payload[0]` that was not float64 and re-hashed the payload instead
+of keeping the received bytes (#183, fixed red-first, and the origin
+of that section). Its pins are in
+`leviculum-lxmf/tests/foreign_payload_encodings.rs`, backed by
+`VEC-MSG-FOREIGN-*` vectors that record the reference decoder's own
+verdict.
+
 The recurring lesson across all four: the offenders were timestamps and
 identifier-derivation order, never framing. Nothing that round-trips
 was ever wrong; everything that a *peer compared against a value from
 another machine* was worth checking — and, from #181, everything the
-reference deliberately declines to send.
+reference deliberately declines to send, and from #183, everything the
+reference declines to *require*.
 
 ## See also
 

@@ -368,6 +368,75 @@ def gen_message_vectors():
         "matches_source": unpacked.hash == m.hash,
     })
 
+    gen_foreign_writer_vectors(src, dst)
+
+
+# --------------------------------------------------------------------------
+# Foreign-writer vectors (frozen).
+#
+# LXMF always writes time.time(), so payload[0] from a Python peer is always
+# float64. These vectors cover the other case: a third-party writer that packs
+# the same value with a different MessagePack type. The reference reads
+# payload[0] with no type check (LXMessage.py:766) and, when the payload has no
+# stamp, hashes the received bytes verbatim (packed_payload, :753,762), so it
+# accepts them. The verdict recorded in each vector is the reference's own.
+# --------------------------------------------------------------------------
+
+FOREIGN_TIMESTAMP_FORMS = [
+    ("VEC-MSG-FOREIGN-UINT32", "uint32", bytes([0xCE, 0x65, 0x53, 0xF1, 0x00])),
+    ("VEC-MSG-FOREIGN-FLOAT32", "float32", bytes([0xCA, 0x3F, 0xC0, 0x00, 0x00])),
+    ("VEC-MSG-FOREIGN-NEGATIVE-FIXINT", "negative fixint", bytes([0xFF])),
+]
+
+
+def gen_foreign_writer_vectors(src, dst):
+    RNS.Identity.remember(None, src.hash, src.identity.get_public_key())
+    for vector_id, form, timestamp_bytes in FOREIGN_TIMESTAMP_FORMS:
+        # payload[0] spliced in verbatim; the rest is the canonical form a
+        # Python writer produces, so the timestamp type is the only variable.
+        packed_payload = (
+            b"\x94"
+            + timestamp_bytes
+            + msgpack.packb(b"Hi")
+            + msgpack.packb(b"Hello")
+            + msgpack.packb({})
+        )
+        # A writer signs what it packed. This is LXMessage.pack() with the
+        # hand-built payload substituted (LXMessage.py:362-375).
+        hashed_part = dst.hash + src.hash + packed_payload
+        message_hash = RNS.Identity.full_hash(hashed_part)
+        signed_part = hashed_part + message_hash
+        signature = src.identity.sign(signed_part)
+        lxmf_bytes = dst.hash + src.hash + signature + packed_payload
+
+        recovered = LXMessage.unpack_from_bytes(lxmf_bytes)
+        add({
+            "id": vector_id,
+            "title": f"Foreign writer: payload[0] as MessagePack {form}",
+            "kind": "frozen",
+            "citation": "LXMessage.py:747-766",
+            "inputs": {
+                "timestamp_msgpack_hex": timestamp_bytes.hex(),
+                "timestamp_form": form,
+                "title": "Hi",
+                "content": "Hello",
+                "fields": {},
+            },
+            "packed_hex": lxmf_bytes.hex(),
+            "packed_len": len(lxmf_bytes),
+            "parts": split_packed(lxmf_bytes),
+            "message_id_hex": message_hash.hex(),
+            "reference_timestamp_repr": repr(recovered.timestamp),
+            "reference_timestamp_type": type(recovered.timestamp).__name__,
+            "reference_signature_validated": bool(recovered.signature_validated),
+            "reference_message_id_matches": recovered.hash == message_hash,
+            "note": (
+                "The reference accepts the message and validates the signature "
+                "against the bytes the writer packed, because an unstamped "
+                "payload is hashed as received."
+            ),
+        })
+
 
 # --------------------------------------------------------------------------
 # Delivery-method vectors.

@@ -6,7 +6,19 @@ use leviculum_core::{crypto::full_hash, Identity};
 /// value so unknown extensions round-trip byte-for-byte. Python accepts signed
 /// integer keys, including negative fixints.
 pub type Field = (i64, Vec<u8>);
-type DecodedPayload = (f64, Vec<u8>, Vec<u8>, Vec<Field>, Option<Vec<u8>>);
+
+/// A decoded payload, plus the exact bytes the message ID and signature cover.
+struct Payload {
+    timestamp: f64,
+    title: Vec<u8>,
+    content: Vec<u8>,
+    fields: Vec<Field>,
+    stamp: Option<Vec<u8>>,
+    /// What `hashed_part` is built from. The reference keeps the received
+    /// bytes for an unstamped payload and re-packs `unpacked_payload[:4]` for
+    /// a stamped one (`LXMessage.py:753-762`); this field is that distinction.
+    signed: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -31,6 +43,8 @@ pub enum MessageError {
     InvalidField,
     Identity,
     WrongDestination,
+    /// `payload[0]` was not a MessagePack number we can carry as an `f64`.
+    InvalidTimestamp,
 }
 impl From<msgpack::Error> for MessageError {
     fn from(_: msgpack::Error) -> Self {
@@ -53,6 +67,14 @@ pub struct Message {
     pub message_id: [u8; 32],
     pub verification: Verification,
     pub method: DeliveryMethod,
+    /// The bytes this message arrived as, when it came off the wire.
+    ///
+    /// The reference caches the same thing (`message.packed = lxmf_bytes`,
+    /// `LXMessage.py:799`) and `pack()` returns it untouched (`if not
+    /// self.packed`, `:355`). Without the cache, re-packing a message composed
+    /// by a writer whose MessagePack encoder differs from ours would emit
+    /// bytes its signature no longer covers.
+    packed: Option<Vec<u8>>,
 }
 
 impl Message {
@@ -75,7 +97,13 @@ impl Message {
                 return Err(MessageError::InvalidField);
             }
         }
-        let payload = encode_payload(timestamp, &title, &content, &fields, None);
+        let payload = encode_payload(
+            msgpack::Number::Float(timestamp),
+            &title,
+            &content,
+            &fields,
+            None,
+        );
         let mut hashed = Vec::with_capacity(32 + payload.len());
         hashed.extend_from_slice(&destination_hash);
         hashed.extend_from_slice(&source_hash);
@@ -96,6 +124,7 @@ impl Message {
             message_id,
             verification: Verification::Valid,
             method,
+            packed: None,
         })
     }
     pub fn set_stamp(&mut self, stamp: Vec<u8>) -> Result<(), MessageError> {
@@ -103,11 +132,17 @@ impl Message {
             return Err(MessageError::InvalidFormat);
         }
         self.stamp = Some(stamp);
+        // The wire form changed, so the bytes we came in as no longer describe
+        // this message.
+        self.packed = None;
         Ok(())
     }
     pub fn pack(&self) -> Vec<u8> {
+        if let Some(packed) = &self.packed {
+            return packed.clone();
+        }
         let payload = encode_payload(
-            self.timestamp,
+            msgpack::Number::Float(self.timestamp),
             &self.title,
             &self.content,
             &self.fields,
@@ -155,12 +190,18 @@ impl Message {
         let destination_hash: [u8; 16] = d[0..16].try_into().map_err(|_| MessageError::TooShort)?;
         let source_hash: [u8; 16] = d[16..32].try_into().map_err(|_| MessageError::TooShort)?;
         let signature: [u8; 64] = d[32..96].try_into().map_err(|_| MessageError::TooShort)?;
-        let (timestamp, title, content, fields, stamp) = decode_payload(&d[96..])?;
-        let clean = encode_payload(timestamp, &title, &content, &fields, None);
+        let Payload {
+            timestamp,
+            title,
+            content,
+            fields,
+            stamp,
+            signed: signed_payload,
+        } = decode_payload(&d[96..])?;
         let mut hashed = Vec::new();
         hashed.extend_from_slice(&destination_hash);
         hashed.extend_from_slice(&source_hash);
-        hashed.extend_from_slice(&clean);
+        hashed.extend_from_slice(&signed_payload);
         let message_id = full_hash(&hashed);
         let mut signed = hashed;
         signed.extend_from_slice(&message_id);
@@ -188,12 +229,13 @@ impl Message {
             message_id,
             verification,
             method,
+            packed: Some(d.to_vec()),
         })
     }
 }
 
 fn encode_payload(
-    ts: f64,
+    ts: msgpack::Number,
     title: &[u8],
     content: &[u8],
     fields: &[Field],
@@ -201,7 +243,10 @@ fn encode_payload(
 ) -> Vec<u8> {
     let mut o = Vec::new();
     msgpack::array(&mut o, if stamp.is_some() { 5 } else { 4 });
-    msgpack::f64(&mut o, ts);
+    match ts {
+        msgpack::Number::Int(v) => msgpack::int(&mut o, v),
+        msgpack::Number::Float(v) => msgpack::f64(&mut o, v),
+    }
     msgpack::bin(&mut o, title);
     msgpack::bin(&mut o, content);
     msgpack::map(&mut o, fields.len());
@@ -214,13 +259,23 @@ fn encode_payload(
     }
     o
 }
-fn decode_payload(d: &[u8]) -> Result<DecodedPayload, MessageError> {
+/// Decode `[timestamp, title, content, fields (, stamp)]`.
+///
+/// `payload[0]` is read as any MessagePack number, not only float64. The
+/// reference takes `unpacked_payload[0]` with no type check at all
+/// (`LXMessage.py:766`), so a writer that packs an integer second — LXMF
+/// itself never does, but a third-party implementation may — produces a
+/// message Python delivers. Refusing it here dropped the whole message with
+/// no diagnostic (Codeberg #183). Non-numeric types are refused, because
+/// `Message::timestamp` is an `f64` and nothing downstream of the reference
+/// can use a string or `nil` as a time either.
+fn decode_payload(d: &[u8]) -> Result<Payload, MessageError> {
     let mut p = 0;
     let n = msgpack::array_len(d, &mut p)?;
     if !(4..=5).contains(&n) {
         return Err(MessageError::InvalidFormat);
     }
-    let ts = msgpack::read_f64(d, &mut p)?;
+    let ts = msgpack::read_number(d, &mut p).map_err(|_| MessageError::InvalidTimestamp)?;
     let title = msgpack::read_bin(d, &mut p)?.to_vec();
     let content = msgpack::read_bin(d, &mut p)?.to_vec();
     let count = msgpack::map_len(d, &mut p)?;
@@ -241,7 +296,26 @@ fn decode_payload(d: &[u8]) -> Result<DecodedPayload, MessageError> {
     if p != d.len() {
         return Err(MessageError::InvalidFormat);
     }
-    Ok((ts, title, content, fields, stamp))
+    // The reference hashes `packed_payload`, and only replaces it with a
+    // re-pack of the first four elements when a stamp had to be stripped
+    // (`LXMessage.py:753-762`). Mirroring both branches keeps our accept set
+    // equal to Python's: an unstamped payload verifies whatever its writer's
+    // encoder produced, and a stamped one survives only if the writer's
+    // encoding is what `msgpack.packb` would emit — which is why the numeric
+    // family, not just the value, is carried through the re-pack.
+    let signed = if n == 5 {
+        encode_payload(ts, &title, &content, &fields, None)
+    } else {
+        d.to_vec()
+    };
+    Ok(Payload {
+        timestamp: ts.as_f64(),
+        title,
+        content,
+        fields,
+        stamp,
+        signed,
+    })
 }
 
 #[cfg(test)]

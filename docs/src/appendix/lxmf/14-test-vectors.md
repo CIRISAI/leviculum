@@ -106,6 +106,19 @@ After making the source identity recallable, `unpack_from_bytes` of VEC-MSG-1
 yields `signature_validated = true`, `matches_source = true`, recovered
 `title="Hi"`, `content="Hello"`. (`LXMessage.py:747-822`)
 
+## VEC-MSG-FOREIGN-\* (frozen) — reader tolerance for `payload[0]`
+
+Three payloads built with `payload[0]` spliced in as a non-float64 msgpack
+number — `uint32`, `float32` and a negative fixint — and signed over the bytes
+the writer packed. Each vector records the reference decoder's own verdict:
+`reference_signature_validated = true` and `reference_message_id_matches =
+true` in all three cases, with `reference_timestamp_type` showing `int` or
+`float` as packed. They exist because LXMF's writer cannot produce these forms
+(`time.time()` is always a Python float) while its reader accepts them, so
+nothing generated from the reference's *writer* covers the case. See
+[Reader tolerance](03-message-format.md#reader-tolerance).
+(`LXMessage.py:747-766`)
+
 ## VEC-DLV-OPP (frozen) — opportunistic on-air payload
 
 `on_air = packed[16:]` (destination hash omitted). (`LXMessage.py:633-634`)

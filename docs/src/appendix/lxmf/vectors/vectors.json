@@ -170,6 +170,87 @@
       "matches_source": true
     },
     {
+      "id": "VEC-MSG-FOREIGN-UINT32",
+      "title": "Foreign writer: payload[0] as MessagePack uint32",
+      "kind": "frozen",
+      "citation": "LXMessage.py:747-766",
+      "inputs": {
+        "timestamp_msgpack_hex": "ce6553f100",
+        "timestamp_form": "uint32",
+        "title": "Hi",
+        "content": "Hello",
+        "fields": {}
+      },
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03c31d9a07e39b6996b6c33e1c5c5de0825abb3879736fca70ff2f19d57df2bba49cb7d88f21e0fb093632182edcfec281587e5b70ea5d931098f9fda81baa7f80c94ce6553f100c4024869c40548656c6c6f80",
+      "packed_len": 114,
+      "parts": {
+        "destination_hash": "cf0b2a4a8d2a0b6978b71290da7cc80e",
+        "source_hash": "fae321c442e3c9bdcd7a3e79d850e03c",
+        "signature": "31d9a07e39b6996b6c33e1c5c5de0825abb3879736fca70ff2f19d57df2bba49cb7d88f21e0fb093632182edcfec281587e5b70ea5d931098f9fda81baa7f80c",
+        "packed_payload": "94ce6553f100c4024869c40548656c6c6f80"
+      },
+      "message_id_hex": "f249f3fd71ae2544ba19c2e678ea0e72fc7003cdf12bd0209da9e4a6d3c7f4cf",
+      "reference_timestamp_repr": "1700000000",
+      "reference_timestamp_type": "int",
+      "reference_signature_validated": true,
+      "reference_message_id_matches": true,
+      "note": "The reference accepts the message and validates the signature against the bytes the writer packed, because an unstamped payload is hashed as received."
+    },
+    {
+      "id": "VEC-MSG-FOREIGN-FLOAT32",
+      "title": "Foreign writer: payload[0] as MessagePack float32",
+      "kind": "frozen",
+      "citation": "LXMessage.py:747-766",
+      "inputs": {
+        "timestamp_msgpack_hex": "ca3fc00000",
+        "timestamp_form": "float32",
+        "title": "Hi",
+        "content": "Hello",
+        "fields": {}
+      },
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03cd13daf3bcab517a561dd9fce9e700b9496742ca7c96cb4cb35929b484a3aecc443f38c99402df7b6d28b848ea1cafb6d1bac868ce47a50731f13c04f6c63950f94ca3fc00000c4024869c40548656c6c6f80",
+      "packed_len": 114,
+      "parts": {
+        "destination_hash": "cf0b2a4a8d2a0b6978b71290da7cc80e",
+        "source_hash": "fae321c442e3c9bdcd7a3e79d850e03c",
+        "signature": "d13daf3bcab517a561dd9fce9e700b9496742ca7c96cb4cb35929b484a3aecc443f38c99402df7b6d28b848ea1cafb6d1bac868ce47a50731f13c04f6c63950f",
+        "packed_payload": "94ca3fc00000c4024869c40548656c6c6f80"
+      },
+      "message_id_hex": "56c844861c283f3d484b0038bf4825a8cf5103f65e59c6223bc24f9da6988ff2",
+      "reference_timestamp_repr": "1.5",
+      "reference_timestamp_type": "float",
+      "reference_signature_validated": true,
+      "reference_message_id_matches": true,
+      "note": "The reference accepts the message and validates the signature against the bytes the writer packed, because an unstamped payload is hashed as received."
+    },
+    {
+      "id": "VEC-MSG-FOREIGN-NEGATIVE-FIXINT",
+      "title": "Foreign writer: payload[0] as MessagePack negative fixint",
+      "kind": "frozen",
+      "citation": "LXMessage.py:747-766",
+      "inputs": {
+        "timestamp_msgpack_hex": "ff",
+        "timestamp_form": "negative fixint",
+        "title": "Hi",
+        "content": "Hello",
+        "fields": {}
+      },
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03cc4ce44ad0ae76542b8e2efc2190ec54be99d039a21bd86c5efe019d623a9059a1e5e958a371e7a5c3b0c8d82722db5dbc27130334b7fefd9ce5fcd10c1c8670294ffc4024869c40548656c6c6f80",
+      "packed_len": 110,
+      "parts": {
+        "destination_hash": "cf0b2a4a8d2a0b6978b71290da7cc80e",
+        "source_hash": "fae321c442e3c9bdcd7a3e79d850e03c",
+        "signature": "c4ce44ad0ae76542b8e2efc2190ec54be99d039a21bd86c5efe019d623a9059a1e5e958a371e7a5c3b0c8d82722db5dbc27130334b7fefd9ce5fcd10c1c86702",
+        "packed_payload": "94ffc4024869c40548656c6c6f80"
+      },
+      "message_id_hex": "8c5bec7442d3bd3368c72aa01ef65ac9ff718575638f51bd62b344ca2f3a4d47",
+      "reference_timestamp_repr": "-1",
+      "reference_timestamp_type": "int",
+      "reference_signature_validated": true,
+      "reference_message_id_matches": true,
+      "note": "The reference accepts the message and validates the signature against the bytes the writer packed, because an unstamped payload is hashed as received."
+    },
+    {
       "id": "VEC-DLV-OPP",
       "title": "Opportunistic on-air payload (leading destination hash omitted)",
       "kind": "frozen",

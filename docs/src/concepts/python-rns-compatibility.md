@@ -31,6 +31,17 @@ Semantic compatibility is decided field by field: what a peer
 the byte layout is right. The audit method and testing rule for that
 are in [Wire Field Semantics](wire-field-semantics.md).
 
+It cuts both ways. The reference's **accept set** is as much of the
+contract as its output set, and it is wider — Python's decoder takes
+forms Python's encoder never emits. A mesh has more than two
+implementations in it (reticulum-kt, microReticulum, hand-rolled
+senders), and any of them may pick a legal encoding Python happens not
+to use. Testing only against `rnsd` cannot see this: it never produces
+the form we refuse. Being stricter than the reference on the read
+path is a compatibility defect of the same standing as emitting a
+wrong value, and it fails silently — see
+[Wire Field Semantics](wire-field-semantics.md#the-mirror-question-what-do-we-refuse-to-read).
+
 ## Level 2: drop-in daemon and tooling
 
 `lnsd` shares two interfaces with Python's `rnsd`:

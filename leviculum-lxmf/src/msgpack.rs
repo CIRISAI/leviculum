@@ -155,17 +155,47 @@ pub fn read_f64(d: &[u8], p: &mut usize) -> Result<f64, Error> {
         .ok_or(Error::Overflow)?;
     Ok(value)
 }
-/// Read any MessagePack numeric representation as `f64`.
-pub fn read_number_f64(d: &[u8], p: &mut usize) -> Result<f64, Error> {
+/// One MessagePack number together with the family the wire used for it.
+///
+/// Callers that only need the value take [`read_number_f64`]. The family
+/// matters where a decoded value has to be packed again in the form the
+/// reference's `msgpack.packb` would produce: an int goes back as a
+/// minimal-width int, a float as float64.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Number {
+    Int(i64),
+    Float(f64),
+}
+
+impl Number {
+    pub fn as_f64(self) -> f64 {
+        match self {
+            Self::Int(v) => v as f64,
+            Self::Float(v) => v,
+        }
+    }
+}
+
+/// Read any MessagePack numeric representation, keeping its family.
+///
+/// Non-numeric markers give [`Error::Type`]; an unsigned value above
+/// `i64::MAX` gives [`Error::Overflow`] rather than a silently rounded double.
+pub fn read_number(d: &[u8], p: &mut usize) -> Result<Number, Error> {
     match d.get(*p).copied().ok_or(Error::Truncated)? {
         0xca => {
             let marker = take(d, p, 1)?[0];
             debug_assert_eq!(marker, 0xca);
-            Ok(f32::from_be_bytes(take(d, p, 4)?.try_into().map_err(|_| Error::Truncated)?) as f64)
+            let bits = f32::from_be_bytes(take(d, p, 4)?.try_into().map_err(|_| Error::Truncated)?);
+            Ok(Number::Float(bits as f64))
         }
-        0xcb => read_f64(d, p),
-        _ => Ok(read_int(d, p)? as f64),
+        0xcb => read_f64(d, p).map(Number::Float),
+        _ => read_int(d, p).map(Number::Int),
     }
+}
+
+/// Read any MessagePack numeric representation as `f64`.
+pub fn read_number_f64(d: &[u8], p: &mut usize) -> Result<f64, Error> {
+    read_number(d, p).map(Number::as_f64)
 }
 pub fn read_bool(d: &[u8], p: &mut usize) -> Result<bool, Error> {
     match take(d, p, 1)?[0] {
