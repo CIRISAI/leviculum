@@ -529,6 +529,32 @@ async fn send_single_msg(
 /// link genuinely fails to keep up.
 const FRAME_OVERHEAD_PERMILLE: u64 = 1_200;
 
+/// The size the frame reaches on the air, given the size the tool's own node
+/// packed and the hop count to the destination.
+///
+/// The tool measures its packet where it leaves its own node, which is a hop
+/// short of the radio. A packet a transport node forwards is rewritten from
+/// the minimum header form to the maximum one — the forwarder inserts its own
+/// address field ahead of the destination's, `HEADER_MAXSIZE - HEADER_MINSIZE`
+/// = one truncated hash — and that happens once, at the first forwarder,
+/// regardless of how many hops follow.
+///
+/// Measured, not assumed: on the T-Beam pair of Codeberg #190 the tool packs
+/// 131 bytes and the daemon's `LORA_TX` carries 147 for the same frame, over
+/// a 3-hop path. Pricing the 131 under-sized the airtime term by 12 %, which
+/// is a second of window on a 20-frame burst — enough to cut the tail of the
+/// slower direction off and read it as loss, which is the whole failure this
+/// derivation exists to remove.
+///
+/// A directly attached destination is not rewritten, so nothing is added.
+fn on_air_bytes(packed: usize, hops: Option<u8>) -> usize {
+    use leviculum_core::constants::{HEADER_MAXSIZE, HEADER_MINSIZE};
+    match hops {
+        Some(h) if h >= 2 => packed + (HEADER_MAXSIZE - HEADER_MINSIZE),
+        _ => packed,
+    }
+}
+
 /// A delivery budget with the arithmetic that produced it, so the run's log
 /// carries the derivation and not just the number.
 struct DrainBudget {
@@ -1483,7 +1509,7 @@ pub async fn run_selftest(
             &state,
             "Phase 8",
             sp_expected,
-            sp_wire_bytes,
+            on_air_bytes(sp_wire_bytes, node_a.hops_to(&dest_hash_b)),
             &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
             std::time::Duration::from_secs(5),
         )
@@ -1589,7 +1615,7 @@ pub async fn run_selftest(
                 &state,
                 &format!("Ratchet {mode}"),
                 msg_count * 2,
-                wire_bytes,
+                on_air_bytes(wire_bytes, node_a.hops_to(&dest_hash_b)),
                 &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
                 std::time::Duration::from_secs(10),
             )
@@ -1714,7 +1740,7 @@ pub async fn run_selftest(
                 &state,
                 "Ratchet rotation pre-rotation",
                 10,
-                wire_bytes,
+                on_air_bytes(wire_bytes, node_a.hops_to(&dest_hash_b)),
                 &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
                 std::time::Duration::from_secs(5),
             )
@@ -1801,7 +1827,7 @@ pub async fn run_selftest(
                     &state,
                     "Ratchet rotation post-rotation",
                     10,
-                    wire_bytes,
+                    on_air_bytes(wire_bytes, node_a.hops_to(&dest_hash_b)),
                     &link_sizing(node_a.next_hop_link_profile(&dest_hash_b), &daemon_sizing),
                     std::time::Duration::from_secs(5),
                 )
@@ -2176,6 +2202,51 @@ mod tests {
             std::time::Duration::from_secs(5),
         );
         assert_eq!(budget.total, std::time::Duration::from_millis(5_160));
+    }
+
+    /// The frame the budget prices must be the frame that crosses the air.
+    ///
+    /// Measured on the T-Beam pair of Codeberg #190, 2026-08-05: the tool's
+    /// own node packs 131 bytes and the daemon's `LORA_TX` carries 147 for the
+    /// same frame over a 3-hop path — the forwarder's own address field. The
+    /// first re-measurement priced the 131 and expired 0.75 s before the
+    /// slower direction's last two frames landed, with both radios' logs
+    /// showing 10 sent and 10 received. Same shape as the fixed sleep it
+    /// replaced, one layer down.
+    #[test]
+    fn a_relayed_frame_is_priced_as_it_crosses_the_air() {
+        assert_eq!(
+            on_air_bytes(131, Some(3)),
+            147,
+            "the measured on-air size of the measured packed size"
+        );
+        assert_eq!(
+            on_air_bytes(131, Some(1)),
+            131,
+            "a directly attached destination is not rewritten"
+        );
+        assert_eq!(on_air_bytes(131, None), 131, "no path, nothing to add");
+
+        // And the difference is the one that mattered: the 20-frame burst's
+        // budget has to grow by about a second.
+        let priced_short = drain_budget(
+            18,
+            131,
+            Some(MEASURED_LINK),
+            std::time::Duration::from_secs(10),
+        );
+        let priced_right = drain_budget(
+            18,
+            on_air_bytes(131, Some(3)),
+            Some(MEASURED_LINK),
+            std::time::Duration::from_secs(10),
+        );
+        let gained = priced_right.total - priced_short.total;
+        assert!(
+            gained >= std::time::Duration::from_millis(900),
+            "pricing the on-air frame must recover the ~1s the truncated \
+             measurement lost, gained {gained:?}"
+        );
     }
 
     // Reading the daemon's answer (Codeberg #190)

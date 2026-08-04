@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and reports an expiry as a budget expiry rather than as loss (#190).
 - `lnstest -c <dir> selftest` asks the daemon that owns the radio for
   that link profile; without it the phases keep the fixed wait (#190).
+- The drain budget prices the frame as it crosses the air, including the
+  address field a forwarder inserts, not as the tool packed it (#190).
 - `interface_stats` reports a radio interface's own on-air bitrate
   instead of the TCP `BITRATE_GUESS`, and adds `tx_jitter_max` (#190).
 - `interface_stats` reports the listeners the daemon runs (shared
