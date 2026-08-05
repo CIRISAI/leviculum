@@ -61,9 +61,23 @@ m0-build-gate:
     rustup target add thumbv6m-none-eabi
     cargo build -p leviculum-core --target thumbv6m-none-eabi --no-default-features
 
-# Tier 0 (~3 min, runs on every git push): fmt + clippy (host + nrf)
-# + rustdoc gate + tracing-shim + M0 gates + workspace lib tests.
-fast: mvr lint-nrf doc-gate core-no-tracing m0-build-gate
+# Guarantee C step 1 (docs/src/concepts/checks-and-citations.md): the four
+# vendored references must sit at the commit their gitlink names. One wrong
+# fact — `reference/LXMF` twelve commits behind for five weeks — silently
+# repoints every LXMF citation in the tree. Sub-second, no build, and first
+# in `fast` so it reports before anything expensive: a batch that gets a
+# compile error still learns its references are wrong.
+#
+# In a gate, not a `#[test]`, deliberately. The `reference_lock` test that
+# should have caught the LXMF drift was itself red and unobserved for the
+# whole five weeks; a test can be the thing that runs nowhere.
+check-submodules:
+    @bash scripts/check-submodule-pins.sh
+
+# Tier 0 (~3 min, runs on every git push): submodule pins + fmt + clippy
+# (host + nrf) + rustdoc gate + tracing-shim + M0 gates + workspace lib
+# tests.
+fast: check-submodules mvr lint-nrf doc-gate core-no-tracing m0-build-gate
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     cargo test --workspace --lib
