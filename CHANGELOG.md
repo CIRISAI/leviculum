@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A targeted path response is transmitted once instead of twice, so a
+  requester no longer gets a duplicate announce five seconds later
+  (#192).
 - An LXMF message whose timestamp is any msgpack number, not only
   float64, is accepted, and an unstamped payload is hashed as received
   instead of re-encoded; both dropped messages from writers other than

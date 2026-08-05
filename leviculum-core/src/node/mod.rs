@@ -80,6 +80,8 @@ mod mvr_orphaned_path_cache;
 #[cfg(test)]
 mod mvr_path_response_hops;
 #[cfg(test)]
+mod mvr_path_response_retries;
+#[cfg(test)]
 mod mvr_pending_local_path_requests;
 #[cfg(test)]
 mod mvr_proof_activity;

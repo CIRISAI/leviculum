@@ -7195,7 +7195,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         AnnounceEntry {
                             timestamp_ms: now,
                             hops: stored_hops,
-                            retries: 0,
+                            // A targeted response fires ONCE (Codeberg #192).
+                            // The reference inserts the response entry with
+                            // retries = PATHFINDER_R (Transport.py:2970) and
+                            // its job loop completes an entry at
+                            // retries > PATHFINDER_R (Transport.py:585-587),
+                            // so the requester gets exactly one announce.
+                            // Starting at 0 — the value a RECEIVED announce
+                            // uses (Transport.py:1867) because it is meant to
+                            // be rebroadcast twice — sent a duplicate 189-byte
+                            // announce one PATHFINDER_G later, absorbed by the
+                            // requester's hashlist and reported by nothing.
+                            // Pinned in
+                            // `node::mvr_path_response_retries`.
+                            retries: PATHFINDER_RETRIES,
                             retransmit_at_ms: Some(now + grace),
                             raw_packet: cached_raw,
                             receiving_interface_index: interface_index,

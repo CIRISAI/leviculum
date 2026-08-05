@@ -95,6 +95,29 @@ although the reference does not, because that deviation is invisible
 on the wire and to any conforming peer, and removes an unbounded loop
 reachable from the network.
 
+### The frame is a field: how often we send it
+
+The four questions are asked of a value inside a frame, but they
+apply unchanged to the emission itself — whether a frame goes out at
+all, and how many times. A peer decides from that too: a second copy
+of an announce it already holds is absorbed by its packet hashlist
+and costs it only airtime, which on a shared medium is airtime
+nobody else can use, and which no counter on either side reports.
+
+Codeberg #192 is the worked example. Answering a path request, we
+inserted the response into the announce table with `retries = 0` —
+the value the reference uses for a *received* announce, which it
+means to rebroadcast twice (`Transport.py:1867`). The reference
+inserts a path response with `retries = PATHFINDER_R`
+(`Transport.py:2970`) and completes the entry at
+`retries > PATHFINDER_R` (`Transport.py:585-587`): one transmission,
+not two. Every field in both frames was correct; the second frame
+should not have existed. It was found by decoding what each daemon
+transmitted under one byte-identical traffic script and comparing the
+two multisets frame by frame (`status_parity_tests.rs`, TX frame
+census), not by comparing byte totals — a percentage says something
+diverged, a census says what.
+
 ## The mirror question: what do we refuse to read?
 
 The four questions above are asked of fields we *generate*. They

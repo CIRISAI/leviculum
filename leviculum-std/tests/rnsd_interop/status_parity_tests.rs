@@ -66,10 +66,16 @@
 //!     they count the SAME layer: Python reassigns `data` to the framed
 //!     buffer before `self.txb += len(data)` (TCPInterface.py:327), as we
 //!     do in `interfaces/tcp.rs`. A txb delta is therefore a real
-//!     difference in what was transmitted, not a framing allowance -
-//!     Codeberg #192: lnsd emits 62 announce-sized frames on this script
-//!     where rnsd emits 59, which is 4.3-5.8% and trips this guard about
-//!     one run in four.
+//!     difference in what was transmitted, not a framing allowance;
+//!   * and because it is real, txb is not compared as a percentage alone.
+//!     The injector connection is each daemon's only non-local interface,
+//!     so everything it reads back IS that interface's tx (the capture
+//!     total is asserted against the reported txb). Every frame is decoded
+//!     and the two multisets compared EXACTLY - see the TX frame census
+//!     below. That is how Codeberg #192 was resolved: the 4.3-5.8% txb
+//!     delta that tripped the byte guard about one run in four was three
+//!     duplicate PATH_RESPONSE announces, from a path-response entry that
+//!     started its retry count at a received announce's value.
 //!
 //! ## Freeze discipline (why the frozen comparisons cannot flake)
 //!
@@ -126,7 +132,7 @@ use leviculum_core::constants::{MTU, TRUNCATED_HASHBYTES};
 use leviculum_core::identity::Identity;
 use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
 
-use crate::common::{build_path_request_raw_with_tag, init_tracing, now_ms, send_framed};
+use crate::common::{build_path_request_raw_with_tag, init_tracing, now_ms};
 use crate::harness::find_available_ports;
 use crate::rpc_interop_tests::{run_python_tool, RNPATH_PY};
 
@@ -607,20 +613,108 @@ fn build_script() -> TrafficScript {
     }
 }
 
+/// One frame a daemon transmitted back on the injector connection, stamped
+/// with the offset from the moment the injector connected.
+#[derive(Clone)]
+struct CapturedFrame {
+    at: Duration,
+    bytes: Vec<u8>,
+}
+
+/// What the reader task accumulates for one injector connection.
+#[derive(Default)]
+struct Capture {
+    frames: Vec<CapturedFrame>,
+    /// Raw bytes read off the socket, i.e. HDLC-FRAMED bytes - the same
+    /// quantity both stacks add to the spawned interface's `txb`
+    /// (TCPInterface.py:327, `interfaces/tcp.rs`). Comparing this against
+    /// the reported txb is what makes the census a measurement of the
+    /// volume guard's own number rather than of a parallel one.
+    wire_bytes: u64,
+}
+
 /// One injector per daemon: a single raw RNS/TCP connection, kept open for
 /// the whole scenario so each daemon sees exactly one stable traffic
 /// interface whose ingress state is never reset by reconnects.
+///
+/// The read half is drained by a background task that deframes and keeps
+/// every frame the daemon sent back. That connection is the daemon's ONLY
+/// non-local interface, so its capture is the complete record of what the
+/// traffic interface transmitted - the content behind the volume guard's
+/// txb number (Codeberg #192).
+struct Injector {
+    tx: tokio::net::tcp::OwnedWriteHalf,
+    capture: std::sync::Arc<std::sync::Mutex<Capture>>,
+    _reader: tokio::task::JoinHandle<()>,
+}
+
+impl Injector {
+    fn attach(stream: TcpStream) -> Injector {
+        let (mut rx, tx) = stream.into_split();
+        let capture = std::sync::Arc::new(std::sync::Mutex::new(Capture::default()));
+        let sink = capture.clone();
+        let started = Instant::now();
+        let reader = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut deframer = leviculum_std::interfaces::hdlc::Deframer::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = match rx.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let at = started.elapsed();
+                let mut guard = sink.lock().expect("capture lock");
+                guard.wire_bytes += n as u64;
+                for result in deframer.process(&buf[..n]) {
+                    if let leviculum_std::interfaces::hdlc::DeframeResult::Frame(bytes) = result {
+                        guard.frames.push(CapturedFrame { at, bytes });
+                    }
+                }
+            }
+        });
+        Injector {
+            tx,
+            capture,
+            _reader: reader,
+        }
+    }
+
+    async fn send(&mut self, raw: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        let mut framed = Vec::new();
+        leviculum_std::interfaces::hdlc::frame(raw, &mut framed);
+        self.tx.write_all(&framed).await.expect("injector write");
+        self.tx.flush().await.expect("injector flush");
+    }
+
+    fn captured(&self) -> Vec<CapturedFrame> {
+        self.capture.lock().expect("capture lock").frames.clone()
+    }
+
+    fn wire_bytes(&self) -> u64 {
+        self.capture.lock().expect("capture lock").wire_bytes
+    }
+}
+
 struct Injectors {
-    lnsd: TcpStream,
-    rnsd: TcpStream,
+    lnsd: Injector,
+    rnsd: Injector,
 }
 
 impl Injectors {
+    async fn connect(lnsd: &ParityDaemon, rnsd: &ParityDaemon) -> Injectors {
+        Injectors {
+            lnsd: Injector::attach(connect_injector(lnsd).await),
+            rnsd: Injector::attach(connect_injector(rnsd).await),
+        }
+    }
+
     /// Send the same frame to both daemons back to back. Loopback TCP writes
     /// complete in microseconds, so both daemons observe the same pacing.
     async fn send_both(&mut self, frame: &[u8]) {
-        send_framed(&mut self.lnsd, frame).await;
-        send_framed(&mut self.rnsd, frame).await;
+        self.lnsd.send(frame).await;
+        self.rnsd.send(frame).await;
     }
 
     /// Send a paced sequence of frames to both daemons: `pace` BEFORE each
@@ -631,6 +725,76 @@ impl Injectors {
             self.send_both(frame).await;
         }
     }
+}
+
+// =========================================================================
+// TX frame census (Codeberg #192)
+// =========================================================================
+
+/// One transmitted frame reduced to what identifies it on the wire: the
+/// fourth wire-field question (docs/src/concepts/wire-field-semantics.md)
+/// asks whether we emit a frame at all, so the census keys on the fields a
+/// peer decides from, not on the byte count.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TxFrame {
+    packet_type: String,
+    context: String,
+    dest_hash: String,
+    hops: u8,
+    size: usize,
+}
+
+impl std::fmt::Display for TxFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:<9} ctx={:<12} dest={} hops={} size={}",
+            self.packet_type, self.context, self.dest_hash, self.hops, self.size
+        )
+    }
+}
+
+fn decode_tx(frame: &CapturedFrame) -> TxFrame {
+    let packet = leviculum_core::packet::Packet::unpack(&frame.bytes)
+        .unwrap_or_else(|e| panic!("captured frame is not a valid RNS packet: {e:?}"));
+    TxFrame {
+        packet_type: format!("{:?}", packet.flags.packet_type),
+        context: format!("{:?}", packet.context),
+        dest_hash: hex::encode(packet.destination_hash),
+        hops: packet.hops,
+        size: frame.bytes.len(),
+    }
+}
+
+/// A daemon's transmitted frames, in order, with their capture offsets.
+fn census(frames: &[CapturedFrame]) -> Vec<(Duration, TxFrame)> {
+    frames.iter().map(|f| (f.at, decode_tx(f))).collect()
+}
+
+fn render_census(rows: &[(Duration, TxFrame)]) -> String {
+    rows.iter()
+        .map(|(at, f)| format!("    t={:>7.2}s {f}", at.as_secs_f64()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Multiset difference `left - right` on decoded frames, ignoring the
+/// per-frame timing and the destination hash's identity: two daemons fed the
+/// same script emit frames for the same destinations, so what a surplus is
+/// made of is (type, context, hops, size) plus which destination it names.
+fn frame_surplus(left: &[(Duration, TxFrame)], right: &[(Duration, TxFrame)]) -> Vec<TxFrame> {
+    let mut pool: Vec<TxFrame> = right.iter().map(|(_, f)| f.clone()).collect();
+    let mut surplus = Vec::new();
+    for (_, f) in left {
+        match pool.iter().position(|c| c == f) {
+            Some(i) => {
+                pool.remove(i);
+            }
+            None => surplus.push(f.clone()),
+        }
+    }
+    surplus.sort();
+    surplus
 }
 
 // =========================================================================
@@ -1088,10 +1252,7 @@ async fn status_parity_matrix_2x2() {
     let lnsd = ParityDaemon::start(Stack::Lnsd).await;
     let rnsd = ParityDaemon::start(Stack::Rnsd).await;
 
-    let mut injectors = Injectors {
-        lnsd: connect_injector(&lnsd).await,
-        rnsd: connect_injector(&rnsd).await,
-    };
+    let mut injectors = Injectors::connect(&lnsd, &rnsd).await;
 
     // ---- Phase 1: STEADY announces. ----
     // Anti-flake: paced below the ingress threshold, then the path sets are
@@ -1442,6 +1603,101 @@ async fn status_parity_matrix_2x2() {
     let stats_l = lnsd.stats().await;
     let stats_r = rnsd.stats().await;
     let (traffic_l, traffic_r) = (traffic_iface(&stats_l), traffic_iface(&stats_r));
+
+    // ---- TX FRAME CENSUS (Codeberg #192). ----
+    // The injector connection is each daemon's only non-local interface, so
+    // everything it received back IS what the traffic interface transmitted.
+    // Decoded before the byte comparison so a txb delta is reported as
+    // frames-with-content, not as an unexplained percentage.
+    let cen_l = census(&injectors.lnsd.captured());
+    let cen_r = census(&injectors.rnsd.captured());
+    tracing::info!(
+        "TX CENSUS lnsd ({} frames, {} wire bytes):\n{}",
+        cen_l.len(),
+        injectors.lnsd.wire_bytes(),
+        render_census(&cen_l)
+    );
+    tracing::info!(
+        "TX CENSUS rnsd ({} frames, {} wire bytes):\n{}",
+        cen_r.len(),
+        injectors.rnsd.wire_bytes(),
+        render_census(&cen_r)
+    );
+    // The census is trusted only because it measures the guard's OWN number:
+    // the framed bytes the capture read off the socket must equal the txb the
+    // daemon reports for that interface. A short settle covers socket lag
+    // between the daemon's write (where it counts) and our read; the state is
+    // frozen, so nothing new can arrive during it.
+    for (label, injector, traffic) in [
+        ("lnsd", &injectors.lnsd, &traffic_l),
+        ("rnsd", &injectors.rnsd, &traffic_r),
+    ] {
+        let txb = num(traffic, "txb") as u64;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while injector.wire_bytes() < txb && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            injector.wire_bytes(),
+            txb,
+            "TX CENSUS on {label}: the capture ({} framed bytes) does not \
+             account for the interface's reported txb ({txb}); the census \
+             would be describing something other than the guarded number",
+            injector.wire_bytes(),
+        );
+        tracing::info!("TX CENSUS {label}: captured framed bytes = reported txb = {txb}");
+    }
+    let surplus_l = frame_surplus(&cen_l, &cen_r);
+    let surplus_r = frame_surplus(&cen_r, &cen_l);
+    let render_surplus = |s: &[TxFrame]| {
+        if s.is_empty() {
+            "    (none)".to_string()
+        } else {
+            s.iter()
+                .map(|f| format!("    {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    };
+    tracing::info!(
+        "TX CENSUS surplus lnsd-over-rnsd ({}):\n{}\nsurplus rnsd-over-lnsd ({}):\n{}",
+        surplus_l.len(),
+        render_surplus(&surplus_l),
+        surplus_r.len(),
+        render_surplus(&surplus_r),
+    );
+    // The frame-level form of the volume guard: identical frames in, so the
+    // frames OUT must be the same multiset on both stacks. Not a byte
+    // percentage - which of the two stacks put an announce on the wire that
+    // the other did not, and what was in it.
+    //
+    // Codeberg #192 was found here: lnsd transmitted 62 announce-sized frames
+    // where the reference transmitted 59, and the three surplus frames
+    // decoded as duplicate PATH_RESPONSEs for the three answered path
+    // requests - our path-response announce-table entry started at
+    // `retries = 0` (a received announce's value, rebroadcast twice) instead
+    // of the reference's `retries = PATHFINDER_R` (Transport.py:2970, fires
+    // once). Fixed in `transport.rs handle_path_request`; the mechanism is
+    // pinned sans-I/O in `leviculum-core node::mvr_path_response_retries`.
+    //
+    // Timing is deliberately NOT compared: the two stacks schedule the same
+    // frame within their own jitter windows, and the census shows offsets
+    // differing by seconds on frames that are otherwise identical.
+    assert!(
+        surplus_l.is_empty() && surplus_r.is_empty(),
+        "TX CENSUS: the two stacks transmitted different frames on identical \
+         injected traffic.\nlnsd-only ({}):\n{}\nrnsd-only ({}):\n{}\n\
+         full lnsd census ({} frames):\n{}\nfull rnsd census ({} frames):\n{}",
+        surplus_l.len(),
+        render_surplus(&surplus_l),
+        surplus_r.len(),
+        render_surplus(&surplus_r),
+        cen_l.len(),
+        render_census(&cen_l),
+        cen_r.len(),
+        render_census(&cen_r),
+    );
+
     for key in ["rxb", "txb"] {
         let (a, b) = (num(&traffic_l, key), num(&traffic_r, key));
         assert!(
@@ -1741,10 +1997,7 @@ async fn status_inventory_parity_across_daemons() {
     wait_observer_gone(&lnsd).await;
     wait_observer_gone(&rnsd).await;
 
-    let mut injectors = Injectors {
-        lnsd: connect_injector(&lnsd).await,
-        rnsd: connect_injector(&rnsd).await,
-    };
+    let mut injectors = Injectors::connect(&lnsd, &rnsd).await;
     let identity = Identity::generate(&mut OsRng);
     let (frame, dest) = build_announce_for(&identity, "inventory");
     injectors.send_both(&frame).await;
