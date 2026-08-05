@@ -288,3 +288,25 @@ of the 15-minute budget. See `leviculum-core/fuzz/README.md` and
 - Don't commit while tests are red.
 - `#[ignore]` is only for hardware-dependent tests. For
   CPU-expensive non-hardware tests, use a Cargo feature flag.
+
+## The ignored-test census
+
+An `#[ignore]`d test is run by nothing. Codeberg #189 found one such
+suite that had been broken for a month with no gate anywhere to say so,
+so the size of that bucket is pinned per test unit in
+`scripts/ignored-counts.txt` and checked by
+`scripts/check-ignored-counts.py` at the end of `just standard`. The
+census is exhaustive: every test executable in the workspace plus every
+package's doc-tests, with units absent from the pin file expected to
+have zero, so a new test binary is covered without an entry.
+
+A new `#[ignore]` therefore fails Tier 1 until you either route the test
+into a tier or raise its number in the pin file — a one-line diff, on
+purpose, with the reason belonging in the commit message. `python3
+scripts/check-ignored-counts.py --print` dumps the current census in
+pin-file format.
+
+Routing an ignored test by name (rather than lifting the ignore) is what
+`scripts/run-status-parity.sh` does for the three `status_parity` tests,
+which need to run serially. A test filter that matches nothing exits 0,
+so any such script must also assert how many tests actually ran.

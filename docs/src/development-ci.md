@@ -10,7 +10,7 @@ external runners.
 | Tier | Name | Trigger | Budget | Test scope |
 |------|------|---------|--------|------------|
 | 0 | `fast` | pre-push hook | ~3 min | fmt + clippy (host + nrf firmware workspace, both BSPs) + rustdoc gate + workspace lib tests |
-| 1 | `standard` | post-commit (background) | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop + TCP-hub endurance smoke soak (see [Soak and endurance](soak-and-endurance.md)) + the `status_parity` two-daemon suite |
+| 1 | `standard` | post-commit (background) | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop + TCP-hub endurance smoke soak (see [Soak and endurance](soak-and-endurance.md)) + the `status_parity` two-daemon suite + the ignored-test census |
 | 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + the periculum `conformance/` and `regression/` corpora (docker) |
 | 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LNode flash-from-HEAD + the periculum `hardware/` corpus |
 

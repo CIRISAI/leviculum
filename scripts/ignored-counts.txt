@@ -1,0 +1,34 @@
+# Pinned census of #[ignore]d tests, one line per test unit (Codeberg #191c).
+#
+# An #[ignore]d test is run by nothing. It compiles, it is registered, and
+# it is never executed: Codeberg #189 found a suite that had been in that
+# state for a month while it was broken, and nothing anywhere said so.
+# This file makes the size of that bucket a reviewed number instead of a
+# side effect. scripts/check-ignored-counts.py compares it against the
+# real census and fails `just standard` on any difference.
+#
+# Format:  <expected count>   <cargo selector for the unit>
+# Units not listed here are expected to have ZERO ignored tests, so a new
+# test binary is covered without an entry. Lines starting with # and blank
+# lines are ignored.
+#
+# Raising a number here is a one-line diff on purpose. That is the whole
+# mechanism: adding a legitimately-ignored test stays cheap, but the
+# decision lands in a diff a reviewer can ask about. Say in the commit
+# message WHY the test cannot be routed into a tier and WHERE it does get
+# run instead.
+#
+# Baseline measured 2026-08-05 (Codeberg #191): 35 workspace-wide.
+
+3    -p leviculum-core --lib
+3    -p leviculum-core --doc
+
+4    -p leviculum-std --lib
+1    -p leviculum-std --doc
+9    -p leviculum-std --test mvr
+
+# 15 in rnsd_interop, of which the three status_parity_tests::* are NOT
+# unobserved: `just standard` runs them by name through
+# scripts/run-status-parity.sh (Codeberg #191a). They keep the #[ignore]
+# because they must run serially, apart from the parallel suite.
+15   -p leviculum-std --test rnsd_interop

@@ -98,6 +98,10 @@ standard: fast test-ffi verify-packaging
     # through one traffic script. ~196 s. Kept #[ignore]d and run by name
     # (serially, apart from the parallel suite) — see the script header.
     bash scripts/run-status-parity.sh
+    # #191c: the #[ignore]d bucket is a pinned number per test unit, so it
+    # cannot grow without a diff. Last, because it needs every workspace
+    # test binary built and this tier has built most of them already.
+    python3 scripts/check-ignored-counts.py
 
 # Build the production binaries periculum mounts into its node containers. Explicit per-bin list avoids `--workspace --bins` which
 # would also try to build leviculum-nrf firmware on the host. Runs on

@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `just standard` runs the `status_parity` two-daemon suite (#191).
+- The number of `#[ignore]`d tests is pinned per test unit and checked
+  in `just standard` (#191).
 - A connection accepted by a listener inherits the listener's
   `ingress_control` instead of always having it off, and a listener
   defaults it on as the reference does (#189).
