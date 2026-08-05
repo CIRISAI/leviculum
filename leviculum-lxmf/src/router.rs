@@ -427,8 +427,8 @@ impl LxmfRouter {
     /// signature.
     ///
     /// The expiry is `emission_secs + TICKET_EXPIRY`, from the one producer
-    /// (see [`emission_secs`]). It is the only LXMF field a peer *discards* on
-    /// its own clock: `if time.time() < expires`
+    /// (the module-private `emission_secs` helper). It is the only LXMF field
+    /// a peer *discards* on its own clock: `if time.time() < expires`
     /// (`reference/LXMF/LXMF/LXMRouter.py:1854`), silently, with no reply and
     /// no log naming us.
     ///
