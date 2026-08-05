@@ -118,7 +118,7 @@ standard: fast test-ffi verify-packaging
 # re-hardlinks it from deps/ without relinking, keeping the old mtime.
 build-integ-bins:
     find leviculum-cli/src leviculum-proxy/src -name '*.rs' -exec touch {} +
-    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
+    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy
 
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
 # leviculum-ci-tier2.service`): Tier 1 + the docker scenario suites.
