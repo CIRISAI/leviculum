@@ -715,8 +715,9 @@ pub struct PathTableExport {
     ///
     /// Back-computed as `expires_ms - <the lifetime this path was given>`,
     /// because [`PathEntry`] stores only the expiry. The lifetime depends on
-    /// the receiving interface's mode ([`Transport::path_expiry_ms_for_interface`],
-    /// mirroring Transport.py:773-778), so this is exact for every path that
+    /// the receiving interface's mode — see the private
+    /// `Transport::path_expiry_ms_for_interface`, mirroring Transport.py:773-778
+    /// — so this is exact for every path that
     /// still sits on the interface it was learned on. A tunnel-restored path
     /// re-homed onto an interface of a *different* mode (`handle_tunnel`)
     /// inherits the original expiry and is therefore off by the difference
