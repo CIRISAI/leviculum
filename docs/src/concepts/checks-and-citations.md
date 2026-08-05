@@ -157,6 +157,18 @@ Rollout has an ordering constraint: counts and reporting cannot be
 enforced until every gate emits manifests, or everything reads as unrun.
 Manifests first, enforcement second.
 
+Step 1 is built: `scripts/run-with-manifest.py` wraps a gate's test
+command, parses the names out of the run and writes one JSON manifest per
+gate under `~/.local/state/leviculum-ci/test-manifests/`, next to the
+other CI run state rather than in the tree or in `target/` — the tiers
+run with their own `CARGO_TARGET_DIR`, so a manifest under `target/`
+would split the union into one per tier. Fourteen gates emit today. The
+union covers 3361 of the 3719 tests the workspace holds; the 358 outside
+it are 31 `#[ignore]`d and 327 in units no gate names — `leviculum-cli`
+and `leviculum-micron` entirely, most of `leviculum-lxmf`, the `jl`/
+`jldiff` suites and every `lnomad` test. That is the size of step 2's
+first report.
+
 ### Declared exceptions expire by execution, not by date
 
 A test may legitimately run in no automatic gate: a rig test needing
@@ -266,6 +278,13 @@ reports anything else:
   subject is a hard error, `mutants_generated > 0` is asserted per pin,
   and the equivalent-mutant allowlist carries per-entry justifications
   and is pinned like `scripts/ignored-counts.txt`.
+- **B, manifest writer**: a fixture of libtest output, parsed before every
+  wrapped run, holding tests that must land in the manifest — including a
+  `#[should_panic]` one, which libtest names `<test> - should panic` and
+  `--list` names plainly — and lines that must not: an ignored test, an
+  indented look-alike a test could print. The counts are then reconciled
+  against libtest's own summary line, so a manifest that disagrees with
+  the run fails the gate.
 - **B, manifest check**: a test deliberately in no gate that must always
   be reported, and one in a gate that must never be.
 - **C, citation guard**: a deliberately drifted citation that must be
@@ -310,8 +329,11 @@ gate observes its green.
 ## Where this stands
 
 Codeberg is the source of truth for what is built. At the time of
-writing: C exists for `docs/src/**` only. A and B are unbuilt, as are
-C's submodule check, its source coverage and its bump path.
+writing: C covers `docs/src/**` and the Rust sources of `leviculum-core`,
+`leviculum-lxmf` and `leviculum-std`, and its submodule check runs first
+in `just fast`; its bump path is unbuilt. B emits manifests from every
+host gate that runs tests; the check that reads their union, and the
+staleness bound that ages them out, are unbuilt. A is unbuilt.
 
 All three are subject to the rule they enforce. The standing canaries
 above are the demonstration made permanent, because a one-time one

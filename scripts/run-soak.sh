@@ -60,6 +60,12 @@ cargo build -p leviculum-cli --release --bin lnsd
 # 2. Run the chosen variant. It is #[ignore]d (spawns the lnsd binary), so
 #    --ignored --exact selects exactly it. --nocapture surfaces the PASS block
 #    with the "rss plateau:" and "fds:" lines.
+#
+#    Through run-with-manifest.py (Guarantee B step 1): `--exact` is the
+#    by-name form where a typo runs nothing and still exits 0, which is what
+#    the manifest exists to make visible. Two variants, two manifests, because
+#    a smoke run must not be readable as evidence that the heavy soak ran.
 echo "[run-soak] running $TEST ..."
-cargo test -p leviculum-std --test rnsd_interop -- \
+python3 scripts/run-with-manifest.py --gate "soak-$([ "$FULL" = 1 ] && echo full || echo smoke)" -- \
+    cargo test -p leviculum-std --test rnsd_interop -- \
     --ignored --exact "$TEST" --nocapture

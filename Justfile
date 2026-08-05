@@ -3,6 +3,16 @@
 # over its three corpora. Override the checkout with PERICULUM_ROOT or the
 # binary with PERICULUM_BIN.
 
+# Guarantee B step 1 (docs/src/concepts/checks-and-citations.md): a gate that
+# runs tests records WHICH tests it executed, parsed out of the run's own
+# output rather than out of `cargo test --list` — a list records intent, and a
+# by-name selector that matches nothing runs zero tests and exits 0.
+# `{{manifest}} <name> -- <command>` passes the command's output and exit
+# status straight through and writes the manifest beside the other CI run
+# state, under ~/.local/state/leviculum-ci/test-manifests/. Step 2 (not built)
+# reads the union of those manifests and reports every test in none of them.
+manifest := "python3 scripts/run-with-manifest.py --gate"
+
 # Minimum-viable-reproduction tier — discipline tier, not size tier.
 # Each test < 5 s, deterministic, single named failure mode.  See
 # Codeberg #39 for design intent.  --test-threads=1 avoids
@@ -10,7 +20,7 @@
 # in the same binary.  Depends on build-integ-bins because the mvr
 # tests spawn the release lnsd/lncp binaries directly.
 mvr: build-integ-bins
-    cargo test -p leviculum-std --test mvr -- --test-threads=1
+    {{manifest}} mvr -- cargo test -p leviculum-std --test mvr -- --test-threads=1
 
 # Promote the most-recent auto-bug bundle to the coder bridge.
 # Run after a tier RED has emitted to $BRIDGE/auto-bug/instructions.md
@@ -51,7 +61,7 @@ doc-gate:
 # core logic (a bare `tracing::x!` that slipped past the shim would either
 # fail to compile here or, worse, only on M0 — see m0-build-gate).
 core-no-tracing:
-    cargo test -p leviculum-core --no-default-features
+    {{manifest}} core-no-tracing -- cargo test -p leviculum-core --no-default-features
 
 # Cortex-M0 gate (PR #57): leviculum-core must cross-compile for thumbv6m
 # (atomic-less MCU, e.g. rp2040) with tracing off. tracing-core's CAS-based
@@ -81,7 +91,7 @@ check-submodules:
 # and `standard` names leviculum-std suites one by one — which is the
 # Guarantee-B-masking-C shape the concept page warns about.
 citation-guard:
-    cargo test -p leviculum-std --test doc_citations -- --nocapture
+    {{manifest}} citation-guard -- cargo test -p leviculum-std --test doc_citations -- --nocapture
 
 # Tier 0 (~3 min, runs on every git push): submodule pins + fmt + clippy
 # (host + nrf) + rustdoc gate + tracing-shim + M0 gates + workspace lib
@@ -89,7 +99,7 @@ citation-guard:
 fast: check-submodules mvr lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
-    cargo test --workspace --lib
+    {{manifest}} workspace-lib -- cargo test --workspace --lib
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Runs in background
 # after every commit via the post-commit hook.
@@ -102,18 +112,18 @@ fast: check-submodules mvr lint-nrf doc-gate core-no-tracing m0-build-gate citat
 # lnomad/tests/ and leviculum-micron/tests/ are still uncovered, as are
 # several leviculum-std suites beyond the three named below.
 standard: fast test-ffi verify-packaging
-    cargo test -p leviculum-core --tests
+    {{manifest}} core-tests -- cargo test -p leviculum-core --tests
     # ~4 s: node_integ builds an in-process daemon + IPC + blog node, which
     # is too slow for the Tier 0 push gate but trivial here.
-    cargo test -p lblogd --tests
-    cargo test -p leviculum-proxy
-    cargo test -p leviculum-std --test rnsd_interop
-    cargo test -p leviculum-std --test event_log_subscriber -- --test-threads=1
-    cargo test -p leviculum-std --test event_log_multiprocess
+    {{manifest}} lblogd-tests -- cargo test -p lblogd --tests
+    {{manifest}} proxy -- cargo test -p leviculum-proxy
+    {{manifest}} rnsd-interop -- cargo test -p leviculum-std --test rnsd_interop
+    {{manifest}} event-log-subscriber -- cargo test -p leviculum-std --test event_log_subscriber -- --test-threads=1
+    {{manifest}} event-log-multiprocess -- cargo test -p leviculum-std --test event_log_multiprocess
     # The LNode debug-log format contract (Codeberg #65): pins the [HEAP] and
     # [PANIC_COUNT] line shapes that catch-reboot.sh and the by-hand heap
     # analysis grep, against the firmware source that emits them.
-    cargo test -p leviculum-std --test lnode_debug_log_format
+    {{manifest}} lnode-debug-log-format -- cargo test -p leviculum-std --test lnode_debug_log_format
     # Endurance gate (#101): builds lnsd, boots it as a hub, asserts 100%
     # delivery + RSS plateau + no fd leak. ~15 s smoke; `--full` is on demand.
     bash scripts/run-soak.sh
@@ -213,7 +223,7 @@ nightly: extensive
 # tests skip cleanly if Python RNS is unavailable.
 test-ffi:
     cargo build -p leviculum-ffi --target x86_64-unknown-linux-gnu
-    cargo test-ffi
+    {{manifest}} ffi -- cargo test-ffi
 
 # Memory- and race-check the C API under sanitizers and Miri. On demand, not in
 # the standard tiers: it needs the nightly toolchain

@@ -33,6 +33,11 @@ cd "$(dirname "$0")/.."
 # from a run that measured nothing -- the exact failure mode
 # docs/src/concepts/evidence-and-honesty.md opens with. Pinned, and checked
 # against the summary line below.
+#
+# scripts/run-with-manifest.py now closes the matches-nothing hole for every
+# gate, this one included: it records the names that ran and fails a run that
+# executed none. EXPECTED stays because it pins a NUMBER -- the manifest says
+# what ran, not how many were meant to.
 EXPECTED=3
 
 cargo build -p leviculum-cli --bin lnsd --bin lnstatus
@@ -42,7 +47,8 @@ trap 'rm -f "$log"' EXIT
 
 start=$(date +%s)
 set +e
-cargo test -p leviculum-std --test rnsd_interop status_parity_tests:: \
+python3 scripts/run-with-manifest.py --gate status-parity -- \
+    cargo test -p leviculum-std --test rnsd_interop status_parity_tests:: \
     -- --ignored --test-threads=1 2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
 set -e
