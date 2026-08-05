@@ -58,11 +58,18 @@
 //!     daemons, equal to the script's expectation), not "within a few
 //!     percent" - the traffic is byte-identical, so any missing path is a
 //!     real processing divergence;
-//!   * per-interface rxb/txb are compared within 5% across daemons: the
-//!     frames are identical, but the two stacks count at different framing
-//!     layers (lnsd counts on-wire HDLC bytes, Python counts de-framed
-//!     payload bytes; measured ~3% delta), so exact equality is impossible
-//!     by design and the tolerance covers exactly that layer difference.
+//!   * per-interface rxb/txb are compared within 5% across daemons. On RX
+//!     the two stacks count at different framing layers - we count the
+//!     on-wire HDLC bytes, Python counts the de-framed payload
+//!     (`process_incoming` is handed the de-framed buffer,
+//!     TCPInterface.py:306) - a stable ~2% delta on this script. On TX
+//!     they count the SAME layer: Python reassigns `data` to the framed
+//!     buffer before `self.txb += len(data)` (TCPInterface.py:327), as we
+//!     do in `interfaces/tcp.rs`. A txb delta is therefore a real
+//!     difference in what was transmitted, not a framing allowance -
+//!     Codeberg #192: lnsd emits 62 announce-sized frames on this script
+//!     where rnsd emits 59, which is 4.3-5.8% and trips this guard about
+//!     one run in four.
 //!
 //! ## Freeze discipline (why the frozen comparisons cannot flake)
 //!
@@ -1442,6 +1449,13 @@ async fn status_parity_matrix_2x2() {
             "VOLUME GUARD: {key} must be non-zero on both traffic interfaces"
         );
         let rel = (a - b).abs() / a.max(b);
+        // Logged in BOTH states, not only on the assert: a tolerance whose
+        // margin nobody has ever seen is a tolerance nobody can defend
+        // (docs/src/concepts/evidence-and-honesty.md).
+        tracing::info!(
+            "VOLUME GUARD {key}: lnsd={a} rnsd={b} delta={:.2}% (limit 5%)",
+            rel * 100.0
+        );
         assert!(
             rel <= 0.05,
             "VOLUME GUARD: traffic interface {key} diverges {:.1}% (lnsd={a}, rnsd={b}); \
