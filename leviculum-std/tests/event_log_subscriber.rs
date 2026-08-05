@@ -5,19 +5,55 @@
 //!
 //! The subscriber lives behind a process-global tracing layer.  Every
 //! active `EventLogHandle` receives every event the layer sees,
-//! regardless of which test emitted it.  To stay deterministic when
-//! tests run in parallel, each test uses a **disjoint event name**
-//! (`EV_BASIC`, `EV_VIOLATION` (= `PKT_RX` since the production
+//! regardless of which test emitted it.  Two things keep that
+//! deterministic.
+//!
+//! Where a test can choose its own event name it uses a **disjoint**
+//! one (`EV_BASIC`, `EV_VIOLATION` (= `PKT_RX` since the production
 //! catalogue is needed for the schema-violation test), `EV_UNKNOWN`,
-//! `EV_PANIC`, `EV_MACRO`, `EV_WS`) and filters the dump to lines
-//! that reference its own event name before asserting.
+//! `EV_PANIC`, `EV_MACRO`, `EV_WS`) and filters the dump to lines that
+//! reference its own event name before asserting.
+//!
+//! Disjoint names are not available to every test: the `test_catalogue_*`
+//! family and `obs3_endpoint_events_clean_under_layer` assert on the
+//! *production* catalogue entries, so they necessarily share names —
+//! and they disagree about them, because the catalogue tests emit a
+//! deliberately malformed event to prove the violation fires while the
+//! OBS-3 test asserts those same names are violation-free.  Filtering
+//! by name cannot separate the two.  Every test therefore takes
+//! [`lock_event_log`] before creating its handle, so no two handles are
+//! ever active at once.
 
 use std::panic;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use leviculum_std::test_support::event_log::{
     init_event_log, init_event_log_to_file, init_event_log_with_extra_schemas, EventLogHandle,
     EventSchema,
 };
+
+/// Serialises the tests in this file.
+///
+/// A handle is registered when it is created and removed when it is
+/// dropped (`leviculum-std/src/event_log.rs:382`, `:344`), so it
+/// captures exactly the events emitted during its lifetime.  Holding
+/// this lock across a test's handle therefore makes the buffer contain
+/// that test's events and nothing else.
+///
+/// Take it *before* creating the handle and bind the guard first, so
+/// the handle — declared later — drops first and deregisters while the
+/// lock is still held.
+///
+/// Poison is recovered rather than propagated: several tests panic on
+/// purpose, and a poisoned lock would turn one deliberate panic into 25
+/// unrelated failures.
+static EVENT_LOG_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_event_log() -> MutexGuard<'static, ()> {
+    EVENT_LOG_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Test-only catalogue extension for `test_assert_no_schema_violations_macro_red`.
 /// Per-handle (lives in the handle's `extra_schemas`); other handles
@@ -46,6 +82,7 @@ fn lines_for(handle: &EventLogHandle, event_name: &str) -> Vec<String> {
 /// production catalogue, so no schema check fires.
 #[test]
 fn test_basic_event_format() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     for _ in 0..3 {
         tracing::debug!(
@@ -102,6 +139,7 @@ fn test_basic_event_format() {
 /// synthetic `EVENT_SCHEMA_VIOLATION` line is appended.
 #[test]
 fn test_schema_violation_emitted() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "PKT_RX",
@@ -144,6 +182,7 @@ fn test_schema_violation_emitted() {
 /// no field-value violation expected.
 #[test]
 fn test_unknown_event_passes_through() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(event = "EV_UNKNOWN", x = 1u32);
     let lines = lines_for(&handle, "EV_UNKNOWN");
@@ -166,6 +205,10 @@ fn test_unknown_event_passes_through() {
 /// deterministically.
 #[test]
 fn test_dump_on_panic() {
+    // Outside the catch_unwind: the guard must not live in the frame
+    // that unwinds, or the deliberate panic would drop it before the
+    // handle it protects.
+    let _lock = lock_event_log();
     let dump_path = std::env::temp_dir().join(format!("event-log-dump-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&dump_path);
 
@@ -197,6 +240,8 @@ fn test_dump_on_panic() {
 /// catches the violation and panics with a count message.
 #[test]
 fn test_assert_no_schema_violations_macro_red() {
+    // See test_dump_on_panic: the guard stays outside the unwinding frame.
+    let _lock = lock_event_log();
     let result = panic::catch_unwind(|| {
         let handle = init_event_log_with_extra_schemas(TEST_MACRO_SCHEMAS, None);
         // EV_MACRO requires k1 and k2; we send only k1 → schema violation
@@ -231,6 +276,7 @@ fn test_assert_no_schema_violations_macro_red() {
 /// `EVENT_FIELD_VIOLATION` line in addition to the original event.
 #[test]
 fn test_field_value_whitespace_violation() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(event = "EV_WS", note = "has space");
     tracing::debug!(event = "EV_WS", extra = "key=val");
@@ -285,6 +331,7 @@ fn test_field_value_whitespace_violation() {
 /// EVENT_FIELD_VIOLATION must still fire (it surfaces the source bug).
 #[test]
 fn test_field_value_sanitized_to_scalar() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "EV_SANI",
@@ -337,6 +384,7 @@ fn test_field_value_sanitized_to_scalar() {
 /// This is the false-positive flood that poisoned the miauhaus self-alarm.
 #[test]
 fn test_name_field_whitespace_no_violation() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(event = "EV_IFACE", iface = "autoconnect/Dark Doodad 23");
 
@@ -375,6 +423,7 @@ fn test_name_field_whitespace_no_violation() {
 /// surfaced.
 #[test]
 fn test_structured_field_whitespace_still_violates() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(event = "EV_STRUCT", reason = "no route found");
 
@@ -394,6 +443,7 @@ fn test_structured_field_whitespace_still_violates() {
 /// `None` (legitimate enum variants are also named `None`).
 #[test]
 fn test_record_debug_renders_bare_scalar() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "EV_OPT",
@@ -435,6 +485,7 @@ fn test_record_debug_renders_bare_scalar() {
 /// required key is missing.
 #[test]
 fn test_silence_lnode_events_in_catalogue() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
 
     // Happy path — both events with all required keys.
@@ -528,6 +579,7 @@ fn assert_catalogue_round_trip(
 
 #[test]
 fn test_catalogue_emb_evict() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "EMB_EVICT",
@@ -541,6 +593,7 @@ fn test_catalogue_emb_evict() {
 
 #[test]
 fn test_catalogue_emb_insert_fail() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "EMB_INSERT_FAIL",
@@ -558,6 +611,7 @@ fn test_catalogue_emb_insert_fail() {
 
 #[test]
 fn test_catalogue_identity() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::info!(
         event = "IDENTITY",
@@ -569,6 +623,7 @@ fn test_catalogue_identity() {
 
 #[test]
 fn test_catalogue_path_lookup() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     // found=true site emits dst, found, hops, iface
     tracing::debug!(
@@ -587,6 +642,7 @@ fn test_catalogue_path_lookup() {
 
 #[test]
 fn test_catalogue_path_table() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(event = "PATH_TABLE", size = 5_usize);
     tracing::debug!(event = "PATH_TABLE"); // missing size
@@ -595,6 +651,7 @@ fn test_catalogue_path_table() {
 
 #[test]
 fn test_catalogue_path_table_entry() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "PATH_TABLE_ENTRY",
@@ -614,6 +671,7 @@ fn test_catalogue_path_table_entry() {
 
 #[test]
 fn test_catalogue_proof_gen() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(event = "PROOF_GEN", for_pkt = "abcd", to_dst = "ef01");
     tracing::debug!(event = "PROOF_GEN", for_pkt = "abcd"); // missing to_dst
@@ -622,6 +680,7 @@ fn test_catalogue_proof_gen() {
 
 #[test]
 fn test_catalogue_proof_send() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(event = "PROOF_SEND", pkt = "abcd", iface = "lora0");
     tracing::debug!(event = "PROOF_SEND", pkt = "abcd"); // missing iface
@@ -634,6 +693,7 @@ fn test_catalogue_proof_send() {
 
 #[test]
 fn test_catalogue_link_local() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "LINK_LOCAL",
@@ -647,6 +707,7 @@ fn test_catalogue_link_local() {
 
 #[test]
 fn test_catalogue_request_rx() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "REQUEST_RX",
@@ -660,6 +721,7 @@ fn test_catalogue_request_rx() {
 
 #[test]
 fn test_catalogue_response_tx() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "RESPONSE_TX",
@@ -679,6 +741,7 @@ fn test_catalogue_response_tx() {
 /// because #114 wires them from new call sites.
 #[test]
 fn obs3_endpoint_events_clean_under_layer() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
 
     tracing::debug!(
@@ -736,6 +799,7 @@ fn obs3_endpoint_events_clean_under_layer() {
 
 #[test]
 fn test_catalogue_reverse_add() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::debug!(
         event = "REVERSE_ADD",
@@ -753,6 +817,7 @@ fn test_catalogue_reverse_add() {
 
 #[test]
 fn test_catalogue_event_channel_full() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::warn!(
         event = "EVENT_CHANNEL_FULL",
@@ -769,6 +834,7 @@ fn test_catalogue_event_channel_full() {
 
 #[test]
 fn test_catalogue_event_channel_closed() {
+    let _lock = lock_event_log();
     let handle = init_event_log();
     tracing::warn!(
         event = "EVENT_CHANNEL_CLOSED",
