@@ -15,6 +15,7 @@
 - [Wire field semantics](concepts/wire-field-semantics.md)
 - [Regulatory airtime](concepts/regulatory-airtime.md)
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
+- [Checks that are actually checks](concepts/checks-and-citations.md)
 
 # User Guide
 
