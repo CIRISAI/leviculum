@@ -164,4 +164,32 @@ async fn test_lns_rpc_query_against_python_rnsd() {
         stats.get("interfaces").and_then(|i| i.as_array()).is_some(),
         "interface_stats must carry an interfaces array, got: {stats}"
     );
+
+    // Codeberg #174, the absence half of `lnstatus --tables`. `transport_tables`
+    // is a Leviculum-only command; a Python `rnsd` matches no arm for it and
+    // falls straight through to `conn.close()` (Reticulum.py:1213-1260). This
+    // pins what that looks like from our side, because the design of
+    // `merge_transport_tables` rests on it: an error, bounded in time, not a
+    // hang and not a plausible-looking empty answer that would be
+    // indistinguishable from "the tables really are empty".
+    let started = Instant::now();
+    let unsupported =
+        leviculum_std::rpc_query(&rnsd.instance_name, &rnsd.authkey, "transport_tables").await;
+    let waited = started.elapsed();
+    assert!(
+        unsupported.is_err(),
+        "a Python rnsd must not answer transport_tables; got {unsupported:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(10),
+        "an unsupported command must fail fast, not stall the client; took {waited:?}"
+    );
+
+    // And the daemon is still usable afterwards: the unanswered command closed
+    // one connection, not the RPC listener. A client that degrades to "no
+    // tables" must still get its status.
+    let after = leviculum_std::rpc_query(&rnsd.instance_name, &rnsd.authkey, "interface_stats")
+        .await
+        .expect("rnsd still answers interface_stats after refusing transport_tables");
+    assert!(after.get("interfaces").and_then(|i| i.as_array()).is_some());
 }

@@ -394,6 +394,14 @@ impl leviculum_core::traits::Storage for Storage {
     ) -> Option<leviculum_core::storage_types::ReverseEntry> {
         self.inner.remove_reverse(hash)
     }
+    fn reverse_entries(
+        &self,
+    ) -> Vec<(
+        [u8; TRUNCATED_HASHBYTES],
+        leviculum_core::storage_types::ReverseEntry,
+    )> {
+        self.inner.reverse_entries()
+    }
 
     // Link Table
     fn get_link_entry(
@@ -414,6 +422,14 @@ impl leviculum_core::traits::Storage for Storage {
         entry: leviculum_core::storage_types::LinkEntry,
     ) {
         self.inner.set_link_entry(link_id, entry)
+    }
+    fn link_entries(
+        &self,
+    ) -> Vec<(
+        [u8; TRUNCATED_HASHBYTES],
+        leviculum_core::storage_types::LinkEntry,
+    )> {
+        self.inner.link_entries()
     }
     // Announce Table
     fn get_announce(

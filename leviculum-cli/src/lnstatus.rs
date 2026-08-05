@@ -75,6 +75,19 @@ struct Args {
     #[arg(short = 'j', long = "json", default_value_t = false)]
     json: bool,
 
+    /// add the transport's internal tables to the JSON output (requires -j)
+    ///
+    /// Additive Leviculum extension (Codeberg #174): `rnstatus` has no
+    /// counterpart, so the flag is gated on `-j` rather than changing what any
+    /// reference flag does. See `lnstatus_render::merge_transport_tables`.
+    #[arg(
+        long = "tables",
+        default_value_t = false,
+        requires = "json",
+        conflicts_with_all = ["remote", "discovered", "discovered_details"]
+    )]
+    tables: bool,
+
     /// transport identity hash of remote instance to get status from
     #[arg(short = 'R')]
     remote: Option<String>,
@@ -183,6 +196,33 @@ async fn fetch_status(
     Ok((stats, link_count))
 }
 
+/// Fetch the `transport_tables` snapshot for `--tables` (Codeberg #174).
+///
+/// Returns `None` when the daemon does not answer the command — a Python
+/// `rnsd`, or an `lnsd` from before #174, both match no arm and close the
+/// connection, which surfaces here as a transport error. That is the same
+/// tolerance `rnstatus` applies to `link_count` (rnstatus.py:337-338) and the
+/// same one `fetch_status` above already mirrors: the status query the user
+/// asked for succeeded, so the exit code stays 0 and the stats dict is still
+/// printed — just without the additive key. The reason goes to stderr so the
+/// omission is never silent.
+async fn fetch_transport_tables(
+    instance_name: &str,
+    authkey: &[u8; 32],
+) -> Option<serde_json::Value> {
+    match leviculum_std::rpc_query(instance_name, authkey, "transport_tables").await {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!(
+                "(daemon did not answer the transport_tables query, omitting \
+                 \"{}\" from the output: {e})",
+                lnstatus_render::TRANSPORT_TABLES_KEY
+            );
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -240,8 +280,12 @@ async fn main() {
     }
 
     match fetch_status(&instance_name, &authkey, args.link_stats).await {
-        Ok((stats, link_count)) => {
+        Ok((mut stats, link_count)) => {
             if args.json {
+                if args.tables {
+                    let tables = fetch_transport_tables(&instance_name, &authkey).await;
+                    lnstatus_render::merge_transport_tables(&mut stats, tables);
+                }
                 println!("{}", lnstatus_render::render_json(&stats));
             } else {
                 print!(
@@ -449,8 +493,12 @@ async fn run_monitor(instance_name: &str, authkey: &[u8; 32], args: &Args, opts:
     let interval = args.monitor_interval.max(0.2);
     loop {
         let rendered = match fetch_status(instance_name, authkey, args.link_stats).await {
-            Ok((stats, link_count)) => {
+            Ok((mut stats, link_count)) => {
                 if args.json {
+                    if args.tables {
+                        let tables = fetch_transport_tables(instance_name, authkey).await;
+                        lnstatus_render::merge_transport_tables(&mut stats, tables);
+                    }
                     lnstatus_render::render_json(&stats) + "\n"
                 } else {
                     lnstatus_render::render_status(&stats, link_count, opts)
@@ -571,6 +619,30 @@ mod cli_tests {
         // Wrong length and non-hex are rejected.
         assert!(super::parse_identity_hash("abcd").is_err());
         assert!(super::parse_identity_hash(&"z".repeat(32)).is_err());
+    }
+
+    // Codeberg #174: --tables is additive. It is off unless asked for, it
+    // cannot be asked for without -j (so it can never change what a reference
+    // flag prints), and it is refused in the two modes that answer from a
+    // different source than the local transport.
+    #[test]
+    fn tables_flag_is_additive_and_gated() {
+        assert!(!parse(&[]).tables, "off by default");
+        assert!(!parse(&["-j"]).tables, "-j alone stays exactly what it was");
+        assert!(parse(&["-j", "--tables"]).tables);
+        assert!(parse(&["--json", "--tables"]).tables);
+        // Without -j there is nothing to add the key to.
+        assert!(Args::try_parse_from(["lnstatus", "--tables"]).is_err());
+        // No short flag, and it must not be reachable by prefixing -t/--totals.
+        assert!(Args::try_parse_from(["lnstatus", "-j", "-T"]).is_err());
+        assert!(!parse(&["-t"]).tables && parse(&["-t"]).totals);
+        // Remote (-R) and the discovered registry (-d/-D) answer from
+        // somewhere other than the local transport's tables.
+        assert!(
+            Args::try_parse_from(["lnstatus", "-j", "--tables", "-R", &"a".repeat(32)]).is_err()
+        );
+        assert!(Args::try_parse_from(["lnstatus", "-j", "--tables", "-d"]).is_err());
+        assert!(Args::try_parse_from(["lnstatus", "-j", "--tables", "-D"]).is_err());
     }
 
     #[test]

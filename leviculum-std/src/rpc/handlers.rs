@@ -39,6 +39,7 @@ pub(super) fn handle_request(
         ),
         RpcRequest::GetLinkCount => pickle_int(core.active_link_count() as i64),
         RpcRequest::GetLinkTable => build_link_table(core),
+        RpcRequest::GetTransportTables => build_transport_tables(core, start_time),
         RpcRequest::GetDiscoveredInterfaces => build_discovered_interfaces(discovery_storage),
         RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
         RpcRequest::GetRateTable => build_rate_table(core, start_time),
@@ -738,7 +739,6 @@ fn build_path_table(
     max_hops: Option<i64>,
 ) -> Value {
     let entries = core.path_table_entries();
-    let path_expiry_ms = core.transport_config().path_expiry_secs * 1000;
 
     // Anchor: wall clock at start_time
     let epoch_base = epoch_base_secs(start_time);
@@ -759,9 +759,11 @@ fn build_path_table(
             .interface_name(entry.interface_index)
             .unwrap_or("unknown");
 
-        // Back-compute creation timestamp from expires - path_lifetime
-        let timestamp_mono_ms = entry.expires_ms.saturating_sub(path_expiry_ms);
-        let timestamp_secs = mono_ms_to_epoch(epoch_base, now_mono_ms, timestamp_mono_ms);
+        // Local receipt time, back-computed from expires - the lifetime THIS
+        // path was given (which depends on the receiving interface's mode, so
+        // the flat configured default is wrong for access-point and roaming
+        // paths). See `PathTableExport::timestamp_ms`.
+        let timestamp_secs = mono_ms_to_epoch(epoch_base, now_mono_ms, entry.timestamp_ms);
         let expires_secs = mono_ms_to_epoch(epoch_base, now_mono_ms, entry.expires_ms);
 
         let dict = pickle_dict(vec![
@@ -823,6 +825,235 @@ fn build_link_table(core: &StdNodeCore) -> Value {
         list.push(dict);
     }
     pickle_list(list)
+}
+
+// Transport tables (Codeberg #174 — `lnstatus -j --tables`)
+//
+// One snapshot of every table the transport maintains, taken under a single
+// RPC call so the tables are mutually consistent. Python `rnsd` serves no such
+// command and answers by closing the connection, which is what makes absence
+// distinguishable from emptiness on the reading side: an absent
+// `transport_tables` key means the daemon does not know the question, an
+// empty list means it does and the table is empty.
+//
+// Reference check, per table:
+//
+//   * `path_table` — the ONE table Python serves over RPC
+//     (`Reticulum.get_path_table`, Reticulum.py:1516-1538). Its six keys
+//     (`hash`, `timestamp`, `via`, `hops`, `expires`, `interface`) and their
+//     units (Unix seconds as floats) are taken verbatim, so a row here is a
+//     row of that RPC's response plus `announce_emitted`.
+//   * `reverse_table`, `link_table`, `announce_table`, `tunnels` — Python
+//     holds all four but exposes none of them. The reference names them only
+//     by list index (`IDX_RT_*`, `IDX_LT_*`, `IDX_AT_*`, `IDX_TT_*`,
+//     Transport.py:3556-3586); the string keys here are ours, spelled after
+//     those constants.
+//   * `announce_cache` — our cache of the last announce per known
+//     destination, whose retain/recency semantics mirror
+//     `Identity.known_destinations[dest][4]` (Codeberg #84). No reference
+//     RPC.
+//   * `local_links` — the links this node TERMINATES; identical rows to the
+//     pre-existing `link_table` RPC. Note the trap: that RPC's `link_table`
+//     and this dump's `link_table` are different tables. Here the reference
+//     name wins, because `Transport.link_table` is the reference's own name
+//     for the relay table, and the local inventory (which the reference has
+//     no table for at all) is the one that gets the qualified name.
+//
+// The additive keys are safe against a Python reader for the same reason
+// `tx_jitter_max` is (Codeberg #190): every Python consumer of an RPC
+// response reads it by name and none enumerates it, so an unknown key is
+// simply never read.
+fn build_transport_tables(core: &StdNodeCore, start_time: std::time::Instant) -> Value {
+    let epoch_base = epoch_base_secs(start_time);
+    let now_mono_ms = core.now_ms();
+    let to_epoch = |mono_ms: u64| pickle_float(mono_ms_to_epoch(epoch_base, now_mono_ms, mono_ms));
+    // Name lookup only; interface_stats() would pop frequency samples.
+    let iface = |idx: usize| pickle_str(core.interface_name(idx).unwrap_or("unknown"));
+    let opt_iface = |idx: Option<usize>| match idx {
+        Some(i) => iface(i),
+        None => pickle_none(),
+    };
+
+    let path_table = core
+        .path_table_entries()
+        .iter()
+        .map(|e| {
+            pickle_dict(vec![
+                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+                (
+                    pickle_str_key("via"),
+                    // Direct: Python uses the destination hash as received_from
+                    // (Transport.py:1600), never None.
+                    pickle_bytes(e.next_hop.as_ref().unwrap_or(&e.hash)),
+                ),
+                (pickle_str_key("hops"), pickle_int(e.hops as i64)),
+                (pickle_str_key("expires"), to_epoch(e.expires_ms)),
+                (pickle_str_key("interface"), iface(e.interface_index)),
+                (
+                    pickle_str_key("announce_emitted"),
+                    pickle_int(e.announce_emitted_secs as i64),
+                ),
+            ])
+        })
+        .collect();
+
+    let reverse_table = core
+        .reverse_table_entries()
+        .iter()
+        .map(|e| {
+            pickle_dict(vec![
+                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                (
+                    pickle_str_key("receiving_interface"),
+                    iface(e.receiving_interface_index),
+                ),
+                (
+                    pickle_str_key("outbound_interface"),
+                    iface(e.outbound_interface_index),
+                ),
+                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+            ])
+        })
+        .collect();
+
+    let link_table = core
+        .transport_link_table_entries()
+        .iter()
+        .map(|e| {
+            pickle_dict(vec![
+                (pickle_str_key("link_id"), pickle_bytes(&e.link_id)),
+                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+                (
+                    pickle_str_key("next_hop_interface"),
+                    iface(e.next_hop_interface_index),
+                ),
+                (
+                    pickle_str_key("remaining_hops"),
+                    pickle_int(e.remaining_hops as i64),
+                ),
+                (
+                    pickle_str_key("receiving_interface"),
+                    iface(e.received_interface_index),
+                ),
+                (pickle_str_key("hops"), pickle_int(e.hops as i64)),
+                (
+                    pickle_str_key("destination_hash"),
+                    pickle_bytes(&e.destination_hash),
+                ),
+                (pickle_str_key("validated"), pickle_bool(e.validated)),
+                (
+                    pickle_str_key("proof_timeout"),
+                    to_epoch(e.proof_timeout_ms),
+                ),
+            ])
+        })
+        .collect();
+
+    let announce_table = core
+        .announce_table_entries()
+        .iter()
+        .map(|e| {
+            pickle_dict(vec![
+                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+                (
+                    pickle_str_key("retransmit_timeout"),
+                    e.retransmit_at_ms.map(to_epoch).unwrap_or_else(pickle_none),
+                ),
+                (pickle_str_key("retries"), pickle_int(e.retries as i64)),
+                (
+                    pickle_str_key("receiving_interface"),
+                    iface(e.receiving_interface_index),
+                ),
+                (pickle_str_key("hops"), pickle_int(e.hops as i64)),
+                (
+                    pickle_str_key("packet_length"),
+                    pickle_int(e.packet_length as i64),
+                ),
+                (
+                    pickle_str_key("local_rebroadcasts"),
+                    pickle_int(e.local_rebroadcasts as i64),
+                ),
+                (
+                    pickle_str_key("block_rebroadcasts"),
+                    pickle_bool(e.block_rebroadcasts),
+                ),
+                (
+                    pickle_str_key("attached_interface"),
+                    opt_iface(e.target_interface_index),
+                ),
+            ])
+        })
+        .collect();
+
+    let announce_cache = core
+        .announce_cache_entries()
+        .iter()
+        .map(|e| {
+            pickle_dict(vec![
+                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                (
+                    pickle_str_key("packet_length"),
+                    pickle_int(e.packet_length as i64),
+                ),
+                (pickle_str_key("retained"), pickle_bool(e.retained)),
+                (
+                    pickle_str_key("last_used"),
+                    e.last_used_ms.map(to_epoch).unwrap_or_else(pickle_none),
+                ),
+            ])
+        })
+        .collect();
+
+    let tunnels = core
+        .tunnel_table_entries()
+        .iter()
+        .map(|t| {
+            let paths = t
+                .paths
+                .iter()
+                .map(|p| {
+                    pickle_dict(vec![
+                        (pickle_str_key("hash"), pickle_bytes(&p.hash)),
+                        (pickle_str_key("hops"), pickle_int(p.hops as i64)),
+                        (
+                            pickle_str_key("via"),
+                            pickle_bytes(p.next_hop.as_ref().unwrap_or(&p.hash)),
+                        ),
+                        (pickle_str_key("expires"), to_epoch(p.expires_ms)),
+                        (pickle_str_key("timestamp"), to_epoch(p.timestamp_ms)),
+                        (
+                            pickle_str_key("announce_emitted"),
+                            pickle_int(p.announce_emitted_secs as i64),
+                        ),
+                    ])
+                })
+                .collect();
+            pickle_dict(vec![
+                (pickle_str_key("tunnel_id"), pickle_bytes(&t.tunnel_id)),
+                (pickle_str_key("interface"), opt_iface(t.interface_index)),
+                (pickle_str_key("expires"), to_epoch(t.expires_ms)),
+                (pickle_str_key("paths"), pickle_list(paths)),
+            ])
+        })
+        .collect();
+
+    pickle_dict(vec![
+        (pickle_str_key("path_table"), pickle_list(path_table)),
+        (pickle_str_key("reverse_table"), pickle_list(reverse_table)),
+        (pickle_str_key("link_table"), pickle_list(link_table)),
+        (
+            pickle_str_key("announce_table"),
+            pickle_list(announce_table),
+        ),
+        (
+            pickle_str_key("announce_cache"),
+            pickle_list(announce_cache),
+        ),
+        (pickle_str_key("tunnels"), pickle_list(tunnels)),
+        (pickle_str_key("local_links"), build_link_table(core)),
+    ])
 }
 
 // Rate Table (rnpath -r)
@@ -2030,5 +2261,286 @@ mod tests {
             Some(Value::String("RNodeInterface".into())),
             "a radio interface must be reported as an RNode, not classified by its name label"
         );
+    }
+
+    // Codeberg #174: the transport_tables dump. Two things are pinned here —
+    // that every table the transport maintains is present as its own key even
+    // when empty (so a reader can tell "table is empty" from "daemon cannot
+    // answer", which is what `merge_transport_tables` relies on), and that a
+    // populated row carries the reference key names with the reference units.
+    #[test]
+    fn build_transport_tables_names_every_table_and_uses_reference_keys() {
+        use crate::clock::SystemClock;
+        use leviculum_core::constants::RANDOM_HASHBYTES;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::storage_types::{AnnounceEntry, LinkEntry, PathEntry, ReverseEntry};
+        use leviculum_core::traits::Storage as _;
+        use std::collections::BTreeMap;
+
+        let tmp = std::env::temp_dir().join(format!("rpc-tt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        core.set_interface_name(0, "TCPInterface[peer]".into());
+        core.set_interface_name(1, "RNodeInterface[/dev/ttyUSB0]".into());
+
+        let now = core.now_ms();
+        let lifetime_ms = core.transport_config().path_expiry_secs * 1000;
+        let dest = [0x11u8; 16];
+        let via = [0x22u8; 16];
+        // A random blob whose trailing 5 bytes are the emission timebase
+        // (announce.rs::emission_from_random_hash / Transport.py:3191-3195).
+        // Recomposed here independently of the writer: 0x0102030405 big-endian.
+        let mut blob = [0u8; RANDOM_HASHBYTES];
+        blob[5..].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+        let expected_emitted: i64 = 0x01_0203_0405;
+
+        core.storage_mut().set_path(
+            dest,
+            PathEntry {
+                hops: 3,
+                expires_ms: now + lifetime_ms,
+                interface_index: 0,
+                random_blobs: vec![blob],
+                next_hop: Some(via),
+            },
+        );
+        core.storage_mut().set_reverse(
+            [0x33u8; 16],
+            ReverseEntry {
+                timestamp_ms: now,
+                receiving_interface_index: 0,
+                outbound_interface_index: 1,
+            },
+        );
+        core.storage_mut().set_link_entry(
+            [0x44u8; 16],
+            LinkEntry {
+                timestamp_ms: now,
+                next_hop_interface_index: 1,
+                remaining_hops: 2,
+                received_interface_index: 0,
+                hops: 1,
+                validated: true,
+                proof_timeout_ms: now + 5_000,
+                destination_hash: dest,
+                peer_signing_key: None,
+            },
+        );
+        core.storage_mut().set_announce(
+            dest,
+            AnnounceEntry {
+                timestamp_ms: now,
+                hops: 3,
+                retries: 1,
+                retransmit_at_ms: Some(now + 1_000),
+                raw_packet: vec![0xAB; 77],
+                receiving_interface_index: 0,
+                target_interface: Some(1),
+                local_rebroadcasts: 2,
+                block_rebroadcasts: true,
+            },
+        );
+        core.storage_mut().set_announce_cache(dest, vec![0xCD; 42]);
+
+        let value = build_transport_tables(&core, std::time::Instant::now());
+        let Value::Dict(top) = &value else {
+            panic!("transport_tables must be a dict")
+        };
+        let table = |k: &str| match top.get(&HashableValue::String(k.into())) {
+            Some(Value::List(rows)) => rows.clone(),
+            other => panic!("{k} must be a list, got {other:?}"),
+        };
+
+        // Every table is named, including the ones that are empty here. An
+        // absent key must never be the way a reader learns a table is empty.
+        for key in [
+            "path_table",
+            "reverse_table",
+            "link_table",
+            "announce_table",
+            "announce_cache",
+            "tunnels",
+            "local_links",
+        ] {
+            assert!(
+                top.contains_key(&HashableValue::String(key.into())),
+                "transport_tables must always carry the {key} key, got {:?}",
+                top.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            table("tunnels").is_empty() && table("local_links").is_empty(),
+            "no tunnel and no local link were seeded, so both tables are present and empty"
+        );
+
+        let row = |rows: &[Value], what: &str| -> BTreeMap<HashableValue, Value> {
+            match rows.first() {
+                Some(Value::Dict(d)) => d.clone(),
+                other => panic!("{what} must hold one dict row, got {other:?}"),
+            }
+        };
+        let field = |d: &BTreeMap<HashableValue, Value>, k: &str| -> Value {
+            d.get(&HashableValue::String(k.into()))
+                .unwrap_or_else(|| panic!("missing key {k}"))
+                .clone()
+        };
+
+        // path_table: Python's own six RPC keys (Reticulum.py:1528-1535) plus
+        // the additive announce_emitted.
+        let p = row(&table("path_table"), "path_table");
+        assert_eq!(field(&p, "hash"), Value::Bytes(dest.to_vec()));
+        assert_eq!(field(&p, "via"), Value::Bytes(via.to_vec()));
+        assert_eq!(field(&p, "hops"), Value::I64(3));
+        assert_eq!(
+            field(&p, "interface"),
+            Value::String("TCPInterface[peer]".into())
+        );
+        assert_eq!(
+            field(&p, "announce_emitted"),
+            Value::I64(expected_emitted),
+            "announce_emitted is what the PEER stamped, read out of the random blob"
+        );
+        // timestamp is OUR receipt time, back-computed from expires minus the
+        // lifetime the path was given: expires - lifetime == now, so the two
+        // epoch values must differ by exactly the lifetime.
+        let (Value::F64(ts), Value::F64(exp)) = (field(&p, "timestamp"), field(&p, "expires"))
+        else {
+            panic!("timestamp and expires are Unix seconds as floats, like Python's time.time()")
+        };
+        assert!(
+            (exp - ts - lifetime_ms as f64 / 1000.0).abs() < 0.001,
+            "expires - timestamp must be the path lifetime ({lifetime_ms} ms), got {}",
+            exp - ts
+        );
+
+        // reverse_table: field names after IDX_RT_* (Transport.py:3556-3558),
+        // interfaces reported by name, not index.
+        let r = row(&table("reverse_table"), "reverse_table");
+        assert_eq!(field(&r, "hash"), Value::Bytes(vec![0x33u8; 16]));
+        assert_eq!(
+            field(&r, "receiving_interface"),
+            Value::String("TCPInterface[peer]".into())
+        );
+        assert_eq!(
+            field(&r, "outbound_interface"),
+            Value::String("RNodeInterface[/dev/ttyUSB0]".into())
+        );
+
+        // link_table: the RELAYED links, field names after IDX_LT_*
+        // (Transport.py:3572-3580). The hops/remaining_hops split is the pair
+        // Codeberg #38 turned on.
+        let l = row(&table("link_table"), "link_table");
+        assert_eq!(field(&l, "link_id"), Value::Bytes(vec![0x44u8; 16]));
+        assert_eq!(field(&l, "hops"), Value::I64(1));
+        assert_eq!(field(&l, "remaining_hops"), Value::I64(2));
+        assert_eq!(field(&l, "validated"), Value::Bool(true));
+        assert_eq!(field(&l, "destination_hash"), Value::Bytes(dest.to_vec()));
+
+        // announce_table: field names after IDX_AT_* (Transport.py:3561-3569);
+        // the stored packet is reported as a length, not as bytes.
+        let a = row(&table("announce_table"), "announce_table");
+        assert_eq!(field(&a, "retries"), Value::I64(1));
+        assert_eq!(field(&a, "packet_length"), Value::I64(77));
+        assert_eq!(field(&a, "local_rebroadcasts"), Value::I64(2));
+        assert_eq!(field(&a, "block_rebroadcasts"), Value::Bool(true));
+        assert_eq!(
+            field(&a, "attached_interface"),
+            Value::String("RNodeInterface[/dev/ttyUSB0]".into())
+        );
+
+        // announce_cache: the known-destination cache, with the retain state
+        // Codeberg #84 mirrors from known_destinations[dest][4].
+        let c = row(&table("announce_cache"), "announce_cache");
+        assert_eq!(field(&c, "hash"), Value::Bytes(dest.to_vec()));
+        assert_eq!(field(&c, "packet_length"), Value::I64(42));
+        assert_eq!(field(&c, "retained"), Value::Bool(false));
+        core.storage_mut().retain_known_dest(&dest);
+        let c = row(
+            &match build_transport_tables(&core, std::time::Instant::now()) {
+                Value::Dict(d) => match d.get(&HashableValue::String("announce_cache".into())) {
+                    Some(Value::List(rows)) => rows.clone(),
+                    other => panic!("announce_cache must be a list, got {other:?}"),
+                },
+                other => panic!("expected dict, got {other:?}"),
+            },
+            "announce_cache",
+        );
+        assert_eq!(
+            field(&c, "retained"),
+            Value::Bool(true),
+            "retaining a destination must be visible in the dump"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Codeberg #174: the dump survives both codecs. `transport_tables` is a
+    // nested dict-of-lists-of-dicts, deeper than any pre-existing response, so
+    // the msgpack transcode is worth pinning rather than assuming.
+    #[test]
+    fn transport_tables_round_trips_through_both_codecs() {
+        use crate::clock::SystemClock;
+        use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
+        use leviculum_core::node::NodeCoreBuilder;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-tt-codec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+
+        for codec in [Codec::Pickle, Codec::Msgpack] {
+            let bytes = handle_request(
+                &RpcRequest::GetTransportTables,
+                &mut core,
+                std::time::Instant::now(),
+                &stats,
+                &online,
+                &crate::interfaces::inventory::InterfaceInventory::shared(),
+                0,
+                None,
+                codec,
+            )
+            .expect("transport_tables must serialize");
+            let decoded = match codec {
+                Codec::Pickle => {
+                    serde_pickle::value_from_slice(&bytes, Default::default()).unwrap()
+                }
+                Codec::Msgpack => decode_response_msgpack(&bytes).unwrap(),
+            };
+            let Value::Dict(d) = decoded else {
+                panic!("{codec:?}: transport_tables must decode to a dict")
+            };
+            for key in [
+                "path_table",
+                "reverse_table",
+                "link_table",
+                "announce_table",
+                "announce_cache",
+                "tunnels",
+                "local_links",
+            ] {
+                assert!(
+                    matches!(
+                        d.get(&HashableValue::String(key.into())),
+                        Some(Value::List(_))
+                    ),
+                    "{codec:?}: {key} must survive as a list"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

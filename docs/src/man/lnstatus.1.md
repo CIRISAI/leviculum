@@ -54,6 +54,14 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 **-j**, **--json**
 :   Output in JSON format.
 
+**--tables**
+:   Add the transport's internal tables to the JSON output as a
+    `transport_tables` object. Requires **-j**; not available with **-R** or
+    **-d**/**-D**. Leviculum extension — `rnstatus` has no counterpart, and a
+    daemon that does not implement it (a Python `rnsd`, or an older `lnsd`)
+    causes the key to be omitted, with a note on stderr and exit status 0.
+    See **TRANSPORT TABLES** below.
+
 **-m**, **--monitor**
 :   Continuously monitor status, clearing and redrawing on each interval.
 
@@ -116,6 +124,77 @@ Continuously monitor, refreshing every two seconds:
 Emit machine-readable JSON:
 
     lnstatus -j
+
+Emit JSON with the transport's tables included:
+
+    lnstatus -j --tables
+
+## TRANSPORT TABLES
+
+With **--tables**, the **-j** object gains one additional key,
+`transport_tables`. Nothing else about the output changes, so anything that
+parses `lnstatus -j` today keeps working.
+
+The object holds one key per table, each a list of rows:
+
+`path_table`
+:   Destinations this node knows a route to. Keys `hash`, `timestamp`, `via`,
+    `hops`, `expires`, `interface` are the same keys, with the same units, that
+    Python's own `path_table` RPC returns (`Reticulum.get_path_table`). Added:
+    `announce_emitted`.
+
+`reverse_table`
+:   Where to send the reply to a packet this node forwarded: `hash`,
+    `receiving_interface`, `outbound_interface`, `timestamp`.
+
+`link_table`
+:   Links this node **relays**: `link_id`, `timestamp`,
+    `next_hop_interface`, `remaining_hops`, `receiving_interface`, `hops`,
+    `destination_hash`, `validated`, `proof_timeout`.
+
+`announce_table`
+:   Announces held for deferred rebroadcast: `hash`, `timestamp`,
+    `retransmit_timeout`, `retries`, `receiving_interface`, `hops`,
+    `packet_length`, `local_rebroadcasts`, `block_rebroadcasts`,
+    `attached_interface`.
+
+`announce_cache`
+:   Known destinations whose last announce is still held: `hash`,
+    `packet_length`, `retained`, `last_used`.
+
+`tunnels`
+:   Reconnectable peers and the paths held against them: `tunnel_id`,
+    `interface`, `expires`, and `paths`, each path carrying `hash`, `hops`,
+    `via`, `expires`, `timestamp`, `announce_emitted`.
+
+`local_links`
+:   Links this node is an **endpoint** of — not the same table as `link_table`
+    above: `link_id`, `state`, `destination_hash`, `age`, `interface`.
+
+### Which clock a timestamp is
+
+Two questions that are easy to confuse, and are answered by two different
+keys:
+
+`timestamp`
+:   **Our** clock. When this node learned or last refreshed the row, in Unix
+    seconds. In `path_table` it is recovered from `expires` minus the lifetime
+    that path was granted, so it is exact for a path still on the interface it
+    was learned on.
+
+`announce_emitted`
+:   **The announcing node's** clock. The whole-second emission stamp that node
+    wrote into its announce, as this node received it. Peers order competing
+    announces for one destination by this value, so it is a claim about a
+    remote machine's time, never about ours. `0` means no announce blob is
+    stored for the row.
+
+### Absent is not empty
+
+A daemon that implements the query answers with `transport_tables` present and
+its tables possibly empty. A daemon that does not implement it causes the key
+to be **omitted** entirely. Test the key's presence to tell the two apart; do
+not read an absent key as an empty table.
 
 ## SEE ALSO
 

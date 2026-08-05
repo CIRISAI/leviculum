@@ -400,3 +400,95 @@ fn thousands_and_compact_time_match_python() {
     // Compact keeps only the two most-significant components.
     assert_eq!(prettytime_compact(90061.0), "1d and 1h");
 }
+
+// --- --tables (Codeberg #174) --------------------------------------------
+
+/// The stats object a daemon returns, trimmed to the parts a reader keys on.
+fn stats_object() -> Value {
+    serde_json::json!({
+        "transport_id": "aabb",
+        "transport_uptime": 12.5,
+        "interfaces": [{"name": "TCPInterface[peer]", "rxb": 1, "txb": 2}],
+    })
+}
+
+/// Present: the tables land under one additive key and nothing else moves.
+/// The `interfaces` array stays at the top level, which is what every existing
+/// `-j` consumer keys on (Periculum's `parse_status` scans for exactly that).
+#[test]
+fn merge_transport_tables_adds_one_key_and_leaves_the_stats_dict_alone() {
+    let before = stats_object();
+    let mut stats = stats_object();
+    let tables = serde_json::json!({
+        "path_table": [{"hash": "11", "hops": 3}],
+        "reverse_table": [],
+        "link_table": [],
+        "announce_table": [],
+        "announce_cache": [],
+        "tunnels": [],
+        "local_links": [],
+    });
+    merge_transport_tables(&mut stats, Some(tables.clone()));
+
+    assert_eq!(stats[TRANSPORT_TABLES_KEY], tables);
+    assert!(
+        stats["interfaces"].is_array(),
+        "-j consumers key on interfaces"
+    );
+    let obj = stats.as_object().unwrap();
+    for (k, v) in before.as_object().unwrap() {
+        assert_eq!(obj.get(k), Some(v), "--tables must not disturb {k}");
+    }
+    assert_eq!(
+        obj.len(),
+        before.as_object().unwrap().len() + 1,
+        "exactly one key is added"
+    );
+}
+
+/// Absent: an `rnsd`, or an `lnsd` older than #174, answers no
+/// `transport_tables` at all. The merge then leaves the stats dict byte-for-byte
+/// as it was — the status question the user asked was answered, and the missing
+/// capability must not cost them the answer.
+#[test]
+fn merge_transport_tables_tolerates_a_daemon_that_cannot_answer() {
+    let mut stats = stats_object();
+    merge_transport_tables(&mut stats, None);
+    assert_eq!(stats, stats_object());
+    assert_eq!(render_json(&stats), render_json(&stats_object()));
+}
+
+/// Absence and emptiness must not look alike. A daemon that knows the command
+/// but holds nothing answers with the key present and every table empty; one
+/// that does not know it leaves the key out. A reader distinguishes the two by
+/// presence, which is the whole reason the key is omitted rather than nulled.
+#[test]
+fn an_empty_table_is_distinguishable_from_a_daemon_that_cannot_answer() {
+    let empty = serde_json::json!({
+        "path_table": [], "reverse_table": [], "link_table": [],
+        "announce_table": [], "announce_cache": [], "tunnels": [], "local_links": [],
+    });
+
+    let mut knows = stats_object();
+    merge_transport_tables(&mut knows, Some(empty));
+    let mut cannot = stats_object();
+    merge_transport_tables(&mut cannot, None);
+
+    assert!(knows.get(TRANSPORT_TABLES_KEY).is_some());
+    assert!(cannot.get(TRANSPORT_TABLES_KEY).is_none());
+    assert_ne!(knows, cannot);
+    assert_eq!(
+        knows[TRANSPORT_TABLES_KEY]["path_table"],
+        serde_json::json!([]),
+        "an empty path table is an empty list, never an absent key"
+    );
+}
+
+/// A response that is not an object (an unexpected answer from a foreign
+/// daemon) is passed through untouched rather than reshaped.
+#[test]
+fn merge_transport_tables_leaves_a_non_object_response_alone() {
+    let mut stats = Value::Array(vec![Value::from(1)]);
+    merge_transport_tables(&mut stats, Some(serde_json::json!({"path_table": []})));
+    assert_eq!(stats, Value::Array(vec![Value::from(1)]));
+}

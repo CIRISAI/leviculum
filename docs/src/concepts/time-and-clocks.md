@@ -26,7 +26,7 @@ in [Wire Field Semantics](wire-field-semantics.md).
 
 ## One value, one producer
 
-`Transport::emission_secs` (`leviculum-core/src/transport.rs:2677`)
+`Transport::emission_secs` (`leviculum-core/src/transport.rs:2841`)
 is the single point that turns whatever time the platform has into
 the unix-seconds value for wire fields that peers compare across our
 process lifetimes: announce emission timestamps
@@ -143,13 +143,13 @@ serial channel (the radio-config envelope of
 ### 4. Learned from validated announces
 
 The clockless fallback: `learn_emission_timebase`
-(`transport.rs:2765`) adopts the highest emission timestamp seen in
+(`transport.rs:2929`) adopts the highest emission timestamp seen in
 any signature-valid announce as the node's timebase, then advances it
-with the monotonic clock (`transport.rs:2617`). This includes the
+with the monotonic clock (`transport.rs:2846`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —
 learning deliberately runs before the own-destination echo drop, so a
 rebooted node re-seeds past exactly the value its next announce must
-exceed (pinned at `transport.rs:15355`).
+exceed (pinned at `transport.rs:16662`).
 
 - **Cost:** nothing — no hardware, no host.
 - **Unavailable:** on a mesh where no participant has a clock, or

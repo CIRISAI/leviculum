@@ -709,6 +709,170 @@ pub struct PathTableExport {
     pub interface_index: usize,
     /// Identity hash of the next relay hop
     pub next_hop: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// When WE learned or last refreshed this path (ms since clock epoch) —
+    /// the local receipt time, Python's `path_table[dst][IDX_PT_TIMESTAMP]`
+    /// (`time.time()` at insert, Transport.py:2365).
+    ///
+    /// Back-computed as `expires_ms - <the lifetime this path was given>`,
+    /// because [`PathEntry`] stores only the expiry. The lifetime depends on
+    /// the receiving interface's mode ([`Transport::path_expiry_ms_for_interface`],
+    /// mirroring Transport.py:773-778), so this is exact for every path that
+    /// still sits on the interface it was learned on. A tunnel-restored path
+    /// re-homed onto an interface of a *different* mode (`handle_tunnel`)
+    /// inherits the original expiry and is therefore off by the difference
+    /// between the two lifetimes.
+    pub timestamp_ms: u64,
+    /// What the ANNOUNCING node stamped: the 40-bit emission timebase carried
+    /// in this path's newest random blob, in whole seconds
+    /// (`Transport.timebase_from_random_blobs`, and
+    /// `announce_emitted`, Transport.py:3191-3195). 0 when no blob is stored.
+    ///
+    /// This is a different question from [`Self::timestamp_ms`] — that one is
+    /// our clock, this one is the peer's — and conflating the two is exactly
+    /// what Codeberg #155 was. A peer orders same-destination announces by
+    /// this value, so it is the value that has to be a real wall-clock second
+    /// on the wire.
+    pub announce_emitted_secs: u64,
+}
+
+/// Exported reverse table entry for RPC reporting.
+///
+/// Python holds this as `Transport.reverse_table[truncated_packet_hash] =
+/// [receiving_interface, outbound_interface, timestamp]` (index constants
+/// `IDX_RT_*`, Transport.py:3556-3558) and serves it over no RPC at all, so
+/// the exported shape is ours; the field names mirror the reference's index
+/// constants.
+#[derive(Debug, Clone)]
+pub struct ReverseTableExport {
+    /// Truncated hash (16 bytes) of the packet whose reply this entry routes.
+    pub hash: [u8; TRUNCATED_HASHBYTES],
+    /// Interface index the original packet arrived on (`IDX_RT_RCVD_IF`).
+    pub receiving_interface_index: usize,
+    /// Interface index the original packet was forwarded to (`IDX_RT_OUTB_IF`).
+    pub outbound_interface_index: usize,
+    /// When the entry was learned (ms since clock epoch, `IDX_RT_TIMESTAMP`).
+    pub timestamp_ms: u64,
+}
+
+/// Exported transport link-table entry for RPC reporting: one link this node
+/// RELAYS, not one this node terminates.
+///
+/// This is Python's `Transport.link_table[link_id] = [timestamp, next_hop,
+/// next_hop_interface, remaining_hops, receiving_interface, hops,
+/// destination_hash, validated, proof_timeout]` (`IDX_LT_*`,
+/// Transport.py:3572-3580), and it is a *different table* from
+/// [`LinkTableExport`], which lists the links this node is an endpoint of.
+/// Neither is served by a Python RPC.
+#[derive(Debug, Clone)]
+pub struct TransportLinkTableExport {
+    /// Link ID (16 bytes) — the key.
+    pub link_id: [u8; TRUNCATED_HASHBYTES],
+    /// When the entry was created (ms since clock epoch, `IDX_LT_TIMESTAMP`).
+    pub timestamp_ms: u64,
+    /// Interface index toward the destination (`IDX_LT_NH_IF`).
+    pub next_hop_interface_index: usize,
+    /// Hops still to go toward the destination (`IDX_LT_REM_HOPS`).
+    pub remaining_hops: u8,
+    /// Interface index the link request arrived on (`IDX_LT_RCVD_IF`).
+    pub received_interface_index: usize,
+    /// Hops already travelled from the initiator (`IDX_LT_HOPS`).
+    pub hops: u8,
+    /// Destination the link addresses (`IDX_LT_DSTHASH`).
+    pub destination_hash: [u8; TRUNCATED_HASHBYTES],
+    /// Whether an LRPROOF has validated the link (`IDX_LT_VALIDATED`).
+    pub validated: bool,
+    /// Deadline for the proof (ms since clock epoch, `IDX_LT_PROOF_TMO`).
+    pub proof_timeout_ms: u64,
+}
+
+/// Exported announce-table entry for RPC reporting: an announce held for
+/// deferred rebroadcast.
+///
+/// Python's `Transport.announce_table[destination_hash] = [timestamp,
+/// retransmit_timeout, retries, received_from, hops, packet, local_rebroadcasts,
+/// block_rebroadcasts, attached_interface]` (`IDX_AT_*`,
+/// Transport.py:3561-3569), served by no RPC. The stored raw packet is reported
+/// as a length only.
+#[derive(Debug, Clone)]
+pub struct AnnounceTableExport {
+    /// Destination hash (16 bytes) — the key.
+    pub hash: [u8; TRUNCATED_HASHBYTES],
+    /// When the announce was received (ms since clock epoch, `IDX_AT_TIMESTAMP`).
+    pub timestamp_ms: u64,
+    /// When the deferred rebroadcast is due (ms since clock epoch,
+    /// `IDX_AT_RTRNS_TMO`); `None` when the entry will not be retransmitted.
+    pub retransmit_at_ms: Option<u64>,
+    /// Rebroadcast attempts so far (`IDX_AT_RETRIES`).
+    pub retries: u8,
+    /// Interface index the announce arrived on (`IDX_AT_RCVD_IF`).
+    pub receiving_interface_index: usize,
+    /// Hop count as received (`IDX_AT_HOPS`).
+    pub hops: u8,
+    /// Length in bytes of the stored raw announce (`IDX_AT_PACKET` is the
+    /// packet itself; we report its size, not its bytes).
+    pub packet_length: usize,
+    /// Times a neighbour was heard echoing this announce (`IDX_AT_LCL_RBRD`).
+    pub local_rebroadcasts: u8,
+    /// Whether further rebroadcast is suppressed (`IDX_AT_BLCK_RBRD`).
+    pub block_rebroadcasts: bool,
+    /// Interface index the rebroadcast is pinned to (`IDX_AT_ATTCHD_IF`),
+    /// `None` for a normal broadcast to every interface.
+    pub target_interface_index: Option<usize>,
+}
+
+/// Exported announce-cache entry for RPC reporting: one known destination whose
+/// last announce we still hold.
+///
+/// The reference counterpart is `Identity.known_destinations[dest] =
+/// [timestamp, packet_hash, public_key, app_data, use_state]` plus the on-disk
+/// announce cache; the retain/recency semantics of `use_state` are what
+/// Codeberg #84 mirrored. Served by no RPC.
+#[derive(Debug, Clone)]
+pub struct AnnounceCacheExport {
+    /// Destination hash (16 bytes) — the key.
+    pub hash: [u8; TRUNCATED_HASHBYTES],
+    /// Length in bytes of the cached raw announce.
+    pub packet_length: usize,
+    /// Whether the entry is pinned against cache cleaning (`use_state < 0`).
+    pub retained: bool,
+    /// Last recency touch (ms since clock epoch); `None` when never touched or
+    /// while retained, matching `known_dest_last_used`.
+    pub last_used_ms: Option<u64>,
+}
+
+/// Exported tunnel-table entry for RPC reporting.
+///
+/// Python's `Transport.tunnels[tunnel_id] = [tunnel_id, interface, paths,
+/// expires]` (`IDX_TT_*`, Transport.py:3583-3586), served by no RPC.
+#[derive(Debug, Clone)]
+pub struct TunnelTableExport {
+    /// Tunnel ID (32 bytes).
+    pub tunnel_id: [u8; crate::tunnel::TUNNEL_ID_LEN],
+    /// Interface index currently carrying the tunnel (`IDX_TT_IF`), `None`
+    /// while the tunnel is dormant.
+    pub interface_index: Option<usize>,
+    /// Tunnel expiry (ms since clock epoch, `IDX_TT_EXPIRES`).
+    pub expires_ms: u64,
+    /// Paths held against the tunnel for restore on reconnect (`IDX_TT_PATHS`).
+    pub paths: Vec<TunnelPathExport>,
+}
+
+/// One path snapshot held against a tunnel ([`TunnelTableExport::paths`]).
+#[derive(Debug, Clone)]
+pub struct TunnelPathExport {
+    /// Destination hash (16 bytes).
+    pub hash: [u8; TRUNCATED_HASHBYTES],
+    /// Hop count to the destination.
+    pub hops: u8,
+    /// Next relay hop, if any.
+    pub next_hop: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// Expiry inherited from the original path (ms since clock epoch).
+    pub expires_ms: u64,
+    /// When the snapshot was last refreshed (ms since clock epoch).
+    pub timestamp_ms: u64,
+    /// Emission timebase of the newest random blob, in whole seconds — the
+    /// same peer-stamped quantity as [`PathTableExport::announce_emitted_secs`].
+    pub announce_emitted_secs: u64,
 }
 
 /// Exported announce rate table entry for RPC reporting.
@@ -2800,6 +2964,110 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 expires_ms: entry.expires_ms,
                 interface_index: entry.interface_index,
                 next_hop: entry.next_hop,
+                // See PathTableExport::timestamp_ms for why this is a
+                // back-computation and where it is inexact.
+                timestamp_ms: entry
+                    .expires_ms
+                    .saturating_sub(self.path_expiry_ms_for_interface(entry.interface_index)),
+                announce_emitted_secs: max_emission_from_blobs(&entry.random_blobs),
+            })
+            .collect()
+    }
+
+    /// Return all reverse table entries for RPC export.
+    pub fn reverse_table_entries(&self) -> Vec<ReverseTableExport> {
+        self.storage
+            .reverse_entries()
+            .into_iter()
+            .map(|(hash, entry)| ReverseTableExport {
+                hash,
+                receiving_interface_index: entry.receiving_interface_index,
+                outbound_interface_index: entry.outbound_interface_index,
+                timestamp_ms: entry.timestamp_ms,
+            })
+            .collect()
+    }
+
+    /// Return all transport link-table entries (relayed links) for RPC export.
+    pub fn transport_link_table_entries(&self) -> Vec<TransportLinkTableExport> {
+        self.storage
+            .link_entries()
+            .into_iter()
+            .map(|(link_id, entry)| TransportLinkTableExport {
+                link_id,
+                timestamp_ms: entry.timestamp_ms,
+                next_hop_interface_index: entry.next_hop_interface_index,
+                remaining_hops: entry.remaining_hops,
+                received_interface_index: entry.received_interface_index,
+                hops: entry.hops,
+                destination_hash: entry.destination_hash,
+                validated: entry.validated,
+                proof_timeout_ms: entry.proof_timeout_ms,
+            })
+            .collect()
+    }
+
+    /// Return all announce-table entries (announces held for rebroadcast) for
+    /// RPC export.
+    pub fn announce_table_entries(&self) -> Vec<AnnounceTableExport> {
+        self.storage
+            .announce_keys()
+            .into_iter()
+            .filter_map(|hash| {
+                let entry = self.storage.get_announce(&hash)?;
+                Some(AnnounceTableExport {
+                    hash,
+                    timestamp_ms: entry.timestamp_ms,
+                    retransmit_at_ms: entry.retransmit_at_ms,
+                    retries: entry.retries,
+                    receiving_interface_index: entry.receiving_interface_index,
+                    hops: entry.hops,
+                    packet_length: entry.raw_packet.len(),
+                    local_rebroadcasts: entry.local_rebroadcasts,
+                    block_rebroadcasts: entry.block_rebroadcasts,
+                    target_interface_index: entry.target_interface,
+                })
+            })
+            .collect()
+    }
+
+    /// Return all announce-cache entries (known destinations) for RPC export.
+    pub fn announce_cache_entries(&self) -> Vec<AnnounceCacheExport> {
+        self.storage
+            .announce_cache_keys()
+            .into_iter()
+            .filter_map(|hash| {
+                let raw = self.storage.get_announce_cache(&hash)?;
+                Some(AnnounceCacheExport {
+                    hash,
+                    packet_length: raw.len(),
+                    retained: self.storage.is_known_dest_retained(&hash),
+                    last_used_ms: self.storage.known_dest_last_used(&hash),
+                })
+            })
+            .collect()
+    }
+
+    /// Return all tunnel-table entries for RPC export.
+    pub fn tunnel_table_entries(&self) -> Vec<TunnelTableExport> {
+        self.tunnels
+            .iter()
+            .map(|(tunnel_id, tunnel)| TunnelTableExport {
+                tunnel_id: *tunnel_id,
+                interface_index: tunnel.interface_index,
+                expires_ms: tunnel.expires_ms,
+                paths: tunnel
+                    .paths
+                    .iter()
+                    .map(|(hash, path)| TunnelPathExport {
+                        hash: *hash,
+                        hops: path.hops,
+                        next_hop: path.next_hop,
+                        expires_ms: path.expires_ms,
+                        timestamp_ms: path.timestamp_ms,
+                        announce_emitted_secs: max_emission_from_blobs(&path.random_blobs),
+                    })
+                    .collect(),
             })
             .collect()
     }
@@ -25979,6 +26247,23 @@ mod tunnel_restore_tests {
             "restored next hop preserved"
         );
         assert_eq!(t.tunnel_count(), 1);
+
+        // Codeberg #174: the tunnel table is exportable, including the path
+        // snapshots that made the restore above possible. `tunnel_count` /
+        // `tunnel_path_count` only ever reported cardinalities; a test that
+        // wants to assert WHICH destination a tunnel holds needs the rows.
+        let tunnels = t.tunnel_table_entries();
+        assert_eq!(tunnels.len(), 1, "one tunnel exported");
+        assert_eq!(tunnels[0].tunnel_id, tunnel_id);
+        assert_eq!(
+            tunnels[0].interface_index,
+            Some(if_b),
+            "the exported tunnel is re-homed onto the reconnect interface"
+        );
+        assert_eq!(tunnels[0].paths.len(), 1);
+        assert_eq!(tunnels[0].paths[0].hash, dest);
+        assert_eq!(tunnels[0].paths[0].next_hop, Some(next_hop));
+        assert_eq!(tunnels[0].paths[0].hops, learned.hops);
     }
 
     #[test]
@@ -26209,5 +26494,195 @@ mod tunnel_restore_tests {
             "no packet queued for a non-tunnel interface"
         );
         assert_eq!(t.own_tunnel_id(if_a), None);
+    }
+}
+
+/// Structured table export for the shared-instance RPC (Codeberg #174).
+///
+/// The tables themselves are exercised all over this file; what is pinned here
+/// is the *derivation* the export does on top of them, because that derivation
+/// is where a value can be self-consistently wrong: the local receipt
+/// timestamp is back-computed from the expiry, and the peer-stamped emission
+/// second is read out of the announce's random blob.
+#[cfg(test)]
+mod table_export_tests {
+    use super::*;
+    use crate::constants::RANDOM_HASHBYTES;
+    use crate::memory_storage::MemoryStorage;
+    use crate::storage_types::{LinkEntry, PathEntry, ReverseEntry};
+    use crate::test_utils::MockClock;
+    use crate::traits::InterfaceMode;
+    use alloc::vec;
+    use rand_core::OsRng;
+
+    const T0: u64 = 1_700_000_000_000;
+
+    fn transport() -> Transport<MockClock, MemoryStorage> {
+        Transport::new(
+            TransportConfig {
+                enable_transport: true,
+                ..TransportConfig::default()
+            },
+            MockClock::new(T0),
+            MemoryStorage::with_defaults(),
+            Identity::generate(&mut OsRng),
+        )
+    }
+
+    /// A path's exported `timestamp_ms` is the moment WE learned it, recovered
+    /// as `expires - the lifetime that path was given`. The lifetime is
+    /// per-interface-mode (Transport.py:773-778), so a single flat
+    /// `path_expiry_secs` misdates every access-point and roaming path — by
+    /// six days on an AP path at the 7-day default, dating it before the
+    /// daemon started. Same-mode paths are unaffected, which is why the error
+    /// stayed invisible.
+    #[test]
+    fn exported_path_timestamp_uses_the_lifetime_that_path_was_actually_given() {
+        let mut t = transport();
+        for (idx, mode) in [
+            (0usize, InterfaceMode::Full),
+            (1, InterfaceMode::AccessPoint),
+            (2, InterfaceMode::Roaming),
+        ] {
+            t.set_interface_mode(idx, mode);
+        }
+
+        for idx in 0..3usize {
+            let mut hash = [0u8; TRUNCATED_HASHBYTES];
+            hash[0] = idx as u8;
+            // Recompose the lifetime independently of the export, from the
+            // reference's own constants rather than from the helper the
+            // exporter calls.
+            let lifetime_ms = match idx {
+                0 => t.config.path_expiry_secs * 1000,
+                1 => crate::constants::AP_PATH_TIME_SECS * 1000,
+                _ => crate::constants::ROAMING_PATH_TIME_SECS * 1000,
+            };
+            t.storage.set_path(
+                hash,
+                PathEntry {
+                    hops: 1,
+                    expires_ms: T0 + lifetime_ms,
+                    interface_index: idx,
+                    random_blobs: Vec::new(),
+                    next_hop: None,
+                },
+            );
+        }
+
+        // The three paths were all learned at T0 despite three different
+        // expiries; a flat back-computation would report three different
+        // receipt times.
+        let rows = t.path_table_entries();
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_eq!(
+                row.timestamp_ms, T0,
+                "path on interface {} was learned at T0, exported {}",
+                row.interface_index, row.timestamp_ms
+            );
+        }
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.expires_ms)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3,
+            "the three expiries really do differ; otherwise this test proves nothing"
+        );
+    }
+
+    /// `announce_emitted_secs` is the PEER's stamp, not ours: the 40-bit
+    /// timebase in the newest random blob (Transport.py:3191-3195, and
+    /// `timebase_from_random_blobs`, which takes the max over the blobs).
+    /// Recomposed here from the raw bytes, not by calling the writer's helper.
+    #[test]
+    fn exported_announce_emission_is_the_peer_stamp_from_the_newest_blob() {
+        let mut t = transport();
+        let mut older = [0u8; RANDOM_HASHBYTES];
+        older[5..].copy_from_slice(&[0x00, 0x65, 0x2C, 0x2E, 0x00]);
+        let mut newer = [0u8; RANDOM_HASHBYTES];
+        newer[5..].copy_from_slice(&[0x00, 0x65, 0x2C, 0x2E, 0xFF]);
+
+        let hash = [0xA1u8; TRUNCATED_HASHBYTES];
+        t.storage.set_path(
+            hash,
+            PathEntry {
+                hops: 2,
+                expires_ms: T0 + 1000,
+                interface_index: 0,
+                random_blobs: vec![older, newer],
+                next_hop: None,
+            },
+        );
+
+        // Big-endian bytes 5..10 of `newer`, recomposed by hand.
+        let expected = 0x0000_0000_652C_2EFF_u64;
+        assert_eq!(t.path_table_entries()[0].announce_emitted_secs, expected);
+
+        // No blob at all is 0, not a fabricated "now": we report what the peer
+        // stamped or nothing, never our own clock in the peer's field.
+        let bare = [0xB2u8; TRUNCATED_HASHBYTES];
+        t.storage.set_path(
+            bare,
+            PathEntry {
+                hops: 1,
+                expires_ms: T0 + 1000,
+                interface_index: 0,
+                random_blobs: Vec::new(),
+                next_hop: None,
+            },
+        );
+        let row = t
+            .path_table_entries()
+            .into_iter()
+            .find(|r| r.hash == bare)
+            .unwrap();
+        assert_eq!(row.announce_emitted_secs, 0);
+    }
+
+    /// The reverse and (relay) link tables had no enumeration at all before
+    /// #174 — the storage trait exposed get/set/remove by key only, so nothing
+    /// outside the transport could see what was in them.
+    #[test]
+    fn reverse_and_relay_link_tables_are_enumerable() {
+        let mut t = transport();
+        t.storage.set_reverse(
+            [0x01u8; TRUNCATED_HASHBYTES],
+            ReverseEntry {
+                timestamp_ms: T0,
+                receiving_interface_index: 3,
+                outbound_interface_index: 7,
+            },
+        );
+        t.storage.set_link_entry(
+            [0x02u8; TRUNCATED_HASHBYTES],
+            LinkEntry {
+                timestamp_ms: T0,
+                next_hop_interface_index: 7,
+                remaining_hops: 4,
+                received_interface_index: 3,
+                hops: 2,
+                validated: false,
+                proof_timeout_ms: T0 + 5_000,
+                destination_hash: [0x03u8; TRUNCATED_HASHBYTES],
+                peer_signing_key: None,
+            },
+        );
+
+        let rev = t.reverse_table_entries();
+        assert_eq!(rev.len(), 1);
+        assert_eq!(rev[0].hash, [0x01u8; TRUNCATED_HASHBYTES]);
+        assert_eq!(rev[0].receiving_interface_index, 3);
+        assert_eq!(rev[0].outbound_interface_index, 7);
+
+        let links = t.transport_link_table_entries();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_id, [0x02u8; TRUNCATED_HASHBYTES]);
+        // The hops / remaining_hops pair is the asymmetry Codeberg #38 turned
+        // on, and it is unassertable on hardware until it is exported.
+        assert_eq!((links[0].hops, links[0].remaining_hops), (2, 4));
+        assert!(!links[0].validated);
+        assert_eq!(links[0].destination_hash, [0x03u8; TRUNCATED_HASHBYTES]);
     }
 }

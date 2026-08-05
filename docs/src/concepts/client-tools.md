@@ -174,12 +174,56 @@ an extra flag must not change what an existing flag does, and extra
 output must not break what a Python-tool script would parse.
 
 Current examples: `lnstatus --instance_name`
-(`leviculum-cli/src/lnstatus.rs:113-115`) selects a shared instance
+(`leviculum-cli/src/lnstatus.rs`) selects a shared instance
 by name where the reference tool only reads it from the config file,
-and the planned structured state dump (the second half of Codeberg
-#174) will expose internal tables `rnstatus` cannot show at all.
+and `lnstatus --tables` (the second half of Codeberg #174) exposes
+internal tables `rnstatus` cannot show at all.
 Both are additive: run `lnstatus` with exactly `rnstatus`'s
 arguments and you get `rnstatus`'s behaviour.
+
+### The shape an additive dump takes
+
+`--tables` is the worked example, and three of its decisions generalise
+to the next one.
+
+**Additive key, not an envelope.** The tables go into the `-j` object
+under one new key rather than wrapping it, so the stats dict stays the
+top-level object. Everything that parses `lnstatus -j` today — Periculum's
+`parse_status` scans for the line whose object carries `interfaces` —
+keeps working untouched, and `-j` without the flag is what it always was.
+Wrapping would have been tidier and would have broken every existing
+reader.
+
+**Reference names where the reference has one, its own vocabulary where
+it does not.** Python serves exactly one of these tables over RPC
+(`get_path_table`, Reticulum.py:1516-1538), so those six keys and their
+units are taken verbatim and our one addition sits beside them. The other
+tables Python holds but never exposes; it names their fields only by list
+index (`IDX_RT_*`, `IDX_LT_*`, `IDX_AT_*`, `IDX_TT_*`,
+Transport.py:3556-3586), so the string keys are ours, spelled after those
+constants. The additive keys are safe against a Python reader for the same
+reason `tx_jitter_max` is: every Python consumer of an RPC response reads
+it by name and none enumerates it.
+
+Naming collides once, and it is worth knowing about: `link_table` in the
+dump is `Transport.link_table`, the links this node *relays*. The
+pre-existing `link_table` RPC (`lnstest diag`) is the links this node
+*terminates*, and appears in the dump as `local_links`. The reference name
+won the contested word because the reference has a table by that name; the
+inventory the reference has no table for at all took the qualified one.
+
+**Absent is not empty.** A daemon that implements the query answers with
+the key present and its tables possibly empty. A daemon that does not — a
+Python `rnsd`, or an `lnsd` from before the flag — makes the client omit
+the key, print why on stderr, and exit 0. Presence therefore distinguishes
+"cannot answer" from "nothing there". Nulling the key, or defaulting it to
+empty lists, would have made every assertion about an empty table pass
+silently against a daemon that cannot answer it — the read-side tolerance
+question of Codeberg #183, one layer up. Python's `rpc_loop` matches no arm
+for an unknown command and falls through to `conn.close()`
+(Reticulum.py:1213-1260), so the absence surfaces as a fast transport error
+rather than a hang; that is pinned against a real `rnsd` in
+`reverse_rpc_interop_tests`.
 
 One honesty note, because it is easy to get wrong in the other
 direction: `-j/--json`, `-m/--monitor` and the announce/path-request/

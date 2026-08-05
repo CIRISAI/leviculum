@@ -424,6 +424,9 @@ pub trait Storage {
     /// Remove a reverse entry
     fn remove_reverse(&mut self, hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<ReverseEntry>;
 
+    /// Return owned copies of all reverse table entries (for RPC export).
+    fn reverse_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], ReverseEntry)>;
+
     // Link Table
     /// Look up a link table entry
     fn get_link_entry(&self, link_id: &[u8; TRUNCATED_HASHBYTES]) -> Option<&LinkEntry>;
@@ -439,6 +442,9 @@ pub trait Storage {
     fn has_link_entry(&self, link_id: &[u8; TRUNCATED_HASHBYTES]) -> bool {
         self.get_link_entry(link_id).is_some()
     }
+
+    /// Return owned copies of all link table entries (for RPC export).
+    fn link_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)>;
 
     // Announce Table
     /// Look up an announce entry
@@ -753,6 +759,9 @@ impl Storage for NoStorage {
     fn remove_reverse(&mut self, _hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<ReverseEntry> {
         None
     }
+    fn reverse_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], ReverseEntry)> {
+        Vec::new()
+    }
 
     fn get_link_entry(&self, _link_id: &[u8; TRUNCATED_HASHBYTES]) -> Option<&LinkEntry> {
         None
@@ -764,6 +773,9 @@ impl Storage for NoStorage {
         None
     }
     fn set_link_entry(&mut self, _link_id: [u8; TRUNCATED_HASHBYTES], _entry: LinkEntry) {}
+    fn link_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)> {
+        Vec::new()
+    }
 
     fn get_announce(&self, _dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&AnnounceEntry> {
         None

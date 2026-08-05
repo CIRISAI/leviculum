@@ -91,6 +91,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lnstatus -j --tables` adds the transport's path, reverse, link,
+  announce, announce-cache and tunnel tables to the JSON output, so a
+  test can assert on routing state instead of scraping logs. A daemon
+  that cannot answer omits the key rather than reporting empty tables
+  (#174).
+
 - The LNode firmware honours a host-side reboot frame on its control
   channel and ACKs before resetting, so a test harness can start every
   run from a defined board state.

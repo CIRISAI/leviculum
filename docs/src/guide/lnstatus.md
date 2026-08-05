@@ -25,6 +25,7 @@ Options:
   -s, --sort <SORT>                      Sort interfaces by [rate, traffic, rx, tx, rxs, txs, announces, arx, atx, prx, ptx, held]
   -r, --reverse                          Reverse sorting
   -j, --json                             Output in JSON format
+      --tables                           Add the transport's internal tables to the JSON output (requires -j)
   -m, --monitor                          Continuously monitor status
   -I, --monitor-interval <INTERVAL>      Refresh interval for monitor mode [default: 1]
   -v, --verbose...                       Increase verbosity
@@ -99,6 +100,35 @@ scripting:
 ```sh
 lnstatus -j
 ```
+
+### The transport's tables
+
+`--tables` adds one key, `transport_tables`, to that JSON object. It carries
+the tables the transport maintains — `path_table`, `reverse_table`,
+`link_table` (relayed links), `announce_table`, `announce_cache`, `tunnels`,
+and `local_links` (links this node terminates) — so a test can assert on the
+route a packet will take instead of inferring it from log lines:
+
+```sh
+lnstatus -j --tables
+```
+
+`rnstatus` has no counterpart, so the flag requires `-j` and never changes what
+a reference flag prints. `lnstatus -j` on its own is exactly what it was.
+
+Two timestamps in there answer different questions. `timestamp` is *our*
+clock — when this node learned the row. `announce_emitted` is the *announcing*
+node's clock — the second it stamped into its announce, which is what peers
+order competing announces by.
+
+A daemon that does not implement the query — a Python `rnsd`, or an `lnsd`
+older than this flag — makes `lnstatus` omit the key, print why on stderr, and
+exit 0; the status you asked for is still printed. So an **absent**
+`transport_tables` key means "this daemon cannot answer", while a **present**
+key with empty lists means "the tables really are empty". Check for the key
+before reading it, and do not treat its absence as an empty table.
+
+Full field lists are in [lnstatus(1)](../man/lnstatus.1.md).
 
 ## Not yet supported
 

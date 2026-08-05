@@ -57,6 +57,13 @@ pub(crate) enum RpcRequest {
     GetPathTable {
         max_hops: Option<i64>,
     },
+    /// Structured dump of the tables the transport maintains (Codeberg #174) —
+    /// a Leviculum-only extension with no Python `rnsd` precedent. Python's
+    /// `rpc_loop` matches no arm for it and closes the connection without a
+    /// reply (Reticulum.py:1213-1260), so a client asking an `rnsd` sees a
+    /// transport error, never a hang. Response shape: see
+    /// `build_transport_tables`.
+    GetTransportTables,
     /// Discovered-interface registry query (Codeberg #32). Response is a list of
     /// per-record dicts (see `build_discovered_interfaces`), mirroring Python
     /// `RNS.Discovery.InterfaceDiscovery.list_discovered_interfaces`.
@@ -154,6 +161,7 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 let max_hops = dict_get_int(&dict, "max_hops");
                 Ok(RpcRequest::GetPathTable { max_hops })
             }
+            "transport_tables" => Ok(RpcRequest::GetTransportTables),
             "discovered_interfaces" => Ok(RpcRequest::GetDiscoveredInterfaces),
             "rate_table" => Ok(RpcRequest::GetRateTable),
             "next_hop" => {

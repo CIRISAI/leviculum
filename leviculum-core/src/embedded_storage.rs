@@ -661,6 +661,10 @@ impl Storage for EmbeddedStorage {
         self.reverse_table.remove(hash)
     }
 
+    fn reverse_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], ReverseEntry)> {
+        self.reverse_table.iter().map(|(k, v)| (*k, *v)).collect()
+    }
+
     // Link Table
     fn get_link_entry(&self, link_id: &[u8; TRUNCATED_HASHBYTES]) -> Option<&LinkEntry> {
         self.link_table.get(link_id)
@@ -675,6 +679,13 @@ impl Storage for EmbeddedStorage {
 
     fn set_link_entry(&mut self, link_id: [u8; TRUNCATED_HASHBYTES], entry: LinkEntry) {
         self.link_table.insert(link_id, entry);
+    }
+
+    fn link_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)> {
+        self.link_table
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
     }
 
     // Announce Table

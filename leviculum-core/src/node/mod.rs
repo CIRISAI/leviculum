@@ -2461,6 +2461,32 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.rate_table_entries()
     }
 
+    /// Return all reverse table entries for RPC export (Codeberg #174).
+    pub fn reverse_table_entries(&self) -> Vec<crate::transport::ReverseTableExport> {
+        self.transport.reverse_table_entries()
+    }
+
+    /// Return all transport link-table entries — links this node RELAYS, not
+    /// the links it terminates (those are [`Self::link_table_entries`]).
+    pub fn transport_link_table_entries(&self) -> Vec<crate::transport::TransportLinkTableExport> {
+        self.transport.transport_link_table_entries()
+    }
+
+    /// Return all announce-table entries (announces held for rebroadcast).
+    pub fn announce_table_entries(&self) -> Vec<crate::transport::AnnounceTableExport> {
+        self.transport.announce_table_entries()
+    }
+
+    /// Return all announce-cache entries (known destinations).
+    pub fn announce_cache_entries(&self) -> Vec<crate::transport::AnnounceCacheExport> {
+        self.transport.announce_cache_entries()
+    }
+
+    /// Return all tunnel-table entries for RPC export.
+    pub fn tunnel_table_entries(&self) -> Vec<crate::transport::TunnelTableExport> {
+        self.transport.tunnel_table_entries()
+    }
+
     /// Clone a path entry by destination hash (for RPC lookups).
     pub fn get_path_clone(
         &self,

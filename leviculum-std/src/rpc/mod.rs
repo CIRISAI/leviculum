@@ -289,12 +289,17 @@ pub(crate) async fn rpc_client_call(
 ///
 /// `get_key` must be one of the parameterless RPC keys understood by the daemon:
 /// `"interface_stats"`, `"path_table"`, `"link_count"`, `"link_table"`,
-/// `"rate_table"`, `"blackholed_identities"`. The first five overlap with
-/// Python `rnsd` (`"link_table"` is a Leviculum-only extension — Python has
-/// only `link_count` — and degrades to `<unavailable>` against an `rnsd` that
-/// rejects it). Queries that take parameters (`next_hop`, `packet_rssi`, …)
-/// and the mutating `drop`/`blackhole`/`destination_data` ops are
-/// intentionally not reachable through this helper.
+/// `"rate_table"`, `"blackholed_identities"`, `"transport_tables"`.
+/// `"interface_stats"`, `"path_table"`, `"link_count"`, `"rate_table"` and
+/// `"blackholed_identities"` overlap with Python `rnsd`; `"link_table"` and
+/// `"transport_tables"` are Leviculum-only extensions (Codeberg #174 for the
+/// latter) and degrade to an `Err` against an `rnsd`, which matches no arm
+/// for them and closes the connection without replying
+/// (Reticulum.py:1213-1260). Callers must treat that error as "this daemon
+/// does not know the question", not as a failed query. Queries that take
+/// parameters (`next_hop`, `packet_rssi`, …) and the mutating
+/// `drop`/`blackhole`/`destination_data` ops are intentionally not reachable
+/// through this helper.
 ///
 /// `authkey` is `SHA256(transport_identity)` — the daemon derives the same key
 /// from its `{config_dir}/storage/transport_identity` file (raw 64 bytes).
@@ -1084,6 +1089,97 @@ mod tests {
             .as_array()
             .expect("link_table response should be a JSON array");
         assert!(arr.is_empty(), "fresh test core has no links: {arr:?}");
+    }
+
+    /// `rpc_query("transport_tables")` round-trips against our own server
+    /// (Codeberg #174), which is the presence half of the absence-tolerance
+    /// contract: an `lnsd` answers, with a real path row surviving the
+    /// msgpack transcode and the hex encoding `rpc_query` applies to byte
+    /// values. The refusal half — a Python `rnsd` closing the connection —
+    /// is pinned in `reverse_rpc_interop_tests`.
+    #[tokio::test]
+    async fn test_rpc_query_transport_tables_round_trip() {
+        use leviculum_core::storage_types::PathEntry;
+        use leviculum_core::traits::Storage as _;
+
+        let core = make_test_core(true);
+        let start_time = std::time::Instant::now();
+        let authkey = derive_authkey(&core);
+
+        let dest = [0x5Au8; 16];
+        {
+            let mut guard = core.lock().unwrap();
+            let now = guard.now_ms();
+            guard.set_interface_name(0, "TCPInterface[peer]".into());
+            guard.storage_mut().set_path(
+                dest,
+                PathEntry {
+                    hops: 2,
+                    expires_ms: now + 60_000,
+                    interface_index: 0,
+                    random_blobs: Vec::new(),
+                    next_hop: None,
+                },
+            );
+        }
+
+        let instance_name = format!("rpctest_tt_{}", std::process::id());
+        spawn_rpc_server(
+            &instance_name,
+            Arc::clone(&core),
+            authkey,
+            start_time,
+            empty_stats_map(),
+            empty_online_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
+            AutoPeerCount::default(),
+            None,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let json = rpc_query(&instance_name, &authkey, "transport_tables")
+            .await
+            .expect("an lnsd must answer transport_tables");
+
+        // Every table is named even when empty, so a reader can tell an empty
+        // table from a daemon that cannot answer.
+        for key in [
+            "path_table",
+            "reverse_table",
+            "link_table",
+            "announce_table",
+            "announce_cache",
+            "tunnels",
+            "local_links",
+        ] {
+            assert!(
+                json.get(key).and_then(|v| v.as_array()).is_some(),
+                "{key} must be present as an array: {json}"
+            );
+        }
+
+        let paths = json["path_table"].as_array().unwrap();
+        assert_eq!(paths.len(), 1, "one seeded path: {paths:?}");
+        assert_eq!(paths[0]["hash"], serde_json::json!("5a".repeat(16)));
+        assert_eq!(paths[0]["hops"], serde_json::json!(2));
+        // Direct path: `via` is the destination hash, never null — the same
+        // rule the path_table RPC follows (Transport.py:1600).
+        assert_eq!(paths[0]["via"], paths[0]["hash"]);
+        assert_eq!(
+            paths[0]["interface"],
+            serde_json::json!("TCPInterface[peer]")
+        );
+        assert!(
+            paths[0]["expires"].as_f64().unwrap() > paths[0]["timestamp"].as_f64().unwrap(),
+            "expires is later than the receipt timestamp: {:?}",
+            paths[0]
+        );
+        assert_eq!(
+            paths[0]["announce_emitted"],
+            serde_json::json!(0),
+            "no random blob stored, so the peer-stamped emission is 0"
+        );
     }
 
     /// `rpc_query("discovered_interfaces")` round-trips: a record persisted into

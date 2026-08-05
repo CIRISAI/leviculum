@@ -297,6 +297,38 @@ pub fn render_json(stats: &Value) -> String {
     serde_json::to_string(stats).unwrap_or_else(|_| "null".to_string())
 }
 
+/// The key `--tables` adds to the `-j` object (Codeberg #174).
+pub const TRANSPORT_TABLES_KEY: &str = "transport_tables";
+
+/// `--tables`: fold the `transport_tables` RPC response into the `-j` stats
+/// object, under one additive key.
+///
+/// The shape is deliberate on both sides of the read:
+///
+/// * **Additive, not an envelope.** The stats dict stays the top-level object,
+///   so anything that parses `lnstatus -j` today — Periculum's `parse_status`
+///   scans for the line whose object carries `interfaces` — keeps working
+///   unchanged, and `-j` without `--tables` is byte-identical to before.
+/// * **Absence is not emptiness.** `tables == None` means the daemon did not
+///   answer the question (a Python `rnsd`, or an `lnsd` older than #174: both
+///   match no arm for the command and close the connection), and the key is
+///   then *omitted*. A daemon that does know the question answers with the
+///   key present and its per-table lists possibly empty. A reader can tell
+///   "cannot ask" from "nothing there" by presence alone; if it could not,
+///   every assertion about an empty table would silently also pass against a
+///   daemon that cannot answer it. This is the read-side tolerance question of
+///   Codeberg #183, one layer up.
+///
+/// `stats` is left untouched when it is not a JSON object (an `rnsd` that
+/// answered something unexpected), which keeps this a pure merge with no
+/// opinion about the rest of the response.
+pub fn merge_transport_tables(stats: &mut Value, tables: Option<Value>) {
+    let (Some(obj), Some(tables)) = (stats.as_object_mut(), tables) else {
+        return;
+    };
+    obj.insert(TRANSPORT_TABLES_KEY.to_string(), tables);
+}
+
 // ---------------------------------------------------------------------------
 // -d / -D  discovered interfaces (rnstatus.py:182-306, Codeberg #32)
 // ---------------------------------------------------------------------------
