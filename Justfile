@@ -94,6 +94,10 @@ standard: fast test-ffi verify-packaging
     # Endurance gate (#101): builds lnsd, boots it as a hub, asserts 100%
     # delivery + RSS plateau + no fd leak. ~15 s smoke; `--full` is on demand.
     bash scripts/run-soak.sh
+    # #191a: the only suite that drives lnsd AND the vendor Python rnsd
+    # through one traffic script. ~196 s. Kept #[ignore]d and run by name
+    # (serially, apart from the parallel suite) — see the script header.
+    bash scripts/run-status-parity.sh
 
 # Build the production binaries periculum mounts into its node containers. Explicit per-bin list avoids `--workspace --bins` which
 # would also try to build leviculum-nrf firmware on the host. Runs on
