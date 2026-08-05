@@ -26,16 +26,38 @@
 #
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
-# file only reacts to the `event: cron` trigger. Suggested schedule:
-# `0 2 * * *` (02:00 UTC daily).
+# file only reacts to the `event: cron` trigger it produces. Suggested
+# schedule: `0 2 * * *` (02:00 UTC daily).
 #
 # Authentication for the publish step uses a Codeberg API token
 # (write:repository scope) supplied via the Woodpecker secret
 # `codeberg_token`. NETRC is only visible inside the clone step,
 # not in user-defined steps, so a manual token is required.
 
+# Two triggers. The nightly cron is what publishes; the push trigger is
+# a guard, and only builds. Packaging changes were previously unbuildable
+# before merge — `when: event: cron` alone meant a broken manifest first
+# showed up in the following night's run, and then only to whoever
+# thought to look at the releases page. That is exactly how commit
+# 4c580cc5 stalled the release for eight days. The paths listed here are
+# the inputs to the .deb build and nothing else, so ordinary commits do
+# not pay for a packaging build.
 when:
-  event: cron
+  - event: cron
+  - event: push
+    path:
+      include:
+        - '.woodpecker/**'
+        - 'scripts/build-deb.sh'
+        - 'scripts/deb-stamp.sh'
+        - 'scripts/deb-finalize.sh'
+        - 'scripts/collect-nightly-debs.sh'
+        - 'scripts/md2man.py'
+        - 'docs/src/man/**'
+        - 'packaging/**'
+        - 'leviculum-cli/Cargo.toml'
+        - 'lnomad/Cargo.toml'
+        - 'lblogd/Cargo.toml'
 
 # Skip submodule init: reference/ holds the Python reference Reticulum
 # implementation and two firmware reference repos, none of which the
@@ -51,7 +73,10 @@ steps:
   build-amd64:
     image: rust:bookworm
     commands:
-      - apt-get update && apt-get install -y musl-tools
+      # python3: scripts/build-deb.sh renders the manual pages the .deb
+      # manifests install from. It is stdlib-only by design, so the
+      # interpreter is the whole dependency.
+      - apt-get update && apt-get install -y musl-tools python3
       - cargo install --locked cargo-deb
       - rustup target add x86_64-unknown-linux-musl
       # Pin the build ID + per-package DEB versions once and persist
@@ -64,24 +89,11 @@ steps:
       # brace-style references in the raw YAML before any shell sees
       # them and expands unknown names to empty without warning.
       - bash scripts/deb-stamp.sh
-      - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      # `cargo clean` on the bin crates avoids a Cargo incremental quirk
-      # where repeated builds with the same LEVICULUM_BUILD_ID skip
-      # relinking some binaries, leaving them with a stale version
-      # string. Fresh containers rarely hit this, but the clean is
-      # cheap insurance.
-      - cargo clean -p leviculum-cli -p lnomad -p lblogd
-      - cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
-      # One --deb-version per package: the three are versioned
-      # independently, so a single shared version string would be wrong
-      # for at least two of them.
-      # --no-strip: rust strips debuginfo at link time (see workspace
-      # Cargo.toml [profile.release] strip = "debuginfo"). cargo-deb's
-      # default strip --strip-all corrupted x86_64 musl-static binaries
-      # (SIGSEGV at startup), so we skip it entirely.
-      - cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
-      - cargo deb -p lnomad --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
-      - cargo deb -p lblogd --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
+      # Everything from here to the finished .debs — manual pages, clean,
+      # build, cargo deb, deb-finalize — is one script, shared with the
+      # Justfile's build-deb-amd64. Spelling the steps out here a second
+      # time is what broke the nightly for eight days.
+      - bash scripts/build-deb.sh amd64
 
   build-arm64:
     image: rust:bookworm
@@ -96,16 +108,19 @@ steps:
       - rustup target add aarch64-unknown-linux-musl
       # No re-stamp here: build-amd64 already wrote .build-id and the
       # .deb-version-* files, and this step must reuse them verbatim so
-      # the two architectures ship identical version strings.
-      - export LEVICULUM_BUILD_ID="$(cat .build-id)"
-      - cargo clean -p leviculum-cli -p lnomad -p lblogd
-      - cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
-      - cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
-      - cargo deb -p lnomad --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
-      - cargo deb -p lblogd --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
+      # the two architectures ship identical version strings. The script
+      # reads them rather than deriving versions of its own, which is
+      # what makes reusing them the default instead of a discipline.
+      - bash scripts/build-deb.sh arm64
 
+  # Staging and publishing are cron-only. A push build exists to prove
+  # the packages still build; letting it reach these two steps would let
+  # any packaging commit replace the rolling release with a mid-day
+  # build of whatever was just pushed.
   package:
     image: debian:bookworm-slim
+    when:
+      event: cron
     commands:
       # git for the source tarball (`git archive HEAD`); coreutils for
       # sha256sum is already in the slim image.
@@ -115,6 +130,8 @@ steps:
 
   publish:
     image: debian:bookworm-slim
+    when:
+      event: cron
     environment:
       CODEBERG_TOKEN:
         from_secret: codeberg_token

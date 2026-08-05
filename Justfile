@@ -296,38 +296,18 @@ build-c-lnsd: build-ffi
 _deb-stamp:
     @bash scripts/deb-stamp.sh
 
-# Render docs/src/man/*.1.md to roff under target/man/, which the .deb
-# manifests install from. The Markdown is the single source: mdbook
-# publishes the same files, so the shipped manual pages and the online
-# documentation cannot drift apart.
-#
-# The selftest runs first because nothing downstream reads the roff: a
-# mangled conversion does not fail the build, it ships. It cost a silently
-# wrong lnomad(1) once already (a code span holding a backtick shifted
-# every span after it), so the conversions now have a standing guard.
-_deb-man:
-    @python3 scripts/md2man.py --selftest
-    @python3 scripts/md2man.py --outdir target/man docs/src/man/*.1.md
-
 # amd64 musl-static .debs for all three packages: leviculum (the daemon
 # and its clients), lnomad (the browser), lblogd (the blog server).
 # Binaries come from the workspace musl target, so they are fully static
 # and run on Debian >= 9 / Ubuntu >= 16.04 regardless of host glibc.
-# `cargo clean` on the bin crates is the same incremental-relink
-# insurance nightly uses (a repeated build with an unchanged
-# LEVICULUM_BUILD_ID can skip relinking and ship a stale version
-# string). --no-strip: rust already strips debuginfo at link time;
-# cargo-deb's default strip --strip-all corrupts musl-static binaries
-# (SIGSEGV at startup). Output: target/debian/*_amd64.deb (cargo-deb
-# also hardlinks each under target/<triple>/debian/).
-build-deb-amd64: (_require-cargo-deb) _deb-stamp _deb-man
-    cargo clean -p leviculum-cli -p lnomad -p lblogd
-    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo build --release --target x86_64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
-    cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
-    cargo deb -p lnomad --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
-    cargo deb -p lblogd --target x86_64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
-    bash scripts/deb-finalize.sh target/debian/leviculum_"$(cat .deb-version-leviculum-cli)"_amd64.deb target/debian/lnomad_"$(cat .deb-version-lnomad)"_amd64.deb target/debian/lblogd_"$(cat .deb-version-lblogd)"_amd64.deb
-    @ls -1t target/debian/*_amd64.deb | head -3 | sed 's/^/[build-deb-amd64] produced: /'
+#
+# The build itself lives in scripts/build-deb.sh, which nightly.yml calls
+# too: the sequence used to be written out in both places and drifted,
+# stalling the nightly release for eight days (see the script's header).
+# Output: target/debian/*_amd64.deb, hardlinked by cargo-deb under
+# target/<triple>/debian/ as well.
+build-deb-amd64: (_require-cargo-deb) _deb-stamp
+    @bash scripts/build-deb.sh amd64
 
 # arm64 musl-static .debs via cargo-zigbuild (Zig as the cross
 # compiler/linker — the only way to reach aarch64-musl from an amd64 host
@@ -335,17 +315,9 @@ build-deb-amd64: (_require-cargo-deb) _deb-stamp _deb-man
 # ziglang on PATH; `pip install ziglang` provides a self-contained Zig
 # the zigbuild wrapper finds, or install a full Zig distribution (the
 # bare zig binary without its sibling lib/ fails at `zig cc` with "unable
-# to find zig installation directory"). Same clean/--no-strip/version
-# handling as build-deb-amd64. Output: target/debian/*_arm64.deb
-# (cargo-deb also hardlinks each under target/<triple>/debian/).
-build-deb-arm64: (_require-cargo-deb) _deb-stamp _deb-man
-    cargo clean -p leviculum-cli -p lnomad -p lblogd
-    LEVICULUM_BUILD_ID="$(cat .build-id)" cargo zigbuild --release --target aarch64-unknown-linux-musl --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnomad --bin lblogd
-    cargo deb -p leviculum-cli --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-leviculum-cli)"
-    cargo deb -p lnomad --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lnomad)"
-    cargo deb -p lblogd --target aarch64-unknown-linux-musl --no-build --no-strip --deb-version "$(cat .deb-version-lblogd)"
-    bash scripts/deb-finalize.sh target/debian/leviculum_"$(cat .deb-version-leviculum-cli)"_arm64.deb target/debian/lnomad_"$(cat .deb-version-lnomad)"_arm64.deb target/debian/lblogd_"$(cat .deb-version-lblogd)"_arm64.deb
-    @ls -1t target/debian/*_arm64.deb | head -3 | sed 's/^/[build-deb-arm64] produced: /'
+# to find zig installation directory").
+build-deb-arm64: (_require-cargo-deb) _deb-stamp
+    @bash scripts/build-deb.sh arm64
 
 # Build every .deb in one go. _deb-stamp runs first (a dependency of each
 # child), so all six packages share one build-id and a consistent set of
