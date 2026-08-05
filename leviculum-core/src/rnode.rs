@@ -1266,7 +1266,9 @@ impl AirtimeTracker {
     }
 
     /// Recompute short-term airtime, long-term airtime, and the lock state for a
-    /// monotonic `now_ms` (RNode_Firmware.ino:693-702 + 1673-1696).
+    /// monotonic `now_ms`. Mirrors the firmware's `update_airtime`
+    /// (RNode_Firmware.ino:693-702) and the `airtime_lock` evaluation in its
+    /// main loop (RNode_Firmware.ino:1673-1696).
     ///
     /// Short-term airtime is the fraction of channel time used across the
     /// current and previous bins; long-term airtime is total keyed airtime over

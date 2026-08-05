@@ -993,7 +993,8 @@ pub enum DropReason {
     /// Incoming announce from a blackholed identity (Codeberg #67). The announce
     /// carries the identity's public key, so `identity_hash =
     /// truncated_hash(public_key)` is matched directly against the blackhole set;
-    /// mirrors Python's drop in `Identity.validate_announce` (Identity.py:574-577).
+    /// mirrors the drop in Python's `Identity.validate_announce`, which tests
+    /// `blackholed_identities` (Identity.py:574-577).
     BlackholedAnnounce,
     /// Relay suppressed because the packet's only outbound interface is the one
     /// it arrived on — a shared medium, where forwarding would put the packet
@@ -6245,7 +6246,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
     /// Compute the receipt timeout for a packet sent to a destination.
     ///
-    /// Matches Python's `PacketReceipt.__init__()` (Packet.py:432-433):
+    /// Matches the timeout Python's `PacketReceipt.__init__` builds from
+    /// `get_first_hop_timeout` (Packet.py:433-434):
     ///   `timeout = first_hop_timeout(dest) + TIMEOUT_PER_HOP * hops`
     ///
     /// Where `first_hop_timeout = MTU * per_byte_latency + DEFAULT_PER_HOP_TIMEOUT`
@@ -7383,9 +7385,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // request when the next hop toward the destination sits on the
                 // same roaming interface. Answering would just bounce the request
                 // back into the same roaming segment; a better-connected peer
-                // should respond instead. Mirrors Python
-                // `Transport.path_request` (Transport.py:2951-2952), where
-                // `received_from` is the interface the path was learned on.
+                // should respond instead. Mirrors the roaming branch of Python's
+                // `Transport.path_request`, which compares the attached
+                // interface against `received_from` (Transport.py:2951-2952) —
+                // the interface the path was learned on.
                 if mode == InterfaceMode::Roaming {
                     let received_from = self
                         .storage

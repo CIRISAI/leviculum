@@ -1198,7 +1198,8 @@ fn build_blackholed_identities(core: &StdNodeCore) -> Value {
 
 /// Insert into the blackhole set. Returns bool `true` on a fresh blackhole and
 /// `None` when the identity was already present, mirroring Python's
-/// `Transport.blackhole_identity` (Transport.py:3425/3427). An invalid hash
+/// `Transport.blackhole_identity` (Transport.py:3409); the `True`/`None`
+/// returns are at Transport.py:3425,3427. An invalid hash
 /// length yields `false`, matching the client-side length guard
 /// (Reticulum.py:1723).
 fn blackhole_identity(
@@ -1220,7 +1221,8 @@ fn blackhole_identity(
 
 /// Remove from the blackhole set. Returns bool `true` when an entry was lifted
 /// and `None` when the identity was not blackholed, mirroring Python's
-/// `Transport.unblackhole_identity` (Transport.py:3446/3448).
+/// `Transport.unblackhole_identity` (Transport.py:3434); the `True`/`None`
+/// returns are at Transport.py:3446,3448.
 fn unblackhole_identity(core: &mut StdNodeCore, identity_hash: &[u8]) -> Value {
     let hash = match try_into_hash(identity_hash) {
         Some(h) => h,

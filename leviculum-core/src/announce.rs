@@ -192,7 +192,7 @@ pub(crate) fn emission_from_random_hash(random_hash: &[u8; RANDOM_HASHBYTES]) ->
 
 /// Get the maximum emission timestamp from a list of random_hashes.
 ///
-/// Matches Python `Transport.timebase_from_random_blobs()` (Transport.py:2939).
+/// Matches Python `Transport.timebase_from_random_blobs()` (Transport.py:3182-3186).
 pub(crate) fn max_emission_from_blobs(blobs: &[[u8; RANDOM_HASHBYTES]]) -> u64 {
     blobs
         .iter()

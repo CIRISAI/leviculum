@@ -90,7 +90,8 @@ struct SpeedState {
 /// (Codeberg #25).
 ///
 /// Field names and units mirror Python `RNodeInterface`'s `r_*` attributes as
-/// surfaced through `Reticulum.get_interface_stats()` (Reticulum.py:1371-1420),
+/// surfaced through `Reticulum.get_interface_stats()`, which copies them out
+/// starting at `r_airtime_short` (Reticulum.py:1371-1420),
 /// so rnstatus/lnstatus render the radio rows without special-casing:
 ///
 /// - `airtime_short`/`airtime_long`, `channel_load_short`/`channel_load_long`:

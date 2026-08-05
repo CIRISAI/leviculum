@@ -74,10 +74,19 @@ m0-build-gate:
 check-submodules:
     @bash scripts/check-submodule-pins.sh
 
+# Guarantee C step 3: `path:line` citations in docs/src/** and in the Rust
+# sources of leviculum-core/-lxmf/-std must still point at what they claim.
+# ~3 s, and the leviculum-std test deps are already built by `mvr`, so it is
+# nearly free here. No tier ran this suite before — `fast` runs `--lib` only
+# and `standard` names leviculum-std suites one by one — which is the
+# Guarantee-B-masking-C shape the concept page warns about.
+citation-guard:
+    cargo test -p leviculum-std --test doc_citations -- --nocapture
+
 # Tier 0 (~3 min, runs on every git push): submodule pins + fmt + clippy
 # (host + nrf) + rustdoc gate + tracing-shim + M0 gates + workspace lib
-# tests.
-fast: check-submodules mvr lint-nrf doc-gate core-no-tracing m0-build-gate
+# tests + the citation guard.
+fast: check-submodules mvr lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     cargo test --workspace --lib

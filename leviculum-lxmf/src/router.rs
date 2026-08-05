@@ -802,7 +802,7 @@ impl LxmfRouter {
     ///
     /// The reference applies no bound on the read side: `received_announce`
     /// (Handlers.py:17-18) stores whatever `stamp_cost_from_app_data` returned
-    /// and `get_stamp` (LXMessage.py:320) feeds it to `generate_stamp`, whose
+    /// and `get_stamp` feeds it to `generate_stamp` (LXMessage.py:320), whose
     /// search loop (LXStamper.py:199) runs until `stamp_valid` holds. At cost
     /// 255 the target is `1 << 1` and the loop never terminates, so a single
     /// hostile or buggy announce wedges the sender's outbound queue.
@@ -2412,8 +2412,8 @@ mod persistence_tests {
     /// The app_data here is hand-built, because our own encoder can no longer
     /// produce it: only a non-conforming or hostile peer emits `0xcc 0xff` in
     /// the stamp-cost slot. Python's `received_announce` (Handlers.py:17-18)
-    /// stores that 255 unbounded and `get_stamp` (LXMessage.py:320) hands it to
-    /// `generate_stamp`, whose loop (LXStamper.py:199) cannot terminate at that
+    /// stores that 255 unbounded and `get_stamp` hands it to `generate_stamp`
+    /// (LXMessage.py:320), whose loop (LXStamper.py:199) cannot terminate at that
     /// cost. We drop it instead; see `outbound_stamp_cost` for the deviation
     /// argument.
     ///
