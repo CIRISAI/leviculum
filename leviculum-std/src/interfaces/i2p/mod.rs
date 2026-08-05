@@ -90,6 +90,9 @@ pub(crate) struct I2pClientConfig {
     pub reconnect_wait: Duration,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// Resolved `ingress_control` of the parent I2P interface entry, inherited
+    /// by this sub-interface (Codeberg #189).
+    pub ingress_control: bool,
     /// Applied to every TCP socket this sub-interface dials toward the SAM
     /// bridge, before it connects. See [`crate::socket_hook::OutboundSocketHook`].
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
@@ -106,6 +109,9 @@ pub(crate) struct I2pServerConfig {
     pub next_id: Arc<AtomicUsize>,
     pub new_interface_tx: mpsc::Sender<InterfaceHandle>,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
+    /// Resolved `ingress_control` of the parent I2P interface entry, inherited
+    /// by every accepted connection (Codeberg #189).
+    pub ingress_control: bool,
     /// Applied to every TCP socket the server endpoint dials toward the SAM
     /// bridge (control and accept sockets), before it connects.
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
@@ -156,6 +162,11 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
             ifac: config.ifac,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::I2p,
+            // Codeberg #189: every sub-interface of an I2P entry inherits the
+            // entry's resolved ingress control, as in the reference where the
+            // spawned interface takes `self.ingress_control` from the one
+            // parent interface (I2PInterface.py:951).
+            ingress_control: Some(config.ingress_control),
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -400,6 +411,7 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
             accept_sock,
             config.buffer_size,
             config.ifac.clone(),
+            config.ingress_control,
         );
         if config.new_interface_tx.send(handle).await.is_err() {
             return Ok(()); // event loop shut down
@@ -416,6 +428,7 @@ fn spawn_i2p_accepted(
     stream: TcpStream,
     buffer_size: usize,
     ifac: Option<leviculum_core::ifac::IfacConfig>,
+    ingress_control: bool,
 ) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
@@ -438,6 +451,9 @@ fn spawn_i2p_accepted(
             ifac,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::I2p,
+            // Codeberg #189, I2PInterface.py:951: inherited from the endpoint
+            // that accepted this connection.
+            ingress_control: Some(ingress_control),
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

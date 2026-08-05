@@ -99,3 +99,37 @@ only "this breaks wire or semantic compatibility" is. The
 [interface-isolation](interface-isolation.md) design — interfaces
 applying their own jitter, CSMA, and airtime budgeting — is a
 deliberate deviation that satisfies this rule.
+
+A deviation that is not written down is indistinguishable from a bug.
+Each one is pinned here with the reference line it departs from, so
+the next reader can check the claim instead of re-deriving it.
+
+### Pinned deviation: ingress-control default on dial-out links
+
+The reference gives every interface `ingress_control = True`
+(`Interface.py:112`), overridable per interface by the config key of
+the same name (`Reticulum.py:768-769`, applied at `Reticulum.py:910`).
+Leviculum defaults it **off** on dial-out point-to-point links —
+`TCPClientInterface`, `BackboneClientInterface`, `UDPInterface`, and an
+`I2PInterface` without `connectable` — and leaves it **on** everywhere
+else, including every listener
+(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:640`).
+
+Against the rule: the flag decides only whether *we* hold incoming
+announces, so no wire byte and no behaviour a peer observes changes
+(1 and 2). It gains us the announces the limiter would otherwise hold
+silently on a link carrying one known peer's startup burst — the
+mechanism behind the Codeberg #44 flake, on our receive side (3).
+An operator who wants the reference behaviour writes
+`ingress_control = yes` on the interface.
+
+The default is a *role* distinction, not a medium one: an interface
+that accepts connections from arbitrary unknown peers is exactly the
+announce-storm surface the limiter exists for, so a listener keeps the
+reference default. What a listener resolves is inherited by every
+connection it accepts, as in the reference
+(`TCPInterface.py:582`, `I2PInterface.py:951`,
+`BackboneInterface.py:409`). Shared-instance IPC clients are never
+ingress-limited on either stack — the reference hard-wires
+`should_ingress_limit` to `False` for them
+(`LocalInterface.py:137-138`) — so that is not a deviation.

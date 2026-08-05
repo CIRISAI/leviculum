@@ -248,6 +248,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Tcp,
+            ingress_control: None,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -322,6 +323,9 @@ pub(crate) struct TcpServerConfig {
     pub corrupt_every: Option<u64>,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
     pub mode: leviculum_core::traits::InterfaceMode,
+    /// Resolved `ingress_control` of the listener, inherited by every accepted
+    /// connection (Codeberg #189).
+    pub ingress_control: bool,
     /// Inventory id reserved for this listener (its config index) plus the
     /// shared inventory the accept loop registers spawned children in.
     pub listener_id: usize,
@@ -340,6 +344,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
         corrupt_every,
         ifac,
         mode,
+        ingress_control,
         listener_id,
         inventory,
         announce_rate,
@@ -405,6 +410,13 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                             // this server, mirroring Python
                             // `spawned_interface.mode = self.mode` (TCPInterface.py:625).
                             handle.info.mode = mode;
+                            // Codeberg #189: and its ingress control, mirroring
+                            // `spawned_interface.ingress_control =
+                            // self.ingress_control` (TCPInterface.py:582). The
+                            // operator configures the limiter on the listener,
+                            // which is the only entry a config file has for an
+                            // accepted connection.
+                            handle.info.ingress_control = Some(ingress_control);
                             tracing::info!("Accepted connection: {} ({})", name, id);
                             if new_interface_tx.send(handle).await.is_err() {
                                 break; // event loop shut down
@@ -481,6 +493,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Tcp,
+            ingress_control: None,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -1324,6 +1337,7 @@ mod tests {
             corrupt_every: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
+            ingress_control: false,
             listener_id: 99,
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             announce_rate: (None, None, None),
@@ -1368,6 +1382,7 @@ mod tests {
             corrupt_every: None,
             ifac: None,
             mode: InterfaceMode::AccessPoint,
+            ingress_control: false,
             listener_id: 99,
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             announce_rate: (None, None, None),
@@ -1391,6 +1406,55 @@ mod tests {
             InterfaceMode::AccessPoint,
             "the Interface::mode() trait accessor must report the inherited mode"
         );
+    }
+
+    /// Codeberg #189: an accepted connection carries the listener's
+    /// `ingress_control` on its handle, mirroring Python
+    /// `spawned_interface.ingress_control = self.ingress_control`
+    /// (TCPInterface.py:582). Both directions are asserted: before #189 the
+    /// driver forced every spawned interface off, so a listener configured ON
+    /// could never limit an ingress burst.
+    #[tokio::test]
+    async fn test_tcp_server_spawned_child_inherits_ingress_control() {
+        for listener_ingress in [true, false] {
+            let next_id = Arc::new(AtomicUsize::new(0));
+            let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
+
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let std_listener = std::net::TcpListener::bind(addr).unwrap();
+            let bound_addr = std_listener.local_addr().unwrap();
+            drop(std_listener);
+
+            spawn_tcp_server(TcpServerConfig {
+                bind_addr: bound_addr,
+                section: "Test Server".to_string(),
+                next_id: next_id.clone(),
+                new_interface_tx: tx,
+                buffer_size: 16,
+                corrupt_every: None,
+                ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
+                ingress_control: listener_ingress,
+                listener_id: 99,
+                inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+                announce_rate: (None, None, None),
+            })
+            .unwrap();
+
+            let _client = tokio::net::TcpStream::connect(bound_addr).await.unwrap();
+
+            let handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout waiting for handle")
+                .expect("channel closed");
+
+            assert_eq!(
+                handle.info.ingress_control,
+                Some(listener_ingress),
+                "spawned child must carry the listener's ingress_control \
+                 (listener had {listener_ingress})"
+            );
+        }
     }
 
     #[tokio::test]

@@ -3482,6 +3482,7 @@ async fn run_event_loop(
                 let inherited_ifac = handle.info.ifac.clone();
                 let inherited_mode = handle.info.mode;
                 let inherited_kind = handle.info.kind;
+                let inherited_ingress = handle.info.ingress_control;
                 {
                     let mut core = inner.lock_recover();
                     core.set_interface_name(iface_idx, handle.info.name.clone());
@@ -3497,13 +3498,24 @@ async fn run_event_loop(
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
                     core.set_interface_kind(iface_idx, inherited_kind);
-                    // Ingress control (Codeberg #8): dynamically-spawned
-                    // interfaces here are TCP-server-accepted connections or
-                    // local IPC clients, both point-to-point, so ingress control
-                    // defaults off (no announce storms on a single TCP/IPC peer;
-                    // leaving it on would silently hold the peer's startup
-                    // announces, the #44 flake).
-                    core.set_interface_ingress_control(iface_idx, false);
+                    // Ingress control (Codeberg #8, reshaped in #189): a
+                    // dynamically-spawned interface inherits its listener's
+                    // configured value, mirroring `spawned_interface
+                    // .ingress_control = self.ingress_control`
+                    // (TCPInterface.py:582, I2PInterface.py:951,
+                    // BackboneInterface.py:409). #8 forced `false` here instead,
+                    // which threw away the operator's `ingress_control` on every
+                    // accepted connection — a larger claim than "this medium
+                    // does not need it", and the reason a TCP server never
+                    // limited an ingress burst at all.
+                    //
+                    // `None` means no listener declared a value. Every spawner
+                    // in the tree declares one today (TCP accept, I2P accept and
+                    // peer, local IPC accept), so this is the fallback for a
+                    // future one; off is the safe reading, and it is what the
+                    // local IPC path asks for explicitly anyway.
+                    let ingress_on = inherited_ingress.unwrap_or(false);
+                    core.set_interface_ingress_control(iface_idx, ingress_on);
                     // Inherit IFAC config from parent interface (e.g., TCP server listener).
                     // Removal path: handle_interface_down removes ifac_config when connection drops.
                     if let Some(ifac) = &inherited_ifac {
@@ -4541,6 +4553,7 @@ mod tests {
                     ifac,
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Udp,
+                    ingress_control: None,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -5089,6 +5102,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -5615,6 +5629,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -5665,6 +5680,7 @@ mod tests {
                     ifac: None,
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Unknown,
+                    ingress_control: None,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -5732,6 +5748,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: l_inc_rx,
             outgoing: l_out_tx,
@@ -5754,6 +5771,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -5805,6 +5823,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -5875,6 +5894,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: lora_inc_rx,
             outgoing: lora_out_tx,
@@ -5896,6 +5916,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: plain_inc_rx,
             outgoing: plain_out_tx,
@@ -5969,6 +5990,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -6022,6 +6044,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -6075,6 +6098,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: inc_rx,
             outgoing: out_tx,

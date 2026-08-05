@@ -29,6 +29,12 @@ pub(super) fn build(
         .map(Duration::from_secs)
         .unwrap_or(I2P_DEFAULT_RECONNECT_WAIT);
     let ifac = build_ifac_config(config);
+    // Codeberg #189: resolve the entry's ingress control once; every
+    // sub-interface it spawns (accepted or dialled) inherits it, as in the
+    // reference where a spawned I2P interface takes `self.ingress_control`
+    // from the one parent (I2PInterface.py:951). A `connectable` entry takes
+    // the listener default, a peers-only entry the dial-out one.
+    let ingress_control = config.resolve_ingress_control();
     let storage_root = ctx
         .storage_path
         .clone()
@@ -49,6 +55,7 @@ pub(super) fn build(
             next_id: ctx.next_id.clone(),
             new_interface_tx: ctx.new_iface_tx.clone(),
             ifac: ifac.clone(),
+            ingress_control,
             outbound_socket_hook: ctx.outbound_socket_hook.clone(),
         });
         tracing::info!("I2P connectable endpoint (interface {})", idx);
@@ -75,6 +82,7 @@ pub(super) fn build(
                 reconnect_wait,
                 ifac: ifac.clone(),
                 reconnect_notify: Some(ctx.reconnect_tx.clone()),
+                ingress_control,
                 outbound_socket_hook: ctx.outbound_socket_hook.clone(),
             });
             if ctx.new_iface_tx.try_send(handle).is_err() {

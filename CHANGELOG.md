@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A connection accepted by a listener inherits the listener's
+  `ingress_control` instead of always having it off, and a listener
+  defaults it on as the reference does (#189).
 - `lnstest selftest` sizes its single-packet delivery window from the
   link's own bitrate and pre-TX jitter ceiling instead of a fixed sleep,
   and reports an expiry as a budget expiry rather than as loss (#190).

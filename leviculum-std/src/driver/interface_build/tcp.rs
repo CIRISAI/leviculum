@@ -118,6 +118,12 @@ pub(super) fn build_server(
         corrupt_every: ctx.corrupt_every,
         ifac,
         mode,
+        // Codeberg #189: the listener resolves its ingress control once and
+        // every accepted connection inherits it. The listener itself never
+        // registers as a routable interface, so the startup config loop (which
+        // sets the flag by config index) skips it — this is the only place the
+        // operator's `ingress_control` on a TCP server can take effect.
+        ingress_control: config.resolve_ingress_control(),
         listener_id: idx,
         inventory: Arc::clone(&ctx.inventory),
         announce_rate: leviculum_core::transport::resolve_announce_rate(

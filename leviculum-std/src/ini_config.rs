@@ -987,6 +987,45 @@ mod tests {
             "unset RNode resolves ingress control ON"
         );
         assert!(ingress_control_default_for_type("RNodeInterface"));
+
+        // Codeberg #189: a listener resolves ON when unset — it accepts
+        // arbitrary unknown peers, which is the storm surface the limiter
+        // exists for, and it is also what the reference does for every
+        // interface (Interface.py:112). The value is inherited by every
+        // connection the listener accepts, so this is the only place an
+        // operator can configure the limiter for those connections.
+        let srv = parse_ini(
+            "[interfaces]\n  [[If]]\n    type = TCPServerInterface\n    listen_port = 4242\n",
+        )
+        .unwrap();
+        let srv_cfg = srv.interfaces.get("If").unwrap();
+        assert_eq!(srv_cfg.ingress_control, None);
+        assert!(
+            srv_cfg.resolve_ingress_control(),
+            "unset TCP server resolves ingress control ON"
+        );
+        assert!(ingress_control_default_for_type("TCPServerInterface"));
+
+        // A listening BackboneInterface normalizes to TCPServerInterface at
+        // parse time, so it picks up the listener default too; a Backbone entry
+        // with a `remote` becomes a client and keeps the dial-out default.
+        let bb_listen =
+            parse_ini("[interfaces]\n  [[If]]\n    type = BackboneInterface\n    port = 4242\n")
+                .unwrap();
+        assert!(bb_listen
+            .interfaces
+            .get("If")
+            .unwrap()
+            .resolve_ingress_control());
+        let bb_client = parse_ini(
+            "[interfaces]\n  [[If]]\n    type = BackboneInterface\n    remote = example.com\n    port = 4242\n",
+        )
+        .unwrap();
+        assert!(!bb_client
+            .interfaces
+            .get("If")
+            .unwrap()
+            .resolve_ingress_control());
     }
 
     /// Codeberg #172: `egress_control` is an rnsd config key

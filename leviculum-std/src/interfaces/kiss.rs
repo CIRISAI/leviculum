@@ -430,6 +430,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Kiss,
+            ingress_control: None,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

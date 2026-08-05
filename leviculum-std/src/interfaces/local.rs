@@ -350,6 +350,14 @@ fn spawn_local_interface_from_stream(
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Local,
+            // A shared-instance IPC client is never ingress-limited, in the
+            // reference by construction: `LocalClientInterface` overrides
+            // `should_ingress_limit()` to return False unconditionally
+            // (LocalInterface.py:137-138), regardless of the flat
+            // `ingress_control = True` it inherits from `Interface.__init__`.
+            // Stated here rather than left to a fallback so the local server
+            // says what it means (Codeberg #189).
+            ingress_control: Some(false),
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -435,6 +443,7 @@ pub(crate) fn spawn_local_client(
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Local,
+            ingress_control: None,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

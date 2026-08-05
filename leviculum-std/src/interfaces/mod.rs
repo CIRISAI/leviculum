@@ -414,6 +414,18 @@ pub(crate) struct InterfaceInfo {
     /// `Transport::set_interface_kind` at registration so status can group by
     /// transport rather than by the peer-label name.
     pub kind: InterfaceKind,
+    /// Ingress-control flag this interface must be registered with, inherited
+    /// from the listener that spawned it (Codeberg #189, Python
+    /// `spawned_interface.ingress_control = self.ingress_control`,
+    /// TCPInterface.py:582 / I2PInterface.py:951 / BackboneInterface.py:409).
+    ///
+    /// `None` means no listener declared one: statically registered interfaces
+    /// carry `None` because the driver resolves their flag from the config by
+    /// index at startup, and a local IPC client carries `Some(false)` because
+    /// the reference never ingress-limits one
+    /// (`LocalClientInterface.should_ingress_limit() -> False`,
+    /// LocalInterface.py:137-138).
+    pub ingress_control: Option<bool>,
 }
 
 /// Event loop's handle to a spawned interface task
@@ -605,6 +617,7 @@ mod tests {
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
             },
             incoming: inc_rx,
             outgoing: out_tx,

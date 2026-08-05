@@ -650,6 +650,7 @@ fn handle_discovery_packet(
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Auto,
+            ingress_control: None,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

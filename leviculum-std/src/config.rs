@@ -410,13 +410,16 @@ pub struct InterfaceConfig {
     /// keep the raw percentage.
     pub announce_cap: Option<f32>,
 
-    // Ingress control (Codeberg #8). Python: `ingress_control` config key
+    // Ingress control (Codeberg #8/#189). Python: `ingress_control` config key
     // (Reticulum.py:768-769), a flat per-interface bool defaulting True.
     /// Enable the announce/path-request ingress burst limiter for this interface
-    /// (Python `ingress_control`). `None` resolves to the medium-class default
-    /// via [`InterfaceConfig::resolve_ingress_control`]: off for point-to-point
-    /// media (TCP/UDP/I2P), on for shared/broadcast media (RNode/Serial/KISS/
-    /// AX25/Auto). An explicit value overrides the default in either direction.
+    /// (Python `ingress_control`). `None` resolves to the role default via
+    /// [`InterfaceConfig::resolve_ingress_control`]: off for dial-out
+    /// point-to-point links (TCP client, UDP, non-connectable I2P), on for
+    /// listeners (TCP server) and shared/broadcast media (RNode/Serial/KISS/
+    /// AX25/Auto). An explicit value overrides the default in either direction,
+    /// and — since #189 — a listener's value is inherited by every connection it
+    /// accepts.
     #[serde(default)]
     pub ingress_control: Option<bool>,
 
@@ -612,35 +615,57 @@ impl Default for InterfaceConfig {
 }
 
 /// Whether ingress control defaults on for an interface of `interface_type`
-/// (Codeberg #8). The interface's carrier medium decides the default: shared /
-/// broadcast RF media (RNode, Serial, KISS, AX25, AutoInterface, Pipe) suffer
-/// announce storms, so the burst limiter defaults on there; point-to-point IP
-/// tunnels (TCP client/server, Backbone, UDP, I2P) do not, and the limiter
-/// there only silently holds legitimate startup announces (the #44 flake on our
-/// side), so it defaults off.
+/// (Codeberg #8, narrowed in #189). What decides the default is not the carrier
+/// alone but the interface's role on it: an interface that accepts connections
+/// from arbitrary, unknown peers is exactly the announce-storm surface the burst
+/// limiter exists for, while a link this node dials out to one configured peer
+/// is not.
 ///
-/// Python uses a flat `ingress_control = True` for every medium
-/// (Reticulum.py:768); defaulting it off for point-to-point media is a
-/// receiver-local policy deviation that changes no wire bytes and no behaviour a
-/// peer observes, and it recovers otherwise-suppressed announces (the deviation
-/// rule's Priority-1 gain). An explicit config value still restores Python's
-/// behaviour on either medium. Unknown types default on, the conservative
-/// (unchanged) choice.
+/// So the limiter defaults ON everywhere except the dial-out point-to-point IP
+/// types — `TCPClientInterface`, `BackboneClientInterface`, `UDPInterface`,
+/// `I2PInterface` without `connectable` (refined in
+/// [`InterfaceConfig::resolve_ingress_control`]). There the limiter has no storm
+/// to damp and only silently holds the one peer's legitimate startup announces
+/// (the #44 flake on our receive side). Shared/broadcast RF media (RNode,
+/// Serial, KISS, AX25, AutoInterface, Pipe), listeners (`TCPServerInterface`,
+/// which is also what a listening `BackboneInterface` normalizes to) and unknown
+/// types default on.
+///
+/// Python uses a flat `ingress_control = True` for every interface
+/// (Interface.py:112, config key at Reticulum.py:768-769). Defaulting it off on
+/// the dial-out types is a **pinned deviation**: receiver-local policy, it
+/// changes no wire bytes and no behaviour a peer observes, and it recovers
+/// otherwise-suppressed announces (the deviation rule's Priority-1 gain). An
+/// explicit config value restores Python's behaviour on any type.
 pub fn ingress_control_default_for_type(interface_type: &str) -> bool {
-    let point_to_point = interface_type.starts_with("TCP")
-        || interface_type == "BackboneInterface"
+    let dial_out_point_to_point = interface_type == "TCPClientInterface"
+        || interface_type == "BackboneClientInterface"
         || interface_type == "UDPInterface"
         || interface_type.starts_with("I2P");
-    !point_to_point
+    !dial_out_point_to_point
 }
 
 impl InterfaceConfig {
     /// Resolve the effective ingress-control flag for this interface (Codeberg
-    /// #8): an explicit `ingress_control` value wins, otherwise the medium-class
-    /// default from [`ingress_control_default_for_type`].
+    /// #8/#189): an explicit `ingress_control` value wins, otherwise the
+    /// role default from [`ingress_control_default_for_type`].
+    ///
+    /// One type carries its role in the config rather than in its name: an
+    /// `I2PInterface` with `connectable = yes` accepts inbound connections from
+    /// arbitrary peers, so it takes the listener default (on) even though a
+    /// plain I2P peer link takes the dial-out default (off). A `connectable`
+    /// entry that also lists `peers` resolves once, and both its accepted and
+    /// its dialled sub-interfaces inherit that one value — as in the reference,
+    /// where every sub-interface inherits `self.ingress_control` from the one
+    /// parent (I2PInterface.py:951).
     pub fn resolve_ingress_control(&self) -> bool {
-        self.ingress_control
-            .unwrap_or_else(|| ingress_control_default_for_type(&self.interface_type))
+        if let Some(explicit) = self.ingress_control {
+            return explicit;
+        }
+        if self.interface_type.starts_with("I2P") && self.connectable.unwrap_or(false) {
+            return true;
+        }
+        ingress_control_default_for_type(&self.interface_type)
     }
 }
 
@@ -762,19 +787,19 @@ mod tests {
 
     #[test]
     fn test_ingress_control_defaults_by_medium_class() {
-        // Codeberg #8: without an explicit setting, point-to-point media resolve
-        // OFF and shared/broadcast media resolve ON.
+        // Codeberg #8/#189: without an explicit setting, only dial-out
+        // point-to-point links resolve OFF; listeners and shared/broadcast
+        // media resolve ON (as every interface does in the reference).
         let off_by_default = [
             "TCPClientInterface",
-            "TCPServerInterface",
-            "BackboneInterface",
+            "BackboneClientInterface",
             "UDPInterface",
             "I2PInterface",
         ];
         for t in off_by_default {
             assert!(
                 !ingress_control_default_for_type(t),
-                "{t} (point-to-point) must default ingress control OFF"
+                "{t} (dial-out point-to-point) must default ingress control OFF"
             );
             let cfg = InterfaceConfig {
                 interface_type: t.to_string(),
@@ -786,6 +811,10 @@ mod tests {
             );
         }
         let on_by_default = [
+            // A listener accepts arbitrary unknown peers — the storm surface
+            // the limiter exists for. `BackboneInterface` in listening form
+            // normalizes to this type at parse time (ini_config.rs).
+            "TCPServerInterface",
             "RNodeInterface",
             "RNodeMultiInterface",
             "SerialInterface",
@@ -798,7 +827,7 @@ mod tests {
         for t in on_by_default {
             assert!(
                 ingress_control_default_for_type(t),
-                "{t} (shared/broadcast or unknown) must default ingress control ON"
+                "{t} (listener, shared/broadcast or unknown) must default ingress control ON"
             );
             let cfg = InterfaceConfig {
                 interface_type: t.to_string(),
@@ -806,6 +835,39 @@ mod tests {
             };
             assert!(cfg.resolve_ingress_control(), "{t} resolves ON when unset");
         }
+    }
+
+    #[test]
+    fn test_ingress_control_i2p_connectable_takes_the_listener_default() {
+        // An I2P entry carries its role in `connectable`, not in its type name:
+        // a connectable endpoint accepts arbitrary peers and takes the listener
+        // default (on); a plain peer link keeps the dial-out default (off).
+        let listener = InterfaceConfig {
+            interface_type: "I2PInterface".to_string(),
+            connectable: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            listener.resolve_ingress_control(),
+            "a connectable I2P endpoint resolves ON when unset"
+        );
+        let dialler = InterfaceConfig {
+            interface_type: "I2PInterface".to_string(),
+            peers: Some(vec!["peer.b32.i2p".to_string()]),
+            ..Default::default()
+        };
+        assert!(
+            !dialler.resolve_ingress_control(),
+            "an I2P peer link resolves OFF when unset"
+        );
+        // The explicit key still wins over the connectable refinement.
+        let listener_off = InterfaceConfig {
+            interface_type: "I2PInterface".to_string(),
+            connectable: Some(true),
+            ingress_control: Some(false),
+            ..Default::default()
+        };
+        assert!(!listener_off.resolve_ingress_control());
     }
 
     #[test]

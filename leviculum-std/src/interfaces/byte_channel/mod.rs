@@ -86,6 +86,7 @@ where
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Channel,
+            ingress_control: None,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

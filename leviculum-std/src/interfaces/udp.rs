@@ -278,6 +278,7 @@ pub(crate) fn spawn_udp_interface_with_opts(
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Udp,
+            ingress_control: None,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

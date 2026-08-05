@@ -131,6 +131,7 @@ async fn announce_crosses_i2p_loopback() {
         reconnect_wait: Duration::from_millis(200),
         next_id,
         new_interface_tx: new_tx,
+        ingress_control: false,
         ifac: None,
         outbound_socket_hook: None,
     });
@@ -144,6 +145,7 @@ async fn announce_crosses_i2p_loopback() {
         reconnect_wait: Duration::from_millis(200),
         ifac: None,
         reconnect_notify: None,
+        ingress_control: false,
         outbound_socket_hook: None,
     });
 
@@ -200,6 +202,7 @@ async fn hdlc_escaping_survives_i2p_stream() {
         reconnect_wait: Duration::from_millis(200),
         next_id,
         new_interface_tx: new_tx,
+        ingress_control: false,
         ifac: None,
         outbound_socket_hook: None,
     });
@@ -212,6 +215,7 @@ async fn hdlc_escaping_survives_i2p_stream() {
         reconnect_wait: Duration::from_millis(200),
         ifac: None,
         reconnect_notify: None,
+        ingress_control: false,
         outbound_socket_hook: None,
     });
 
@@ -253,6 +257,7 @@ async fn socket_hook_covers_every_sam_dial() {
         reconnect_wait: Duration::from_secs(30),
         ifac: None,
         reconnect_notify: None,
+        ingress_control: false,
         outbound_socket_hook: Some(hook),
     });
     handle
