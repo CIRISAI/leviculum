@@ -127,6 +127,29 @@ disturb what it measures**, and a diagnostic that can must be checked
 for it before its numbers are believed. See
 [Evidence and Honesty in Testing](evidence-and-honesty.md).
 
+## The firmware ledger is not a cross-session account
+
+The same fact has a second consequence, and it is the one that decides
+where an hour-scale budget lives. Because a radio start clears the
+bins, the firmware's long-term figure covers *airtime since the last
+radio start*, not the rolling hour. It is a lower bound, and the bound
+is zero exactly when the question is worth asking: a harness that
+reboots a board to give a test a defined starting state (Periculum
+does, before every scenario that binds one) has zeroed it, and the
+daemon under test zeroes it again when it brings the radio up. An
+offline radio's history survives in RAM and cannot be read out-of-band
+at all — the only way to make the firmware emit it is the call that
+clears it first.
+
+So: **enforcement belongs to the firmware, but the hour-scale account
+belongs to whoever drives the radio.** The board is the only thing that
+can refuse to transmit, and the only thing that cannot tell you what it
+transmitted an hour ago. Anything that needs to know — a test harness
+spacing its runs, a scheduler shaping traffic — keeps its own ledger
+and states plainly that the figure is modelled, not measured, and a
+floor rather than a total. A reset makes the board forget what it
+radiated; it does not make the airtime unspent.
+
 ## See also
 
 - [Interface Isolation](interface-isolation.md) — why airtime
