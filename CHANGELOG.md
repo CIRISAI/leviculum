@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.13.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `8e3dbef` (+102 since 0.8.0): announce emission
+timestamps carried in unix seconds (#155/#160 — cross-restart path replacement),
+the driver-tick state-machine seam (a consumer can run a protocol state machine
+inside the driver's tick), discovery stamp-cost fix, ingress-control inheritance,
+workspace-wide test gates, and the documented core-lock budget.
+
+Everything from the fork's third upstream-PR round is absorbed and dropped from
+the carry: the #29 stage-1 off-lock resource build + inbound pre-hash (#152),
+both `now_ms()` de-flakes and the macOS absent-daemon error kind (#153), and the
+complete #35 per-link delivery telemetry (#154). The carry is now: the
+explicit-hash listen API (leviculum#30), fork CI/bench/tooling, and release
+bookkeeping.
+
 ## [0.12.0+ciris.1] — CIRIS fork
 
 ### Added
