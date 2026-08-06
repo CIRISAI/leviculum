@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `generate_stamp` refuses a cost above the 256-bit hash width instead
+  of searching for a stamp that cannot exist: `stamp_valid` rejects every
+  candidate at that cost, so the loop could not terminate at all and one
+  off-by-one past the legal maximum left the node permanently dead.
 - The `status_parity` freeze waits out the 1 Hz traffic sampler, so a
   speed that has not been sampled yet is no longer read as an idle one
   (#195).

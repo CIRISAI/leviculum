@@ -38,8 +38,8 @@ pub use registry::{
     THRESHOLD_STALE, THRESHOLD_UNKNOWN,
 };
 pub use stamp::{
-    generate_stamp, stamp_valid, stamp_value, stamp_workblock, DEFAULT_STAMP_VALUE, STAMP_SIZE,
-    WORKBLOCK_EXPAND_ROUNDS,
+    generate_stamp, stamp_valid, stamp_value, stamp_workblock, StampError, DEFAULT_STAMP_VALUE,
+    STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS,
 };
 
 use alloc::format;
@@ -364,8 +364,11 @@ fn build_announce_app_data_inner(
 ) -> Option<Vec<u8>> {
     let packed = encode_info(desc, transport_id, transport_enabled)?;
     let infohash = full_hash(&packed);
+    // `DEFAULT_STAMP_VALUE` is a local constant well under the hash width, so
+    // the guard cannot fire here; propagate rather than unwrap so it stays that
+    // way if the cost ever becomes configurable.
     let (stamp, _value) =
-        stamp::generate_stamp(&infohash, DEFAULT_STAMP_VALUE, WORKBLOCK_EXPAND_ROUNDS, rng);
+        stamp::generate_stamp(&infohash, DEFAULT_STAMP_VALUE, WORKBLOCK_EXPAND_ROUNDS, rng).ok()?;
 
     let mut tail = Vec::with_capacity(packed.len() + STAMP_SIZE);
     tail.extend_from_slice(&packed);

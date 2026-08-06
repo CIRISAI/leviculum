@@ -102,24 +102,64 @@ pub fn stamp_valid(stamp: &[u8], target_cost: u32, workblock: &[u8]) -> bool {
     result <= target
 }
 
+/// Why a stamp could not be generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampError {
+    /// `cost` exceeds the 256-bit width of the hash the target is compared
+    /// against, so no stamp can ever satisfy it.
+    CostExceedsHashWidth {
+        /// The rejected cost.
+        cost: u32,
+    },
+}
+
+impl core::fmt::Display for StampError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StampError::CostExceedsHashWidth { cost } => write!(
+                f,
+                "stamp cost {cost} exceeds the 256-bit hash width; no stamp can satisfy it"
+            ),
+        }
+    }
+}
+
 /// Brute-force a valid stamp for `material` at the given `cost` and `rounds`.
 ///
 /// Returns the stamp and its realised value (`>= cost`). Mirrors
 /// `LXStamper.generate_stamp` (single-worker form): draw random 32-byte
 /// candidates until one is valid.
+///
+/// # Termination
+///
+/// [`stamp_valid`] answers `false` unconditionally for `target_cost > 256` —
+/// the target would need more bits than the hash has — so the search loop
+/// below would spin forever rather than merely for a long time. A caller that
+/// let a cost of 257 through would therefore not get a slow node, it would get
+/// a permanently dead one, and on the discovery path that cost is one
+/// off-by-one away from the legal maximum. The guard turns that into an error
+/// at the door.
+///
+/// This bounds nothing else: the search is exponential in `cost`, so a cost in
+/// the high tens is already unfinishable in practice. Keeping *peer-chosen*
+/// costs off this function entirely is a separate invariant, held by
+/// `docs/src/concepts/core-lock-budget.md`.
 pub fn generate_stamp(
     material: &[u8],
     cost: u32,
     rounds: usize,
     rng: &mut impl CryptoRngCore,
-) -> ([u8; STAMP_SIZE], u32) {
+) -> Result<([u8; STAMP_SIZE], u32), StampError> {
+    if cost > 256 {
+        return Err(StampError::CostExceedsHashWidth { cost });
+    }
     let workblock = stamp_workblock(material, rounds);
     let mut stamp = [0u8; STAMP_SIZE];
     loop {
         rng.fill_bytes(&mut stamp);
         if stamp_valid(&stamp, cost, &workblock) {
             let value = stamp_value(&workblock, &stamp);
-            return (stamp, value);
+            return Ok((stamp, value));
         }
     }
 }
@@ -158,11 +198,40 @@ mod tests {
     fn generate_then_validate_roundtrip() {
         let material = [0x11u8; 32];
         // A low cost keeps the brute force fast and deterministic in runtime.
-        let (stamp, value) = generate_stamp(&material, 8, WORKBLOCK_EXPAND_ROUNDS, &mut OsRng);
+        let (stamp, value) =
+            generate_stamp(&material, 8, WORKBLOCK_EXPAND_ROUNDS, &mut OsRng).expect("cost 8");
         assert!(value >= 8);
         let wb = stamp_workblock(&material, WORKBLOCK_EXPAND_ROUNDS);
         assert!(stamp_valid(&stamp, 8, &wb));
         assert_eq!(stamp_value(&wb, &stamp), value);
+    }
+
+    /// RED-before: `stamp_valid` rejects every candidate above 256, so the
+    /// search loop never returned. This test could not be written against the
+    /// old signature at all — it would have hung the suite.
+    #[test]
+    fn cost_above_the_hash_width_is_refused_rather_than_ground_forever() {
+        let err = generate_stamp(&[0x33u8; 32], 257, WORKBLOCK_EXPAND_ROUNDS, &mut OsRng)
+            .expect_err("257 is unsatisfiable, not merely expensive");
+        assert_eq!(err, StampError::CostExceedsHashWidth { cost: 257 });
+    }
+
+    /// The guard's boundary is exactly `stamp_valid`'s: 256 is the largest cost
+    /// for which a target still fits in the hash, so it stays on the accepted
+    /// side. Asserted against `stamp_valid` rather than by calling
+    /// `generate_stamp(_, 256, ..)`, which would run until the heat death of
+    /// the universe — unfinishable is not the same defect as non-terminating,
+    /// and only the second one is what this guard is for.
+    #[test]
+    fn the_guard_boundary_matches_what_stamp_valid_can_answer() {
+        let wb = stamp_workblock(&[0x44u8; 32], 1);
+        // A cost of 256 targets `result <= 1`: satisfiable in principle, so
+        // `stamp_valid` does not short-circuit it the way it does 257.
+        assert!(!stamp_valid(&[0u8; 32], 256, &wb) || stamp_value(&wb, &[0u8; 32]) >= 256);
+        assert!(
+            !stamp_valid(&[0u8; 32], 257, &wb),
+            "257 is never satisfiable"
+        );
     }
 
     #[test]

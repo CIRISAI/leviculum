@@ -127,7 +127,7 @@ is the one that matters: `generate_with` is an `async fn`, so no
 synchronous callee of the event loop can drive it to completion at all.
 It is not true that the tree contains no synchronous proof-of-work.
 `leviculum-core::discovery::stamp::generate_stamp`
-(`leviculum-core/src/discovery/stamp.rs:110`) is a public synchronous
+(`leviculum-core/src/discovery/stamp.rs:147`) is a public synchronous
 brute-force loop taking a caller-supplied `cost`, and nothing stops a
 loop callee from calling it. It is not a DoS vector today because no
 peer picks its number: the only caller is the discovery announcer,
