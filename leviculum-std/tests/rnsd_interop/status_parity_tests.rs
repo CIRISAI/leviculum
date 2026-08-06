@@ -83,13 +83,22 @@
 //! returns n/span over a timestamp deque and POPS one decayed sample per call
 //! once the span exceeds 10 s; when the deque is down to 2 samples it returns
 //! exactly 0. Our implementation mirrors that. The freeze loop polls
-//! interface_stats (1 s interval) until, on BOTH daemons, every frequency
-//! reads exactly 0, rxs/txs read exactly 0, held_announces is 0 and no burst
-//! flag is set. The polling itself drains the deques, so the loop always
-//! converges, and after it the ONLY values that can differ between two reads
-//! of the same daemon are transport_uptime and (on rnsd) the process rss.
-//! Every other field is bit-stable, which is what makes EXACT comparison
-//! possible instead of "almost".
+//! interface_stats until, on BOTH daemons, every frequency reads exactly 0,
+//! rxs/txs read exactly 0, held_announces is 0 and no burst flag is set. The
+//! polling itself drains the deques, so the loop always converges, and after
+//! it the ONLY values that can differ between two reads of the same daemon are
+//! transport_uptime and (on rnsd) the process rss. Every other field is
+//! bit-stable, which is what makes EXACT comparison possible instead of
+//! "almost".
+//!
+//! One of those values needs more than a predicate. rxs/txs are not computed
+//! on read: a 1 Hz sampler turns byte-counter deltas into speeds on both
+//! stacks, so a speed of 0 means EITHER "idle" OR "received but not sampled
+//! yet", and the second reading flips positive for a whole second at the next
+//! tick. The freeze therefore requires the quiet state to hold across more
+//! than one sampling period with the byte counters unchanged
+//! (`FREEZE_SETTLE`), which is the only thing that tells the two zeros apart.
+//! Codeberg #195 was that tick landing between two client reads.
 //!
 //! ## Known, pinned cross-stack divergences (asserted, not ignored)
 //!
@@ -874,6 +883,141 @@ fn is_quiet(stats: &Value) -> bool {
     iface_quiet && num(stats, "rxs") == 0.0 && num(stats, "txs") == 0.0
 }
 
+/// One tick of the 1 Hz traffic counter, on BOTH stacks: ours samples the byte
+/// counters once a second and caches `(delta * 8) / elapsed`
+/// (`spawn_traffic_counter`, leviculum-std/src/interfaces/mod.rs:243-256),
+/// Python's `Transport.count_traffic_loop` does the same.
+const SPEED_SAMPLE_PERIOD: Duration = Duration::from_secs(1);
+
+/// How long [`is_quiet`] must hold CONTINUOUSLY, over unchanged byte counters,
+/// before a daemon counts as frozen.
+///
+/// **Why a duration and not just a predicate (Codeberg #195).** `rxs == 0` has
+/// two meanings: "this interface is idle" and "bytes have arrived but the 1 Hz
+/// sampler has not run since". They are the same number
+/// (`leviculum-std/src/interfaces/mod.rs`, unit test
+/// `a_zero_speed_reading_does_not_mean_the_bytes_have_been_accounted`), so a
+/// predicate reading one snapshot cannot tell them apart — and in the second
+/// case the next tick turns the speed positive for one whole sampling period.
+/// A comparison of two sequential client reads that straddles that tick then
+/// sees `0 bps` in one render and `64 bps` in the other, with nothing wrong on
+/// either side.
+///
+/// What separates the two states is time, and only time: once the byte
+/// counters stop moving, at most ONE further tick can report a delta. Watching
+/// the quiet state hold across a window that must contain more than one tick
+/// therefore proves the sampler has already consumed the final byte count, and
+/// that every later read will be the same one. Two-and-a-half periods leaves
+/// room for the sampler thread's own drift.
+const FREEZE_SETTLE: Duration =
+    Duration::from_millis(SPEED_SAMPLE_PERIOD.as_millis() as u64 * 5 / 2);
+
+/// `(interface name, rxb, txb)` for every reported interface, sorted.
+type ByteCounters = Vec<(String, u64, u64)>;
+
+/// The byte counters of every reported interface, keyed by name: the input the
+/// speed sampler works from, and what has to stand still for the freeze to
+/// mean anything.
+fn byte_counters(stats: &Value) -> ByteCounters {
+    let mut rows: ByteCounters = ifaces(stats)
+        .iter()
+        .map(|i| {
+            (
+                i["name"].as_str().unwrap_or_default().to_string(),
+                num(i, "rxb") as u64,
+                num(i, "txb") as u64,
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Poll `daemon` until it is [`is_quiet`], `extra` holds, and both have held
+/// continuously over unchanged byte counters for [`FREEZE_SETTLE`].
+///
+/// This is the suite's freeze, and the only wait in it that is allowed to
+/// couple to a duration — because the thing being waited for IS a sampling
+/// period (see [`FREEZE_SETTLE`]). Any positive speed, any byte-counter
+/// movement or any `extra` violation restarts the window, so the wait ends on
+/// an observed state and not on elapsed time.
+async fn wait_frozen<F: Fn(&Value) -> bool>(
+    daemon: &ParityDaemon,
+    what: &str,
+    deadline: Duration,
+    extra: F,
+) -> Value {
+    let start = Instant::now();
+    // Frequency deques drain one decayed sample per read, so polling faster
+    // than the sampler only makes the freeze converge sooner.
+    let interval = Duration::from_millis(200);
+    let mut quiet_since: Option<(Instant, ByteCounters)> = None;
+    loop {
+        let stats = daemon.stats().await;
+        let counters = byte_counters(&stats);
+        if is_quiet(&stats) && extra(&stats) {
+            match &quiet_since {
+                Some((since, seen)) if *seen == counters => {
+                    if since.elapsed() >= FREEZE_SETTLE {
+                        return stats;
+                    }
+                }
+                _ => quiet_since = Some((Instant::now(), counters)),
+            }
+        } else {
+            quiet_since = None;
+        }
+        assert!(
+            start.elapsed() < deadline,
+            "{}: {} not reached within {:?} (needs {:?} of unbroken quiet); last stats:\n{}",
+            daemon.stack.label(),
+            what,
+            deadline,
+            FREEZE_SETTLE,
+            serde_json::to_string_pretty(&stats).unwrap_or_default()
+        );
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Every per-interface field the idle render is a pure function of, one line
+/// per interface, sorted by name.
+///
+/// Captured before and after the client comparison loop. The whole test rests
+/// on the daemon standing still between two sequential client reads; if it
+/// ever moves again, this says which field moved, instead of leaving a reader
+/// to spot it in two multi-hundred-byte render blobs (Codeberg #195).
+fn render_inputs(stats: &Value) -> Vec<String> {
+    let mut rows: Vec<String> = ifaces(stats)
+        .iter()
+        .map(|i| {
+            format!(
+                "{} type={} status={} clients={:?} bitrate={} mode={} rxb={} txb={} \
+                 rxs={} txs={} held={} iaf={} oaf={} ipf={} opf={} burst={} pr_burst={}",
+                i["name"].as_str().unwrap_or_default(),
+                i["type"].as_str().unwrap_or_default(),
+                boolean(i, "status"),
+                i.get("clients"),
+                num(i, "bitrate"),
+                num(i, "mode"),
+                num(i, "rxb"),
+                num(i, "txb"),
+                num(i, "rxs"),
+                num(i, "txs"),
+                num(i, "held_announces"),
+                num(i, "incoming_announce_frequency"),
+                num(i, "outgoing_announce_frequency"),
+                num(i, "incoming_pr_frequency"),
+                num(i, "outgoing_pr_frequency"),
+                boolean(i, "burst_active"),
+                boolean(i, "pr_burst_active"),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
 /// Poll `daemon` until `pred` holds; panic with the final snapshot when the
 /// deadline passes. Eventual-consistency polling: no assertion in this suite
 /// couples to a wall-clock instant, only to a state being reached.
@@ -1568,17 +1712,18 @@ async fn status_parity_matrix_2x2() {
 
     // ---- Phase 5: FREEZE. ----
     // Poll both daemons until every volatile stat reads its exact frozen
-    // value. The 1 s polling itself drains the frequency deques on both
-    // stacks (identical n/span-with-decay semantics), so this converges
-    // deterministically; the deadline is sized to the deque length (~30
-    // samples), not guessed.
+    // value and has held it for a full sampling period. The polling itself
+    // drains the frequency deques on both stacks (identical n/span-with-decay
+    // semantics), so this converges deterministically; the deadline is sized
+    // to the deque length (~30 samples), not guessed. The settle window is
+    // what separates a speed that has decayed to 0 from one that has not been
+    // sampled yet — see FREEZE_SETTLE.
     for daemon in [&lnsd, &rnsd] {
-        wait_stats(
+        wait_frozen(
             daemon,
             "all volatile stats settled (freeze)",
             Duration::from_secs(240),
-            Duration::from_secs(1),
-            is_quiet,
+            |_| true,
         )
         .await;
     }
@@ -2149,23 +2294,33 @@ async fn lnstatus_rnstatus_multi_interface_sort_parity() {
     inj_b.flush().await.expect("flush b");
 
     // Readiness + freeze: exactly two visible interfaces, unequal non-zero
-    // rxb, and all speeds decayed to 0 so nothing live can differ between the
+    // rxb, and every speed settled at 0 so nothing live can differ between the
     // two sequential client reads.
-    wait_stats(
+    //
+    // `wait_frozen`, not a one-shot predicate: the noise above is the only
+    // traffic in this test, so at the first poll it has been received (rxb is
+    // already 6 and 2) but not yet sampled, and every speed reads 0 for the
+    // pre-sample reason rather than the idle one. Accepting that snapshot as
+    // the freeze put the single tick that turns those speeds positive for one
+    // second inside the comparison window, and one run in five rendered
+    // `0 bps` for rnstatus and `64 bps` for lnstatus off the same daemon
+    // (Codeberg #195). Waiting the sampling period out is what makes the two
+    // reads reads of the same state.
+    let frozen = wait_frozen(
         &lnsd,
-        "two frozen interfaces with unequal rxb",
+        "two settled interfaces with unequal rxb",
         Duration::from_secs(30),
-        Duration::from_millis(500),
         |stats| {
             let vis = visible_ifaces(stats);
             if vis.len() != 2 {
                 return false;
             }
             let (r0, r1) = (num(&vis[0], "rxb"), num(&vis[1], "rxb"));
-            r0 > 0.0 && r1 > 0.0 && r0 != r1 && is_quiet(stats)
+            r0 > 0.0 && r1 > 0.0 && r0 != r1
         },
     )
     .await;
+    let before = render_inputs(&frozen);
 
     // The A/B matrix: same daemon, two clients, byte-identical output after
     // blanking only the uptime. `-a` is included on every set because the
@@ -2197,6 +2352,17 @@ async fn lnstatus_rnstatus_multi_interface_sort_parity() {
             "multi-interface render parity for flags {flags:?} on lnsd\nrnstatus:\n{rn}\nlnstatus:\n{ln}"
         );
     }
+
+    // What the render parity above is a statement about: the daemon stood
+    // still for all of it. Asserted rather than assumed, and named field by
+    // field, so a future move reports itself as the field that moved instead
+    // of as a diff between two render blobs (Codeberg #195).
+    assert_eq!(
+        before,
+        render_inputs(&lnsd.stats().await),
+        "lnsd interface state moved during the client comparison; the two \
+         sequential client reads were not reads of one frozen daemon"
+    );
 
     // The -j top-level key set must match structurally as well (the JSON both
     // clients read is the same daemon dict; key order/separators are the only

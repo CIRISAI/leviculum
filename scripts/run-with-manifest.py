@@ -17,6 +17,17 @@ The command's stdout and stderr are merged and passed straight through, and
 its exit status is this script's exit status, so a wrapped gate behaves like
 the bare one.
 
+THE FULL OUTPUT IS ALSO KEPT ON DISK
+------------------------------------
+Passing output through is not the same as preserving it. Whatever runs a gate
+decides how much of its stdout survives, and a caller that summarised a red run
+with `tail -6` threw away the only assertion diff it produced (Codeberg #195);
+re-running turned the run green and the evidence was gone for good. So every
+invocation also streams the merged output to <gate>.log next to the manifest,
+line by line (a killed run keeps what it printed), and a run that exits non-zero
+copies it to <gate>.failed.log, which nothing but the NEXT failure overwrites.
+Green runs cannot clobber the last red one, which is the case that mattered.
+
 WHY RUN OUTPUT AND NOT `cargo test --list`
 ------------------------------------------
 A list records intent. `cargo test -- --exact <typo>` matches nothing, runs
@@ -63,6 +74,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -492,6 +504,11 @@ def main() -> int:
         # colour that the unwrapped gate had. ANSI is stripped before parsing.
         env.setdefault("CARGO_TERM_COLOR", "always")
 
+    out_dir = manifest_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / f"{args.gate}.log"
+    failed_log_path = out_dir / f"{args.gate}.failed.log"
+
     started = time.time()
     proc = subprocess.Popen(
         command,
@@ -504,13 +521,25 @@ def main() -> int:
         errors="replace",
     )
     assert proc.stdout is not None
-    for raw in proc.stdout:
-        sys.stdout.write(raw)
-        sys.stdout.flush()
-        parser.feed(raw)
-    rc = proc.wait()
+    # Line-buffered and flushed per line: a run that is killed, times out or
+    # panics its way out still leaves everything it had printed on disk.
+    with open(log_path, "w", errors="replace") as log:
+        log.write(f"$ {shlex.join(command)}\n")
+        log.flush()
+        for raw in proc.stdout:
+            sys.stdout.write(raw)
+            sys.stdout.flush()
+            log.write(raw)
+            log.flush()
+            parser.feed(raw)
+        rc = proc.wait()
     parser.finish()
     finished = time.time()
+
+    if rc != 0:
+        # Only a failure overwrites the failure log, so the green runs that
+        # follow a red one cannot erase what the red one printed.
+        failed_log_path.write_text(log_path.read_text(errors="replace"), errors="replace")
 
     executed = sum(len(u.ok) + len(u.failed) for u in parser.units)
     for warning in parser.warnings:
@@ -529,11 +558,11 @@ def main() -> int:
         "duration_s": round(finished - started, 3),
         "exit_code": rc,
         "executed": executed,
+        "log": str(log_path),
+        "failed_log": str(failed_log_path) if rc != 0 else None,
         "units": [u.as_json() for u in parser.units],
     }
 
-    out_dir = manifest_dir()
-    out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{args.gate}.json"
     tmp = out.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
@@ -543,11 +572,23 @@ def main() -> int:
         f"[manifest] {args.gate}: {executed} tests executed across "
         f"{len(parser.units)} unit(s) -> {out}"
     )
+    print(f"[manifest] full output: {log_path}")
 
     if rc != 0:
         # The gate failed on its own terms. The manifest of a failed run is
         # still written -- a failing test did execute -- but nothing below is
         # asserted about a run that did not finish.
+        failed = sorted(n for u in parser.units for n in u.failed)
+        sys.stderr.write(
+            f"[manifest] {args.gate}: exit {rc}"
+            + (f", failing: {', '.join(failed)}" if failed else "")
+            + "\n"
+        )
+        sys.stderr.write(
+            f"[manifest] FULL OUTPUT OF THIS FAILURE: {failed_log_path}\n"
+            "[manifest] It is kept until the next failure of this gate, whatever\n"
+            "[manifest] the caller did with the stdout above (Codeberg #195).\n"
+        )
         return rc
 
     problems = [p for p in (u.reconcile() for u in parser.units) if p]

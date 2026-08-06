@@ -635,6 +635,50 @@ mod tests {
         assert!(h.credit.is_none());
     }
 
+    /// Minimal reproduction of Codeberg #195: a reported speed of exactly 0 is
+    /// NOT evidence that an interface has settled.
+    ///
+    /// `speeds()` returns whatever `update_speed()` last cached, and the
+    /// sampler runs at 1 Hz (`spawn_traffic_counter`). So bytes that have
+    /// already been received but not yet sampled read 0 — the same value the
+    /// interface reads once it really has gone idle. Two sequential reads of a
+    /// daemon in that pre-sample state can therefore straddle the one sampling
+    /// tick that turns the number positive and disagree, which is exactly how
+    /// the status_parity render comparison went red on one run in five.
+    ///
+    /// Nothing here is a product defect: Python's `count_traffic_loop` samples
+    /// the same way, so a reader that treats `rxs == 0` as "frozen" is wrong
+    /// against either stack. It is the freeze predicate that has to know the
+    /// difference, and it can only get it by watching the value across at
+    /// least one full sampling period.
+    #[test]
+    fn a_zero_speed_reading_does_not_mean_the_bytes_have_been_accounted() {
+        let counters = InterfaceCounters::new();
+        counters.rx_bytes.store(6, Ordering::Relaxed);
+
+        // State A: bytes are in, the sampler has not run yet.
+        let (pre_sample, _) = counters.speeds();
+        assert_eq!(pre_sample, 0.0, "an unsampled interface reads 0 bps");
+
+        // The next tick turns the very same byte count into a positive rate.
+        counters.update_speed();
+        let (sampled, _) = counters.speeds();
+        assert!(
+            sampled > 0.0,
+            "the first tick after the bytes arrived must report them, got {sampled}"
+        );
+
+        // State B: a further tick with no new bytes returns it to 0 — and this
+        // zero, unlike the first one, is permanent.
+        counters.update_speed();
+        let (settled, _) = counters.speeds();
+        assert_eq!(settled, 0.0, "an idle interface reads 0 bps");
+
+        // The two zeros are indistinguishable to any reader of `rxs` alone;
+        // only the positive reading between them separates them.
+        assert_eq!(pre_sample, settled);
+    }
+
     /// Regression: `spawn_traffic_counter` must not panic when the host
     /// runtime lacks a time driver.
     ///

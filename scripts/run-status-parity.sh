@@ -42,8 +42,12 @@ EXPECTED=3
 
 cargo build -p leviculum-cli --bin lnsd --bin lnstatus
 
-log=$(mktemp)
-trap 'rm -f "$log"' EXIT
+# Kept, not mktemp'd-and-deleted: this gate's whole job is to produce an
+# assertion diff when the two stacks disagree, and a red run whose output is
+# thrown away is close to unactionable (Codeberg #195). The durable copy is
+# scripts/run-with-manifest.py's <gate>.failed.log; this one is the tee target
+# for the parsing below and is reported alongside it.
+log=$(mktemp -t status-parity-XXXXXX.log)
 
 start=$(date +%s)
 set +e
@@ -56,6 +60,8 @@ elapsed=$(( $(date +%s) - start ))
 
 if [ "$rc" -ne 0 ]; then
     echo "[status-parity] FAILED after ${elapsed}s (exit $rc)" >&2
+    grep -E '^(test |failures:|    status_parity)' "$log" >&2 || true
+    echo "[status-parity] full output: $log" >&2
     exit "$rc"
 fi
 
@@ -68,7 +74,9 @@ if [ "${ran:-0}" -ne "$EXPECTED" ]; then
     echo "[status-parity] scripts/run-status-parity.sh in the same commit -- and" >&2
     echo "[status-parity] if the ignored count changed, scripts/ignored-counts.txt" >&2
     echo "[status-parity] will tell you so too." >&2
+    echo "[status-parity] full output: $log" >&2
     exit 1
 fi
 
+rm -f "$log"
 echo "[status-parity] OK: $ran/$EXPECTED tests, ${elapsed}s"

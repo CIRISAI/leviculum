@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `status_parity` freeze waits out the 1 Hz traffic sampler, so a
+  speed that has not been sampled yet is no longer read as an idle one
+  (#195).
+- Every gate wrapper keeps its full output on disk, and a failure's copy
+  survives the green runs after it (#195).
 - A targeted path response is transmitted once instead of twice, so a
   requester no longer gets a duplicate announce five seconds later
   (#192).

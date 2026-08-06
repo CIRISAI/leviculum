@@ -22,7 +22,7 @@ per reference tool. The honest current state, as of 2026-08:
 | Reference tool | Counterpart | State |
 |---|---|---|
 | `rnsd` | `lnsd` | Shipped. Drop-in at IPC and config level; see [Python-RNS Compatibility](python-rns-compatibility.md). |
-| `rnstatus` | `lnstatus` | Shipped. Local-mode output is byte-parity-pinned against the reference by the 2×2 matrix `status_parity_matrix_2x2` (`status_parity_tests.rs:1246`), the reported inventory by `status_inventory_parity_across_daemons` (`status_parity_tests.rs:1940`); Periculum wiring is Codeberg #174. |
+| `rnstatus` | `lnstatus` | Shipped. Local-mode output is byte-parity-pinned against the reference by the 2×2 matrix `status_parity_matrix_2x2` (`status_parity_tests.rs:1390`), the reported inventory by `status_inventory_parity_across_daemons` (`status_parity_tests.rs:2085`); Periculum wiring is Codeberg #174. |
 | `rncp` | `lncp` | Shipped (send, fetch, listen). |
 | `rnprobe` | — | Missing; filed as Codeberg #173. |
 | `rnpath` | — | Missing; filed as Codeberg #173. |
