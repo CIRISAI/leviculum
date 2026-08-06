@@ -89,6 +89,43 @@ impl PropagationUpload {
         msgpack::bin(&mut output, &stamped);
         output
     }
+
+    /// Decode an upload envelope received off the wire (raw Link data or a
+    /// Resource body) — the propagation-node HOST side (leviculum#38).
+    ///
+    /// Exact inverse of [`encode`](Self::encode): `[timestamp, [stamped]]`
+    /// where `stamped = unstamped_lxmf || propagation_stamp`. The transient ID
+    /// is recomputed from the unstamped bytes, exactly as
+    /// [`single`](Self::single) does, so a host validates the stamp against
+    /// the same transient ID an honest client computed.
+    ///
+    /// Only the singleton envelope an originating client sends is accepted —
+    /// the multi-message form belongs to the node-to-node `/offer` sync path,
+    /// which this crate does not implement (see the crate docs).
+    pub fn decode(bytes: &[u8]) -> Result<Self, PropagationError> {
+        let mut position = 0;
+        if msgpack::array_len(bytes, &mut position)? != 2 {
+            return Err(PropagationError::InvalidLength);
+        }
+        let timestamp = msgpack::read_number_f64(bytes, &mut position)?;
+        if msgpack::array_len(bytes, &mut position)? != 1 {
+            return Err(PropagationError::InvalidLength);
+        }
+        let stamped = msgpack::read_bin(bytes, &mut position)?;
+        // The stamped body is destination_hash || ciphertext || 32-byte stamp;
+        // anything not strictly longer than hash+stamp cannot carry all three.
+        if stamped.len() <= STAMP_SIZE + DESTINATION_LENGTH {
+            return Err(PropagationError::InvalidLength);
+        }
+        let (unstamped, stamp) = stamped.split_at(stamped.len() - STAMP_SIZE);
+        let mut propagation_stamp = [0u8; STAMP_SIZE];
+        propagation_stamp.copy_from_slice(stamp);
+        Ok(Self::single(
+            timestamp,
+            unstamped.to_vec(),
+            propagation_stamp,
+        ))
+    }
 }
 
 /// Errors returned by LXMF propagation codecs.
@@ -148,8 +185,8 @@ pub enum PeerError {
 }
 
 impl PeerError {
-    #[cfg(test)]
-    pub(crate) const fn code(self) -> u8 {
+    /// The on-wire error code a propagation node sends in an error response.
+    pub const fn code(self) -> u8 {
         self as u8
     }
 }
@@ -199,7 +236,7 @@ impl PropagationSignal {
 /// Unstamped, destination-encrypted LXMF bytes downloaded from a propagation
 /// node.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PropagatedMessage {
+pub struct PropagatedMessage {
     destination_hash: [u8; DESTINATION_LENGTH],
     encrypted_payload: Vec<u8>,
 }
@@ -300,8 +337,10 @@ impl MessageGetRequest {
         Ok(output)
     }
 
-    #[cfg(test)]
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, PropagationError> {
+    /// Decode a client's `/get` request — the propagation-node HOST side of
+    /// the exchange (leviculum#38). Exact inverse of the encoders used by
+    /// [`MessageGetRequest::list`] / [`MessageGetRequest::acknowledge`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, PropagationError> {
         let mut position = 0;
         let count = msgpack::array_len(bytes, &mut position)?;
         if !(2..=3).contains(&count) {
@@ -331,8 +370,10 @@ pub enum MessageListResponse {
 }
 
 impl MessageListResponse {
-    #[cfg(test)]
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, PropagationError> {
+    /// Serialize the node's transient-ID list (or error) response — the
+    /// propagation-node HOST side (leviculum#38); clients parse it with
+    /// [`MessageListResponse::decode`].
+    pub fn encode(&self) -> Result<Vec<u8>, PropagationError> {
         let mut output = Vec::new();
         match self {
             Self::TransientIds(ids) => encode_ids(&mut output, ids),
@@ -363,8 +404,10 @@ pub enum MessageGetResponse {
 }
 
 impl MessageGetResponse {
-    #[cfg(test)]
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, PropagationError> {
+    /// Serialize the node's message-download (or error) response — the
+    /// propagation-node HOST side (leviculum#38); clients parse it with
+    /// [`MessageGetResponse::decode`].
+    pub fn encode(&self) -> Result<Vec<u8>, PropagationError> {
         let mut output = Vec::new();
         match self {
             Self::Messages(messages) => encode_binary_list(&mut output, messages),
@@ -409,8 +452,10 @@ pub struct PropagationNodeAnnounce {
 }
 
 impl PropagationNodeAnnounce {
-    #[cfg(test)]
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, PropagationError> {
+    /// Serialize this node's own announce app-data — the propagation-node
+    /// HOST side (leviculum#38); clients parse it with
+    /// [`PropagationNodeAnnounce::decode`].
+    pub fn encode(&self) -> Result<Vec<u8>, PropagationError> {
         let mut output = Vec::new();
         msgpack::array(&mut output, 7);
         msgpack::bool(&mut output, self.legacy_support);
@@ -492,7 +537,6 @@ fn decode_announce_limit(bytes: &[u8], position: &mut usize) -> Result<u64, Prop
     Ok(value as u64)
 }
 
-#[cfg(test)]
 fn validate_raw_value(bytes: &[u8]) -> Result<(), PropagationError> {
     let mut position = 0;
     msgpack::skip(bytes, &mut position)?;
@@ -549,7 +593,6 @@ fn encode_optional_ids(output: &mut Vec<u8>, ids: Option<&[TransientId]>) {
     }
 }
 
-#[cfg(test)]
 fn decode_optional_ids(
     bytes: &[u8],
     position: &mut usize,
@@ -562,7 +605,6 @@ fn decode_optional_ids(
     }
 }
 
-#[cfg(test)]
 fn encode_binary_list(output: &mut Vec<u8>, values: &[Vec<u8>]) {
     msgpack::array(output, values.len());
     for value in values {
@@ -583,7 +625,6 @@ fn decode_binary_list(
     Ok(values)
 }
 
-#[cfg(test)]
 fn decode_transfer_limit(
     bytes: &[u8],
     position: &mut usize,
