@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.14.0+ciris.1] — CIRIS fork
+
+### Added
+
+The propagation-node HOST direction of the LXMF propagation protocol
+(leviculum#38, for CIRISEdge#169 — a CIRIS fabric node hosting mailboxes for
+asleep mobiles). Promoted from `#[cfg(test)] pub(crate)` to `pub`:
+`MessageGetRequest::decode`, `MessageListResponse::encode`,
+`MessageGetResponse::encode`, `PropagationNodeAnnounce::encode`,
+`PeerError::code`, and the `PropagatedMessage` type; plus a new
+`PropagationUpload::decode` — the inverse of `encode()` for upload envelopes
+received off the wire, recomputing the transient ID from the unstamped bytes so
+a host validates stamps against the same ID an honest client derived
+(singleton-only; the multi-message `/offer` sync form stays out of scope).
+Wire format untouched. Offered upstream as Lew_Palm/leviculum#201.
+
 ## [0.13.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master @ `8e3dbef` (+102 since 0.8.0): announce emission
