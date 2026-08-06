@@ -35,8 +35,15 @@
 //!   separated by `|` with any literal pipe escaped
 //! - blockquotes: two-space indented text per nesting level
 //! - raw HTML: emitted as escaped plain text
-//! - strikethrough/footnotes/task lists: extensions not enabled, so their
-//!   syntax passes through as plain text
+//! - strikethrough/task lists/definition lists: extensions not enabled, so
+//!   their syntax passes through as plain text
+//! - footnotes: the extension is not enabled, and the syntax does NOT
+//!   reliably degrade to plain text. A reference `[^1]` stays literal, but a
+//!   definition line whose body is a bare URL or a single word (`[^1]: Kurz`)
+//!   parses as a CommonMark link-reference definition instead: the definition
+//!   line disappears from the output entirely and the reference in the body
+//!   turns into a link labelled `^1`. Until #197 closes the gap, footnotes are
+//!   lossy on both sides.
 //!
 //! Plain text is escaped so it can never be misread as micron markup:
 //! backslashes and backticks are `\`-escaped inline, and a text line that
@@ -897,8 +904,11 @@ impl MicronWriter {
             }
             Tag::HtmlBlock => self.block_sep(),
             // Extensions we do not enable (footnotes, definition lists,
-            // strikethrough, sub/superscript, metadata): contents degrade to
-            // the plain text events pulldown-cmark still emits.
+            // strikethrough, sub/superscript, metadata): their tags are never
+            // constructed, so what reaches us is whatever pulldown-cmark makes
+            // of the raw syntax. For most of them that is plain text; footnote
+            // definitions are the exception and can be swallowed as link
+            // reference definitions (see the module docs).
             _ => {}
         }
     }
