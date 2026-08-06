@@ -48,6 +48,7 @@
 
 mod builder;
 mod interface_build;
+mod processor;
 mod remote_mgmt;
 mod sender;
 mod stream;
@@ -55,6 +56,7 @@ mod stream;
 use remote_mgmt::RemoteMgmtResponder;
 
 pub use builder::ReticulumNodeBuilder;
+pub use processor::{CoreProcessor, PROCESSOR_TICK_BUDGET};
 pub use sender::PacketSender;
 pub use stream::LinkHandle;
 
@@ -95,8 +97,23 @@ use crate::interfaces::{
 };
 use crate::storage::Storage;
 
-/// Type alias for the concrete NodeCore used by std platforms
-pub(crate) type StdNodeCore = NodeCore<rand_core::OsRng, SystemClock, Storage>;
+/// Type alias for the concrete NodeCore used by std platforms.
+///
+/// Public because it is the handle a [`CoreProcessor`] is given (Codeberg
+/// #196). It is the sans-io core: no async surface, and no channel back into
+/// the driver's event loop.
+///
+/// Its two crate-local type parameters are re-exported below because they have
+/// to be: naming a private type in the signature of a trait a downstream crate
+/// implements is a hard error there, not merely a lint here. This is the public
+/// surface design B costs, and the issue's own summary of B ("requires
+/// publishing `&mut StdNodeCore`") is what it means concretely.
+pub type StdNodeCore = NodeCore<rand_core::OsRng, SystemClock, Storage>;
+
+// Re-exported solely so `StdNodeCore` is nameable and implementable downstream
+// (Codeberg #196). A processor has no reason to touch either directly.
+pub use crate::clock::SystemClock as StdClock;
+pub use crate::storage::Storage as StdStorage;
 
 /// Capacity of the internal action-dispatch channel that carries
 /// `TickOutput`s produced outside the event loop (connect, send_on_link,
@@ -890,6 +907,17 @@ pub struct ReticulumNode {
     /// overdue discoverable interface. Set by the builder from config; lowered
     /// by fast tests. Default 60.
     discovery_job_interval_secs: u64,
+    /// Registered in-driver core processor (Codeberg #196). Installed by the
+    /// builder — i.e. before `start()` creates the real `action_dispatch_tx` —
+    /// and moved into the event loop by `start()`.
+    ///
+    /// Behind a `Mutex` only to keep `ReticulumNode: Sync`, which consumers
+    /// (lnomad shares one across tasks) depend on: a bare
+    /// `Box<dyn CoreProcessor>` is `Send` but not `Sync`. Both accessors hold
+    /// `&mut self`, so this never locks — requiring `Sync` of the processor
+    /// itself would instead tax every single-threaded state machine that will
+    /// ever be plugged in here, for nothing.
+    core_processor: Mutex<Option<Box<dyn CoreProcessor>>>,
 }
 
 impl Drop for ReticulumNode {
@@ -997,6 +1025,7 @@ impl ReticulumNode {
             autoconnect_max: 0,
             discovery_network_identity: None,
             discovery_job_interval_secs: crate::config::DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,
+            core_processor: Mutex::new(None),
         }
     }
 
@@ -1004,6 +1033,17 @@ impl ReticulumNode {
     /// types that persist per-interface state under `<storage>/i2p/`.
     pub(crate) fn set_storage_path(&mut self, path: PathBuf) {
         self.storage_path = Some(path);
+    }
+
+    /// Install the in-driver core processor (called by the builder, Codeberg
+    /// #196). Deliberately not public and deliberately not callable after
+    /// `start()`: registering before the event loop exists is what guarantees
+    /// no live `action_dispatch_tx` can be captured into the processor.
+    pub(crate) fn set_core_processor(&mut self, processor: Box<dyn CoreProcessor>) {
+        *self
+            .core_processor
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner()) = Some(processor);
     }
 
     /// Set the runtime auto-connect cap (called by the builder, Codeberg #32).
@@ -1451,6 +1491,15 @@ impl ReticulumNode {
         // interface. `None` leaves the announcer arm dormant.
         let discovery_announce = self.build_discovery_announce_wiring();
 
+        // In-driver core processor (Codeberg #196). Moved out of the node here:
+        // it belongs to the event loop from now on, and a restart therefore
+        // runs without it rather than with a half-owned one.
+        let core_processor = self
+            .core_processor
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+
         // Auto-connect wiring (Codeberg #32, sub-task b): the event loop spawns
         // discovered TCP endpoints at runtime through the same interface-id
         // allocator and registration channel the static/hot-plug paths use.
@@ -1492,6 +1541,7 @@ impl ReticulumNode {
                     outbound_socket_hook: autoconnect_socket_hook,
                 },
                 discovery_announce,
+                core_processor,
             )
             .await;
         });
@@ -3148,6 +3198,7 @@ async fn run_event_loop(
     discovery_network_identity: Option<Arc<leviculum_core::Identity>>,
     autoconnect_wiring: AutoConnectWiring,
     discovery_announce: Option<DiscoveryAnnounceWiring>,
+    mut core_processor: Option<Box<dyn CoreProcessor>>,
 ) {
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
@@ -3303,6 +3354,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
+                            core_processor.as_deref_mut(),
                         );
                     }
                     RecvEvent::Disconnected(iface_id) => {
@@ -3321,6 +3373,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
+                            core_processor.as_deref_mut(),
                         );
                         // Clear retry queue for disconnected interface. The legacy
                         // is_interface_congested flag was removed in Phase F;
@@ -3392,6 +3445,7 @@ async fn run_event_loop(
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
+                    core_processor.as_deref_mut(),
                 );
             }
 
@@ -3399,7 +3453,7 @@ async fn run_event_loop(
             _ = tokio::time::sleep_until(next_poll) => {
                 let (output, now_ms) = {
                     let mut core = inner.lock_recover();
-                    let output = core.handle_timeout();
+                    let mut output = core.handle_timeout();
                     // Blackhole `until` timestamps are unix wall-clock values
                     // from the Python RPC, so the expiry sweep needs wall time
                     // injected here; the sweep self-throttles to one pass per
@@ -3413,6 +3467,15 @@ async fn run_event_loop(
                     // call self-throttles to one pass per minute.
                     core.cull_tunnels();
                     let now_ms = core.now_ms();
+                    // Codeberg #196: the processor's periodic slot. An event tap
+                    // alone can only react — it fires when the core has something
+                    // to say — so a processor that wants to *initiate* (drain its
+                    // own outbound queue, run its own timers) needs a slot that
+                    // fires on the driver's clock. Merged into this tick's output
+                    // so it rides the same dispatch as the core's own.
+                    if let Some(processor) = core_processor.as_deref_mut() {
+                        output.merge(processor::run_tick(processor, &mut core, now_ms));
+                    }
                     (output, now_ms)
                 };
                 let next = output.next_deadline_ms;
@@ -3426,6 +3489,7 @@ async fn run_event_loop(
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
+                    core_processor.as_deref_mut(),
                 );
 
                 // Advance next_poll based on next_deadline_ms
@@ -3460,6 +3524,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
+                            core_processor.as_deref_mut(),
                         );
                     }
                     // Bounded graceful flush: dispatch only pushes onto the
@@ -3544,7 +3609,7 @@ async fn run_event_loop(
                         let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
-                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac);
+                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_deref_mut());
                 }
             }
 
@@ -3565,7 +3630,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac);
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_deref_mut());
             }
 
             // Branch 6b: Tunnel synthesize initiation (Codeberg #64).
@@ -3579,7 +3644,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac);
+                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_deref_mut());
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
@@ -3656,6 +3721,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
+                            core_processor.as_deref_mut(),
                         );
                         retry_queues.remove(&iface_id.0);
                         registry.remove(iface_id);
@@ -3734,6 +3800,7 @@ async fn run_event_loop(
                                     discovery_storage.as_deref(),
                                     discovery_network_identity.as_deref(),
                                     &mut discovery_heard_ifac,
+                                    core_processor.as_deref_mut(),
                                 );
                             }
                             Err(e) => {
@@ -3927,7 +3994,7 @@ async fn flush_outgoing_on_shutdown(registry: &InterfaceRegistry) {
 fn dispatch_output(
     output: TickOutput,
     registry: &mut InterfaceRegistry,
-    event_sink: Option<&mut EventSink>,
+    mut event_sink: Option<&mut EventSink>,
     inner: &Arc<Mutex<StdNodeCore>>,
     retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
     retry_queue_warned: &mut std::collections::BTreeSet<usize>,
@@ -3937,6 +4004,7 @@ fn dispatch_output(
     discovery_storage: Option<&Path>,
     discovery_network_identity: Option<&leviculum_core::Identity>,
     discovery_heard_ifac: &mut HeardIfacMap,
+    core_processor: Option<&mut dyn CoreProcessor>,
 ) {
     // Drain retry queues before dispatching new actions
     let drain_now_ms = inner.lock_recover().now_ms();
@@ -4084,13 +4152,27 @@ fn dispatch_output(
         }
     }
 
+    // Registered core processor (Codeberg #196). Reads the SAME raw
+    // `output.events` as the mgmt responder and the discovery registry, and
+    // for the same reason plus a sharper one: seven of the event types LXMF
+    // needs — `PacketReceived` and `LinkDataReceived` among them, i.e. how a
+    // message arrives — are `EventClass::Data`, so the sink below is entitled
+    // to drop them. A processor fed from the forwarded stream would lose
+    // inbound messages with nothing underneath to retransmit them. The tap
+    // therefore has to be here, ahead of `EventSink::emit`.
+    //
+    // Its output is dispatched after event forwarding, with the processor
+    // detached — see `processor::run_event_tap` for the recursion bound.
+    let processor_output = core_processor
+        .and_then(|processor| processor::run_event_tap(processor, inner, &output.events));
+
     // Forward events to the application via the split-plane EventSink:
     // control events lossless-by-default (overflow surfaced via
     // ControlPlaneOverflow), data events droppable under load (Codeberg #71).
     // When event_sink is None (daemon-mode, built via `without_events()`),
     // events are dropped here without forwarding — the events vector
     // simply falls out of scope at the end of this function.
-    if let Some(event_sink) = event_sink {
+    if let Some(event_sink) = event_sink.as_deref_mut() {
         // #25 — the frames-destroyed signal rides the SAME sink as core's own
         // events, so a consumer learns of the loss on the stream it already
         // reads. Emitted first: the loss happened before anything core queued
@@ -4124,6 +4206,37 @@ fn dispatch_output(
             None,
             None,
             discovery_heard_ifac,
+            // The `/status` response is the driver's own; it is not the
+            // processor's business and must not re-enter the tap.
+            None,
+        );
+    }
+
+    // Dispatch the processor's answer on the driver's own send path — the same
+    // `dispatch_actions` call its own outputs take, in this same tick. That is
+    // what lets `PacketProofRequested`/`LinkProofRequested`/`ResourceAdvertised`
+    // be answered synchronously rather than deferred to a later tick.
+    //
+    // `core_processor: None` on the recursive call is the recursion bound:
+    // depth is exactly one, so a processor never sees the events it emitted.
+    if let Some(resp) = processor_output {
+        dispatch_output(
+            resp,
+            registry,
+            // The processor's answer produces ordinary core events (a
+            // `ResourceTransferStarted` behind an `accept_resource`, say).
+            // They belong on the application's stream like any other.
+            event_sink,
+            inner,
+            retry_queues,
+            retry_queue_warned,
+            retry_queue_max_depth,
+            ifac_configs,
+            None,
+            None,
+            None,
+            discovery_heard_ifac,
+            None,
         );
     }
 }
@@ -5058,6 +5171,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            None,
         );
     }
 
@@ -5142,6 +5256,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            None,
         );
 
         let ev = rx
@@ -6247,6 +6362,361 @@ mod tests {
             node.link_destination(&link_id),
             Some(dest_hash),
             "active link must expose the dialed destination"
+        );
+    }
+
+    // ---- Codeberg #196: the in-driver core processor seam --------------
+
+    /// Test processor: records every event it is handed, and optionally
+    /// answers with a canned `TickOutput`.
+    #[derive(Default)]
+    struct RecordingProcessor {
+        seen: Arc<Mutex<Vec<String>>>,
+        /// Emitted once, on the first event, as this processor's answer.
+        answer: Option<TickOutput>,
+        /// Wall-clock burn per event, to exercise the budget report.
+        burn: Option<Duration>,
+        tick_calls: Arc<AtomicUsize>,
+    }
+
+    impl CoreProcessor for RecordingProcessor {
+        fn on_event(&mut self, _core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
+            self.seen
+                .lock_recover()
+                .push(event.variant_name().to_string());
+            if let Some(burn) = self.burn {
+                std::thread::sleep(burn);
+            }
+            self.answer.take().unwrap_or_else(TickOutput::empty)
+        }
+
+        fn on_tick(&mut self, _core: &mut StdNodeCore, _now_ms: u64) -> TickOutput {
+            self.tick_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TickOutput::empty()
+        }
+    }
+
+    fn shared_test_core() -> (Arc<Mutex<StdNodeCore>>, tempfile::TempDir) {
+        use leviculum_core::node::NodeCoreBuilder;
+        let td = tempfile::tempdir().expect("tempdir");
+        let core = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(td.path()).unwrap(),
+        );
+        (Arc::new(Mutex::new(core)), td)
+    }
+
+    fn packet_received(i: usize) -> NodeEvent {
+        NodeEvent::PacketReceived {
+            destination: leviculum_core::DestinationHash::new([0xCD; 16]),
+            data: vec![i as u8],
+            interface_index: i,
+        }
+    }
+
+    /// Register an interface whose outgoing frames the test can read back.
+    fn registry_with_readable_iface(
+        registry: &mut InterfaceRegistry,
+        id: usize,
+    ) -> mpsc::Receiver<crate::interfaces::OutgoingPacket> {
+        use crate::interfaces::{InterfaceCounters, InterfaceHandle, InterfaceInfo};
+        let (_inc_tx, inc_rx) = mpsc::channel(4);
+        let (out_tx, out_rx) = mpsc::channel(8);
+        registry.register(InterfaceHandle {
+            info: InterfaceInfo {
+                id: InterfaceId(id),
+                name: "test/readable".into(),
+                hw_mtu: None,
+                is_local_client: false,
+                bitrate: None,
+                tx_jitter_max_ms: None,
+                ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
+            },
+            incoming: inc_rx,
+            outgoing: out_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
+        });
+        out_rx
+    }
+
+    /// Constraint 2 of Codeberg #196, demonstrated rather than asserted from
+    /// the code: the processor must observe an event that the lossy sink DROPS
+    /// in the same run.
+    ///
+    /// `PacketReceived` is `EventClass::Data`, so a full data plane discards it
+    /// silently — that is the designed backpressure (#71). For LXMF it is also
+    /// how a message *arrives*, with nothing underneath to retransmit it. Three
+    /// of them go into a data plane with room for one: the sink delivers one,
+    /// and the tap sees all three.
+    #[tokio::test(flavor = "current_thread")]
+    async fn processor_tap_sees_the_data_event_the_lossy_sink_drops() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut processor = RecordingProcessor {
+            seen: Arc::clone(&seen),
+            ..Default::default()
+        };
+
+        let mut output = TickOutput::empty();
+        for i in 0..3 {
+            output.events.push(packet_received(i));
+        }
+
+        // Data plane of capacity 1, never drained during dispatch.
+        let (mut sink, mut rx) = sink_and_receiver(8, 1);
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut processor),
+        );
+
+        let mut delivered = 0;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+
+        assert_eq!(
+            delivered, 1,
+            "the data plane has room for one; the sink must drop the other two"
+        );
+        assert_eq!(
+            seen.lock_recover().len(),
+            3,
+            "the tap sits ahead of classification, so it must see all three — \
+             including the two the sink dropped in this same run"
+        );
+    }
+
+    /// The processor's `TickOutput` is transmitted on the driver's own send
+    /// path, in the same `dispatch_output` that fed it the event. This is the
+    /// mechanism behind constraint 3 (`PacketProofRequested`,
+    /// `LinkProofRequested`, `ResourceAdvertised` cannot be deferred to a later
+    /// tick); the end-to-end proof over a real interface is the
+    /// `core_processor_seam` mvr.
+    #[tokio::test(flavor = "current_thread")]
+    async fn processor_answer_reaches_the_interface_in_the_same_tick() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let mut out_rx = registry_with_readable_iface(&mut registry, 3);
+
+        let mut answer = TickOutput::empty();
+        answer
+            .actions
+            .push(leviculum_core::transport::Action::SendPacket {
+                iface: InterfaceId(3),
+                data: vec![0xEE; 24],
+            });
+        let mut processor = RecordingProcessor {
+            answer: Some(answer),
+            ..Default::default()
+        };
+
+        let mut output = TickOutput::empty();
+        output.events.push(NodeEvent::PacketProofRequested {
+            packet_hash: [0x11; 32],
+            destination_hash: leviculum_core::DestinationHash::new([0xCD; 16]),
+            interface_index: 3,
+        });
+
+        dispatch_output(
+            output,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut processor),
+        );
+
+        let frame = out_rx
+            .try_recv()
+            .expect("the answer must be on the interface before dispatch_output returns");
+        assert_eq!(frame.data, vec![0xEE; 24]);
+    }
+
+    /// The recursion bound is one: a processor never sees the events of its own
+    /// `TickOutput`. Unbounded here is a node hang, not a bug report.
+    #[tokio::test(flavor = "current_thread")]
+    async fn processor_does_not_observe_its_own_emitted_events() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+
+        // The answer carries an event. If the seam re-entered the tap, the
+        // processor would see it — and `LxmfNode::handle_event` emitting on
+        // events would then never terminate.
+        let mut answer = TickOutput::empty();
+        answer.events.push(NodeEvent::InterfaceDown(9));
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut processor = RecordingProcessor {
+            seen: Arc::clone(&seen),
+            answer: Some(answer),
+            ..Default::default()
+        };
+
+        let mut output = TickOutput::empty();
+        output.events.push(packet_received(0));
+
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut processor),
+        );
+
+        assert_eq!(
+            *seen.lock_recover(),
+            vec!["PacketReceived".to_string()],
+            "the processor must see the core's event and NOT its own answer's"
+        );
+
+        // The answer's event still reaches the application: detaching the tap
+        // on the recursive dispatch must not also silence the event sink.
+        let mut forwarded = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            forwarded.push(ev.variant_name().to_string());
+        }
+        assert!(
+            forwarded.contains(&"InterfaceDown".to_string()),
+            "processor-produced events belong on the application stream: {forwarded:?}"
+        );
+    }
+
+    /// An empty event list must not take the core lock at all — the tap runs on
+    /// every dispatch, including the many that carry only actions.
+    #[tokio::test(flavor = "current_thread")]
+    async fn processor_is_not_consulted_when_the_tick_carried_no_events() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut processor = RecordingProcessor {
+            seen: Arc::clone(&seen),
+            ..Default::default()
+        };
+
+        dispatch_output(
+            TickOutput::empty(),
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut processor),
+        );
+
+        assert!(seen.lock_recover().is_empty());
+    }
+
+    /// A processor that runs past `PROCESSOR_TICK_BUDGET` is reported. The
+    /// bound is observational by necessity: a synchronous `fn` cannot be
+    /// preempted, and moving it off-thread would take away the `&mut
+    /// StdNodeCore` that is the whole seam.
+    #[tokio::test(flavor = "current_thread")]
+    async fn processor_over_the_tick_budget_is_reported() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tracing::field::{Field, Visit};
+
+        #[derive(Default)]
+        struct Seen(Arc<AtomicBool>);
+        impl Visit for Seen {
+            fn record_debug(&mut self, _f: &Field, _v: &dyn std::fmt::Debug) {}
+            fn record_str(&mut self, f: &Field, v: &str) {
+                if f.name() == "event" && v == "CORE_PROCESSOR_OVER_BUDGET" {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+
+        struct Layer(Arc<AtomicBool>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Layer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                event.record(&mut Seen(Arc::clone(&self.0)));
+            }
+        }
+
+        let tripped = Arc::new(AtomicBool::new(false));
+        let subscriber = {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing_subscriber::registry().with(Layer(Arc::clone(&tripped)))
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let mut processor = RecordingProcessor {
+            burn: Some(PROCESSOR_TICK_BUDGET + Duration::from_millis(5)),
+            ..Default::default()
+        };
+
+        let mut output = TickOutput::empty();
+        output.events.push(packet_received(0));
+
+        dispatch_output(
+            output,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut processor),
+        );
+
+        assert!(
+            tripped.load(Ordering::Relaxed),
+            "a processor over the {PROCESSOR_TICK_BUDGET:?} budget must emit \
+             CORE_PROCESSOR_OVER_BUDGET"
         );
     }
 }

@@ -101,6 +101,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `leviculum-std` lets a consumer register a `CoreProcessor` that runs
+  inside the driver's tick: it receives `&mut StdNodeCore` plus each
+  `NodeEvent` and returns a `TickOutput` the driver dispatches on its own
+  send path, so `leviculum-lxmf` can be driven on the async runtime
+  without forking the driver. The events are tapped ahead of the lossy
+  application sink, so a processor sees the `EventClass::Data` events the
+  sink is entitled to drop (#196).
+
 - `lnstatus -j --tables` adds the transport's path, reverse, link,
   announce, announce-cache and tunnel tables to the JSON output, so a
   test can assert on routing state instead of scraping logs. A daemon

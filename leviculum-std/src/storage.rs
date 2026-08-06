@@ -46,7 +46,7 @@ use leviculum_core::ratchet_store::RatchetStore;
 /// At 32 bytes/entry × 1.5x HashSet overhead ≈ 4.8 MB max.
 const FILE_STORAGE_PACKET_HASH_CAP: usize = 100_000;
 
-pub(crate) struct Storage {
+pub struct Storage {
     // Read by category_path/read_root/write_root in #[cfg(test)] helpers only.
     #[cfg_attr(not(test), allow(dead_code))]
     base_path: PathBuf,

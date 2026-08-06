@@ -20,6 +20,7 @@ pub mod harness;
 
 mod announce_emission_unix_time;
 mod client_wait_for_path_request_fallback;
+mod core_processor_seam;
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
 mod responder_close_delivery;

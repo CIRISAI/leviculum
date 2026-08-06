@@ -76,7 +76,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:3927`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:3994`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -89,6 +89,22 @@ and they may not call back into the driver's public async API: those
 methods end in `action_dispatch_tx.send(output).await` on a bounded
 channel that the same loop drains, so a full channel deadlocks the
 node.
+
+Those are one rule, not two, and knowing which way round matters when
+you have to enforce it. The second is a consequence of the first: an
+`async fn` called and not awaited builds a future and drops it, sends
+nothing and blocks nothing. The deadlock needs the bounded-channel send
+to *complete*, and only `.await` can complete it. So a callee expressed
+as a synchronous `fn` has both prohibitions closed at once, which is
+what the in-driver core processor (#196) is built on — see
+`leviculum-std/src/driver/processor.rs`. It follows that a *runtime*
+guard on the async API would be the wrong shape: there is nothing to
+guard until an `.await` that cannot be written.
+
+The residue the type system does not cover is a callee that blocks on
+its own smuggled handle (`futures::executor::block_on`). No signature
+can prevent that; it is the one place here where prose is still the
+only rule.
 
 ## Work that is already off the core by construction
 
@@ -104,3 +120,19 @@ It cannot, and no seam added later may make it possible.
 
 That pattern — emit a request, compute detached, submit the result —
 is the general answer whenever the cost of a step is not ours to bound.
+
+One correction to the paragraph above, because its phrasing is wider
+than what holds. It is exactly true of the *peer-priced* search, which
+is the one that matters: `generate_with` is an `async fn`, so no
+synchronous callee of the event loop can drive it to completion at all.
+It is not true that the tree contains no synchronous proof-of-work.
+`leviculum-core::discovery::stamp::generate_stamp`
+(`leviculum-core/src/discovery/stamp.rs:110`) is a public synchronous
+brute-force loop taking a caller-supplied `cost`, and nothing stops a
+loop callee from calling it. It is not a DoS vector today because no
+peer picks its number: the only caller is the discovery announcer,
+which runs it once per discoverable interface during
+`ReticulumNode::start()` — off the loop — at the locally fixed
+`DEFAULT_STAMP_VALUE`. The invariant to keep is therefore "no
+*peer-chosen* cost is ever ground synchronously", and the async
+signature is what enforces it.

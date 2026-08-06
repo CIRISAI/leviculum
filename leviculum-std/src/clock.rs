@@ -10,7 +10,7 @@ use std::time::Instant;
 /// Monotonic, suitable for timeouts and RTT measurement. Wall-clock unix
 /// time for wire fields (announce emission timestamps, Codeberg #155) is
 /// exposed separately via `wall_unix_secs`, backed by `SystemTime`.
-pub(crate) struct SystemClock {
+pub struct SystemClock {
     start: Instant,
 }
 

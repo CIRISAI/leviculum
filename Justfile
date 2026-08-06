@@ -84,6 +84,18 @@ m0-build-gate:
 check-submodules:
     @bash scripts/check-submodule-pins.sh
 
+# Codeberg #196: the core-processor seam must keep making the two prohibitions
+# of the core-lock budget unrepresentable. Builds the leviculum-std `cf_*`
+# fixtures, each of which is a `CoreProcessor` attempting one forbidden move,
+# and asserts each fails to compile with one SPECIFIC error code — "does not
+# compile" is not the assertion.
+#
+# A gate rather than a #[test] for the same reason as check-submodules, plus a
+# mechanical one: shelling out to cargo from inside `cargo test` blocks on the
+# build-directory lock the outer invocation holds.
+check-processor-seam:
+    @bash scripts/check-processor-compile-fail.sh
+
 # Guarantee C step 3: `path:line` citations in docs/src/** and in the Rust
 # sources of leviculum-core/-lxmf/-std must still point at what they claim.
 # ~3 s, and the leviculum-std test deps are already built by `mvr`, so it is
@@ -96,7 +108,7 @@ citation-guard:
 # Tier 0 (~3 min, runs on every git push): submodule pins + fmt + clippy
 # (host + nrf) + rustdoc gate + tracing-shim + M0 gates + workspace lib
 # tests + the citation guard.
-fast: check-submodules mvr lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
+fast: check-submodules check-processor-seam mvr lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

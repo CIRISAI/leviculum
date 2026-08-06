@@ -15,6 +15,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 default = ["compression"]
 # Enable compression support (uses no_std compatible compression from leviculum-core)
 compression = ["leviculum-core/compression"]
+# INTERNAL. Enables the `cf_*` test targets, which exist to NOT compile: they
+# are the enforcement of the two prohibitions the core-lock budget places on
+# anything the event loop calls (Codeberg #196). Never enable it in a build you
+# want to succeed; `scripts/check-processor-compile-fail.sh` turns it on,
+# asserts the build fails, and pins the error code each fixture must produce.
+__compile_fail_fixtures = []
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = true }

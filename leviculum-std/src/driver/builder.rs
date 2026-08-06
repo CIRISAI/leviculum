@@ -19,7 +19,7 @@ use crate::interfaces::rnode::{
 };
 use crate::storage::Storage;
 
-use super::ReticulumNode;
+use super::{CoreProcessor, ReticulumNode};
 
 /// Builder for creating ReticulumNode instances
 ///
@@ -77,6 +77,9 @@ pub struct ReticulumNodeBuilder {
     /// Explicit discovery announcer job interval in seconds (Codeberg #107).
     /// Takes priority over the config value; fast tests lower it.
     discovery_job_interval_secs_explicit: Option<u64>,
+    /// In-driver core processor (Codeberg #196), moved into the event loop by
+    /// `ReticulumNode::start()`.
+    core_processor: Option<Box<dyn CoreProcessor>>,
 }
 
 impl Default for ReticulumNodeBuilder {
@@ -108,7 +111,61 @@ impl ReticulumNodeBuilder {
             connect_instance_name: None,
             events_enabled: true,
             discovery_job_interval_secs_explicit: None,
+            core_processor: None,
         }
+    }
+
+    /// Register an in-driver core processor (Codeberg #196).
+    ///
+    /// Inside the driver's tick the processor receives `&mut StdNodeCore` plus
+    /// each `NodeEvent` the core produced, and returns a `TickOutput` the
+    /// driver dispatches on its own send path — in the same tick, which is what
+    /// lets `PacketProofRequested`, `LinkProofRequested` and
+    /// `ResourceAdvertised` be answered rather than deferred. The events it
+    /// sees are tapped ahead of the lossy application sink, so it observes
+    /// `EventClass::Data` events the sink is entitled to drop.
+    ///
+    /// Read [`CoreProcessor`] before writing one: it runs with the core lock
+    /// held, under a documented [`PROCESSOR_TICK_BUDGET`], and the shape of its
+    /// methods is load-bearing rather than stylistic.
+    ///
+    /// Registration is builder-only on purpose. The event loop, and with it the
+    /// bounded `action_dispatch_tx` a processor must never block on, does not
+    /// exist yet at this point.
+    ///
+    /// [`PROCESSOR_TICK_BUDGET`]: super::PROCESSOR_TICK_BUDGET
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use leviculum_core::node::NodeEvent;
+    /// use leviculum_core::transport::TickOutput;
+    /// use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
+    ///
+    /// struct CountAnnounces {
+    ///     seen: u64,
+    /// }
+    ///
+    /// impl CoreProcessor for CountAnnounces {
+    ///     fn on_event(&mut self, _core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
+    ///         if matches!(event, NodeEvent::AnnounceReceived { .. }) {
+    ///             self.seen += 1;
+    ///         }
+    ///         TickOutput::empty()
+    ///     }
+    /// }
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let node = ReticulumNodeBuilder::new()
+    ///     .core_processor(CountAnnounces { seen: 0 })
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn core_processor(mut self, processor: impl CoreProcessor) -> Self {
+        self.core_processor = Some(Box::new(processor));
+        self
     }
 
     /// Disable the application event channel.
@@ -669,7 +726,7 @@ impl ReticulumNodeBuilder {
     ///
     /// Same as `build()` but does not require an async context.
     /// Useful when constructing a node outside of an async runtime.
-    pub fn build_sync(self) -> Result<ReticulumNode, Error> {
+    pub fn build_sync(mut self) -> Result<ReticulumNode, Error> {
         // Resolve config: pre-loaded > loaded from path > default
         let config = self.resolve_config()?;
 
@@ -864,6 +921,9 @@ impl ReticulumNodeBuilder {
         node.set_rnode_channels(rnode_channels);
         node.set_autoconnect_max(autoconnect_max);
         node.set_discovery_network_identity(discovery_network_identity);
+        if let Some(processor) = self.core_processor.take() {
+            node.set_core_processor(processor);
+        }
         node.set_discovery_job_interval_secs(
             self.discovery_job_interval_secs_explicit
                 .unwrap_or(config.reticulum.discovery_job_interval_secs),
