@@ -29,7 +29,7 @@
 //! Run: `cargo test -p leviculum-core --test embedded_eviction_alloc -- --nocapture`
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::storage_types::{PathEntry, PathState};
@@ -42,19 +42,56 @@ use leviculum_core::EmbeddedStorage;
 
 struct CountingAlloc;
 
-/// Gross bytes ever requested (never decremented). The transient-spike metric.
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-/// Number of allocation calls (alloc + alloc_zeroed + realloc).
-static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+// The counters are PER THREAD, and that is load-bearing rather than tidy.
+//
+// They used to be process-global `AtomicUsize`es, on the reasoning that a
+// binary exposing a single `#[test]` has no intra-binary parallelism and so no
+// other thread to pollute a measured window. That reasoning is wrong by one
+// thread: libtest runs the test on a spawned thread while its MAIN thread
+// stays alive waiting on the result channel, and that main thread allocates
+// when it wakes. Under CPU load it wakes inside the window — reproduced at
+// 3 failures in 25 runs against six busy cores, every one of them the same
+// four calls and 900 gross bytes, in the first scenario, with an allocation
+// rate (0.0001 calls/iter over 50 000 iterations) that no per-insert
+// regression could produce. A guard that fails 12 % of the time under load
+// while the code it guards is correct teaches the opposite of what it exists
+// to teach.
+//
+// Counting on the allocating thread makes the window measure exactly what the
+// assertion claims: allocations made BY THE CODE UNDER TEST, which runs on one
+// thread. Nothing is lost — `set_path_state` and friends are called only from
+// the measuring thread, so a real regression is still counted in full.
+//
+// `const`-initialised `Cell<usize>` on purpose: it has no destructor, so TLS
+// needs no lazy init and no destructor registration, and therefore never
+// allocates. A `thread_local!` that allocated on first touch inside a global
+// allocator would recurse.
+thread_local! {
+    /// Gross bytes ever requested on this thread (never decremented). The
+    /// transient-spike metric: the #65 failure is a spike, not a leak.
+    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+    /// Number of allocation calls on this thread (alloc + alloc_zeroed +
+    /// realloc).
+    static ALLOC_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Record one allocation of `size` bytes against the calling thread.
+///
+/// `try_with` rather than `with`: after TLS destruction has begun on a thread,
+/// `with` panics, and a panic inside the global allocator is an abort. There
+/// is nothing to count that late anyway.
+fn record(size: usize) {
+    let _ = ALLOCATED.try_with(|c| c.set(c.get().wrapping_add(size)));
+    let _ = ALLOC_CALLS.try_with(|c| c.set(c.get().wrapping_add(1)));
+}
 
 // SAFETY: every branch forwards to the System allocator with the same layout
-// it was handed; the atomic counters never touch the returned memory.
+// it was handed; the thread-local counters never touch the returned memory.
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = System.alloc(layout);
         if !ptr.is_null() {
-            ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
-            ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            record(layout.size());
         }
         ptr
     }
@@ -66,8 +103,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let ptr = System.alloc_zeroed(layout);
         if !ptr.is_null() {
-            ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
-            ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            record(layout.size());
         }
         ptr
     }
@@ -76,8 +112,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         let new_ptr = System.realloc(ptr, layout, new_size);
         if !new_ptr.is_null() {
             // A realloc that grows is a fresh large request against the heap.
-            ALLOCATED.fetch_add(new_size, Ordering::Relaxed);
-            ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            record(new_size);
         }
         new_ptr
     }
@@ -87,21 +122,17 @@ unsafe impl GlobalAlloc for CountingAlloc {
 static GLOBAL: CountingAlloc = CountingAlloc;
 
 fn allocated_bytes() -> usize {
-    ALLOCATED.load(Ordering::Relaxed)
+    ALLOCATED.with(Cell::get)
 }
 
 fn alloc_calls() -> usize {
-    ALLOC_CALLS.load(Ordering::Relaxed)
+    ALLOC_CALLS.with(Cell::get)
 }
 
-// The counters are process-global and the allocator runs on whatever thread
-// allocates. libtest's own parallel orchestration (thread spawn, stdout
-// capture) allocates on OTHER threads and would leak into the counter during a
-// measured window. A per-test `MutexGuard` cannot stop that. So this binary
-// exposes a SINGLE `#[test]` that runs every scenario sequentially: with one
-// test there is no intra-binary parallelism, and other test binaries are
-// separate processes with their own counter. The measured windows are then
-// truly clean (verified: 0 allocations).
+// This binary still exposes a SINGLE `#[test]` that runs every scenario
+// sequentially. With per-thread counters that is no longer load-bearing for
+// correctness, but it keeps the scenarios' windows from interleaving and keeps
+// the output readable, so it stays.
 
 fn key_th(i: usize) -> [u8; TRUNCATED_HASHBYTES] {
     let mut h = [0u8; TRUNCATED_HASHBYTES];
@@ -268,4 +299,50 @@ fn check_path_request_tag_set_eviction() {
         let seen = s.check_path_request_tag(&key32(base + i));
         assert!(!seen, "fresh tag wrongly reported as seen");
     });
+}
+
+/// Canary: the counter still counts.
+///
+/// Every assertion above is of the form "the count is zero", and a counter
+/// that has quietly stopped counting satisfies all of them forever — the same
+/// hazard `doc_citations.rs` keeps `citation_guard_canary` for. This drives a
+/// body that allocates on purpose through the same accessors and requires the
+/// allocations to be seen.
+///
+/// It is also what makes the move to per-thread counters checkable: had
+/// `record` been unable to touch TLS from inside the allocator, this would
+/// read zero while the four windows above went on passing.
+///
+/// A second `#[test]` in this binary is safe now that the counters are
+/// per-thread. libtest may run the two concurrently, and each thread counts
+/// only its own allocations.
+#[test]
+fn the_allocation_counter_counts() {
+    const BLOCKS: usize = 64;
+    const BLOCK: usize = 256;
+
+    let bytes0 = allocated_bytes();
+    let calls0 = alloc_calls();
+    let mut sink: Vec<Vec<u8>> = Vec::with_capacity(BLOCKS);
+    for _ in 0..BLOCKS {
+        sink.push(vec![0u8; BLOCK]);
+    }
+    let calls = alloc_calls() - calls0;
+    let bytes = allocated_bytes() - bytes0;
+
+    // `>=`: the outer `Vec` allocates once as well, and `vec![0u8; n]` may go
+    // through `alloc_zeroed`. The floor is what the inner blocks must cost.
+    assert!(
+        calls >= BLOCKS,
+        "the allocation counter saw {calls} calls for {BLOCKS} heap blocks — \
+         it has stopped counting, and every zero-allocation assertion in this \
+         file is now vacuous"
+    );
+    assert!(
+        bytes >= BLOCKS * BLOCK,
+        "the allocation counter saw {bytes} gross bytes for {} — it is \
+         undercounting",
+        BLOCKS * BLOCK
+    );
+    drop(sink);
 }
