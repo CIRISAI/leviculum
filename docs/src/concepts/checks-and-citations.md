@@ -25,6 +25,7 @@ person what to do. This one is about the cases where the person forgot.
 | drifted `file:line` citations — six across five concept documents in the 2026-07 manual audit (`leviculum-std/tests/doc_citations.rs:6`), sixteen across the whole book on the guard's first automated run | **C** |
 | `reference/LXMF` sat twelve commits behind its gitlink for five weeks; every LXMF citation meant something other than it said | **C**, and the red `reference_lock` test that should have said so was itself unobserved — a **B** failure masking a **C** failure |
 | a `Co-Authored-By:` naming a model reached a periculum commit on 2026-08-07, against a rule the same author had cited correctly hours earlier (#205) | **neither** — a commit message, which all three explicitly do not reach |
+| `PROCESSOR_TICK_BUDGET` justified the only number in a public API constant with "the number comes off `docs/…/core-lock-budget.md`" and then named 126.6 ms; that figure occurred exactly once in the tree, in that comment (#200) | **C**, only since the figure check below — a prose attribution carries no line and no identifier, so the resolver never saw it |
 
 The last row is worth reading twice: the guarantees are not
 independent. A rotted citation had a test attached, and that test ran
@@ -288,6 +289,48 @@ prose. The honest response is to publish the ratio on every run so
 nobody reads a green guard as full coverage, and to convert
 opportunistically (#167 is the standing example).
 
+### 4. A prose attribution is not a citation, and was not checked
+
+`leviculum-std/tests/doc_citations.rs` resolves `path:line` and checks
+identifier proximity. A sentence that attributes a number to a document
+by name carries neither, so it sailed through — and that is not a rare
+shape. `PROCESSOR_TICK_BUDGET`
+(`leviculum-std/src/driver/processor.rs:128`) was justified with "The
+number comes off `docs/src/concepts/core-lock-budget.md`" and then named
+126.6 ms. The figure occurred exactly once in the whole tree: in that
+comment. The measurement was real — taken in the #196 design pass — but
+the page it was attributed to did not contain it, so the only number
+behind a public constant could not be traced by anyone but its author.
+
+The check: **a doc-comment paragraph naming a document under `docs/` and
+quoting a decimal figure must have that figure occur in that document.**
+`figure_attributions` in the same file, with the reach limits written
+where a reader hits them.
+
+Two decisions are worth lifting out of the code.
+
+**Paragraph scope, not sentence.** The defect attributed across a
+sentence boundary — the document named in one sentence, "The failure
+mode it names is 126.6 ms" two sentences later — so a sentence-scoped
+trigger would have missed the case it exists for. Reconstructed and run:
+it is reported at paragraph scope and invisible at sentence scope.
+
+**Decimal figures only, which is where the precision comes from.** In
+the paragraph the defect lived in, "126.6 ms", "3.2 ms" and "0.8 ms" are
+the page's figures; "5 ms" is the constant being defined and "~25x" is
+arithmetic done in the comment. Checking every number would have
+reported three of its own numbers alongside the one real finding — on
+the very comment the check exists for. What it gives up is integers:
+"the page names 141 ms" is unchecked, and a wrong round number is as
+believable as a wrong precise one. That is the largest known gap and it
+is stated rather than closed, because a guard with false positives gets
+switched off, and a switched-off guard is worse than none.
+
+Two paragraphs in the tree trigger it and five figures are checked. Both
+numbers are printed on every run for the same reason the citation counts
+are: with a trigger this narrow, "no failures" and "the trigger stopped
+firing" are otherwise the same output.
+
 ### What C cannot reach
 
 Issue comments, commit messages and batch reports carry hundreds of
@@ -373,6 +416,13 @@ reports anything else:
 - **C, citation guard**: a deliberately drifted citation that must be
   reported. The existing guard has floor asserts against parser rot; the
   canary is the stronger form.
+- **C, figure attribution**: a fixture page and a fixture doc comment
+  attributing two figures to it — one on the page, one not — plus a
+  version string that must not be read as a figure and an attribution to a
+  page that is not in the tree. Exactly two must be reported. This one is
+  not optional in the ordinary way: #200 was fixed hours before the check
+  was written, so the corpus has no failing case left and a broken trigger
+  would report zero forever against a tree that reads clean.
 - **C, commit-trailer guard**: a message carrying the trailer that must be
   rejected and one that only quotes it, indented, that must not — both run
   before the guard reports anything else. leviculum's pinned count of
@@ -423,9 +473,10 @@ gate observes its green.
 Codeberg is the source of truth for what is built. At the time of
 writing: C covers `docs/src/**` and the Rust sources of `leviculum-core`,
 `leviculum-lxmf` and `leviculum-std`, and its submodule check runs first
-in `just fast`; its bump path is unbuilt. Its commit-trailer step runs on
-every push to either repository, and checks one line shape and no claim.
-B emits manifests from every
+in `just fast`; its bump path is unbuilt. Prose attributions in Rust doc
+comments are checked for decimal figures and for nothing else. Its
+commit-trailer step runs on every push to either repository, and checks
+one line shape and no claim. B emits manifests from every
 host gate that runs tests, and `just complete` in the `extensive` tier
 runs the whole workspace by construction, so no ordinary test is outside
 the union; the check that reads that union, and the staleness bound that

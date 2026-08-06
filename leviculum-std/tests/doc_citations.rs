@@ -1,7 +1,8 @@
-//! Citation guard: `path:line` citations must still point at what they
-//! claim. Covers `docs/src/**/*.md` and the Rust sources and tests of
-//! `leviculum-core`, `leviculum-lxmf` and `leviculum-std`; and every concept
-//! document must be reachable from `docs/src/SUMMARY.md`.
+//! Citation guard (Guarantee C): a reference to something outside the text
+//! must still point at what it claims. Covers `docs/src/**/*.md` and the
+//! Rust sources and tests of `leviculum-core`, `leviculum-lxmf`,
+//! `leviculum-lxmf-node` and `leviculum-std`; and every concept document
+//! must be reachable from `docs/src/SUMMARY.md`.
 //!
 //! The concept documents are binding policy, and a wrong citation gets
 //! believed. A 2026-07 audit found six drifted citations across five
@@ -10,7 +11,12 @@
 //! the load-bearing half: a pinned deviation means nothing without the
 //! reference line it deviates from.
 //!
-//! What is checked, per citation:
+//! # Three kinds of sentence, and which of them is checked
+//!
+//! A reader of a doc comment cannot tell by looking which of these they are
+//! in front of, so this is the map.
+//!
+//! **1. A `path:line` citation — resolved.** Per citation:
 //! - the cited file exists in the repo and has at least the cited number
 //!   of lines (catches deletions and renames);
 //! - where the citation follows a backticked identifier — the
@@ -27,6 +33,25 @@
 //! reference is at the commit this tree pins is not checkable from here —
 //! that is `scripts/check-submodule-pins.sh`, in a gate rather than in a
 //! test. See `docs/src/concepts/checks-and-citations.md`.
+//!
+//! **2. A prose attribution to a document — checked for figures only.** A
+//! Rust doc-comment paragraph that names a document under `docs/` and
+//! quotes a decimal figure must have that figure occur in that document
+//! (Codeberg #200). It carries no line and no identifier, so nothing above
+//! reaches it: `PROCESSOR_TICK_BUDGET` was justified with "the number comes
+//! off `docs/…/core-lock-budget.md`" and then named 126.6 ms, a figure that
+//! existed nowhere in the tree but in that comment. The measurement was
+//! real; the attribution was not.
+//!
+//! Only decimal figures, and only within one paragraph. See
+//! `figure_attributions` for exactly what that excludes and why the trigger
+//! is drawn where it is.
+//!
+//! **3. Everything else in a doc comment — unchecked prose.** Which is most
+//! of it. A sentence can name a mechanism that no longer exists, describe a
+//! guarantee the code does not make, or attribute an integer to a page that
+//! never carried it, and nothing here will notice. Guarantee C is about
+//! references, not about truth.
 
 use regex::Regex;
 use std::collections::BTreeSet;
@@ -455,6 +480,244 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
     (counts, failures)
 }
 
+// --- figure attribution (Codeberg #200) ----------------------------------
+
+/// A document path under `docs/` ending in `.md`. Any `:line` suffix stops
+/// the match on its own, so the same reference is seen whether or not it
+/// carries one.
+const DOC_PATH_PATTERN: &str = r"[A-Za-z0-9_.-]*docs/[A-Za-z0-9_./-]*\.md";
+
+/// A decimal figure. Boundaries are applied separately in `figures_in`,
+/// because the `regex` crate has no lookaround.
+const FIGURE_PATTERN: &str = r"\d+\.\d+";
+
+/// One `///`/`//!` paragraph: the contiguous doc-comment lines between two
+/// blank doc-comment lines (or between a blank one and the end of the run).
+struct Paragraph {
+    file: PathBuf,
+    /// Line number of the paragraph's first line, in the source file.
+    first_line: usize,
+    text: String,
+}
+
+/// Every doc-comment paragraph in `files`.
+///
+/// Paragraph, not sentence, and that is the load-bearing choice. The #200
+/// defect attributed its figure across a sentence boundary — "The number
+/// comes off `docs/…`" in one sentence, "The failure mode it names is
+/// 126.6 ms" two sentences later — so a sentence-scoped trigger would have
+/// sailed past the case it exists for. Paragraph scope also avoids having
+/// to segment sentences at all, which in this corpus means deciding whether
+/// the `.` in `126.6`, in `core-lock-budget.md` and in `e.g.` ends one.
+fn doc_paragraphs(root: &Path, files: &[PathBuf]) -> Vec<Paragraph> {
+    let mut out = Vec::new();
+    for file in files {
+        let Ok(text) = fs::read_to_string(file) else {
+            continue;
+        };
+        let rel = file.strip_prefix(root).unwrap_or(file).to_path_buf();
+        let mut acc: Vec<&str> = Vec::new();
+        let mut first = 0usize;
+        let flush = |acc: &mut Vec<&str>, first: usize, out: &mut Vec<Paragraph>| {
+            if !acc.is_empty() {
+                out.push(Paragraph {
+                    file: rel.clone(),
+                    first_line: first,
+                    text: acc.join(" "),
+                });
+                acc.clear();
+            }
+        };
+        for (i, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let body = trimmed
+                .strip_prefix("///")
+                .or_else(|| trimmed.strip_prefix("//!"))
+                .map(str::trim);
+            match body {
+                Some("") | None => flush(&mut acc, first, &mut out),
+                Some(b) => {
+                    if acc.is_empty() {
+                        first = i + 1;
+                    }
+                    acc.push(b);
+                }
+            }
+        }
+        flush(&mut acc, first, &mut out);
+    }
+    out
+}
+
+/// Whether the byte range `[start, end)` of `text` is a standalone number:
+/// not glued to another digit or to a further `.`.
+///
+/// This is what keeps `0.8.0`, `1.3.4` and `127.0.0.1` out. Each yields
+/// `0.8` / `1.3` / `127.0` from the pattern and each is rejected here for
+/// the `.` that follows.
+fn is_standalone(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[end..].chars().next();
+    let glued = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit() || c == '.');
+    !glued(before) && !glued(after)
+}
+
+/// The standalone decimal figures in `text`, in order, deduplicated.
+fn figures_in(re: &Regex, text: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    re.find_iter(text)
+        .filter(|m| is_standalone(text, m.start(), m.end()))
+        .map(|m| m.as_str().to_string())
+        .filter(|f| seen.insert(f.clone()))
+        .collect()
+}
+
+/// Whether `figure` occurs in `text` as a standalone number.
+fn document_names_figure(re: &Regex, text: &str, figure: &str) -> bool {
+    re.find_iter(text)
+        .any(|m| m.as_str() == figure && is_standalone(text, m.start(), m.end()))
+}
+
+/// Every decimal figure a doc comment attributes to a named document must
+/// occur in that document.
+///
+/// Returns `(paragraphs triggered, figures checked, failures)`.
+///
+/// # Where the trigger is drawn, and what that gives up
+///
+/// A guard with false positives gets switched off, and a switched-off guard
+/// is worse than none, so this is narrow on purpose and the cost is stated
+/// rather than hidden.
+///
+/// It fires only where **a paragraph names a document under `docs/` and
+/// quotes a decimal figure**. Decimal, because that is what separates a
+/// measurement somebody took from a number somebody derived in the same
+/// breath. In the paragraph the #200 defect lived in, "126.6 ms", "3.2 ms"
+/// and "0.8 ms" are the page's figures, while "5 ms" is the constant being
+/// defined, "~25x" is arithmetic done in the comment, and "141 ms", "8" and
+/// "256 KiB" are the page's too but round. Checking every number would have
+/// reported the constant's own value and a ratio as unattributed on the
+/// tree as it stood — three false positives against one true one, on the
+/// very comment this exists for.
+///
+/// What that gives up, in order of how much it costs:
+///
+/// - **Integer figures.** "the page names 141 ms" is unchecked. This is the
+///   real gap, and it is not small: a wrong round number is as believable
+///   as a wrong precise one.
+/// - **Attribution across paragraphs.** A figure a paragraph below the one
+///   naming the document is unchecked. Doc comments break paragraphs at
+///   headings, so a `# Where the number comes from` section that names the
+///   page in its first paragraph and the figure in its second is missed.
+/// - **Ordinary `//` comments and prose in `docs/src/**`.** Only `///` and
+///   `//!` are read, in the four crates `SOURCE_CRATES` names.
+/// - **Which figure means what.** A paragraph naming two documents passes
+///   if the figure is in either, and a figure that appears in the document
+///   in an unrelated sentence passes. This checks that the number is on the
+///   page, not that the page says what the comment says it says.
+/// - **Non-numeric attributions.** "the page forbids X" is prose (kind 3 in
+///   the module header) and stays prose.
+fn figure_attributions(root: &Path, crates: &[&str]) -> (usize, usize, Vec<Failure>) {
+    let mut rs = Vec::new();
+    for krate in crates {
+        walk(&root.join(krate), SKIP_DIRS, &mut rs);
+    }
+    rs.retain(|p| p.extension().is_some_and(|e| e == "rs"));
+    rs.retain(|p| !p.components().any(|c| c.as_os_str() == "citation_canary"));
+    rs.sort();
+
+    let doc_re = Regex::new(DOC_PATH_PATTERN).unwrap();
+    let fig_re = Regex::new(FIGURE_PATTERN).unwrap();
+
+    let mut index = Vec::new();
+    walk(root, SKIP_DIRS, &mut index);
+    let rel_index: Vec<String> = index
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    let mut triggered = 0;
+    let mut checked = 0;
+    let mut failures = Vec::new();
+
+    for para in doc_paragraphs(root, &rs) {
+        let named: BTreeSet<String> = doc_re
+            .find_iter(&para.text)
+            .map(|m| m.as_str().to_string())
+            .collect();
+        if named.is_empty() {
+            continue;
+        }
+        let figures = figures_in(&fig_re, &para.text);
+        if figures.is_empty() {
+            continue;
+        }
+        triggered += 1;
+
+        let where_ = format!("{}:{}", para.file.display(), para.first_line);
+        let mut bodies = Vec::new();
+        let mut absent = Vec::new();
+        for name in &named {
+            let suffix = format!("/{name}");
+            match rel_index
+                .iter()
+                .find(|f| *f == name || f.ends_with(&suffix))
+            {
+                Some(found) => bodies.push((
+                    found.clone(),
+                    fs::read_to_string(root.join(found)).unwrap_or_default(),
+                )),
+                None => absent.push(name.clone()),
+            }
+        }
+        if !absent.is_empty() {
+            // A doc comment attributing a figure to a document that is not
+            // in the tree is the same defect one step further along: there
+            // is nothing left to check the figure against.
+            failures.push(Failure {
+                kind: FailureKind::Missing,
+                message: format!(
+                    "{where_}\n    a figure is attributed to {}, which is not in the repo \
+                     -- deleted or renamed?\n    figures in the paragraph: {}",
+                    absent.join(", "),
+                    figures.join(", ")
+                ),
+            });
+            continue;
+        }
+
+        for figure in &figures {
+            checked += 1;
+            if bodies
+                .iter()
+                .any(|(_, body)| document_names_figure(&fig_re, body, figure))
+            {
+                continue;
+            }
+            let names: Vec<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
+            failures.push(Failure {
+                kind: FailureKind::Drift,
+                message: format!(
+                    "{where_}\n    the figure {figure} is attributed to {}, which does not \
+                     contain it.\n    Either the number is wrong, or it was never written down \
+                     where the comment says it was --\n    a measurement that lives only in the \
+                     comment claiming to quote it cannot be checked by anyone.\n    Put it on \
+                     the page, or attribute it to where it actually is.\n    Paragraph: {}",
+                    names.join(" or "),
+                    para.text.chars().take(300).collect::<String>()
+                ),
+            });
+        }
+    }
+
+    (triggered, checked, failures)
+}
+
 fn report(label: &str, failures: &[Failure]) {
     assert!(
         failures.is_empty(),
@@ -492,6 +755,8 @@ fn report(label: &str, failures: &[Failure]) {
 /// the four fixture citations is for.
 const CANARY_TARGET: &str = include_str!("citation_canary/canary_target.rs.in");
 const CANARY_CITATIONS: &str = include_str!("citation_canary/canary_citations.rs.in");
+const CANARY_FIGURES: &str = include_str!("citation_canary/canary_figures.rs.in");
+const CANARY_BUDGET: &str = include_str!("citation_canary/canary_budget.md.in");
 const CANARY_SUBJECT_LINE: usize = 3;
 const CANARY_DRIFT_LINE: usize = 50;
 
@@ -500,6 +765,87 @@ fn write_canary_fixture(root: &Path) {
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("canary_target.rs"), CANARY_TARGET).unwrap();
     fs::write(src.join("canary_citations.rs"), CANARY_CITATIONS).unwrap();
+}
+
+/// The figure-attribution fixture. A separate tree from the one above: the
+/// citation canary excludes `citation_canary` paths from its scan, and this
+/// one needs its Rust file *inside* the corpus.
+fn write_figure_canary_fixture(root: &Path) {
+    let src = root.join("leviculum-core/src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("canary_figures.rs"), CANARY_FIGURES).unwrap();
+    let docs = root.join("docs/src/concepts");
+    fs::create_dir_all(&docs).unwrap();
+    fs::write(docs.join("canary_budget.md"), CANARY_BUDGET).unwrap();
+}
+
+/// Both directions, on the same fixture: the unsupported figure and the
+/// missing page must be reported, and the supported figure, the version
+/// string and the two integers in the same paragraph must not.
+///
+/// A one-time demonstration is not enough. A trigger that stops matching --
+/// a paragraph splitter that returns nothing, a boundary rule that rejects
+/// every figure -- reports zero findings forever, which reads exactly like
+/// a clean tree. It is the shape this whole page exists to remove, and the
+/// #200 case itself was fixed hours before the guard was written, so the
+/// real corpus cannot supply the failing side.
+fn run_figure_canary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_figure_canary_fixture(root);
+
+    let (triggered, checked, failures) = figure_attributions(root, &["leviculum-core"]);
+    // Two of the fixture's three paragraphs, exactly. The third names the
+    // page and quotes only the version string `0.8.0`, which the boundary
+    // rule must not read as the figure `0.8`. So this number is pinned in
+    // both directions at once: 1 or 0 means the trigger stopped matching and
+    // a green run means nothing, 3 means the boundary rule broke and every
+    // version string in the tree is about to be reported as a figure.
+    assert_eq!(
+        triggered, 2,
+        "CANARY: {triggered} of the fixture's 3 paragraphs triggered, expected 2."
+    );
+    // 3.2 and 126.6. The third paragraph's 1.5 is deliberately not among
+    // them: its page is absent, and there is nothing to check a figure
+    // against.
+    assert_eq!(
+        checked, 2,
+        "CANARY: {checked} figures were checked, expected 3.2 and 126.6. \
+         Figure extraction has stopped working."
+    );
+
+    let msgs: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
+    let joined = msgs.join("\n\n");
+    assert!(
+        failures
+            .iter()
+            .any(|f| f.kind == FailureKind::Drift && f.message.contains("figure 126.6")),
+        "CANARY: a figure attributed to a page that does not contain it was NOT \
+         reported. This is the defect the check exists for.\n{joined}"
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|f| f.kind == FailureKind::Missing && f.message.contains("canary_gone.md")),
+        "CANARY: an attribution to a document absent from the tree was not \
+         reported; a renamed page would switch the check off silently.\n{joined}"
+    );
+    // Everything below is the false-positive side. A guard that reports these
+    // gets switched off, and a switched-off guard is worse than none.
+    for quiet in ["figure 3.2", "figure 0.8", "figure 5", "figure 25"] {
+        assert!(
+            !joined.contains(quiet),
+            "CANARY: `{quiet}` was reported. 3.2 is on the page, 0.8 is half of \
+             the version string 0.8.0, and 5 and 25 are integers the comment \
+             derives rather than quotes.\n{joined}"
+        );
+    }
+    assert_eq!(
+        failures.len(),
+        2,
+        "CANARY: expected exactly the drift and the missing page; got {}:\n{joined}",
+        failures.len()
+    );
 }
 
 fn run_canary() {
@@ -591,6 +937,30 @@ fn run_canary() {
 #[test]
 fn citation_guard_canary() {
     run_canary();
+    run_figure_canary();
+}
+
+/// Guarantee C, kind 2: a figure a doc comment attributes to a document
+/// must occur in that document (Codeberg #200).
+#[test]
+fn doc_comment_figures_are_on_the_page_they_cite() {
+    run_figure_canary();
+
+    let root = repo_root();
+    let (triggered, checked, failures) = figure_attributions(&root, SOURCE_CRATES);
+
+    // Published like the citation counts above, and for the same reason: a
+    // trigger this narrow finds very little, and the number it found is the
+    // only thing that tells a reader whether "no failures" means the tree is
+    // clean or the trigger stopped firing. The canary is the real guard
+    // against the second; this is what makes it visible without one.
+    println!(
+        "figure attributions ({}): {triggered} paragraph(s) naming a docs/ page \
+         and quoting a decimal, {checked} figure(s) checked",
+        SOURCE_CRATES.join(", ")
+    );
+
+    report("figure-attribution", &failures);
 }
 
 #[test]
