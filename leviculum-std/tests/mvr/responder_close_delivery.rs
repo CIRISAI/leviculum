@@ -17,8 +17,7 @@
 //! delivery rate. It is the RED reproduction: it asserts 100% delivery, so
 //! it fails on master while the bug is live and prints the measured rate.
 
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use leviculum_core::link::{LinkCloseReason, LinkId};
@@ -26,21 +25,14 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::NodeEvent;
 
-/// Port band above the other mvr files' bases to avoid cross-file
-/// collisions in a shared `cargo test` invocation.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(63500);
-
+/// Listener port from the host-wide allocator shared by every suite
+/// (`crate::harness::port_alloc`). This file used to carry its own
+/// `AtomicU16` at a private base, which is why the bases were chosen
+/// disjoint; one counter per host does not need disjoint bases and, unlike
+/// a per-process one, does not hand the same number to a concurrently
+/// running test binary.
 fn next_port() -> u16 {
-    loop {
-        let candidate = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if candidate >= 65000 {
-            PORT_COUNTER.store(63500, Ordering::Relaxed);
-            continue;
-        }
-        if StdTcpListener::bind(("127.0.0.1", candidate)).is_ok() {
-            return candidate;
-        }
-    }
+    crate::harness::port_alloc::free_tcp_port()
 }
 
 #[derive(Debug)]

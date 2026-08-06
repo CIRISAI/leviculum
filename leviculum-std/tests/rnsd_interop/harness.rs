@@ -29,48 +29,25 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::net::{SocketAddr, TcpListener, TcpStream as StdTcpStream};
+use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-
-use std::sync::atomic::{AtomicU16, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// Per-process counter used by [`find_available_ports`] to hand out
-/// non-overlapping port numbers to parallel tests. Sits ABOVE Linux's
-/// `ip_local_port_range` ceiling (default `60999`) so that nothing in the
-/// process can win an OS-assigned 0-bind on a port we have already handed
-/// out — that was the second incarnation of the alloc → bind race, surfaced
-/// after switching from 0-bind allocation to a counter (the alloc itself no
-/// longer collides, but a parallel `bind("127.0.0.1:0")` in another test
-/// could still grab a counter-reserved port that has not yet been bound by
-/// its intended consumer).
+/// Host-wide listener-port allocator, shared with the `mvr` suite and with
+/// `tests/discovery_autoconnect.rs`.
 ///
-/// 61000-65000 = 4000 distinct ports; a full 250-test suite uses around
-/// 1500-2500 ports, so a single run does not wrap. The range is above
-/// 60999 by default on Linux; should the host's `ip_local_port_range` be
-/// configured to span this range, `pick_free_*_port` would still skip ports
-/// in use because it test-binds each candidate before returning.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(PORT_RANGE_BASE);
-const PORT_RANGE_BASE: u16 = 61000;
-const PORT_RANGE_END: u16 = 65000;
-
-fn next_port_candidate() -> u16 {
-    let v = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if v >= PORT_RANGE_END {
-        // Best-effort wrap; the racing-incrementers may briefly read past the
-        // end before the store lands, that is harmless because we re-test
-        // bindability below in the caller.
-        PORT_COUNTER.store(PORT_RANGE_BASE, Ordering::Relaxed);
-        PORT_RANGE_BASE
-    } else {
-        v
-    }
-}
+/// The counter behind it lives in a file rather than in this process, because
+/// `cargo test --workspace` runs test binaries in parallel and a per-process
+/// counter hands two of them the same numbers in the same order. The module
+/// documents the handoff window and why the alternatives were rejected.
+#[path = "../support/port_alloc.rs"]
+#[allow(dead_code)]
+pub mod port_alloc;
 
 /// Error type for test harness operations
 #[derive(Debug)]
@@ -213,12 +190,12 @@ impl TestDaemon {
     /// If the Reticulum submodule exists but is not initialized, this will
     /// automatically run `git submodule update --init` first.
     ///
-    /// Allocates ports via the per-process [`PORT_COUNTER`] (each call
-    /// receives an unused, non-overlapping band) and spawns the daemon. The
-    /// retry loop remains as defence in depth against external port
-    /// collisions (other processes); the in-process TOCTOU race that
-    /// previously caused intermittent `249/250` failures is eliminated by
-    /// the counter-based allocation, not by retries.
+    /// Allocates ports via the host-wide counter in [`port_alloc`] (each call
+    /// receives a number no other caller on this host will be given) and
+    /// spawns the daemon. The retry loop remains as defence in depth against
+    /// an occupant that never asked the allocator for anything; the TOCTOU
+    /// race that previously caused intermittent `249/250` failures is
+    /// eliminated by the allocation, not by retries.
     pub async fn start() -> Result<Self, HarnessError> {
         ensure_reticulum_submodule()?;
 
@@ -2859,35 +2836,20 @@ fn find_two_available_ports() -> Result<(u16, u16), HarnessError> {
     Ok((port1, port2))
 }
 
-/// Pick the next port from `PORT_COUNTER` that the OS confirms is currently
-/// bindable on 127.0.0.1, retrying past any external occupant. Returns
-/// `Err(SpawnFailed)` only if the entire range is exhausted (extremely
+/// Pick the next port from the host-wide counter that the OS confirms is
+/// currently bindable on 127.0.0.1, retrying past any external occupant.
+/// Returns `Err(SpawnFailed)` only if the entire band is exhausted (extremely
 /// unlikely in practice).
 pub fn pick_free_tcp_port() -> Result<u16, HarnessError> {
-    for _ in 0..(PORT_RANGE_END - PORT_RANGE_BASE) {
-        let candidate = next_port_candidate();
-        if let Ok(listener) = TcpListener::bind(("127.0.0.1", candidate)) {
-            // Take and immediately drop to free the port for the daemon.
-            drop(listener);
-            return Ok(candidate);
-        }
-    }
-    Err(HarnessError::SpawnFailed(std::io::Error::other(
-        "exhausted test port range",
-    )))
+    port_alloc::try_free_tcp_port().ok_or_else(|| {
+        HarnessError::SpawnFailed(std::io::Error::other("exhausted test port range"))
+    })
 }
 
 fn pick_free_udp_port() -> Result<u16, HarnessError> {
-    for _ in 0..(PORT_RANGE_END - PORT_RANGE_BASE) {
-        let candidate = next_port_candidate();
-        if let Ok(sock) = std::net::UdpSocket::bind(("127.0.0.1", candidate)) {
-            drop(sock);
-            return Ok(candidate);
-        }
-    }
-    Err(HarnessError::SpawnFailed(std::io::Error::other(
-        "exhausted test port range",
-    )))
+    port_alloc::try_free_udp_port().ok_or_else(|| {
+        HarnessError::SpawnFailed(std::io::Error::other("exhausted test port range"))
+    })
 }
 
 /// Find four distinct available ports (TCP rns, TCP cmd, UDP listen, UDP forward).
@@ -2910,9 +2872,10 @@ fn find_four_available_ports() -> Result<(u16, u16, u16, u16), HarnessError> {
 pub struct PortAllocation;
 
 /// Find N distinct available ports (first 2 via TCP, rest via UDP), drawn
-/// from [`PORT_COUNTER`]. No two parallel callers ever receive the same port
-/// number, so the previous 0-bind TOCTOU race cannot occur. Returns the
-/// ports together with an empty [`PortAllocation`] marker.
+/// from the host-wide counter in [`port_alloc`]. No two callers ever receive
+/// the same port number — including callers in another test process, which is
+/// what makes `cargo test --workspace` safe. Returns the ports together with
+/// an empty [`PortAllocation`] marker.
 pub async fn find_available_ports<const N: usize>(
 ) -> Result<([u16; N], PortAllocation), HarnessError> {
     assert!(N >= 2, "need at least 2 ports");

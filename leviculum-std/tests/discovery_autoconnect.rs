@@ -18,8 +18,7 @@
 //! separately-advertised server port, so the auto-connected interface is a
 //! genuinely new link, distinct from the bootstrap one.
 
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use leviculum_core::discovery::{
@@ -29,19 +28,18 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::config::{Config, InterfaceConfig};
 use leviculum_std::driver::ReticulumNodeBuilder;
 
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(53100);
+/// Host-wide listener-port allocator, shared with the `mvr` and
+/// `rnsd_interop` suites.
+#[path = "support/port_alloc.rs"]
+#[allow(dead_code)]
+mod port_alloc;
 
+/// This file used to draw from a private counter based at 53100 — inside the
+/// default `ip_local_port_range`, where an OS-assigned `bind(0)` anywhere on
+/// the host can take a number between the probe and the consumer's bind. The
+/// shared band sits above that ceiling; see `port_alloc`.
 fn next_port() -> u16 {
-    loop {
-        let candidate = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if candidate >= 54000 {
-            PORT_COUNTER.store(53100, Ordering::Relaxed);
-            continue;
-        }
-        if StdTcpListener::bind(("127.0.0.1", candidate)).is_ok() {
-            return candidate;
-        }
-    }
+    port_alloc::free_tcp_port()
 }
 
 /// Poll `cond` every 100 ms until it returns true or the deadline passes.

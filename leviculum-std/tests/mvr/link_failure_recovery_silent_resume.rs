@@ -40,7 +40,7 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener as StdTcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,22 +49,14 @@ use leviculum_core::{Destination, DestinationHash, DestinationType, Direction, I
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::NodeEvent;
 
-/// Use a port band above the lncp_fetch mvr's 61500 base to avoid
-/// cross-file collisions when both files run in the same `cargo test`
-/// invocation. Bind-and-release picks a free port within the band.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(62500);
-
+/// Listener port from the host-wide allocator shared by every suite
+/// (`crate::harness::port_alloc`). This file used to carry its own
+/// `AtomicU16` at a private base, which is why the bases were chosen
+/// disjoint; one counter per host does not need disjoint bases and, unlike
+/// a per-process one, does not hand the same number to a concurrently
+/// running test binary.
 fn next_port() -> u16 {
-    loop {
-        let candidate = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if candidate >= 65000 {
-            PORT_COUNTER.store(62500, Ordering::Relaxed);
-            continue;
-        }
-        if StdTcpListener::bind(("127.0.0.1", candidate)).is_ok() {
-            return candidate;
-        }
-    }
+    crate::harness::port_alloc::free_tcp_port()
 }
 
 /// Runner-side proxy controls. `blocked` toggles silent-drop mode;

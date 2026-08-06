@@ -59,19 +59,26 @@ not be described as having Guarantee A.
 
 ### Why mutation cannot be the per-batch gate
 
-The blocking facts, in order: **`-j` is unsafe** here, so the pass is
-serial — though not for the reason it first looks. Storage is not the
-hazard: the suites take theirs from `tempfile::tempdir()`, and
-`cargo-mutants` gives each job its own copy of the tree anyway. Ports
-are. Both the mvr and `rnsd_interop` suites draw listeners from a
-counter over a fixed band, 61000-65000, and that counter is explicitly
-per-process — `PORT_COUNTER`
-(`leviculum-std/tests/rnsd_interop/harness.rs:58`). It test-binds each
-candidate, releases it, and hands it to its intended consumer to bind.
-Between threads of one process that is sound. Two concurrent suite
-processes start the same counter at the same base and race in exactly
-the handoff window the comment above it describes. On top of a serial
-pass come cold baseline builds and hang-mutant timeouts.
+`-j` used to be unsafe here, and ports were the reason. Storage never
+was: the suites take theirs from `tempfile::tempdir()`, and
+`cargo-mutants` gives each job its own copy of the tree anyway. Both
+the mvr and `rnsd_interop` suites drew listeners from a counter over a
+fixed band, 61000-65000, and that counter was per-process: each test
+binary started at the same base and walked the same numbers, so two
+concurrent processes raced in the alloc → bind handoff window. Measured
+on two concurrent runs of the mvr binary under `strace -e trace=bind`:
+10 ports bound by both processes and ~80 `EADDRINUSE` binds in the band
+per run, none of which went red, because the probe loop retried.
+
+That is fixed. `next_port_candidate`
+(`leviculum-std/tests/support/port_alloc.rs`) draws from one counter per
+*host*, kept in a file and bumped under `flock`, so no two processes are
+handed the same number — the same measurement after the change reports
+0 and 0. `tests/port_alloc_multiprocess.rs` pins it with four concurrent
+worker processes and a negative control that must collide.
+
+What is left is cost, not correctness: cold baseline builds and
+hang-mutant timeouts, and the rebuild term below.
 
 Measured on a 32-core host (musl, warm; the CI host has four cores,
 where every figure below is worse): incremental rebuild after a content

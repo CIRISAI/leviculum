@@ -19,26 +19,17 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Port band starts above Linux's `ip_local_port_range` ceiling (60999 on
-/// the host) so our explicit binds cannot collide with OS-assigned
-/// ephemeral ports elsewhere in the test suite. Same design as the
-/// `harness.rs` counter in `rnsd_interop/`.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(61500);
-
+/// Listener port from the host-wide allocator shared by every suite
+/// (`crate::harness::port_alloc`). This file used to carry its own
+/// `AtomicU16` at a private base, which is why the bases were chosen
+/// disjoint; one counter per host does not need disjoint bases and, unlike
+/// a per-process one, does not hand the same number to a concurrently
+/// running test binary.
 fn next_port() -> u16 {
-    loop {
-        let candidate = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if candidate >= 65000 {
-            PORT_COUNTER.store(61500, Ordering::Relaxed);
-            continue;
-        }
-        if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
-            return candidate;
-        }
-    }
+    crate::harness::port_alloc::free_tcp_port()
 }
 
 /// Resolve the release binary that the integ runner and this mvr share.
