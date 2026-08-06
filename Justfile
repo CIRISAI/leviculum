@@ -168,7 +168,40 @@ build-integ-bins:
 # RED, 2 = usage/malformed/internal, 3 = nothing ran at all. The bare
 # invocation therefore fails the recipe on 1, 2 and 3, which is what a tier
 # gate wants.
-extensive: standard build-integ-bins build-c-lnsd
+# The run that covers everything BY CONSTRUCTION (Guarantee B,
+# docs/src/concepts/checks-and-citations.md). Tiers define latency, not
+# coverage: `fast` runs `--lib`, `standard` names packages one at a time, and
+# 327 ordinary tests were consequently executed by no gate at all (Codeberg
+# #194) — whole crates, not stragglers. Naming the missing ones is what
+# produced the gap in the first place and loses something again with every new
+# test file, so this selects nothing by name. Leaving a test out of the
+# complete run is now what has to be declared.
+#
+# Two commands, because neither spelling covers everything alone. `--all-targets`
+# runs every lib, bin and integration target and additionally compiles the six
+# leviculum-std examples — but cargo DROPS doctests when it is given, and
+# scripts/ignored-counts.txt tracks two doctest units, so `--doc` is its own
+# invocation rather than a footnote. The workspace has no bench targets
+# (`cargo metadata`, checked 2026-08-06), so `--all-targets` pulls in nothing
+# that fails to compile.
+#
+# `--no-fail-fast` is load-bearing for the manifest, not a convenience: without
+# it cargo stops after the first red binary and every later binary goes unrun,
+# so a red run would emit a manifest covering a prefix of the workspace while
+# looking like the whole of it.
+#
+# No `--test-threads=1`. It was needed for port contention, which the host-wide
+# allocator (leviculum-std/tests/support/port_alloc.rs) removed, and for the
+# event-log subscriber suite, which now takes its own lock. Measured green at
+# default parallelism, 3669 tests + 28 doctests, 2026-08-06.
+#
+# Wall time on this host (4 cores, warm target dir): 7m50s + 3s. A fresh
+# CARGO_TARGET_DIR adds a full workspace test build on top.
+complete:
+    {{manifest}} workspace-all-targets -- cargo test --workspace --all-targets --no-fail-fast
+    {{manifest}} workspace-doc -- cargo test --workspace --doc --no-fail-fast
+
+extensive: standard complete build-integ-bins build-c-lnsd
     #!/usr/bin/env bash
     set -euo pipefail
     PERICULUM_ROOT="${PERICULUM_ROOT:-../periculum}"

@@ -169,12 +169,36 @@ command, parses the names out of the run and writes one JSON manifest per
 gate under `~/.local/state/leviculum-ci/test-manifests/`, next to the
 other CI run state rather than in the tree or in `target/` — the tiers
 run with their own `CARGO_TARGET_DIR`, so a manifest under `target/`
-would split the union into one per tier. Fourteen gates emit today. The
-union covers 3361 of the 3719 tests the workspace holds; the 358 outside
-it are 31 `#[ignore]`d and 327 in units no gate names — `leviculum-cli`
-and `leviculum-micron` entirely, most of `leviculum-lxmf`, the `jl`/
-`jldiff` suites and every `lnomad` test. That is the size of step 2's
-first report.
+would split the union into one per tier.
+
+Coverage was the problem the manifests then made visible: fourteen gates
+emitted, and their union covered 3361 of the 3719 tests the workspace
+held. The 358 outside it were 31 `#[ignore]`d and **327 ordinary tests
+executed by no gate at all** — `leviculum-cli` and `leviculum-micron`
+entirely, most of `leviculum-lxmf`, the `jl`/`jldiff` suites and every
+`lnomad` test (#194).
+
+Naming the missing 327 is what produced the gap: naming is a list, and a
+list loses something again with every new test file. The fix inverts it.
+`just complete`, in the `extensive` tier, runs
+`cargo test --workspace --all-targets --no-fail-fast` and
+`cargo test --workspace --doc --no-fail-fast`, selects nothing by name,
+and therefore covers everything by construction. **Tiers define latency,
+not coverage**, and leaving the complete run is what has to be declared.
+
+Sixteen gates emit today and the union covers 3690 of 3721; the 31
+outside it are `#[ignore]`d, and no ordinary test is outside it.
+
+Two spellings matter and neither is optional. `--all-targets` makes cargo
+drop doctests, so `--doc` is a second invocation. Without `--no-fail-fast`
+cargo stops after the first red binary, and the manifest would then record
+a prefix of the workspace while reading like the whole of it.
+
+Step 2 must normalise libtest's run-time name suffixes before it can
+report anything: a `no_run` doctest is listed plainly and *run* as
+`<name> - compile`, exactly as a `#[should_panic]` test is run as
+`<name> - should panic`. Six doctests read as uncovered in the first
+measurement for that reason alone, having in fact executed.
 
 ### Declared exceptions expire by execution, not by date
 
@@ -288,7 +312,8 @@ reports anything else:
 - **B, manifest writer**: a fixture of libtest output, parsed before every
   wrapped run, holding tests that must land in the manifest — including a
   `#[should_panic]` one, which libtest names `<test> - should panic` and
-  `--list` names plainly — and lines that must not: an ignored test, an
+  `--list` names plainly (a `no_run` doctest is the same shape, run as
+  `<test> - compile`) — and lines that must not: an ignored test, an
   indented look-alike a test could print. The counts are then reconciled
   against libtest's own summary line, so a manifest that disagrees with
   the run fails the gate.
@@ -339,8 +364,10 @@ Codeberg is the source of truth for what is built. At the time of
 writing: C covers `docs/src/**` and the Rust sources of `leviculum-core`,
 `leviculum-lxmf` and `leviculum-std`, and its submodule check runs first
 in `just fast`; its bump path is unbuilt. B emits manifests from every
-host gate that runs tests; the check that reads their union, and the
-staleness bound that ages them out, are unbuilt. A is unbuilt.
+host gate that runs tests, and `just complete` in the `extensive` tier
+runs the whole workspace by construction, so no ordinary test is outside
+the union; the check that reads that union, and the staleness bound that
+ages manifests out, are unbuilt. A is unbuilt.
 
 All three are subject to the rule they enforce. The standing canaries
 above are the demonstration made permanent, because a one-time one
