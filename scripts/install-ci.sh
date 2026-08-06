@@ -79,12 +79,15 @@ fi
 
 # 3. chmod hook + runner scripts
 if [[ "$VM_MODE" -eq 0 ]]; then
-    chmod +x .githooks/pre-push .githooks/post-commit
+    # commit-msg is the machine-authorship trailer guard (Codeberg #205). It
+    # is convenience only — the enforcement is .woodpecker/commit-trailers.yml,
+    # because a fresh clone has none of these hooks.
+    chmod +x .githooks/pre-push .githooks/post-commit .githooks/commit-msg
 fi
 chmod +x scripts/run-tier1.sh scripts/run-tier2.sh scripts/run-tier3.sh scripts/run-tier3-hw.sh
 chmod +x scripts/flash-lnodes-from-head.sh
 chmod +x scripts/check-tier2-staleness.sh scripts/ci-status.sh
-chmod +x scripts/check-submodule-pins.sh
+chmod +x scripts/check-submodule-pins.sh scripts/check-commit-trailers.sh
 chmod +x scripts/install-ci.sh
 echo "[install-ci] runner scripts made executable"
 

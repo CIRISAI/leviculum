@@ -1,0 +1,9 @@
+#!/bin/bash
+# Reject a machine-authorship trailer at commit time (Codeberg #205).
+#
+# Convenience, not enforcement. A fresh clone has no hooks until
+# `scripts/install-ci.sh` sets core.hooksPath, and `--no-verify` skips the
+# ones it has. The enforcement is the woodpecker check on the pushed range,
+# which nobody can forget to install. This exists so the failure arrives
+# while the message is still in the editor rather than after a push.
+exec bash "$(git rev-parse --show-toplevel)/scripts/check-commit-trailers.sh" --message "$1"

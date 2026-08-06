@@ -105,10 +105,21 @@ check-processor-seam:
 citation-guard:
     {{manifest}} citation-guard -- cargo test -p leviculum-std --test doc_citations -- --nocapture
 
-# Tier 0 (~3 min, runs on every git push): submodule pins + fmt + clippy
-# (host + nrf) + rustdoc gate + tracing-shim + M0 gates + workspace lib
-# tests + the citation guard.
-fast: check-submodules check-processor-seam mvr lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
+# Codeberg #205: no commit since the pinned baseline may carry a machine-
+# authorship trailer. ~20 ms — one `git log` over the range and one `awk`.
+#
+# The enforcement is the forge check (.woodpecker/commit-trailers.yml), which
+# a fresh clone cannot skip. This entry is what puts the same check on the
+# pre-push path, where `.githooks/pre-push` runs `just fast`: the incident
+# this exists for was a trailer that reached a commit and was caught by a
+# human reading the message in the window between committing and pushing.
+check-trailers:
+    @bash scripts/check-commit-trailers.sh
+
+# Tier 0 (~3 min, runs on every git push): submodule pins + commit-message
+# trailers + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
+# gates + workspace lib tests + the citation guard.
+fast: check-submodules check-trailers check-processor-seam mvr lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

@@ -24,6 +24,7 @@ person what to do. This one is about the cases where the person forgot.
 | the status-parity volume guard compared one interface, so a whole-inventory divergence stayed green (#177) | **A**, only if the author's negative control covers the whole inventory rather than the one interface they compared |
 | drifted `file:line` citations — six across five concept documents in the 2026-07 manual audit (`leviculum-std/tests/doc_citations.rs:6`), sixteen across the whole book on the guard's first automated run | **C** |
 | `reference/LXMF` sat twelve commits behind its gitlink for five weeks; every LXMF citation meant something other than it said | **C**, and the red `reference_lock` test that should have said so was itself unobserved — a **B** failure masking a **C** failure |
+| a `Co-Authored-By:` naming a model reached a periculum commit on 2026-08-07, against a rule the same author had cited correctly hours earlier (#205) | **neither** — a commit message, which all three explicitly do not reach |
 
 The last row is worth reading twice: the guarantees are not
 independent. A rotted citation had a test attached, and that test ran
@@ -296,6 +297,56 @@ the largest uncovered surface of the three guarantees. A `just cite`
 helper that emits a verified citation would reduce fabrication at the
 point of writing; nothing can verify it after the fact.
 
+### One line shape on that surface, and only one
+
+`scripts/check-commit-trailers.sh` is the first mechanical check on a
+commit message in either repository. It is worth being exact about how
+little it does: it checks **one line shape**, not one claim. A message
+may cite a file that does not exist, attribute a measurement to a page
+that never carried it, and describe a fix it did not make; none of that
+is reachable from here, and the paragraph above still stands whole.
+
+What it does reach is #205, which was not a claim going wrong but a rule
+losing to a default. `periculum/CONTRIBUTING.md:43` said "no AI
+trailers. Commit under your real name and a reachable e-mail" while the
+assistant harnesses used here instruct their agents to append exactly
+that trailer to every commit. A rule in that position, with nothing
+behind it, is not half-remembered — it is *reliably* broken, and its
+violation is invisible unless a person reads every message before every
+push. Which is how the one on 2026-08-07 was caught, and is not a
+mechanism.
+
+The check is a forge step
+(`.woodpecker/commit-trailers.yml`, and the `commit-trailers` step in
+periculum's `.woodpecker.yml`) over every commit since a pinned
+baseline. `.githooks/commit-msg` runs the same script at commit time and
+`just fast` runs it over the outgoing range, but neither is the
+enforcement: a fresh clone has no hooks, which is the whole reason the
+gate is where it is.
+
+**It matches only at column 0.** That is not a compromise, it is the
+definition: column 0 is where git's `interpret-trailers` and every forge
+harvest a trailer, so it is where the default writes and the only place
+the line is doing anything. It also leaves the one escape a message
+sometimes needs — this guard's own commit message quotes the offending
+trailer — namely the indentation git already uses for quoted material.
+The alternative was git's own trailer block, the last paragraph; that
+was rejected because the default's `Generated with <tool>` line sits in
+its own paragraph *above* it, so the rule would have covered half the
+default while reading as covering all of it.
+
+A leading space defeats the check. That is a bound, not a hole: this
+stands against a tool's default, and nothing message-shaped stands
+against a person who has decided to misattribute authorship.
+
+Sixteen commits below leviculum's baseline carry such a trailer, from
+before the rule had anything behind it. They are recorded in
+`scripts/commit-trailer-baseline.txt` rather than rewritten out of
+published history, and **their count is recomputed and compared on every
+run** — which is what stops the baseline being the off switch the expiry
+dates above are criticised for being. Moving it forward to silence a
+fresh failure moves a violation across that line and changes the number.
+
 ## Standing canaries
 
 Every gate on this page carries a permanent pair, checked before it
@@ -322,6 +373,13 @@ reports anything else:
 - **C, citation guard**: a deliberately drifted citation that must be
   reported. The existing guard has floor asserts against parser rot; the
   canary is the stronger form.
+- **C, commit-trailer guard**: a message carrying the trailer that must be
+  rejected and one that only quotes it, indented, that must not — both run
+  before the guard reports anything else. leviculum's pinned count of
+  sixteen below-baseline violations is the same canary in stronger form,
+  covering both directions over 1275 real commits on every run; periculum's
+  count is zero and covers only the direction that cannot rot, which is why
+  the pair is in the script rather than only in the baseline file.
 
 A one-time demonstration at implementation time is not enough. A gate
 that stops matching — a glob that no longer resolves, a parser that
@@ -350,7 +408,9 @@ gate observes its green.
   registry gate; only the audit can see it.
 - **Whether a test asserts anything at all.** A body of `let _ = f();`
   can be executed and coupled to its subject.
-- **Prose.** Issue comments, commit messages, reports.
+- **Prose.** Issue comments, commit messages, reports. One line shape in a
+  commit message is now checked (#205, above); nothing a message *claims*
+  is, and that is the surface that matters.
 - **Scenario corpora.** A Periculum step that asserts nothing is the
   same defect in another language; its analogue is the delivery bar
   (Periculum #25).
@@ -363,7 +423,9 @@ gate observes its green.
 Codeberg is the source of truth for what is built. At the time of
 writing: C covers `docs/src/**` and the Rust sources of `leviculum-core`,
 `leviculum-lxmf` and `leviculum-std`, and its submodule check runs first
-in `just fast`; its bump path is unbuilt. B emits manifests from every
+in `just fast`; its bump path is unbuilt. Its commit-trailer step runs on
+every push to either repository, and checks one line shape and no claim.
+B emits manifests from every
 host gate that runs tests, and `just complete` in the `extensive` tier
 runs the whole workspace by construction, so no ordinary test is outside
 the union; the check that reads that union, and the staleness bound that
