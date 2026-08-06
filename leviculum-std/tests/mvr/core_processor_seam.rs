@@ -192,3 +192,114 @@ async fn no_processor_means_no_proof() {
          can reach B — if this fires, the positive test proves nothing"
     );
 }
+
+// ---- Finding A: `on_tick` output must not re-enter the tap ---------------
+
+/// Emits one unmistakably synthetic event from `on_tick`, and records every
+/// event the tap hands back.
+///
+/// `ControlPlaneOverflow { dropped_count: 4242 }` is the marker: nothing in the
+/// stack produces that count, so seeing it in `seen` can only mean the
+/// processor was fed its own output.
+struct TickEmitter {
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+    ticks: Arc<AtomicUsize>,
+    emitted: bool,
+}
+
+const TICK_MARKER: u64 = 4242;
+
+impl CoreProcessor for TickEmitter {
+    fn on_event(&mut self, _core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("{event:?}"));
+        TickOutput::empty()
+    }
+
+    fn on_tick(&mut self, _core: &mut StdNodeCore, _now_ms: u64) -> TickOutput {
+        self.ticks.fetch_add(1, Ordering::Relaxed);
+        if self.emitted {
+            return TickOutput::empty();
+        }
+        self.emitted = true;
+        let mut out = TickOutput::empty();
+        out.events.push(NodeEvent::ControlPlaneOverflow {
+            dropped_count: TICK_MARKER,
+        });
+        out
+    }
+}
+
+/// `on_tick` runs, and its output is dispatched with the processor detached.
+///
+/// Two claims, one run, end to end through the real timer branch:
+///
+/// * **`on_tick` is called at all.** Before this test the hook had no coverage
+///   anywhere in the tree — `RecordingProcessor::tick_calls` was incremented and
+///   never asserted on — which is how the merge defect survived a green suite.
+/// * **Its events do not come back to it.** The merge at the timer branch fed
+///   `on_tick`'s output straight back into the tap, so a processor re-handled
+///   its own synthesised events; `LxmfNode::handle_event` legitimately emits
+///   events in response to events, so that is double-processing at best. The
+///   split routes them like the tap's own output: out to the application,
+///   never back in.
+///
+/// The application still receives them — detaching the tap on the recursive
+/// dispatch must not also silence the event sink.
+#[tokio::test]
+async fn on_tick_output_reaches_the_application_but_not_the_processor() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ticks = Arc::new(AtomicUsize::new(0));
+
+    let storage = tempfile::tempdir().expect("tempdir");
+    let mut node = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .storage_path(storage.path().to_path_buf())
+        .core_processor(TickEmitter {
+            seen: Arc::clone(&seen),
+            ticks: Arc::clone(&ticks),
+            emitted: false,
+        })
+        .build()
+        .await
+        .expect("build");
+    let mut rx = node.take_event_receiver().expect("event rx");
+    node.start().await.expect("start");
+
+    // The timer branch fires on the loop's first poll, so the marker is on its
+    // way immediately; the timeout is slack, not a cadence.
+    let marker = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            if matches!(
+                event,
+                NodeEvent::ControlPlaneOverflow {
+                    dropped_count: TICK_MARKER
+                }
+            ) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+
+    let _ = node.stop().await;
+
+    assert!(
+        ticks.load(Ordering::Relaxed) > 0,
+        "on_tick must be called by the driver's timer branch"
+    );
+    assert!(
+        marker,
+        "an event emitted from on_tick must reach the application's stream"
+    );
+
+    let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert!(
+        !seen.iter().any(|e| e.contains(&TICK_MARKER.to_string())),
+        "on_tick's own output must not be fed back to the tap: {seen:?}"
+    );
+}

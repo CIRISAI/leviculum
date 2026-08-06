@@ -3198,8 +3198,12 @@ async fn run_event_loop(
     discovery_network_identity: Option<Arc<leviculum_core::Identity>>,
     autoconnect_wiring: AutoConnectWiring,
     discovery_announce: Option<DiscoveryAnnounceWiring>,
-    mut core_processor: Option<Box<dyn CoreProcessor>>,
+    core_processor: Option<Box<dyn CoreProcessor>>,
 ) {
+    // A slot rather than the bare box: a panicking hook is detached from
+    // inside its own call frame, several `dispatch_output` frames down from
+    // here (Codeberg #196).
+    let mut core_processor = core_processor.map(processor::ProcessorSlot::new);
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
     let mut new_interface_rx = channels.new_interface_rx;
@@ -3344,7 +3348,7 @@ async fn run_event_loop(
                                 next_poll = wake_at;
                             }
                         }
-                        dispatch_output(
+                        let processor_delay = dispatch_output(
                             output,
                             &mut registry,
                             event_sink.as_mut(),
@@ -3354,8 +3358,9 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
-                            core_processor.as_deref_mut(),
+                            core_processor.as_mut(),
                         );
+                        tighten_next_poll(&mut next_poll, processor_delay);
                     }
                     RecvEvent::Disconnected(iface_id) => {
                         tracing::warn!("Interface {} ({}) disconnected", iface_id, registry.name_of(iface_id));
@@ -3363,7 +3368,7 @@ async fn run_event_loop(
                             let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
                         };
-                        dispatch_output(
+                        let processor_delay = dispatch_output(
                             output,
                             &mut registry,
                             event_sink.as_mut(),
@@ -3373,8 +3378,9 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
-                            core_processor.as_deref_mut(),
+                            core_processor.as_mut(),
                         );
+                        tighten_next_poll(&mut next_poll, processor_delay);
                         // Clear retry queue for disconnected interface. The legacy
                         // is_interface_congested flag was removed in Phase F;
                         // Transport's interface_next_slot_ms falls back to
@@ -3389,6 +3395,11 @@ async fn run_event_loop(
                         // emit it so the sender can re-send on a fresh link.
                         // For an accept-only node serving a NAT'd initiator this
                         // is the steady state (rebind ≈60 s), not an edge case.
+                        //
+                        // #196: dispatched rather than emitted straight to the
+                        // sink, so the registered processor's tap sees it. A
+                        // processor is a sender like any other, and this is the
+                        // one loss signal it cannot learn any other way.
                         if let Some(purged) = retry_queues.remove(&iface_id.0) {
                             if !purged.is_empty() {
                                 tracing::warn!(
@@ -3397,13 +3408,27 @@ async fn run_event_loop(
                                     iface_id,
                                     purged.len()
                                 );
-                                if let Some(sink) = event_sink.as_mut() {
-                                    sink.emit(NodeEvent::FramesDropped {
-                                        iface_id: iface_id.0,
-                                        count: purged.len(),
-                                        reason: FrameDropReason::RetryQueuePurged,
-                                    });
-                                }
+                                let mut purge_output = TickOutput::empty();
+                                purge_output.events.push(NodeEvent::FramesDropped {
+                                    iface_id: iface_id.0,
+                                    count: purged.len(),
+                                    reason: FrameDropReason::RetryQueuePurged,
+                                });
+                                tighten_next_poll(&mut next_poll, dispatch_output(
+                                    purge_output,
+                                    &mut registry,
+                                    event_sink.as_mut(),
+                                    &inner,
+                                    &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                                    // A purge notice is neither a request nor
+                                    // an announce; the responder and the
+                                    // discovery registry have no business here.
+                                    None,
+                                    None,
+                                    None,
+                                    &mut discovery_heard_ifac,
+                                    core_processor.as_mut(),
+                                ));
                             }
                         }
                         if !registry.remove(iface_id) {
@@ -3435,7 +3460,7 @@ async fn run_event_loop(
             // Branch 2: Dispatch TickOutput from outside the event loop
             // (connect, send_on_link, close_link, announce send here)
             Some(output) = action_dispatch_rx.recv() => {
-                dispatch_output(
+                let processor_delay = dispatch_output(
                     output,
                     &mut registry,
                     event_sink.as_mut(),
@@ -3445,15 +3470,16 @@ async fn run_event_loop(
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
-                    core_processor.as_deref_mut(),
+                    core_processor.as_mut(),
                 );
+                tighten_next_poll(&mut next_poll, processor_delay);
             }
 
             // Branch 3: Timer, persistent deadline, not recomputed per iteration
             _ = tokio::time::sleep_until(next_poll) => {
-                let (output, now_ms) = {
+                let (output, tick_output, now_ms) = {
                     let mut core = inner.lock_recover();
-                    let mut output = core.handle_timeout();
+                    let output = core.handle_timeout();
                     // Blackhole `until` timestamps are unix wall-clock values
                     // from the Python RPC, so the expiry sweep needs wall time
                     // injected here; the sweep self-throttles to one pass per
@@ -3471,15 +3497,33 @@ async fn run_event_loop(
                     // alone can only react — it fires when the core has something
                     // to say — so a processor that wants to *initiate* (drain its
                     // own outbound queue, run its own timers) needs a slot that
-                    // fires on the driver's clock. Merged into this tick's output
-                    // so it rides the same dispatch as the core's own.
-                    if let Some(processor) = core_processor.as_deref_mut() {
-                        output.merge(processor::run_tick(processor, &mut core, now_ms));
-                    }
-                    (output, now_ms)
+                    // fires on the driver's clock.
+                    //
+                    // Kept SEPARATE from the core's own output rather than
+                    // merged into it. Merging routed the processor's synthetic
+                    // events into three consumers the detached dispatch below
+                    // deliberately excludes: back into the tap (so a processor
+                    // re-handled its own `on_tick` output, exactly the
+                    // unbounded self-cycle `run_event_tap` documents as a node
+                    // hang), into the `/status` responder — whose "any request
+                    // that reaches here is authorised" rests on the core having
+                    // checked it, which is false for an event the core never
+                    // produced — and into the discovery registry, which would
+                    // persist a synthetic announce. `on_event` output was
+                    // isolated from all three; `on_tick` output from none.
+                    let tick_output = core_processor
+                        .as_mut()
+                        .map(|slot| processor::run_tick(slot, &mut core, now_ms));
+                    (output, tick_output, now_ms)
                 };
-                let next = output.next_deadline_ms;
-                dispatch_output(
+                // Scheduling is preserved across the split by taking the same
+                // `min()` `TickOutput::merge` used to take. Nothing else about
+                // the deadline changes.
+                let next = merged_next_deadline(
+                    output.next_deadline_ms,
+                    tick_output.as_ref().and_then(|o| o.next_deadline_ms),
+                );
+                let tap_delay = dispatch_output(
                     output,
                     &mut registry,
                     event_sink.as_mut(),
@@ -3489,8 +3533,32 @@ async fn run_event_loop(
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
-                    core_processor.as_deref_mut(),
+                    core_processor.as_mut(),
                 );
+                // The processor's periodic output goes out on the driver's own
+                // send path, detached exactly like the tap's: no responder, no
+                // discovery persistence, no re-entry into the tap. The event
+                // sink stays attached — these events belong on the
+                // application's stream like any other.
+                if let Some(tick_output) = tick_output {
+                    if !tick_output.is_empty() {
+                        // No return value to fold in: the tap is detached on
+                        // this call, so nothing here can ask for a deadline.
+                        // `on_tick`'s own deadline is already in `next` above.
+                        let _ = dispatch_output(
+                            tick_output,
+                            &mut registry,
+                            event_sink.as_mut(),
+                            &inner,
+                            &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                            None,
+                            None,
+                            None,
+                            &mut discovery_heard_ifac,
+                            None,
+                        );
+                    }
+                }
 
                 // Advance next_poll based on next_deadline_ms
                 let interval = match next {
@@ -3501,6 +3569,7 @@ async fn run_event_loop(
                     None => Duration::from_secs(1),
                 };
                 next_poll = tokio::time::Instant::now() + interval;
+                tighten_next_poll(&mut next_poll, tap_delay);
             }
 
             // Branch 4: Shutdown — bounded graceful drain (Codeberg #77).
@@ -3514,7 +3583,8 @@ async fn run_event_loop(
                     // — including the SendPacket close bytes AND the LinkClosed
                     // event riding in the same output — which is the #77 loss.
                     while let Ok(output) = action_dispatch_rx.try_recv() {
-                        dispatch_output(
+                        // Shutting down; there is no next poll to bring forward.
+                        let _ = dispatch_output(
                             output,
                             &mut registry,
                             event_sink.as_mut(),
@@ -3524,7 +3594,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
-                            core_processor.as_deref_mut(),
+                            core_processor.as_mut(),
                         );
                     }
                     // Bounded graceful flush: dispatch only pushes onto the
@@ -3609,7 +3679,7 @@ async fn run_event_loop(
                         let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
-                    dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_deref_mut());
+                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_mut()));
                 }
             }
 
@@ -3630,7 +3700,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_deref_mut());
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_mut()));
             }
 
             // Branch 6b: Tunnel synthesize initiation (Codeberg #64).
@@ -3644,7 +3714,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
-                dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_deref_mut());
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_mut()));
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet hashes)
@@ -3711,7 +3781,7 @@ async fn run_event_loop(
                             let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
                         };
-                        dispatch_output(
+                        let processor_delay = dispatch_output(
                             output,
                             &mut registry,
                             event_sink.as_mut(),
@@ -3721,8 +3791,9 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
-                            core_processor.as_deref_mut(),
+                            core_processor.as_mut(),
                         );
+                        tighten_next_poll(&mut next_poll, processor_delay);
                         retry_queues.remove(&iface_id.0);
                         registry.remove(iface_id);
                         retire_from_inventory(
@@ -3790,7 +3861,7 @@ async fn run_event_loop(
                                     label,
                                     app_data.len(),
                                 );
-                                dispatch_output(
+                                let processor_delay = dispatch_output(
                                     output,
                                     &mut registry,
                                     event_sink.as_mut(),
@@ -3800,8 +3871,9 @@ async fn run_event_loop(
                                     discovery_storage.as_deref(),
                                     discovery_network_identity.as_deref(),
                                     &mut discovery_heard_ifac,
-                                    core_processor.as_deref_mut(),
+                                    core_processor.as_mut(),
                                 );
+                                tighten_next_poll(&mut next_poll, processor_delay);
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -3984,12 +4056,51 @@ async fn flush_outgoing_on_shutdown(registry: &InterfaceRegistry) {
     tokio::time::sleep(SHUTDOWN_FLUSH_MARGIN).await;
 }
 
+/// The deadline the driver schedules against when the core's own output and
+/// the processor's `on_tick` output are dispatched separately.
+///
+/// Codeberg #196: the two used to be folded together with `TickOutput::merge`
+/// before the deadline was read, so the driver saw one `next_deadline_ms`. The
+/// merge had to go — it also routed the processor's synthetic events into the
+/// tap, the `/status` responder and the discovery registry — but the
+/// *scheduling* half of it was correct and has to survive the split verbatim.
+/// This is that half, lifted out so it can be pinned against
+/// `TickOutput::merge` directly rather than argued
+/// (`merged_next_deadline_matches_what_tickoutput_merge_computed`).
+fn merged_next_deadline(core_ms: Option<u64>, processor_ms: Option<u64>) -> Option<u64> {
+    match (core_ms, processor_ms) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Bring `next_poll` forward when a processor asked to be woken sooner.
+///
+/// Codeberg #196: `on_tick`'s `next_deadline_ms` was honoured by the timer
+/// branch while `on_event`'s was read by nobody, which made the same field
+/// mean two different things depending on which hook filled it in. This is the
+/// `on_event` half; `dispatch_output` returns the delay because that is where
+/// the tap runs and where `now_ms` is already in hand.
+fn tighten_next_poll(next_poll: &mut tokio::time::Instant, delay: Option<Duration>) {
+    if let Some(delay) = delay {
+        let wake_at = tokio::time::Instant::now() + delay;
+        if wake_at < *next_poll {
+            *next_poll = wake_at;
+        }
+    }
+}
+
 /// Dispatch a TickOutput: drain retry queues, route Actions to interfaces, forward Events.
 ///
 /// `event_sink` is `None` when the node was built with `without_events()`;
 /// in that case, `output.events` is dropped at the end of this function
 /// without being forwarded — identical to the NRF daemon path, where
 /// the events vector simply falls out of scope.
+///
+/// Returns how long the caller may wait before polling again, when the
+/// registered processor's event tap asked for a deadline. `None` means "no
+/// request"; the caller keeps whatever it had. Fold it in with
+/// [`tighten_next_poll`].
 #[allow(clippy::too_many_arguments)]
 fn dispatch_output(
     output: TickOutput,
@@ -4004,8 +4115,8 @@ fn dispatch_output(
     discovery_storage: Option<&Path>,
     discovery_network_identity: Option<&leviculum_core::Identity>,
     discovery_heard_ifac: &mut HeardIfacMap,
-    core_processor: Option<&mut dyn CoreProcessor>,
-) {
+    core_processor: Option<&mut processor::ProcessorSlot>,
+) -> Option<Duration> {
     // Drain retry queues before dispatching new actions
     let drain_now_ms = inner.lock_recover().now_ms();
     drain_retry_queues(retry_queues, registry, drain_now_ms);
@@ -4161,10 +4272,24 @@ fn dispatch_output(
     // inbound messages with nothing underneath to retransmit them. The tap
     // therefore has to be here, ahead of `EventSink::emit`.
     //
+    // The driver's own `FramesDropped` notices are tapped ALONGSIDE the core's
+    // events, in the order the sink will see them. They are built above, in
+    // this same call, and never pass through `handle_packet` — so the tap's
+    // "everything your actions cause comes back on a later tick" only holds if
+    // they are fed in here. #25's whole point is that the sender must re-send
+    // on a fresh link, and a processor that issued the `SendPacket` is the
+    // sender.
+    //
     // Its output is dispatched after event forwarding, with the processor
     // detached — see `processor::run_event_tap` for the recursion bound.
-    let processor_output = core_processor
-        .and_then(|processor| processor::run_event_tap(processor, inner, &output.events));
+    let tap_events: Vec<&NodeEvent> = drop_events.iter().chain(output.events.iter()).collect();
+    let processor_output =
+        core_processor.and_then(|slot| processor::run_event_tap(slot, inner, &tap_events));
+    drop(tap_events);
+    let processor_deadline = processor_output
+        .as_ref()
+        .and_then(|out| out.next_deadline_ms)
+        .map(|deadline_ms| Duration::from_millis(deadline_ms.saturating_sub(drain_now_ms)));
 
     // Forward events to the application via the split-plane EventSink:
     // control events lossless-by-default (overflow surfaced via
@@ -4192,7 +4317,7 @@ fn dispatch_output(
     // on the recursive call: a response carries no `RequestReceived`, so this
     // never recurses further.
     for resp in mgmt_responses {
-        dispatch_output(
+        let _ = dispatch_output(
             resp,
             registry,
             None,
@@ -4220,7 +4345,7 @@ fn dispatch_output(
     // `core_processor: None` on the recursive call is the recursion bound:
     // depth is exactly one, so a processor never sees the events it emitted.
     if let Some(resp) = processor_output {
-        dispatch_output(
+        let _ = dispatch_output(
             resp,
             registry,
             // The processor's answer produces ordinary core events (a
@@ -4239,6 +4364,8 @@ fn dispatch_output(
             None,
         );
     }
+
+    processor_deadline
 }
 
 /// Persist a discovery announce into the discovered-interface registry, if it
@@ -6377,6 +6504,10 @@ mod tests {
         /// Wall-clock burn per event, to exercise the budget report.
         burn: Option<Duration>,
         tick_calls: Arc<AtomicUsize>,
+        /// Panic on the first `on_event`, to exercise the unwind guard.
+        panic_on_event: bool,
+        /// Panic on the first `on_tick`, same.
+        panic_on_tick: bool,
     }
 
     impl CoreProcessor for RecordingProcessor {
@@ -6384,6 +6515,9 @@ mod tests {
             self.seen
                 .lock_recover()
                 .push(event.variant_name().to_string());
+            if self.panic_on_event {
+                panic!("consumer bug in on_event");
+            }
             if let Some(burn) = self.burn {
                 std::thread::sleep(burn);
             }
@@ -6393,8 +6527,48 @@ mod tests {
         fn on_tick(&mut self, _core: &mut StdNodeCore, _now_ms: u64) -> TickOutput {
             self.tick_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            TickOutput::empty()
+            if self.panic_on_tick {
+                panic!("consumer bug in on_tick");
+            }
+            self.answer.take().unwrap_or_else(TickOutput::empty)
         }
+    }
+
+    /// Collects `CORE_PROCESSOR_*` structured events off the tracing bus.
+    ///
+    /// Installed with `set_default`, so it is thread-local: a test that runs
+    /// `run_event_tap` on another thread has to install it *there*.
+    fn processor_event_probe() -> (
+        Arc<Mutex<Vec<String>>>,
+        impl tracing::Subscriber + Send + Sync,
+    ) {
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct Sink(Arc<Mutex<Vec<String>>>);
+        impl Visit for Sink {
+            fn record_debug(&mut self, _f: &Field, _v: &dyn std::fmt::Debug) {}
+            fn record_str(&mut self, f: &Field, v: &str) {
+                if f.name() == "event" {
+                    self.0.lock_recover().push(v.to_string());
+                }
+            }
+        }
+
+        struct Layer(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Layer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                event.record(&mut Sink(Arc::clone(&self.0)));
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Layer(Arc::clone(&seen)));
+        (seen, subscriber)
     }
 
     fn shared_test_core() -> (Arc<Mutex<StdNodeCore>>, tempfile::TempDir) {
@@ -6461,10 +6635,11 @@ mod tests {
         let mut registry = InterfaceRegistry::new();
 
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut processor = RecordingProcessor {
+        let processor = RecordingProcessor {
             seen: Arc::clone(&seen),
             ..Default::default()
         };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
 
         let mut output = TickOutput::empty();
         for i in 0..3 {
@@ -6486,7 +6661,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
-            Some(&mut processor),
+            Some(&mut slot),
         );
 
         let mut delivered = 0;
@@ -6525,10 +6700,11 @@ mod tests {
                 iface: InterfaceId(3),
                 data: vec![0xEE; 24],
             });
-        let mut processor = RecordingProcessor {
+        let processor = RecordingProcessor {
             answer: Some(answer),
             ..Default::default()
         };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
 
         let mut output = TickOutput::empty();
         output.events.push(NodeEvent::PacketProofRequested {
@@ -6550,7 +6726,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
-            Some(&mut processor),
+            Some(&mut slot),
         );
 
         let frame = out_rx
@@ -6573,11 +6749,12 @@ mod tests {
         answer.events.push(NodeEvent::InterfaceDown(9));
 
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut processor = RecordingProcessor {
+        let processor = RecordingProcessor {
             seen: Arc::clone(&seen),
             answer: Some(answer),
             ..Default::default()
         };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
 
         let mut output = TickOutput::empty();
         output.events.push(packet_received(0));
@@ -6596,7 +6773,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
-            Some(&mut processor),
+            Some(&mut slot),
         );
 
         assert_eq!(
@@ -6625,10 +6802,11 @@ mod tests {
         let mut registry = InterfaceRegistry::new();
 
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut processor = RecordingProcessor {
+        let processor = RecordingProcessor {
             seen: Arc::clone(&seen),
             ..Default::default()
         };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
 
         dispatch_output(
             TickOutput::empty(),
@@ -6643,7 +6821,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
-            Some(&mut processor),
+            Some(&mut slot),
         );
 
         assert!(seen.lock_recover().is_empty());
@@ -6689,10 +6867,11 @@ mod tests {
 
         let (core, _td) = shared_test_core();
         let mut registry = InterfaceRegistry::new();
-        let mut processor = RecordingProcessor {
+        let processor = RecordingProcessor {
             burn: Some(PROCESSOR_TICK_BUDGET + Duration::from_millis(5)),
             ..Default::default()
         };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
 
         let mut output = TickOutput::empty();
         output.events.push(packet_received(0));
@@ -6710,13 +6889,339 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
-            Some(&mut processor),
+            Some(&mut slot),
         );
 
         assert!(
             tripped.load(Ordering::Relaxed),
             "a processor over the {PROCESSOR_TICK_BUDGET:?} budget must emit \
              CORE_PROCESSOR_OVER_BUDGET"
+        );
+    }
+
+    /// The scheduling half of the merge the split removed, pinned against the
+    /// thing it replaced rather than argued.
+    ///
+    /// Before #196's A fix the timer branch called `TickOutput::merge` and read
+    /// `next_deadline_ms` off the result. The merge had to go — it also fed the
+    /// processor's events back into the tap, the `/status` responder and the
+    /// discovery registry — but the deadline arithmetic was correct and had to
+    /// survive verbatim. This drives both the old path and the new one over the
+    /// same matrix and asserts they agree, including the boundary cases where
+    /// `min()` and `or()` differ.
+    #[test]
+    fn merged_next_deadline_matches_what_tickoutput_merge_computed() {
+        let cases = [None, Some(0_u64), Some(1), Some(500), Some(u64::MAX)];
+        for core_ms in cases {
+            for processor_ms in cases {
+                // The old path, reconstructed exactly: merge, then read.
+                let mut merged = TickOutput::empty();
+                merged.next_deadline_ms = core_ms;
+                let mut tick = TickOutput::empty();
+                tick.next_deadline_ms = processor_ms;
+                merged.merge(tick);
+
+                assert_eq!(
+                    merged_next_deadline(core_ms, processor_ms),
+                    merged.next_deadline_ms,
+                    "split scheduling diverges from the merge it replaced at \
+                     core={core_ms:?} processor={processor_ms:?}"
+                );
+            }
+        }
+    }
+
+    /// Finding H: `on_tick`'s `next_deadline_ms` was honoured by the timer
+    /// branch while `on_event`'s was read by nobody, so the same field meant
+    /// two different things depending on which hook filled it in.
+    ///
+    /// `dispatch_output` now hands the tap's deadline back as a delay for the
+    /// caller to fold into `next_poll`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_deadline_from_on_event_reaches_the_driver() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+
+        let now_ms = core.lock_recover().now_ms();
+        let mut answer = TickOutput::empty();
+        answer.next_deadline_ms = Some(now_ms + 40);
+        let processor = RecordingProcessor {
+            answer: Some(answer),
+            ..Default::default()
+        };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
+
+        let mut output = TickOutput::empty();
+        output.events.push(packet_received(0));
+
+        let delay = dispatch_output(
+            output,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut slot),
+        )
+        .expect("the tap asked for a deadline; the driver must be told");
+
+        // The clock the delay is measured against is read at the top of
+        // dispatch_output, so the answer is 40 ms minus however long the call
+        // itself took. Anything at or under 40 ms is the right side of the
+        // boundary; a driver that ignored the request would have got `None`.
+        assert!(
+            delay <= Duration::from_millis(40),
+            "delay {delay:?} must be the requested 40 ms, less time already spent"
+        );
+    }
+
+    /// Finding G: `FramesDropped` is built inside `dispatch_output` and never
+    /// passes through `handle_packet`, so the tap's "everything your actions
+    /// cause comes back on a later tick" was false for exactly the #25 loss
+    /// signal — the one a sender must see to re-send on a fresh link.
+    ///
+    /// A dead interface (receiver dropped) turns the processor's own
+    /// `SendPacket` into a `Disconnected` dispatch error, and the notice must
+    /// reach the tap in this same call.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_tap_sees_the_frames_dropped_a_send_on_a_dead_interface_caused() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        // Dropping the receiver is what an interface task dying looks like to
+        // `try_send`: `Closed` → `InterfaceError::Disconnected`.
+        let out_rx = registry_with_readable_iface(&mut registry, 5);
+        drop(out_rx);
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let processor = RecordingProcessor {
+            seen: Arc::clone(&seen),
+            ..Default::default()
+        };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
+
+        let mut output = TickOutput::empty();
+        output
+            .actions
+            .push(leviculum_core::transport::Action::SendPacket {
+                iface: InterfaceId(5),
+                data: vec![0x77; 16],
+            });
+
+        dispatch_output(
+            output,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut slot),
+        );
+
+        assert_eq!(
+            *seen.lock_recover(),
+            vec!["FramesDropped".to_string()],
+            "the loss signal #25 exists for must reach the processor that sent \
+             the frame"
+        );
+    }
+
+    /// Finding B: nothing wrapped the hooks, so a panic in third-party consumer
+    /// code unwound through the tap's live guard, poisoned the core mutex, and
+    /// killed the event loop — while the node kept its event-channel senders,
+    /// so a consumer awaiting the stream never saw closure and waited forever.
+    ///
+    /// The unwind is now caught: the processor is detached for good, the
+    /// consumer is told on the control plane, and the node carries on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_panicking_on_event_detaches_the_processor_and_tells_the_consumer() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+
+        let (logged, subscriber) = processor_event_probe();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let processor = RecordingProcessor {
+            seen: Arc::clone(&seen),
+            panic_on_event: true,
+            ..Default::default()
+        };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
+
+        let mut output = TickOutput::empty();
+        output.events.push(packet_received(0));
+
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+        // The default panic hook would print the backtrace of a panic the test
+        // is provoking on purpose; silence it for the duration.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut slot),
+        );
+        std::panic::set_hook(previous_hook);
+
+        assert!(
+            !core.is_poisoned(),
+            "the unwind must be caught inside the guard's scope, so the core \
+             mutex is never poisoned"
+        );
+        assert!(
+            logged
+                .lock_recover()
+                .contains(&"CORE_PROCESSOR_PANICKED".to_string()),
+            "the panic must be reported on the structured event log: {:?}",
+            logged.lock_recover()
+        );
+
+        let mut forwarded = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            forwarded.push(ev.variant_name().to_string());
+        }
+        assert!(
+            forwarded.contains(&"CoreProcessorPanicked".to_string()),
+            "the consumer learns on the stream it already reads: {forwarded:?}"
+        );
+
+        // Detached for good: a second dispatch must not call it again.
+        seen.lock_recover().clear();
+        let mut later = TickOutput::empty();
+        later.events.push(packet_received(1));
+        dispatch_output(
+            later,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            Some(&mut slot),
+        );
+        assert!(
+            seen.lock_recover().is_empty(),
+            "a processor that panicked once must never be called again"
+        );
+    }
+
+    /// The same defence on the other hook. `on_tick` is called with a guard the
+    /// timer branch holds, so an escaping unwind there poisons the core just as
+    /// `on_event` did.
+    #[test]
+    fn a_panicking_on_tick_detaches_the_processor() {
+        let (core, _td) = shared_test_core();
+
+        let (logged, subscriber) = processor_event_probe();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let processor = RecordingProcessor {
+            tick_calls: Arc::clone(&calls),
+            panic_on_tick: true,
+            ..Default::default()
+        };
+        let mut slot = processor::ProcessorSlot::new(Box::new(processor));
+
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let output = {
+            let mut guard = core.lock_recover();
+            let now_ms = guard.now_ms();
+            processor::run_tick(&mut slot, &mut guard, now_ms)
+        };
+        std::panic::set_hook(previous_hook);
+
+        assert!(
+            !core.is_poisoned(),
+            "the unwind must not escape the timer branch's guard"
+        );
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::CoreProcessorPanicked { hook: "on_tick" })),
+            "the detach notice rides out on the tick's own output"
+        );
+        assert!(logged
+            .lock_recover()
+            .contains(&"CORE_PROCESSOR_PANICKED".to_string()));
+
+        let before = calls.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = {
+            let mut guard = core.lock_recover();
+            let now_ms = guard.now_ms();
+            processor::run_tick(&mut slot, &mut guard, now_ms)
+        };
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "a processor that panicked once must never be ticked again"
+        );
+    }
+
+    /// Finding F: the budget clock started before `inner.lock_recover()`, so a
+    /// 141 ms `send_resource` on another thread was charged to a processor that
+    /// had not run yet — `CORE_PROCESSOR_OVER_BUDGET` against a hook that did
+    /// nothing.
+    ///
+    /// Deterministic by construction: the lock is taken here *before* the tap
+    /// thread is spawned, so the tap is guaranteed to wait for it.
+    #[test]
+    fn lock_wait_is_not_charged_to_the_processor() {
+        let (core, _td) = shared_test_core();
+        let hold = Duration::from_millis(20 * 5).max(PROCESSOR_TICK_BUDGET * 8);
+
+        let guard = core.lock_recover();
+
+        let tap_core = Arc::clone(&core);
+        let tap = std::thread::spawn(move || {
+            let (logged, subscriber) = processor_event_probe();
+            // Thread-local: the tap runs here, so the probe has to live here.
+            let _sub = tracing::subscriber::set_default(subscriber);
+            let processor = RecordingProcessor::default();
+            let mut slot = processor::ProcessorSlot::new(Box::new(processor));
+            let event = packet_received(0);
+            let _ = processor::run_event_tap(&mut slot, &tap_core, &[&event]);
+            let out = logged.lock_recover().clone();
+            out
+        });
+
+        std::thread::sleep(hold);
+        drop(guard);
+
+        let logged = tap.join().expect("tap thread");
+        assert!(
+            !logged.contains(&"CORE_PROCESSOR_OVER_BUDGET".to_string()),
+            "a processor that did nothing must not be blamed for {hold:?} of \
+             lock contention: {logged:?}"
         );
     }
 }

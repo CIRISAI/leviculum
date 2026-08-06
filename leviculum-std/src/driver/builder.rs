@@ -129,9 +129,26 @@ impl ReticulumNodeBuilder {
     /// held, under a documented [`PROCESSOR_TICK_BUDGET`], and the shape of its
     /// methods is load-bearing rather than stylistic.
     ///
-    /// Registration is builder-only on purpose. The event loop, and with it the
-    /// bounded `action_dispatch_tx` a processor must never block on, does not
-    /// exist yet at this point.
+    /// Registration is builder-only on purpose, and that has two consequences
+    /// worth knowing before you write one.
+    ///
+    /// * The event loop, and with it the bounded `action_dispatch_tx` a
+    ///   processor must never block on, does not exist yet at this point.
+    ///   Neither does the node — so a processor cannot be built holding a
+    ///   handle to the node it will run inside, which is the deadlock
+    ///   [`CoreProcessor`] warns about.
+    /// * **A processor survives exactly one `start()`.** `start()` moves it
+    ///   into the event loop; a `stop()` / `start()` cycle on the same node
+    ///   therefore runs with no processor at all, and says nothing about it.
+    ///   Nothing re-registers it, because re-registration would have to happen
+    ///   while the loop owns it. If a node is restarted, build a new one.
+    ///
+    /// # Panics
+    ///
+    /// A panic inside either hook does not kill the node: the driver catches
+    /// it, detaches the processor for good, and emits
+    /// `NodeEvent::CoreProcessorPanicked` on the event stream. Whatever the
+    /// processor was driving stops there — recovery means a new node.
     ///
     /// [`PROCESSOR_TICK_BUDGET`]: super::PROCESSOR_TICK_BUDGET
     ///

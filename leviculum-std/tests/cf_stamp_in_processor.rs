@@ -18,9 +18,11 @@
 //! property is not available: `StampExecutor::generate`
 //! (leviculum-lxmf/src/stamp.rs:74) returns `Pin<Box<dyn Future>>`, which any
 //! synchronous `fn` can drive to completion with
-//! `futures::executor::block_on`. That is the residual hole
-//! `leviculum-std/src/driver/processor.rs` names in its module doc, and no
-//! signature closes it.
+//! `futures::executor::block_on`. That is one instance of the residual hole
+//! `leviculum-std/src/driver/processor.rs` names in its module doc — the hole
+//! is any hook body that re-enters the core mutex, and a `block_on` over an
+//! executor that never touches the core is in fact the *benign* end of it: it
+//! burns the lock rather than deadlocking on it. No signature closes either.
 //!
 //! E0728 here is therefore the same compiler property `cf_await_in_processor`
 //! already pins, reached through the stamp API rather than through the

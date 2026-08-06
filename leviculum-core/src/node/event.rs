@@ -394,6 +394,27 @@ pub enum NodeEvent {
         /// Number of control-plane events dropped since the last marker.
         dropped_count: u64,
     },
+
+    // In-driver core processor (Codeberg #196)
+    /// The registered in-driver core processor panicked and has been detached.
+    ///
+    /// The std driver can run a consumer-supplied synchronous state machine
+    /// inside its own tick. That code is third-party, and before this event
+    /// existed a panic in it unwound through the driver's event loop and killed
+    /// the node — while the node kept its event-channel senders alive, so a
+    /// consumer awaiting the event stream never saw closure and waited forever.
+    ///
+    /// The driver now catches the unwind, drops the processor, and continues
+    /// serving the mesh without it. Every core-driving job the processor owned
+    /// (for LXMF: message delivery) has stopped; the node itself has not.
+    /// Re-registration is builder-only, so recovering means building a new
+    /// node.
+    ///
+    /// `hook` names which method panicked, `on_event` or `on_tick`.
+    CoreProcessorPanicked {
+        /// The processor method that panicked: `"on_event"` or `"on_tick"`.
+        hook: &'static str,
+    },
 }
 
 /// Delivery plane a [`NodeEvent`] belongs to.
@@ -451,6 +472,7 @@ impl NodeEvent {
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::PacketProofRequested { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
+            | NodeEvent::CoreProcessorPanicked { .. }
             | NodeEvent::InterfaceDown(_)
             | NodeEvent::FramesDropped { .. } => None,
         }
@@ -525,10 +547,15 @@ impl NodeEvent {
             | NodeEvent::ResponseReceived { .. }
             | NodeEvent::RequestTimedOut { .. } => EventClass::Control,
 
-            // Interface lifecycle and the overflow marker itself.
+            // Interface lifecycle, the overflow marker itself, and the
+            // notice that the in-driver processor died. The last one is at
+            // most once per node lifetime and is the only way a consumer
+            // learns its state machine stopped: losing it silently would be
+            // the #196 defect it exists to report.
             NodeEvent::InterfaceDown(_)
             | NodeEvent::FramesDropped { .. }
-            | NodeEvent::ControlPlaneOverflow { .. } => EventClass::Control,
+            | NodeEvent::ControlPlaneOverflow { .. }
+            | NodeEvent::CoreProcessorPanicked { .. } => EventClass::Control,
         }
     }
 
@@ -571,6 +598,7 @@ impl NodeEvent {
             NodeEvent::InterfaceDown(_) => "InterfaceDown",
             NodeEvent::FramesDropped { .. } => "FramesDropped",
             NodeEvent::ControlPlaneOverflow { .. } => "ControlPlaneOverflow",
+            NodeEvent::CoreProcessorPanicked { .. } => "CoreProcessorPanicked",
         }
     }
 }

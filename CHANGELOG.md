@@ -44,6 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of searching for a stamp that cannot exist: `stamp_valid` rejects every
   candidate at that cost, so the loop could not terminate at all and one
   off-by-one past the legal maximum left the node permanently dead.
+- A `CoreProcessor`'s `on_tick` output is dispatched on its own instead
+  of being merged into the core's, so it no longer re-enters the event
+  tap, the `/status` responder — which answers on the strength of a
+  core-side authorisation that never ran for a synthesised request — or
+  the discovery registry, which would persist a synthesised announce.
+  The two hooks are now isolated identically (#196).
+- A `CoreProcessor` sees the `FramesDropped` its own send caused. The
+  notice is built inside `dispatch_output` and never passes through
+  `handle_packet`, so it was the one #25 loss signal a processor could
+  not learn any other way (#196).
+- The processor budget report is measured from inside the core lock, so
+  another thread's contention is no longer charged to a processor that
+  did nothing (#196).
+- A `next_deadline_ms` returned from `on_event` is honoured, as one
+  returned from `on_tick` already was (#196).
 - The `status_parity` freeze waits out the 1 Hz traffic sampler, so a
   speed that has not been sampled yet is no longer read as an idle one
   (#195).
@@ -112,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without forking the driver. The events are tapped ahead of the lossy
   application sink, so a processor sees the `EventClass::Data` events the
   sink is entitled to drop (#196).
+
+- A panic in a registered `CoreProcessor` no longer kills the node. The
+  driver catches the unwind, detaches the processor for good and reports
+  `NodeEvent::CoreProcessorPanicked` on the control plane, so a consumer
+  learns its state machine stopped instead of waiting on an event stream
+  nothing will ever close again (#196).
 
 - `lnstatus -j --tables` adds the transport's path, reverse, link,
   announce, announce-cache and tunnel tables to the JSON output, so a

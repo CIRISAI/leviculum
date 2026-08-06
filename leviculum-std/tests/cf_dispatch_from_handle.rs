@@ -17,6 +17,16 @@
 //! saying exactly that, three times over: the constructor is not on the thing
 //! the seam hands out.
 //!
+//! This is the fixture with the widest claim of the three, and it is still
+//! narrower than it looks. It proves the seam does not *hand out* a route back
+//! into the node. It cannot prove a processor has none: a processor struct may
+//! hold an `Arc<ReticulumNode>` injected after construction, and then
+//! `self.node.has_path(..)` — no `.await`, no channel, plain safe code —
+//! deadlocks on the core mutex the hook is already holding. See
+//! `leviculum-std/src/driver/processor.rs` for what does hold that line up
+//! (registration precedes the node's existence) and what does not (the type
+//! system).
+//!
 //! Method calls rather than paths on purpose. `NodeCore` lives in
 //! `leviculum-core`, which cannot name a `leviculum-std` type at all, so no
 //! *inherent* method could ever return one of the three. What could is an

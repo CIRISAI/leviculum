@@ -24,6 +24,11 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     "ChannelRetransmit",
     // Interface-death frame loss is internal reliability observability.
     "FramesDropped",
+    // Reports that the in-driver `CoreProcessor` panicked and was detached
+    // (Codeberg #196). A `CoreProcessor` is a Rust trait registered on the
+    // Rust builder; the C ABI has no way to install one, so this event cannot
+    // fire for an FFI consumer and a typed code for it would be dead ABI.
+    "CoreProcessorPanicked",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into
