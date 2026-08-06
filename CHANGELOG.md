@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `just complete`, in the `extensive` tier, runs the whole workspace by
+  construction instead of the tiers naming packages; 327 tests were
+  executed by no gate (#194).
+- Test listener ports come from one counter per host, so concurrent test
+  processes are never handed the same port (#194).
 - `just standard` runs the `status_parity` two-daemon suite (#191).
 - The number of `#[ignore]`d tests is pinned per test unit and checked
   in `just standard` (#191).
