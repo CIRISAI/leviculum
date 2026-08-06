@@ -56,7 +56,12 @@ const SUBMODULES: &[&str] = &["Reticulum", "LXMF", "LXST", "RNode_Firmware"];
 /// not `src/` alone: `tests/`, `examples/` and `benches/` cite the reference
 /// as much as `src/` does, and narrowing the glob would only make the number
 /// smaller, not the tree more correct.
-const SOURCE_CRATES: &[&str] = &["leviculum-core", "leviculum-lxmf", "leviculum-std"];
+const SOURCE_CRATES: &[&str] = &[
+    "leviculum-core",
+    "leviculum-lxmf",
+    "leviculum-lxmf-node",
+    "leviculum-std",
+];
 
 /// Extensions that make a `name.ext:number` look like a citation while being
 /// a `host:port`. Only reachable in `Corpus::Source`, where citations are not

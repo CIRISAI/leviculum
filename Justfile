@@ -136,6 +136,12 @@ standard: fast test-ffi verify-packaging
     # [PANIC_COUNT] line shapes that catch-reboot.sh and the by-hand heap
     # analysis grep, against the firmware source that emits them.
     {{manifest}} lnode-debug-log-format -- cargo test -p leviculum-std --test lnode_debug_log_format
+    # The LXMF helper end to end (#196): two `lxmf-node` processors over TCP
+    # loopback exchange messages in both directions, plus the partitioned
+    # negative control. ~11 s, no docker — this is the part of the helper's
+    # evidence that does not need the rig, and Tier 0 runs `--lib` only, so a
+    # crate's tests/ directory is covered here or nowhere.
+    {{manifest}} lxmf-node -- cargo test -p leviculum-lxmf-node --test two_node_loopback
     # Endurance gate (#101): builds lnsd, boots it as a hub, asserts 100%
     # delivery + RSS plateau + no fd leak. ~15 s smoke; `--full` is on demand.
     bash scripts/run-soak.sh
@@ -162,8 +168,8 @@ standard: fast test-ffi verify-packaging
 # it for the hardware nightly. Deleting the binary does NOT work: cargo
 # re-hardlinks it from deps/ without relinking, keeping the old mtime.
 build-integ-bins:
-    find leviculum-cli/src leviculum-proxy/src -name '*.rs' -exec touch {} +
-    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy
+    find leviculum-cli/src leviculum-proxy/src leviculum-lxmf-node/src -name '*.rs' -exec touch {} +
+    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy --bin lxmf-node
 
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
 # leviculum-ci-tier2.service`): Tier 1 + the docker scenario suites.

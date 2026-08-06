@@ -120,6 +120,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lxmf-node`, a new `leviculum-lxmf-node` crate, runs `leviculum-lxmf`
+  as a shared-instance client of `lnsd` or `rnsd` and speaks periculum's
+  LXMF helper protocol — the same stdin commands and `EVENT` lines as the
+  Python `lxmf_node.py`. periculum's six LXMF verbs now drive either
+  messaging stack via `lxmf_start`'s `helper` field, so a scenario can
+  hold the daemon constant and vary only the messaging stack. Built
+  entirely on the two crates' public APIs, which is the acceptance
+  evidence for #196's first criterion (#196).
+
 - `leviculum-std` lets a consumer register a `CoreProcessor` that runs
   inside the driver's tick: it receives `&mut StdNodeCore` plus each
   `NodeEvent` and returns a `TickOutput` the driver dispatches on its own

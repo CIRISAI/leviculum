@@ -1850,6 +1850,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-lxmf-node"
+version = "0.8.0"
+dependencies = [
+ "leviculum-core",
+ "leviculum-lxmf",
+ "leviculum-std",
+ "rand_core 0.6.4",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "leviculum-micron"
 version = "0.8.0"
 
