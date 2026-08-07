@@ -99,17 +99,30 @@ impl PropagationUpload {
     /// [`single`](Self::single) does, so a host validates the stamp against
     /// the same transient ID an honest client computed.
     ///
-    /// Only the singleton envelope an originating client sends is accepted —
-    /// the multi-message form belongs to the node-to-node `/offer` sync path,
-    /// which this crate does not implement (see the crate docs).
+    /// Only the singleton envelope an originating client sends is accepted.
+    /// The multi-message form belongs to the node-to-node `/offer` sync path,
+    /// which this crate does not implement — see [the crate docs](crate) for
+    /// that split — and is reported as
+    /// [`PropagationError::MultipleMessages`] rather than as a bad length.
     pub fn decode(bytes: &[u8]) -> Result<Self, PropagationError> {
         let mut position = 0;
         if msgpack::array_len(bytes, &mut position)? != 2 {
             return Err(PropagationError::InvalidLength);
         }
         let timestamp = msgpack::read_number_f64(bytes, &mut position)?;
-        if msgpack::array_len(bytes, &mut position)? != 1 {
-            return Err(PropagationError::InvalidLength);
+        match msgpack::array_len(bytes, &mut position)? {
+            1 => {}
+            // Not a malformed length — a different message. Python parses
+            // client uploads and peer syncs with one parser over one wire
+            // shape (reference/LXMF/LXMF/LXMRouter.py:2336-2345) and tells
+            // them apart afterwards by peering-key state (:2377-2385): more
+            // than one message in a transfer is the `/offer` sync form and
+            // requires a validated peering key. Reporting that distinctly
+            // lets the `/offer` layer branch on it when it lands
+            // (leviculum#209), instead of forcing a second public parser for
+            // a wire shape identical to this one.
+            0 => return Err(PropagationError::InvalidLength),
+            _ => return Err(PropagationError::MultipleMessages),
         }
         let stamped = msgpack::read_bin(bytes, &mut position)?;
         // `validate_pn_stamp` (reference/LXMF/LXMF/LXStamper.py:86) discards a
@@ -124,6 +137,13 @@ impl PropagationUpload {
         let (unstamped, stamp) = stamped.split_at(stamped.len() - STAMP_SIZE);
         let mut propagation_stamp = [0u8; STAMP_SIZE];
         propagation_stamp.copy_from_slice(stamp);
+        // No `finish()` here, unlike every other decoder in this module, and
+        // that is deliberate rather than an omission. `LXMRouter` unpacks this
+        // envelope with `RNS.vendor.umsgpack.unpackb`
+        // (reference/LXMF/LXMF/LXMRouter.py:14), which ignores bytes after the
+        // decoded value; pip `msgpack` would raise, but LXMRouter does not use
+        // it. So the leniency is what matches Python here, and the strict
+        // siblings are the divergence — do not "fix" this by adding the call.
         Ok(Self::single(
             timestamp,
             unstamped.to_vec(),
@@ -138,6 +158,10 @@ pub enum PropagationError {
     Truncated,
     InvalidType,
     InvalidLength,
+    /// The upload carried more than one message — the peer `/offer` sync
+    /// form, not a client upload. Distinct from [`Self::InvalidLength`]
+    /// because the bytes are well-formed and belong to another endpoint.
+    MultipleMessages,
     InvalidValue,
     Overflow,
     TrailingData,
@@ -151,6 +175,7 @@ impl core::fmt::Display for PropagationError {
             Self::Truncated => "truncated propagation data",
             Self::InvalidType => "invalid propagation msgpack type",
             Self::InvalidLength => "invalid propagation value length",
+            Self::MultipleMessages => "multi-message propagation upload (peer /offer form)",
             Self::InvalidValue => "invalid propagation value",
             Self::Overflow => "propagation value exceeds codec limits",
             Self::TrailingData => "trailing propagation data",

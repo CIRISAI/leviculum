@@ -241,6 +241,55 @@ fn host_decodes_client_upload_envelope() {
     assert!(PropagationUpload::decode(&[0x91]).is_err());
 }
 
+/// The multi-message upload is a different message, not a malformed one, and
+/// says so with its own error.
+///
+/// Python runs one parser over one wire shape
+/// (reference/LXMF/LXMF/LXMRouter.py:2336-2345) and separates client uploads
+/// from peer syncs afterwards by peering-key state (:2377-2385). An empty
+/// array is still just a bad length.
+#[test]
+fn host_reports_the_multi_message_form_distinctly_from_a_bad_length() {
+    fn envelope(message_count: usize) -> Vec<u8> {
+        let body = vec![0x11u8; 145];
+        let mut out = Vec::new();
+        msgpack::array(&mut out, 2);
+        msgpack::f64(&mut out, 1_700_000_000.5);
+        msgpack::array(&mut out, message_count);
+        for _ in 0..message_count {
+            msgpack::bin(&mut out, &body);
+        }
+        out
+    }
+
+    assert!(PropagationUpload::decode(&envelope(1)).is_ok());
+    assert_eq!(
+        PropagationUpload::decode(&envelope(2)),
+        Err(PropagationError::MultipleMessages)
+    );
+    assert_eq!(
+        PropagationUpload::decode(&envelope(0)),
+        Err(PropagationError::InvalidLength)
+    );
+}
+
+/// Trailing bytes after the envelope are accepted on purpose: `LXMRouter`
+/// unpacks with `RNS.vendor.umsgpack.unpackb`
+/// (reference/LXMF/LXMF/LXMRouter.py:14), which ignores them. The strict
+/// `finish()` in this module's other decoders is the divergence, not this.
+#[test]
+fn host_upload_decode_ignores_trailing_bytes_as_umsgpack_does() {
+    let mut wire = PropagationUpload::single(
+        1_700_000_000.5,
+        vec![0x11u8; 145 - STAMP_SIZE],
+        [0x5a; STAMP_SIZE],
+    )
+    .encode();
+    let clean = PropagationUpload::decode(&wire).expect("well-formed envelope");
+    wire.push(0xc0); // nil, the way a padded Resource body can arrive
+    assert_eq!(PropagationUpload::decode(&wire), Ok(clean));
+}
+
 /// The upload length guard sits exactly where Python's does.
 ///
 /// `validate_pn_stamp` (reference/LXMF/LXMF/LXStamper.py:86) discards a
