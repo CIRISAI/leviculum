@@ -4,11 +4,30 @@
 //! adapters drive `leviculum-core` and return actions for the application to
 //! dispatch.
 //!
-//! Propagation support is client-side: [`PropagationUpload`] implements the
-//! Python-compatible origin upload envelope, [`MessageGetRequest`] implements
-//! the `/get` list, download, and acknowledgement exchange, and
-//! [`PropagationNodeAnnounce`] decodes propagation-node discovery data. The
-//! crate does not host propagation nodes or implement the peer `/offer` path.
+//! # Propagation
+//!
+//! Propagation support covers both ends of the *client ↔ node* exchange.
+//! [`PropagationUpload`] encodes the Python-compatible origin upload envelope
+//! and decodes it again on the receiving node, [`MessageGetRequest`] and the
+//! [`MessageListResponse`] / [`MessageGetResponse`] pair carry the `/get`
+//! list, download, and acknowledgement exchange in both directions,
+//! [`PropagationSignal`] carries a node's refusal of an upload, and
+//! [`PropagationNodeAnnounce`] both encodes a node's own discovery data and
+//! decodes another node's. A host built on these codecs still owns its own
+//! mailbox storage, stamp validation, links and resources: this crate
+//! performs no I/O.
+//!
+//! What the crate does **not** implement is the *node ↔ node* direction. A
+//! Python propagation node syncs with its peers over a second endpoint,
+//! `/offer`, whose upload payload is the same wire shape carrying more than
+//! one message, admitted only against a validated peering key
+//! (`LXMRouter.propagation_resource_concluded`,
+//! reference/LXMF/LXMF/LXMRouter.py:2336-2345, and the peering-key branch at
+//! :2377-2385). That is why [`PropagationUpload::decode`] accepts the
+//! singleton envelope only and answers the multi-message form with
+//! [`PropagationError::MultipleMessages`]: it is a message for an endpoint
+//! this crate does not serve, not a malformed one. Peer sync, peering keys
+//! and the `/offer` path are leviculum#209.
 
 #![no_std]
 
