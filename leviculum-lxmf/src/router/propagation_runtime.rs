@@ -1016,6 +1016,35 @@ impl PropagationRuntime {
         let upload =
             PropagationUpload::single(prepared.timebase, prepared.unstamped_lxmf.clone(), stamp)
                 .encode();
+        // Deferred like a direct Resource: capture the link, hand the build out,
+        // and let the caller return it to `LxmfRouter::commit_resource_build`.
+        if router.config.defer_resource_builds
+            && upload.len() > crate::constants::LINK_PACKET_MAX_CONTENT
+        {
+            match self
+                .transport
+                .upload_send_params(node, link_id, message_id, upload.len())
+            {
+                Ok(params) => {
+                    router.push_upload_build(message_id, params, upload);
+                    output
+                        .events
+                        .push(RouterEvent::ResourceBuildPending(message_id));
+                    return Ok(output);
+                }
+                Err(PropagationTransportError::UploadInProgress)
+                | Err(PropagationTransportError::Resource(ResourceError::TransferInProgress)) => {
+                    schedule_upload_retry(
+                        router,
+                        message_id,
+                        now_ms.saturating_add(super::PROCESSING_INTERVAL_MS),
+                    );
+                    return Ok(output);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
         let mut submitted = match self
             .transport
             .submit_upload(node, link_id, message_id, &upload)
@@ -1048,6 +1077,29 @@ impl PropagationRuntime {
             }
             Err(error) => return Err(error.into()),
         };
+        output.core.merge(submitted.core);
+        for event in submitted.events.drain(..) {
+            self.handle_transport_event(router, node, event, now_unix, &mut output)?;
+        }
+        Ok(output)
+    }
+
+    /// Install an upload built off the caller's lock and run the events it
+    /// produces through the same path a direct submission takes.
+    pub(super) fn commit_upload<R, C, S>(
+        &mut self,
+        router: &mut LxmfRouter,
+        node: &mut NodeCore<R, C, S>,
+        prepared: crate::propagation_client::PreparedUpload,
+        now_unix: f64,
+    ) -> Result<RouterOutput, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let mut output = RouterOutput::default();
+        let mut submitted = self.transport.commit_upload(node, prepared)?;
         output.core.merge(submitted.core);
         for event in submitted.events.drain(..) {
             self.handle_transport_event(router, node, event, now_unix, &mut output)?;

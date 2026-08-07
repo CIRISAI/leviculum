@@ -89,6 +89,10 @@ struct Sender {
 }
 
 fn sender(seed: u8) -> Sender {
+    sender_with(seed, RouterConfig::default())
+}
+
+fn sender_with(seed: u8, config: RouterConfig) -> Sender {
     let clock = Rc::new(Cell::new(1_000));
     let mut node = test_node(TestClock(Rc::clone(&clock)));
     let identity = identity_from(seed);
@@ -100,7 +104,7 @@ fn sender(seed: u8) -> Sender {
         .expect("register delivery destination");
     Sender {
         node,
-        router: LxmfRouter::new(lxmf, identity_hash, RouterConfig::default()),
+        router: LxmfRouter::new(lxmf, identity_hash, config),
         clock,
         destination: destination_hash,
         signing_identity: Identity::from_private_key_bytes(&private)
@@ -469,5 +473,81 @@ fn a_receiver_cancelled_resource_is_rejected_and_keeps_the_link() {
     assert!(
         sender.node.link(&link_id).is_some(),
         "a rejection must preserve the reusable direct link"
+    );
+}
+
+/// The point of `defer_resource_builds`: the build a tick would have run is
+/// handed out instead, so the tick emits nothing for that message and the
+/// transfer only starts when the caller returns what it built.
+#[test]
+fn a_deferred_resource_build_leaves_the_tick_and_starts_on_commit() {
+    let mut sender = sender_with(
+        60,
+        RouterConfig {
+            defer_resource_builds: true,
+            ..RouterConfig::default()
+        },
+    );
+    let mut receiver = receiver(160);
+    exchange_announces(&mut sender, &mut receiver);
+
+    let message = direct_message(
+        11,
+        receiver.destination,
+        &sender.signing_identity,
+        vec![0x7au8; 2_048],
+    );
+    let id = message.message_id;
+    let output = sender
+        .router
+        .enqueue(&sender.node, message)
+        .expect("enqueue direct message");
+    let packets = sender.absorb_router(output);
+    pump(&mut sender, &mut receiver, packets);
+
+    let mut deferring_tick = Vec::new();
+    for _ in 0..8 {
+        let packets = sender.tick();
+        if sender.state(&id) == Some(MessageState::Sending) {
+            deferring_tick = packets;
+            break;
+        }
+        pump(&mut sender, &mut receiver, packets);
+        sender.advance_ms(11_000);
+    }
+    assert_eq!(
+        sender.state(&id),
+        Some(MessageState::Sending),
+        "the message was never handed out"
+    );
+    assert!(
+        sender
+            .events
+            .iter()
+            .any(|event| matches!(event, RouterEvent::ResourceBuildPending(m) if *m == id)),
+        "the caller was never told a build is waiting"
+    );
+    assert!(
+        deferring_tick.is_empty(),
+        "the deferring tick must not put the Resource on the wire"
+    );
+
+    let mut builds = sender.router.take_resource_builds();
+    assert_eq!(builds.len(), 1, "exactly one build was handed out");
+    let built = builds
+        .remove(0)
+        .build(&mut OsRng)
+        .expect("build off the caller's lock");
+    let output = sender
+        .router
+        .commit_resource_build(&mut sender.node, built)
+        .expect("commit the built transfer");
+    let packets = sender.absorb_router(output);
+    assert!(!packets.is_empty(), "commit must advertise the Resource");
+    pump(&mut sender, &mut receiver, packets);
+
+    assert!(
+        !receiver.accepted_resources.is_empty(),
+        "the receiver never saw the transfer start"
     );
 }

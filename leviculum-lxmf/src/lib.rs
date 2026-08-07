@@ -70,6 +70,9 @@ pub use propagation_client::{
     PropagationUploadFailure, PropagationUploadRepresentation, UploadSendParams,
     PROPAGATION_ASPECT,
 };
-pub use router::{DeliveryStampRequest, InboundStampRequest, PropagationStampRequest};
+pub use router::{
+    BuiltResource, DeliveryStampRequest, InboundStampRequest, PendingResourceBuild,
+    PropagationStampRequest,
+};
 #[cfg(feature = "pow")]
 pub use stamp::{CooperativeStamper, CooperativeYield, StampError, StampExecutor, Yield};

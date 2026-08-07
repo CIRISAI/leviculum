@@ -21,10 +21,12 @@ use crate::{
     msgpack,
     node::{
         DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection, LxmfNode,
-        LxmfNodeError, LxmfNodeEvent,
+        LxmfNodeError, LxmfNodeEvent, LxmfNodeOutput, LxmfResourceSendParams, PreparedLxmfSend,
     },
     propagation::PropagationError,
-    propagation_client::{PropagationTransport, PropagationTransportError},
+    propagation_client::{
+        PreparedUpload, PropagationTransport, PropagationTransportError, UploadSendParams,
+    },
     storage::{LxmfStorage, StorageError},
     ticket::{Ticket, TicketStore},
 };
@@ -76,6 +78,21 @@ pub struct RouterConfig {
     pub max_snapshot_bytes: usize,
     pub enforce_stamps: bool,
     pub inbound_stamp_cost: Option<u8>,
+    /// Hand outbound Resource builds to the caller instead of building them
+    /// inside [`LxmfRouter::tick`].
+    ///
+    /// A tick that builds its own Resources holds the caller's borrow for the
+    /// whole build — 126.6 ms for eight due 256 KiB messages, measured in
+    /// `docs/src/concepts/core-lock-budget.md`. With this set, `tick` captures
+    /// the link parameters instead and emits
+    /// [`RouterEvent::ResourceBuildPending`]; the caller drains
+    /// [`LxmfRouter::take_resource_builds`], builds off its lock, and returns
+    /// each result to [`LxmfRouter::commit_resource_build`].
+    ///
+    /// Off by default: a caller that ignores the drained work would leave those
+    /// messages queued forever, so the split is opt-in for hosts that implement
+    /// both halves.
+    pub defer_resource_builds: bool,
 }
 
 impl Default for RouterConfig {
@@ -90,8 +107,71 @@ impl Default for RouterConfig {
             max_snapshot_bytes: 32 * 1024 * 1024,
             enforce_stamps: false,
             inbound_stamp_cost: None,
+            defer_resource_builds: false,
         }
     }
+}
+
+/// Detached work coordinates for one outbound Resource, mirroring the stamp
+/// requests above: it owns everything the build needs, so building never
+/// borrows [`LxmfRouter`] or `NodeCore`.
+#[must_use = "a dropped build leaves its message queued in the router"]
+pub struct PendingResourceBuild {
+    message_id: [u8; 32],
+    kind: PendingBuildKind,
+}
+
+enum PendingBuildKind {
+    /// A direct delivery to the recipient.
+    Delivery {
+        params: LxmfResourceSendParams,
+        message: Box<Message>,
+        auto_compress: bool,
+    },
+    /// An upload of one message to a propagation node's mailbox.
+    Upload {
+        params: UploadSendParams,
+        data: Vec<u8>,
+    },
+}
+
+impl PendingResourceBuild {
+    pub fn message_id(&self) -> [u8; 32] {
+        self.message_id
+    }
+
+    /// Build the transfer. This is the part that scales with the message, and
+    /// the reason the router handed it out.
+    pub fn build(self, rng: &mut impl CryptoRngCore) -> Result<BuiltResource, RouterError> {
+        let kind = match self.kind {
+            PendingBuildKind::Delivery {
+                params,
+                message,
+                auto_compress,
+            } => BuiltKind::Delivery(Box::new(LxmfNode::prepare_resource_send(
+                &params,
+                &message,
+                auto_compress,
+                rng,
+            )?)),
+            PendingBuildKind::Upload { params, data } => {
+                BuiltKind::Upload(params.build(&data, rng)?)
+            }
+        };
+        Ok(BuiltResource { kind })
+    }
+}
+
+/// A built transfer on its way back to
+/// [`LxmfRouter::commit_resource_build`].
+#[must_use = "a dropped build leaves its message queued in the router"]
+pub struct BuiltResource {
+    kind: BuiltKind,
+}
+
+enum BuiltKind {
+    Delivery(Box<PreparedLxmfSend>),
+    Upload(PreparedUpload),
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +267,9 @@ pub enum RouterEvent {
     Duplicate([u8; 32]),
     InvalidSignature([u8; 32]),
     InvalidStamp([u8; 32]),
+    /// A Resource build is waiting in [`LxmfRouter::take_resource_builds`].
+    /// Only emitted with [`RouterConfig::defer_resource_builds`].
+    ResourceBuildPending([u8; 32]),
     StampPending(DeliveryStampRequest),
     InboundStampPending(InboundStampRequest),
     PropagationStampPending(PropagationStampRequest),
@@ -278,6 +361,7 @@ pub struct LxmfRouter {
     config: RouterConfig,
     identity_hash: [u8; 16],
     outbound: BTreeMap<[u8; 32], OutboundEntry>,
+    pending_builds: Vec<PendingResourceBuild>,
     outbound_stamp_costs: StampCostMap,
     delivered_ids: BTreeMap<[u8; 32], f64>,
     processed_ids: BTreeMap<[u8; 32], f64>,
@@ -366,6 +450,7 @@ impl LxmfRouter {
             config,
             identity_hash,
             outbound: BTreeMap::new(),
+            pending_builds: Vec::new(),
             outbound_stamp_costs: BTreeMap::new(),
             delivered_ids: BTreeMap::new(),
             processed_ids: BTreeMap::new(),
@@ -685,6 +770,68 @@ impl LxmfRouter {
         };
         self.apply_deadline(&mut output.core);
         Ok(self.finish_output(output))
+    }
+
+    pub(super) fn push_upload_build(
+        &mut self,
+        message_id: [u8; 32],
+        params: UploadSendParams,
+        data: Vec<u8>,
+    ) {
+        self.pending_builds.push(PendingResourceBuild {
+            message_id,
+            kind: PendingBuildKind::Upload { params, data },
+        });
+    }
+
+    /// Take the Resource builds [`tick`](Self::tick) handed out, to run off the
+    /// caller's lock. Each result goes back through
+    /// [`commit_resource_build`](Self::commit_resource_build).
+    pub fn take_resource_builds(&mut self) -> Vec<PendingResourceBuild> {
+        core::mem::take(&mut self.pending_builds)
+    }
+
+    /// Install a built transfer and emit its advertisement.
+    ///
+    /// Reports a link that re-keyed while the build ran as
+    /// `RouterError::Node(LxmfNodeError::Resource(ResourceError::LinkStateChanged))`
+    /// — an upload reports the same through `RouterError::PropagationTransport`.
+    /// That build is spent either way; the message is retried by a later tick
+    /// once its `Sending` state lapses.
+    pub fn commit_resource_build<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        built: BuiltResource,
+    ) -> Result<RouterOutput, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let now_unix = emission_secs(node);
+        let now_ms = node.now_ms();
+        match built.kind {
+            BuiltKind::Delivery(prepared) => {
+                let committed = self.node.commit_resource_send(node, *prepared)?;
+                let mut output = RouterOutput {
+                    core: committed.core,
+                    events: Vec::new(),
+                };
+                for ev in committed.events {
+                    self.handle_node_event(ev, now_ms, now_unix, &mut output.events);
+                }
+                Ok(output)
+            }
+            BuiltKind::Upload(prepared) => {
+                let mut propagation = self
+                    .propagation
+                    .take()
+                    .ok_or(RouterError::PropagationNodeUnavailable)?;
+                let result = propagation.commit_upload(self, node, prepared, now_unix);
+                self.propagation = Some(propagation);
+                result
+            }
+        }
     }
 
     /// Attach the result of a detached recipient-stamp request after checking
@@ -1327,7 +1474,32 @@ impl LxmfRouter {
                 }
             }
 
-            match self.node.send(node, &entry.message) {
+            // A deferred Resource takes the same path as a submitted one: it is
+            // an attempt, the entry goes to Sending, and the build the caller
+            // now owns is what would otherwise have run here.
+            let submitted = if self.config.defer_resource_builds
+                && representation == Ok(DeliveryRepresentation::DirectResource)
+            {
+                match self.node.resource_send_params(node, &entry.message) {
+                    Ok(params) => {
+                        self.pending_builds.push(PendingResourceBuild {
+                            message_id: id,
+                            kind: PendingBuildKind::Delivery {
+                                params,
+                                message: Box::new(entry.message.clone()),
+                                auto_compress: self.node.config().auto_compress_resources,
+                            },
+                        });
+                        output.events.push(RouterEvent::ResourceBuildPending(id));
+                        Ok(LxmfNodeOutput::default())
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.node.send(node, &entry.message)
+            };
+
+            match submitted {
                 Ok(sent) => {
                     record_successful_submission_attempt(&mut entry, &representation);
                     entry.state = MessageState::Sending;
