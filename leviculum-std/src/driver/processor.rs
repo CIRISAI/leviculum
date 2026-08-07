@@ -53,6 +53,15 @@
 //! compile-fail fixture to catch. The async API is one instance of the rule,
 //! and not the instance a consumer is likely to hit.
 //!
+//! That hole is not closed — it cannot be, see below — but since Codeberg #198
+//! it is no longer silent. Every acquisition through
+//! [`crate::sync_ext::MutexRecover`] checks a thread-local set of held mutex
+//! addresses first, so a hook that re-locks the core panics with the mutex
+//! named instead of parking the event loop. The panic lands in the
+//! `catch_unwind` below: the processor is detached, `CoreProcessorPanicked` is
+//! emitted, and the node keeps serving. See
+//! `docs/src/concepts/self-deadlock-tripwire.md`.
+//!
 //! What the seam actually guarantees is narrower than "the mistake cannot be
 //! written":
 //!
@@ -175,6 +184,11 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 /// `transport_stats` — and one of them in an `on_event` body is a deadlock in
 /// ordinary safe code. Everything a hook needs is on the `core` argument;
 /// anything else belongs on the far side of a channel.
+///
+/// Since Codeberg #198 that mistake reports itself: the re-entrant acquisition
+/// panics naming the mutex, this hook is detached, and the node continues. It
+/// is still a bug in the processor and it still costs you the processor — the
+/// tripwire makes it visible, it does not make it survivable.
 ///
 /// # The one call on `core` that must not be made
 ///
