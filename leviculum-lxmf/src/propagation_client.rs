@@ -8,6 +8,7 @@
 //! [`crate::router::LxmfRouter`].
 
 use alloc::{
+    boxed::Box,
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
 };
@@ -184,6 +185,53 @@ struct PendingUpload {
 }
 
 /// Live propagation-client transport state.
+/// Link-derived inputs for one mailbox upload, captured by
+/// [`PropagationTransport::upload_send_params`].
+#[must_use = "a dropped capture leaves the upload unsent"]
+pub struct UploadSendParams {
+    link_id: LinkId,
+    message_id: [u8; 32],
+    representation: PropagationUploadRepresentation,
+    resource: Option<leviculum_core::resource::ResourceSendParams>,
+}
+
+impl UploadSendParams {
+    /// Phase 2: build the transfer off the caller's lock. A `Packet`-sized
+    /// upload has nothing to build and is carried through as-is.
+    pub fn build(
+        self,
+        data: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PreparedUpload, PropagationTransportError> {
+        let kind = match self.resource {
+            None => PreparedUploadKind::Packet(data.to_vec()),
+            Some(params) => PreparedUploadKind::Resource(Box::new(
+                leviculum_core::resource::prepare_resource_send(&params, data, None, true, rng)?,
+            )),
+        };
+        Ok(PreparedUpload {
+            link_id: self.link_id,
+            message_id: self.message_id,
+            representation: self.representation,
+            kind,
+        })
+    }
+}
+
+/// A built upload on its way back to [`PropagationTransport::commit_upload`].
+#[must_use = "a dropped upload leaves its message unsent"]
+pub struct PreparedUpload {
+    link_id: LinkId,
+    message_id: [u8; 32],
+    representation: PropagationUploadRepresentation,
+    kind: PreparedUploadKind,
+}
+
+enum PreparedUploadKind {
+    Packet(Vec<u8>),
+    Resource(Box<leviculum_core::resource::PreparedResourceSend>),
+}
+
 pub struct PropagationTransport {
     destination: DestinationHash,
     identity_hash: [u8; 16],
@@ -467,6 +515,86 @@ impl PropagationTransport {
                 (PendingUploadTransfer::Resource, core)
             }
         };
+        Ok(self.record_upload(link_id, message_id, representation, transfer, core))
+    }
+
+    /// Phase 1 of an off-lock upload: validate the link exactly as
+    /// [`submit_upload`](Self::submit_upload) does, then snapshot what the
+    /// build needs.
+    ///
+    /// A `Packet`-sized upload carries no build, so its params hold nothing and
+    /// [`commit_upload`](Self::commit_upload) sends it there instead.
+    pub fn upload_send_params<R, C, S>(
+        &self,
+        node: &NodeCore<R, C, S>,
+        link_id: LinkId,
+        message_id: [u8; 32],
+        data_len: usize,
+    ) -> Result<UploadSendParams, PropagationTransportError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        if !self.link_destinations.contains_key(&link_id)
+            || !node.link(&link_id).is_some_and(|link| link.is_active())
+        {
+            return Err(PropagationTransportError::LinkUnavailable);
+        }
+        if self.pending_uploads.contains_key(&link_id) || self.has_active_upload(&message_id) {
+            return Err(PropagationTransportError::UploadInProgress);
+        }
+        let representation = upload_representation(data_len);
+        let resource = match representation {
+            PropagationUploadRepresentation::Packet => None,
+            PropagationUploadRepresentation::Resource => Some(node.resource_send_params(&link_id)?),
+        };
+        Ok(UploadSendParams {
+            link_id,
+            message_id,
+            representation,
+            resource,
+        })
+    }
+
+    /// Phase 3: put the built upload on the link and record it.
+    pub fn commit_upload<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        prepared: PreparedUpload,
+    ) -> Result<PropagationTransportOutput, PropagationTransportError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let PreparedUpload {
+            link_id,
+            message_id,
+            representation,
+            kind,
+        } = prepared;
+        let (transfer, core) = match kind {
+            PreparedUploadKind::Packet(data) => {
+                let (packet_hash, core) = node.send_packet_on_link(&link_id, &data)?;
+                (PendingUploadTransfer::Packet { packet_hash }, core)
+            }
+            PreparedUploadKind::Resource(resource) => {
+                let (_, core) = node.commit_resource_send(*resource)?;
+                (PendingUploadTransfer::Resource, core)
+            }
+        };
+        Ok(self.record_upload(link_id, message_id, representation, transfer, core))
+    }
+
+    fn record_upload(
+        &mut self,
+        link_id: LinkId,
+        message_id: [u8; 32],
+        representation: PropagationUploadRepresentation,
+        transfer: PendingUploadTransfer,
+        core: TickOutput,
+    ) -> PropagationTransportOutput {
         self.pending_uploads.insert(
             link_id,
             PendingUpload {
@@ -474,16 +602,14 @@ impl PropagationTransport {
                 transfer,
             },
         );
-
-        let output = PropagationTransportOutput {
+        PropagationTransportOutput {
             core,
             events: alloc::vec![PropagationTransportEvent::UploadSubmitted {
                 link_id,
                 message_id,
                 representation,
             }],
-        };
-        Ok(output)
+        }
     }
 
     /// Submit one typed `/get` mailbox request and remember its correlation.

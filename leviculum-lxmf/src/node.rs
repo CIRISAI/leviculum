@@ -161,6 +161,23 @@ impl LxmfNodeOutput {
     }
 }
 
+/// Link-derived inputs for one resource send, captured under a brief borrow by
+/// [`LxmfNode::resource_send_params`].
+pub struct LxmfResourceSendParams {
+    core: leviculum_core::resource::ResourceSendParams,
+    link_id: LinkId,
+    message_id: [u8; 32],
+}
+
+/// A message packed and built into a transfer off the node, ready for
+/// [`LxmfNode::commit_resource_send`].
+pub struct PreparedLxmfSend {
+    prepared: leviculum_core::resource::PreparedResourceSend,
+    link_id: LinkId,
+    message_id: [u8; 32],
+    packed_len: usize,
+}
+
 /// Synchronous adapter errors. Inbound wire errors are reported as
 /// [`LxmfNodeEvent::InboundRejected`] instead, so malformed network traffic
 /// never aborts an event loop.
@@ -367,10 +384,22 @@ impl LxmfNode {
         self.incoming_resource_transfers.len()
     }
 
+    pub fn config(&self) -> LxmfNodeConfig {
+        self.config
+    }
+
     /// Select the exact Python-compatible delivery representation.
     pub fn representation(message: &Message) -> Result<DeliveryRepresentation, LxmfNodeError> {
-        let packed_len = message.pack().len();
-        match message.method {
+        Self::representation_of(message.method, message.pack().len())
+    }
+
+    /// [`representation`](Self::representation) against a length the caller
+    /// already packed for, so a send does not pack the message twice.
+    fn representation_of(
+        method: DeliveryMethod,
+        packed_len: usize,
+    ) -> Result<DeliveryRepresentation, LxmfNodeError> {
+        match method {
             DeliveryMethod::Opportunistic
                 if packed_len.saturating_sub(DESTINATION_LENGTH) <= OPPORTUNISTIC_PACKET_MDU =>
             {
@@ -477,7 +506,8 @@ impl LxmfNode {
         C: Clock,
         S: Storage,
     {
-        let representation = Self::representation(message)?;
+        let packed = message.pack();
+        let representation = Self::representation_of(message.method, packed.len())?;
         let destination = DestinationHash::new(message.destination_hash);
 
         match representation {
@@ -498,7 +528,6 @@ impl LxmfNode {
             }
             DeliveryRepresentation::DirectPacket => {
                 let link_id = self.active_direct_link(node, &destination)?;
-                let packed = message.pack();
                 let (packet_hash, core) = node.send_packet_on_link(&link_id, &packed)?;
                 self.link_packet_receipts.insert(
                     packet_hash,
@@ -520,34 +549,125 @@ impl LxmfNode {
             }
             DeliveryRepresentation::DirectResource => {
                 let link_id = self.active_direct_link(node, &destination)?;
-                let packed = message.pack();
                 let (resource_hash, core) = node.send_resource(
                     &link_id,
                     &packed,
                     None,
                     self.config.auto_compress_resources,
                 )?;
-                self.resources.insert(
+                Ok(self.record_resource_submission(
                     link_id,
-                    PendingResource {
-                        message_id: message.message_id,
-                        current_resource_hash: resource_hash,
-                        completed_size: 0,
-                        current_size: packed.len().min(RESOURCE_MAX_EFFICIENT_SIZE) as u64,
-                        total_size: packed.len() as u64,
-                    },
-                );
-                let output = LxmfNodeOutput {
+                    message.message_id,
+                    resource_hash,
+                    packed.len(),
                     core,
-                    events: vec![LxmfNodeEvent::Submitted {
-                        message_id: message.message_id,
-                        method: DeliveryMethod::Direct,
-                        representation,
-                        submission: SubmissionId::Resource(resource_hash),
-                    }],
-                };
-                Ok(output)
+                ))
             }
+        }
+    }
+
+    /// Phase 1 of the off-lock resource send: resolve the link and snapshot
+    /// what [`prepare_resource_send`](Self::prepare_resource_send) needs.
+    ///
+    /// The caller must already know the message is a
+    /// [`DeliveryRepresentation::DirectResource`] — deciding that packs, and
+    /// packing belongs off the lock with the rest of the build.
+    pub fn resource_send_params<R, C, S>(
+        &mut self,
+        node: &NodeCore<R, C, S>,
+        message: &Message,
+    ) -> Result<LxmfResourceSendParams, LxmfNodeError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let destination = DestinationHash::new(message.destination_hash);
+        let link_id = self.active_direct_link(node, &destination)?;
+        Ok(LxmfResourceSendParams {
+            core: node.resource_send_params(&link_id)?,
+            link_id,
+            message_id: message.message_id,
+        })
+    }
+
+    /// Phase 2: pack and build the transfer without touching the node, so the
+    /// cost that scales with the message runs off the caller's lock.
+    pub fn prepare_resource_send(
+        params: &LxmfResourceSendParams,
+        message: &Message,
+        auto_compress: bool,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PreparedLxmfSend, LxmfNodeError> {
+        let packed = message.pack();
+        let prepared = leviculum_core::resource::prepare_resource_send(
+            &params.core,
+            &packed,
+            None,
+            auto_compress,
+            rng,
+        )?;
+        Ok(PreparedLxmfSend {
+            prepared,
+            link_id: params.link_id,
+            message_id: params.message_id,
+            packed_len: packed.len(),
+        })
+    }
+
+    /// Phase 3: install the built transfer and emit its advertisement.
+    ///
+    /// Propagates [`ResourceError::LinkStateChanged`] when the link re-keyed
+    /// while the build ran; the caller re-runs the three phases once, as the
+    /// std driver does for its own resource sends.
+    pub fn commit_resource_send<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        prepared: PreparedLxmfSend,
+    ) -> Result<LxmfNodeOutput, LxmfNodeError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let (resource_hash, core) = node.commit_resource_send(prepared.prepared)?;
+        Ok(self.record_resource_submission(
+            prepared.link_id,
+            prepared.message_id,
+            resource_hash,
+            prepared.packed_len,
+            core,
+        ))
+    }
+
+    /// Track a submitted Resource and report it. Shared by the composed
+    /// [`send`](Self::send) and phase 3 so the two cannot drift apart.
+    fn record_resource_submission(
+        &mut self,
+        link_id: LinkId,
+        message_id: [u8; 32],
+        resource_hash: [u8; 32],
+        packed_len: usize,
+        core: TickOutput,
+    ) -> LxmfNodeOutput {
+        self.resources.insert(
+            link_id,
+            PendingResource {
+                message_id,
+                current_resource_hash: resource_hash,
+                completed_size: 0,
+                current_size: packed_len.min(RESOURCE_MAX_EFFICIENT_SIZE) as u64,
+                total_size: packed_len as u64,
+            },
+        );
+        LxmfNodeOutput {
+            core,
+            events: vec![LxmfNodeEvent::Submitted {
+                message_id,
+                method: DeliveryMethod::Direct,
+                representation: DeliveryRepresentation::DirectResource,
+                submission: SubmissionId::Resource(resource_hash),
+            }],
         }
     }
 
@@ -1889,6 +2009,132 @@ mod tests {
         )));
     }
 
+    /// Why only the Resource path is phased: the other two submit one packet
+    /// each, bounded by their MDU, so neither carries a build that scales with
+    /// the message.
+    #[test]
+    fn opportunistic_and_direct_packet_submit_one_packet_each() {
+        let mut sender = peer(41);
+        let mut receiver = peer(131);
+        exchange_announces(&mut sender, &mut receiver);
+        let mut sender_events = Vec::new();
+        let mut receiver_events = Vec::new();
+
+        let opportunistic = message(
+            receiver.destination,
+            &sender.signing_identity,
+            sender.destination,
+            DeliveryMethod::Opportunistic,
+            250,
+        );
+        assert_eq!(
+            LxmfNode::representation(&opportunistic).expect("representation"),
+            DeliveryRepresentation::OpportunisticPacket
+        );
+        let sent = sender
+            .lxmf
+            .send(&mut sender.node, &opportunistic)
+            .expect("send opportunistic");
+        assert_eq!(sent.core.actions.len(), 1);
+
+        let (_, link_output) = sender
+            .lxmf
+            .ensure_direct_link(&mut sender.node, receiver.destination)
+            .expect("ensure direct link");
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(link_output.core.actions),
+            &mut sender_events,
+            &mut receiver_events,
+        );
+
+        let direct = message(
+            receiver.destination,
+            &sender.signing_identity,
+            sender.destination,
+            DeliveryMethod::Direct,
+            300,
+        );
+        assert_eq!(
+            LxmfNode::representation(&direct).expect("representation"),
+            DeliveryRepresentation::DirectPacket
+        );
+        let sent = sender
+            .lxmf
+            .send(&mut sender.node, &direct)
+            .expect("send direct packet");
+        assert_eq!(sent.core.actions.len(), 1);
+    }
+
+    /// The phased path is a second build path beside the composed `send`; a
+    /// drift between them would deliver nothing, and the composed round-trip
+    /// above cannot see it.
+    #[test]
+    fn phased_resource_send_delivers_what_the_composed_one_does() {
+        let mut sender = peer(40);
+        let mut receiver = peer(130);
+        exchange_announces(&mut sender, &mut receiver);
+
+        let mut sender_events = Vec::new();
+        let mut receiver_events = Vec::new();
+
+        let (_, link_output) = sender
+            .lxmf
+            .ensure_direct_link(&mut sender.node, receiver.destination)
+            .expect("ensure direct link");
+        sender_events.extend(link_output.events);
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(link_output.core.actions),
+            &mut sender_events,
+            &mut receiver_events,
+        );
+
+        let resource = message(
+            receiver.destination,
+            &sender.signing_identity,
+            sender.destination,
+            DeliveryMethod::Direct,
+            1_200,
+        );
+        assert_eq!(
+            LxmfNode::representation(&resource).expect("representation"),
+            DeliveryRepresentation::DirectResource
+        );
+
+        let params = sender
+            .lxmf
+            .resource_send_params(&sender.node, &resource)
+            .expect("phase 1");
+        let prepared =
+            LxmfNode::prepare_resource_send(&params, &resource, true, &mut OsRng).expect("phase 2");
+        let sent = sender
+            .lxmf
+            .commit_resource_send(&mut sender.node, prepared)
+            .expect("phase 3");
+
+        sender_events.extend(sent.events);
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(sent.core.actions),
+            &mut sender_events,
+            &mut receiver_events,
+        );
+        assert!(sender_events.iter().any(|event| matches!(
+            event,
+            LxmfNodeEvent::Delivered { message_id } if *message_id == resource.message_id
+        )));
+        assert!(receiver_events.iter().any(|event| matches!(
+            event,
+            LxmfNodeEvent::MessageReceived(received)
+                if received.message_id == resource.message_id
+                    && received.content.len() == 1_200
+        )));
+    }
+
     #[test]
     fn direct_link_uses_identity_cached_by_core_without_lxmf_peer_state() {
         let mut sender = peer(30);
@@ -2021,5 +2267,127 @@ mod tests {
                 if received.message_id == small.message_id
                     && received.content.len() == 700
         )));
+    }
+    /// Reports what each delivery representation costs a caller that holds the
+    /// core, so `docs/src/concepts/core-lock-budget.md` can cite the adapter's
+    /// numbers instead of assuming them (Codeberg #196).
+    ///
+    /// Run it deliberately, on a release build:
+    ///
+    /// ```text
+    /// cargo test -p leviculum-lxmf --release --lib measure_send_lock_costs \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// `#[ignore]`d because it reports timings: an assertion over them would
+    /// fail on a loaded CI machine for reasons that have nothing to do with the
+    /// code. The invariants it exists to defend are asserted, without a clock,
+    /// by `opportunistic_and_direct_packet_submit_one_packet_each` and
+    /// `phased_resource_send_delivers_what_the_composed_one_does`.
+    #[test]
+    #[ignore]
+    fn measure_send_lock_costs() {
+        use std::time::Instant;
+
+        fn linked() -> (Peer, Peer) {
+            let mut sender = peer(70);
+            let mut receiver = peer(170);
+            exchange_announces(&mut sender, &mut receiver);
+            let (_, out) = sender
+                .lxmf
+                .ensure_direct_link(&mut sender.node, receiver.destination)
+                .expect("link");
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            pump(
+                &mut sender,
+                &mut receiver,
+                take_packets(out.core.actions),
+                &mut a,
+                &mut b,
+            );
+            (sender, receiver)
+        }
+
+        for (label, method, len) in [
+            ("opportunistic", DeliveryMethod::Opportunistic, 250usize),
+            ("direct packet", DeliveryMethod::Direct, 300),
+        ] {
+            let (mut s, r) = linked();
+            let m = message(
+                r.destination,
+                &s.signing_identity,
+                s.destination,
+                method,
+                len,
+            );
+            assert_ne!(
+                LxmfNode::representation(&m).expect("rep"),
+                DeliveryRepresentation::DirectResource
+            );
+            // Discard the first send: it pays one-time setup this measurement
+            // is not about.
+            let _ = s.lxmf.send(&mut s.node, &m).expect("warm-up send");
+            let m = message(
+                r.destination,
+                &s.signing_identity,
+                s.destination,
+                method,
+                len,
+            );
+            let t = Instant::now();
+            let sent = s.lxmf.send(&mut s.node, &m).expect("send");
+            let elapsed = t.elapsed();
+            assert_eq!(sent.core.actions.len(), 1, "{label} must be one packet");
+            std::println!("{label}: 1 packet, {elapsed:?}");
+        }
+
+        for len in [16 * 1024usize, 256 * 1024, 1024 * 1024] {
+            let (mut s, r) = linked();
+            let m = message(
+                r.destination,
+                &s.signing_identity,
+                s.destination,
+                DeliveryMethod::Direct,
+                len,
+            );
+            let t = Instant::now();
+            let _ = s.lxmf.send(&mut s.node, &m).expect("composed");
+            let composed = t.elapsed();
+
+            let (mut s2, r2) = linked();
+            let m2 = message(
+                r2.destination,
+                &s2.signing_identity,
+                s2.destination,
+                DeliveryMethod::Direct,
+                len,
+            );
+            let t = Instant::now();
+            let params = s2
+                .lxmf
+                .resource_send_params(&s2.node, &m2)
+                .expect("phase 1");
+            let phase1 = t.elapsed();
+            let t = Instant::now();
+            let prepared =
+                LxmfNode::prepare_resource_send(&params, &m2, true, &mut OsRng).expect("phase 2");
+            let phase2 = t.elapsed();
+            let t = Instant::now();
+            let _ = s2
+                .lxmf
+                .commit_resource_send(&mut s2.node, prepared)
+                .expect("phase 3");
+            let phase3 = t.elapsed();
+            std::println!(
+                "resource {:>7}B: composed(locked) {:?} | phased locked {:?} (p1 {:?} + p3 {:?}), off-lock build {:?}",
+                len,
+                composed,
+                phase1 + phase3,
+                phase1,
+                phase3,
+                phase2
+            );
+        }
     }
 }

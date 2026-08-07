@@ -30,6 +30,8 @@
 //! and the `/offer` path are leviculum#209.
 
 #![no_std]
+#[cfg(test)]
+extern crate std;
 
 extern crate alloc;
 
@@ -54,7 +56,7 @@ pub use message::{DeliveryMethod, Field, Message, MessageError, Verification};
 pub use node::{
     DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection,
     IncomingResourceTransfer, LxmfNode, LxmfNodeConfig, LxmfNodeError, LxmfNodeEvent,
-    LxmfNodeOutput, SubmissionId,
+    LxmfNodeOutput, LxmfResourceSendParams, PreparedLxmfSend, SubmissionId,
 };
 pub use paper::{PaperError, PaperMessage};
 pub use propagation::{
@@ -63,9 +65,10 @@ pub use propagation::{
     PropagationUpload, TransferLimit, TransientId, MESSAGE_GET_PATH,
 };
 pub use propagation_client::{
-    KnownPropagationNode, PropagationRequestKind, PropagationTransport, PropagationTransportError,
-    PropagationTransportEvent, PropagationTransportOutput, PropagationUploadFailure,
-    PropagationUploadRepresentation, PROPAGATION_ASPECT,
+    KnownPropagationNode, PreparedUpload, PropagationRequestKind, PropagationTransport,
+    PropagationTransportError, PropagationTransportEvent, PropagationTransportOutput,
+    PropagationUploadFailure, PropagationUploadRepresentation, UploadSendParams,
+    PROPAGATION_ASPECT,
 };
 pub use router::{DeliveryStampRequest, InboundStampRequest, PropagationStampRequest};
 #[cfg(feature = "pow")]

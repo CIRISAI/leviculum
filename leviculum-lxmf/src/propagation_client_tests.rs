@@ -932,4 +932,46 @@ fn packet_and_resource_uploads_complete_end_to_end_without_offer_endpoint() {
             ..
         } if data == &resource_data
     )));
+
+    // The same upload built off the caller's lock: a second build path that
+    // must put the identical bytes on the wire.
+    client_events.clear();
+    server_events.clear();
+    let phased_data = alloc::vec![0x76; LINK_PACKET_MAX_CONTENT + 1];
+    let phased_message_id = [0x77; 32];
+    let params = transport
+        .upload_send_params(&client, client_link, phased_message_id, phased_data.len())
+        .unwrap();
+    let prepared = params.build(&phased_data, &mut OsRng).unwrap();
+    let submitted = transport.commit_upload(&mut client, prepared).unwrap();
+    assert!(matches!(
+        submitted.events.as_slice(),
+        [PropagationTransportEvent::UploadSubmitted {
+            representation: PropagationUploadRepresentation::Resource,
+            ..
+        }]
+    ));
+    client_events.extend(submitted.events);
+    pump(
+        &mut client,
+        &mut transport,
+        &mut server,
+        take_packets(submitted.core.actions),
+        Vec::new(),
+        &mut client_events,
+        &mut server_events,
+    );
+    assert!(client_events.iter().any(|event| matches!(
+        event,
+        PropagationTransportEvent::UploadCompleted { message_id, .. }
+            if message_id == &phased_message_id
+    )));
+    assert!(server_events.iter().any(|event| matches!(
+        event,
+        NodeEvent::ResourceCompleted {
+            data,
+            is_sender: false,
+            ..
+        } if data == &phased_data
+    )));
 }
