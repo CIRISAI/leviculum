@@ -390,6 +390,50 @@ run** — which is what stops the baseline being the off switch the expiry
 dates above are criticised for being. Moving it forward to silence a
 fresh failure moves a violation across that line and changes the number.
 
+### The rule was narrower than the check, and the gap cost a day
+
+As first written the guard scanned by message text alone. The rule the
+repositories actually hold is narrower: **a machine-authorship trailer is
+a violation on our commits and not on anyone else's** — we do not edit,
+and do not refuse, a message somebody outside the project wrote. The
+commit-msg hook in Lew's checkout had keyed on the author e-mail since
+2026-06-13 and said so in a comment; the guard did not, and could not,
+because nothing in the tree stated the policy. Merging PR #201, an
+external contribution whose commit carries such a trailer, then turned
+`just fast`, the pre-push hook and the forge check permanently red on a
+tree with nothing wrong with it. The brief for #205 argued the rule
+entirely in terms of our own harness default and never mentioned external
+contributors; the guard did exactly what it was told.
+
+This is the failure mode the page's opening promise misses. A check that
+*could* have failed and *did* run can still be red for a reason the rule
+does not hold — and a gate that is red on a clean tree gets switched off
+or bypassed, which costs more than the gate was ever worth. **A check
+also has to be able to go green on every tree the rule permits.**
+
+Authorship is the discriminator and `git log --format=%ae` is the whole
+mechanism. Two things follow, both of which are this page's own
+arguments applied one level down:
+
+- The exemption is **counted, not trusted**. `foreign` in the baseline
+  file pins how many commits above the baseline carry a trailer under an
+  author that is not ours, recomputed every run. Uncounted, an exemption
+  granted by class is an off switch anyone can reach by setting an author
+  e-mail; counted, a new external contribution lands with its message
+  intact and still moves a number in a diff, which is the outcome we
+  wanted — we want to know when it happens, we just do not want to
+  rewrite somebody else's message.
+- Who counts as ours is **a list in the reviewed file, not a constant in
+  the script**. It has to be a set: `lp@lew-palm.de` is what we use at a
+  terminal, but Codeberg stamps a web-UI edit with its own noreply
+  address, and three commits in leviculum's history carry it. A
+  single-address discriminator would have handed the foreign exemption to
+  the project lead's own commits, silently — the exact failure the guard
+  exists to prevent, arriving by accident rather than by intent. There is
+  no computed control on that list, because who is inside the project is a
+  declaration and not a fact the script can derive; the control is that
+  the list sits next to the counts, where adding a line is a diff.
+
 ## Standing canaries
 
 Every gate on this page carries a permanent pair, checked before it
@@ -430,6 +474,23 @@ reports anything else:
   covering both directions over 1275 real commits on every run; periculum's
   count is zero and covers only the direction that cannot rot, which is why
   the pair is in the script rather than only in the baseline file.
+- **C, commit-trailer authorship arm**: the ours/foreign split needs its
+  own pair, because "no violation found" is what a guard that has stopped
+  noticing foreign trailers reports forever, and equally what one that has
+  started calling *everything* foreign reports forever. Two independent
+  failures, two checks. The **plumbing** is verified against git itself on
+  HEAD — a `--format` that lost `%ae` would leave every commit classified
+  as foreign and go green on our own violations from then on, and checking
+  it against a constant in the script would only prove the script agrees
+  with itself. The **classification** is verified on a synthetic set
+  carrying one hit per declared identity plus one from outside: on a tree
+  whose history happens to hold no foreign hit an inverted comparison
+  would also read green, and a comparison tightened until it stopped
+  recognising the forge's noreply address would be silent without the
+  per-identity cases. What no canary reaches is an identity *deleted* from
+  the baseline file, since that file is the only statement of who we are —
+  that one is caught by reading the diff, which is why the list lives
+  where a reviewer already looks.
 
 A one-time demonstration at implementation time is not enough. A gate
 that stops matching — a glob that no longer resolves, a parser that
