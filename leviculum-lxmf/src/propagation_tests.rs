@@ -198,3 +198,81 @@ fn invalid_stamp_signal_is_exact_and_strict() {
         Err(PropagationError::TrailingData)
     );
 }
+
+// leviculum#38 — the HOST direction: everything a propagation node needs to
+// parse from and serialize to a client, driven strictly through the public
+// API surface an external crate (CIRISEdge) sees.
+
+/// A host decodes the client's upload envelope back to the exact typed value
+/// the client built, transient ID included, and rejects malformed shapes.
+#[test]
+fn host_decodes_client_upload_envelope() {
+    let unstamped = {
+        let mut v = vec![0x11u8; DESTINATION_LENGTH]; // destination hash
+        v.extend_from_slice(&[0xAB; 64]); // ciphertext-ish body
+        v
+    };
+    let upload = PropagationUpload::single(1_700_000_000.5, unstamped, [0x5A; STAMP_SIZE]);
+    let wire = upload.encode();
+
+    let decoded = PropagationUpload::decode(&wire).expect("round-trip");
+    assert_eq!(decoded, upload);
+    assert_eq!(decoded.transient_id(), upload.transient_id());
+
+    // Too short to carry hash + body + stamp → refused.
+    let tiny =
+        PropagationUpload::single(1.0, vec![0u8; DESTINATION_LENGTH], [0u8; STAMP_SIZE]).encode();
+    assert_eq!(
+        PropagationUpload::decode(&tiny),
+        Err(PropagationError::InvalidLength)
+    );
+    assert!(PropagationUpload::decode(&[0x91]).is_err());
+}
+
+/// A host serves the full `/get` exchange with the now-public codecs: decode
+/// the client's request, encode the list and download responses (success and
+/// error arms), and the client-side decoders read them back exactly.
+#[test]
+fn host_serves_the_get_exchange_with_public_codecs() {
+    // Client asks for a list (wants=None) — host decodes it.
+    let list_req = MessageGetRequest::list();
+    let decoded = MessageGetRequest::decode(&list_req.encode().expect("encode")).expect("decode");
+    assert_eq!(decoded, list_req);
+
+    // Host answers with transient IDs — client decodes them back.
+    let ids = vec![[0x01u8; 32], [0x02u8; 32]];
+    let listing = MessageListResponse::TransientIds(ids.clone());
+    let wire = listing.encode().expect("encode");
+    assert_eq!(
+        MessageListResponse::decode(&wire).expect("decode"),
+        MessageListResponse::TransientIds(ids)
+    );
+
+    // Host download response, success and error arms.
+    let msgs = vec![vec![0xAA; 40], vec![0xBB; 12]];
+    let get = MessageGetResponse::Messages(msgs.clone());
+    assert_eq!(
+        MessageGetResponse::decode(&get.encode().expect("encode")).expect("decode"),
+        MessageGetResponse::Messages(msgs)
+    );
+    let err = MessageListResponse::Error(PeerError::Throttled);
+    assert_eq!(
+        MessageListResponse::decode(&err.encode().expect("encode")).expect("decode"),
+        MessageListResponse::Error(PeerError::Throttled)
+    );
+
+    // Host announces itself — the client decoder reads it back.
+    let ann = PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase: 1_700_000_000,
+        enabled: true,
+        transfer_limit_kb: 1024,
+        sync_limit_kb: 4096,
+        stamp_cost: 12,
+        stamp_cost_flexibility: 2,
+        peering_cost: 0,
+        metadata: Vec::new(),
+    };
+    let wire = ann.encode().expect("encode");
+    assert_eq!(PropagationNodeAnnounce::decode(&wire).expect("decode"), ann);
+}

@@ -40,8 +40,8 @@ pub use node::{
 pub use paper::{PaperError, PaperMessage};
 pub use propagation::{
     MessageGetRequest, MessageGetResponse, MessageListResponse, MetadataEntry, PeerError,
-    PropagationError, PropagationNodeAnnounce, PropagationSignal, PropagationUpload, TransferLimit,
-    TransientId, MESSAGE_GET_PATH,
+    PropagatedMessage, PropagationError, PropagationNodeAnnounce, PropagationSignal,
+    PropagationUpload, TransferLimit, TransientId, MESSAGE_GET_PATH,
 };
 pub use propagation_client::{
     KnownPropagationNode, PropagationRequestKind, PropagationTransport, PropagationTransportError,
