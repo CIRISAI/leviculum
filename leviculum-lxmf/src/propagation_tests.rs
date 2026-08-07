@@ -342,11 +342,13 @@ fn host_upload_length_guard_matches_python_pn_stamp_bound() {
 
     // The remainder the host would store must survive the parser that indexes
     // it — the two bounds are one bound, and 112 is on the reject side of it.
+    let at_overhead = vec![0x11u8; LXMF_OVERHEAD];
     assert_eq!(
-        PropagatedMessage::from_unstamped_bytes(&vec![0x11u8; LXMF_OVERHEAD]),
+        PropagatedMessage::from_unstamped_bytes(&at_overhead),
         Err(PropagationError::InvalidLength)
     );
-    assert!(PropagatedMessage::from_unstamped_bytes(&vec![0x11u8; LXMF_OVERHEAD + 1]).is_ok());
+    let past_overhead = vec![0x11u8; LXMF_OVERHEAD + 1];
+    assert!(PropagatedMessage::from_unstamped_bytes(&past_overhead).is_ok());
 }
 
 /// A host serves the full `/get` exchange with the now-public codecs: decode
