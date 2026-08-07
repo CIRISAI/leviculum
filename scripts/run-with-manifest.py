@@ -46,15 +46,22 @@ and a checked-in artefact gets diffed, blessed and eventually committed
 wrong. Not in target/: `cargo clean` deletes it, and the tiers run with
 different CARGO_TARGET_DIR values, which would silently split one union into
 several. ~/.local/state/leviculum-ci/ is where this repo already keeps CI run
-state (last-results.txt, the tier logs, scripts/check-tier2-staleness.sh).
+state (last-results.txt and the tier logs).
 
 <repo-slug> is <dirname>-<hash of the real repo path>: two checkouts on one
 host (the CI tree and the rig worktree) must not overwrite each other's
 manifests, or step 2 reads a union assembled from two different trees.
 
 The file carries gate, command, commit, dirtiness, host, repo and both
-timestamps, which is what step 2 needs to age a manifest out the way
-check-tier2-staleness.sh ages out a tier-2 result.
+timestamps, which is what step 2 needs to age a manifest out.
+
+One warning for whoever builds step 2. This repo aged out a tier-2 result
+exactly that way from a pre-push hook, and the bound was unsatisfiable for
+46 days: the marker had one writer, nothing was scheduled to run it, and the
+remedy the failure message named wrote no marker at all. An age bound is only
+as live as its writer, so step 2 must age a gate out against the manifest that
+gate itself emits -- which is the point of writing one per `{{manifest}}`
+invocation -- and never against a signal produced somewhere else.
 
 STANDING CANARY
 ---------------

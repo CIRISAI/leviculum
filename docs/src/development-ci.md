@@ -94,17 +94,20 @@ exists only when you have a logged-in graphical session. On a
 headless server, notifications are silently dropped — inspect
 `~/.local/state/leviculum-ci/last-results.txt` instead.
 
-## Stale-block on push
+## Stale-block on push (removed 2026-08-07)
 
-`pre-push` blocks the push if Tier 2 hasn't run successfully in
-≥ 10 commits or ≥ 24 hours (warning at 5 commits / 8h). To override:
+`pre-push` used to block the push when the last `tier2 GREEN` line in
+`last-results.txt` was ≥ 10 commits or ≥ 24 hours old. It was removed,
+not repaired. Only `scripts/run-tier2.sh` writes that line, nothing has
+started it since the Tier 2 timer was retired on 2026-06-12, and the
+remedy the block printed (`just extensive`) does not write it either —
+so the block could not be cleared by doing what it said. It was
+unsatisfiable for 46 days, and the 502 commits that landed in that
+window all used `git push --no-verify`, which switches off the lint,
+Tier 0, mvr and the trailer guard along with it.
 
-```
-git push --no-verify
-```
-
-To clear the block normally, run `just extensive` once (or wait for
-the next scheduled run).
+`scripts/ci-status.sh` still reports how long it has been since a Tier 2
+run was recorded. It states the age and blocks nothing.
 
 ## Logs
 
@@ -277,6 +280,6 @@ scenario verdict from the vanish onwards is untrusted.
 | post-commit looks dead | `ps -ef | grep run-tier1` and check the latest log file |
 | Notification never arrived | Check `last-results.txt`. On headless boxes notifications are dropped. |
 | Tier 1 spuriously red | Check log; if Docker is involved, ensure no leftover containers (`docker ps -a`) |
-| Timer didn't fire | `systemctl --user list-timers`, then `journalctl --user -u leviculum-ci-tier2.timer` |
-| Stale-block annoying | `git push --no-verify` (one-shot) or run `just extensive` |
+| Timer didn't fire | `systemctl --user list-timers`, then `journalctl --user -u leviculum-ci-nightly.timer`. The nightly is the only timer this installer enables; Tier 2 has no timer. |
+| Tier 2 looks like it never runs | It doesn't, unless started: `systemctl --user start leviculum-ci-tier2.service`. `scripts/ci-status.sh` prints how long it has been. |
 | Disk filling up | Logs auto-rotate (14d/60d), but `~/.cache/leviculum-ci-target/` can grow large — clear with `cargo clean --target-dir ~/.cache/leviculum-ci-target` |

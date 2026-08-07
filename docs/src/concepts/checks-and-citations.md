@@ -217,8 +217,27 @@ satisfied by editing a number, and folds the exception list into the
 staleness bound rather than leaving it a separate off switch.
 
 The same bound applies to manifests themselves: a union with no age
-limit counts a gate retired weeks ago. The repo already does this for
-tier 2 (`scripts/check-tier2-staleness.sh`).
+limit counts a gate retired weeks ago.
+
+The repo tried exactly this bound for tier 2, and how it failed is worth
+recording, because the failure was not in the idea. `pre-push` blocked
+when the newest `tier2 GREEN` line in the CI ledger was over 24 hours or
+10 commits old. The only writer of that line was
+`scripts/run-tier2.sh`; the timer that started it was retired on
+2026-06-12; and the remedy the block printed — `just extensive` — drives
+periculum directly and writes no line at all. So the bound became
+unsatisfiable on the day the timer went, and stayed that way for 46 days
+and 502 commits, every one of which reached master through
+`--no-verify`. That flag disables the *whole* hook, lint and Tier 0 and
+the trailer guard with it. The block was removed on 2026-08-07 rather
+than repaired.
+
+**A staleness bound measures its writer, not its subject.** Age a
+manifest out only against a signal that something is still scheduled to
+emit, and let the remedy name that emitter rather than a recipe which
+merely looks equivalent. A bound whose remedy cannot clear it does not
+fail open or closed — it fails into `--no-verify`, and takes the checks
+that worked with it.
 
 Two reach limits: tier-3 hardware manifests and the release-only
 92-scenario corpus are produced on another host on a per-release

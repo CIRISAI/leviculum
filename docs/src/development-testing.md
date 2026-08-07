@@ -8,7 +8,8 @@ automation details.
 - **Writing code**: run `cargo test -p <crate-you-touched>` as you go.
 - **Committing**: nothing manual. Tier 1 runs in the background.
 - **Pushing**: Tier 0 runs automatically and blocks on fail.
-- **Daily**: Tier 2 (12:30, 18:30) and Tier 3 (02:00) run via systemd.
+- **Daily**: Tier 3 (02:00) runs via systemd. Tier 2 is on demand —
+  nothing starts it for you.
 - **Suite overview**: `just status`.
 
 ## Prerequisites (system tools)
@@ -48,11 +49,19 @@ up from scratch.
 |------|-----------------------------------|-----------------|-----------|-------|
 | 0    | on `git push` (hook)              | `just fast`     | ~3 min    | fmt + clippy + workspace lib tests |
 | 1    | after `git commit` (hook, background) | `just standard` | ~15 min (40 min cold[^cold]) | Tier 0 + core/tests + ffi + proxy + rnsd_interop |
-| 2    | 12:30 & 18:30 daily (systemd timer) | `just extensive` | 30–90 min | Tier 1 + periculum `conformance/` + `regression/` |
+| 2    | on demand: `systemctl --user start leviculum-ci-tier2.service`[^t2] | `just extensive` | 30–90 min | Tier 1 + periculum `conformance/` + `regression/` |
 | 3    | 02:00 daily (systemd timer)       | `just nightly`  | 2–6 h     | Tier 2 + LNode flash-from-HEAD + periculum `hardware/` |
 
 Each tier includes every lower tier, so a green nightly proves the
 whole stack.
+
+[^t2]: Tier 2 had a 12:30/18:30 timer until 2026-06-12, when it was
+retired in favour of on-demand runs (`scripts/install-ci.sh` step 9,
+which also deletes any timer a previous install left behind). This page
+went on advertising the timer, and `.githooks/pre-push` went on telling
+people to "wait for the next scheduled run" until 2026-08-07 — see
+[CI Pipeline](development-ci.md). `scripts/ci-status.sh` prints how long
+it has been since a Tier 2 run was recorded.
 
 [^cold]: The CI uses its own `CARGO_TARGET_DIR` at
 `~/.cache/leviculum-ci-target` so IDE builds and CI builds don't
