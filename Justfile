@@ -11,6 +11,13 @@
 # status straight through and writes the manifest beside the other CI run
 # state, under ~/.local/state/leviculum-ci/test-manifests/. Step 2 (not built)
 # reads the union of those manifests and reports every test in none of them.
+#
+# It is also what keeps a gate from hanging: it waits for its child to EXIT
+# rather than for the output pipe to close, kills the child's process group
+# afterwards so a leaked daemon cannot hold the gate open, gives up at 1800 s
+# with a named failure, and prints what it had to kill. `just standard` sat for
+# two hours on 2026-08-07 for want of the first of those. Per-gate budget:
+# `{{ manifest }} <name> --timeout <seconds> -- <command>`; 0 disables.
 manifest := "python3 scripts/run-with-manifest.py --gate"
 
 # Minimum-viable-reproduction tier — discipline tier, not size tier.
@@ -228,9 +235,15 @@ build-integ-bins:
 # default parallelism, 3669 tests + 28 doctests, 2026-08-06.
 #
 # Wall time on this host (4 cores, warm target dir): 7m50s + 3s. A fresh
-# CARGO_TARGET_DIR adds a full workspace test build on top.
+# CARGO_TARGET_DIR adds a full workspace test build on top — which is why this
+# one gate raises the wrapper's 1800 s default. 493 s is the longest run the
+# manifests have recorded for it, so the default is comfortable warm and only
+# marginal cold, and a backstop that fires on an honest cold build is a backstop
+# people switch off. The nightly's `timeout 3600` around all of `just complete`
+# stays the outer bound; this is the inner one, so an interactive cold run is
+# not cut off mid-build.
 complete:
-    {{manifest}} workspace-all-targets -- cargo test --workspace --all-targets --no-fail-fast
+    {{manifest}} workspace-all-targets --timeout 3600 -- cargo test --workspace --all-targets --no-fail-fast
     {{manifest}} workspace-doc -- cargo test --workspace --doc --no-fail-fast
 
 extensive: standard complete build-integ-bins build-c-lnsd

@@ -26,6 +26,7 @@ person what to do. This one is about the cases where the person forgot.
 | `reference/LXMF` sat twelve commits behind its gitlink for five weeks; every LXMF citation meant something other than it said | **C**, and the red `reference_lock` test that should have said so was itself unobserved — a **B** failure masking a **C** failure |
 | a `Co-Authored-By:` naming a model reached a periculum commit on 2026-08-07, against a rule the same author had cited correctly hours earlier (#205) | **neither** — a commit message, which all three explicitly do not reach |
 | `PROCESSOR_TICK_BUDGET` justified the only number in a public API constant with "the number comes off `docs/…/core-lock-budget.md`" and then named 126.6 ms; that figure occurred exactly once in the tree, in that comment (#200) | **C**, only since the figure check below — a prose attribution carries no line and no identifier, so the resolver never saw it |
+| `just standard` held a decided red for two hours, alive and silent, because a test that aborted in a destructor leaked a daemon holding the gate's stdout pipe (2026-08-07) | **none of the three** — every one of them reports, and a gate that never terminates reports nothing at all. See [A gate must pass, fail, or say it gave up](#a-gate-must-pass-fail-or-say-it-gave-up) |
 
 The last row is worth reading twice: the guarantees are not
 independent. A rotted citation had a test attached, and that test ran
@@ -453,6 +454,93 @@ arguments applied one level down:
   declaration and not a fact the script can derive; the control is that
   the list sits next to the counts, where adding a line is a diff.
 
+## A gate must pass, fail, or say it gave up
+
+There is a fourth way for a gate to end, and it is worse than any red:
+still running, verdict already determined, nobody told. On 2026-08-07
+`just standard` sat for **two hours** in exactly that state. It was found
+by noticing that its log's mtime was two hours old.
+
+The mechanism, end to end:
+
+1. `python_accepts_ratcheted_c_announce` (`leviculum-ffi`, `--test
+   ffi_interop`) panicked **in a destructor during cleanup** — "thread
+   caused non-unwinding panic. aborting." — and took SIGABRT.
+2. An abort skips unwinding, so the `Drop` that would have killed the
+   `scripts/test_daemon.py` that test had spawned never ran.
+3. The orphaned daemon had inherited cargo's stdout. Confirmed by walking
+   `/proc/*/fd`: PID 960389 held fd 2 on the same pipe.
+4. `cargo` exited and became a zombie.
+5. The wrapper read `for raw in proc.stdout:`. **That loop ends on EOF of
+   the pipe, not on exit of the child.** `proc.wait()` sat behind it and
+   was never reached. One surviving write end held the gate open.
+
+Killing the orphan by hand finished the run *immediately*, printing the
+`exit code 101` it had held for two hours.
+
+The class is wider than the test that triggered it: **a gate that waits
+for a pipe to close instead of for its child to exit can be held open by
+any leaked grandchild.** Every harness here that spawns an external
+process is exposed — the FFI tests spawn Python daemons and C binaries,
+the interop tests spawn `lnsd` and `rnsd`, others spawn docker. So the
+fix belongs in the wrapper, which is one place, and not in each spawn
+site, which is many and will grow.
+
+Three properties, in `scripts/run-with-manifest.py`:
+
+1. **The verdict waits on the child, not on the pipe.** `proc.wait()`
+   runs on the main thread and a reader thread drains stdout, so nothing
+   the wrapper decides depends on EOF ever arriving. This is the property
+   that would have ended the two hours by itself, and the only one that
+   still holds when the other two fail.
+2. **Orphans die with the gate.** The child is spawned with
+   `start_new_session=True`, so it leads its own process group, and the
+   whole group is killed once the child has exited — SIGTERM, then
+   SIGKILL after a short grace, because what leaks here is daemons
+   holding sockets, tempdirs and sometimes a serial port. The pipe then
+   closes on its own and the tail of the output is drained normally. The
+   cost on a clean run is one `/proc` scan that finds nothing.
+3. **A hard timeout that reports.** Default 1800 s per wrapped command,
+   overridable with `--timeout` per gate and `LEVICULUM_GATE_TIMEOUT`
+   globally. On expiry the gate exits 124 — `timeout(1)`'s code — naming
+   itself, how long it waited and what was still alive. The per-line
+   flush that already existed makes the partial log true for free.
+
+And the reporting rule, which is not decoration: **if the gate had to
+kill survivors, it says so, by pid and command line.** A leaked daemon is
+a bug in the test that leaked it, and a gate that cleans up silently
+hides the bug it just worked around. The manifest carries the same facts
+(`timed_out`, `killed`, `survived_sigkill`) so a nightly that kept only
+the JSON can still see it.
+
+What none of this reaches: an orphan that calls `setsid()` has left the
+group and survives the kill. It cannot hold the gate open — property 1
+does not care — but it is still alive afterwards, and the reader thread
+has to be abandoned with the tail of the log unwritten. Both facts are
+printed rather than swallowed. Interrupting the wrapper is also no longer
+free: `start_new_session` detaches the child from the terminal's
+foreground group, so INT/TERM/HUP are relayed by hand, or a Ctrl-C would
+trade the hang at the end for an escape at the start.
+
+### A harness that spawns a process must ensure it dies with the harness
+
+The wrapper is a backstop, not an excuse. The rule for the spawn sites:
+
+> **A harness that spawns an external process must ensure that process
+> dies with the harness however the harness dies — not only when it exits
+> cleanly.**
+
+Relying on Rust's `Drop` to kill a child satisfies the "cleanly" half and
+nothing else: an abort skips unwinding, and so does a SIGKILL of the test
+binary. The Linux answer is `PR_SET_PDEATHSIG` on the child, set after
+the fork and before the exec, so the kernel signals it when its parent
+dies for any reason. `Drop` then becomes the polite path rather than the
+only one.
+
+Auditing every spawn site against this rule is its own batch; the rule is
+written here first so the next harness written is written correctly, and
+so the audit has something to audit against.
+
 ## Standing canaries
 
 Every gate on this page carries a permanent pair, checked before it
@@ -476,6 +564,24 @@ reports anything else:
   the run fails the gate.
 - **B, manifest check**: a test deliberately in no gate that must always
   be reported, and one in a gate that must never be.
+- **B, gate termination**: a child that leaks a grandchild holding the
+  gate's stdout and then exits — the wrapper must report the child's exit
+  status promptly and must **name** what it killed — paired with a child
+  that leaks nothing, which must report no kill at all, because a kill
+  claimed on every green run is noise and noise is how a real one goes
+  unread. Two further arms: a child that never exits, which must produce
+  the named timeout rather than a wait, and an orphan that escapes the
+  process group with its own `setsid()`, which must not delay the verdict
+  past the drain grace. This canary is **bounded from outside the thing
+  it tests** — a watchdog in the canary kills the grandchild by an argv
+  marker after twenty seconds, so a regression fails in twenty seconds
+  instead of wedging the suite the way the incident wedged the run.
+  Walking into that trap while fixing it would be poor form. It costs
+  about 0.85 s per wrapped gate, which is the price of the only check
+  that can see a wrapper that has stopped terminating: every other gate
+  on this page reports nothing at all when that happens, including the
+  parser canary in the same script, which passes happily while the run it
+  belongs to never ends.
 - **C, citation guard**: a deliberately drifted citation that must be
   reported. The existing guard has floor asserts against parser rot; the
   canary is the stronger form.
@@ -632,7 +738,11 @@ one line shape and no claim. B emits manifests from every
 host gate that runs tests, and `just complete` in the `extensive` tier
 runs the whole workspace by construction, so no ordinary test is outside
 the union; the check that reads that union, and the staleness bound that
-ages manifests out, are unbuilt. A is unbuilt.
+ages manifests out, are unbuilt. Its wrapper terminates on its child
+rather than on the pipe, kills the child's process group and reports what
+it killed, and gives up at 1800 s with a named failure; the spawn-site
+rule that would stop the leaks upstream is written and unaudited. A is
+unbuilt.
 
 All three are subject to the rule they enforce. The standing canaries
 above are the demonstration made permanent, because a one-time one

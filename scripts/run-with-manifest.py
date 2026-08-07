@@ -63,15 +63,45 @@ as live as its writer, so step 2 must age a gate out against the manifest that
 gate itself emits -- which is the point of writing one per `{{manifest}}`
 invocation -- and never against a signal produced somewhere else.
 
-STANDING CANARY
----------------
-canary() runs before anything real is parsed, on every invocation. It feeds
-the parser a fixture holding tests that must appear in a manifest and tests
-that must never, plus a deliberately miscounted unit that the reconciler must
-reject. A manifest writer that silently stops writing -- a libtest format
-change, a regex that stops matching -- is green forever, which is the defect
-the concept page exists to remove; a one-time demonstration at implementation
-time decays.
+A GATE MUST PASS, FAIL, OR SAY IT GAVE UP
+-----------------------------------------
+It must never end a fourth way: still running, verdict already determined,
+nobody told. On 2026-08-07 `just standard` sat for two hours holding a red it
+had decided in its first minute, and was found by noticing a log's mtime.
+
+The mechanism, end to end. A leviculum-ffi test aborted in a destructor;
+SIGABRT skips unwinding, so the `Drop` that would have killed the
+scripts/test_daemon.py it had spawned never ran. The orphaned daemon had
+inherited cargo's stdout, cargo exited and became a zombie, and the read loop
+here kept reading -- `for raw in proc.stdout:` ends on **EOF of the pipe**, not
+on **exit of the child**, and one surviving write end holds it open forever.
+`proc.wait()` sat behind that loop and was never reached. Killing the orphan by
+hand ended the run instantly with the exit code it had already had.
+
+The class is wider than the one test: **a gate that waits for a pipe to close
+instead of for its child to exit can be held open by any leaked grandchild**,
+and every harness here that spawns an external process (Python daemons, C
+binaries, lnsd/rnsd, docker) can leak one. So the fix is in the wrapper, not in
+the test that leaked. See run_command() for the three properties and
+reaping_canary() for the standing pair that keeps them true.
+
+STANDING CANARIES
+-----------------
+Both run before anything real does, on every invocation.
+
+canary() feeds the parser a fixture holding tests that must appear in a
+manifest and tests that must never, plus a deliberately miscounted unit that
+the reconciler must reject. A manifest writer that silently stops writing -- a
+libtest format change, a regex that stops matching -- is green forever, which
+is the defect the concept page exists to remove; a one-time demonstration at
+implementation time decays.
+
+reaping_canary() spawns a child that leaks a grandchild holding the pipe and
+asserts this wrapper still terminates with the child's exit status, names what
+it killed, and claims to have killed nothing when nothing leaked -- plus that
+the timeout fires and reports. It bounds itself from the outside, so a
+regression fails it in seconds instead of wedging the suite the way the real
+thing wedged the run.
 """
 
 from __future__ import annotations
@@ -82,16 +112,22 @@ import json
 import os
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SCHEMA = 1
+# 2 (2026-08-07): timeout_s / timed_out / killed / survived_sigkill. Additive,
+# but step 2 must be able to tell "this gate answered" from "this gate gave up",
+# and a reader that cannot see the difference would count a timed-out gate's
+# partial manifest as coverage.
+SCHEMA = 2
 
 # libtest, one result per line: `test <name> ... <status>`. The name may hold
 # spaces (doc-tests: `leviculum-micron/src/lib.rs - (line 14)`), so the name is
@@ -364,7 +400,346 @@ class Parser:
             self.pending = None
 
 
-# --- standing canary --------------------------------------------------------
+# --- running the command, and surviving what it leaves behind ---------------
+#
+# Three properties, none of which is "the tests stop leaking" -- that is a bug
+# per leaking test, and this is the wrapper that must not be hostage to any of
+# them. See the module docstring for the incident.
+#
+# 1. THE VERDICT WAITS ON THE CHILD, NOT ON THE PIPE. proc.wait() runs on the
+#    main thread; a reader thread drains stdout. Nothing this script decides
+#    depends on EOF ever arriving. That property alone ends the two hours, and
+#    it is the one that still holds when everything below fails.
+# 2. THE ORPHANS DIE WITH THE GATE. start_new_session=True makes the child lead
+#    its own process group, and the whole group is killed once the child has
+#    exited. The pipe then closes on its own, so the tail of the output is
+#    drained normally rather than abandoned, and nothing is left running.
+# 3. A HARD TIMEOUT THAT REPORTS. Named gate, waited duration, and what was
+#    still alive; the log is already flushed per line, so it is on disk.
+#
+# What no property covers: an orphan that calls setsid() has left the group and
+# survives the kill. It cannot hold the gate open -- property 1 does not care
+# -- but it is still alive afterwards and the reader thread has to be
+# abandoned. Both facts are reported rather than swallowed.
+
+# Per wrapped command, not per tier. Chosen from what the manifests on this
+# host actually recorded for an honest run: the longest is
+# `workspace-all-targets` at 493 s, then `rnsd-interop` at 352 s and
+# `status-parity` at 169 s. 1800 s is ~3.6x the longest honest run measured,
+# which leaves room for a cold CARGO_TARGET_DIR (the first wrapped command in a
+# fresh tree carries the workspace build; `just standard` cold is 20-40 min for
+# the whole tier) without leaving room for a two-hour hang. It is also half the
+# only backstop anyone had already accepted -- the nightly's `timeout 3600`
+# around all of `just complete` -- so a per-command budget cannot swallow the
+# per-tier one. Raise it for one gate with --timeout, for all of them with
+# LEVICULUM_GATE_TIMEOUT; 0 disables, which is what a by-hand soak wants.
+DEFAULT_TIMEOUT_S = 1800.0
+# `timeout(1)`'s code for "the command was still running when the budget ran
+# out". Borrowed rather than invented so a caller that already knows one number
+# does not have to learn a second.
+TIMEOUT_EXIT = 124
+# Long enough for a daemon to put down a socket, a tempdir or (on the rig) a
+# serial port; short enough that a verdict already decided is not held up by
+# the bug that is being reported. Only ever paid when something did leak.
+KILL_GRACE_S = 2.0
+# After the group is gone the pipe's last write end is closed, so EOF is
+# immediate. This is the allowance for the case where it is not -- an escaped
+# setsid() orphan -- after which the reader is abandoned and said to be.
+DRAIN_GRACE_S = 5.0
+
+
+class Outcome:
+    """How one wrapped command ended, beyond its exit status."""
+
+    def __init__(self) -> None:
+        self.rc: int | None = None
+        self.timed_out = False
+        self.timeout_s: float | None = None
+        self.duration_s = 0.0
+        # Alive in the child's process group after the child itself was gone
+        # (or, on a timeout, alive when the budget ran out). Named, not counted.
+        self.survivors: list[tuple[int, str]] = []
+        self.stubborn: list[tuple[int, str]] = []  # still there after SIGKILL
+        self.reader_stuck = False  # EOF never came; the tail of the log is lost
+
+    def clean(self) -> bool:
+        return not (self.timed_out or self.survivors or self.stubborn or self.reader_stuck)
+
+
+def proc_snapshot() -> list[tuple[int, int, str, str]]:
+    """(pid, pgid, state, command) for every process /proc will show us.
+
+    Linux-specific, and naming is the whole point of it: "killed 1 survivor" is
+    a workaround, "killed PID 960389 scripts/test_daemon.py --rns-port 43153"
+    is a bug report against the test that leaked it. On a kernel without /proc
+    the killing still works and only the names are missing.
+    """
+    procfs = Path("/proc")
+    if not procfs.is_dir():
+        return []
+    me = os.getpid()
+    rows = []
+    for entry in procfs.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == me:
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+            # comm sits in parens and may itself contain spaces and parens, so
+            # the fields after it are positional from the LAST ')': state,
+            # ppid, pgrp.
+            head, _, tail = stat.rpartition(")")
+            fields = tail.split()
+            state, pgid = fields[0], int(fields[2])
+            comm = head.partition("(")[2]
+            cmdline = (entry / "cmdline").read_bytes()
+        except (OSError, ValueError, IndexError):
+            continue  # it exited between the readdir and the read
+        cmd = " ".join(cmdline.decode("utf-8", "replace").rstrip("\0").split("\0"))
+        rows.append((pid, pgid, state, cmd or f"[{comm}]"))
+    return sorted(rows)
+
+
+def group_members(pgid: int) -> list[tuple[int, str]]:
+    """Live, non-zombie members of process group `pgid`, as (pid, command).
+
+    Zombies are skipped: an exited process holds no file descriptor, so it can
+    neither hold the pipe open nor be killed again.
+    """
+    return [(pid, cmd) for pid, gid, state, cmd in proc_snapshot() if gid == pgid and state != "Z"]
+
+
+def signal_group(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def wait_for_empty(pgid: int, grace_s: float) -> bool:
+    deadline = time.monotonic() + grace_s
+    while time.monotonic() < deadline:
+        if not group_members(pgid):
+            return True
+        time.sleep(0.05)
+    return not group_members(pgid)
+
+
+def reap_group(pgid: int, grace_s: float = KILL_GRACE_S) -> tuple[list, list]:
+    """Kill what is left of a process group. Returns (killed, stubborn).
+
+    SIGTERM then SIGKILL rather than a plain kill, and the extra step is worth
+    it here: what leaks in this repo is daemons -- test_daemon.py, lnsd, rnsd --
+    which hold a listening socket, a tempdir and sometimes a serial port, and a
+    SIGTERM lets them put those down. The cost is bounded and conditional: when
+    nothing leaked the member list is empty and this returns without signalling
+    anything, so the ordinary green run pays one /proc scan.
+    """
+    alive = group_members(pgid)
+    if not alive:
+        return [], []
+    signal_group(pgid, signal.SIGTERM)
+    if wait_for_empty(pgid, grace_s):
+        return alive, []
+    signal_group(pgid, signal.SIGKILL)
+    wait_for_empty(pgid, 1.0)
+    return alive, group_members(pgid)
+
+
+def forward_signals(pgid: int):
+    """Relay INT/TERM/HUP to the child's group; returns a restore callable.
+
+    start_new_session detaches the child from the terminal's foreground process
+    group, so a Ctrl-C that used to reach cargo directly now reaches only this
+    wrapper. Without the relay, interrupting a gate would leave a whole cargo
+    tree running -- trading a hang at the end for an escape at the start.
+    """
+    previous: dict[int, object] = {}
+
+    def relay(signum, _frame):
+        signal_group(pgid, signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            previous[sig] = signal.signal(sig, relay)
+        except (ValueError, OSError):  # not the main thread, or no such signal
+            pass
+
+    def restore() -> None:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+
+    return restore
+
+
+def run_command(
+    command: list[str],
+    *,
+    cwd: str,
+    env: dict,
+    on_line,
+    timeout_s: float | None,
+    on_spawn=None,
+    kill_grace_s: float = KILL_GRACE_S,
+    drain_grace_s: float = DRAIN_GRACE_S,
+) -> Outcome:
+    """Run `command`, hand every output line to `on_line`, and always return.
+
+    `on_spawn` is handed the Popen the moment it exists; reaping_canary() uses
+    it to arm its own watchdog, and nothing in the real path needs it.
+    """
+    outcome = Outcome()
+    outcome.timeout_s = timeout_s
+    started = time.monotonic()
+
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        errors="replace",
+        # Property 2: its own session, so its own process group, so one
+        # os.killpg reaches every descendant that did not deliberately leave.
+        start_new_session=True,
+    )
+    assert proc.stdout is not None
+    # start_new_session makes the child a session and group leader, so its pgid
+    # IS its pid. Deliberately not read back with os.getpgid(): between the fork
+    # and the child's setsid() the parent would observe its OWN group, and a
+    # killpg on that number is the one mistake here that is worse than the hang.
+    # If start_new_session had somehow not taken, this group is empty and the
+    # reap below finds nothing to kill, which is the safe direction to fail in.
+    pgid = proc.pid
+    abandoned = threading.Event()
+
+    def pump() -> None:
+        try:
+            for raw in proc.stdout:
+                on_line(raw)
+        except Exception:
+            # Once abandoned, the log this writes to is closed under it and the
+            # descriptor may be too. That is the expected end of an abandoned
+            # reader, not a failure to report.
+            if not abandoned.is_set():
+                raise
+
+    reader = threading.Thread(target=pump, name="gate-output", daemon=True)
+    reader.start()
+
+    restore = forward_signals(pgid)
+    if on_spawn is not None:
+        on_spawn(proc)
+    try:
+        # Property 1. Everything this script decides hangs off this line, and
+        # this line cannot be held open by anything the child leaked.
+        try:
+            outcome.rc = proc.wait(timeout=timeout_s if timeout_s else None)
+        except subprocess.TimeoutExpired:
+            outcome.timed_out = True
+    finally:
+        restore()
+
+    # The child is done deciding, one way or the other, so anything still in
+    # its group is either the timed-out child itself or something a test
+    # leaked. Both are named before they are killed (property 3).
+    outcome.survivors, outcome.stubborn = reap_group(pgid, kill_grace_s)
+    if outcome.timed_out:
+        try:
+            outcome.rc = proc.wait(timeout=kill_grace_s + 1.0)
+        except subprocess.TimeoutExpired:
+            outcome.rc = None
+
+    reader.join(drain_grace_s)
+    if reader.is_alive():
+        # Nothing in the group holds the pipe any more, so a reader still
+        # blocked is waiting on a write end that escaped the group with its own
+        # setsid(). It is ABANDONED here, not interrupted: proc.stdout.close()
+        # from this thread would block on the very lock the reader holds while
+        # inside read(), which is the same hang one level down -- measured, on
+        # 2026-08-07, while building this. The thread is a daemon, so it costs
+        # the interpreter nothing at exit, and `abandoned` tells it to die
+        # quietly when the log closes under it.
+        abandoned.set()
+        outcome.reader_stuck = True
+    else:
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+
+    outcome.duration_s = time.monotonic() - started
+    return outcome
+
+
+def outcome_report(gate: str, outcome: Outcome) -> list[str]:
+    """The lines a gate must print about how it ended. Empty when it ended well.
+
+    Property 3 in full: a gate that cleans up silently hides the bug it just
+    worked around, so every kill is attributed to a pid and a command line.
+    """
+    lines: list[str] = []
+    if outcome.timed_out:
+        lines.append(
+            f"[manifest] TIMED OUT: gate `{gate}` exceeded its "
+            f"{outcome.timeout_s:.0f}s budget and was killed after waiting "
+            f"{outcome.duration_s:.0f}s."
+        )
+        lines.append(
+            "[manifest]   This is a named failure, not a verdict about the "
+            "tests: the gate gave up."
+        )
+    if outcome.survivors:
+        what = "still alive when the budget ran out" if outcome.timed_out else (
+            "still alive after the gate's own process had exited"
+        )
+        lines.append(f"[manifest] KILLED {len(outcome.survivors)} process(es) {what}:")
+        for pid, cmd in outcome.survivors:
+            lines.append(f"[manifest]   PID {pid}: {cmd}")
+        if not outcome.timed_out:
+            lines.append(
+                "[manifest]   A leaked process is a bug in whatever spawned it, "
+                "not a quirk of this wrapper."
+            )
+            lines.append(
+                "[manifest]   It had inherited this gate's stdout, so before "
+                "2026-08-07 it would have"
+            )
+            lines.append(
+                "[manifest]   held the gate open forever instead of letting it "
+                "report. File it."
+            )
+    if outcome.stubborn:
+        lines.append(
+            f"[manifest] {len(outcome.stubborn)} process(es) survived SIGKILL "
+            "(uninterruptible, or not ours):"
+        )
+        for pid, cmd in outcome.stubborn:
+            lines.append(f"[manifest]   PID {pid}: {cmd}")
+    if outcome.reader_stuck:
+        lines.append(
+            "[manifest] The output pipe never reached EOF even with the child's "
+            "process group gone."
+        )
+        lines.append(
+            "[manifest]   Something escaped the group (setsid) and still holds "
+            "a write end. The"
+        )
+        lines.append(
+            "[manifest]   verdict below is correct; the last lines of the log "
+            "may be missing."
+        )
+    return lines
+
+
+# --- standing canary: the parser --------------------------------------------
 #
 # Runs before the real command, every invocation. Two halves, as
 # docs/src/concepts/checks-and-citations.md §Standing canaries requires: a test
@@ -463,6 +838,270 @@ def canary() -> bool:
     return True
 
 
+# --- standing canary: the reaping wrapper -----------------------------------
+#
+# Also on every invocation. The parser canary above cannot see this failure at
+# all -- a wrapper that hangs has parsed everything correctly -- and the shape
+# of the defect is exactly the shape §Standing canaries exists for: a gate that
+# stops terminating reports nothing forever, and nothing else notices.
+
+# How long the canary's own watchdog waits before forcing the pipe shut. Two
+# orders of magnitude above what a passing arm takes (~0.1 s) and two orders
+# below the hang it exists to catch. A regression costs the suite this, once.
+CANARY_BOUND_S = 20.0
+# Not 0 and not 1: an exit status that no interpreter, signal or shell produces
+# by accident, so "the child's status was passed through" cannot pass by luck.
+CANARY_CHILD_EXIT = 42
+# Long enough that the grandchild is certainly still holding the pipe when the
+# child exits, and irrelevant afterwards because it gets killed.
+CANARY_GRANDCHILD_SLEEP_S = 300
+
+# The defect, reproduced in nine lines: a child that spawns a grandchild which
+# inherits the gate's stdout, then exits without killing it. This is what an
+# aborted Rust test does when SIGABRT skips the Drop that would have killed its
+# daemon; the wrapper cannot tell the two apart and must not need to.
+CANARY_LEAK_SOURCE = """
+import subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep({sleep})  # {marker}"])
+print("canary: leaked a grandchild holding this pipe, now exiting", flush=True)
+sys.exit({code})
+"""
+CANARY_CLEAN_SOURCE = """
+import sys
+print("canary: leaked nothing", flush=True)
+sys.exit(0)
+"""
+CANARY_HANG_SOURCE = """
+import sys, time
+print("canary: never exiting", flush=True)
+time.sleep({sleep})
+"""
+# The degradation path. This orphan calls setsid() too, so it leaves the group
+# and the reap cannot reach it: it goes on holding the pipe after the gate has
+# its verdict. The gate must report anyway, on time, and say the tail of the
+# log may be missing. Nothing here can make that orphan die -- the property is
+# that the gate stops depending on it.
+CANARY_ESCAPEE_SOURCE = """
+import subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep({sleep})  # {marker}"],
+                 start_new_session=True)
+print("canary: leaked an orphan that escaped the process group", flush=True)
+sys.exit({code})
+"""
+
+
+def kill_by_marker(marker: str) -> None:
+    """SIGKILL every process whose argv carries `marker`.
+
+    The canary's watchdog, and deliberately not a process-group kill: the arm
+    that matters runs against a wrapper that may have regressed to leaving the
+    child in OUR group, where a killpg would take this script with it. A marker
+    unique to this invocation is the only handle that is correct in both worlds.
+    """
+    for pid, _pgid, _state, cmd in proc_snapshot():
+        if marker in cmd:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def canary_arm(
+    source: str,
+    *,
+    timeout_s: float | None,
+    marker: str | None,
+    drain_grace_s: float = 2.0,
+):
+    """Run one canary child under a watchdog. Returns (outcome, lines, tripped).
+
+    `tripped` is the whole point: it is True when the watchdog had to force the
+    pipe shut, which is precisely the failure -- the wrapper did not terminate
+    on its own and, on the pre-2026-08-07 code, would have waited forever.
+    """
+    lines: list[str] = []
+    tripped = threading.Event()
+    timers: list[threading.Timer] = []
+
+    def on_spawn(proc: subprocess.Popen) -> None:
+        def trip() -> None:
+            tripped.set()
+            if marker:
+                kill_by_marker(marker)
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+        timer = threading.Timer(CANARY_BOUND_S, trip)
+        timer.daemon = True
+        timer.start()
+        timers.append(timer)
+
+    try:
+        outcome = run_command(
+            [sys.executable, "-c", source],
+            cwd=str(ROOT),
+            env=dict(os.environ),
+            on_line=lines.append,
+            timeout_s=timeout_s,
+            on_spawn=on_spawn,
+            kill_grace_s=0.5,
+            drain_grace_s=drain_grace_s,
+        )
+    finally:
+        for timer in timers:
+            timer.cancel()
+        if marker:
+            kill_by_marker(marker)  # belt: an arm that raised leaves nothing behind
+    return outcome, lines, tripped.is_set()
+
+
+def reaping_canary() -> bool:
+    """True if a leaked grandchild still cannot hold this wrapper open.
+
+    Three arms, and the pair the concept page asks for is the first two: a run
+    that must report a kill and a run that must report none. Without the
+    negative arm, a wrapper that killed and blamed something on every green run
+    would print noise that everybody learns to skip, which is the same defect
+    as printing nothing.
+
+    BOUNDED FROM OUTSIDE THE THING UNDER TEST. The watchdog is a timer in this
+    process that kills the grandchild by an argv marker, so the pipe closes by
+    force whatever run_command() does or does not do. A regression therefore
+    fails here in CANARY_BOUND_S seconds; it does not wedge the suite for two
+    hours the way the incident wedged the run. Walking into that trap while
+    fixing it would be poor form.
+    """
+
+    def fail(msg: str) -> bool:
+        sys.stderr.write(f"[manifest] REAPING CANARY FAILED -- {msg}\n")
+        sys.stderr.write(
+            "[manifest]   A gate must pass, fail, or say it gave up. This checks\n"
+            "[manifest]   that a process a test leaked cannot hold it in a fourth\n"
+            "[manifest]   state instead -- alive, verdict decided, nobody told.\n"
+            "[manifest]   Fix run_command() in scripts/run-with-manifest.py; do\n"
+            "[manifest]   not skip it, because a wrapper that stops terminating\n"
+            "[manifest]   reports nothing forever and nothing else notices.\n"
+        )
+        return False
+
+    named = Path("/proc").is_dir()  # elsewhere we can kill but not name
+
+    # Arm 1: the incident. A grandchild holds the pipe after the child is gone.
+    marker = f"leviculum-canary-{os.getpid()}-{os.urandom(4).hex()}"
+    outcome, lines, tripped = canary_arm(
+        CANARY_LEAK_SOURCE.format(
+            sleep=CANARY_GRANDCHILD_SLEEP_S, marker=marker, code=CANARY_CHILD_EXIT
+        ),
+        timeout_s=CANARY_BOUND_S * 2,  # must never be what ends this arm
+        marker=marker,
+    )
+    if tripped:
+        return fail(
+            "the wrapper did not return after its child exited; the canary's own "
+            "watchdog had to kill the leaked grandchild to unblock it. This is "
+            "the two-hour hang of 2026-08-07, caught in "
+            f"{CANARY_BOUND_S:.0f}s."
+        )
+    if outcome.timed_out:
+        return fail("the leak arm hit the hard timeout instead of the child's exit")
+    if outcome.rc != CANARY_CHILD_EXIT:
+        return fail(
+            f"the child's exit status was not passed through: got {outcome.rc}, "
+            f"want {CANARY_CHILD_EXIT}"
+        )
+    if not any("leaked a grandchild" in line for line in lines):
+        return fail("the child's output never reached the reader")
+    if not outcome.survivors:
+        return fail(
+            "a leaked grandchild was not reported as killed. The gate terminated, "
+            "but silently cleaning up hides the bug in the test that leaked"
+        )
+    if named and not any(marker in cmd for _pid, cmd in outcome.survivors):
+        return fail(
+            f"the survivor was reported without naming it: {outcome.survivors}. "
+            "A count is a workaround; a pid and a command line is a bug report"
+        )
+    if outcome.stubborn:
+        return fail(f"the leaked grandchild survived SIGKILL: {outcome.stubborn}")
+
+    # Arm 2: the negative control. Nothing leaked, so nothing may be blamed.
+    outcome, _lines, tripped = canary_arm(
+        CANARY_CLEAN_SOURCE, timeout_s=CANARY_BOUND_S * 2, marker=None
+    )
+    if tripped or outcome.rc != 0:
+        return fail(f"a child that leaked nothing did not exit cleanly: rc={outcome.rc}")
+    if not outcome.clean():
+        return fail(
+            f"a clean run reported survivors {outcome.survivors} / stubborn "
+            f"{outcome.stubborn}. A kill reported every run is noise, and noise "
+            "is how a real one goes unread"
+        )
+
+    # Arm 3: the backstop. A child that never exits must produce a named
+    # failure, not a wait. Short budget on purpose -- the property under test is
+    # that the budget is enforced at all, and it costs the canary a quarter of
+    # a second to prove it.
+    outcome, _lines, tripped = canary_arm(
+        CANARY_HANG_SOURCE.format(sleep=CANARY_GRANDCHILD_SLEEP_S),
+        timeout_s=0.25,
+        marker=None,
+    )
+    if tripped:
+        return fail("the hard timeout did not fire; the canary's watchdog ended the arm")
+    if not outcome.timed_out:
+        return fail(f"a child that never exits was not timed out (rc={outcome.rc})")
+    if not outcome_report("canary", outcome):
+        return fail("a timed-out gate produced no report of what happened")
+    if outcome.stubborn:
+        return fail(f"the timed-out child survived: {outcome.stubborn}")
+
+    # Arm 4: the degradation. An orphan with its own session cannot be reaped,
+    # so it holds the pipe for as long as it likes. The gate must report within
+    # its drain grace regardless, and must say the tail may be missing.
+    #
+    # This arm exists because the first attempt at the fix failed it: closing
+    # the read end to interrupt the reader blocks on the lock the reader holds
+    # inside read(), which is the original hang one level down. Nothing else
+    # here would have caught that -- arms 1 to 3 all pass with it.
+    marker = f"leviculum-canary-escapee-{os.getpid()}-{os.urandom(4).hex()}"
+    grace = 0.5
+    outcome, lines, tripped = canary_arm(
+        CANARY_ESCAPEE_SOURCE.format(
+            sleep=CANARY_GRANDCHILD_SLEEP_S, marker=marker, code=CANARY_CHILD_EXIT
+        ),
+        timeout_s=CANARY_BOUND_S * 2,
+        marker=marker,
+        drain_grace_s=grace,
+    )
+    if tripped:
+        return fail(
+            "an orphan that escaped the process group held the gate open; the "
+            "canary's watchdog had to kill it. The reap is best-effort, but the "
+            "verdict must not depend on it"
+        )
+    if outcome.rc != CANARY_CHILD_EXIT:
+        return fail(
+            f"the child's exit status was lost behind an escaped orphan: got "
+            f"{outcome.rc}, want {CANARY_CHILD_EXIT}"
+        )
+    if outcome.duration_s > grace + CANARY_BOUND_S / 4:
+        return fail(
+            f"the gate took {outcome.duration_s:.1f}s to report behind an escaped "
+            f"orphan, with a drain grace of {grace}s. It is waiting on the pipe "
+            "again"
+        )
+    if not outcome.reader_stuck:
+        return fail(
+            "an escaped orphan still held the pipe, but the gate did not say the "
+            "tail of its log may be missing"
+        )
+    if not any("escaped the process group" in line for line in lines):
+        return fail("the child's output never reached the reader")
+    return True
+
+
 # --- manifest ---------------------------------------------------------------
 
 
@@ -490,6 +1129,16 @@ def main() -> int:
         description="Run a test command and record the tests it executed."
     )
     ap.add_argument("--gate", required=True, help="manifest name, e.g. mvr")
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            f"budget for this gate (default {DEFAULT_TIMEOUT_S:.0f}s, or "
+            "$LEVICULUM_GATE_TIMEOUT; 0 disables)"
+        ),
+    )
     ap.add_argument("command", nargs=argparse.REMAINDER)
     args = ap.parse_args()
 
@@ -499,7 +1148,25 @@ def main() -> int:
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.gate):
         ap.error(f"gate name {args.gate!r} must be lowercase kebab-case")
 
+    # Per-gate flag beats the global env var beats the default. The env var is
+    # what a soak or a cold-cache first run reaches for; the flag is what the
+    # Justfile uses when one gate is honestly slower than the rest.
+    timeout_s = args.timeout
+    if timeout_s is None:
+        raw = os.environ.get("LEVICULUM_GATE_TIMEOUT")
+        if raw:
+            try:
+                timeout_s = float(raw)
+            except ValueError:
+                ap.error(f"LEVICULUM_GATE_TIMEOUT={raw!r} is not a number of seconds")
+        else:
+            timeout_s = DEFAULT_TIMEOUT_S
+    if timeout_s < 0:
+        ap.error("--timeout must not be negative (0 disables the budget)")
+
     if not canary():
+        return 1
+    if not reaping_canary():
         return 1
 
     by_src, by_crate = target_index()
@@ -517,31 +1184,49 @@ def main() -> int:
     failed_log_path = out_dir / f"{args.gate}.failed.log"
 
     started = time.time()
-    proc = subprocess.Popen(
-        command,
-        cwd=os.getcwd(),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        errors="replace",
-    )
-    assert proc.stdout is not None
     # Line-buffered and flushed per line: a run that is killed, times out or
-    # panics its way out still leaves everything it had printed on disk.
+    # panics its way out still leaves everything it had printed on disk. That
+    # is what makes the timeout's "and here is the partial log" true for free.
     with open(log_path, "w", errors="replace") as log:
         log.write(f"$ {shlex.join(command)}\n")
         log.flush()
-        for raw in proc.stdout:
+
+        def on_line(raw: str) -> None:
             sys.stdout.write(raw)
             sys.stdout.flush()
             log.write(raw)
             log.flush()
             parser.feed(raw)
-        rc = proc.wait()
+
+        outcome = run_command(
+            command,
+            cwd=os.getcwd(),
+            env=env,
+            on_line=on_line,
+            timeout_s=timeout_s,
+        )
+        # How the run ended goes into the log as well as onto stderr. A nightly
+        # keeps the log and throws the terminal away, and "which gate gave up,
+        # after how long, with what still alive" is the part it must keep.
+        report = outcome_report(args.gate, outcome)
+        for line in report:
+            sys.stderr.write(line + "\n")
+            log.write(line + "\n")
+        log.flush()
     parser.finish()
     finished = time.time()
+
+    if outcome.timed_out:
+        rc = TIMEOUT_EXIT
+    elif outcome.rc is None:
+        rc = TIMEOUT_EXIT
+    elif outcome.rc < 0:
+        # proc.wait() returns -N for "killed by signal N". Passing that to
+        # sys.exit() would report SIGABRT as 250; the shell convention every
+        # caller here already reads is 128+N.
+        rc = 128 - outcome.rc
+    else:
+        rc = outcome.rc
 
     if rc != 0:
         # Only a failure overwrites the failure log, so the green runs that
@@ -564,6 +1249,13 @@ def main() -> int:
         "finished": datetime.fromtimestamp(finished, timezone.utc).isoformat(),
         "duration_s": round(finished - started, 3),
         "exit_code": rc,
+        # A hang leaves no manifest at all, so these three fields are how the
+        # NEXT reader of a manifest learns that a gate gave up rather than
+        # answered, and what it had to kill to be able to say so.
+        "timeout_s": timeout_s or None,
+        "timed_out": outcome.timed_out,
+        "killed": [{"pid": pid, "command": cmd} for pid, cmd in outcome.survivors],
+        "survived_sigkill": [{"pid": pid, "command": cmd} for pid, cmd in outcome.stubborn],
         "executed": executed,
         "log": str(log_path),
         "failed_log": str(failed_log_path) if rc != 0 else None,

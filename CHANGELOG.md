@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A gate wrapped by `scripts/run-with-manifest.py` waits for its command
+  to exit rather than for the output pipe to close, so a process a test
+  leaked can no longer hold it open: `just standard` spent two hours
+  alive and silent on 2026-08-07 holding a red it had already decided.
+  The command's process group is killed once it has exited, every
+  survivor is reported by pid and command line, and a gate that exceeds
+  its budget (1800 s by default, `--timeout` per gate,
+  `LEVICULUM_GATE_TIMEOUT` globally) exits 124 naming itself, how long it
+  waited and what was still alive. A standing canary spawns a child that
+  leaks a grandchild holding the pipe and fails if the wrapper stops
+  terminating.
 - `just complete`, in the `extensive` tier, runs the whole workspace by
   construction instead of the tiers naming packages; 327 tests were
   executed by no gate (#194).
