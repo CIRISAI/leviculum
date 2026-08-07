@@ -179,6 +179,22 @@ fn singleton_upload_matches_python_msgpack_golden_vector() {
     );
 }
 
+/// A host that refuses an upload has to be able to say so on the wire.
+///
+/// The bytes are Python's, not ours: `RNS.vendor.umsgpack.packb([0xf5])` —
+/// the packer `LXMRouter` imports as `msgpack` — emits `91 cc f5`, and that
+/// is what `LXMPeer.ERROR_INVALID_STAMP`
+/// (reference/LXMF/LXMF/LXMRouter.py:2257-2260) puts on the raw Link packet.
+/// Pinning against our own decoder instead would only prove `encode` and
+/// `decode` agree with each other, which is not the property that matters.
+#[test]
+fn invalid_stamp_signal_encodes_the_python_packers_bytes() {
+    assert_eq!(
+        PropagationSignal::InvalidStamp.encode(),
+        vec![0x91, 0xcc, 0xf5]
+    );
+}
+
 #[test]
 fn invalid_stamp_signal_is_exact_and_strict() {
     assert_eq!(

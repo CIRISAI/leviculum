@@ -222,6 +222,23 @@ pub enum PropagationSignal {
 }
 
 impl PropagationSignal {
+    /// Serialize the signalling packet a host sends when it refuses an upload
+    /// — the propagation-node HOST side (leviculum#38).
+    ///
+    /// Python answers a client upload carrying an invalid propagation stamp
+    /// by packing `LXMPeer.ERROR_INVALID_STAMP`
+    /// (reference/LXMF/LXMF/LXMRouter.py:2257-2260) into a raw Link packet and
+    /// then tearing the link down. Tearing down is the caller's business;
+    /// these are the bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut output = Vec::new();
+        msgpack::array(&mut output, 1);
+        match self {
+            Self::InvalidStamp => msgpack::uint(&mut output, PeerError::InvalidStamp.code() as u64),
+        }
+        output
+    }
+
     /// Decode the Python signalling packet `[LXMPeer.ERROR_INVALID_STAMP]`.
     pub fn decode(bytes: &[u8]) -> Result<Self, PropagationError> {
         let mut position = 0;
