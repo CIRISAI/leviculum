@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use lblogd::content::{Reloader, SnapshotRx, Sources};
+use lblogd::counter::Counter;
 use lblogd::files::FileArea;
 use lblogd::render::BlogMeta;
 use lblogd::web::{run_web, AcmeSettings, WebConfig, WebError};
@@ -95,6 +96,9 @@ async fn serve_plain(content: SnapshotRx) -> SocketAddr {
             https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
         },
         content,
+        // These tests are about serving, not counting; a disabled counter
+        // keeps them off the filesystem.
+        std::sync::Arc::new(Counter::disabled()),
     ));
     wait_for_listener(bind).await;
     bind
@@ -349,6 +353,7 @@ async fn acme_mode_still_requires_domains() {
             https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
         },
         content,
+        std::sync::Arc::new(Counter::disabled()),
     )
     .await
     .expect_err("empty domains must be rejected");

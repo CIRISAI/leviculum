@@ -18,10 +18,10 @@
 # Full documentation: /usr/share/doc/lblogd/README.md
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# Node identity and the ACME certificate cache. Owned by the `lblogd`
-# system user; the destination hash is derived from an identity stored
-# here, so keeping this directory is what keeps the blog's address
-# stable across restarts and upgrades.
+# Node identity, the ACME certificate cache, and the per-day counts file.
+# Owned by the `lblogd` system user; the destination hash is derived from
+# an identity stored here, so keeping this directory is what keeps the
+# blog's address stable across restarts and upgrades.
 data_dir = "/var/lib/lblogd"
 
 # The posts themselves: one Markdown file per post. Drop a file in and
@@ -59,6 +59,22 @@ title = "A Leviculum blog"
 # about = "/etc/lblogd/about.md"
 # Replaces the built-in stylesheet.
 # css = "/etc/lblogd/style.css"
+
+# How much was served, one line per day, appended to
+# /var/lib/lblogd/counts.log. On by default: it records request totals
+# and no addresses, and costs about a hundred bytes a day.
+#
+#   DAY date=2026-08-07 tz=UTC mesh_requests=41 mesh_sessions=12 \
+#       mesh_identified_requests=0 web_requests=308 web_not_found=57 \
+#       clock_behind=0 written=2026-08-07T23:59:12Z
+#
+# Requests and links, not visitors. A Reticulum link is a session, not a
+# person, and the web side deliberately never reads a peer address — so
+# there is no "unique visitors" number here, because neither side can
+# honestly produce one. See the README for the full argument.
+[counter]
+# enabled = true
+# path    = "/var/lib/lblogd/counts.log"
 
 [node]
 # Must match the instance_name of the running Reticulum daemon. "default"

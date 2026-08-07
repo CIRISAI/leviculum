@@ -21,6 +21,20 @@ The area is flat, and a requested name can carry no path separator, so no reques
 
 The web side either obtains its own certificate from Let's Encrypt, or runs plain behind a reverse proxy that terminates TLS. Note that the canonical page URL and the Atom feed are derived from the configured `domains` list even when certificate handling is switched off, so a deployment behind a proxy still has to set that list.
 
+## COUNTING
+
+**lblogd** appends one record per day to a counts file — `counts.log` under `data_dir` unless `[counter] path` says otherwise, and not at all if `[counter] enabled` is false. There is no UI and no HTTP endpoint; the file is the interface:
+
+    DAY date=2026-08-07 tz=UTC mesh_requests=41 mesh_sessions=12 mesh_identified_requests=0 web_requests=308 web_not_found=57 clock_behind=0 written=2026-08-07T23:59:12Z
+
+The counts are requests and links, and are named as such. **They are not visitors.** On the mesh a request arrives on a Reticulum link, and a link is a session, not a person: one reader browsing five pages over one link is one session and five requests, and the same reader tomorrow is a different session. Reticulum discloses who a peer is only when the peer chooses to identify, which fetching a public page never asks for — `mesh_identified_requests` exists so that its zero is measured rather than assumed. On the web side there is a peer address, and **lblogd** never reads it, on disk or in memory: an address would buy a "unique visitors" figure that CGNAT, rotating IPv6 privacy addresses and crawlers make wrong anyway, at the price of making a blog server hold personal data. `web_not_found` is separate so that scans for pages that do not exist can be subtracted instead of inflating the total.
+
+Dates are UTC calendar days, the same midnight a post's mtime fallback uses, and each record says `tz=UTC` so a bare date is still readable a year later.
+
+The file is append-only and each record carries that day's whole running total, so the last record for a date wins and a `kill -9` mid-write can lose at most the line being written — never an earlier day. A clock that steps backwards never reopens a day already written; its counts land on the open day and `clock_behind` records that it happened. The open day is written every five minutes, at every rollover, and once more on `SIGTERM`, and a restart resumes the day from the file rather than starting it again at zero. Each start compacts the file to one record per date.
+
+`awk '$1=="DAY" {print $2, $4}' /var/lib/lblogd/counts.log` is the intended reader.
+
 ## OPTIONS
 
 **--config** *file*
@@ -40,6 +54,9 @@ The web side either obtains its own certificate from Let's Encrypt, or runs plai
 */var/lib/lblogd/files/*
 :   The file area: pictures and other files a post references. Set with `files_dir`, which defaults to a `files` directory beside `posts_dir`. The directory need not exist; without it the blog simply serves no files. Reloaded with the posts.
 
+*/var/lib/lblogd/counts.log*
+:   The per-day request counts. See COUNTING. Moved with `[counter] path`, suppressed entirely with `[counter] enabled = false`.
+
 */var/lib/lblogd/*
 :   Node identity and, when certificate handling is enabled, the ACME certificate cache.
 
@@ -47,6 +64,9 @@ The web side either obtains its own certificate from Let's Encrypt, or runs plai
 
 **SIGHUP**
 :   Re-read the posts directory and the file area. The packaged service maps `systemctl reload lblogd` onto this.
+
+**SIGTERM**, **SIGINT**
+:   Stop. The open day's counts are written out first, so `systemctl stop` and `systemctl restart` do not lose the day so far.
 
 ## EXIT STATUS
 

@@ -23,9 +23,11 @@
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Path as UrlPath, Request, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -35,6 +37,7 @@ use rustls_acme::AcmeConfig;
 use thiserror::Error;
 
 use crate::content::SnapshotRx;
+use crate::counter::Counter;
 use crate::files;
 use crate::render::{
     render_about_html, render_feed_atom, render_index_html, render_post_html, ABOUT_HTML_PATH,
@@ -110,6 +113,11 @@ pub struct WebConfig {
 /// The handlers read the snapshot per request, so a reload takes effect on
 /// the next request without touching the listener.
 pub fn build_router(content: SnapshotRx) -> Router {
+    build_router_counting(content, Arc::new(Counter::disabled()))
+}
+
+/// [`build_router`], with every request counted into `counter`.
+pub fn build_router_counting(content: SnapshotRx, counter: Arc<Counter>) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/posts/{slug}", get(post_page))
@@ -118,6 +126,28 @@ pub fn build_router(content: SnapshotRx) -> Router {
         .route(&format!("{}{{name}}", files::WEB_PREFIX), get(file_asset))
         .fallback(fallback_page)
         .with_state(content)
+        .layer(middleware::from_fn_with_state(counter, count_request))
+}
+
+/// Count one request, by status only.
+///
+/// A layer rather than a line in each handler so the fallback is covered too:
+/// a 404 is a request, and the number of them is exactly what tells a reader
+/// how much of the total was somebody scanning for `/wp-login.php`.
+///
+/// What is deliberately absent is the peer address. It never reaches this
+/// function — the router is served with [`Router::into_make_service`], not
+/// the `with_connect_info` variant, so there is no `ConnectInfo` to extract
+/// and no way for a later edit to start retaining one by accident. A count
+/// does not need to know who; see [`crate::counter`] for the argument.
+async fn count_request(
+    State(counter): State<Arc<Counter>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let response = next.run(request).await;
+    counter.web_request(response.status() != StatusCode::NOT_FOUND);
+    response
 }
 
 /// One file from the file area: the same bytes the mesh side serves under
@@ -219,8 +249,12 @@ fn not_found() -> Response {
 /// With [`WebConfig::acme`] set, that means HTTPS with automatic Let's
 /// Encrypt certificates plus a plain-HTTP listener that 301-redirects to it;
 /// without it, a single plain-HTTP listener serving the blog directly.
-pub async fn run_web(config: WebConfig, content: SnapshotRx) -> Result<(), WebError> {
-    let router = build_router(content);
+pub async fn run_web(
+    config: WebConfig,
+    content: SnapshotRx,
+    counter: Arc<Counter>,
+) -> Result<(), WebError> {
+    let router = build_router_counting(content, counter);
     match config.acme {
         Some(acme) => serve_https(router, acme, config.http_bind, config.https_bind).await,
         None => serve_plain(router, config.http_bind).await,
@@ -460,6 +494,34 @@ mod tests {
             status,
             StatusCode::NOT_FOUND,
             "a removed post must stop being served"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_request_is_counted_and_the_404s_are_separable() {
+        // A bot scanning for /wp-login.php is a request and is counted as
+        // one; what keeps it from quietly inflating a number about reading is
+        // that it is also counted as a miss.
+        let dir = tempfile::tempdir().unwrap();
+        let counter = Arc::new(Counter::open(dir.path().join("counts.log")).unwrap());
+        let snapshot = Arc::new(Snapshot {
+            meta: test_meta(),
+            posts: sample_posts(),
+            ..Snapshot::default()
+        });
+        let (_tx, rx) = watch::channel(snapshot);
+        let router = build_router_counting(rx, Arc::clone(&counter));
+
+        for path in ["/", "/posts/hello-world", "/wp-login.php"] {
+            get(router.clone(), path).await;
+        }
+
+        let (_, counts) = counter.open_day();
+        assert_eq!(counts.web_requests, 3, "the fallback route counts too");
+        assert_eq!(counts.web_not_found, 1);
+        assert_eq!(
+            counts.mesh_requests, 0,
+            "the web layer must not touch the mesh side's numbers"
         );
     }
 

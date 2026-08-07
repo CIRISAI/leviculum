@@ -30,6 +30,7 @@ use leviculum_std::{
 };
 
 use crate::content::{Snapshot, SnapshotRx};
+use crate::counter::Counter;
 use crate::files::{self, FileEntry};
 
 /// Truncated request id length (matches the driver's request/response API).
@@ -123,6 +124,9 @@ pub struct BlogNode {
     /// carries only one outgoing resource at a time, so concurrent large-page
     /// requests on the same link queue here until the slot frees up.
     pending: HashMap<LinkId, VecDeque<PendingResponse>>,
+    /// Where requests and links are counted, disabled unless a caller hands
+    /// over a real one via [`with_counter`](Self::with_counter).
+    counter: Arc<Counter>,
 }
 
 impl BlogNode {
@@ -171,7 +175,17 @@ impl BlogNode {
             snapshot,
             content,
             pending: HashMap::new(),
+            counter: Arc::new(Counter::disabled()),
         })
+    }
+
+    /// Count this node's requests and links into `counter`.
+    ///
+    /// Not a [`BlogNodeConfig`] field: that struct is the config file's shape,
+    /// and the counter is a live object shared with the web server.
+    pub fn with_counter(mut self, counter: Arc<Counter>) -> Self {
+        self.counter = counter;
+        self
     }
 
     /// The node's destination hash (what a browser dials).
@@ -264,6 +278,12 @@ impl BlogNode {
                 path,
                 ..
             } => {
+                // The event carries no identity — a request is a path on a
+                // link and nothing more. The link may hold one, if the peer
+                // sent a LINKIDENTIFY, so ask it; for a public page nothing
+                // asks a reader to, and the answer is expected to be None.
+                self.counter
+                    .mesh_request(self.node.get_remote_identity(&link_id).is_some());
                 let page = self.snapshot.pages.get(&path).cloned();
                 let file = self.snapshot.file_for_node_path(&path).cloned();
                 match (page, file) {
@@ -291,6 +311,15 @@ impl BlogNode {
             NodeEvent::LinkClosed { link_id, .. } => {
                 self.pending.remove(&link_id);
             }
+            // A reader arriving. This is the only honest session boundary the
+            // mesh offers, and counting it here rather than deduplicating
+            // request events by `link_id` is what keeps the counter's memory
+            // flat: one increment, no set of live links to grow all day.
+            NodeEvent::LinkEstablished {
+                is_initiator: false,
+                destination_hash,
+                ..
+            } if destination_hash == self.dest_hash => self.counter.mesh_session(),
             _ => {}
         }
     }

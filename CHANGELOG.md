@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `lblogd` counts what it served, one appended `key=value` record per UTC
+  day in `<data_dir>/counts.log` (`[counter]` moves it or switches it
+  off). Requests and links, named as such: a Reticulum link is a session
+  and not a person, `RequestReceived` carries no identity at all, and the
+  web side never reads a peer address — so there is no visitor number,
+  because neither side can honestly produce one. Each record holds that
+  day's whole running total and the last record for a date wins, so a
+  `kill -9` mid-append costs at most the line it was writing and never an
+  earlier day; a clock stepping backwards keeps the open day open and
+  says so in `clock_behind` rather than rewriting a day already on disk.
+  The day is written every five minutes, at each rollover and on
+  `SIGTERM`, a restart resumes the day from the file, and each start
+  compacts it to one record per date.
+
 ### Changed
 
 - Every long-lived external process this repository spawns now dies with

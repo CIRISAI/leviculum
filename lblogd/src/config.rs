@@ -30,9 +30,19 @@
 //! http_bind = "127.0.0.1:8080"
 //! ```
 //!
+//! The per-day request counter is on by default and needs no configuration.
+//! `[counter]` exists to move it or switch it off:
+//!
+//! ```toml
+//! [counter]
+//! enabled = true                        # optional, this is the default
+//! path    = "/var/lib/lblogd/counts.log" # optional, this is the default
+//! ```
+//!
 //! [`Config::blog_node_config`] and [`Config::web_config`] map the file onto
 //! the two component configs; the ACME cache directory is derived as
-//! `<data_dir>/acme` rather than configured separately.
+//! `<data_dir>/acme` rather than configured separately, and the counter file
+//! from [`Config::counter_path`] the same way.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -42,6 +52,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::content::Sources;
+use crate::counter;
 use crate::files::{self, FileArea};
 use crate::node::BlogNodeConfig;
 use crate::render::BlogMeta;
@@ -114,6 +125,10 @@ pub struct Config {
     /// Blog identity: what a reader sees on every page, on both sides.
     #[serde(default)]
     pub blog: BlogSection,
+    /// The per-day request counter. The whole section may be omitted, which
+    /// is the default: counting on, into `<data_dir>/counts.log`.
+    #[serde(default)]
+    pub counter: CounterSection,
     /// NomadNet node settings.
     pub node: NodeSection,
     /// Web server settings.
@@ -191,6 +206,43 @@ impl Default for BlogSection {
             lxmf: None,
             about: None,
             css: None,
+        }
+    }
+}
+
+/// The `[counter]` section: where the per-day request counts are written,
+/// and whether they are written at all.
+///
+/// Two keys, both optional, because the counter has no other decisions to
+/// expose: what it counts is fixed by what the two sides can honestly see
+/// (see [`crate::counter`]), and the flush cadence is a durability constant,
+/// not a preference.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CounterSection {
+    /// Whether to count at all. On by default: the file holds request totals
+    /// and no addresses, it costs about a hundred bytes a day, and a blog
+    /// server that cannot say how much it served is the odd default.
+    #[serde(default = "default_counter_enabled")]
+    pub enabled: bool,
+    /// Where to write. Defaults to
+    /// [`counter::DEFAULT_FILE_NAME`] under `data_dir`, which is already the
+    /// directory `lblogd` owns its state in.
+    pub path: Option<PathBuf>,
+}
+
+fn default_counter_enabled() -> bool {
+    true
+}
+
+/// Hand-written for the same reason [`BlogSection`]'s is: an omitted section
+/// must behave exactly like an empty one, and `#[derive(Default)]` would make
+/// the omitted case mean `enabled = false`.
+impl Default for CounterSection {
+    fn default() -> CounterSection {
+        CounterSection {
+            enabled: default_counter_enabled(),
+            path: None,
         }
     }
 }
@@ -386,6 +438,17 @@ impl Config {
                 dir,
                 max_bytes: self.max_file_bytes.unwrap_or(files::DEFAULT_MAX_FILE_BYTES),
             }))
+    }
+
+    /// The file the per-day counts are appended to, or `None` when counting
+    /// is switched off.
+    pub fn counter_path(&self) -> Option<PathBuf> {
+        self.counter.enabled.then(|| {
+            self.counter
+                .path
+                .clone()
+                .unwrap_or_else(|| self.data_dir.join(counter::DEFAULT_FILE_NAME))
+        })
     }
 
     /// The NomadNet node config this file describes.
@@ -628,6 +691,33 @@ mod tests {
         let config = load_from_str(SAMPLE).unwrap();
         assert!(config.web.acme);
         assert!(config.web_config().acme.is_some());
+    }
+
+    #[test]
+    fn counting_is_on_by_default_and_lands_under_data_dir() {
+        // SAMPLE carries no `[counter]` section, exactly like a config
+        // written before it existed.
+        assert!(!SAMPLE.contains("[counter]"));
+        let config = load_from_str(SAMPLE).unwrap();
+        assert_eq!(
+            config.counter_path(),
+            Some(PathBuf::from("/var/lib/lblogd/counts.log"))
+        );
+    }
+
+    #[test]
+    fn the_counter_can_be_moved_or_switched_off() {
+        let sample = format!("{SAMPLE}\n[counter]\npath = \"/var/log/lblogd-counts\"\n");
+        assert_eq!(
+            load_from_str(&sample).unwrap().counter_path(),
+            Some(PathBuf::from("/var/log/lblogd-counts"))
+        );
+
+        // Off means off, even with a path set: an operator turning it off has
+        // not asked for the file to keep growing.
+        let sample =
+            format!("{SAMPLE}\n[counter]\nenabled = false\npath = \"/var/log/lblogd-counts\"\n");
+        assert_eq!(load_from_str(&sample).unwrap().counter_path(), None);
     }
 
     #[test]

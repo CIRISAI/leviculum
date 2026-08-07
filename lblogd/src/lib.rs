@@ -11,13 +11,17 @@
 //! node: a shared-instance client of a running `lnsd` daemon that serves the
 //! rendered Micron pages over Reticulum. The [`web`] module is the clearnet
 //! side: an axum server that serves the rendered HTML over HTTP and
-//! automatic-HTTPS (Let's Encrypt via rustls-acme). The [`config`] module
+//! automatic-HTTPS (Let's Encrypt via rustls-acme). The [`counter`] module
+//! holds the per-day request counter both sides feed, and the append-only
+//! file it writes — requests and links, named as such, because neither side
+//! can honestly count readers. The [`config`] module
 //! maps the single TOML config file onto the node and web configs, and
 //! [`cli`] holds the binary's argument parser.
 
 pub mod cli;
 pub mod config;
 pub mod content;
+pub mod counter;
 pub mod files;
 pub mod node;
 pub mod post;

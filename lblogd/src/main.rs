@@ -17,6 +17,7 @@ use clap::Parser;
 use lblogd::cli::Args;
 use lblogd::config::Config;
 use lblogd::content::{load_snapshot, Reloader};
+use lblogd::counter::{self, Counter};
 use lblogd::node::{self, BlogNode};
 use lblogd::{watcher, web};
 
@@ -91,7 +92,21 @@ async fn serve(config: &Config) -> Result<(), MainError> {
         false => None,
     };
 
-    let blog = BlogNode::start(config.blog_node_config(), content.clone()).await?;
+    // Opened before either server, because opening is also what resumes
+    // today's partial count from the file: a restart that started serving
+    // first would count its first requests into a day that then got
+    // overwritten by the resumed total.
+    let counter = Arc::new(match config.counter_path() {
+        Some(path) => {
+            eprintln!("lblogd: counting requests into {}", path.display());
+            Counter::open(path)?
+        }
+        None => Counter::disabled(),
+    });
+
+    let blog = BlogNode::start(config.blog_node_config(), content.clone())
+        .await?
+        .with_counter(Arc::clone(&counter));
     eprintln!("lblogd: node destination {}", blog.destination_hash());
     for path in blog.served_paths() {
         eprintln!("lblogd: serving {path}");
@@ -109,7 +124,7 @@ async fn serve(config: &Config) -> Result<(), MainError> {
         Err(MainError::from("node: daemon connection closed"))
     };
     let web_task = async {
-        web::run_web(config.web_config(), content)
+        web::run_web(config.web_config(), content, Arc::clone(&counter))
             .await
             .map_err(|e| MainError::from(format!("web: {e}")))?;
         Err(MainError::from("web: server exited unexpectedly"))
@@ -125,13 +140,60 @@ async fn serve(config: &Config) -> Result<(), MainError> {
         Err(MainError::from("watch: watcher stopped unexpectedly"))
     };
 
-    tokio::try_join!(
-        node_task,
-        web_task,
-        reload_task(Arc::clone(&reloader)),
-        watch_task
-    )
-    .map(|_: ((), (), (), ())| ())
+    let counter_task = async {
+        counter::flush_loop(Arc::clone(&counter)).await;
+        Err(MainError::from("counter: flush loop stopped unexpectedly"))
+    };
+
+    let servers = async {
+        tokio::try_join!(
+            node_task,
+            web_task,
+            reload_task(Arc::clone(&reloader)),
+            watch_task,
+            counter_task
+        )
+        .map(|_: ((), (), (), (), ())| ())
+    };
+
+    // A clean stop is a success, not a lost service: `systemctl stop` and
+    // `systemctl restart` both arrive as SIGTERM, and without this the
+    // process would be killed with the open day's count still in memory —
+    // up to one FLUSH_INTERVAL of it.
+    let result = tokio::select! {
+        result = servers => result,
+        signal = shutdown_signal() => {
+            match signal {
+                Ok(name) => {
+                    eprintln!("lblogd: {name}, shutting down");
+                    Ok(())
+                }
+                Err(e) => Err(MainError::from(format!("shutdown handler: {e}"))),
+            }
+        }
+    };
+    // Unconditional: a server that failed still served requests that were
+    // counted, and there is no reason to drop them on the way out.
+    if let Err(e) = counter.flush() {
+        eprintln!("lblogd: counter: final flush failed: {e}");
+    }
+    result
+}
+
+/// Resolve when the service is asked to stop, naming the signal.
+///
+/// SIGTERM is what systemd sends; SIGINT is what a foreground development run
+/// gets from Ctrl-C. Both mean the same thing here.
+async fn shutdown_signal() -> Result<&'static str, std::io::Error> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let name = tokio::select! {
+        _ = sigterm.recv() => "SIGTERM",
+        _ = sigint.recv() => "SIGINT",
+    };
+    Ok(name)
 }
 
 /// Reload the posts on every SIGHUP, for as long as the servers run.

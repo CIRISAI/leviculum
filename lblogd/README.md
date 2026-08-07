@@ -88,7 +88,8 @@ rows — so it stays a table on the mesh side as well. Round-trip tests parse th
 One TOML file drives everything:
 
 ```toml
-data_dir    = "/var/lib/lblogd"        # identity, node storage, ACME cache
+data_dir    = "/var/lib/lblogd"        # identity, node storage, ACME cache,
+                                       # and the per-day counts file
 posts_dir   = "/var/lib/lblogd/posts"  # the *.md blog posts
 # files_dir      = "/var/lib/lblogd/files"  # pictures; default: files/ beside posts_dir
 # max_file_bytes = 10485760                 # per-file ceiling, default 10 MiB
@@ -197,6 +198,57 @@ An entry is identified by its URL, so a post that changes slug appears in
 readers as a new entry. Pin `slug` in the frontmatter for anything already
 published, and retitling is then free.
 
+### Counting what was served
+
+`lblogd` writes a one-line-per-day record of how much it served, to
+`data_dir/counts.log` by default. No UI, no HTTP endpoint: a file.
+
+```toml
+[counter]
+enabled = true                          # optional, default true
+path    = "/var/lib/lblogd/counts.log"  # optional, this is the default
+```
+
+After a day it holds exactly one line, plus the header written when the file
+was created:
+
+```
+# lblogd request counts. One record per line: DAY key=value ...
+# Dates are UTC calendar days; a record holds that day's running total.
+# The last record for a date wins. Appended, never rewritten in place.
+DAY date=2026-08-07 tz=UTC mesh_requests=41 mesh_sessions=12 mesh_identified_requests=0 web_requests=308 web_not_found=57 clock_behind=0 written=2026-08-07T23:59:12Z
+```
+
+So `awk '$1=="DAY"'` reads it, and so does a person.
+
+**It does not count visitors, and it does not claim to.** On the mesh a
+request arrives on a link, and a link is a session, not a person: one reader
+browsing five pages over one link is one session and five requests, and the
+same reader tomorrow is a different session. Reticulum only tells you who
+someone is if they choose to identify, which nothing about fetching a public
+page asks them to — `mesh_identified_requests` is there so that zero is a
+measurement rather than an assumption. On the web there is a peer address,
+and this deliberately never looks at it: an address would buy a "unique
+visitors" number that CGNAT, rotating IPv6 privacy addresses and bots make
+wrong anyway, while turning a blog server into a processor of personal data.
+`web_not_found` is carried separately so the scans for `/wp-login.php` can be
+subtracted rather than quietly inflating the total.
+
+Dates are **UTC** calendar days — the same midnight the mtime fallback above
+uses, and the one with no daylight-saving discontinuity. Every record says
+so, because a bare `2026-08-07` a year later does not.
+
+The file is only ever appended to, and each record carries that day's full
+running total, so the last record for a date wins and a `kill -9` mid-write
+can lose at most the line it was writing. A clock that jumps backwards never
+reopens a day already written: the counts land on the open day and
+`clock_behind` says it happened. The open day is written out every five
+minutes, at each rollover, and once more on `SIGTERM`, so `systemctl restart`
+does not lose the day so far — a restart resumes the day's total from the
+file rather than beginning again at zero. Each start also compacts the file
+to one record per date, so the duplicate records a long run accumulates do
+not accumulate across runs.
+
 ### Styling
 
 Without `blog.css` the pages use a small built-in stylesheet. With it, that
@@ -209,7 +261,7 @@ no way for a page and its stylesheet to disagree.
 
 The node's persistent identity lives at `data_dir/identities/lblogd`, node
 storage at `data_dir/storage`, the ACME account and certificates at
-`data_dir/acme`. Losing the identity file changes the NomadNet destination
+`data_dir/acme`, the per-day counts at `data_dir/counts.log`. Losing the identity file changes the NomadNet destination
 hash; losing the ACME cache forces certificate re-issuance. Back up `data_dir`.
 
 Run it:
