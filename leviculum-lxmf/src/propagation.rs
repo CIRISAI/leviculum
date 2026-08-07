@@ -112,9 +112,13 @@ impl PropagationUpload {
             return Err(PropagationError::InvalidLength);
         }
         let stamped = msgpack::read_bin(bytes, &mut position)?;
-        // The stamped body is destination_hash || ciphertext || 32-byte stamp;
-        // anything not strictly longer than hash+stamp cannot carry all three.
-        if stamped.len() <= STAMP_SIZE + DESTINATION_LENGTH {
+        // `validate_pn_stamp` (reference/LXMF/LXMF/LXStamper.py:86) discards a
+        // transient body of `LXMF_OVERHEAD + STAMP_SIZE` bytes or fewer — 112
+        // + 32 = 144. Guarding at hash+stamp (48) instead would accept the
+        // band 49..=144, which every Python propagation node throws away, and
+        // which `PropagatedMessage::from_unstamped_bytes` below then refuses
+        // anyway: the host would store what it cannot index.
+        if stamped.len() <= LXMF_OVERHEAD + STAMP_SIZE {
             return Err(PropagationError::InvalidLength);
         }
         let (unstamped, stamp) = stamped.split_at(stamped.len() - STAMP_SIZE);
@@ -243,8 +247,14 @@ pub struct PropagatedMessage {
 
 impl PropagatedMessage {
     /// Parse unstamped `destination_hash || encrypted_payload` bytes.
+    ///
+    /// `LXMF_OVERHEAD` bytes exactly is refused, not accepted: Python holds a
+    /// propagated body only when `validate_pn_stamp`
+    /// (reference/LXMF/LXMF/LXStamper.py:86) finds the stamped form strictly
+    /// longer than `LXMF_OVERHEAD + STAMP_SIZE`, so the unstamped remainder it
+    /// keeps is strictly longer than `LXMF_OVERHEAD`.
     pub fn from_unstamped_bytes(bytes: &[u8]) -> Result<Self, PropagationError> {
-        if bytes.len() < LXMF_OVERHEAD {
+        if bytes.len() <= LXMF_OVERHEAD {
             return Err(PropagationError::InvalidLength);
         }
         let destination_hash = bytes[..DESTINATION_LENGTH]

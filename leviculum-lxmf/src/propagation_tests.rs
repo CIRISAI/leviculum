@@ -207,9 +207,12 @@ fn invalid_stamp_signal_is_exact_and_strict() {
 /// the client built, transient ID included, and rejects malformed shapes.
 #[test]
 fn host_decodes_client_upload_envelope() {
+    // The body is long enough to clear Python's `validate_pn_stamp` bound
+    // (reference/LXMF/LXMF/LXStamper.py:86); the bound itself is pinned by
+    // `host_upload_length_guard_matches_python_pn_stamp_bound`.
     let unstamped = {
         let mut v = vec![0x11u8; DESTINATION_LENGTH]; // destination hash
-        v.extend_from_slice(&[0xAB; 64]); // ciphertext-ish body
+        v.extend_from_slice(&[0xAB; 160]); // ciphertext-ish body
         v
     };
     let upload = PropagationUpload::single(1_700_000_000.5, unstamped, [0x5A; STAMP_SIZE]);
@@ -219,14 +222,66 @@ fn host_decodes_client_upload_envelope() {
     assert_eq!(decoded, upload);
     assert_eq!(decoded.transient_id(), upload.transient_id());
 
-    // Too short to carry hash + body + stamp → refused.
-    let tiny =
-        PropagationUpload::single(1.0, vec![0u8; DESTINATION_LENGTH], [0u8; STAMP_SIZE]).encode();
+    assert!(PropagationUpload::decode(&[0x91]).is_err());
+}
+
+/// The upload length guard sits exactly where Python's does.
+///
+/// `validate_pn_stamp` (reference/LXMF/LXMF/LXStamper.py:86) discards a
+/// transient body with `len(transient_data) <= LXMessage.LXMF_OVERHEAD +
+/// STAMP_SIZE`, and 112 + 32 = 144. So 144 is the longest stamped body every
+/// Python propagation node throws away and 145 is the shortest one it keeps.
+///
+/// Both sides are pinned on purpose. A single vector below the bound cannot
+/// discriminate: a stamped length of 48 is rejected by a 48-threshold and by
+/// a 144-threshold alike, so it holds for the wrong guard as happily as for
+/// the right one. Only a pair straddling the bound names it.
+#[test]
+fn host_upload_length_guard_matches_python_pn_stamp_bound() {
+    /// `[timestamp, [0x11 * (n - 32) || 0x5a * 32]]`, the envelope a client
+    /// puts on the wire for a stamped body of exactly `n` bytes.
+    fn envelope(stamped_len: usize) -> Vec<u8> {
+        PropagationUpload::single(
+            1_700_000_000.5,
+            vec![0x11u8; stamped_len - STAMP_SIZE],
+            [0x5a; STAMP_SIZE],
+        )
+        .encode()
+    }
+
+    // The exact bytes, cross-checked against RNS.vendor.umsgpack.packb:
+    // 0x92 array(2) | 0xcb f64 1700000000.5 | 0x91 array(1) | 0xc4 bin8 len.
+    let rejected = envelope(144);
     assert_eq!(
-        PropagationUpload::decode(&tiny),
+        &rejected[..13],
+        &[0x92, 0xcb, 0x41, 0xd9, 0x54, 0xfc, 0x40, 0x20, 0x00, 0x00, 0x91, 0xc4, 0x90]
+    );
+    assert_eq!(rejected.len(), 13 + 144);
+
+    let accepted = envelope(145);
+    assert_eq!(
+        &accepted[..13],
+        &[0x92, 0xcb, 0x41, 0xd9, 0x54, 0xfc, 0x40, 0x20, 0x00, 0x00, 0x91, 0xc4, 0x91]
+    );
+    assert_eq!(accepted.len(), 13 + 145);
+
+    assert_eq!(
+        PropagationUpload::decode(&rejected),
+        Err(PropagationError::InvalidLength),
+        "144 = LXMF_OVERHEAD + STAMP_SIZE is discarded by every Python \
+         propagation node and must be refused here too"
+    );
+    let decoded = PropagationUpload::decode(&accepted).expect("145 is the shortest accepted body");
+    assert_eq!(decoded.unstamped_lxmf().len(), 145 - STAMP_SIZE);
+    assert_eq!(decoded.propagation_stamp(), &[0x5a; STAMP_SIZE]);
+
+    // The remainder the host would store must survive the parser that indexes
+    // it — the two bounds are one bound, and 112 is on the reject side of it.
+    assert_eq!(
+        PropagatedMessage::from_unstamped_bytes(&vec![0x11u8; LXMF_OVERHEAD]),
         Err(PropagationError::InvalidLength)
     );
-    assert!(PropagationUpload::decode(&[0x91]).is_err());
+    assert!(PropagatedMessage::from_unstamped_bytes(&vec![0x11u8; LXMF_OVERHEAD + 1]).is_ok());
 }
 
 /// A host serves the full `/get` exchange with the now-public codecs: decode
