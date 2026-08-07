@@ -13,6 +13,23 @@
 # makes the same objection to expiry dates -- a bound a one-line diff can
 # bump is not a bound.
 #
+# `foreign` is that same argument applied to the author exemption. A machine
+# trailer is a violation on our commits and not on anyone else's -- we do not
+# edit, and do not refuse, a message somebody outside the project wrote
+# (policy 2026-06-13, which the commit-msg hook has keyed on since, and which
+# the guard did not know about until 2026-08-07). So commits above the
+# baseline whose author is not lp@lew-palm.de keep their trailers, and this
+# counts them. Uncounted, the exemption is an off switch anyone can reach by
+# setting an author e-mail; counted, a new one forces a diff and a human
+# look, which is what we wanted all along -- we still want to know when it
+# happens, we just do not want to rewrite the message.
+#
+# The 1 foreign commit above the baseline:
+#   57f7c59 2026-08-07 Eric Moore <mooreericnyc@gmail.com>
+#           feat(lxmf): expose the propagation-node HOST direction
+#           (leviculum#38), merged as PR #201; carries
+#           `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@…>`
+#
 # The 16, newest first, all on master:
 #   5c79cc9 2026-07-31 feat(link): per-link delivery telemetry
 #   b2a42a3 2026-07-31 test(local): platform-correct error kind
@@ -33,3 +50,20 @@
 
 baseline 8d309ab69a2d451b54f61dc003fb0d509bb12524
 legacy 16
+foreign 1
+
+# Every `ours` line is an identity this guard stops exempting -- i.e. one
+# whose commit messages it checks. `lp@lew-palm.de` is what Lew, the
+# reviewer and the coder use at a terminal; the second is what Codeberg
+# stamps on a web-UI edit, and three commits in this history carry it
+# (d574850, 7a76d7f, 6f366ca, all `Lew_Palm`). Both are ours, and a guard
+# that knew only the first would hand the foreign exemption to the project
+# lead's own commits without saying so.
+#
+# Who is inside the project is a declaration, not something the script can
+# derive, so there is no computed control on this list -- the control is
+# that it lives here, next to the counts, where adding a line is a diff a
+# reviewer reads. Adding one is the single cheapest way to switch this
+# guard off for somebody, so it should be as loud as moving `foreign`.
+ours lp@lew-palm.de
+ours lew_palm@noreply.codeberg.org

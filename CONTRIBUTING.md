@@ -51,14 +51,33 @@ So the rule now has something behind it in both repositories:
 * `.woodpecker/commit-trailers.yml` runs that over every commit pushed
   since a pinned baseline. This is the enforcement, and it is a forge
   check rather than a hook because a fresh clone has no hooks.
-* `.githooks/commit-msg`, installed by `scripts/install-ci.sh`, runs it
-  at commit time so the failure arrives while the message is still in
-  the editor. Convenience, not enforcement.
+* `.githooks/commit-msg` — the only commit-msg hook in the tree, and the
+  one `scripts/install-ci.sh` installs by pointing `core.hooksPath` at
+  `.githooks` — runs the same script at commit time so the failure
+  arrives while the message is still in the editor. It refuses; it never
+  edits what you wrote. Convenience, not enforcement.
+
+**The rule binds our commits, not yours.** A machine-authorship trailer
+is a violation on a commit authored by one of the project's own
+identities — the `ours` lines in `scripts/commit-trailer-baseline.txt` —
+and on nothing else: we do not rewrite, and do not refuse, a message
+somebody outside the project wrote. Your attribution is yours. The hook
+and the pushed-range check both read `git log --format=%ae` and agree;
+if you install our hooks in your own clone they will not ask you to
+change your commit messages.
+
+That exemption is counted rather than trusted. `foreign` in the same
+file pins how many commits above the baseline carry such a trailer under
+an author that is not ours, and the check recomputes it every run — so a
+new external contribution with a trailer lands, keeps its message, and
+still shows up as a number moving in a diff. Left uncounted, the
+exemption would be an off switch anyone could reach by setting an author
+e-mail.
 
 Sixteen commits below the baseline carry such a trailer. They are listed
-in `scripts/commit-trailer-baseline.txt` rather than rewritten out of
-published history, and their count is itself checked so the baseline
-cannot be quietly moved forward.
+in the same file rather than rewritten out of published history, and
+their count is checked the same way, so the baseline cannot be quietly
+moved forward.
 
 ## Licensing
 
