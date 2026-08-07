@@ -10,7 +10,7 @@ external runners.
 | Tier | Name | Trigger | Budget | Test scope |
 |------|------|---------|--------|------------|
 | 0 | `fast` | pre-push hook | ~3 min | fmt + clippy (host + nrf firmware workspace, both BSPs) + rustdoc gate + workspace lib tests |
-| 1 | `standard` | post-commit (background) | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop + TCP-hub endurance smoke soak (see [Soak and endurance](soak-and-endurance.md)) + the `status_parity` two-daemon suite + the ignored-test census |
+| 1 | `standard` | on demand: `just standard`, once per batch | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop + TCP-hub endurance smoke soak (see [Soak and endurance](soak-and-endurance.md)) + the `status_parity` two-daemon suite + the ignored-test census |
 | 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + the periculum `conformance/` and `regression/` corpora (docker) |
 | 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LNode flash-from-HEAD + the periculum `hardware/` corpus |
 
@@ -85,8 +85,14 @@ minutes**. Subsequent runs are incremental, ~5-15 minutes.
 
 ## Notifications
 
-`notify-send` is called on every Tier 1/2/3 result. Failures use
-`-u critical` (sticky until dismissed); successes use `-u low`.
+**Read this as history, not as behaviour.** `scripts/run-tier3.sh` calls
+`notify-send` on its verdict — `-u critical` for RED (sticky until
+dismissed), `-u normal` for GREEN and for a lock-held skip. It is the only
+tier runner that ever did. It is also not the script the nightly starts:
+`leviculum-ci-nightly.service` runs `scripts/run-tier3-hw.sh`, which
+writes the ledger and notifies nobody. So no tier notifies today. Results
+are pull-only — `just status`, or
+`~/.local/state/leviculum-ci/last-results.txt`.
 
 **Prerequisite:** `notify-send` needs `DBUS_SESSION_BUS_ADDRESS` and
 `XDG_RUNTIME_DIR` in the user systemd manager environment, which
@@ -108,6 +114,27 @@ Tier 0, mvr and the trailer guard along with it.
 
 `scripts/ci-status.sh` still reports how long it has been since a Tier 2
 run was recorded. It states the age and blocks nothing.
+
+## Tier 1 after every commit (removed 2026-08-07)
+
+`.githooks/post-commit` detached `scripts/run-tier1.sh` — `just standard`
+under docker, 15 minutes warm and 20-40 cold — after every commit that was
+not part of a rebase. It was removed, and the rule it failed is in
+[Checks That Are Actually Checks](concepts/checks-and-citations.md).
+
+The short form: a commit is not a unit anybody wants tested. WIP commits,
+amends and commits mid-refactor all started a forty-minute run, which is
+why the runner needed a dirty-flag loop to coalesce them — it was
+repairing a granularity that was wrong to begin with. It was also
+invisible: batches were separately instructed to start `just standard`
+under `nohup`, so the same tier ran twice per batch for a week before
+anyone noticed the hook existed. And it ran docker in the background,
+which tears down containers whatever else is on the box was using — the
+standing rule against starting the full integ suite behind someone's back
+exists for that collision, and this hook was doing it after every commit.
+
+Tier 1 is now started explicitly, once per batch, by typing
+`just standard`.
 
 ## Logs
 
@@ -277,8 +304,8 @@ scenario verdict from the vanish onwards is untrusted.
 
 | Symptom | Action |
 |---------|--------|
-| post-commit looks dead | `ps -ef | grep run-tier1` and check the latest log file |
-| Notification never arrived | Check `last-results.txt`. On headless boxes notifications are dropped. |
+| Tier 1 never seems to run | It doesn't run itself. Type `just standard`. Nothing has started it automatically since the post-commit hook went (2026-08-07). |
+| Notification never arrived | Expected: nothing that currently runs calls `notify-send` (see Notifications above). Check `last-results.txt`. |
 | Tier 1 spuriously red | Check log; if Docker is involved, ensure no leftover containers (`docker ps -a`) |
 | Timer didn't fire | `systemctl --user list-timers`, then `journalctl --user -u leviculum-ci-nightly.timer`. The nightly is the only timer this installer enables; Tier 2 has no timer. |
 | Tier 2 looks like it never runs | It doesn't, unless started: `systemctl --user start leviculum-ci-tier2.service`. `scripts/ci-status.sh` prints how long it has been. |

@@ -124,8 +124,11 @@ fast: check-submodules check-trailers check-processor-seam mvr lint-nrf doc-gate
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
 
-# First run after a fresh CARGO_TARGET_DIR: 20-40 min. Runs in background
-# after every commit via the post-commit hook.
+# First run after a fresh CARGO_TARGET_DIR: 20-40 min. Nothing triggers this
+# automatically: it is typed once per batch. A post-commit hook detached it
+# after every commit until 2026-08-07 — a commit is not a unit anyone wants
+# tested, and forty minutes is not a wait a commit can absorb. See
+# docs/src/concepts/checks-and-citations.md.
 # Tier 1 (~15 min): Tier 0 + core/tests + ffi (incl. C-program + Python interop)
 # + proxy + rnsd_interop + the TCP-hub endurance smoke soak.
 #

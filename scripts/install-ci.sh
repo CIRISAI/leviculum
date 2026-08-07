@@ -82,7 +82,12 @@ if [[ "$VM_MODE" -eq 0 ]]; then
     # commit-msg is the machine-authorship trailer guard (Codeberg #205). It
     # is convenience only — the enforcement is .woodpecker/commit-trailers.yml,
     # because a fresh clone has none of these hooks.
-    chmod +x .githooks/pre-push .githooks/post-commit .githooks/commit-msg
+    #
+    # These two are the whole set. A post-commit hook detached
+    # `scripts/run-tier1.sh` — a 15-40 min background docker run — after every
+    # commit until 2026-08-07; the rule that removed it is in
+    # docs/src/concepts/checks-and-citations.md ("What may live in a git hook").
+    chmod +x .githooks/pre-push .githooks/commit-msg
 fi
 chmod +x scripts/run-tier1.sh scripts/run-tier2.sh scripts/run-tier3.sh scripts/run-tier3-hw.sh
 chmod +x scripts/flash-lnodes-from-head.sh
@@ -158,9 +163,10 @@ echo "[install-ci] Installation complete."
 echo ""
 echo "  Run manually:    just fast | just standard | just extensive | just nightly"
 echo "  Show status:     just status"
-echo "  Override stale:  git push --no-verify"
 echo "  Logs:            ~/.local/state/leviculum-ci/"
 echo "  Timers:          systemctl --user list-timers"
 echo ""
-echo "  First Tier 1 run uses a fresh CARGO_TARGET_DIR and takes 20-40 min."
-echo "  Subsequent runs are incremental, ~5-15 min."
+echo "  Nothing starts Tier 1 for you. The pre-push hook runs Tier 0 only;"
+echo "  Tier 1 is 'just standard', typed once per batch. A post-commit hook"
+echo "  used to detach it after every commit — removed 2026-08-07."
+echo "  A cold Tier 1 compiles the whole workspace: plan for 20-40 min."

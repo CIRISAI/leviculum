@@ -523,6 +523,78 @@ list.** Nothing else here makes that true: a pin that is `#[ignore]`d
 satisfies A — its negative control is present and correct — while no
 gate observes its green.
 
+## What may live in a git hook
+
+A hook is the most tempting place to put a check and the worst place to
+get it wrong, because it is the one gate that has an off switch every
+author already knows. So the admission test is narrow:
+
+> **A git hook may only contain checks that are fast, deterministic, and
+> that fail for a reason the author can fix at that moment. Anything else
+> belongs in a scheduled run or an explicit command.**
+
+Three conditions, and a check has to pass all three. Two worked examples
+from 2026-08-07, both of which were in hooks and neither of which should
+have been:
+
+- **The tier-2 staleness block** (`pre-push`) failed all three. It was
+  slow by construction — the remedy it named was a 30-90 minute docker
+  run. It was not deterministic in the sense that matters: its verdict
+  depended on a ledger line written by a process nothing scheduled, so
+  the same tree pushed on two days gave two answers for a reason
+  unrelated to the tree. And the author could not clear it at all, at any
+  moment, because `just extensive` — the remedy it printed — does not
+  write the line it read. It blocked for 46 days and 502 commits. The
+  full telling is under Guarantee B, above.
+- **`post-commit`** failed the first and the third. It detached
+  `scripts/run-tier1.sh` — `just standard` under docker, fifteen minutes
+  warm and forty cold — after every commit. A commit cannot wait forty
+  minutes, and a commit is not a unit anyone wanted tested in the first
+  place: WIP commits, amends and commits mid-refactor each started a
+  run, which is why the runner carried a dirty-flag loop to coalesce
+  them — machinery repairing a granularity that was wrong to begin with.
+  The third condition is the decisive one: when that gate came back red
+  twenty minutes later, there was nothing the author could do about it
+  *at the moment of committing*, which is the only moment a hook has. It
+  was removed on 2026-08-07 and Tier 1 became an explicit `just
+  standard`, once per batch.
+
+The condition that keeps getting skipped is the third one, so state it
+positively: a hook fires at a moment the author is still holding the
+thing being judged. That is the whole value of the position — a red
+`fast` names a file the author has open. A check whose result arrives
+after that moment has passed, or whose remedy is somewhere other than the
+work in hand, is not cheaper in a hook; it is only louder.
+
+### The corollary, which is the part that bites
+
+**A hook that is ever unsatisfiable trains people to bypass the whole
+hook.** There is no partial override. `--no-verify` is one flag for all
+of `pre-push`, so the 502 commits that walked past the tier-2 block also
+walked past the pipeline lint, Tier 0, mvr and the commit-trailer guard —
+checks that were working, that were fast, and that nobody had any
+complaint about. The unsatisfiable check did not merely fail to protect
+anything. It switched off the ones that did, and then went on being
+green-adjacent in the ledger while it did so.
+
+Two consequences worth writing down:
+
+- **The cost of a bad hook is paid by the good ones.** A check's
+  admission to a hook is therefore not a decision about that check
+  alone, and "it can't hurt to also verify X here" is false as stated.
+- **Bypassing becomes the habit, not the exception.** After the first
+  few `--no-verify`s the flag stops being a considered override and
+  becomes how one pushes. Removing the offending check does not undo
+  that by itself; the habit outlives it, which is why the removal is
+  worth recording where people read rather than only in the diff.
+
+The same reasoning is why `.githooks/commit-msg` and the Tier 0 half of
+`.githooks/pre-push` stay: milliseconds and ~3 minutes respectively,
+deterministic given the tree, and each fails naming a file the author can
+open. It is also why neither of them is the *enforcement* — a fresh clone
+has no hooks at all. The forge check is the gate; the hook is the same
+rule delivered early, at the moment it is cheapest to obey.
+
 ## What none of the three reaches
 
 - **Whether the check is the *right* check.** A pin can be executed,

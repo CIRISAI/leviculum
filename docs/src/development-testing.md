@@ -6,7 +6,9 @@ automation details.
 ## TL;DR
 
 - **Writing code**: run `cargo test -p <crate-you-touched>` as you go.
-- **Committing**: nothing manual. Tier 1 runs in the background.
+- **Committing**: nothing happens. No hook tests a commit.
+- **Per batch of work**: run `just standard` (Tier 1) yourself. Nothing
+  starts it for you.
 - **Pushing**: Tier 0 runs automatically and blocks on fail.
 - **Daily**: Tier 3 (02:00) runs via systemd. Tier 2 is on demand —
   nothing starts it for you.
@@ -48,7 +50,7 @@ up from scratch.
 | Tier | When                              | Command         | Time      | Scope |
 |------|-----------------------------------|-----------------|-----------|-------|
 | 0    | on `git push` (hook)              | `just fast`     | ~3 min    | fmt + clippy + workspace lib tests |
-| 1    | after `git commit` (hook, background) | `just standard` | ~15 min (40 min cold[^cold]) | Tier 0 + core/tests + ffi + proxy + rnsd_interop |
+| 1    | on demand, once per batch[^t1]     | `just standard` | ~15 min (40 min cold[^cold]) | Tier 0 + core/tests + ffi + proxy + rnsd_interop |
 | 2    | on demand: `systemctl --user start leviculum-ci-tier2.service`[^t2] | `just extensive` | 30–90 min | Tier 1 + periculum `conformance/` + `regression/` |
 | 3    | 02:00 daily (systemd timer)       | `just nightly`  | 2–6 h     | Tier 2 + LNode flash-from-HEAD + periculum `hardware/` |
 
@@ -63,16 +65,27 @@ people to "wait for the next scheduled run" until 2026-08-07 — see
 [CI Pipeline](development-ci.md). `scripts/ci-status.sh` prints how long
 it has been since a Tier 2 run was recorded.
 
-[^cold]: The CI uses its own `CARGO_TARGET_DIR` at
-`~/.cache/leviculum-ci-target` so IDE builds and CI builds don't
-fight over the same incremental cache. The first Tier 1 run after
-`install-ci.sh` compiles the workspace from scratch (~40 min);
-subsequent runs are incremental (~15 min).
+[^t1]: A `post-commit` hook detached `scripts/run-tier1.sh` after every
+commit until 2026-08-07. A commit is not a unit anybody wants tested — a
+WIP commit, an amend and a commit mid-refactor each started the same
+forty-minute docker run — and there is nothing an author can do about a
+red gate that lands twenty minutes after the commit it judges. Removed;
+see [CI Pipeline](development-ci.md) and the hook rule in
+[Checks That Are Actually Checks](concepts/checks-and-citations.md).
+
+[^cold]: `just standard` typed by hand builds in the repo's own
+`target/`. The separate `CARGO_TARGET_DIR` at
+`~/.cache/leviculum-ci-target` — so IDE builds and CI builds don't fight
+over the same incremental cache — belongs to `scripts/run-tier1.sh`,
+which nothing has started since the post-commit hook went. Either way the
+first run against a cold target dir compiles the workspace from scratch
+(~40 min); subsequent runs are incremental (~15 min).
 
 Results go to `~/.local/state/leviculum-ci/last-results.txt`:
-`GREEN` = passed, `RED` = failed (sticky `notify-send` alarm),
-`SKIPPED` = deferred because another test held the lock (see
-"Concurrent runs" below).
+`GREEN` = passed, `RED` = failed, `SKIPPED` = deferred because another
+test held the lock (see "Concurrent runs" below). No tier raises a
+`notify-send` alarm today — read the ledger, or `just status`. See
+[CI Pipeline](development-ci.md).
 
 ## While writing code
 
@@ -85,15 +98,14 @@ cargo clippy -p leviculum-core       # clippy for one crate
 cargo fmt                             # apply formatter (not --check)
 ```
 
-End of a work session with unsynced work? Don't wait for the
-post-commit hook:
+End of a batch of work:
 
 ```sh
-just standard                        # manually trigger Tier 1 (~15 min)
+just standard                        # Tier 1 (~15 min)
 ```
 
 This is the "15-minute-budget" check that CLAUDE.md expects after
-every task.
+every task, and typing it is the only thing that runs it.
 
 **Never** run a full scenario corpus casually:
 
@@ -108,23 +120,21 @@ mount first and is lock-protected.
 
 ## Before pushing
 
-Nothing to type. `git push` triggers `.githooks/pre-push` which
-runs `just fast` (Tier 0). A red Tier 0 aborts the push — fix, stage,
-and push again.
+Nothing to type. `git push` triggers `.githooks/pre-push`, which lints
+the Woodpecker pipelines and then runs `just fast` (Tier 0). A red Tier 0
+aborts the push — fix, stage, and push again.
 
-Also checked: Tier 2 staleness.
-
-- **WARN** at 5 commits or 8 h since last GREEN Tier 2 — push goes
-  through with a visible warning, no action required.
-- **BLOCK** at 10 commits or 24 h — push aborted. Run `just
-  extensive` once to clear, or `git push --no-verify` to override.
+That is the whole hook. It used to also block on Tier 2 staleness, at
+5 commits/8 h (warn) and 10 commits/24 h (block); the block was
+unsatisfiable and was removed on 2026-08-07, along with the
+`git push --no-verify` habit it taught. See
+[CI Pipeline](development-ci.md).
 
 ## After committing
 
-`.githooks/post-commit` fires `scripts/run-tier1.sh` in the
-background. You'll get a desktop notification (~15 min later) with
-GREEN or a critical RED + log path. Multiple commits in a row
-coalesce — no parallel re-runs.
+Nothing. There is no `post-commit` hook — deliberately, since
+2026-08-07 (footnote [^t1] above). Tier 1 is `just standard`, typed once
+per batch.
 
 ## Checking state
 

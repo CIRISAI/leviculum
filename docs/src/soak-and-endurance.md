@@ -94,9 +94,11 @@ values; the smoke variant uses smaller ones):
 ### Where it runs regularly
 
 The smoke soak is wired into the Tier 1 `standard` CI target (`Justfile`), which
-runs in the background after every commit via the post-commit hook — so a green
-soak is produced regularly and left on record. See [CI Pipeline](development-ci.md).
-The heavier `--full` soak is run on demand.
+is run once per batch of work, and again by `just extensive` and `just nightly`,
+which depend on it — so a green soak is produced regularly and left on record.
+Until 2026-08-07 a post-commit hook also ran it after every commit; that hook is
+gone and Tier 1 is now started explicitly. See
+[CI Pipeline](development-ci.md). The heavier `--full` soak is run on demand.
 
 ## Real-world production soak: the `miauhaus` node
 
