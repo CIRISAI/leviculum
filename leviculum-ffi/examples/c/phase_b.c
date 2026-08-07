@@ -5,6 +5,11 @@
  * announces it; node B observes the announce as an event over its pollable
  * event fd, identified by the destination hash.
  *
+ * Takes the loopback listen address as argv[1]; the Rust harness allocates a
+ * free port and passes it in (Codeberg #206). Running it by hand needs one
+ * too: `./phase_b_c 127.0.0.1:0` will not do, the address is used verbatim
+ * by both nodes.
+ *
  * Returns 0 on success, non-zero on failure. Compiled and run by the Rust
  * harness in tests/ffi_c_tests.rs.
  */
@@ -52,11 +57,24 @@ static int drain_for_announce(leviculum_t *b, const uint8_t want[LEV_ADDR_LEN]) 
     return got;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr,
+                "usage: %s <host:port>\n"
+                "  Listen address for node A's TCP server; node B connects to\n"
+                "  it. There is no default on purpose: a literal port lands in\n"
+                "  the kernel's ephemeral range (32768-60999 by default), so\n"
+                "  any concurrent bind(\"127.0.0.1:0\") in the suite can be\n"
+                "  handed it and this program then cannot bind (Codeberg #206).\n"
+                "  The Rust harness in tests/ffi_c_tests.rs allocates one and\n"
+                "  passes it here.\n",
+                argv[0]);
+        return 2;
+    }
+    const char *addr = argv[1];
+
     printf("leviculum phase b C acceptance test\n");
     CHECK(lev_init() == LEV_OK);
-
-    const char *addr = "127.0.0.1:45872";
 
     /* Node A: TCP server, with an identity and an incoming destination. */
     lev_identity_t *ida = lev_identity_generate();

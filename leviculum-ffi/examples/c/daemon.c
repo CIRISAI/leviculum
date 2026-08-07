@@ -7,6 +7,9 @@
  * config-file driven node coming up, and a node offering a shared instance
  * that a second node attaches to as a local client.
  *
+ * Takes the config-file node's TCP listen port as argv[1]; the Rust harness
+ * allocates a free one and passes it in (Codeberg #206).
+ *
  * Links the real libleviculum.so. Returns 0 on success, non-zero on the first
  * failed check. Compiled and run by the Rust harness in tests/ffi_c_tests.rs.
  */
@@ -65,11 +68,10 @@ static const char *write_config(const char *dir, int port) {
     return path;
 }
 
-static void test_config_file(void) {
+static void test_config_file(int port) {
     char dir[] = "/tmp/leviculum-c-daemon-cfg-XXXXXX";
     CHECK(mkdtemp(dir) != NULL);
-    /* An ephemeral-ish high port; collisions on loopback are improbable. */
-    const char *cfg = write_config(dir, 37123);
+    const char *cfg = write_config(dir, port);
     CHECK(cfg != NULL);
 
     lev_builder_t *b = lev_builder_new();
@@ -125,10 +127,29 @@ static void test_shared_instance(void) {
     lev_free(daemon);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr,
+                "usage: %s <port>\n"
+                "  TCP port for the config-file node's TCPServerInterface.\n"
+                "  There is no default on purpose: a literal port lands in the\n"
+                "  kernel's ephemeral range (32768-60999 by default), so any\n"
+                "  concurrent bind(\"127.0.0.1:0\") in the suite can be handed\n"
+                "  it and this program then cannot bind (Codeberg #206). The\n"
+                "  Rust harness in tests/ffi_c_tests.rs allocates one and\n"
+                "  passes it here.\n",
+                argv[0]);
+        return 2;
+    }
+    int port = atoi(argv[1]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "not a port: %s\n", argv[1]);
+        return 2;
+    }
+
     printf("leviculum daemon C acceptance test\n");
     test_argument_guards();
-    test_config_file();
+    test_config_file(port);
     test_shared_instance();
 
     if (failures == 0) {

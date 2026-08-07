@@ -81,12 +81,31 @@ fn compile(source: &str, bin_name: &str) -> Option<PathBuf> {
     Some(out_bin)
 }
 
-/// Compile `source` against the cdylib and run it. Panics on any failure.
-fn compile_and_run(source: &str, bin_name: &str) {
+/// A TCP port on loopback the kernel has just confirmed free: bind `:0`, read
+/// the number, drop the listener.
+///
+/// This is the tree's existing idiom — `tests/support/mod.rs:165` in this same
+/// crate, `lblogd/tests/web_plain.rs:24`,
+/// `leviculum-lxmf-node/tests/two_node_loopback.rs:84` — and the point of
+/// Codeberg #206 is that the C examples were the one family that did not use
+/// it. It is a narrow race (the consumer binds a moment after the probe
+/// releases), which #206 rules out as the mechanism it saw and names as the
+/// next suspect should the failure recur.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("bind an ephemeral loopback port")
+        .port()
+}
+
+/// Compile `source` against the cdylib and run it with `args`. Panics on any
+/// failure.
+fn compile_and_run_args(source: &str, bin_name: &str, args: &[String]) {
     let Some(out_bin) = compile(source, bin_name) else {
         return;
     };
     let run = Command::new(&out_bin)
+        .args(args)
         .env("LD_LIBRARY_PATH", lib_dir())
         .status()
         .expect("failed to run compiled C test");
@@ -98,6 +117,25 @@ fn compile_and_run(source: &str, bin_name: &str) {
     );
 }
 
+/// Compile `source` against the cdylib and run it. Panics on any failure.
+fn compile_and_run(source: &str, bin_name: &str) {
+    compile_and_run_args(source, bin_name, &[]);
+}
+
+/// Compile `source` and run it with a freshly allocated loopback address as
+/// `argv[1]`.
+///
+/// The two-node C examples used to carry a literal `127.0.0.1:4587x`, which
+/// sits inside this host's `ip_local_port_range` (32768-60999): any concurrent
+/// `bind("127.0.0.1:0")` in the workspace could be handed exactly that number,
+/// and while it held it the example's server could not bind, its announce
+/// timed out, and every check downstream of a working node failed with it
+/// (Codeberg #206).
+fn compile_and_run_on_free_addr(source: &str, bin_name: &str) {
+    let addr = format!("127.0.0.1:{}", free_port());
+    compile_and_run_args(source, bin_name, &[addr]);
+}
+
 #[test]
 fn c_phase_a_acceptance() {
     compile_and_run("examples/c/phase_a.c", "phase_a_c");
@@ -105,27 +143,74 @@ fn c_phase_a_acceptance() {
 
 #[test]
 fn c_phase_b_acceptance() {
-    compile_and_run("examples/c/phase_b.c", "phase_b_c");
+    compile_and_run_on_free_addr("examples/c/phase_b.c", "phase_b_c");
 }
 
 #[test]
 fn c_phase_c_acceptance() {
-    compile_and_run("examples/c/phase_c.c", "phase_c_c");
+    compile_and_run_on_free_addr("examples/c/phase_c.c", "phase_c_c");
 }
 
 #[test]
 fn c_phase_d_acceptance() {
-    compile_and_run("examples/c/phase_d.c", "phase_d_c");
+    compile_and_run_on_free_addr("examples/c/phase_d.c", "phase_d_c");
 }
 
 #[test]
 fn c_phase_e_acceptance() {
-    compile_and_run("examples/c/phase_e.c", "phase_e_c");
+    compile_and_run_on_free_addr("examples/c/phase_e.c", "phase_e_c");
 }
 
 #[test]
 fn c_daemon_acceptance() {
-    compile_and_run("examples/c/daemon.c", "daemon_c");
+    compile_and_run_args(
+        "examples/c/daemon.c",
+        "daemon_c",
+        &[free_port().to_string()],
+    );
+}
+
+/// Standing canary for Codeberg #206
+/// (`docs/src/concepts/checks-and-citations.md` §Standing canaries).
+///
+/// The fix for #206 is a *negative* property — the two-node examples carry no
+/// default address — and nothing about a green `c_phase_d_acceptance` proves
+/// it. Re-adding `const char *addr = "127.0.0.1:45874";` as a fallback would
+/// leave every test above passing while quietly restoring the bug, because the
+/// harness would still pass a good port and the program would still ignore the
+/// literal until the day it did not.
+///
+/// So: run each of them with no argument and require the usage exit. This dies
+/// the moment a default comes back.
+#[test]
+fn the_two_node_examples_refuse_to_run_without_an_address() {
+    for (source, bin) in [
+        ("examples/c/phase_b.c", "phase_b_c_noargs"),
+        ("examples/c/phase_c.c", "phase_c_c_noargs"),
+        ("examples/c/phase_d.c", "phase_d_c_noargs"),
+        ("examples/c/phase_e.c", "phase_e_c_noargs"),
+        ("examples/c/daemon.c", "daemon_c_noargs"),
+    ] {
+        let Some(out_bin) = compile(source, bin) else {
+            return;
+        };
+        let run = Command::new(&out_bin)
+            .env("LD_LIBRARY_PATH", lib_dir())
+            .output()
+            .expect("failed to run compiled C test");
+        assert_eq!(
+            run.status.code(),
+            Some(2),
+            "{source} must refuse to run without an address rather than fall back \
+             to a literal port (Codeberg #206); it exited {:?}",
+            run.status.code()
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains("usage:"),
+            "{source} must say what it wants: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -164,10 +249,7 @@ fn c_lnsd_runs_as_daemon() {
     };
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("free port")
-        .port();
+    let port = free_port();
     let name = format!("clnsd-test-{port}");
     let cfg = format!(
         "[reticulum]\n  enable_transport = no\n  share_instance = yes\n  \
@@ -229,10 +311,7 @@ fn c_lncp_copies_a_file_end_to_end() {
     let Some(bin) = compile("examples/c/lncp.c", "lncp_c") else {
         return;
     };
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("free port")
-        .port();
+    let port = free_port();
     let addr = format!("127.0.0.1:{port}");
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -303,10 +382,7 @@ fn c_lncp_copies_via_shared_instance() {
     };
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("free port")
-        .port();
+    let port = free_port();
     let instance = format!("lncp-ipc-{port}");
 
     // The daemon: shares an instance, no interfaces of its own needed since the
@@ -412,10 +488,7 @@ fn c_levcat_pipes_a_line_end_to_end() {
     let Some(bin) = compile("examples/c/levcat.c", "levcat_c") else {
         return;
     };
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("free port")
-        .port();
+    let port = free_port();
     let addr = format!("127.0.0.1:{port}");
 
     let dir = tempfile::tempdir().expect("tempdir");
