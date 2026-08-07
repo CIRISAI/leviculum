@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A propagation upload is refused at the length Python refuses it at.
+  `PropagationUpload::decode` guarded at `STAMP_SIZE +
+  DESTINATION_LENGTH` (48) where `validate_pn_stamp` guards at
+  `LXMF_OVERHEAD + STAMP_SIZE` (144), so a host on this decoder stored
+  bodies in the band 49..=144 that every Python propagation node
+  discards — and that its own `PropagatedMessage::from_unstamped_bytes`
+  then refused. That parser was the same bound off by one from the other
+  side, accepting exactly `LXMF_OVERHEAD`; both now reject where the
+  reference does (#201).
 - `generate_stamp` refuses a cost above the 256-bit hash width instead
   of searching for a stamp that cannot exist: `stamp_valid` rejects every
   candidate at that cost, so the loop could not terminate at all and one
@@ -120,6 +129,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The propagation-node HOST direction is public: `PropagationUpload::
+  decode`, `MessageGetRequest::decode`, `MessageListResponse::encode`,
+  `MessageGetResponse::encode`, `PropagationNodeAnnounce::encode`,
+  `PropagationSignal::encode`, `PeerError::code` and `PropagatedMessage`,
+  so an external crate can operate a propagation node and not only be a
+  client of one (#201, leviculum#38). `PropagationSignal::encode` emits
+  the `[LXMPeer.ERROR_INVALID_STAMP]` packet a node sends when it refuses
+  an upload; `PropagationError::MultipleMessages` reports the peer
+  `/offer` sync form distinctly from a malformed length.
 - `lxmf-node`, a new `leviculum-lxmf-node` crate, runs `leviculum-lxmf`
   as a shared-instance client of `lnsd` or `rnsd` and speaks periculum's
   LXMF helper protocol — the same stdin commands and `EVENT` lines as the
