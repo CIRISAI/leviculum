@@ -1,6 +1,21 @@
 #!/bin/bash
 set -e
 
+# git runs hooks with the login shell's PATH, not an interactive one, so
+# ~/.local/bin — where woodpecker-cli is installed — is absent and the bare
+# name resolved to nothing. Prepend it, then resolve the name explicitly:
+# `command -v` failing is a different fact from the lint failing, and the
+# hook should say which one happened. Not an absolute path, because the
+# install location is per-machine and a wrong one here is a hook every
+# clone has to edit.
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v woodpecker-cli >/dev/null 2>&1; then
+    echo "pre-push: woodpecker-cli not found on PATH (looked in ~/.local/bin)." >&2
+    echo "pre-push: install it from https://codeberg.org/woodpecker/woodpecker" >&2
+    echo "pre-push: or set PATH so this hook can see it, then push again." >&2
+    exit 1
+fi
+
 # Lint Woodpecker pipelines first — schema-check is sub-second, so
 # bailing here saves the multi-minute Tier 0 below if a YAML is broken.
 woodpecker-cli lint .woodpecker/
