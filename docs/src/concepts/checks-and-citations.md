@@ -27,6 +27,7 @@ person what to do. This one is about the cases where the person forgot.
 | a `Co-Authored-By:` naming a model reached a periculum commit on 2026-08-07, against a rule the same author had cited correctly hours earlier (#205) | **neither** — a commit message, which all three explicitly do not reach |
 | `PROCESSOR_TICK_BUDGET` justified the only number in a public API constant with "the number comes off `docs/…/core-lock-budget.md`" and then named 126.6 ms; that figure occurred exactly once in the tree, in that comment (#200) | **C**, only since the figure check below — a prose attribution carries no line and no identifier, so the resolver never saw it |
 | `just standard` held a decided red for two hours, alive and silent, because a test that aborted in a destructor leaked a daemon holding the gate's stdout pipe (2026-08-07) | **none of the three** — every one of them reports, and a gate that never terminates reports nothing at all. See [A gate must pass, fail, or say it gave up](#a-gate-must-pass-fail-or-say-it-gave-up) |
+| seven orphaned `scripts/test_daemon.py` processes alive at once on 2026-08-07, the oldest over four hours, from several different runs — every one of them left by a test whose `Drop` was written correctly and did not run | **none of the three**, and nothing else either: an orphan makes no gate red, so the only thing that ever reported it was somebody running `pgrep` by hand. Now **B**, via the census and the SIGKILL proof under [A harness that spawns a process must ensure it dies with the harness](#a-harness-that-spawns-a-process-must-ensure-it-dies-with-the-harness) |
 
 The last row is worth reading twice: the guarantees are not
 independent. A rotted citation had a test attached, and that test ran
@@ -526,9 +527,9 @@ trade the hang at the end for an escape at the start.
 
 The wrapper is a backstop, not an excuse. The rule for the spawn sites:
 
-> **A harness that spawns an external process must ensure that process
-> dies with the harness however the harness dies — not only when it exits
-> cleanly.**
+> **A harness that spawns a long-lived external process must ensure it
+> dies with the harness, however the harness dies. Cleanup code is a
+> convenience; the kernel is the guarantee.**
 
 Relying on Rust's `Drop` to kill a child satisfies the "cleanly" half and
 nothing else: an abort skips unwinding, and so does a SIGKILL of the test
@@ -537,9 +538,88 @@ the fork and before the exec, so the kernel signals it when its parent
 dies for any reason. `Drop` then becomes the polite path rather than the
 only one.
 
-Auditing every spawn site against this rule is its own batch; the rule is
-written here first so the next harness written is written correctly, and
-so the audit has something to audit against.
+The receipt, from the afternoon this was written: **seven orphaned
+`scripts/test_daemon.py` processes alive at once, the oldest over four
+hours, from several different runs** — so the leak was the normal case
+and not the exceptional one. One of them held a pipe open and hung
+`just standard` for two hours with its verdict already decided.
+
+`leviculum_std::process::spawn_supervised` is the mechanism, and it takes
+its `Command` **by value**, so that a supervised spawn and a bare one do
+not look alike at a call site. Four things it has to get right, each of
+which has bitten somebody:
+
+1. **`PR_SET_PDEATHSIG` is per-task, not per-process.** The kernel stores
+   it on the child's `task_struct` and delivers it from
+   `forget_original_parent()`, which runs when the *forking task* exits —
+   not when that task's process exits. A tokio worker or a
+   `spawn_blocking` thread finishing mid-test would therefore kill the
+   daemon under the test, which turns the fix into a flake generator. So
+   **every supervised spawn is forked from one dedicated thread that
+   never exits**, and the only event that ends that thread is the process
+   ending. Nothing else in the design substitutes for this: the
+   `getppid()` check below reports the parent's *thread group leader*, so
+   a forking thread exiting while its process lives leaves it unchanged
+   and the check sees nothing wrong.
+
+   The same fact bites the measurement, not only the mechanism.
+   `copy_process()` clears `pdeath_signal` for every new task, threads
+   included, and libtest runs a test body on a spawned thread even under
+   `--test-threads=1` — so a canary written as a `#[test]` reads its own
+   parent-death signal as 0 while its process's main thread carries
+   `SIGKILL`. That is why the probe below is a `fn main` and not a test.
+
+2. **The race between `fork` and `prctl`.** If the parent dies inside
+   that window the signal is already missed and the child runs on
+   forever. After setting the flag the child re-reads `getppid()` and
+   `_exit`s if it no longer names the process that spawned it.
+
+3. **It does not reach grandchildren,** and the remedy is *not* `setsid`.
+   A supervised child deliberately stays in its parent's process group,
+   so `run-with-manifest.py`'s group kill still reaches everything below
+   it — an orphan that has `setsid`-ed is the one thing that wrapper
+   names as out of reach. Where a supervised process starts its own
+   long-lived children, that is a separate link needing the same
+   treatment at its own site.
+
+4. **The signal is `SIGKILL`, and the reason is the state it fires in.**
+   `PDEATHSIG` is delivered only once the parent is *already dead*, so
+   there is nobody left to wait for a polite exit and nobody to escalate
+   if the child declines. A catchable signal there is the same "cleanup
+   that usually runs" the mechanism exists to replace, and the daemon
+   whose graceful shutdown is being trusted is the one whose graceful
+   shutdown hung a gate for two hours. The polite path is still tried
+   first, by the owning `Drop`, and those destructors already end in
+   `kill()` — so this is the same signal, moved to where it cannot be
+   skipped. The cost is the child's own last wishes: `test_daemon.py`
+   removes its `mkdtemp` config directory in a `finally:` block, and
+   under `SIGKILL` that directory stays. Ports, sockets, ptys and
+   `flock`s are released by the kernel on death, so the loss is a few KiB
+   under `/tmp` in a run whose parent has already crashed.
+
+**And the other half of the same rule, in the destructors.** A `Drop`
+that owns an external process must reach the kill on **every** path.
+`PyDaemon::drop` (`leviculum-ffi/tests/support/python_daemon.rs`) did
+fallible I/O first — `query("shutdown")`, which `expect`ed a JSON
+response and got the empty body a mid-shutdown daemon returns — and a
+panic in a destructor that is itself running during unwinding is a
+non-unwinding panic, so the process aborted before reaching
+`child.kill()` two lines down. That is a second, independent reason the
+same daemon leaked. The shape to write is: try the polite shutdown,
+ignore every error it can produce, then kill unconditionally. It pairs
+with `PDEATHSIG` rather than replacing it — the kernel covers "the parent
+died", this covers "the parent lived and its cleanup threw".
+
+**Which sites.** Every spawn whose process outlives the call that made
+it: the Python `TestDaemon` and its `socat` pty pair, `PyDaemon`, the C
+`lnsd`/`lncp`/`levcat` programs in the FFI suite, `lnsd` and the vendored
+`rnsd` in the mvr, load-test, reverse-RPC and status-parity harnesses,
+the instance-conflict holder — and, outside the tests, the
+`PipeInterface` bridge program, which is the one long-lived process the
+shipped daemon starts. Deliberately not covered: everything spawned and
+awaited inside one call — `cc`, `git`, `stty`, `rnstatus`, the `jl` /
+`jldiff` filters, the `event-log-helper` and port-allocator workers.
+Those are counted rather than argued about; see the gate below.
 
 ## Standing canaries
 
@@ -582,6 +662,23 @@ reports anything else:
   on this page reports nothing at all when that happens, including the
   parser canary in the same script, which passes happily while the run it
   belongs to never ends.
+- **B, supervised spawns**: two of them, because the property has two
+  halves that fail independently. The **census**
+  (`scripts/check-supervised-spawns.py`) classifies two fixtures before
+  it reports anything about the tree — one holding a bare spawn in each
+  of the four shapes the tree writes them in, all of which must be
+  reported, and one holding a supervised call, a runtime `spawn`, a
+  string and a comment that mention the words, none of which may be.
+  Without the first arm a classifier that has stopped matching reports a
+  clean tree forever; without the second it reports every line in it. The
+  **behaviour** (`leviculum-std/tests/supervised_spawn.rs`) SIGKILLs a
+  parent and requires its child to be gone, paired with the same
+  experiment on a child spawned bare, which must still be alive after the
+  same deadline — otherwise "the child is gone" is satisfied by a child
+  that never started. Both arms are bounded and fail loudly rather than
+  waiting, which is the mistake the incident above was about, and the
+  child's own `PR_GET_PDEATHSIG` is checked first as the cheap form: a
+  refactor that drops the `pre_exec` is named in milliseconds.
 - **C, citation guard**: a deliberately drifted citation that must be
   reported. The existing guard has floor asserts against parser rot; the
   canary is the stronger form.
@@ -740,9 +837,14 @@ runs the whole workspace by construction, so no ordinary test is outside
 the union; the check that reads that union, and the staleness bound that
 ages manifests out, are unbuilt. Its wrapper terminates on its child
 rather than on the pipe, kills the child's process group and reports what
-it killed, and gives up at 1800 s with a named failure; the spawn-site
-rule that would stop the leaks upstream is written and unaudited. A is
-unbuilt.
+it killed, and gives up at 1800 s with a named failure. The spawn-site
+rule above is built and audited: every long-lived spawn goes through
+`spawn_supervised`, the eleven bare spawns that remain are pinned per
+file in `scripts/supervised-spawn-counts.txt` with a reason each, and
+both halves run in `just fast`. What it does not reach is a process a
+supervised child starts for itself — a separate link, covered only by the
+wrapper's group kill — and any platform that is not Linux, where the
+helper compiles to the `Drop` path and says so. A is unbuilt.
 
 All three are subject to the rule they enforce. The standing canaries
 above are the demonstration made permanent, because a one-time one

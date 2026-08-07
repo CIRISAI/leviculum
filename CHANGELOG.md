@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every long-lived external process this repository spawns now dies with
+  its parent because the kernel kills it, not because a destructor got to
+  run. `leviculum_std::process::spawn_supervised` sets
+  `PR_SET_PDEATHSIG` to `SIGKILL` on the child between `fork` and `exec`,
+  and forks from one dedicated thread that never exits — the flag is
+  per-task and fires when the *forking task* exits, so forking from a
+  tokio worker would have killed daemons mid-test. The child also
+  re-reads `getppid()` after setting the flag and stands down if it lost
+  its parent inside that window. It covers the Python `TestDaemon` and
+  its `socat` pty pair, `PyDaemon`, the C `lnsd`/`lncp`/`levcat`
+  programs, `lnsd` and the vendored `rnsd` in the mvr, load-test,
+  reverse-RPC, status-parity and instance-conflict harnesses, and the
+  production `PipeInterface` bridge program. Seven orphaned
+  `scripts/test_daemon.py` processes were found alive on 2026-08-07, the
+  oldest over four hours old and from several different runs, one of
+  which held a pipe that kept `just standard` alive for two hours after
+  its verdict was decided.
+- `just fast` gained both halves of that property: a census over the
+  sources pinning every remaining bare `Command::new(..).spawn()` per
+  file (`scripts/supervised-spawn-counts.txt`), and a test that SIGKILLs
+  a parent and requires its child to be gone within a bounded deadline —
+  paired with the same experiment on a bare spawn, where the child must
+  survive.
 - A gate wrapped by `scripts/run-with-manifest.py` waits for its command
   to exit rather than for the output pipe to close, so a process a test
   leaked can no longer hold it open: `just standard` spent two hours
@@ -51,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `PyDaemon::drop` reaches the kill on every path. It sent the polite
+  `shutdown` RPC through a helper that `expect`ed a JSON response, and a
+  daemon that is already stopping answers with an empty body — so the
+  destructor panicked, and a panic in a destructor already running during
+  unwinding aborts the process, which meant `child.kill()` two lines
+  below never ran. That is the second, independent reason the same daemon
+  leaked on 2026-08-07 (#215). The polite shutdown now swallows every
+  error it can produce and the kill is unconditional.
 - A propagation upload is refused at the length Python refuses it at.
   `PropagationUpload::decode` guarded at `STAMP_SIZE +
   DESTINATION_LENGTH` (48) where `validate_pn_stamp` guards at

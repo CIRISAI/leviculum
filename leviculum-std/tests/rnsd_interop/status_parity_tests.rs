@@ -140,6 +140,7 @@ use tokio::net::TcpStream;
 use leviculum_core::constants::{MTU, TRUNCATED_HASHBYTES};
 use leviculum_core::identity::Identity;
 use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
+use leviculum_std::process::spawn_supervised;
 
 use crate::common::{build_path_request_raw_with_tag, init_tracing, now_ms};
 use crate::harness::find_available_ports;
@@ -330,27 +331,23 @@ impl ParityDaemon {
 
         let log = std::fs::File::create(config_dir.join("daemon.log")).expect("create log");
         let log_err = log.try_clone().expect("clone log handle");
-        let child = match stack {
-            Stack::Lnsd => Command::new(cli_bin("lnsd"))
-                .arg("--config")
-                .arg(&config_dir)
-                .stdout(Stdio::from(log))
-                .stderr(Stdio::from(log_err))
-                .spawn()
-                .expect("spawn lnsd"),
-            Stack::Rnsd => Command::new("python3")
-                .arg(RNSD_PY)
-                .arg("--config")
-                .arg(&config_dir)
-                .env(
+        let mut cmd = match stack {
+            Stack::Lnsd => {
+                let mut cmd = Command::new(cli_bin("lnsd"));
+                cmd.arg("--config").arg(&config_dir);
+                cmd
+            }
+            Stack::Rnsd => {
+                let mut cmd = Command::new("python3");
+                cmd.arg(RNSD_PY).arg("--config").arg(&config_dir).env(
                     "PYTHONPATH",
                     concat!(env!("CARGO_MANIFEST_DIR"), "/../reference/Reticulum"),
-                )
-                .stdout(Stdio::from(log))
-                .stderr(Stdio::from(log_err))
-                .spawn()
-                .expect("spawn rnsd"),
+                );
+                cmd
+            }
         };
+        cmd.stdout(Stdio::from(log)).stderr(Stdio::from(log_err));
+        let child = spawn_supervised(cmd).expect("spawn the parity daemon");
 
         let daemon = ParityDaemon {
             stack,

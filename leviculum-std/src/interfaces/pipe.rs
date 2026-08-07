@@ -290,6 +290,15 @@ where
 ///
 /// The command is split shell-style (`split_command`) to match Python's
 /// `subprocess.Popen(shlex.split(command), ...)`.
+///
+/// The bridge program is the one long-lived external process this crate spawns
+/// outside a test, so it goes through the same supervised spawn the harnesses
+/// do: `kill_on_drop` covers a dropped supervisor task, and
+/// `PR_SET_PDEATHSIG` covers an `lnsd` that was `SIGKILL`ed and never dropped
+/// anything. Note the forking thread matters here for the same reason it does
+/// in a test binary — a tokio worker exiting must not take the bridge with it —
+/// which is why this does not simply call `Command::spawn` on the caller's
+/// thread. See [`crate::process`].
 fn spawn_child(command: &str) -> std::io::Result<Child> {
     let parts = split_command(command);
     let (program, args) = parts.split_first().ok_or_else(|| {
@@ -299,16 +308,16 @@ fn spawn_child(command: &str) -> std::io::Result<Child> {
         )
     })?;
 
-    Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Let the child's stderr flow to our stderr so bridge programs can log
         // diagnostics; we never read it ourselves.
         .stderr(Stdio::inherit())
         // If the supervisor task is dropped, take the child down with it.
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    crate::process::spawn_supervised_async(cmd)
 }
 
 /// Bidirectional pipe I/O task.

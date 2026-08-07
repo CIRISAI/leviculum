@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use leviculum_core::Identity;
+use leviculum_std::process::spawn_supervised;
 use rand_core::OsRng;
 use sha2::Digest;
 
@@ -102,15 +103,14 @@ fn spawn_rnsd(tcp_port: u16) -> Rnsd {
 
     let log = std::fs::File::create(config_dir.join("daemon.log")).expect("create log");
     let log_err = log.try_clone().expect("clone log handle");
-    let child = Command::new("python3")
-        .arg(RNSD_PY)
+    let mut cmd = Command::new("python3");
+    cmd.arg(RNSD_PY)
         .arg("--config")
         .arg(&config_dir)
         .env("PYTHONPATH", VENDOR_RNS_ROOT)
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .expect("spawn rnsd");
+        .stderr(Stdio::from(log_err));
+    let child = spawn_supervised(cmd).expect("spawn rnsd");
 
     Rnsd {
         config_dir,

@@ -14,6 +14,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use leviculum_std::process::spawn_supervised;
+
 use super::free_port;
 
 /// Path to the shared daemon script (sibling `scripts/` of the repo root).
@@ -48,17 +50,18 @@ impl PyDaemon {
             return None;
         }
 
-        let mut child = Command::new("python3")
-            .arg(&script)
+        let mut cmd = Command::new("python3");
+        cmd.arg(&script)
             .arg("--rns-port")
             .arg(rns_port.to_string())
             .arg("--cmd-port")
             .arg(cmd_port.to_string())
             .args(extra)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .ok()?;
+            .stderr(Stdio::inherit());
+        // Supervised: the kernel kills this daemon when the test binary dies,
+        // whatever it dies of. `Drop` below is the polite path on top.
+        let mut child = spawn_supervised(cmd).ok()?;
 
         // Read stdout on a thread, signalling when "READY" appears or stdout
         // closes (the daemon exited, e.g. RNS not importable).
@@ -98,20 +101,38 @@ impl PyDaemon {
     }
 
     /// Send one JSON-RPC command and return the parsed response value.
+    ///
+    /// Panics on any I/O or parse failure, which is what a test wants
+    /// *during* a test. It is emphatically not what a destructor wants — see
+    /// [`try_shutdown`](Self::try_shutdown) and the `Drop` below.
     fn query(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.try_query(method, params)
+            .unwrap_or_else(|e| panic!("daemon {method}: {e}"))
+    }
+
+    /// The same round trip with every failure returned rather than raised.
+    fn try_query(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let cmd = serde_json::json!({ "method": method, "params": params });
-        let mut stream =
-            TcpStream::connect(("127.0.0.1", self.cmd_port)).expect("connect daemon cmd port");
+        let mut stream = TcpStream::connect(("127.0.0.1", self.cmd_port))?;
         stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-        stream
-            .write_all(cmd.to_string().as_bytes())
-            .expect("write command");
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .expect("shutdown write");
+        stream.write_all(cmd.to_string().as_bytes())?;
+        stream.shutdown(std::net::Shutdown::Write)?;
         let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).expect("read response");
-        serde_json::from_slice(&buf).expect("parse JSON response")
+        stream.read_to_end(&mut buf)?;
+        Ok(serde_json::from_slice(&buf)?)
+    }
+
+    /// Ask the daemon to stop, and swallow every way that can fail.
+    ///
+    /// A daemon that has already exited refuses the connection; one that is
+    /// mid-shutdown answers with an empty body, which is not JSON. Neither is
+    /// news to a destructor whose next line kills the process anyway.
+    fn try_shutdown(&self) {
+        let _ = self.try_query("shutdown", serde_json::json!({}));
     }
 
     fn result(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -214,9 +235,25 @@ impl PyDaemon {
     }
 }
 
+/// A `Drop` that owns an external process must reach the kill on **every**
+/// path.
+///
+/// This one did not, and it is the second, independent reason the daemon leaked
+/// on 2026-08-07. `query("shutdown")` panicked on the empty response a
+/// mid-shutdown daemon returns — `serde_json::from_slice(&[])` is an error and
+/// the old code `expect`ed it — and a panic *inside a destructor that is itself
+/// running during unwinding* is a non-unwinding panic: the process aborts, so
+/// the `child.kill()` two lines down never ran, and neither did any other
+/// destructor in the test. Seven orphaned daemons, the oldest four hours old,
+/// and a gate held open for two.
+///
+/// So: try the polite shutdown, ignore every error it can produce, then kill
+/// unconditionally. This pairs with `PR_SET_PDEATHSIG` rather than replacing
+/// it — the kernel covers "the parent died", this covers "the parent lived and
+/// its cleanup threw".
 impl Drop for PyDaemon {
     fn drop(&mut self) {
-        let _ = self.query("shutdown", serde_json::json!({}));
+        self.try_shutdown();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

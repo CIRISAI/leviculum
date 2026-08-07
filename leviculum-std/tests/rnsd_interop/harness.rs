@@ -38,6 +38,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Every daemon this module starts outlives the call that started it, so every
+/// one of them goes through the supervised spawn: the kernel `SIGKILL`s it when
+/// this test binary dies, whatever the test binary dies of. The `Drop`s below
+/// are the polite path on top of that, not the guarantee. See
+/// `leviculum_std::process` and `docs/src/concepts/checks-and-citations.md`.
+use leviculum_std::process::spawn_supervised;
+
 /// Host-wide listener-port allocator, shared with the `mvr` suite and with
 /// `tests/discovery_autoconnect.rs`.
 ///
@@ -440,12 +447,11 @@ impl TestDaemon {
             cmd_port.to_string(),
         ];
         args.extend(extra_args);
-        let mut process = Command::new("python3")
-            .args(&args)
+        let mut cmd = Command::new("python3");
+        cmd.args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(HarnessError::SpawnFailed)?;
+            .stderr(Stdio::inherit());
+        let mut process = spawn_supervised(cmd).map_err(HarnessError::SpawnFailed)?;
 
         // Wait for "READY <rns_port> <cmd_port>" line
         let stdout = process.stdout.take().expect("stdout should be captured");
@@ -608,22 +614,21 @@ impl TestDaemon {
         udp_listen_port: u16,
         udp_forward_port: u16,
     ) -> Result<Self, HarnessError> {
-        let mut process = Command::new("python3")
-            .args([
-                Self::DAEMON_SCRIPT,
-                "--rns-port",
-                &rns_port.to_string(),
-                "--cmd-port",
-                &cmd_port.to_string(),
-                "--udp-listen-port",
-                &udp_listen_port.to_string(),
-                "--udp-forward-port",
-                &udp_forward_port.to_string(),
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(HarnessError::SpawnFailed)?;
+        let mut cmd = Command::new("python3");
+        cmd.args([
+            Self::DAEMON_SCRIPT,
+            "--rns-port",
+            &rns_port.to_string(),
+            "--cmd-port",
+            &cmd_port.to_string(),
+            "--udp-listen-port",
+            &udp_listen_port.to_string(),
+            "--udp-forward-port",
+            &udp_forward_port.to_string(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+        let mut process = spawn_supervised(cmd).map_err(HarnessError::SpawnFailed)?;
 
         let stdout = process.stdout.take().expect("stdout should be captured");
         let reader = BufReader::new(stdout);
@@ -737,12 +742,11 @@ impl TestDaemon {
         if echo_channel {
             args.push("--echo-channel".to_string());
         }
-        let mut process = Command::new("python3")
-            .args(&args)
+        let mut cmd = Command::new("python3");
+        cmd.args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(HarnessError::SpawnFailed)?;
+            .stderr(Stdio::inherit());
+        let mut process = spawn_supervised(cmd).map_err(HarnessError::SpawnFailed)?;
 
         let stdout = process.stdout.take().expect("stdout should be captured");
         let reader = BufReader::new(stdout);
@@ -821,19 +825,18 @@ impl TestDaemon {
 
     /// Start a daemon with `respond_to_probes` on specific ports.
     async fn start_with_probes_ports(rns_port: u16, cmd_port: u16) -> Result<Self, HarnessError> {
-        let mut process = Command::new("python3")
-            .args([
-                Self::DAEMON_SCRIPT,
-                "--rns-port",
-                &rns_port.to_string(),
-                "--cmd-port",
-                &cmd_port.to_string(),
-                "--respond-to-probes",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(HarnessError::SpawnFailed)?;
+        let mut cmd = Command::new("python3");
+        cmd.args([
+            Self::DAEMON_SCRIPT,
+            "--rns-port",
+            &rns_port.to_string(),
+            "--cmd-port",
+            &cmd_port.to_string(),
+            "--respond-to-probes",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+        let mut process = spawn_supervised(cmd).map_err(HarnessError::SpawnFailed)?;
 
         let stdout = process.stdout.take().expect("stdout should be captured");
         let reader = BufReader::new(stdout);
@@ -954,12 +957,11 @@ impl TestDaemon {
             args.push(bits.to_string());
         }
 
-        let mut process = Command::new("python3")
-            .args(&args)
+        let mut cmd = Command::new("python3");
+        cmd.args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(HarnessError::SpawnFailed)?;
+            .stderr(Stdio::inherit());
+        let mut process = spawn_supervised(cmd).map_err(HarnessError::SpawnFailed)?;
 
         let stdout = process.stdout.take().expect("stdout should be captured");
         let reader = BufReader::new(stdout);
@@ -2652,12 +2654,11 @@ impl SocatPtyPair {
     /// the two device paths from there. Returns an error if `socat` is missing
     /// or does not report two ptys within the timeout.
     pub async fn spawn() -> Result<Self, HarnessError> {
-        let mut process = Command::new("socat")
-            .args(["-d", "-d", "pty,raw,echo=0", "pty,raw,echo=0"])
+        let mut cmd = Command::new("socat");
+        cmd.args(["-d", "-d", "pty,raw,echo=0", "pty,raw,echo=0"])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(HarnessError::SpawnFailed)?;
+            .stderr(Stdio::piped());
+        let mut process = spawn_supervised(cmd).map_err(HarnessError::SpawnFailed)?;
 
         let stderr = process.stderr.take().expect("stderr should be captured");
 

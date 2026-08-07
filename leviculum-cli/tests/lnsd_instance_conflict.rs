@@ -19,6 +19,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use leviculum_std::process::spawn_supervised;
+
 /// Minimal daemon config: no interfaces, no transport, just a shared
 /// instance under `name`. The socket bind is the whole subject.
 fn write_config(dir: &std::path::Path, name: &str) {
@@ -66,15 +68,13 @@ fn lnsd_reports_a_taken_instance_name_in_words() {
         }
     }
 
-    let _reaper = Reaper(
-        Command::new(env!("CARGO_BIN_EXE_lnsd"))
-            .arg("--config")
-            .arg(dir_a.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("first lnsd starts"),
-    );
+    let mut holder = Command::new(env!("CARGO_BIN_EXE_lnsd"));
+    holder
+        .arg("--config")
+        .arg(dir_a.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _reaper = Reaper(spawn_supervised(holder).expect("first lnsd starts"));
 
     assert!(
         wait_for_instance(&name, Duration::from_secs(10)),

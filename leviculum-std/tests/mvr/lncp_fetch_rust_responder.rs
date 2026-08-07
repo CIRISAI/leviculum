@@ -22,6 +22,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use leviculum_std::process::spawn_supervised;
+
 /// Listener port from the host-wide allocator shared by every suite
 /// (`crate::harness::port_alloc`). This file used to carry its own
 /// `AtomicU16` at a private base, which is why the bases were chosen
@@ -98,13 +100,13 @@ fn spawn_lnsd(dir: &Path, label: &str) -> std::io::Result<Child> {
     }
     let stdout_path = dir.join(format!("{label}-stdout.log"));
     let stderr_path = dir.join(format!("{label}-stderr.log"));
-    Command::new(&lnsd)
-        .arg("-v")
+    let mut cmd = Command::new(&lnsd);
+    cmd.arg("-v")
         .arg("--config")
         .arg(dir)
         .stdout(Stdio::from(fs::File::create(stdout_path)?))
-        .stderr(Stdio::from(fs::File::create(stderr_path)?))
-        .spawn()
+        .stderr(Stdio::from(fs::File::create(stderr_path)?));
+    spawn_supervised(cmd)
 }
 
 /// Wait for a line matching `pred` on `stderr_path`, up to `timeout`.
@@ -158,14 +160,14 @@ fn spawn_lncp(config_dir: &Path, label: &str, args: &[&str]) -> std::io::Result<
     }
     let stdout_path = config_dir.join(format!("{label}-stdout.log"));
     let stderr_path = config_dir.join(format!("{label}-stderr.log"));
-    let child = Command::new(&lncp)
-        .arg("-v")
+    let mut cmd = Command::new(&lncp);
+    cmd.arg("-v")
         .arg("--config")
         .arg(config_dir)
         .args(args)
         .stdout(Stdio::from(fs::File::create(&stdout_path)?))
-        .stderr(Stdio::from(fs::File::create(&stderr_path)?))
-        .spawn()?;
+        .stderr(Stdio::from(fs::File::create(&stderr_path)?));
+    let child = spawn_supervised(cmd)?;
     Ok(SpawnedLncp {
         child,
         stderr_path,

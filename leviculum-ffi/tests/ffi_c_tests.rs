@@ -16,6 +16,13 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Every C program below outlives the call that started it — a daemon, a
+/// receiver waiting for a link, a listener — so each goes through the
+/// supervised spawn. This suite is where the 2026-08-07 leak came from: an
+/// abort in a destructor left a `test_daemon.py` holding the gate's stdout and
+/// `just standard` hung for two hours with its verdict already decided.
+use leviculum_std::process::spawn_supervised;
+
 /// Directory holding the built `libleviculum.so`.
 ///
 /// The test executable runs from `<target>/<profile>/deps/`, so the cdylib is
@@ -259,13 +266,12 @@ fn c_lnsd_runs_as_daemon() {
     );
     std::fs::write(dir.path().join("config"), cfg).expect("write config");
 
-    let mut child = Command::new(&bin)
-        .arg("--config")
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--config")
         .arg(dir.path())
         .env("LD_LIBRARY_PATH", lib_dir())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn c-lnsd");
+        .stderr(std::process::Stdio::null());
+    let mut child = spawn_supervised(cmd).expect("spawn c-lnsd");
 
     // It must load the config, bind the TCP server, open the shared instance,
     // and stay up.
@@ -327,29 +333,29 @@ fn c_lncp_copies_a_file_end_to_end() {
         .collect();
     std::fs::write(&in_path, &content).unwrap();
 
-    let mut recv = Command::new(&bin)
+    let mut recv_cmd = Command::new(&bin);
+    recv_cmd
         .args([
             "recv",
             store_r.to_str().unwrap(),
             &addr,
             out_path.to_str().unwrap(),
         ])
-        .env("LD_LIBRARY_PATH", lib_dir())
-        .spawn()
-        .expect("spawn recv");
+        .env("LD_LIBRARY_PATH", lib_dir());
+    let mut recv = spawn_supervised(recv_cmd).expect("spawn recv");
     // Give the receiver a moment to bind and start announcing.
     std::thread::sleep(std::time::Duration::from_millis(1200));
 
-    let mut send = Command::new(&bin)
+    let mut send_cmd = Command::new(&bin);
+    send_cmd
         .args([
             "send",
             store_s.to_str().unwrap(),
             &addr,
             in_path.to_str().unwrap(),
         ])
-        .env("LD_LIBRARY_PATH", lib_dir())
-        .spawn()
-        .expect("spawn send");
+        .env("LD_LIBRARY_PATH", lib_dir());
+    let mut send = spawn_supervised(send_cmd).expect("spawn send");
 
     let send_status = wait_timeout(&mut send, 45).expect("sender did not finish in time");
     assert!(
@@ -409,38 +415,38 @@ fn c_lncp_copies_via_shared_instance() {
     std::fs::create_dir_all(&store_r).unwrap();
     std::fs::create_dir_all(&store_s).unwrap();
 
-    let mut daemon = Command::new(&lnsd)
+    let mut daemon_cmd = Command::new(&lnsd);
+    daemon_cmd
         .arg("--config")
         .arg(&dconf)
         .env("LD_LIBRARY_PATH", lib_dir())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn c-lnsd");
+        .stderr(std::process::Stdio::null());
+    let mut daemon = spawn_supervised(daemon_cmd).expect("spawn c-lnsd");
     // Let the daemon bind its IPC socket before the clients attach.
     std::thread::sleep(std::time::Duration::from_millis(1200));
 
-    let mut recv = Command::new(&lncp)
+    let mut recv_cmd = Command::new(&lncp);
+    recv_cmd
         .args([
             "recv-shared",
             store_r.to_str().unwrap(),
             &instance,
             out_path.to_str().unwrap(),
         ])
-        .env("LD_LIBRARY_PATH", lib_dir())
-        .spawn()
-        .expect("spawn recv-shared");
+        .env("LD_LIBRARY_PATH", lib_dir());
+    let mut recv = spawn_supervised(recv_cmd).expect("spawn recv-shared");
     std::thread::sleep(std::time::Duration::from_millis(1200));
 
-    let mut send = Command::new(&lncp)
+    let mut send_cmd = Command::new(&lncp);
+    send_cmd
         .args([
             "send-shared",
             store_s.to_str().unwrap(),
             &instance,
             in_path.to_str().unwrap(),
         ])
-        .env("LD_LIBRARY_PATH", lib_dir())
-        .spawn()
-        .expect("spawn send-shared");
+        .env("LD_LIBRARY_PATH", lib_dir());
+    let mut send = spawn_supervised(send_cmd).expect("spawn send-shared");
 
     let send_status = wait_timeout(&mut send, 45).expect("sender did not finish in time");
     let recv_status = wait_timeout(&mut recv, 20).expect("receiver did not finish in time");
@@ -503,26 +509,26 @@ fn c_levcat_pipes_a_line_end_to_end() {
     std::fs::write(&in_path, payload).unwrap();
 
     // The listener: no stdin, data to a file, status (the destination) to a file.
-    let mut listen = Command::new(&bin)
+    let mut listen_cmd = Command::new(&bin);
+    listen_cmd
         .args(["listen", store_l.to_str().unwrap(), &addr])
         .stdin(std::process::Stdio::null())
         .stdout(std::fs::File::create(&listen_out).unwrap())
         .stderr(std::fs::File::create(&listen_err).unwrap())
-        .env("LD_LIBRARY_PATH", lib_dir())
-        .spawn()
-        .expect("spawn listen");
+        .env("LD_LIBRARY_PATH", lib_dir());
+    let mut listen = spawn_supervised(listen_cmd).expect("spawn listen");
 
     let dest = read_dest(&listen_err, 15).expect("listener never printed its destination");
 
     // The connector reads the payload from a file on stdin; at EOF it closes.
-    let mut connect = Command::new(&bin)
+    let mut connect_cmd = Command::new(&bin);
+    connect_cmd
         .args(["connect", store_c.to_str().unwrap(), &addr, &dest])
         .stdin(std::fs::File::open(&in_path).unwrap())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .env("LD_LIBRARY_PATH", lib_dir())
-        .spawn()
-        .expect("spawn connect");
+        .env("LD_LIBRARY_PATH", lib_dir());
+    let mut connect = spawn_supervised(connect_cmd).expect("spawn connect");
 
     let connect_status = wait_timeout(&mut connect, 30).expect("connector did not finish in time");
     assert!(

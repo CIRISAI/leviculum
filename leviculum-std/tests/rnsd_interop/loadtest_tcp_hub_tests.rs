@@ -72,6 +72,7 @@ use leviculum_core::packet::{
 };
 use leviculum_core::{Destination, DestinationType, Direction};
 use leviculum_std::interfaces::hdlc::frame;
+use leviculum_std::process::spawn_supervised;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -269,14 +270,13 @@ fn spawn_lnsd_hub(port: u16) -> LnsdHub {
     let log = std::fs::File::create(&log_path).expect("create lnsd log");
     let log_err = log.try_clone().expect("clone log handle");
 
-    let child = Command::new(&bin)
-        .arg("--config")
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--config")
         .arg(config_dir.path())
         .env("NO_COLOR", "1")
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn lnsd ({bin:?}): {e}"));
+        .stderr(Stdio::from(log_err));
+    let child = spawn_supervised(cmd).unwrap_or_else(|e| panic!("spawn lnsd ({bin:?}): {e}"));
     let pid = child.id();
     let transport_id = wait_for_lnsd_transport_id(&log_path);
 

@@ -123,10 +123,34 @@ citation-guard:
 check-trailers:
     @bash scripts/check-commit-trailers.sh
 
+# Every long-lived process spawn goes through
+# `leviculum_std::process::spawn_supervised`, so the kernel takes the child down
+# with its parent however the parent dies. ~200 ms, no build: it reads the
+# sources. Bare `Command::new(..).spawn()` sites are counted per file against
+# scripts/supervised-spawn-counts.txt, so a new one is a diff rather than seven
+# orphaned daemons found by hand four hours later (2026-08-07).
+#
+# In `fast` because it passes all three hook conditions: fast, deterministic
+# given the tree, and it fails naming a file:line the author has open. The
+# behaviour itself is proved by `--test supervised_spawn` below; this is the
+# check that the proof still covers every site.
+check-supervised-spawns:
+    @python3 scripts/check-supervised-spawns.py
+
+# The kernel-enforced half of "a harness that spawns a long-lived process must
+# ensure it dies with the harness" (docs/src/concepts/checks-and-citations.md).
+# ~10 s: it SIGKILLs a parent and watches its child disappear, plus the negative
+# control where the same child — spawned without the fix — must survive. Both
+# arms are bounded and fail loudly rather than waiting, which is the mistake the
+# incident behind them was about.
+supervised-spawn:
+    {{manifest}} supervised-spawn -- cargo test -p leviculum-std --test supervised_spawn
+
 # Tier 0 (~3 min, runs on every git push): submodule pins + commit-message
 # trailers + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
-# gates + workspace lib tests + the citation guard.
-fast: check-submodules check-trailers check-processor-seam mvr lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
+# gates + workspace lib tests + the citation guard + the process-supervision
+# pair (census over the sources, proof against the kernel).
+fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
