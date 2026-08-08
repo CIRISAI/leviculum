@@ -33,8 +33,9 @@ use leviculum_core::{
 };
 use leviculum_lxmf::{
     announce,
-    node::{LxmfNode, LxmfNodeConfig},
-    router::{LxmfRouter, MessageState, RouterConfig, RouterEvent, RouterOutput},
+    node::{DeliveryRepresentation, LxmfNode, LxmfNodeConfig, LxmfNodeError, LxmfNodeEvent},
+    router::{LxmfRouter, MessageState, RouterConfig, RouterError, RouterEvent, RouterOutput},
+    storage::MemoryLxmfStorage,
     DeliveryMethod, Message,
 };
 use rand_core::OsRng;
@@ -163,6 +164,17 @@ impl Sender {
     fn state(&self, id: &[u8; 32]) -> Option<MessageState> {
         self.router.outbound().get(id).map(|entry| entry.state)
     }
+
+    /// How many times the router has told the caller a build is waiting for
+    /// this message. `ResourceBuildPending` is emitted nowhere else, so a
+    /// change in this count is proof that the deferral path ran, and it does
+    /// not depend on the entry state the deferral leaves behind.
+    fn builds_pending(&self, id: &[u8; 32]) -> usize {
+        self.events
+            .iter()
+            .filter(|event| matches!(event, RouterEvent::ResourceBuildPending(m) if m == id))
+            .count()
+    }
 }
 
 /// A receiver: `NodeCore` with a plain registered LXMF delivery destination.
@@ -174,6 +186,10 @@ struct Receiver {
     /// only emits `ResourceTransferStarted` on the receiving side, so this is
     /// where the sender's in-flight Resource hash is observable.
     accepted_resources: Vec<[u8; 32]>,
+    /// The messages that actually arrived. A transfer hash says a Resource
+    /// crossed; only the body says *which* bytes crossed, which is what a
+    /// stale build is about.
+    delivered: Vec<Message>,
 }
 
 fn receiver(seed: u8) -> Receiver {
@@ -189,6 +205,7 @@ fn receiver(seed: u8) -> Receiver {
         lxmf,
         destination: destination_hash,
         accepted_resources: Vec::new(),
+        delivered: Vec::new(),
     }
 }
 
@@ -209,6 +226,11 @@ impl Receiver {
                 .lxmf
                 .handle_event(&mut self.node, &event)
                 .expect("receiver handles NodeCore event");
+            for lxmf_event in &follow_up.events {
+                if let LxmfNodeEvent::MessageReceived(message) = lxmf_event {
+                    self.delivered.push(message.clone());
+                }
+            }
             actions.extend(follow_up.core.actions);
             events.extend(follow_up.core.events);
         }
@@ -550,4 +572,966 @@ fn a_deferred_resource_build_leaves_the_tick_and_starts_on_commit() {
         !receiver.accepted_resources.is_empty(),
         "the receiver never saw the transfer start"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Codeberg #196 / PR #212, batch A: what the handoff still gets wrong.
+//
+// Every test below is named in the plan at
+// `~/.local/state/leviculum/attachments/pr212-plan.md` section 6a. Those that
+// describe behaviour the tree does not have yet carry `#[ignore]` with the
+// batch that must remove it, so the suite stays green while the red is on
+// record. Running them is `cargo test -p leviculum-lxmf --test
+// direct_delivery_attempts -- --ignored`.
+//
+// Three vacuity guards run in each of them, because every one of these paths
+// has a green-for-nothing failure mode:
+//
+// * `LxmfNode::representation(&message)` is `DirectResource` — a body under
+//   `DIRECT_PACKET_MDU` (431 bytes) would take the packet path and never
+//   build anything.
+// * `RouterEvent::ResourceBuildPending`, emitted nowhere else, is what says
+//   the deferral ran. The entry state is not usable for that: batch B1
+//   changes it.
+// * where arrival matters, the receiver's `accepted_resources` is non-empty,
+//   so a link packet cannot pass for a Resource.
+// ---------------------------------------------------------------------------
+
+fn deferring_config() -> RouterConfig {
+    RouterConfig {
+        defer_resource_builds: true,
+        ..RouterConfig::default()
+    }
+}
+
+/// Assert the message really takes the Resource path. `DIRECT_PACKET_MDU` is
+/// 431 bytes (`leviculum-lxmf/src/node.rs:39`), so the 2 KiB bodies below are
+/// `DirectResource` — but only an assertion says so.
+fn assert_direct_resource(message: &Message) {
+    assert_eq!(
+        LxmfNode::representation(message),
+        Ok(DeliveryRepresentation::DirectResource),
+        "the test payload must take the Resource path, not the packet path"
+    );
+}
+
+/// Queue a 2 KiB direct message and return its id.
+fn enqueue_resource(sender: &mut Sender, receiver: &mut Receiver, seed: u8) -> [u8; 32] {
+    let message = direct_message(
+        seed,
+        receiver.destination,
+        &sender.signing_identity,
+        vec![0x7au8; 2_048],
+    );
+    assert_direct_resource(&message);
+    let id = message.message_id;
+    let output = sender
+        .router
+        .enqueue(&sender.node, message)
+        .expect("enqueue direct message");
+    let packets = sender.absorb_router(output);
+    pump(sender, receiver, packets);
+    id
+}
+
+/// Tick until the router hands out one more build for `id`, and return the
+/// packets that tick produced.
+///
+/// Detection is on `ResourceBuildPending`, not on `MessageState::Sending`:
+/// the state the deferral leaves behind is precisely what batch B1 changes,
+/// and a test that keyed on it would stop finding the build.
+fn tick_until_next_build(
+    sender: &mut Sender,
+    receiver: &mut Receiver,
+    id: &[u8; 32],
+) -> Vec<Vec<u8>> {
+    let before = sender.builds_pending(id);
+    for _ in 0..8 {
+        let packets = sender.tick();
+        if sender.builds_pending(id) > before {
+            return packets;
+        }
+        pump(sender, receiver, packets);
+        sender.advance_ms(11_000);
+    }
+    panic!(
+        "no build was handed out within 8 ticks: state {:?}, attempts {:?}, builds queued {}",
+        sender.state(id),
+        sender.router.outbound().get(id).map(|entry| entry.attempts),
+        sender.router.take_resource_builds().len()
+    );
+}
+
+/// Take exactly one handed-out build and run it, off the router as a real
+/// caller would.
+fn take_one_built(sender: &mut Sender, id: &[u8; 32]) -> leviculum_lxmf::BuiltResource {
+    let mut builds = sender.router.take_resource_builds();
+    assert_eq!(builds.len(), 1, "exactly one build was handed out");
+    assert_eq!(
+        builds[0].message_id(),
+        *id,
+        "the handed-out build belongs to another message"
+    );
+    builds
+        .remove(0)
+        .build(&mut OsRng)
+        .expect("build off the caller's lock")
+}
+
+/// Establish the direct link ahead of the measurement, so a timed tick times
+/// the send and not the link handshake.
+fn link_to(sender: &mut Sender, receiver: &mut Receiver) {
+    let destination = receiver.destination;
+    let (_state, output) = sender
+        .router
+        .node_mut()
+        .ensure_direct_link(&mut sender.node, destination)
+        .expect("start a direct link");
+    let packets = take_packets(output.core.actions);
+    pump(sender, receiver, packets);
+    assert!(
+        sender.router.node().direct_link(&destination).is_some(),
+        "the direct link never came up"
+    );
+}
+
+/// U2 — a build the caller never returns must come back around.
+///
+/// `efdaac39` answers the deferral with `Ok(LxmfNodeOutput::default())` and
+/// the arm behind it sets `MessageState::Sending`. The `Sending` guard in
+/// `tick` sits above the attempt check, so the entry is skipped on every
+/// later tick and never retried, never failed: it is stranded. A host that
+/// drains the queue and crashes, or whose build errors, produces exactly
+/// this.
+#[test]
+#[ignore = "RED against efdaac39 (#196 D1): the deferral marks the entry Sending and the Sending guard strands it. Batch B1 (C2) removes the mark."]
+fn a_build_that_is_never_committed_is_retried_not_stranded() {
+    let mut sender = sender_with(61, deferring_config());
+    let mut receiver = receiver(161);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 12);
+
+    let deferring = tick_until_next_build(&mut sender, &mut receiver, &id);
+    assert!(
+        deferring.is_empty(),
+        "the deferring tick must not put the Resource on the wire"
+    );
+
+    // The caller drains the work and returns nothing: a crash, a build error,
+    // a channel whose consumer went away.
+    let abandoned = sender.router.take_resource_builds();
+    assert_eq!(abandoned.len(), 1, "exactly one build was handed out");
+    drop(abandoned);
+
+    // DELIVERY_RETRY_WAIT_MS is 10 s, and `tick_until_next_build` advances
+    // 11 s per round.
+    let retried = tick_until_next_build(&mut sender, &mut receiver, &id);
+    assert!(
+        retried.is_empty(),
+        "the retry must defer again, not build inside the tick"
+    );
+    assert_eq!(
+        sender.router.take_resource_builds().len(),
+        1,
+        "the abandoned message must be handed out again"
+    );
+}
+
+/// U2's negative control: with `defer_resource_builds` off the same message
+/// is built inside the tick, goes on the wire in that tick, and no build is
+/// ever handed out — so U2's red is the deferral's, not the harness's.
+#[test]
+fn a_composed_resource_send_hands_out_no_build_and_leaves_in_its_tick() {
+    let mut sender = sender_with(62, RouterConfig::default());
+    let mut receiver = receiver(162);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 13);
+
+    let mut submitted = Vec::new();
+    for _ in 0..8 {
+        let packets = sender.tick();
+        if sender.state(&id) == Some(MessageState::Sending) {
+            submitted = packets;
+            break;
+        }
+        pump(&mut sender, &mut receiver, packets);
+        sender.advance_ms(11_000);
+    }
+    assert_eq!(
+        sender.state(&id),
+        Some(MessageState::Sending),
+        "the composed send never handed the message to NodeCore"
+    );
+    assert!(
+        !submitted.is_empty(),
+        "the composed send must advertise the Resource in its own tick"
+    );
+    assert_eq!(
+        sender.builds_pending(&id),
+        0,
+        "no build may be handed out with the flag off"
+    );
+    assert!(
+        sender.router.take_resource_builds().is_empty(),
+        "the build queue must stay empty with the flag off"
+    );
+    pump(&mut sender, &mut receiver, submitted);
+    assert!(
+        !receiver.accepted_resources.is_empty(),
+        "the receiver never saw the composed transfer start"
+    );
+}
+
+/// U3 — two due Resources to one destination, no host misbehaviour.
+///
+/// `enqueue` sets `next_attempt_ms = now_ms`, so both are due in one tick.
+/// Phase 1 rejects only on `has_outgoing_resource` and the deferral installs
+/// nothing, so both capture. The first commit installs; the second is refused
+/// by the core, and under `efdaac39` its entry is already `Sending` and is
+/// therefore never retried. Master delivers the same pair.
+#[test]
+#[ignore = "RED against efdaac39 (#196 D1): the second commit is refused and its message is left stranded in Sending. Batch B1 (C2) removes the mark."]
+fn two_due_resources_to_one_destination_both_complete() {
+    let mut sender = sender_with(63, deferring_config());
+    let mut receiver = receiver(163);
+    exchange_announces(&mut sender, &mut receiver);
+    let first = enqueue_resource(&mut sender, &mut receiver, 14);
+    let second = enqueue_resource(&mut sender, &mut receiver, 15);
+    assert_ne!(first, second, "the two messages must be distinct");
+
+    // Drive to the tick that captures both.
+    let mut builds = Vec::new();
+    for _ in 0..8 {
+        let packets = sender.tick();
+        builds = sender.router.take_resource_builds();
+        if builds.len() == 2 {
+            assert!(
+                packets.is_empty(),
+                "the deferring tick must not put a Resource on the wire"
+            );
+            break;
+        }
+        for build in builds.drain(..) {
+            let built = build.build(&mut OsRng).expect("build off the lock");
+            let output = sender
+                .router
+                .commit_resource_build(&mut sender.node, built)
+                .expect("early commit");
+            let packets = sender.absorb_router(output);
+            pump(&mut sender, &mut receiver, packets);
+        }
+        pump(&mut sender, &mut receiver, packets);
+        sender.advance_ms(11_000);
+    }
+    assert_eq!(
+        builds.len(),
+        2,
+        "both due messages must capture a build in one tick"
+    );
+    assert_eq!(sender.builds_pending(&first), 1);
+    assert_eq!(sender.builds_pending(&second), 1);
+
+    // `take_resource_builds` hands them back in queue order, which is by
+    // message id, not by enqueue order. Pick by id so the two arms of the
+    // assertion below cannot swap.
+    let position = builds
+        .iter()
+        .position(|build| build.message_id() == first)
+        .expect("the first message's build");
+    let built_first = builds
+        .remove(position)
+        .build(&mut OsRng)
+        .expect("build one");
+    let built_second = builds.remove(0).build(&mut OsRng).expect("build two");
+
+    let output = sender
+        .router
+        .commit_resource_build(&mut sender.node, built_first)
+        .expect("the first commit installs its transfer");
+    let packets = sender.absorb_router(output);
+    assert!(!packets.is_empty(), "the first commit must advertise");
+
+    // The link now carries a transfer. This is the exact error, not
+    // `is_err()`: batch B2 replaces it with `StaleBuild`, and the change of
+    // variant is itself the record that the epoch took over the refusal.
+    let refused = sender
+        .router
+        .commit_resource_build(&mut sender.node, built_second)
+        .expect_err("one link cannot carry two outgoing Resources");
+    assert_eq!(
+        refused,
+        RouterError::Node(LxmfNodeError::Resource(ResourceError::TransferInProgress)),
+        "the second commit must be refused by the core's transfer guard"
+    );
+    pump(&mut sender, &mut receiver, packets);
+
+    // A host loop: tick, commit whatever comes back, repeat.
+    for _ in 0..24 {
+        if sender.router.outbound().is_empty() {
+            break;
+        }
+        let packets = sender.tick();
+        pump(&mut sender, &mut receiver, packets);
+        for build in sender.router.take_resource_builds() {
+            let built = build.build(&mut OsRng).expect("build off the lock");
+            match sender.router.commit_resource_build(&mut sender.node, built) {
+                Ok(output) => {
+                    let packets = sender.absorb_router(output);
+                    pump(&mut sender, &mut receiver, packets);
+                }
+                Err(RouterError::Node(LxmfNodeError::Resource(
+                    ResourceError::TransferInProgress,
+                ))) => {}
+                Err(error) => panic!("unexpected commit error: {error:?}"),
+            }
+        }
+        sender.advance_ms(11_000);
+    }
+
+    for (label, id) in [("first", first), ("second", second)] {
+        assert!(
+            sender.events.iter().any(|event| matches!(
+                event,
+                RouterEvent::MessageState {
+                    message_id,
+                    state: MessageState::Delivered,
+                } if *message_id == id
+            )),
+            "the {label} message was never delivered: state {:?}",
+            sender.state(&id)
+        );
+    }
+    assert!(
+        receiver.accepted_resources.len() >= 2,
+        "the receiver saw {} transfers, not two",
+        receiver.accepted_resources.len()
+    );
+}
+
+/// U4 — a cancel between capture and commit must keep the message off the air.
+///
+/// `commit_resource_build` never checks the message is still queued, and
+/// `cancel` removes the entry without touching the build queue or the builds
+/// already handed out. There is no negative control for this one: with the
+/// flag off there is no build to hold across a cancel, so the pairing would
+/// be an empty test rather than a control.
+#[test]
+#[ignore = "RED against efdaac39 (#196 D3): commit installs a build whose message was cancelled. Turns green with the commit-time membership check (plan C3, batch B1; at the latest C4 in B2)."]
+fn a_cancelled_message_does_not_go_on_the_air_after_its_build_returns() {
+    let mut sender = sender_with(64, deferring_config());
+    let mut receiver = receiver(164);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 16);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+    let built = take_one_built(&mut sender, &id);
+
+    let output = sender
+        .router
+        .cancel(&mut sender.node, &id)
+        .expect("cancel the queued message");
+    let packets = sender.absorb_router(output);
+    pump(&mut sender, &mut receiver, packets);
+    assert!(
+        !sender.router.outbound().contains_key(&id),
+        "the cancelled message must leave the queue"
+    );
+
+    match sender.router.commit_resource_build(&mut sender.node, built) {
+        Err(error) => assert_eq!(
+            error,
+            RouterError::StaleBuild,
+            "a build for a cancelled message is stale, not merely unlucky"
+        ),
+        Ok(output) => {
+            let packets = sender.absorb_router(output);
+            pump(&mut sender, &mut receiver, packets);
+            panic!(
+                "the cancelled message went on the air: the receiver started {} \
+                 transfer(s) and took delivery of {} message(s)",
+                receiver.accepted_resources.len(),
+                receiver.delivered.len()
+            );
+        }
+    }
+    assert!(
+        receiver.accepted_resources.is_empty(),
+        "nothing may reach the receiver for a cancelled message"
+    );
+}
+
+/// U5 — a stamp that lands between capture and commit rewrites the message.
+///
+/// `set_outbound_stamp` is `pub`, rewrites `entry.message` through
+/// `set_stamp` and makes the entry due again, with no state check at any
+/// time. A build captured before it carries the pre-stamp bytes, and
+/// membership cannot see the difference: the entry is still there and still
+/// has the same id, because the id does not cover the stamp.
+///
+/// Negative control: with the flag off there is no window between capture and
+/// commit, so the pairing is vacuous. What is not vacuous is the delivered
+/// body, which is why the harness keeps it.
+#[test]
+#[ignore = "RED against efdaac39 (#196 S1): the pre-stamp build commits and the stale bytes go on the air. Needs the build epoch (C4, batch B2)."]
+fn a_stamp_that_arrives_mid_build_invalidates_that_build() {
+    let mut sender = sender_with(65, deferring_config());
+    let mut receiver = receiver(165);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 17);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+    let built = take_one_built(&mut sender, &id);
+
+    let stamp = vec![0xa5u8; 32];
+    let now_ms = sender.clock.get();
+    let output = sender
+        .router
+        .set_outbound_stamp(&id, stamp.clone(), now_ms)
+        .expect("attach a stamp to the queued message");
+    let _ = sender.absorb_router(output);
+    assert_eq!(
+        sender
+            .router
+            .outbound()
+            .get(&id)
+            .expect("the stamped message is still queued")
+            .message
+            .stamp
+            .as_deref(),
+        Some(stamp.as_slice()),
+        "the queue entry must carry the new stamp"
+    );
+
+    match sender.router.commit_resource_build(&mut sender.node, built) {
+        Err(error) => assert_eq!(
+            error,
+            RouterError::StaleBuild,
+            "a build from before the stamp is stale"
+        ),
+        Ok(output) => {
+            let packets = sender.absorb_router(output);
+            pump(&mut sender, &mut receiver, packets);
+            panic!(
+                "the pre-stamp build went on the air: the receiver got {} message(s), \
+                 stamp {:?}, while the queue holds stamp {:?}",
+                receiver.delivered.len(),
+                receiver.delivered.last().map(|m| m.stamp.clone()),
+                Some(stamp),
+            );
+        }
+    }
+}
+
+/// U6 — a build from before a failed delivery must be refused (S2, ABA).
+///
+/// This test cannot be arranged in this harness, and the attempt is kept so
+/// the reason is on record rather than in prose. Three separate blockers,
+/// found in review and confirmed here:
+///
+/// 1. Under `efdaac39` the deferral sets `Sending`, so the entry is skipped
+///    and a second build is not capturable at all (that is D1, not S2).
+/// 2. A synthetic `NodeEvent::ResourceFailed` does not clear the *core's*
+///    `has_outgoing_resource`, so phase 1 keeps returning
+///    `TransferInProgress` no matter what the router believes.
+/// 3. The only failure that keeps the link is `ResourceError::Cancelled`, and
+///    the router treats it as terminal: the message becomes `Rejected` and
+///    leaves `outbound` (`router.rs`, the `DeliveryFailed` /
+///    `Resource(Cancelled)` arm). It never returns to `Outbound`, so the ABA
+///    sequence S2 describes has no second `A`.
+///
+/// What it needs is a receiver that cancels an accepted incoming Resource, so
+/// the core itself concludes the transfer. `LxmfNode` does not expose that
+/// (`node.rs`: "Cancellation is intentionally not exposed here until
+/// `leviculum-core` can cancel an already accepted inbound Resource by
+/// hash"). That is test infrastructure in `leviculum-core`, not a line in
+/// this file.
+#[test]
+#[ignore = "CANNOT BE ARRANGED (#196 S2): needs a core-side inbound Resource cancel; see the doc comment. Not evidence for or against any batch."]
+fn a_build_from_before_a_failed_delivery_is_refused() {
+    let mut sender = sender_with(66, deferring_config());
+    let mut receiver = receiver(166);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 18);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+    let built = take_one_built(&mut sender, &id);
+    let output = sender
+        .router
+        .commit_resource_build(&mut sender.node, built)
+        .expect("the first commit installs its transfer");
+    let packets = sender.absorb_router(output);
+    exchange_rounds(&mut sender, &mut receiver, packets, 1);
+    let resource_hash = *receiver
+        .accepted_resources
+        .last()
+        .expect("the submission is an outgoing Resource");
+    let link_id = sender
+        .router
+        .node()
+        .direct_link(&receiver.destination)
+        .expect("the transfer's link");
+
+    // Blocker 3: the only link-preserving failure is terminal.
+    let output = sender
+        .router
+        .handle_event(
+            &mut sender.node,
+            &NodeEvent::ResourceFailed {
+                link_id,
+                resource_hash,
+                error: ResourceError::Cancelled,
+                is_sender: true,
+            },
+        )
+        .expect("router handles the receiver's cancel");
+    let _ = sender.absorb_router(output);
+    assert!(
+        !sender.router.outbound().contains_key(&id),
+        "a receiver cancel is terminal: the entry never returns to Outbound, \
+         so there is no ABA window to test"
+    );
+
+    // Blocker 2: the core still believes a Resource is outgoing on that link.
+    let params = sender.router.node_mut().resource_send_params(
+        &sender.node,
+        &direct_message(
+            18,
+            receiver.destination,
+            &sender.signing_identity,
+            vec![0x7au8; 2_048],
+        ),
+    );
+    assert_eq!(
+        params.err(),
+        Some(LxmfNodeError::Resource(ResourceError::TransferInProgress)),
+        "a synthetic ResourceFailed does not clear the core's outgoing Resource, \
+         so no second build can be captured"
+    );
+
+    panic!(
+        "S2 is unreachable from this harness: see the doc comment. \
+         It needs a receiver-side cancel produced by leviculum-core."
+    );
+}
+
+/// U11 — `commit_resource_build` is a public router operation and must end
+/// like one: one coalesced `PersistenceRequested` and the queue's deadline on
+/// its output. It ends with neither, so a host that only ever commits never
+/// learns it has state to write, and its event loop gets no wake-up time.
+#[test]
+#[ignore = "RED against efdaac39 (#196 smaller items): commit_resource_build skips finish_output and apply_deadline. Batch B1."]
+fn commit_resource_build_requests_persistence_and_applies_its_deadline() {
+    let mut sender = sender_with(67, deferring_config());
+    let mut receiver = receiver(167);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 19);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+    let built = take_one_built(&mut sender, &id);
+
+    let output = sender
+        .router
+        .commit_resource_build(&mut sender.node, built)
+        .expect("commit the built transfer");
+    let expected_deadline = sender
+        .router
+        .next_deadline()
+        .expect("the queue has a deadline");
+    assert!(
+        output
+            .events
+            .iter()
+            .any(|event| matches!(event, RouterEvent::PersistenceRequested)),
+        "commit changed the queue and must ask for persistence: {:?}",
+        output.events
+    );
+    assert_eq!(
+        output.core.next_deadline_ms,
+        Some(expected_deadline),
+        "commit must carry the queue's own deadline out to the host"
+    );
+    let packets = sender.absorb_router(output);
+    pump(&mut sender, &mut receiver, packets);
+    assert!(
+        !receiver.accepted_resources.is_empty(),
+        "the commit under test must really have started a transfer"
+    );
+}
+
+/// U12 — a build captured before a `restore` belongs to the queue that was
+/// replaced.
+///
+/// `restore` swaps `outbound` wholesale and touches neither `pending_builds`
+/// nor the builds already handed out. Membership cannot catch it: the
+/// restored snapshot contains the same message id, so the old build lands on
+/// an entry it never came from.
+#[test]
+#[ignore = "RED against efdaac39 (#196 C9): a build captured before restore commits against the restored queue. Batch B1."]
+fn a_build_captured_before_a_restore_is_refused() {
+    let mut sender = sender_with(68, deferring_config());
+    let mut receiver = receiver(168);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 20);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+    let built = take_one_built(&mut sender, &id);
+
+    let mut storage = MemoryLxmfStorage::new(1 << 20);
+    sender
+        .router
+        .persist(&mut storage)
+        .expect("persist the queue that holds the message");
+    sender
+        .router
+        .restore(&storage)
+        .expect("restore the persisted queue");
+    assert!(
+        sender.router.outbound().contains_key(&id),
+        "the restored queue still holds the same message id, so membership \
+         alone cannot refuse the old build"
+    );
+
+    match sender.router.commit_resource_build(&mut sender.node, built) {
+        Err(error) => assert_eq!(
+            error,
+            RouterError::StaleBuild,
+            "a build from a replaced queue is stale"
+        ),
+        Ok(output) => {
+            let packets = sender.absorb_router(output);
+            pump(&mut sender, &mut receiver, packets);
+            panic!(
+                "a build from before the restore was installed: the receiver \
+                 started {} transfer(s) and took delivery of {} message(s)",
+                receiver.accepted_resources.len(),
+                receiver.delivered.len()
+            );
+        }
+    }
+}
+
+/// U13 — one message, at most one outstanding build.
+///
+/// Green today, and for a reason that is about to be removed: the `Sending`
+/// mark `efdaac39` sets is what keeps the entry out of the due list. Batch B1
+/// removes that mark, and only C8's outstanding-build set keeps this green
+/// afterwards. Without it, `tick` appends a full `Message` clone every 10 s
+/// per message against a consumer whose latency is unbounded — the same
+/// unbounded growth D2 is a defect for.
+#[test]
+fn one_message_has_at_most_one_outstanding_build() {
+    let mut sender = sender_with(69, deferring_config());
+    let mut receiver = receiver(169);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 21);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+
+    // Four retry intervals pass with the build outstanding and uncommitted.
+    for _ in 0..4 {
+        sender.advance_ms(11_000);
+        let packets = sender.tick();
+        pump(&mut sender, &mut receiver, packets);
+    }
+
+    assert_eq!(
+        sender.builds_pending(&id),
+        1,
+        "the router announced more than one build for one message"
+    );
+    assert_eq!(
+        sender.router.take_resource_builds().len(),
+        1,
+        "the build queue grew while one build was outstanding"
+    );
+}
+
+/// U15 — `enqueue` returns a `RouterOutput` and must put its own deadline on
+/// it.
+///
+/// It does not call `apply_deadline`, so a host driven by the returned
+/// `next_deadline_ms` sleeps past a message that is due now. Asserting
+/// through `next_deadline()` would be green today, because that folds in
+/// every entry's `next_attempt_ms` — the observation has to be the output
+/// `enqueue` itself hands back. Flag-independent: there is no control here,
+/// because `defer_resource_builds` is not on this path.
+#[test]
+#[ignore = "RED on master (#196 smaller items): enqueue does not call apply_deadline. Batch B1."]
+fn enqueue_returns_its_own_deadline_in_its_output() {
+    let mut sender = sender_with(70, RouterConfig::default());
+    let mut receiver = receiver(170);
+    exchange_announces(&mut sender, &mut receiver);
+
+    // One tick first, so the scheduler cursor is not itself sitting at 0 and
+    // the asserted deadline can only have come from the new entry.
+    let packets = sender.tick();
+    pump(&mut sender, &mut receiver, packets);
+
+    let now_ms = sender.clock.get();
+    let message = direct_message(
+        22,
+        receiver.destination,
+        &sender.signing_identity,
+        vec![0x7au8; 2_048],
+    );
+    let id = message.message_id;
+    let output = sender
+        .router
+        .enqueue(&sender.node, message)
+        .expect("enqueue direct message");
+    assert_eq!(
+        sender
+            .router
+            .outbound()
+            .get(&id)
+            .expect("the message is queued")
+            .next_attempt_ms,
+        now_ms,
+        "enqueue makes the entry due immediately, so there is a deadline to report"
+    );
+    assert_eq!(
+        output.core.next_deadline_ms,
+        Some(now_ms),
+        "enqueue must report the deadline it just created"
+    );
+}
+
+/// U16 — the point of the whole change: the build leaves the tick.
+///
+/// Nothing else in the suite observes it. Every other test here proves "still
+/// delivers"; this one proves the tick stopped paying for the payload.
+///
+/// One due message per measurement, not the eight the lock-budget page uses:
+/// a second Resource to the same link cannot build in the composed arm at all
+/// (`TransferInProgress`), so an N-message comparison would not be comparing
+/// like with like. The payload axis is the one this change is about.
+///
+/// The fixture is incompressible on purpose. `vec![0x5a; n]`, which the PR's
+/// own harness used, is collapsed by bz2's RLE front end before the BWT, so a
+/// table built on it measures the compressor's best case rather than a
+/// message.
+///
+/// The bound is deliberately loose. What must hold is an order-of-magnitude
+/// statement — the deferred tick does not carry the build — not a number.
+///
+/// The name overstates what the deferral achieves, and the measurement says
+/// so: the deferring tick still clones the whole `Message` into the pending
+/// build, which is a memcpy that scales linearly. Measured on this tree, a
+/// 16x payload costs the deferred tick about 6x (49 us at 16 KiB, 313 us at
+/// 256 KiB) while the composed tick at 256 KiB is 174 ms. What left the tick
+/// is the *build* — pack, compress, encrypt, hash — not every byte-sized
+/// cost. `Arc<Message>` is what would remove the remainder, and the plan
+/// defers it to its own issue.
+#[test]
+fn a_deferred_tick_does_not_scale_with_the_payload() {
+    let small = 16 * 1024;
+    let large = 256 * 1024;
+
+    let deferred_small = median_resource_tick(80, true, small);
+    let deferred_large = median_resource_tick(82, true, large);
+    let composed_small = median_resource_tick(84, false, small);
+    let composed_large = median_resource_tick(86, false, large);
+
+    std::println!(
+        "deferred {small}B {deferred_small:?} | composed {small}B {composed_small:?} | \
+         deferred {large}B {deferred_large:?} | composed {large}B {composed_large:?}"
+    );
+
+    // The build is gone from the tick at every size measured, not just at the
+    // largest one.
+    for (len, deferred, composed) in [
+        (small, deferred_small, composed_small),
+        (large, deferred_large, composed_large),
+    ] {
+        assert!(
+            composed > deferred * 20,
+            "at {len}B the deferring tick must cost an order of magnitude less \
+             than the composed one: deferred {deferred:?} vs composed {composed:?}"
+        );
+    }
+
+    // What remains in the tick is the `Message` clone. A 16x payload may not
+    // cost it 4x plus 2 ms — 2 ms being about one percent of what the composed
+    // tick pays at the same size.
+    assert!(
+        deferred_large < deferred_small * 4 + core::time::Duration::from_millis(2),
+        "the deferred tick grew with the payload: {deferred_small:?} at {small}B \
+         vs {deferred_large:?} at {large}B (composed at {large}B is {composed_large:?})"
+    );
+}
+
+/// The numeric harness behind U16, `#[ignore]`d with the other timing
+/// reports. Medians of five with one warm-up, both arms, all three payload
+/// classes:
+///
+/// ```text
+/// cargo test -p leviculum-lxmf --release --test direct_delivery_attempts \
+///     measure_deferred_tick_costs -- --ignored --nocapture
+/// ```
+///
+/// The 1 MiB row is segment 1 of a two-segment transfer:
+/// `RESOURCE_MAX_EFFICIENT_SIZE` is 1 048 575 bytes and the packed message is
+/// above it. Segments 2..N are built on the receive path, under the caller's
+/// lock, and neither this change nor this measurement touches them.
+#[test]
+#[ignore]
+fn measure_deferred_tick_costs() {
+    let mut seed = 100u8;
+    for len in [16 * 1024usize, 256 * 1024, 1024 * 1024] {
+        let deferred = median_resource_tick(seed, true, len);
+        seed = seed.wrapping_add(2);
+        let composed = median_resource_tick(seed, false, len);
+        seed = seed.wrapping_add(2);
+        std::println!(
+            "tick with one due {len:>7}B Resource: deferred {deferred:?} | composed {composed:?}"
+        );
+    }
+}
+
+/// A payload the Resource compressor cannot collapse.
+fn incompressible(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len + 4);
+    let mut state: u32 = 0x9e37_79b9;
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+/// Median of five timed `LxmfRouter::tick` calls, each with exactly one due
+/// `DirectResource` message on an already-established link, after one
+/// discarded warm-up run.
+fn median_resource_tick(seed: u8, defer: bool, len: usize) -> core::time::Duration {
+    let mut samples = Vec::new();
+    for round in 0..6u8 {
+        samples.push(one_resource_tick(seed.wrapping_add(round), defer, len));
+    }
+    samples.remove(0); // warm-up: first run pays one-time setup
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+fn one_resource_tick(seed: u8, defer: bool, len: usize) -> core::time::Duration {
+    let config = if defer {
+        deferring_config()
+    } else {
+        RouterConfig::default()
+    };
+    let mut sender = sender_with(seed, config);
+    let mut receiver = receiver(seed.wrapping_add(128));
+    exchange_announces(&mut sender, &mut receiver);
+    link_to(&mut sender, &mut receiver);
+
+    let message = direct_message(
+        seed,
+        receiver.destination,
+        &sender.signing_identity,
+        incompressible(len),
+    );
+    assert_direct_resource(&message);
+    let id = message.message_id;
+    let output = sender
+        .router
+        .enqueue(&sender.node, message)
+        .expect("enqueue direct message");
+    let _ = sender.absorb_router(output);
+
+    let started = std::time::Instant::now();
+    let output = sender.router.tick(&mut sender.node).expect("tick");
+    let elapsed = started.elapsed();
+
+    // The timed tick must have done the work, or the number is of an empty
+    // loop. This is the same vacuity trap as an FFI test that reports ok in
+    // 0.00 s because the library was absent.
+    if defer {
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|event| matches!(event, RouterEvent::ResourceBuildPending(m) if *m == id)),
+            "the timed tick did not hand out a build"
+        );
+        assert!(
+            output.core.actions.is_empty(),
+            "the deferring tick put something on the wire"
+        );
+    } else {
+        assert!(
+            !output.core.actions.is_empty(),
+            "the timed tick did not advertise the Resource"
+        );
+        assert_eq!(
+            sender.state(&id),
+            Some(MessageState::Sending),
+            "the timed tick did not submit the message"
+        );
+    }
+    elapsed
+}
+
+/// U17 — cancel, re-enqueue the same content, and the build from the previous
+/// lifetime must still be refused.
+///
+/// The message id is derived from the content, so a re-enqueue restores the
+/// same key: membership passes, and a per-entry counter created fresh at
+/// `enqueue` would be back at its initial value. Only a router-level
+/// monotonic epoch never repeats.
+#[test]
+#[ignore = "RED against efdaac39 (#196 C4): a build from before a cancel commits against the re-enqueued entry. Batch B2."]
+fn a_re_enqueued_message_refuses_a_build_from_before_its_cancel() {
+    let mut sender = sender_with(71, deferring_config());
+    let mut receiver = receiver(171);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 23);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+    let built = take_one_built(&mut sender, &id);
+
+    let output = sender
+        .router
+        .cancel(&mut sender.node, &id)
+        .expect("cancel the queued message");
+    let packets = sender.absorb_router(output);
+    pump(&mut sender, &mut receiver, packets);
+
+    let again = direct_message(
+        23,
+        receiver.destination,
+        &sender.signing_identity,
+        vec![0x7au8; 2_048],
+    );
+    assert_eq!(
+        again.message_id, id,
+        "the re-enqueued message must carry the same id, or the test proves \
+         nothing membership does not already catch"
+    );
+    let output = sender
+        .router
+        .enqueue(&sender.node, again)
+        .expect("re-enqueue the same message");
+    let packets = sender.absorb_router(output);
+    pump(&mut sender, &mut receiver, packets);
+
+    match sender.router.commit_resource_build(&mut sender.node, built) {
+        Err(error) => assert_eq!(
+            error,
+            RouterError::StaleBuild,
+            "a build from a previous entry lifetime is stale"
+        ),
+        Ok(output) => {
+            let packets = sender.absorb_router(output);
+            pump(&mut sender, &mut receiver, packets);
+            panic!(
+                "a build from before the cancel was installed on the re-enqueued \
+                 entry: the receiver started {} transfer(s) and took delivery of \
+                 {} message(s)",
+                receiver.accepted_resources.len(),
+                receiver.delivered.len()
+            );
+        }
+    }
 }

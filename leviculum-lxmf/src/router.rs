@@ -302,6 +302,15 @@ pub enum RouterError {
     PropagationNodeUnavailable,
     PropagationStampUnavailable,
     StaleStampRequest,
+    /// A returned Resource build no longer matches the queue entry it was
+    /// captured from, so installing it would put superseded bytes on the wire.
+    ///
+    /// Distinct from the errors those paths already produce
+    /// (`Node(Resource(TransferInProgress))`, `PropagationNodeUnavailable`,
+    /// `PropagationStampUnavailable`), so a test can assert staleness itself
+    /// rather than any refusal. Nothing returns it yet: the guard that does is
+    /// batch B of Codeberg #196.
+    StaleBuild,
     /// The node's timebase is below the plausibility floor, so it has no wall
     /// clock and has learned none: it can only produce uptime seconds.
     ///
