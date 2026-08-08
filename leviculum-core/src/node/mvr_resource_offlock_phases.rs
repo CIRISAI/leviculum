@@ -487,3 +487,118 @@ fn composed_and_phased_paths_are_byte_identical_single_segment() {
 fn composed_and_phased_paths_are_byte_identical_split() {
     assert_wire_equivalence(&pattern(RESOURCE_MAX_EFFICIENT_SIZE + 4096), None);
 }
+
+// ---------------------------------------------------------------------------
+// (f) The activity clock belongs to the commit, not to the capture (S4).
+// ---------------------------------------------------------------------------
+
+/// The advertisement timeout this prepared build will run under, read off the
+/// built resource itself (it derives from the link RTT, so it must not be
+/// hardcoded) and expressed relative to the capture timestamp.
+fn adv_timeout_of(prepared: &crate::resource::outgoing::PreparedResourceSend, rtt_ms: u64) -> u64 {
+    use crate::resource::outgoing::PreparedSendKind;
+    let res = match &prepared.kind {
+        PreparedSendKind::Single(res) => res,
+        PreparedSendKind::Split { segment1, .. } => segment1,
+    };
+    res.next_deadline(rtt_ms)
+        .expect("an advertised resource has a deadline")
+        .saturating_sub(res.last_activity_ms())
+}
+
+/// Run one phased send that stalls `stall_ms` between capture and commit, poll
+/// once a millisecond after the commit, and return
+/// `(advertisement timeout in effect, adv_retries after that poll, packets that
+/// poll emitted, delivered bytes, failures)`.
+fn phased_send_stalled_by(
+    stall_ms: u64,
+) -> (u64, usize, usize, Vec<u8>, Vec<(bool, ResourceError)>) {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+    let data = pattern(4096);
+
+    let params = initiator.resource_send_params(&link_id).expect("params");
+    let prepared = prepare_resource_send(&params, &data, None, true, &mut OsRng).expect("prepare");
+
+    let rtt_ms = initiator.link(&link_id).expect("link").rtt_ms();
+    let adv_timeout_ms = adv_timeout_of(&prepared, rtt_ms);
+
+    // The build waits in the router's hand-out queue while time passes.
+    initiator.transport().clock().advance(stall_ms);
+    let (_hash, out) = initiator
+        .commit_resource_send(prepared)
+        .expect("commit of the stalled build");
+
+    // The very first poll after the commit: one millisecond of the resource's
+    // own life has elapsed, nothing else.
+    initiator.transport().clock().advance(1);
+    let poll_out = initiator.handle_timeout();
+    let poll_packets = action_data(&poll_out).len();
+    let adv_retries = initiator
+        .link(&link_id)
+        .expect("link still present")
+        .outgoing_resource()
+        .expect("the transfer is still installed")
+        .adv_retries();
+
+    let (received, failures) =
+        drain_transfer(&mut initiator, &mut responder, i_iface, r_iface, out);
+    (
+        adv_timeout_ms,
+        adv_retries,
+        poll_packets,
+        received,
+        failures,
+    )
+}
+
+/// (f) U14 / S4: a build handed back to the router and committed long after its
+/// parameters were captured must start its advertisement clock at the commit.
+/// Otherwise the resource is installed already older than its advertisement
+/// timeout, and the first poll burns an advertisement retry before a byte has
+/// moved — elapsed time is staleness no epoch can see.
+///
+/// Control arm: the same send with no stall must behave identically (it does
+/// before and after the fix), so the assertions are not vacuous.
+#[test]
+fn a_build_committed_late_starts_its_advertisement_clock_at_commit() {
+    let data = pattern(4096);
+
+    // Control arm: capture and commit at the same instant.
+    let (adv_timeout_ms, adv_retries, poll_packets, received, failures) = phased_send_stalled_by(0);
+    assert_eq!(
+        adv_retries, 0,
+        "control: the first poll after a prompt commit must not charge a retry"
+    );
+    assert_eq!(
+        poll_packets, 0,
+        "control: the first poll after a prompt commit must not retransmit the advertisement"
+    );
+    assert!(failures.is_empty(), "control: no failures: {failures:?}");
+    assert_eq!(received, data, "control: the transfer must proceed");
+
+    // Late arm: the same send, committed well past the advertisement timeout
+    // that the resource itself is running under.
+    let stall_ms = adv_timeout_ms + 500;
+    assert!(
+        stall_ms > adv_timeout_ms,
+        "the stall ({stall_ms} ms) must exceed the advertisement timeout in effect \
+         ({adv_timeout_ms} ms) or the test proves nothing"
+    );
+    let (late_timeout_ms, adv_retries, poll_packets, received, failures) =
+        phased_send_stalled_by(stall_ms);
+    assert_eq!(
+        late_timeout_ms, adv_timeout_ms,
+        "both arms must run under the same advertisement timeout (test harness sanity)"
+    );
+    assert_eq!(
+        adv_retries, 0,
+        "a build committed {stall_ms} ms after capture must start its advertisement \
+         clock at the commit, not charge a retry for time it spent in the queue"
+    );
+    assert_eq!(
+        poll_packets, 0,
+        "the first poll after a late commit must not retransmit the advertisement"
+    );
+    assert!(failures.is_empty(), "no failures: {failures:?}");
+    assert_eq!(received, data, "the transfer must proceed");
+}

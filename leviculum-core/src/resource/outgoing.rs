@@ -622,6 +622,19 @@ impl OutgoingResource {
         })
     }
 
+    /// Anchor the activity clock at `now_ms`.
+    ///
+    /// A resource built off-lock carries the timestamp of the phase-1 capture
+    /// (`ResourceSendParams::now_ms`), but its advertisement only goes out when
+    /// [`NodeCore::commit_resource_send`](crate::node::NodeCore::commit_resource_send)
+    /// installs it. Whatever time passed in between belongs to the caller's
+    /// queue, not to the receiver's response window, so the commit rebases the
+    /// clock — otherwise the first poll can charge an advertisement retry
+    /// before a byte has moved (issue #196, S4).
+    pub(crate) fn rebase_activity_clock(&mut self, now_ms: u64) {
+        self.last_activity_ms = now_ms;
+    }
+
     /// Handle a REQ packet from the receiver.
     ///
     /// Returns raw data packets to send (RESOURCE context, pre-encrypted).
@@ -1092,6 +1105,21 @@ impl OutgoingResource {
     #[allow(dead_code)] // Resource accessor API — see Codeberg issues #27/#28
     pub(crate) fn sdu(&self) -> usize {
         self.sdu
+    }
+
+    /// Advertisement retransmissions charged against
+    /// [`RESOURCE_MAX_ADV_RETRIES`](crate::resource::RESOURCE_MAX_ADV_RETRIES)
+    /// so far. Test-only: the counter is otherwise observable only through the
+    /// retransmitted packet.
+    #[cfg(test)]
+    pub(crate) fn adv_retries(&self) -> usize {
+        self.adv_retries
+    }
+
+    /// Timestamp the activity clock is currently anchored at. Test-only.
+    #[cfg(test)]
+    pub(crate) fn last_activity_ms(&self) -> u64 {
+        self.last_activity_ms
     }
 }
 

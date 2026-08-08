@@ -1374,6 +1374,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::packet::PacketContext;
         use crate::resource::{outgoing::PreparedSendKind, ResourceError};
 
+        // The advertisement goes out now, so the resource's activity clock
+        // starts now — not at the phase-1 capture. Time the build spent in the
+        // caller's queue is not time the receiver had to answer in (#196, S4).
+        let now_ms = self.transport.clock().now_ms();
+
         let link_id = self.resolve_link_id(&prepared.link_id);
         let link = self
             .links
@@ -1386,10 +1391,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return Err(ResourceError::LinkStateChanged);
         }
         match prepared.kind {
-            PreparedSendKind::Single(outgoing) => {
+            PreparedSendKind::Single(mut outgoing) => {
+                outgoing.rebase_activity_clock(now_ms);
                 link.set_outgoing_resource(outgoing);
             }
-            PreparedSendKind::Split { segment1, plan } => {
+            PreparedSendKind::Split { mut segment1, plan } => {
+                segment1.rebase_activity_clock(now_ms);
                 link.set_outgoing_resource(segment1);
                 link.set_outgoing_segments(plan);
             }
