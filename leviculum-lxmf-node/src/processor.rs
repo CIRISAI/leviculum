@@ -40,7 +40,7 @@
 //! `NodeCore::send_resource` (141 ms for 1 MiB), is never reached: the router
 //! drives resource sends through the three-phase form itself.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Instant;
 
@@ -48,9 +48,10 @@ use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
 use leviculum_core::{DestinationHash, Storage as _};
-use leviculum_lxmf::router::{LxmfRouter, RouterConfig, RouterEvent, RouterOutput};
+use leviculum_lxmf::router::{LxmfRouter, RouterConfig, RouterError, RouterEvent, RouterOutput};
 use leviculum_lxmf::{
-    announce, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig, Verification,
+    announce, BuiltResource, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
+    PendingResourceBuild, Verification,
 };
 use leviculum_std::driver::{CoreProcessor, StdNodeCore};
 
@@ -145,8 +146,17 @@ pub enum StampJob {
     Delivery(DeliveryStampRequest),
 }
 
+/// One deferred Resource build on its way to the build worker.
+///
+/// The pending build owns everything the build needs
+/// ([`PendingResourceBuild`], "it owns everything the build needs"), so the
+/// worker never borrows the router or the core — which is the entire point of
+/// `defer_resource_builds` (Codeberg #196).
+pub enum BuildJob {
+    Resource(PendingResourceBuild),
+}
+
 /// Everything that reaches the processor from outside the driver.
-#[derive(Debug, Clone)]
 pub enum Input {
     /// One raw line from stdin. Parsed in the hook so a malformed command is
     /// reported through the same `lxmf_error` path as a failing one.
@@ -164,6 +174,81 @@ pub enum Input {
         request: DeliveryStampRequest,
         detail: String,
     },
+    /// A Resource transfer the build worker finished, on its way back to
+    /// [`LxmfRouter::commit_resource_build`].
+    ResourceBuildReady { built: Box<BuiltResource> },
+    /// The build worker could not build this message's transfer. The message
+    /// stays queued in the router, which re-offers it after its retry
+    /// interval; the id only has to leave the in-flight set.
+    ResourceBuildFailed {
+        message_id: [u8; 32],
+        detail: String,
+    },
+}
+
+/// Hand-written because [`BuiltResource`] carries prepared transfer state that
+/// neither needs nor offers `Debug`; everything else prints as the derive
+/// would have.
+impl std::fmt::Debug for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Input::Line(line) => f.debug_tuple("Line").field(line).finish(),
+            Input::Eof => write!(f, "Eof"),
+            Input::StampReady { request, stamp } => f
+                .debug_struct("StampReady")
+                .field("request", request)
+                .field("stamp", stamp)
+                .finish(),
+            Input::StampFailed { request, detail } => f
+                .debug_struct("StampFailed")
+                .field("request", request)
+                .field("detail", detail)
+                .finish(),
+            Input::ResourceBuildReady { built } => f
+                .debug_struct("ResourceBuildReady")
+                .field("message_id", &hex_encode(&built.message_id()))
+                .finish(),
+            Input::ResourceBuildFailed { message_id, detail } => f
+                .debug_struct("ResourceBuildFailed")
+                .field("message_id", &hex_encode(message_id))
+                .field("detail", detail)
+                .finish(),
+        }
+    }
+}
+
+/// The build worker's loop: take one job, run the payload-scaled work, send
+/// the answer back as an [`Input`]. Shared between `main.rs` and the loopback
+/// tests so both drive the code the scenarios run.
+///
+/// One sequential worker on purpose: a build is 2–60 ms of CPU, so even a
+/// burst of due messages clears in well under a retry interval, and a single
+/// consumer keeps commits in capture order. A panic out of a build is turned
+/// into [`Input::ResourceBuildFailed`] rather than a dead worker, because a
+/// worker that dies silently would strand every later deferred message.
+pub fn run_build_worker(jobs: Receiver<BuildJob>, results: Sender<Input>) {
+    while let Ok(BuildJob::Resource(pending)) = jobs.recv() {
+        let message_id = pending.message_id();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pending.build(&mut rand_core::OsRng)
+        }));
+        let input = match outcome {
+            Ok(Ok(built)) => Input::ResourceBuildReady {
+                built: Box::new(built),
+            },
+            Ok(Err(e)) => Input::ResourceBuildFailed {
+                message_id,
+                detail: format!("{e:?}"),
+            },
+            Err(_) => Input::ResourceBuildFailed {
+                message_id,
+                detail: "the build panicked".into(),
+            },
+        };
+        if results.send(input).is_err() {
+            return;
+        }
+    }
 }
 
 /// Why the helper is stopping.
@@ -181,6 +266,12 @@ pub struct HelperConfig {
     /// `argv[1]`, carried in the delivery announce. Default `lxmf-test`
     /// (`periculum/assets/scripts/lxmf_node.py:65`).
     pub display_name: Vec<u8>,
+    /// Run outbound Resource builds off the core lock
+    /// ([`RouterConfig::defer_resource_builds`], Codeberg #196): the router
+    /// hands the payload-scaled work out of its tick, the build worker runs it
+    /// on its own thread, and the result comes back as
+    /// [`Input::ResourceBuildReady`]. Off by default, like the router flag.
+    pub defer_resource_builds: bool,
 }
 
 /// A `wait_for_peer` the helper has not answered yet.
@@ -215,9 +306,14 @@ pub struct LxmfHelperProcessor {
     emitter: Emitter,
     inputs: Receiver<Input>,
     stamps: tokio::sync::mpsc::UnboundedSender<StampJob>,
+    builds: Sender<BuildJob>,
     shutdown: tokio::sync::mpsc::UnboundedSender<Shutdown>,
     state: State,
     waits: Vec<PendingWait>,
+    /// Message ids with a build job somewhere between the job queue and the
+    /// worker's answer. See [`Self::dispatch_resource_builds`] for the
+    /// invariant this set carries.
+    builds_inflight: HashSet<[u8; 32]>,
 }
 
 impl LxmfHelperProcessor {
@@ -228,6 +324,7 @@ impl LxmfHelperProcessor {
         emitter: Emitter,
         inputs: Receiver<Input>,
         stamps: tokio::sync::mpsc::UnboundedSender<StampJob>,
+        builds: Sender<BuildJob>,
         shutdown: tokio::sync::mpsc::UnboundedSender<Shutdown>,
     ) -> Self {
         Self {
@@ -235,12 +332,14 @@ impl LxmfHelperProcessor {
             emitter,
             inputs,
             stamps,
+            builds,
             shutdown,
             // A fresh identity per start, like Python's `RNS.Identity()`
             // (`periculum/assets/scripts/lxmf_node.py:75`). The helper is a test peer; persisting one
             // would make consecutive runs of a scenario share a destination.
             state: State::Unregistered(Box::new(Identity::generate(&mut rand_core::OsRng))),
             waits: Vec::new(),
+            builds_inflight: HashSet::new(),
         }
     }
 
@@ -257,7 +356,7 @@ impl LxmfHelperProcessor {
                 return;
             }
         };
-        self.state = match register(core, identity) {
+        self.state = match register(core, identity, self.config.defer_resource_builds) {
             Ok(ready) => {
                 self.emitter
                     .event("lxmf_ready", &[("hash", hex_encode(&ready.delivery_hash))]);
@@ -363,6 +462,16 @@ impl LxmfHelperProcessor {
                 // async. The result comes back as `Input::StampReady`.
                 let _ = self.stamps.send(StampJob::Delivery(request));
             }
+            RouterEvent::ResourceBuildPending(id) => {
+                // Announcement only. The handoff itself is drained from
+                // `take_resource_builds` at the end of the hook
+                // (`dispatch_resource_builds`): the drain needs `&mut` on the
+                // router, and this match runs while `absorb` holds it shared.
+                self.emitter.log(format!(
+                    "[lxmf-node] resource build pending id={}",
+                    hex_encode(&id)
+                ));
+            }
             // The rest are diagnostics. Python's helper reports nothing for
             // any of them, and adding events the driver does not know would
             // be a second protocol rather than the same one — a delivery that
@@ -371,6 +480,81 @@ impl LxmfHelperProcessor {
             other => self
                 .emitter
                 .log(format!("[lxmf-node] router event: {other:?}")),
+        }
+    }
+
+    /// Drain the router's captured Resource builds and queue each as one job
+    /// for the build worker — the deferred half of Codeberg #196. Called at
+    /// the end of both hooks, after every `absorb` of the call that could
+    /// have captured (the drain needs `&mut` on the router, which `absorb`'s
+    /// event loop holds shared).
+    ///
+    /// **Single-flight invariant:** a message id is in `builds_inflight`
+    /// exactly while one job for it is between this queue push and
+    /// `pump_inputs` processing the worker's answer
+    /// (`ResourceBuildReady`/`ResourceBuildFailed`). While it is there, a
+    /// drained build for the same id is dropped here instead of queued.
+    /// Every insert has exactly one matching remove: the worker answers every
+    /// job it receives (a panicking build answers `ResourceBuildFailed`), the
+    /// channels are unbounded and lossless, and a failed queue push removes
+    /// the id on the spot. Without this bound, the router's re-offer — it
+    /// re-captures a still-queued message every retry interval, because
+    /// [`LxmfRouter::take_resource_builds`] deliberately releases its own
+    /// marker on drain — would clone the stamp path's known defect: duplicate
+    /// jobs accumulating behind one sequential worker.
+    ///
+    /// Dropping is safe on both sides of the race. The in-flight build
+    /// commits: the entry leaves `Outbound` and the router stops re-offering.
+    /// It fails or is refused instead: the entry stays queued, the id has
+    /// left the set by the time the failure was pumped, and the router's next
+    /// re-offer (at most one retry interval later) is dispatched normally.
+    fn dispatch_resource_builds(&mut self, ready: &mut Ready) {
+        for pending in ready.router.take_resource_builds() {
+            let id = pending.message_id();
+            if !self.builds_inflight.insert(id) {
+                self.emitter.log(format!(
+                    "[lxmf-node] resource build for {} already in flight; re-offer dropped",
+                    hex_encode(&id)
+                ));
+                continue;
+            }
+            if self.builds.send(BuildJob::Resource(pending)).is_err() {
+                // The worker is gone — a process-teardown state. The message
+                // stays queued and every retry logs again, so a wedged worker
+                // is loud in the stderr log rather than a silent strand.
+                self.builds_inflight.remove(&id);
+                self.emitter.log(format!(
+                    "[lxmf-node] build worker unavailable; resource build for {} dropped",
+                    hex_encode(&id)
+                ));
+                continue;
+            }
+            self.emitter.log(format!(
+                "[lxmf-node] resource build dispatched id={}",
+                hex_encode(&id)
+            ));
+        }
+    }
+
+    /// Say why a returned build was not installed. Never `lxmf_error`.
+    ///
+    /// A [`RouterError::StaleBuild`] is normal operation: the entry changed
+    /// while the build ran (a stamp arrived, a cancel, a restore) and the
+    /// router refuses to put superseded bytes on the air — it retries the
+    /// message itself. Every other refusal (`TransferInProgress`, a re-keyed
+    /// link, …) spends the build the same way and is retried the same way, so
+    /// none of them may fail a scenario step; a message that never gets
+    /// through surfaces as the peer's `lxmf_assert_received` timing out, with
+    /// this line as the diagnosis.
+    fn report_commit_refusal(&self, message_id: &[u8; 32], error: &RouterError) {
+        let id = hex_encode(message_id);
+        match error {
+            RouterError::StaleBuild => self.emitter.log(format!(
+                "[lxmf-node] resource build for {id} superseded; dropped, the router retries"
+            )),
+            other => self.emitter.log(format!(
+                "[lxmf-node] resource build for {id} refused ({other:?}); the router retries"
+            )),
         }
     }
 
@@ -399,6 +583,30 @@ impl LxmfHelperProcessor {
                     "stamp generation failed for {}: {detail}",
                     hex_encode(&request.message_id)
                 )),
+                Ok(Input::ResourceBuildReady { built }) => {
+                    // The answer is in: from here the id is no longer in
+                    // flight, whatever the commit says — a refusal means the
+                    // router re-offers the message and a fresh job may be
+                    // created for it.
+                    let message_id = built.message_id();
+                    self.builds_inflight.remove(&message_id);
+                    match ready.router.commit_resource_build(core, *built) {
+                        Ok(output) => self.absorb(ready, core, output, out),
+                        Err(e) => self.report_commit_refusal(&message_id, &e),
+                    }
+                }
+                Ok(Input::ResourceBuildFailed { message_id, detail }) => {
+                    self.builds_inflight.remove(&message_id);
+                    // Not `lxmf_error`: the message is still queued and the
+                    // router re-offers it after its retry interval. A build
+                    // that fails every time surfaces as the peer's
+                    // `lxmf_assert_received` timing out, with this line as
+                    // the diagnosis.
+                    self.emitter.log(format!(
+                        "[lxmf-node] resource build failed for {}: {detail}",
+                        hex_encode(&message_id)
+                    ));
+                }
                 Err(TryRecvError::Empty) => return,
                 // The sender is gone, which can only follow a shutdown that
                 // has already been signalled.
@@ -589,7 +797,11 @@ fn transport_encryption(method: DeliveryMethod) -> &'static str {
 }
 
 /// Mint the delivery destination and the router that drives it.
-fn register(core: &mut StdNodeCore, identity: Identity) -> Result<Ready, String> {
+fn register(
+    core: &mut StdNodeCore,
+    identity: Identity,
+    defer_resource_builds: bool,
+) -> Result<Ready, String> {
     let identity_hash = *identity.hash();
     // `delivery_destination` consumes the identity, so the private key is
     // copied out first: the destination is what holds it afterwards, and the
@@ -606,7 +818,14 @@ fn register(core: &mut StdNodeCore, identity: Identity) -> Result<Ready, String>
     let node = LxmfNode::register(core, destination, LxmfNodeConfig::default())
         .map_err(|e| format!("register delivery destination: {e:?}"))?;
     Ok(Ready {
-        router: LxmfRouter::new(node, identity_hash, RouterConfig::default()),
+        router: LxmfRouter::new(
+            node,
+            identity_hash,
+            RouterConfig {
+                defer_resource_builds,
+                ..RouterConfig::default()
+            },
+        ),
         delivery_hash,
     })
 }
@@ -626,6 +845,7 @@ impl CoreProcessor for LxmfHelperProcessor {
         // puts the helper's latency at the peer's announce instead of
         // `POLL_INTERVAL_MS` after it.
         self.poll_waits(&mut ready, core, &mut out);
+        self.dispatch_resource_builds(&mut ready);
         self.state = State::Ready(ready);
         out
     }
@@ -642,6 +862,7 @@ impl CoreProcessor for LxmfHelperProcessor {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emitter.error(&format!("router tick: {e:?}")),
         }
+        self.dispatch_resource_builds(&mut ready);
 
         self.state = State::Ready(ready);
         // Always a fresh future instant. The helper always has something to
@@ -652,5 +873,61 @@ impl CoreProcessor for LxmfHelperProcessor {
             None => poll,
         });
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refused commit must never escalate to `lxmf_error`: a
+    /// `StaleBuild` is normal operation (the router refused superseded
+    /// bytes and retries the message itself), and every other refusal is
+    /// retried the same way. An `lxmf_error` here would fail a periculum
+    /// step for a condition the stack recovers from on its own. The
+    /// arrangement is synthetic because the loopback harness cannot
+    /// produce a stale build at all (no stamp costs, no cancel verb, and
+    /// single-flight keeps a second build for one id from existing);
+    /// the refusal *semantics* are the router's own tests' subject.
+    #[test]
+    fn a_commit_refusal_is_a_log_line_not_an_error() {
+        let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Out>();
+        let (_inputs_tx, inputs_rx) = std::sync::mpsc::channel::<Input>();
+        let (builds_tx, _builds_rx) = std::sync::mpsc::channel::<BuildJob>();
+        let (stamps_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (shutdown_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let processor = LxmfHelperProcessor::new(
+            HelperConfig {
+                display_name: b"refusal-test".to_vec(),
+                defer_resource_builds: true,
+            },
+            Emitter::new(lines_tx, Instant::now()),
+            inputs_rx,
+            stamps_tx,
+            builds_tx,
+            shutdown_tx,
+        );
+
+        // Both refusal classes: the normal-operation one and the
+        // build-spent-anyway one.
+        processor.report_commit_refusal(&[0x5a; 32], &RouterError::StaleBuild);
+        processor.report_commit_refusal(&[0x5a; 32], &RouterError::PropagationNodeUnavailable);
+
+        let mut logs = 0;
+        while let Ok(out) = lines_rx.try_recv() {
+            match out {
+                Out::Log(line) => {
+                    assert!(
+                        line.contains(&hex_encode(&[0x5a; 32])),
+                        "the diagnostic must name the message: {line}"
+                    );
+                    logs += 1;
+                }
+                Out::Event(line) => {
+                    panic!("a commit refusal must not emit an EVENT line: {line}")
+                }
+            }
+        }
+        assert_eq!(logs, 2, "each refusal must leave one diagnostic");
     }
 }

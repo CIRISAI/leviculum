@@ -29,185 +29,17 @@
 //! the other end (this is our stack on both ends), and a real daemon in the
 //! middle (these two nodes are directly connected, where the scenario's
 //! helpers are shared-instance clients of `lnsd`/`rnsd`).
+//!
+//! The harness lives in `common/` and is shared with
+//! `deferred_resource_builds.rs`, which runs the same topology with
+//! `defer_resource_builds` on.
 
-use std::collections::BTreeMap;
-use std::net::{SocketAddr, TcpListener};
-use std::sync::mpsc::{self, Receiver, Sender};
+mod common;
+
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use leviculum_lxmf_node::processor::{Emitter, HelperConfig, Input, LxmfHelperProcessor, Out};
-use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
-
-/// Everything a single helper needs to be driven and observed.
-struct Helper {
-    node: ReticulumNode,
-    inputs: Sender<Input>,
-    lines: Receiver<Out>,
-    /// Every `EVENT` line seen so far, parsed. Never drained: several
-    /// assertions are "did this ever happen", which a consuming read cannot
-    /// answer.
-    events: Vec<Event>,
-    /// `lxmf_ready`'s hash, once it has arrived.
-    delivery_hash: Option<String>,
-    _storage: tempfile::TempDir,
-}
-
-/// One parsed `EVENT` line, the same shape the real driver parses into
-/// (`periculum/src/lxmf.rs`, `EventLine`).
-#[derive(Debug, Clone)]
-struct Event {
-    name: String,
-    fields: BTreeMap<String, String>,
-}
-
-impl Event {
-    fn parse(line: &str) -> Option<Event> {
-        let mut tokens = line.split_whitespace();
-        if tokens.next()? != "EVENT" {
-            return None;
-        }
-        let name = tokens.next()?.to_string();
-        let fields = tokens
-            .filter_map(|token| token.split_once('='))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        Some(Event { name, fields })
-    }
-
-    fn field(&self, key: &str) -> Option<&str> {
-        self.fields.get(key).map(String::as_str)
-    }
-}
-
-/// A free loopback port. The listener is dropped before the node binds, which
-/// is the same small race every TCP test in the tree runs.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
-
-impl Helper {
-    /// Build and start one helper. `wire` decides whether this node listens,
-    /// dials, or does neither (the partitioned case).
-    async fn start(display_name: &str, wire: Wire) -> Helper {
-        let storage = tempfile::tempdir().expect("tempdir");
-        let (lines_tx, lines_rx) = mpsc::channel::<Out>();
-        let (inputs_tx, inputs_rx) = mpsc::channel::<Input>();
-        // The stamp and shutdown queues are unbounded senders whose receivers
-        // are dropped immediately: no peer here advertises a stamp cost, and
-        // the test decides when the node stops. A send on either fails rather
-        // than blocks, which is exactly the behaviour a hook needs.
-        let (stamps_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let (shutdown_tx, _) = tokio::sync::mpsc::unbounded_channel();
-
-        let processor = LxmfHelperProcessor::new(
-            HelperConfig {
-                display_name: display_name.as_bytes().to_vec(),
-            },
-            Emitter::new(lines_tx, Instant::now()),
-            inputs_rx,
-            stamps_tx,
-            shutdown_tx,
-        );
-
-        let mut builder = ReticulumNodeBuilder::new()
-            .enable_transport(false)
-            .storage_path(storage.path().to_path_buf())
-            .core_processor(processor);
-        builder = match wire {
-            Wire::Listen(addr) => builder.add_tcp_server(addr),
-            Wire::Dial(addr) => builder.add_tcp_client(addr),
-            Wire::Alone => builder,
-        };
-        let mut node = builder.build().await.expect("build node");
-        node.start().await.expect("start node");
-
-        Helper {
-            node,
-            inputs: inputs_tx,
-            lines: lines_rx,
-            events: Vec::new(),
-            delivery_hash: None,
-            _storage: storage,
-        }
-    }
-
-    fn command(&self, line: &str) {
-        self.inputs
-            .send(Input::Line(line.to_string()))
-            .expect("helper input channel is open");
-    }
-
-    /// Absorb everything the helper has said since the last call.
-    fn drain(&mut self) {
-        while let Ok(out) = self.lines.try_recv() {
-            match out {
-                Out::Event(line) => {
-                    if let Some(event) = Event::parse(&line) {
-                        if event.name == "lxmf_ready" {
-                            self.delivery_hash = event.field("hash").map(str::to_string);
-                        }
-                        self.events.push(event);
-                    }
-                }
-                // Kept visible: a failing run's diagnosis is usually here.
-                Out::Log(line) => eprintln!("{line}"),
-            }
-        }
-    }
-
-    fn seen(&self, name: &str) -> bool {
-        self.events.iter().any(|event| event.name == name)
-    }
-
-    fn find(&self, name: &str) -> Option<&Event> {
-        self.events.iter().find(|event| event.name == name)
-    }
-
-    /// A received message matching the driver's own predicate: right source,
-    /// right body (`periculum/src/executor.rs`, `lxmf_received_verdict`).
-    fn received(&self, src: &str, body_b64: &str) -> Option<&Event> {
-        self.events.iter().find(|event| {
-            event.name == "lxmf_msg_received"
-                && event.field("src") == Some(src)
-                && event.field("body_b64") == Some(body_b64)
-        })
-    }
-}
-
-enum Wire {
-    Listen(SocketAddr),
-    Dial(SocketAddr),
-    Alone,
-}
-
-/// Poll both helpers until `done` holds or the deadline passes.
-async fn pump_until<F>(a: &mut Helper, b: &mut Helper, budget: Duration, mut done: F) -> bool
-where
-    F: FnMut(&Helper, &Helper) -> bool,
-{
-    let deadline = Instant::now() + budget;
-    loop {
-        a.drain();
-        b.drain();
-        if done(a, b) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// The base64 the driver would build for this body
-/// (`periculum/src/executor.rs`: `B64.encode(body.as_bytes())`).
-fn body_b64(body: &str) -> String {
-    leviculum_lxmf_node::protocol::b64_encode(body.as_bytes())
-}
+use common::{body_b64, free_port, pump_until, Helper, Setup, Wire};
 
 /// The `wait_for_peer` window, the same on both runs.
 ///
@@ -228,8 +60,8 @@ async fn run_script(connected: bool) -> (Helper, Helper) {
     } else {
         (Wire::Alone, Wire::Alone)
     };
-    let mut alice = Helper::start("Alice", a_wire).await;
-    let mut bob = Helper::start("Bob", b_wire).await;
+    let mut alice = Helper::start(Setup::new("Alice", a_wire)).await;
+    let mut bob = Helper::start(Setup::new("Bob", b_wire)).await;
 
     // lxmf_start: the helper is up once it has named its delivery destination.
     let ready = pump_until(&mut alice, &mut bob, Duration::from_secs(20), |a, b| {

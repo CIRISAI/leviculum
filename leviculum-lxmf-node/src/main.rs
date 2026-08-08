@@ -30,7 +30,8 @@ use std::time::Instant;
 
 use leviculum_lxmf::CooperativeStamper;
 use leviculum_lxmf_node::processor::{
-    Emitter, HelperConfig, Input, LxmfHelperProcessor, Out, Shutdown, StampJob,
+    run_build_worker, BuildJob, Emitter, HelperConfig, Input, LxmfHelperProcessor, Out, Shutdown,
+    StampJob,
 };
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::Config;
@@ -54,14 +55,22 @@ const STORAGE_DEFAULT: &str = "/tmp/lxmf-state";
 /// `argv[1]` when none is given (`periculum/assets/scripts/lxmf_node.py:65`).
 const DEFAULT_DISPLAY_NAME: &str = "lxmf-test";
 
+/// Hand outbound Resource builds to the build worker instead of running them
+/// inside the router's tick, i.e. under the daemon connection's core lock
+/// (Codeberg #196). Off by default, matching `RouterConfig`; periculum sets it
+/// per node via `defer_resource_builds = true` on its `lxmf_start` step.
+const DEFER_FLAG: &str = "--defer-resource-builds";
+
 struct Args {
     display_name: String,
     config_dir: PathBuf,
+    defer_resource_builds: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut display_name = None;
     let mut config_dir = None;
+    let mut defer_resource_builds = false;
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
@@ -71,6 +80,7 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| format!("{CONFIG_FLAG} needs a directory"))?,
                 ));
             }
+            DEFER_FLAG => defer_resource_builds = true,
             other if other.starts_with("--") => {
                 return Err(format!("unknown option {other}"));
             }
@@ -84,6 +94,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         display_name: display_name.unwrap_or_else(|| DEFAULT_DISPLAY_NAME.to_string()),
         config_dir: config_dir.unwrap_or_else(Config::default_config_dir),
+        defer_resource_builds,
     })
 }
 
@@ -106,7 +117,7 @@ async fn main() -> ExitCode {
         Ok(args) => args,
         Err(e) => {
             eprintln!("[lxmf-node] {e}");
-            eprintln!("usage: lxmf-node [{CONFIG_FLAG} <dir>] [display_name]");
+            eprintln!("usage: lxmf-node [{CONFIG_FLAG} <dir>] [{DEFER_FLAG}] [display_name]");
             return ExitCode::from(2);
         }
     };
@@ -148,6 +159,7 @@ async fn run(args: Args) -> Result<(), String> {
     let emitter = Emitter::new(lines_tx, Instant::now());
     let (inputs_tx, inputs_rx) = mpsc::channel::<Input>();
     let (stamps_tx, mut stamps_rx) = tokio::sync::mpsc::unbounded_channel::<StampJob>();
+    let (builds_tx, builds_rx) = mpsc::channel::<BuildJob>();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<Shutdown>();
 
     let instance = instance_name(&args.config_dir);
@@ -160,10 +172,12 @@ async fn run(args: Args) -> Result<(), String> {
     let processor = LxmfHelperProcessor::new(
         HelperConfig {
             display_name: args.display_name.clone().into_bytes(),
+            defer_resource_builds: args.defer_resource_builds,
         },
         emitter.clone(),
         inputs_rx,
         stamps_tx,
+        builds_tx,
         shutdown_tx.clone(),
     );
 
@@ -241,6 +255,15 @@ async fn run(args: Args) -> Result<(), String> {
             }
         });
     });
+
+    // Resource builds, off the core lock (Codeberg #196). A plain thread with
+    // a blocking receive: the build is synchronous CPU work (2–60 ms), so
+    // there is nothing to await. Deliberately NOT the stamp worker's queue —
+    // a build behind a minutes-long stamp mine would delay a delivery by the
+    // mine, and the two workloads share nothing but "runs off the lock".
+    // Dormant unless the processor was built with `--defer-resource-builds`.
+    let build_inputs = inputs_tx.clone();
+    thread::spawn(move || run_build_worker(builds_rx, build_inputs));
 
     // stdin is a blocking read on a real thread, not a tokio task: the reader
     // must keep running while the runtime is busy, and `quit` has to be seen

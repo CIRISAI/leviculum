@@ -35,5 +35,8 @@
 pub mod processor;
 pub mod protocol;
 
-pub use processor::{Emitter, HelperConfig, Input, LxmfHelperProcessor, Out, Shutdown, StampJob};
+pub use processor::{
+    run_build_worker, BuildJob, Emitter, HelperConfig, Input, LxmfHelperProcessor, Out, Shutdown,
+    StampJob,
+};
 pub use protocol::{parse_command, Command, CommandError};
