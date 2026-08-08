@@ -54,6 +54,15 @@ impl Clock for TestClock {
             .ok()
             .map(|since| since.as_secs())
     }
+    /// And the sub-second reading too (Codeberg #217), for the same reason:
+    /// this clock stands in for `SystemClock` in the interop suite, and the
+    /// LXMF message timestamp Python reads back is built from it.
+    fn wall_unix_micros(&self) -> Option<u64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| u64::try_from(since.as_micros()).ok())
+    }
 }
 
 /// Get current time in milliseconds (convenience for tests)

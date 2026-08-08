@@ -222,7 +222,7 @@ Key-value persistence for the path table, link table, announce caches,
 identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:196`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:711`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:743`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
 - `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the

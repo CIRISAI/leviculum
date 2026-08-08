@@ -2859,6 +2859,49 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         secs.min(EMISSION_TIMESTAMP_MAX_SECS)
     }
 
+    /// [`emission_secs`](Self::emission_secs) in microseconds, for the one
+    /// consumer whose wire field needs sub-second precision: the LXMF message
+    /// timestamp (Codeberg #217).
+    ///
+    /// Same sources in the same order — platform wall clock, learned emission
+    /// timebase advanced by the monotonic clock, monotonic uptime — and
+    /// `emission_micros(now) / 1_000_000 == emission_secs(now)` holds on every
+    /// arm, so this is a refinement of the one producer rather than a second
+    /// one. The announce emission field keeps using `emission_secs`: it is five
+    /// bytes of whole seconds on the wire and gains nothing here.
+    ///
+    /// Microseconds, not milliseconds: the collision #217 reports is between
+    /// two calls in one code path, and two consecutive
+    /// `LxmfRouter::create_message` calls measure ~115 µs apart, so a
+    /// millisecond value collides on every such pair (measured 20/20 before
+    /// this unit was chosen). It is also the unit `time.time()` effectively
+    /// produces on the reference side, an f64 of unix seconds resolving to
+    /// ~0.24 µs at present-day timestamps.
+    ///
+    /// The learned-timebase arm does not invent precision it does not have. A
+    /// timebase learned from a peer's announce is second-granular and the only
+    /// monotonic source below it is `Clock::now_ms`, so the sub-second part is
+    /// `floor_secs * 1_000_000` plus the *milliseconds* elapsed since the floor
+    /// was set, scaled up. That is monotonic and separates two instants one
+    /// millisecond apart, which is what a clockless node can honestly offer; it
+    /// is not a claim to know the wall-clock microsecond, and no peer reads it
+    /// as one.
+    pub fn emission_micros(&self, now_ms: u64) -> u64 {
+        let micros = if let Some(wall) = self.clock.wall_unix_micros() {
+            wall
+        } else {
+            match self.emission_floor {
+                Some((floor_secs, floor_at_ms)) => floor_secs
+                    .saturating_mul(1_000_000)
+                    .saturating_add(now_ms.saturating_sub(floor_at_ms).saturating_mul(1_000)),
+                None => now_ms.saturating_mul(1_000),
+            }
+        };
+        // The same bound as emission_secs, in the same units, so the two can
+        // never disagree at the ceiling either.
+        micros.min(EMISSION_TIMESTAMP_MAX_SECS.saturating_mul(1_000_000))
+    }
+
     /// [`emission_secs`](Self::emission_secs) for an announce we are about
     /// to emit, plus a once-per-process operator warning when the platform
     /// wall clock is implausible (Codeberg #161): a dead RTC or a restored
@@ -17075,6 +17118,130 @@ mod tests {
                 transport.emission_secs(0),
                 crate::constants::EMISSION_TIMESTAMP_MAX_SECS,
                 "emission_secs must saturate at the wire field maximum"
+            );
+            assert_eq!(
+                transport.emission_micros(0),
+                crate::constants::EMISSION_TIMESTAMP_MAX_SECS * 1_000_000,
+                "emission_micros must saturate at the same instant, in its own units"
+            );
+        }
+
+        /// Codeberg #217: `emission_micros` is `emission_secs` at a finer
+        /// resolution, not a second source. On every arm of the
+        /// source-priority chain the two must describe the same instant —
+        /// otherwise the LXMF message timestamp and the announce emission
+        /// timestamp of one node could disagree about what second it is.
+        #[test]
+        fn test_emission_micros_agrees_with_emission_secs_on_every_arm() {
+            let mut transport = make_transport_enabled();
+
+            // Arm 3, the degenerate fallback: no wall clock, nothing learned.
+            transport.clock.advance(3_400);
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_micros(now) / 1_000_000,
+                transport.emission_secs(now)
+            );
+
+            // Arm 2, the learned/injected timebase advanced by the monotonic
+            // clock. The seconds arm truncates the elapsed time; the micros
+            // arm keeps it to the millisecond the timer actually has, and they
+            // still agree on the second.
+            transport.set_wall_time_unix_secs(1_800_000_000);
+            for step in [0u64, 1, 499, 500, 999, 1_000, 1_001, 7_777] {
+                let now = transport.clock.now_ms() + step;
+                assert_eq!(
+                    transport.emission_micros(now) / 1_000_000,
+                    transport.emission_secs(now),
+                    "micros and secs disagree {step} ms after the timebase was set"
+                );
+                assert_eq!(
+                    transport.emission_micros(now),
+                    1_800_000_000 * 1_000_000 + step * 1_000,
+                    "the learned arm advances by monotonic milliseconds, scaled"
+                );
+            }
+
+            // Arm 1, a platform wall clock, which is the arm the trait default
+            // covers when the platform only knows seconds.
+            struct SecondsOnlyClock;
+            impl Clock for SecondsOnlyClock {
+                fn now_ms(&self) -> u64 {
+                    12_345
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    Some(1_790_000_042)
+                }
+            }
+            let seconds_only = Transport::new(
+                TransportConfig::default(),
+                SecondsOnlyClock,
+                MemoryStorage::with_defaults(),
+                Identity::generate(&mut OsRng),
+            );
+            assert_eq!(seconds_only.emission_secs(12_345), 1_790_000_042);
+            assert_eq!(
+                seconds_only.emission_micros(12_345),
+                1_790_000_042_000_000,
+                "a seconds-only platform keeps working, it just gains no precision"
+            );
+        }
+
+        /// Codeberg #217, the property the LXMF message ID depends on: two
+        /// calls one millisecond apart must return different values even
+        /// though they fall inside the same whole second — and on the
+        /// clockless arm, where the sub-second part can only come from our own
+        /// monotonic clock, it must still be strictly increasing.
+        #[test]
+        fn test_emission_micros_distinguishes_instants_inside_one_second() {
+            let mut transport = make_transport_enabled();
+            transport.set_wall_time_unix_secs(1_800_000_000);
+            let base = transport.clock.now_ms();
+
+            let first = transport.emission_micros(base);
+            let second = transport.emission_micros(base + 1);
+            assert_eq!(
+                transport.emission_secs(base),
+                transport.emission_secs(base + 1),
+                "the two instants are inside one whole second"
+            );
+            assert!(
+                second > first,
+                "one millisecond later must be a strictly greater value: {first}, {second}"
+            );
+            assert_eq!(second - first, 1_000);
+        }
+
+        /// Codeberg #217 §"Reticulum announce emission timestamps should remain
+        /// bounded integer seconds": a platform clock that knows microseconds
+        /// must change nothing about the 5-byte announce wire field.
+        #[test]
+        fn test_announce_emission_stays_whole_seconds_under_a_microsecond_clock() {
+            struct MicrosWallClock;
+            impl Clock for MicrosWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    Some(1_790_000_042)
+                }
+                fn wall_unix_micros(&self) -> Option<u64> {
+                    Some(1_790_000_042_837_419)
+                }
+            }
+            let mut transport = Transport::new(
+                TransportConfig::default(),
+                MicrosWallClock,
+                MemoryStorage::with_defaults(),
+                Identity::generate(&mut OsRng),
+            );
+            assert_eq!(transport.emission_secs(0), 1_790_000_042);
+            assert_eq!(transport.announce_emission_secs(0), 1_790_000_042);
+            assert_eq!(transport.emission_micros(0), 1_790_000_042_837_419);
+            assert_eq!(
+                transport.emission_micros(0) / 1_000_000,
+                transport.emission_secs(0),
+                "the sub-second part is dropped for the wire field, not added to it"
             );
         }
 

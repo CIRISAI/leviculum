@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SIGTERM`, a restart resumes the day from the file, and each start
   compacts it to one record per date.
 
+### Fixed
+
+- LXMF message timestamps carry microsecond precision, so two identical
+  messages sent back to back are two messages and not a duplicate
+  (Codeberg #217).
+
 ### Changed
 
 - Every long-lived external process this repository spawns now dies with

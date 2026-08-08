@@ -49,6 +49,44 @@ called wrongly beats a doc comment warning about it. Pinned at
 `leviculum-lxmf/tests/wall_clock_producer.rs`, structurally (no public
 router entry point takes an `f64`) as well as by value.
 
+### One producer, two resolutions
+
+The field decides the resolution, not the clock. `emission_secs`
+returns whole seconds for fields that are whole seconds on the wire —
+the 5-byte announce emission timestamp above all. `emission_micros`
+returns the same instant in microseconds, and
+`NodeCore::emission_secs_f64` divides it back into fractional unix
+seconds for fields that are floats. They are the same producer with
+the same source-priority chain:
+`emission_micros(now) / 1_000_000 == emission_secs(now)` on every arm.
+
+The float resolution exists because LXMF hashes the message timestamp
+into the message ID. At whole seconds, two identical messages created
+inside one second are one ID, and the second is refused as a duplicate
+of the first — a message the reference, writing `time.time()`
+(`reference/LXMF/LXMF/LXMessage.py:357`), would have sent (Codeberg
+#217).
+
+**Microseconds, not milliseconds.** The collision is between two calls
+in one code path, not two user actions. Two consecutive
+`LxmfRouter::create_message` calls measure ~115 µs apart — each signs
+an Ed25519 message — so a millisecond value collides on every such
+pair; that was measured at 20 pairs out of 20 before this unit was
+chosen. Microseconds is also what the reference effectively produces:
+`time.time()` is an f64 of unix seconds, resolving to ~0.24 µs at
+present-day timestamps.
+
+On the clockless arm the sub-second part comes from our own monotonic
+clock, and `Clock::now_ms` is the only monotonic source there. So
+`emission_micros` returns `floor_secs * 1_000_000` plus the
+*milliseconds* elapsed since the floor was set, scaled up: monotonic,
+separating two instants one millisecond apart, and honest about the
+resolution the platform actually has. It is not a claim to know the
+wall-clock microsecond, and nothing reads it as one. Platforms whose
+`Clock` implements only `wall_unix_secs` get the trait default —
+`secs * 1_000_000` — and keep working unchanged, with no precision to
+gain and none invented.
+
 ### Refuse a field the peer discards in silence
 
 The producer carries no plausibility guarantee — on a clockless node
@@ -143,7 +181,7 @@ serial channel (the radio-config envelope of
 ### 4. Learned from validated announces
 
 The clockless fallback: `learn_emission_timebase`
-(`transport.rs:2929`) adopts the highest emission timestamp seen in
+(`transport.rs:2974`) adopts the highest emission timestamp seen in
 any signature-valid announce as the node's timebase, then advances it
 with the monotonic clock (`transport.rs:2846`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —

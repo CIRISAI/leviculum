@@ -318,22 +318,27 @@ struct RestoredRouterState {
 /// so no caller can supply a monotonic or invented value; the parameter this
 /// replaces was the #155 failure mode one crate up.
 ///
-/// Two consequences worth knowing. The value has one-second granularity,
-/// where the reference writes `time.time()` with fractional seconds — nothing
-/// a peer decides looks below one second, and this is the same granularity
-/// the announce emission field already has. And the router's own caches
-/// (`clean`, the stamp-cost and delivered/processed ID windows) are aged on
-/// this value, so a clockless node whose timebase jumps from uptime seconds
-/// to real unix time expires them all in one pass, exactly as a Python node
-/// does across a large NTP step. The effect is a lost dedup window, not a
-/// wire-visible one.
+/// The value carries sub-second precision, as the reference's `time.time()`
+/// does (Codeberg #217). It has to: [`Message::create`] hashes the timestamp
+/// into the message ID, so at whole-second granularity two identical messages
+/// created inside one second are one ID and the second is refused as a
+/// [`RouterError::Duplicate`] — a message a Python node would have sent.
+/// [`NodeCore::emission_secs_f64`] is the same producer and the same
+/// source-priority chain as [`NodeCore::emission_secs`], one decimal point
+/// further right.
+///
+/// One consequence worth knowing: the router's own caches (`clean`, the
+/// stamp-cost and delivered/processed ID windows) are aged on this value, so a
+/// clockless node whose timebase jumps from uptime seconds to real unix time
+/// expires them all in one pass, exactly as a Python node does across a large
+/// NTP step. The effect is a lost dedup window, not a wire-visible one.
 fn emission_secs<R, C, S>(node: &NodeCore<R, C, S>) -> f64
 where
     R: CryptoRngCore,
     C: Clock,
     S: Storage,
 {
-    node.emission_secs() as f64
+    node.emission_secs_f64()
 }
 
 fn unpack_local<R, C, S>(

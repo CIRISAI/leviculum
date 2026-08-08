@@ -339,6 +339,32 @@ pub trait Clock {
         None
     }
 
+    /// Wall-clock unix time in microseconds, if the platform has one.
+    ///
+    /// Same contract as [`wall_unix_secs`](Self::wall_unix_secs) — a wire-field
+    /// source, never a timer — with the sub-second precision that LXMF message
+    /// timestamps need. `Message::create` hashes the timestamp into the message
+    /// ID, so at whole-second granularity two identical messages sent inside one
+    /// second are one message ID and the second is refused as a duplicate
+    /// (Codeberg #217); the reference writes `time.time()` and sends both.
+    ///
+    /// Microseconds rather than milliseconds because the collision this closes
+    /// is between two calls in the same code path, not two user actions: two
+    /// consecutive `LxmfRouter::create_message` calls measure ~115 µs apart
+    /// (each signs an Ed25519 message), so a millisecond clock collides on
+    /// every such pair. `time.time()` on the reference side is an f64 of unix
+    /// seconds, whose resolution at present-day timestamps is ~0.24 µs, so this
+    /// is also the unit that matches what a Python peer produces.
+    ///
+    /// The default derives from `wall_unix_secs`, so a platform that already
+    /// implements only whole seconds keeps working unchanged and simply gains no
+    /// precision. Implementations with a finer clock should override this and
+    /// leave `wall_unix_secs` as the truncation of the same reading.
+    fn wall_unix_micros(&self) -> Option<u64> {
+        self.wall_unix_secs()
+            .map(|secs| secs.saturating_mul(1_000_000))
+    }
+
     /// Seconds since epoch (convenience method)
     fn now_secs(&self) -> u64 {
         self.now_ms() / 1000

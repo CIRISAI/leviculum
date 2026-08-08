@@ -2441,6 +2441,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.emission_secs(self.now_ms())
     }
 
+    /// [`Self::emission_secs`] as fractional unix seconds, for wire fields that
+    /// are floats and whose consumers distinguish values below one second
+    /// (Codeberg #217 — the LXMF message timestamp, which is hashed into the
+    /// message ID).
+    ///
+    /// Same producer, same source-priority chain, same absence of a
+    /// plausibility guarantee: `emission_secs_f64().floor() as u64` equals
+    /// [`Self::emission_secs`]. Integer wire fields — the announce emission
+    /// timestamp above all — keep using `emission_secs`.
+    pub fn emission_secs_f64(&self) -> f64 {
+        self.transport.emission_micros(self.now_ms()) as f64 / 1_000_000.0
+    }
+
     /// Whether [`Self::emission_secs`] sits above the timebase plausibility
     /// floor ([`crate::constants::EMISSION_PLAUSIBLE_MIN_SECS`]).
     ///

@@ -831,3 +831,141 @@ async fn test_lxmf_propagation_node_sync() {
     );
     assert_eq!(hex::encode(message.message_id), message_hash);
 }
+
+/// Codeberg #217: the timestamp Python reads off our message carries
+/// sub-second precision, and the reverse direction still verifies.
+///
+/// `LXMessage.timestamp` is `time.time()` on the reference side
+/// (`reference/LXMF/LXMF/LXMessage.py:357`) and is hashed into the message ID
+/// on both sides. While we stamped whole seconds, two identical messages sent
+/// inside one second were one ID and our router refused the second as a
+/// duplicate — a message a Python peer would have sent. The wire form does not
+/// change: the timestamp was already a MessagePack float64.
+///
+/// Two halves, both against the live Python router:
+///
+/// - forward, the precision itself: four messages, at least one with a
+///   non-zero fractional second. Four samples because a message can legally
+///   land on a whole millisecond boundary; four landing there in a row is
+///   1e-12, not a flake budget.
+/// - forward, the defect: two byte-identical messages sent back to back are
+///   two messages at Python, with two distinct hashes.
+/// - reverse: Python's own fractional timestamp still round-trips into our
+///   router with a validating signature and a matching message ID.
+#[tokio::test]
+async fn test_lxmf_timestamp_subsecond_precision_interop() {
+    let (daemon, mut client, py_info) = setup_pair(None).await;
+    let py_hash = crate::common::parse_dest_hash(&py_info.delivery_hash);
+
+    // --- forward: precision survives to the Python router -----------------
+    let mut fractions = Vec::new();
+    for index in 0..4u8 {
+        let content = format!("subsecond probe {index}");
+        let message_id = client
+            .send(
+                *py_hash.as_bytes(),
+                b"subsecond",
+                content.as_bytes(),
+                Vec::new(),
+                DeliveryMethod::Opportunistic,
+            )
+            .await;
+        // `enqueue` only queues; `tick` inside the pump is what puts the packet
+        // on the wire, and nothing else in this test drives the client's loop.
+        let delivered = client
+            .pump_until(Duration::from_secs(20), |c| c.delivered(&message_id))
+            .await;
+        assert!(
+            delivered,
+            "Python must prove subsecond probe {index}; events: {:?}",
+            client.events
+        );
+        let received = wait_for_python_received(&daemon, &message_id, Duration::from_secs(20))
+            .await
+            .unwrap_or_else(|| panic!("Python must deliver subsecond probe {index}"));
+        assert!(received.timestamp > 1_700_000_000.0, "plausible unix time");
+        fractions.push(received.timestamp - received.timestamp.floor());
+    }
+    assert!(
+        fractions.iter().any(|fraction| *fraction > 0.0),
+        "every timestamp landed on a whole second, so the precision never left \
+         our side: {fractions:?}"
+    );
+
+    // --- forward: two identical messages are two messages -----------------
+    let first_id = client
+        .send(
+            *py_hash.as_bytes(),
+            b"Re: status",
+            b"OK",
+            Vec::new(),
+            DeliveryMethod::Opportunistic,
+        )
+        .await;
+    let second_id = client
+        .send(
+            *py_hash.as_bytes(),
+            b"Re: status",
+            b"OK",
+            Vec::new(),
+            DeliveryMethod::Opportunistic,
+        )
+        .await;
+    assert_ne!(
+        first_id, second_id,
+        "two identical replies sent back to back must be two message IDs"
+    );
+    let both = client
+        .pump_until(Duration::from_secs(30), |c| {
+            c.delivered(&first_id) && c.delivered(&second_id)
+        })
+        .await;
+    assert!(
+        both,
+        "both identical replies must be delivered; events: {:?}",
+        client.events
+    );
+    for (label, id) in [("first", &first_id), ("second", &second_id)] {
+        let received = wait_for_python_received(&daemon, id, Duration::from_secs(20))
+            .await
+            .unwrap_or_else(|| panic!("Python must deliver the {label} identical reply"));
+        assert_eq!(received.content, b"OK");
+        assert!(
+            received.signature_validated,
+            "the {label} reply must validate at Python"
+        );
+    }
+
+    // --- reverse: Python's fractional timestamp round-trips to us ---------
+    let content = b"python subsecond reply";
+    let message_hash = daemon
+        .lxmf_send(
+            &hex::encode(client.delivery_hash),
+            "direct",
+            content,
+            b"py subsecond",
+            None,
+        )
+        .await
+        .expect("lxmf_send");
+    let got = client
+        .pump_until(Duration::from_secs(30), |c| {
+            c.received_message(py_hash.as_bytes()).is_some()
+        })
+        .await;
+    assert!(got, "our router must deliver the Python message");
+
+    let message = client.received_message(py_hash.as_bytes()).unwrap();
+    assert_eq!(message.content, content);
+    assert_eq!(
+        message.verification,
+        Verification::Valid,
+        "the signature covers the timestamp; a mangled one would fail here"
+    );
+    assert_eq!(
+        hex::encode(message.message_id),
+        message_hash,
+        "our message ID must be the hash Python computed over the same timestamp"
+    );
+    assert!(message.timestamp > 1_700_000_000.0);
+}

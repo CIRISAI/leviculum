@@ -192,8 +192,13 @@ fn router_public_surface_takes_no_wall_clock_parameter() {
         .find(|(name, _)| *name == "router.rs")
         .expect("router.rs")
         .1;
+    // `emission_secs_f64` is the same producer and the same source-priority
+    // chain as `emission_secs`, resolved to milliseconds because the LXMF
+    // message timestamp is hashed into the message ID and whole seconds
+    // collide (Codeberg #217). Either spelling satisfies #182's positive half;
+    // a bare `now_ms` or a caller's parameter satisfies neither.
     assert!(
-        router.contains("node.emission_secs()"),
+        router.contains("node.emission_secs_f64()") || router.contains("node.emission_secs()"),
         "router.rs must resolve wall time from the one producer"
     );
     let call_sites: usize = sources
