@@ -28,11 +28,13 @@
 # hand with `--ignored --nocapture` when that page is re-measured.
 1    -p leviculum-lxmf --lib
 
-# Staged red tests for #196 batches B1/B2: each #[ignore] reason names the
-# batch whose change drops the attribute, so this number shrinks to 2 as they
-# land. The two that stay are the U16 timing harness and the one marked
-# CANNOT BE ARRANGED (it needs a core-side inbound Resource cancel).
-10   -p leviculum-lxmf --test direct_delivery_attempts
+# Staged red tests for #196. Batch B1 landed and took six of them green, so
+# this drops from 10 to 4. Two of the four are still red on purpose and are
+# batch B2's evidence: they need the build epoch, and are run by hand with
+# `--ignored` until it lands. The other two stay for good — the U16 timing
+# harness, and the case marked CANNOT BE ARRANGED (it needs a core-side
+# inbound Resource cancel).
+4    -p leviculum-lxmf --test direct_delivery_attempts
 
 4    -p leviculum-std --lib
 1    -p leviculum-std --doc

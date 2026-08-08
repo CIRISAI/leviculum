@@ -999,7 +999,7 @@ impl PropagationTransport {
     }
 }
 
-const fn upload_representation(data_len: usize) -> PropagationUploadRepresentation {
+pub(crate) const fn upload_representation(data_len: usize) -> PropagationUploadRepresentation {
     if data_len <= LINK_PACKET_MAX_CONTENT {
         PropagationUploadRepresentation::Packet
     } else {

@@ -21,7 +21,7 @@ use crate::{
     msgpack,
     node::{
         DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection, LxmfNode,
-        LxmfNodeError, LxmfNodeEvent, LxmfNodeOutput, LxmfResourceSendParams, PreparedLxmfSend,
+        LxmfNodeError, LxmfNodeEvent, LxmfResourceSendParams, PreparedLxmfSend,
     },
     propagation::PropagationError,
     propagation_client::{
@@ -115,9 +115,16 @@ impl Default for RouterConfig {
 /// Detached work coordinates for one outbound Resource, mirroring the stamp
 /// requests above: it owns everything the build needs, so building never
 /// borrows [`LxmfRouter`] or `NodeCore`.
-#[must_use = "a dropped build leaves its message queued in the router"]
+///
+/// No `#[must_use]`: the attribute is not inherited through the `Vec`
+/// [`LxmfRouter::take_resource_builds`] hands back, so it never fired. A
+/// dropped build is not silent either way — its message stays queued and the
+/// next tick hands it out again.
 pub struct PendingResourceBuild {
     message_id: [u8; 32],
+    /// The router's restore generation at capture time. A build made against a
+    /// queue that has since been replaced is refused at commit (C9).
+    restore_generation: u64,
     kind: PendingBuildKind,
 }
 
@@ -143,6 +150,8 @@ impl PendingResourceBuild {
     /// Build the transfer. This is the part that scales with the message, and
     /// the reason the router handed it out.
     pub fn build(self, rng: &mut impl CryptoRngCore) -> Result<BuiltResource, RouterError> {
+        let message_id = self.message_id;
+        let restore_generation = self.restore_generation;
         let kind = match self.kind {
             PendingBuildKind::Delivery {
                 params,
@@ -158,7 +167,11 @@ impl PendingResourceBuild {
                 BuiltKind::Upload(params.build(&data, rng)?)
             }
         };
-        Ok(BuiltResource { kind })
+        Ok(BuiltResource {
+            message_id,
+            restore_generation,
+            kind,
+        })
     }
 }
 
@@ -166,7 +179,15 @@ impl PendingResourceBuild {
 /// [`LxmfRouter::commit_resource_build`].
 #[must_use = "a dropped build leaves its message queued in the router"]
 pub struct BuiltResource {
+    message_id: [u8; 32],
+    restore_generation: u64,
     kind: BuiltKind,
+}
+
+impl BuiltResource {
+    pub fn message_id(&self) -> [u8; 32] {
+        self.message_id
+    }
 }
 
 enum BuiltKind {
@@ -371,6 +392,19 @@ pub struct LxmfRouter {
     identity_hash: [u8; 16],
     outbound: BTreeMap<[u8; 32], OutboundEntry>,
     pending_builds: Vec<PendingResourceBuild>,
+    /// The message IDs whose Resource build the router is still holding.
+    ///
+    /// This is what bounds `pending_builds` once the deferral stops marking
+    /// the entry `Sending`: without it a due message would append a full
+    /// `Message` clone every retry interval. A message listed here is not
+    /// captured again; its `next_attempt_ms` is pushed as usual.
+    builds_outstanding: BTreeSet<[u8; 32]>,
+    /// Bumped by every [`restore`](Self::restore). A build carries the value it
+    /// was captured at, so one made against a queue that has since been
+    /// replaced is refused even though the restored queue holds its ID.
+    /// Deliberately not persisted: a restored counter would validate exactly
+    /// the builds it exists to refuse.
+    restore_generation: u64,
     outbound_stamp_costs: StampCostMap,
     delivered_ids: BTreeMap<[u8; 32], f64>,
     processed_ids: BTreeMap<[u8; 32], f64>,
@@ -460,6 +494,8 @@ impl LxmfRouter {
             identity_hash,
             outbound: BTreeMap::new(),
             pending_builds: Vec::new(),
+            builds_outstanding: BTreeSet::new(),
+            restore_generation: 0,
             outbound_stamp_costs: BTreeMap::new(),
             delivered_ids: BTreeMap::new(),
             processed_ids: BTreeMap::new(),
@@ -710,10 +746,25 @@ impl LxmfRouter {
             },
         );
         self.persistence_dirty = true;
-        Ok(self.finish_output(RouterOutput {
+        let mut output = RouterOutput {
             core: TickOutput::default(),
             events: vec![RouterEvent::MessageQueued(id)],
-        }))
+        };
+        // The entry this call created is due now. A host driven by the returned
+        // `next_deadline_ms` would otherwise sleep past it.
+        self.apply_deadline(&mut output.core);
+        Ok(self.finish_output(output))
+    }
+
+    /// Take an entry out of the outbound queue, dropping any outstanding-build
+    /// marker with it.
+    ///
+    /// A build for an entry that no longer exists is refused at commit; leaving
+    /// the marker behind would only block the ID if the same message is queued
+    /// again.
+    fn remove_outbound(&mut self, id: &[u8; 32]) -> Option<OutboundEntry> {
+        self.builds_outstanding.remove(id);
+        self.outbound.remove(id)
     }
 
     pub fn cancel<R, C, S>(
@@ -726,7 +777,7 @@ impl LxmfRouter {
         C: Clock,
         S: Storage,
     {
-        let entry = self.outbound.remove(id).ok_or(RouterError::NotFound)?;
+        let entry = self.remove_outbound(id).ok_or(RouterError::NotFound)?;
         self.preemptive_path_requests.remove(id);
         self.persistence_dirty = true;
         let mut output = RouterOutput {
@@ -746,6 +797,7 @@ impl LxmfRouter {
         } else {
             output.core.merge(self.node.cancel_outbound(node, id));
         }
+        self.apply_deadline(&mut output.core);
         Ok(self.finish_output(output))
     }
 
@@ -789,24 +841,44 @@ impl LxmfRouter {
     ) {
         self.pending_builds.push(PendingResourceBuild {
             message_id,
+            restore_generation: self.restore_generation,
             kind: PendingBuildKind::Upload { params, data },
         });
+        self.builds_outstanding.insert(message_id);
+    }
+
+    pub(super) fn has_outstanding_build(&self, message_id: &[u8; 32]) -> bool {
+        self.builds_outstanding.contains(message_id)
     }
 
     /// Take the Resource builds [`tick`](Self::tick) handed out, to run off the
     /// caller's lock. Each result goes back through
     /// [`commit_resource_build`](Self::commit_resource_build).
+    ///
+    /// Draining also releases the outstanding-build markers: from here the
+    /// router holds nothing for those messages, and a caller that never returns
+    /// what it took must get the work offered again rather than have its
+    /// messages sit forever behind a marker only it could clear.
     pub fn take_resource_builds(&mut self) -> Vec<PendingResourceBuild> {
+        self.builds_outstanding.clear();
         core::mem::take(&mut self.pending_builds)
     }
 
     /// Install a built transfer and emit its advertisement.
     ///
+    /// This is where a deferred send becomes a submission: the entry goes to
+    /// `MessageState::Sending` and takes its attempt here, at the point the
+    /// core accepts the transfer, exactly as the composed path does inside
+    /// [`tick`](Self::tick). Nothing before this point may claim success.
+    ///
+    /// A build whose message has left the queue, or that was captured before a
+    /// [`restore`](Self::restore), is refused with [`RouterError::StaleBuild`]
+    /// and dropped; the entry, if there is one, is left untouched.
+    ///
     /// Reports a link that re-keyed while the build ran as
     /// `RouterError::Node(LxmfNodeError::Resource(ResourceError::LinkStateChanged))`
     /// — an upload reports the same through `RouterError::PropagationTransport`.
-    /// That build is spent either way; the message is retried by a later tick
-    /// once its `Sending` state lapses.
+    /// That build is spent either way; the message is retried by a later tick.
     pub fn commit_resource_build<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
@@ -819,28 +891,50 @@ impl LxmfRouter {
     {
         let now_unix = emission_secs(node);
         let now_ms = node.now_ms();
-        match built.kind {
+        let message_id = built.message_id;
+        if built.restore_generation != self.restore_generation {
+            // The queue this build was made against no longer exists. The
+            // marker, if any, belongs to a build captured after the restore.
+            return Err(RouterError::StaleBuild);
+        }
+        if !self.outbound.contains_key(&message_id) {
+            self.builds_outstanding.remove(&message_id);
+            return Err(RouterError::StaleBuild);
+        }
+        self.builds_outstanding.remove(&message_id);
+        let mut output = match built.kind {
             BuiltKind::Delivery(prepared) => {
                 let committed = self.node.commit_resource_send(node, *prepared)?;
                 let mut output = RouterOutput {
                     core: committed.core,
                     events: Vec::new(),
                 };
+                if let Some(entry) = self.outbound.get_mut(&message_id) {
+                    let representation = LxmfNode::representation(&entry.message);
+                    record_successful_submission_attempt(entry, &representation);
+                    entry.state = MessageState::Sending;
+                    self.persistence_dirty = true;
+                }
                 for ev in committed.events {
                     self.handle_node_event(ev, now_ms, now_unix, &mut output.events);
                 }
-                Ok(output)
+                output
             }
             BuiltKind::Upload(prepared) => {
+                // The upload path takes its `Sending` mark from the transport's
+                // `UploadSubmitted` event, which `commit_upload` runs through
+                // the same handler a composed submission does.
                 let mut propagation = self
                     .propagation
                     .take()
                     .ok_or(RouterError::PropagationNodeUnavailable)?;
                 let result = propagation.commit_upload(self, node, prepared, now_unix);
                 self.propagation = Some(propagation);
-                result
+                result?
             }
-        }
+        };
+        self.apply_deadline(&mut output.core);
+        Ok(self.finish_output(output))
     }
 
     /// Attach the result of a detached recipient-stamp request after checking
@@ -1098,7 +1192,7 @@ impl LxmfRouter {
                 self.handle_inbound_message(message, now_unix, out)
             }
             LxmfNodeEvent::Delivered { message_id } => {
-                if let Some(mut entry) = self.outbound.remove(&message_id) {
+                if let Some(mut entry) = self.remove_outbound(&message_id) {
                     self.preemptive_path_requests.remove(&message_id);
                     self.persistence_dirty = true;
                     entry.state = MessageState::Delivered;
@@ -1122,7 +1216,7 @@ impl LxmfRouter {
                 message_id,
                 reason: DeliveryFailure::Resource(ResourceError::Cancelled),
             } => {
-                if let Some(mut entry) = self.outbound.remove(&message_id) {
+                if let Some(mut entry) = self.remove_outbound(&message_id) {
                     self.preemptive_path_requests.remove(&message_id);
                     self.persistence_dirty = true;
                     entry.state = MessageState::Rejected;
@@ -1418,6 +1512,7 @@ impl LxmfRouter {
 
             if entry.attempts >= MAX_DELIVERY_ATTEMPTS {
                 self.preemptive_path_requests.remove(&id);
+                self.builds_outstanding.remove(&id);
                 entry.state = MessageState::Failed;
                 output.events.push(RouterEvent::MessageState {
                     message_id: id,
@@ -1483,24 +1578,41 @@ impl LxmfRouter {
                 }
             }
 
-            // A deferred Resource takes the same path as a submitted one: it is
-            // an attempt, the entry goes to Sending, and the build the caller
-            // now owns is what would otherwise have run here.
+            // A deferred Resource has not been sent. Handing the build out is
+            // not a submission and must not be answered like one: the entry
+            // stays `Outbound` and comes due again after the retry wait, so a
+            // build the caller never returns is retried rather than stranded.
+            // `MessageState::Sending` and the attempt belong to
+            // `commit_resource_build`, where the core accepts the transfer.
+            //
+            // Phase 1 stays inside the tick and its `Err` still routes into the
+            // send match below, so link establishment and the
+            // `DirectLinkUnavailable` handling are shared with a composed send.
             let submitted = if self.config.defer_resource_builds
                 && representation == Ok(DeliveryRepresentation::DirectResource)
             {
+                if self.builds_outstanding.contains(&id) {
+                    entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
+                    self.outbound.insert(id, entry);
+                    continue;
+                }
                 match self.node.resource_send_params(node, &entry.message) {
                     Ok(params) => {
                         self.pending_builds.push(PendingResourceBuild {
                             message_id: id,
+                            restore_generation: self.restore_generation,
                             kind: PendingBuildKind::Delivery {
                                 params,
                                 message: Box::new(entry.message.clone()),
                                 auto_compress: self.node.config().auto_compress_resources,
                             },
                         });
+                        self.builds_outstanding.insert(id);
                         output.events.push(RouterEvent::ResourceBuildPending(id));
-                        Ok(LxmfNodeOutput::default())
+                        entry.state = MessageState::Outbound;
+                        entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
+                        self.outbound.insert(id, entry);
+                        continue;
                     }
                     Err(error) => Err(error),
                 }
@@ -1646,6 +1758,13 @@ impl LxmfRouter {
         }
         let restored = self.decode_snapshot(&snapshot)?;
         self.outbound = restored.outbound;
+        // Every build in flight belongs to the queue this call replaces. The
+        // generation is what refuses them — the restored snapshot carries the
+        // same message IDs, so membership cannot tell them apart. Dropping the
+        // queued ones and their markers is housekeeping on top of that.
+        self.restore_generation = self.restore_generation.wrapping_add(1);
+        self.pending_builds.clear();
+        self.builds_outstanding.clear();
         self.preemptive_path_requests.clear();
         // Queue deadlines and in-flight states are expressed in the host's
         // process-local monotonic clock. That epoch is not stable across a

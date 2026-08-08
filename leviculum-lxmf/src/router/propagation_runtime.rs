@@ -22,8 +22,9 @@ use crate::{
         PropagationUpload, TransferLimit, TransientId,
     },
     propagation_client::{
-        KnownPropagationNode, PropagationRequestKind, PropagationTransport,
+        upload_representation, KnownPropagationNode, PropagationRequestKind, PropagationTransport,
         PropagationTransportError, PropagationTransportEvent, PropagationUploadFailure,
+        PropagationUploadRepresentation,
     },
 };
 
@@ -380,7 +381,7 @@ impl PropagationRuntime {
                 }
             }
             PropagationTransportEvent::UploadCompleted { message_id, .. } => {
-                if router.outbound.remove(&message_id).is_some() {
+                if router.remove_outbound(&message_id).is_some() {
                     router.persistence_dirty = true;
                     output.events.push(RouterEvent::MessageState {
                         message_id,
@@ -416,7 +417,7 @@ impl PropagationRuntime {
                 message_id,
                 ..
             } => {
-                if router.outbound.remove(&message_id).is_some() {
+                if router.remove_outbound(&message_id).is_some() {
                     router.persistence_dirty = true;
                     output.events.push(RouterEvent::MessageState {
                         message_id,
@@ -879,7 +880,7 @@ impl PropagationRuntime {
             .get(&message_id)
             .is_some_and(|entry| entry.attempts >= super::MAX_DELIVERY_ATTEMPTS)
         {
-            router.outbound.remove(&message_id);
+            router.remove_outbound(&message_id);
             router.persistence_dirty = true;
             output.events.push(RouterEvent::MessageState {
                 message_id,
@@ -961,7 +962,7 @@ impl PropagationRuntime {
             }
             router.persistence_dirty = true;
             if exhausted {
-                router.outbound.remove(&message_id);
+                router.remove_outbound(&message_id);
                 output.events.push(RouterEvent::MessageState {
                     message_id,
                     state: super::MessageState::Failed,
@@ -993,7 +994,7 @@ impl PropagationRuntime {
             }
             router.persistence_dirty = true;
             if exhausted {
-                router.outbound.remove(&message_id);
+                router.remove_outbound(&message_id);
                 output.events.push(RouterEvent::MessageState {
                     message_id,
                     state: super::MessageState::Failed,
@@ -1019,8 +1020,19 @@ impl PropagationRuntime {
         // Deferred like a direct Resource: capture the link, hand the build out,
         // and let the caller return it to `LxmfRouter::commit_resource_build`.
         if router.config.defer_resource_builds
-            && upload.len() > crate::constants::LINK_PACKET_MAX_CONTENT
+            && upload_representation(upload.len()) == PropagationUploadRepresentation::Resource
         {
+            // One outstanding build per message: the entry is pushed out to the
+            // retry wait either way, so a build already handed out is not
+            // re-encoded and re-queued behind itself.
+            if router.has_outstanding_build(&message_id) {
+                schedule_upload_retry(
+                    router,
+                    message_id,
+                    now_ms.saturating_add(super::DELIVERY_RETRY_WAIT_MS),
+                );
+                return Ok(output);
+            }
             match self
                 .transport
                 .upload_send_params(node, link_id, message_id, upload.len())
@@ -1030,6 +1042,14 @@ impl PropagationRuntime {
                     output
                         .events
                         .push(RouterEvent::ResourceBuildPending(message_id));
+                    // Handing the build out is not a submission. Without this
+                    // the entry stays due and every tick re-encodes the whole
+                    // upload to hand out another copy of it.
+                    schedule_upload_retry(
+                        router,
+                        message_id,
+                        now_ms.saturating_add(super::DELIVERY_RETRY_WAIT_MS),
+                    );
                     return Ok(output);
                 }
                 Err(PropagationTransportError::UploadInProgress)

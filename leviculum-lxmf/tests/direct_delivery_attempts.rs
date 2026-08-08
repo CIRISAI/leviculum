@@ -501,6 +501,13 @@ fn a_receiver_cancelled_resource_is_rejected_and_keeps_the_link() {
 /// The point of `defer_resource_builds`: the build a tick would have run is
 /// handed out instead, so the tick emits nothing for that message and the
 /// transfer only starts when the caller returns what it built.
+///
+/// The state assertions are the load-bearing part. Handing a build out is not
+/// a submission, so the deferring tick must leave the entry `Outbound` — it is
+/// `commit_resource_build` that turns it into `Sending`, at the point the core
+/// accepts the transfer. The version of this test written against `efdaac39`
+/// asserted `Sending` right after the tick, which is defect D1 stated as an
+/// expectation.
 #[test]
 fn a_deferred_resource_build_leaves_the_tick_and_starts_on_commit() {
     let mut sender = sender_with(
@@ -528,26 +535,27 @@ fn a_deferred_resource_build_leaves_the_tick_and_starts_on_commit() {
     pump(&mut sender, &mut receiver, packets);
 
     let mut deferring_tick = Vec::new();
+    let mut handed_out = false;
     for _ in 0..8 {
         let packets = sender.tick();
-        if sender.state(&id) == Some(MessageState::Sending) {
+        if sender
+            .events
+            .iter()
+            .any(|event| matches!(event, RouterEvent::ResourceBuildPending(m) if *m == id))
+        {
             deferring_tick = packets;
+            handed_out = true;
             break;
         }
         pump(&mut sender, &mut receiver, packets);
         sender.advance_ms(11_000);
     }
+    assert!(handed_out, "the caller was never told a build is waiting");
     assert_eq!(
         sender.state(&id),
-        Some(MessageState::Sending),
-        "the message was never handed out"
-    );
-    assert!(
-        sender
-            .events
-            .iter()
-            .any(|event| matches!(event, RouterEvent::ResourceBuildPending(m) if *m == id)),
-        "the caller was never told a build is waiting"
+        Some(MessageState::Outbound),
+        "handing a build out is not a submission: the entry stays Outbound \
+         until the built transfer is committed"
     );
     assert!(
         deferring_tick.is_empty(),
@@ -566,6 +574,11 @@ fn a_deferred_resource_build_leaves_the_tick_and_starts_on_commit() {
         .expect("commit the built transfer");
     let packets = sender.absorb_router(output);
     assert!(!packets.is_empty(), "commit must advertise the Resource");
+    assert_eq!(
+        sender.state(&id),
+        Some(MessageState::Sending),
+        "the commit is the submission, and must mark the entry Sending"
+    );
     pump(&mut sender, &mut receiver, packets);
 
     assert!(
@@ -704,7 +717,6 @@ fn link_to(sender: &mut Sender, receiver: &mut Receiver) {
 /// drains the queue and crashes, or whose build errors, produces exactly
 /// this.
 #[test]
-#[ignore = "RED against efdaac39 (#196 D1): the deferral marks the entry Sending and the Sending guard strands it. Batch B1 (C2) removes the mark."]
 fn a_build_that_is_never_committed_is_retried_not_stranded() {
     let mut sender = sender_with(61, deferring_config());
     let mut receiver = receiver(161);
@@ -790,7 +802,6 @@ fn a_composed_resource_send_hands_out_no_build_and_leaves_in_its_tick() {
 /// by the core, and under `efdaac39` its entry is already `Sending` and is
 /// therefore never retried. Master delivers the same pair.
 #[test]
-#[ignore = "RED against efdaac39 (#196 D1): the second commit is refused and its message is left stranded in Sending. Batch B1 (C2) removes the mark."]
 fn two_due_resources_to_one_destination_both_complete() {
     let mut sender = sender_with(63, deferring_config());
     let mut receiver = receiver(163);
@@ -916,7 +927,6 @@ fn two_due_resources_to_one_destination_both_complete() {
 /// flag off there is no build to hold across a cancel, so the pairing would
 /// be an empty test rather than a control.
 #[test]
-#[ignore = "RED against efdaac39 (#196 D3): commit installs a build whose message was cancelled. Turns green with the commit-time membership check (plan C3, batch B1; at the latest C4 in B2)."]
 fn a_cancelled_message_does_not_go_on_the_air_after_its_build_returns() {
     let mut sender = sender_with(64, deferring_config());
     let mut receiver = receiver(164);
@@ -1119,7 +1129,6 @@ fn a_build_from_before_a_failed_delivery_is_refused() {
 /// its output. It ends with neither, so a host that only ever commits never
 /// learns it has state to write, and its event loop gets no wake-up time.
 #[test]
-#[ignore = "RED against efdaac39 (#196 smaller items): commit_resource_build skips finish_output and apply_deadline. Batch B1."]
 fn commit_resource_build_requests_persistence_and_applies_its_deadline() {
     let mut sender = sender_with(67, deferring_config());
     let mut receiver = receiver(167);
@@ -1129,6 +1138,26 @@ fn commit_resource_build_requests_persistence_and_applies_its_deadline() {
     tick_until_next_build(&mut sender, &mut receiver, &id);
     let built = take_one_built(&mut sender, &id);
 
+    // `apply_deadline` reports the *earliest* of the core's deadline and the
+    // queue's, so the queue's has to be strictly the earlier one or the
+    // assertion below would hold whether or not commit applies it at all.
+    // Two steps get there: service the core's overdue timers, then queue a
+    // second message, which `enqueue` makes due immediately.
+    let serviced = sender.node.handle_timeout();
+    let packets = sender.absorb_core(serviced);
+    pump(&mut sender, &mut receiver, packets);
+    let second = direct_message(
+        24,
+        receiver.destination,
+        &sender.signing_identity,
+        b"a second message, due now".to_vec(),
+    );
+    let output = sender
+        .router
+        .enqueue(&sender.node, second)
+        .expect("enqueue a second message");
+    let _ = sender.absorb_router(output);
+
     let output = sender
         .router
         .commit_resource_build(&mut sender.node, built)
@@ -1137,6 +1166,15 @@ fn commit_resource_build_requests_persistence_and_applies_its_deadline() {
         .router
         .next_deadline()
         .expect("the queue has a deadline");
+    assert!(
+        sender
+            .node
+            .next_deadline()
+            .is_none_or(|core| core > expected_deadline),
+        "the core holds the earlier deadline, so this assertion could not tell \
+         whether commit applied the queue's: core {:?}, queue {expected_deadline}",
+        sender.node.next_deadline()
+    );
     assert!(
         output
             .events
@@ -1166,7 +1204,6 @@ fn commit_resource_build_requests_persistence_and_applies_its_deadline() {
 /// restored snapshot contains the same message id, so the old build lands on
 /// an entry it never came from.
 #[test]
-#[ignore = "RED against efdaac39 (#196 C9): a build captured before restore commits against the restored queue. Batch B1."]
 fn a_build_captured_before_a_restore_is_refused() {
     let mut sender = sender_with(68, deferring_config());
     let mut receiver = receiver(168);
@@ -1256,7 +1293,6 @@ fn one_message_has_at_most_one_outstanding_build() {
 /// `enqueue` itself hands back. Flag-independent: there is no control here,
 /// because `defer_resource_builds` is not on this path.
 #[test]
-#[ignore = "RED on master (#196 smaller items): enqueue does not call apply_deadline. Batch B1."]
 fn enqueue_returns_its_own_deadline_in_its_output() {
     let mut sender = sender_with(70, RouterConfig::default());
     let mut receiver = receiver(170);
