@@ -1367,10 +1367,10 @@ fn a_deferred_tick_does_not_scale_with_the_payload() {
     let small = 16 * 1024;
     let large = 256 * 1024;
 
-    let deferred_small = median_resource_tick(80, true, small);
-    let deferred_large = median_resource_tick(82, true, large);
-    let composed_small = median_resource_tick(84, false, small);
-    let composed_large = median_resource_tick(86, false, large);
+    let deferred_small = median_resource_tick(80, true, small, incompressible);
+    let deferred_large = median_resource_tick(82, true, large, incompressible);
+    let composed_small = median_resource_tick(84, false, small, incompressible);
+    let composed_large = median_resource_tick(86, false, large, incompressible);
 
     std::println!(
         "deferred {small}B {deferred_small:?} | composed {small}B {composed_small:?} | \
@@ -1413,49 +1413,72 @@ fn a_deferred_tick_does_not_scale_with_the_payload() {
 /// `RESOURCE_MAX_EFFICIENT_SIZE` is 1 048 575 bytes and the packed message is
 /// above it. Segments 2..N are built on the receive path, under the caller's
 /// lock, and neither this change nor this measurement touches them.
+///
+/// Every column names its payload class, because what is being timed is a
+/// compressor and a compressor's cost is a property of the bytes it is given.
 #[test]
 #[ignore]
 fn measure_deferred_tick_costs() {
+    // Per-cell warm-up does not cover the first cell's process-level costs.
+    // Both arms, because it is the composed one that grows the allocator's
+    // arena to bz2's working-set size; without it the first cell measured
+    // reads high on the deferred column for a reason that has nothing to do
+    // with its bytes.
+    let _ = median_resource_tick(200, true, 16 * 1024, payloads::incompressible);
+    let _ = median_resource_tick(210, false, 16 * 1024, payloads::incompressible);
+
     let mut seed = 100u8;
-    for len in [16 * 1024usize, 256 * 1024, 1024 * 1024] {
-        let deferred = median_resource_tick(seed, true, len);
-        seed = seed.wrapping_add(2);
-        let composed = median_resource_tick(seed, false, len);
-        seed = seed.wrapping_add(2);
-        std::println!(
-            "tick with one due {len:>7}B Resource: deferred {deferred:?} | composed {composed:?}"
-        );
+    for (class, generate) in payloads::GENERATORS {
+        for len in [16 * 1024usize, 256 * 1024, 1024 * 1024] {
+            let deferred = median_resource_tick(seed, true, len, generate);
+            seed = seed.wrapping_add(2);
+            let composed = median_resource_tick(seed, false, len, generate);
+            seed = seed.wrapping_add(2);
+            std::println!(
+                "tick with one due {len:>7}B {class:>14} Resource: \
+                 deferred {deferred:?} | composed {composed:?}"
+            );
+        }
     }
 }
 
-/// A payload the Resource compressor cannot collapse.
-fn incompressible(len: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(len + 4);
-    let mut state: u32 = 0x9e37_79b9;
-    while out.len() < len {
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-        out.extend_from_slice(&state.to_le_bytes());
-    }
-    out.truncate(len);
-    out
-}
+/// The named payload classes behind `core-lock-budget.md`, shared with the
+/// `leviculum-lxmf` unit harness (`measure_send_lock_costs`) so both measure
+/// the same bytes under the same column names.
+#[path = "common/payloads.rs"]
+mod payloads;
+
+use payloads::incompressible;
 
 /// Median of five timed `LxmfRouter::tick` calls, each with exactly one due
 /// `DirectResource` message on an already-established link, after one
 /// discarded warm-up run.
-fn median_resource_tick(seed: u8, defer: bool, len: usize) -> core::time::Duration {
+fn median_resource_tick(
+    seed: u8,
+    defer: bool,
+    len: usize,
+    generate: payloads::Generator,
+) -> core::time::Duration {
     let mut samples = Vec::new();
     for round in 0..6u8 {
-        samples.push(one_resource_tick(seed.wrapping_add(round), defer, len));
+        samples.push(one_resource_tick(
+            seed.wrapping_add(round),
+            defer,
+            len,
+            generate,
+        ));
     }
     samples.remove(0); // warm-up: first run pays one-time setup
     samples.sort();
     samples[samples.len() / 2]
 }
 
-fn one_resource_tick(seed: u8, defer: bool, len: usize) -> core::time::Duration {
+fn one_resource_tick(
+    seed: u8,
+    defer: bool,
+    len: usize,
+    generate: payloads::Generator,
+) -> core::time::Duration {
     let config = if defer {
         deferring_config()
     } else {
@@ -1470,7 +1493,7 @@ fn one_resource_tick(seed: u8, defer: bool, len: usize) -> core::time::Duration 
         seed,
         receiver.destination,
         &sender.signing_identity,
-        incompressible(len),
+        generate(len),
     );
     assert_direct_resource(&message);
     let id = message.message_id;

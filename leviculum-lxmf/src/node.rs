@@ -1226,6 +1226,15 @@ impl LxmfNode {
     }
 }
 
+/// The named payload classes behind `docs/src/concepts/core-lock-budget.md`,
+/// shared with the router harness in `tests/direct_delivery_attempts.rs` so
+/// both measure the same bytes under the same column names. Declared here
+/// rather than inside `mod tests` because `#[path]` resolves against a
+/// `src/node/` directory that does not exist.
+#[cfg(test)]
+#[path = "../tests/common/payloads.rs"]
+mod payloads;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1302,13 +1311,32 @@ mod tests {
         method: DeliveryMethod,
         content_len: usize,
     ) -> Message {
+        message_with_body(
+            destination,
+            source,
+            source_hash,
+            method,
+            payloads::degenerate(content_len),
+        )
+    }
+
+    /// `message` with the payload class named by the caller. The correctness
+    /// tests do not care which bytes they carry and keep taking the
+    /// `degenerate` fill; the timing harness does care, and says so.
+    fn message_with_body(
+        destination: DestinationHash,
+        source: &Identity,
+        source_hash: DestinationHash,
+        method: DeliveryMethod,
+        body: Vec<u8>,
+    ) -> Message {
         Message::create(
             destination.into_bytes(),
             source_hash.into_bytes(),
             source,
             1_700_000_000.0,
             b"title".to_vec(),
-            vec![0x5a; content_len],
+            body,
             Vec::new(),
             method,
         )
@@ -2284,6 +2312,20 @@ mod tests {
     /// code. The invariants it exists to defend are asserted, without a clock,
     /// by `opportunistic_and_direct_packet_submit_one_packet_each` and
     /// `phased_resource_send_delivers_what_the_composed_one_does`.
+    ///
+    /// Every resource row names its payload class ([`payloads::GENERATORS`]),
+    /// because the cost being reported is a compressor's and a compressor's
+    /// cost is a property of the bytes. Each cell is the median of
+    /// [`MEASURE_SAMPLES`] timed runs after one discarded warm-up, each run on
+    /// a freshly linked pair — a second Resource to the same link cannot build
+    /// at all (`TransferInProgress`), so re-using one would not be measuring
+    /// the same thing twice.
+    ///
+    /// The 1 MiB row is segment 1 of a two-segment transfer: the split
+    /// boundary is `RESOURCE_MAX_EFFICIENT_SIZE` (1 048 575 B) applied to the
+    /// *packed, uncompressed* length (`leviculum-core/src/resource/
+    /// outgoing.rs:123`), which a 1 MiB body exceeds in every payload class.
+    /// Segments 2..N are built on the receive path, under the caller's lock.
     #[test]
     #[ignore]
     fn measure_send_lock_costs() {
@@ -2342,52 +2384,102 @@ mod tests {
             std::println!("{label}: 1 packet, {elapsed:?}");
         }
 
-        for len in [16 * 1024usize, 256 * 1024, 1024 * 1024] {
+        // One composed send on a fresh pair, timed.
+        let composed_once = |body: Vec<u8>| {
             let (mut s, r) = linked();
-            let m = message(
+            let m = message_with_body(
                 r.destination,
                 &s.signing_identity,
                 s.destination,
                 DeliveryMethod::Direct,
-                len,
+                body,
+            );
+            assert_eq!(
+                LxmfNode::representation(&m),
+                Ok(DeliveryRepresentation::DirectResource),
+                "the timed payload must take the Resource path"
             );
             let t = Instant::now();
             let _ = s.lxmf.send(&mut s.node, &m).expect("composed");
-            let composed = t.elapsed();
+            t.elapsed()
+        };
 
-            let (mut s2, r2) = linked();
-            let m2 = message(
-                r2.destination,
-                &s2.signing_identity,
-                s2.destination,
+        // The same send in three phases, timing the two locked ones and the
+        // off-lock build separately.
+        let phased_once = |body: Vec<u8>| {
+            let (mut s, r) = linked();
+            let m = message_with_body(
+                r.destination,
+                &s.signing_identity,
+                s.destination,
                 DeliveryMethod::Direct,
-                len,
+                body,
             );
             let t = Instant::now();
-            let params = s2
-                .lxmf
-                .resource_send_params(&s2.node, &m2)
-                .expect("phase 1");
+            let params = s.lxmf.resource_send_params(&s.node, &m).expect("phase 1");
             let phase1 = t.elapsed();
             let t = Instant::now();
             let prepared =
-                LxmfNode::prepare_resource_send(&params, &m2, true, &mut OsRng).expect("phase 2");
-            let phase2 = t.elapsed();
+                LxmfNode::prepare_resource_send(&params, &m, true, &mut OsRng).expect("phase 2");
+            let build = t.elapsed();
             let t = Instant::now();
-            let _ = s2
+            let _ = s
                 .lxmf
-                .commit_resource_send(&mut s2.node, prepared)
+                .commit_resource_send(&mut s.node, prepared)
                 .expect("phase 3");
             let phase3 = t.elapsed();
-            std::println!(
-                "resource {:>7}B: composed(locked) {:?} | phased locked {:?} (p1 {:?} + p3 {:?}), off-lock build {:?}",
-                len,
-                composed,
-                phase1 + phase3,
-                phase1,
-                phase3,
-                phase2
-            );
+            (phase1 + phase3, build)
+        };
+
+        for (class, generate) in payloads::GENERATORS {
+            for len in [16 * 1024usize, 256 * 1024, 1024 * 1024] {
+                // What the class name claims, as a number: the same bz2
+                // settings the Resource build uses
+                // (`leviculum-core/src/compression.rs:65-71`).
+                let shrunk = leviculum_core::compression::compress(&generate(len))
+                    .expect("compress")
+                    .len();
+                std::println!(
+                    "         {len:>7}B {class:>14}: bz2 {shrunk}B, {:.1}x",
+                    len as f64 / shrunk as f64
+                );
+                // The discarded first run is reported, not just dropped: an
+                // n=1 harness reports exactly that number, and the gap
+                // between it and the median is how much such a harness is
+                // wrong by.
+                let mut composed_samples = Vec::with_capacity(MEASURE_SAMPLES + 1);
+                for _ in 0..=MEASURE_SAMPLES {
+                    composed_samples.push(composed_once(generate(len)));
+                }
+                let cold = composed_samples.remove(0);
+                let composed = median(composed_samples);
+                // One pass over the phased arm, two medians out of it: the
+                // locked halves and the build they moved off the lock come
+                // from the same runs, so the pair can be read together.
+                let mut phased = Vec::with_capacity(MEASURE_SAMPLES + 1);
+                for _ in 0..=MEASURE_SAMPLES {
+                    phased.push(phased_once(generate(len)));
+                }
+                phased.remove(0);
+                let locked = median(phased.iter().map(|(locked, _)| *locked).collect());
+                let build = median(phased.iter().map(|(_, build)| *build).collect());
+                std::println!(
+                    "resource {len:>7}B {class:>14}: composed(locked) {composed:?} | \
+                     phased(locked) {locked:?} | off-lock build {build:?} | \
+                     composed cold run {cold:?}"
+                );
+            }
         }
+    }
+
+    /// Timed samples per reported cell, after one discarded warm-up.
+    const MEASURE_SAMPLES: usize = 5;
+
+    /// Median of the [`MEASURE_SAMPLES`] runs left after the warm-up is
+    /// dropped. The router harness in `tests/direct_delivery_attempts.rs`
+    /// has the same shape over ticks.
+    fn median(mut samples: Vec<core::time::Duration>) -> core::time::Duration {
+        samples.sort();
+        samples[samples.len() / 2]
     }
 }

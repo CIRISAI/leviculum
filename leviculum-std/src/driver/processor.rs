@@ -129,7 +129,7 @@ use super::StdNodeCore;
 /// (0.8 ms) and unpacking one with signature verification (3.2 ms) are listed
 /// as costs that explicitly do *not* justify phasing. The failure mode it
 /// names is `LxmfRouter::tick`
-/// (`docs/src/concepts/core-lock-budget.md:72`) at 126.6 ms for 8 due 256 KiB
+/// (`docs/src/concepts/core-lock-budget.md:147`) at 126.6 ms for 8 due 256 KiB
 /// messages, against the 141 ms measured `send_resource` stall. 5 ms
 /// therefore sits just above everything the page calls acceptable and ~25x
 /// below what it calls the defect, which is the widest gap available that
