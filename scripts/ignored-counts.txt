@@ -23,6 +23,11 @@
 3    -p leviculum-core --lib
 3    -p leviculum-core --doc
 
+# measure_send_lock_costs is a timing harness for the lock-budget doc page,
+# not a behaviour test: it prints microseconds and asserts nothing. Run by
+# hand with `--ignored --nocapture` when that page is re-measured.
+1    -p leviculum-lxmf --lib
+
 4    -p leviculum-std --lib
 1    -p leviculum-std --doc
 9    -p leviculum-std --test mvr
