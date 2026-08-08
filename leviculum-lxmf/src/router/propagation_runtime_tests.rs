@@ -1056,7 +1056,10 @@ fn assert_upload_failure_closes_link(reason: PropagationUploadFailure) {
             .outbound
             .get_mut(&message_id)
             .expect("queued message");
-        entry.state = super::super::MessageState::Sending;
+        entry.set_state(
+            super::super::MessageState::Sending,
+            &mut client.router.build_epochs,
+        );
         entry.attempts = 1;
         entry.progress = 0.75;
     }
@@ -1087,7 +1090,7 @@ fn assert_upload_failure_closes_link(reason: PropagationUploadFailure) {
         .outbound()
         .get(&message_id)
         .expect("message scheduled for retry");
-    assert_eq!(entry.state, super::super::MessageState::Outbound);
+    assert_eq!(entry.state(), super::super::MessageState::Outbound);
     assert_eq!(
         entry.attempts, 1,
         "failure does not charge a second attempt"
@@ -1313,4 +1316,357 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
         .router
         .delivered_ids
         .contains_key(&message.message_id));
+}
+
+// ---------------------------------------------------------------------------
+// Codeberg #196 / PR #212, batch B2: the deferred upload build and its epoch.
+// U7-U9 from the plan at
+// `~/.local/state/leviculum/attachments/pr212-plan.md` section 6a.
+// ---------------------------------------------------------------------------
+
+fn upload_sink(seed: u8) -> (UploadSink, DestinationHash) {
+    let mut server_node = node();
+    let mut server_destination = Destination::new(
+        Some(identity(seed)),
+        Direction::In,
+        DestinationType::Single,
+        APP_NAME,
+        &[PROPAGATION_ASPECT],
+    )
+    .expect("server propagation destination");
+    server_destination.set_accepts_links(true);
+    server_destination.set_proof_strategy(ProofStrategy::All);
+    let server_hash = *server_destination.hash();
+    server_node.register_destination(server_destination);
+    (
+        UploadSink {
+            node: server_node,
+            uploads: Vec::new(),
+        },
+        server_hash,
+    )
+}
+
+struct DeferredUploadHarness {
+    client: ClientHarness,
+    sink: UploadSink,
+    server_hash: DestinationHash,
+    message_id: [u8; 32],
+}
+
+impl DeferredUploadHarness {
+    fn builds_pending(&self) -> usize {
+        self.client
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(event, RouterEvent::ResourceBuildPending(id) if *id == self.message_id)
+            })
+            .count()
+    }
+}
+
+/// Drive a deferring client to the point where its next tick captures the
+/// upload build: propagation node announced and selected, a message large
+/// enough for the Resource representation queued, outer stamp attached, link
+/// established (which makes the entry due again).
+fn deferred_upload_harness(
+    client_seed: u8,
+    server_seed: u8,
+    recipient_seed: u8,
+) -> DeferredUploadHarness {
+    let client_identity = identity(client_seed);
+    let client_identity_hash = *client_identity.hash();
+    let client_delivery =
+        LxmfNode::delivery_destination(identity_copy(&client_identity)).expect("delivery");
+    let client_delivery_hash = *client_delivery.hash();
+    let client_propagation =
+        PropagationTransport::destination(identity_copy(&client_identity)).expect("client PN");
+
+    let recipient_identity = identity(recipient_seed);
+    let recipient_delivery =
+        LxmfNode::delivery_destination(identity_copy(&recipient_identity)).expect("recipient");
+    let recipient_hash = *recipient_delivery.hash();
+
+    let mut client_node = node();
+    client_node.remember_identity(recipient_hash, public_identity(&recipient_identity));
+    let lxmf = LxmfNode::register(&mut client_node, client_delivery, LxmfNodeConfig::default())
+        .expect("register delivery");
+    let propagation = PropagationTransport::register(&mut client_node, client_propagation)
+        .expect("register propagation client");
+    let mut router = LxmfRouter::new(
+        lxmf,
+        client_identity_hash,
+        RouterConfig {
+            defer_resource_builds: true,
+            ..RouterConfig::default()
+        },
+    );
+    router
+        .enable_propagation_client(propagation, PropagationClientConfig::default())
+        .expect("matching propagation identity");
+    let mut client = ClientHarness {
+        node: client_node,
+        router,
+        events: Vec::new(),
+    };
+
+    let (mut sink, server_hash) = upload_sink(server_seed);
+    let announced = sink
+        .node
+        .announce_destination(&server_hash, Some(&propagation_announce()))
+        .expect("announce propagation node");
+    pump_upload(
+        &mut client,
+        &mut sink,
+        Vec::new(),
+        take_packets(announced.actions),
+    );
+    assert!(client.router.known_propagation_node(&server_hash).is_some());
+    let selected = client
+        .router
+        .set_outbound_propagation_node(&mut client.node, Some(server_hash))
+        .expect("select propagation node");
+    assert!(client.absorb_router(selected).is_empty());
+
+    // A body this size puts the encoded upload above the Link-packet
+    // boundary, which is the only representation the deferral covers.
+    let message = Message::create(
+        recipient_hash.into_bytes(),
+        client_delivery_hash.into_bytes(),
+        &client_identity,
+        NOW_UNIX,
+        b"deferred upload".to_vec(),
+        vec![0x6b; 2_048],
+        Vec::new(),
+        DeliveryMethod::Propagated,
+    )
+    .expect("signed LXMF message");
+    let message_id = message.message_id;
+    let queued = client
+        .router
+        .enqueue(&client.node, message)
+        .expect("queue propagated message");
+    assert!(client.absorb_router(queued).is_empty());
+
+    // First tick prepares the envelope and asks for the outer stamp.
+    let prepared = client
+        .router
+        .tick(&mut client.node)
+        .expect("prepare upload");
+    let to_sink = client.absorb_router(prepared);
+    pump_upload(&mut client, &mut sink, to_sink, Vec::new());
+    assert!(client.events.iter().any(|event| matches!(
+        event,
+        RouterEvent::PropagationStampPending(request) if request.message_id == message_id
+    )));
+    let stamped = client
+        .router
+        .set_outbound_propagation_stamp(&message_id, [0x5a; 32], client.node.now_ms())
+        .expect("attach propagation stamp");
+    assert!(client.absorb_router(stamped).is_empty());
+
+    // This tick establishes the propagation link; the establishment event
+    // makes the queued upload due again.
+    let connecting = client
+        .router
+        .tick(&mut client.node)
+        .expect("establish propagation link");
+    let to_sink = client.absorb_router(connecting);
+    pump_upload(&mut client, &mut sink, to_sink, Vec::new());
+
+    DeferredUploadHarness {
+        client,
+        sink,
+        server_hash,
+        message_id,
+    }
+}
+
+/// U7 — two ticks at one instant queue one upload build.
+///
+/// The first tick captures and pushes the retry deadline out (C3a closes
+/// D2's per-tick re-encode); the second tick at the same instant finds the
+/// entry not due. The third phase forces the entry due again — as it is
+/// after a retry interval — and the outstanding-build marker (C8) refuses a
+/// second capture while the first is unreturned.
+#[test]
+fn two_ticks_at_one_instant_queue_one_upload_build() {
+    let mut harness = deferred_upload_harness(60, 61, 62);
+    let message_id = harness.message_id;
+
+    let first = harness
+        .client
+        .router
+        .tick(&mut harness.client.node)
+        .expect("deferring tick");
+    assert!(
+        harness.client.absorb_router(first).is_empty(),
+        "the deferring tick must not put the upload on the wire"
+    );
+    assert_eq!(harness.builds_pending(), 1, "the first tick captures");
+
+    let second = harness
+        .client
+        .router
+        .tick(&mut harness.client.node)
+        .expect("second tick at the same instant");
+    assert!(harness.client.absorb_router(second).is_empty());
+
+    harness
+        .client
+        .router
+        .outbound
+        .get_mut(&message_id)
+        .expect("queued message")
+        .next_attempt_ms = harness.client.node.now_ms();
+    let third = harness
+        .client
+        .router
+        .tick(&mut harness.client.node)
+        .expect("due tick with a build outstanding");
+    assert!(harness.client.absorb_router(third).is_empty());
+
+    assert_eq!(
+        harness.builds_pending(),
+        1,
+        "the router announced more than one build for one message"
+    );
+    assert_eq!(
+        harness.client.router.take_resource_builds().len(),
+        1,
+        "the build queue grew past one build for one message"
+    );
+    assert!(
+        harness.sink.uploads.is_empty(),
+        "nothing may reach the node before a commit"
+    );
+}
+
+/// U9 — a recipient stamp that lands mid-build rewrites the message and
+/// clears the prepared envelope (S1 on the upload path), so the handed-out
+/// upload must come back `StaleBuild` and never reach the node.
+#[test]
+fn a_late_recipient_stamp_invalidates_a_propagated_build() {
+    let mut harness = deferred_upload_harness(63, 64, 65);
+    let message_id = harness.message_id;
+
+    let deferring = harness
+        .client
+        .router
+        .tick(&mut harness.client.node)
+        .expect("deferring tick");
+    assert!(harness.client.absorb_router(deferring).is_empty());
+    let mut builds = harness.client.router.take_resource_builds();
+    assert_eq!(builds.len(), 1, "exactly one upload build was handed out");
+    assert_eq!(builds[0].message_id(), message_id);
+    let built = builds
+        .remove(0)
+        .build(&mut OsRng)
+        .expect("build off the caller's lock");
+
+    let stamped = harness
+        .client
+        .router
+        .set_outbound_stamp(&message_id, vec![0xa5; 32], harness.client.node.now_ms())
+        .expect("attach the recipient stamp mid-build");
+    let _ = harness.client.absorb_router(stamped);
+    assert!(
+        harness.client.router.outbound()[&message_id]
+            .propagation()
+            .is_none(),
+        "the recipient stamp must clear the prepared envelope"
+    );
+
+    let refused = harness
+        .client
+        .router
+        .commit_resource_build(&mut harness.client.node, built)
+        .expect_err("a build from before the recipient stamp must not commit");
+    assert_eq!(
+        refused,
+        RouterError::StaleBuild,
+        "a build from before the recipient stamp is stale"
+    );
+    assert!(
+        harness.sink.uploads.is_empty(),
+        "nothing may reach the propagation node"
+    );
+    assert!(
+        harness.client.router.outbound().contains_key(&message_id),
+        "the refusal leaves the entry queued for a fresh build"
+    );
+}
+
+/// U8 — a propagation-node switch re-targets every prepared envelope (S3), so
+/// a build made against the old node's link must come back `StaleBuild`.
+#[test]
+fn a_propagation_node_switch_invalidates_a_build_for_the_old_node() {
+    let mut harness = deferred_upload_harness(66, 67, 68);
+    let message_id = harness.message_id;
+
+    // A second enabled propagation node becomes known through a real
+    // announce.
+    let (mut second_sink, second_hash) = upload_sink(69);
+    let announced = second_sink
+        .node
+        .announce_destination(&second_hash, Some(&propagation_announce()))
+        .expect("announce the second propagation node");
+    let _ = harness.client.receive(take_packets(announced.actions));
+    assert!(harness
+        .client
+        .router
+        .known_propagation_node(&second_hash)
+        .is_some());
+
+    // Capture the build against the first node's link.
+    let deferring = harness
+        .client
+        .router
+        .tick(&mut harness.client.node)
+        .expect("deferring tick");
+    assert!(harness.client.absorb_router(deferring).is_empty());
+    let mut builds = harness.client.router.take_resource_builds();
+    assert_eq!(builds.len(), 1, "exactly one upload build was handed out");
+    let built = builds
+        .remove(0)
+        .build(&mut OsRng)
+        .expect("build off the caller's lock");
+
+    // The route to the selected node disappears; the next tick moves the
+    // queue to the announced alternative and re-targets the envelope.
+    assert!(harness
+        .client
+        .node
+        .remove_path(harness.server_hash.as_bytes()));
+    let switching = harness
+        .client
+        .router
+        .tick(&mut harness.client.node)
+        .expect("switching tick");
+    let _ = harness.client.absorb_router(switching);
+    assert_eq!(
+        harness.client.router.outbound_propagation_node(),
+        Some(second_hash),
+        "the queue must move to the announced alternative"
+    );
+
+    let refused = harness
+        .client
+        .router
+        .commit_resource_build(&mut harness.client.node, built)
+        .expect_err("a build made against the old node must not commit");
+    assert_eq!(
+        refused,
+        RouterError::StaleBuild,
+        "a build made against the old node's link is stale"
+    );
+    assert!(
+        harness.sink.uploads.is_empty() && second_sink.uploads.is_empty(),
+        "nothing may reach either node"
+    );
+    assert!(
+        harness.client.router.outbound().contains_key(&message_id),
+        "the refusal leaves the entry queued for a fresh build"
+    );
 }

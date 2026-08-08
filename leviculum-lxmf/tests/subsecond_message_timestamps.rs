@@ -225,18 +225,19 @@ fn a_retry_preserves_the_original_timestamp_and_id() {
         .outbound()
         .get(&id)
         .expect("the entry is still keyed by its original ID");
-    assert_eq!(entry.state, MessageState::Outbound);
+    assert_eq!(entry.state(), MessageState::Outbound);
     assert!(
         entry.attempts > 0,
         "the retry ladder must actually have run, else this control is vacuous"
     );
     assert_eq!(
-        entry.message.timestamp, timestamp,
+        entry.message().timestamp,
+        timestamp,
         "a retry re-sends the message it already built"
     );
-    assert_eq!(entry.message.message_id, id);
+    assert_eq!(entry.message().message_id, id);
     assert_eq!(
-        entry.message.pack(),
+        entry.message().pack(),
         packed,
         "the signed wire bytes are unchanged across retries"
     );
@@ -295,8 +296,8 @@ fn a_propagation_fallback_preserves_the_timestamp_and_id() {
         .expect("the fallback is not a duplicate of the cancelled attempt");
 
     let entry = router.outbound().get(&id).expect("queued for propagation");
-    assert_eq!(entry.message.timestamp, timestamp);
-    assert_eq!(entry.message.method, DeliveryMethod::Propagated);
+    assert_eq!(entry.message().timestamp, timestamp);
+    assert_eq!(entry.message().method, DeliveryMethod::Propagated);
 }
 
 /// Control: a restored outbound message keeps its persisted timestamp.
@@ -330,8 +331,9 @@ fn a_restored_outbound_message_keeps_its_persisted_timestamp() {
         .get(&id)
         .expect("the restored entry is keyed by its original ID");
     assert_eq!(
-        entry.message.timestamp, timestamp,
+        entry.message().timestamp,
+        timestamp,
         "the persisted timestamp survives the checkpoint bit for bit"
     );
-    assert_eq!(entry.message.message_id, id);
+    assert_eq!(entry.message().message_id, id);
 }

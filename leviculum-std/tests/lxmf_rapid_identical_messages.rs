@@ -103,7 +103,7 @@ fn rapid_identical_replies_are_never_refused_as_duplicates() {
     let mut timestamps: Vec<f64> = router
         .outbound()
         .values()
-        .map(|entry| entry.message.timestamp)
+        .map(|entry| entry.message().timestamp)
         .collect();
     timestamps.sort_by(|a, b| a.partial_cmp(b).expect("finite timestamps"));
     for pair in timestamps.windows(2) {

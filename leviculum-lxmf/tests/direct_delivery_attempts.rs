@@ -162,7 +162,7 @@ impl Sender {
     }
 
     fn state(&self, id: &[u8; 32]) -> Option<MessageState> {
-        self.router.outbound().get(id).map(|entry| entry.state)
+        self.router.outbound().get(id).map(|entry| entry.state())
     }
 
     /// How many times the router has told the caller a build is waiting for
@@ -863,8 +863,13 @@ fn two_due_resources_to_one_destination_both_complete() {
     assert!(!packets.is_empty(), "the first commit must advertise");
 
     // The link now carries a transfer. This is the exact error, not
-    // `is_err()`: batch B2 replaces it with `StaleBuild`, and the change of
-    // variant is itself the record that the epoch took over the refusal.
+    // `is_err()`. The plan expected B2's epoch to take over this refusal;
+    // measured against the epoch it does not, and the mechanism says why: the
+    // epoch is per-entry, the first commit's `Sending` transition moves only
+    // the FIRST message's epoch, and this second commit belongs to the second
+    // message, whose entry is unchanged since its capture. The refusal
+    // therefore still comes from the core's transfer guard. (Switching the
+    // assertion to `StaleBuild` was observed red against the B2 tree.)
     let refused = sender
         .router
         .commit_resource_build(&mut sender.node, built_second)
@@ -982,7 +987,6 @@ fn a_cancelled_message_does_not_go_on_the_air_after_its_build_returns() {
 /// commit, so the pairing is vacuous. What is not vacuous is the delivered
 /// body, which is why the harness keeps it.
 #[test]
-#[ignore = "RED against efdaac39 (#196 S1): the pre-stamp build commits and the stale bytes go on the air. Needs the build epoch (C4, batch B2)."]
 fn a_stamp_that_arrives_mid_build_invalidates_that_build() {
     let mut sender = sender_with(65, deferring_config());
     let mut receiver = receiver(165);
@@ -1005,7 +1009,7 @@ fn a_stamp_that_arrives_mid_build_invalidates_that_build() {
             .outbound()
             .get(&id)
             .expect("the stamped message is still queued")
-            .message
+            .message()
             .stamp
             .as_deref(),
         Some(stamp.as_slice()),
@@ -1509,6 +1513,51 @@ fn one_resource_tick(seed: u8, defer: bool, len: usize) -> core::time::Duration 
     elapsed
 }
 
+/// The livelock guard on the epoch: a no-op write must not move it.
+///
+/// The tick's deferral arm re-asserts `state = Outbound` on an entry that
+/// already is `Outbound` every retry interval. If that assignment advanced
+/// the epoch, every build older than one interval would come back
+/// `StaleBuild` and a consumer slower than the interval could never land a
+/// commit. This holds a build across two retry intervals — with the deferral
+/// arm running each time — and then commits it successfully.
+#[test]
+fn a_build_held_across_retry_intervals_still_commits() {
+    let mut sender = sender_with(72, deferring_config());
+    let mut receiver = receiver(172);
+    exchange_announces(&mut sender, &mut receiver);
+    let id = enqueue_resource(&mut sender, &mut receiver, 25);
+
+    tick_until_next_build(&mut sender, &mut receiver, &id);
+    let built = take_one_built(&mut sender, &id);
+
+    // Two retry intervals pass with the build in the caller's hands. The
+    // drain released the outstanding-build marker, so the first of these
+    // ticks captures a fresh build and the second sees its marker; both runs
+    // of the deferral arm re-assert `Outbound` on the unchanged entry.
+    for _ in 0..2 {
+        sender.advance_ms(11_000);
+        let packets = sender.tick();
+        pump(&mut sender, &mut receiver, packets);
+    }
+
+    let output = sender
+        .router
+        .commit_resource_build(&mut sender.node, built)
+        .expect("a build held across no-op re-emissions must still commit");
+    let packets = sender.absorb_router(output);
+    assert_eq!(
+        sender.state(&id),
+        Some(MessageState::Sending),
+        "the late commit is still the submission"
+    );
+    pump(&mut sender, &mut receiver, packets);
+    assert!(
+        !receiver.accepted_resources.is_empty(),
+        "the committed transfer must reach the receiver"
+    );
+}
+
 /// U17 — cancel, re-enqueue the same content, and the build from the previous
 /// lifetime must still be refused.
 ///
@@ -1517,7 +1566,6 @@ fn one_resource_tick(seed: u8, defer: bool, len: usize) -> core::time::Duration 
 /// `enqueue` would be back at its initial value. Only a router-level
 /// monotonic epoch never repeats.
 #[test]
-#[ignore = "RED against efdaac39 (#196 C4): a build from before a cancel commits against the re-enqueued entry. Batch B2."]
 fn a_re_enqueued_message_refuses_a_build_from_before_its_cancel() {
     let mut sender = sender_with(71, deferring_config());
     let mut receiver = receiver(171);

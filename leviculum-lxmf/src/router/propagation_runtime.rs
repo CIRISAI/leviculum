@@ -176,47 +176,39 @@ impl PropagationRuntime {
             .outbound
             .get_mut(&message_id)
             .ok_or(RouterError::NotFound)?;
-        if entry.message.method != DeliveryMethod::Propagated {
+        if entry.message().method != DeliveryMethod::Propagated {
             return Err(RouterError::UnsupportedMethod);
         }
 
-        if entry.propagation.is_none() {
-            let packed = entry.message.pack();
+        if entry.propagation().is_none() {
+            let packed = entry.message().pack();
             let encrypted = node
                 .encrypt_for_destination(
-                    &DestinationHash::new(entry.message.destination_hash),
+                    &DestinationHash::new(entry.message().destination_hash),
                     &packed[16..],
                 )
                 .map_err(LxmfNodeError::Send)?;
             let mut unstamped_lxmf = Vec::with_capacity(16 + encrypted.len());
-            unstamped_lxmf.extend_from_slice(&entry.message.destination_hash);
+            unstamped_lxmf.extend_from_slice(&entry.message().destination_hash);
             unstamped_lxmf.extend_from_slice(&encrypted);
             let transient_id = full_hash(&unstamped_lxmf);
-            entry.propagation = Some(OutboundPropagation {
-                timebase: now_unix,
-                unstamped_lxmf,
-                transient_id,
-                target_cost,
-                stamp: None,
-            });
+            entry.set_propagation(
+                Some(OutboundPropagation {
+                    timebase: now_unix,
+                    unstamped_lxmf,
+                    transient_id,
+                    target_cost,
+                    stamp: None,
+                }),
+                &mut router.build_epochs,
+            );
             router.persistence_dirty = true;
-        } else if entry
-            .propagation
-            .as_ref()
-            .is_some_and(|prepared| prepared.target_cost != target_cost)
-        {
-            let prepared = entry
-                .propagation
-                .as_mut()
-                .ok_or(RouterError::PropagationStampUnavailable)?;
-            prepared.target_cost = target_cost;
-            prepared.stamp = None;
+        } else if entry.retarget_propagation(target_cost, &mut router.build_epochs) {
             router.persistence_dirty = true;
         }
 
         let prepared = entry
-            .propagation
-            .as_ref()
+            .propagation()
             .ok_or(RouterError::PropagationStampUnavailable)?;
         Ok(match (prepared.stamp, prepared.target_cost) {
             (None, Some(target_cost)) => Some(PropagationStampRequest {
@@ -303,8 +295,8 @@ impl PropagationRuntime {
                     let now_ms = node.now_ms();
                     let mut changed = false;
                     for entry in router.outbound.values_mut().filter(|entry| {
-                        entry.message.method == DeliveryMethod::Propagated
-                            && entry.state == super::MessageState::Outbound
+                        entry.message().method == DeliveryMethod::Propagated
+                            && entry.state() == super::MessageState::Outbound
                     }) {
                         if entry.next_attempt_ms != now_ms {
                             entry.next_attempt_ms = now_ms;
@@ -360,7 +352,7 @@ impl PropagationRuntime {
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
                     // Establishing the propagation link already charged this logical
                     // attempt. Submitting on that link is part of the same attempt.
-                    entry.state = super::MessageState::Sending;
+                    entry.set_state(super::MessageState::Sending, &mut router.build_epochs);
                     entry.next_attempt_ms =
                         node.now_ms().saturating_add(super::DELIVERY_RETRY_WAIT_MS);
                     entry.progress = 0.01;
@@ -405,7 +397,7 @@ impl PropagationRuntime {
                     output.core.merge(self.transport.close(node, link_id));
                 }
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
-                    entry.state = super::MessageState::Outbound;
+                    entry.set_state(super::MessageState::Outbound, &mut router.build_epochs);
                     entry.next_attempt_ms =
                         node.now_ms().saturating_add(super::DELIVERY_RETRY_WAIT_MS);
                     entry.progress = 0.01;
@@ -847,13 +839,14 @@ impl PropagationRuntime {
                 for entry in router
                     .outbound
                     .values_mut()
-                    .filter(|entry| entry.message.method == DeliveryMethod::Propagated)
+                    .filter(|entry| entry.message().method == DeliveryMethod::Propagated)
                 {
-                    if let Some(prepared) = entry.propagation.as_mut() {
-                        prepared.target_cost = None;
-                        prepared.stamp = None;
-                    }
-                    entry.state = super::MessageState::Outbound;
+                    // A build made against the old node's link must not
+                    // commit against the new one: the retarget is a value
+                    // change of `propagation` and moves the entry's epoch
+                    // whenever an envelope was prepared (S3).
+                    entry.retarget_propagation(None, &mut router.build_epochs);
+                    entry.set_state(super::MessageState::Outbound, &mut router.build_epochs);
                     entry.next_attempt_ms = now_ms;
                 }
                 router.persistence_dirty = true;
@@ -869,7 +862,8 @@ impl PropagationRuntime {
         }
 
         let Some(message_id) = router.outbound.iter().find_map(|(message_id, entry)| {
-            (entry.message.method == DeliveryMethod::Propagated && entry.next_attempt_ms <= now_ms)
+            (entry.message().method == DeliveryMethod::Propagated
+                && entry.next_attempt_ms <= now_ms)
                 .then_some(*message_id)
         }) else {
             return Ok(output);
@@ -893,14 +887,14 @@ impl PropagationRuntime {
             .outbound
             .get(&message_id)
             .and_then(|entry| {
-                router.outbound_stamp_cost_at(&entry.message.destination_hash, now_unix)
+                router.outbound_stamp_cost_at(&entry.message().destination_hash, now_unix)
             })
             .filter(|cost| *cost > 0);
         if let Some(target_cost) = recipient_stamp_cost {
             if router
                 .outbound
                 .get(&message_id)
-                .is_some_and(|entry| entry.message.stamp.is_none())
+                .is_some_and(|entry| entry.message().stamp.is_none())
             {
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
                     entry.next_attempt_ms = now_ms.saturating_add(super::PROCESSING_INTERVAL_MS);
@@ -922,7 +916,7 @@ impl PropagationRuntime {
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
                     entry.next_attempt_ms = now_ms.saturating_add(super::PATH_REQUEST_WAIT_MS);
                     output.core.merge(
-                        node.request_path(&DestinationHash::new(entry.message.destination_hash)),
+                        node.request_path(&DestinationHash::new(entry.message().destination_hash)),
                     );
                 }
                 router.persistence_dirty = true;
@@ -934,7 +928,7 @@ impl PropagationRuntime {
         let target_cost = router
             .outbound
             .get(&message_id)
-            .and_then(|entry| entry.propagation.as_ref())
+            .and_then(super::OutboundEntry::propagation)
             .and_then(|prepared| prepared.target_cost);
         if target_cost.is_none() {
             // A legacy snapshot can contain a path without the corresponding
@@ -1009,7 +1003,7 @@ impl PropagationRuntime {
         let prepared = router
             .outbound
             .get(&message_id)
-            .and_then(|entry| entry.propagation.as_ref())
+            .and_then(super::OutboundEntry::propagation)
             .ok_or(RouterError::PropagationStampUnavailable)?;
         let stamp = prepared
             .stamp
@@ -1138,7 +1132,11 @@ impl PropagationRuntime {
 
 fn schedule_upload_retry(router: &mut LxmfRouter, message_id: [u8; 32], next_attempt_ms: u64) {
     if let Some(entry) = router.outbound.get_mut(&message_id) {
-        entry.state = super::MessageState::Outbound;
+        // Usually a no-op value-wise (the entry already is `Outbound`), and a
+        // no-op must not move the epoch: this runs every retry interval while
+        // a build is outstanding, and a bump per interval would refuse every
+        // build a consumer holds longer than one interval.
+        entry.set_state(super::MessageState::Outbound, &mut router.build_epochs);
         entry.next_attempt_ms = next_attempt_ms;
         entry.progress = 0.01;
         router.persistence_dirty = true;
@@ -1225,16 +1223,12 @@ impl LxmfRouter {
             for entry in self
                 .outbound
                 .values_mut()
-                .filter(|entry| entry.message.method == DeliveryMethod::Propagated)
+                .filter(|entry| entry.message().method == DeliveryMethod::Propagated)
             {
-                if let Some(prepared) = entry.propagation.as_mut() {
-                    queue_changed |= prepared.target_cost.is_some() || prepared.stamp.is_some();
-                    prepared.target_cost = None;
-                    prepared.stamp = None;
-                }
-                queue_changed |=
-                    entry.state != super::MessageState::Outbound || entry.next_attempt_ms != now_ms;
-                entry.state = super::MessageState::Outbound;
+                queue_changed |= entry.retarget_propagation(None, &mut self.build_epochs);
+                queue_changed |= entry
+                    .set_state(super::MessageState::Outbound, &mut self.build_epochs)
+                    || entry.next_attempt_ms != now_ms;
                 entry.next_attempt_ms = now_ms;
             }
             self.persistence_dirty |= queue_changed;

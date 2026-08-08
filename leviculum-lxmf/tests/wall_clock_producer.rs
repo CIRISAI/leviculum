@@ -407,8 +407,7 @@ fn prepared_propagation_upload_timebase_is_the_node_timebase() {
     let _ = router.tick(&mut node).expect("prepare the upload");
 
     let prepared = router.outbound()[&message_id]
-        .propagation
-        .as_ref()
+        .propagation()
         .expect("tick prepares the upload envelope");
     assert_eq!(
         prepared.timebase, INJECTED_UNIX as f64,

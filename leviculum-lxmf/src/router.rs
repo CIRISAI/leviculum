@@ -31,10 +31,13 @@ use crate::{
     ticket::{Ticket, TicketStore},
 };
 
+mod outbound;
 mod paper_runtime;
 mod propagation_runtime;
 #[cfg(feature = "pow")]
 mod stamp_runtime;
+use outbound::BuildEpochs;
+pub use outbound::OutboundEntry;
 use propagation_runtime::PropagationRuntime;
 pub use propagation_runtime::{
     PropagationClientConfig, PropagationClientState, PropagationSyncResult, PropagationSyncStatus,
@@ -125,6 +128,9 @@ pub struct PendingResourceBuild {
     /// The router's restore generation at capture time. A build made against a
     /// queue that has since been replaced is refused at commit (C9).
     restore_generation: u64,
+    /// The entry's build epoch at capture time. A build whose entry has since
+    /// changed `message`, `state` or `propagation` is refused at commit (C4).
+    build_epoch: u64,
     kind: PendingBuildKind,
 }
 
@@ -152,6 +158,7 @@ impl PendingResourceBuild {
     pub fn build(self, rng: &mut impl CryptoRngCore) -> Result<BuiltResource, RouterError> {
         let message_id = self.message_id;
         let restore_generation = self.restore_generation;
+        let build_epoch = self.build_epoch;
         let kind = match self.kind {
             PendingBuildKind::Delivery {
                 params,
@@ -170,6 +177,7 @@ impl PendingResourceBuild {
         Ok(BuiltResource {
             message_id,
             restore_generation,
+            build_epoch,
             kind,
         })
     }
@@ -181,6 +189,7 @@ impl PendingResourceBuild {
 pub struct BuiltResource {
     message_id: [u8; 32],
     restore_generation: u64,
+    build_epoch: u64,
     kind: BuiltKind,
 }
 
@@ -193,19 +202,6 @@ impl BuiltResource {
 enum BuiltKind {
     Delivery(Box<PreparedLxmfSend>),
     Upload(PreparedUpload),
-}
-
-#[derive(Debug, Clone)]
-pub struct OutboundEntry {
-    pub message: Message,
-    pub state: MessageState,
-    pub attempts: u8,
-    pub next_attempt_ms: u64,
-    pub progress: f32,
-    /// Recipient-encrypted bytes and the independent propagation-node stamp.
-    /// This is persisted so a restored queue never re-encrypts a message after
-    /// a propagation stamp has already been generated for its transient ID.
-    pub propagation: Option<OutboundPropagation>,
 }
 
 fn record_successful_submission_attempt(
@@ -329,8 +325,10 @@ pub enum RouterError {
     /// Distinct from the errors those paths already produce
     /// (`Node(Resource(TransferInProgress))`, `PropagationNodeUnavailable`,
     /// `PropagationStampUnavailable`), so a test can assert staleness itself
-    /// rather than any refusal. Nothing returns it yet: the guard that does is
-    /// batch B of Codeberg #196.
+    /// rather than any refusal. Returned by
+    /// [`LxmfRouter::commit_resource_build`] when the build fails any of its
+    /// three checks: restore generation, queue membership, build epoch
+    /// (Codeberg #196, C3/C4/C9).
     StaleBuild,
     /// The node's timebase is below the plausibility floor, so it has no wall
     /// clock and has learned none: it can only produce uptime seconds.
@@ -405,6 +403,12 @@ pub struct LxmfRouter {
     /// Deliberately not persisted: a restored counter would validate exactly
     /// the builds it exists to refuse.
     restore_generation: u64,
+    /// The one source every [`OutboundEntry`] build epoch is minted from.
+    /// Router-level and monotonic, so an epoch never repeats across entry
+    /// lifetimes — a per-entry counter would restart at cancel-plus-re-enqueue
+    /// of identical content and validate a pre-cancel build. Not persisted for
+    /// the same reason as the restore generation.
+    build_epochs: BuildEpochs,
     outbound_stamp_costs: StampCostMap,
     delivered_ids: BTreeMap<[u8; 32], f64>,
     processed_ids: BTreeMap<[u8; 32], f64>,
@@ -496,6 +500,7 @@ impl LxmfRouter {
             pending_builds: Vec::new(),
             builds_outstanding: BTreeSet::new(),
             restore_generation: 0,
+            build_epochs: BuildEpochs::default(),
             outbound_stamp_costs: BTreeMap::new(),
             delivered_ids: BTreeMap::new(),
             processed_ids: BTreeMap::new(),
@@ -736,14 +741,15 @@ impl LxmfRouter {
         let id = message.message_id;
         self.outbound.insert(
             id,
-            OutboundEntry {
+            OutboundEntry::new(
                 message,
-                state: MessageState::Outbound,
-                attempts: 0,
-                next_attempt_ms: now_ms,
-                progress: 0.01,
-                propagation: None,
-            },
+                MessageState::Outbound,
+                0,
+                now_ms,
+                0.01,
+                None,
+                &mut self.build_epochs,
+            ),
         );
         self.persistence_dirty = true;
         let mut output = RouterOutput {
@@ -787,7 +793,7 @@ impl LxmfRouter {
                 state: MessageState::Cancelled,
             }],
         };
-        if entry.message.method == DeliveryMethod::Propagated {
+        if entry.message().method == DeliveryMethod::Propagated {
             if let Some(mut propagation) = self.propagation.take() {
                 output
                     .core
@@ -814,12 +820,12 @@ impl LxmfRouter {
         now_ms: u64,
     ) -> Result<RouterOutput, RouterError> {
         let entry = self.outbound.get_mut(id).ok_or(RouterError::NotFound)?;
-        entry.message.set_stamp(stamp)?;
-        if entry.message.method == DeliveryMethod::Propagated {
+        entry.set_message_stamp(stamp, &mut self.build_epochs)?;
+        if entry.message().method == DeliveryMethod::Propagated {
             // Recipient delivery stamps are inside the encrypted transient
             // bytes. Any late change therefore invalidates the transient ID
             // and its independent propagation-node stamp.
-            entry.propagation = None;
+            entry.set_propagation(None, &mut self.build_epochs);
         }
         entry.next_attempt_ms = now_ms;
         self.next_job_ms = self.next_job_ms.min(now_ms);
@@ -839,9 +845,13 @@ impl LxmfRouter {
         params: UploadSendParams,
         data: Vec<u8>,
     ) {
+        let Some(entry) = self.outbound.get(&message_id) else {
+            return;
+        };
         self.pending_builds.push(PendingResourceBuild {
             message_id,
             restore_generation: self.restore_generation,
+            build_epoch: entry.build_epoch(),
             kind: PendingBuildKind::Upload { params, data },
         });
         self.builds_outstanding.insert(message_id);
@@ -897,7 +907,13 @@ impl LxmfRouter {
             // marker, if any, belongs to a build captured after the restore.
             return Err(RouterError::StaleBuild);
         }
-        if !self.outbound.contains_key(&message_id) {
+        let Some(entry) = self.outbound.get(&message_id) else {
+            self.builds_outstanding.remove(&message_id);
+            return Err(RouterError::StaleBuild);
+        };
+        if built.build_epoch != entry.build_epoch() {
+            // The entry changed `message`, `state` or `propagation` since the
+            // capture, so the built bytes or their target are superseded.
             self.builds_outstanding.remove(&message_id);
             return Err(RouterError::StaleBuild);
         }
@@ -910,9 +926,9 @@ impl LxmfRouter {
                     events: Vec::new(),
                 };
                 if let Some(entry) = self.outbound.get_mut(&message_id) {
-                    let representation = LxmfNode::representation(&entry.message);
+                    let representation = LxmfNode::representation(entry.message());
                     record_successful_submission_attempt(entry, &representation);
-                    entry.state = MessageState::Sending;
+                    entry.set_state(MessageState::Sending, &mut self.build_epochs);
                     self.persistence_dirty = true;
                 }
                 for ev in committed.events {
@@ -954,9 +970,9 @@ impl LxmfRouter {
         let current = self
             .outbound
             .get(&request.message_id)
-            .filter(|entry| entry.message.stamp.is_none())
+            .filter(|entry| entry.message().stamp.is_none())
             .and_then(|entry| {
-                self.outbound_stamp_cost_at(&entry.message.destination_hash, now_unix)
+                self.outbound_stamp_cost_at(&entry.message().destination_hash, now_unix)
             });
         if current != Some(request.target_cost) {
             return Err(RouterError::StaleStampRequest);
@@ -970,7 +986,7 @@ impl LxmfRouter {
         &self,
         id: &[u8; 32],
     ) -> Option<PropagationStampRequest> {
-        let propagation = self.outbound.get(id)?.propagation.as_ref()?;
+        let propagation = self.outbound.get(id)?.propagation()?;
         (propagation.stamp.is_none()).then_some(PropagationStampRequest {
             message_id: *id,
             transient_id: propagation.transient_id,
@@ -995,8 +1011,8 @@ impl LxmfRouter {
     {
         let entry = self.outbound.get(id)?;
         let target_cost =
-            self.outbound_stamp_cost_at(&entry.message.destination_hash, emission_secs(node))?;
-        (entry.message.stamp.is_none() && target_cost > 0).then_some(DeliveryStampRequest {
+            self.outbound_stamp_cost_at(&entry.message().destination_hash, emission_secs(node))?;
+        (entry.message().stamp.is_none() && target_cost > 0).then_some(DeliveryStampRequest {
             message_id: *id,
             target_cost,
         })
@@ -1010,17 +1026,18 @@ impl LxmfRouter {
         now_ms: u64,
     ) -> Result<RouterOutput, RouterError> {
         let entry = self.outbound.get_mut(id).ok_or(RouterError::NotFound)?;
-        if entry.message.method != DeliveryMethod::Propagated {
+        if entry.message().method != DeliveryMethod::Propagated {
             return Err(RouterError::UnsupportedMethod);
         }
-        let propagation = entry
-            .propagation
-            .as_mut()
-            .ok_or(RouterError::PropagationStampUnavailable)?;
-        if propagation.target_cost.is_none() {
+        if entry
+            .propagation()
+            .ok_or(RouterError::PropagationStampUnavailable)?
+            .target_cost
+            .is_none()
+        {
             return Err(RouterError::PropagationStampUnavailable);
         }
-        propagation.stamp = Some(stamp);
+        entry.set_propagation_stamp(stamp, &mut self.build_epochs);
         entry.next_attempt_ms = now_ms;
         self.next_job_ms = self.next_job_ms.min(now_ms);
         self.persistence_dirty = true;
@@ -1041,7 +1058,7 @@ impl LxmfRouter {
         let current = self
             .outbound
             .get(&request.message_id)
-            .and_then(|entry| entry.propagation.as_ref());
+            .and_then(OutboundEntry::propagation);
         if !current.is_some_and(|prepared| {
             prepared.transient_id == request.transient_id
                 && prepared.target_cost == Some(request.target_cost)
@@ -1124,8 +1141,8 @@ impl LxmfRouter {
         } = event
         {
             let needs_direct_link = self.outbound.values().any(|entry| {
-                entry.message.destination_hash == destination_hash.into_bytes()
-                    && LxmfNode::representation(&entry.message)
+                entry.message().destination_hash == destination_hash.into_bytes()
+                    && LxmfNode::representation(entry.message())
                         != Ok(DeliveryRepresentation::OpportunisticPacket)
             });
             if needs_direct_link {
@@ -1162,9 +1179,9 @@ impl LxmfRouter {
     fn wake_direct_outbound(&mut self, destination: DestinationHash, now_ms: u64) {
         let mut changed = false;
         for entry in self.outbound.values_mut() {
-            if entry.state == MessageState::Outbound
-                && entry.message.destination_hash == destination.into_bytes()
-                && LxmfNode::representation(&entry.message)
+            if entry.state() == MessageState::Outbound
+                && entry.message().destination_hash == destination.into_bytes()
+                && LxmfNode::representation(entry.message())
                     != Ok(DeliveryRepresentation::OpportunisticPacket)
                 && entry.next_attempt_ms > now_ms
             {
@@ -1195,16 +1212,16 @@ impl LxmfRouter {
                 if let Some(mut entry) = self.remove_outbound(&message_id) {
                     self.preemptive_path_requests.remove(&message_id);
                     self.persistence_dirty = true;
-                    entry.state = MessageState::Delivered;
-                    if entry.message.fields.iter().any(|(key, raw)| {
+                    entry.set_state(MessageState::Delivered, &mut self.build_epochs);
+                    if entry.message().fields.iter().any(|(key, raw)| {
                         *key == FIELD_TICKET
                             && Ticket::from_field_value(raw).is_ok_and(|ticket| {
                                 self.tickets
-                                    .contains_inbound(&entry.message.destination_hash, &ticket)
+                                    .contains_inbound(&entry.message().destination_hash, &ticket)
                             })
                     }) {
                         self.tickets
-                            .mark_delivered(entry.message.destination_hash, now_unix);
+                            .mark_delivered(entry.message().destination_hash, now_unix);
                     }
                     out.push(RouterEvent::MessageState {
                         message_id,
@@ -1219,7 +1236,7 @@ impl LxmfRouter {
                 if let Some(mut entry) = self.remove_outbound(&message_id) {
                     self.preemptive_path_requests.remove(&message_id);
                     self.persistence_dirty = true;
-                    entry.state = MessageState::Rejected;
+                    entry.set_state(MessageState::Rejected, &mut self.build_epochs);
                     out.push(RouterEvent::MessageState {
                         message_id,
                         state: MessageState::Rejected,
@@ -1231,9 +1248,8 @@ impl LxmfRouter {
                 if let Some(entry) = self.outbound.get_mut(&message_id) {
                     let next_attempt_ms =
                         entry.next_attempt_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
-                    changed = entry.state != MessageState::Outbound
+                    changed = entry.set_state(MessageState::Outbound, &mut self.build_epochs)
                         || entry.next_attempt_ms != next_attempt_ms;
-                    entry.state = MessageState::Outbound;
                     entry.next_attempt_ms = next_attempt_ms;
                 }
                 if changed {
@@ -1264,8 +1280,7 @@ impl LxmfRouter {
                 // later proof promotes it to DELIVERED, while a missing proof
                 // leaves it eligible for the normal router retries.
                 if let Some(entry) = self.outbound.get_mut(&message_id) {
-                    if entry.state != MessageState::Sent {
-                        entry.state = MessageState::Sent;
+                    if entry.set_state(MessageState::Sent, &mut self.build_epochs) {
                         self.persistence_dirty = true;
                     }
                 }
@@ -1483,7 +1498,7 @@ impl LxmfRouter {
             .outbound
             .iter()
             .filter_map(|(id, e)| {
-                (e.message.method != DeliveryMethod::Propagated && e.next_attempt_ms <= now_ms)
+                (e.message().method != DeliveryMethod::Propagated && e.next_attempt_ms <= now_ms)
                     .then_some(*id)
             })
             .collect();
@@ -1492,7 +1507,7 @@ impl LxmfRouter {
                 continue;
             };
             self.persistence_dirty = true;
-            let representation = LxmfNode::representation(&entry.message);
+            let representation = LxmfNode::representation(entry.message());
             let uses_direct_transport = matches!(
                 representation,
                 Ok(DeliveryRepresentation::DirectPacket | DeliveryRepresentation::DirectResource)
@@ -1504,7 +1519,7 @@ impl LxmfRouter {
             // mark a large Resource failed while bytes are still in flight.
             // Python LXMRouter likewise waits while a direct message remains
             // in the SENDING state.
-            if uses_direct_transport && entry.state == MessageState::Sending {
+            if uses_direct_transport && entry.state() == MessageState::Sending {
                 entry.next_attempt_ms = now_ms.saturating_add(PROCESSING_INTERVAL_MS);
                 self.outbound.insert(id, entry);
                 continue;
@@ -1513,7 +1528,7 @@ impl LxmfRouter {
             if entry.attempts >= MAX_DELIVERY_ATTEMPTS {
                 self.preemptive_path_requests.remove(&id);
                 self.builds_outstanding.remove(&id);
-                entry.state = MessageState::Failed;
+                entry.set_state(MessageState::Failed, &mut self.build_epochs);
                 output.events.push(RouterEvent::MessageState {
                     message_id: id,
                     state: MessageState::Failed,
@@ -1521,10 +1536,10 @@ impl LxmfRouter {
                 continue;
             }
             if let Some(target_cost) = entry
-                .message
+                .message()
                 .stamp
                 .is_none()
-                .then(|| self.outbound_stamp_cost_at(&entry.message.destination_hash, now_unix))
+                .then(|| self.outbound_stamp_cost_at(&entry.message().destination_hash, now_unix))
                 .flatten()
                 .filter(|cost| *cost > 0)
             {
@@ -1540,7 +1555,7 @@ impl LxmfRouter {
             }
 
             if representation == Ok(DeliveryRepresentation::OpportunisticPacket) {
-                let destination = DestinationHash::new(entry.message.destination_hash);
+                let destination = DestinationHash::new(entry.message().destination_hash);
                 let has_path = node.has_path(&destination);
 
                 // Python LXMRouter.handle_outbound() requests an unknown path
@@ -1596,34 +1611,40 @@ impl LxmfRouter {
                     self.outbound.insert(id, entry);
                     continue;
                 }
-                match self.node.resource_send_params(node, &entry.message) {
+                match self.node.resource_send_params(node, entry.message()) {
                     Ok(params) => {
+                        // The entry's writes come first, the epoch capture
+                        // second, so the build carries the epoch this tick
+                        // leaves behind. The state write is a no-op here and
+                        // must not advance it (a bump per re-emission would
+                        // refuse every build older than one retry interval).
+                        entry.set_state(MessageState::Outbound, &mut self.build_epochs);
+                        entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                         self.pending_builds.push(PendingResourceBuild {
                             message_id: id,
                             restore_generation: self.restore_generation,
+                            build_epoch: entry.build_epoch(),
                             kind: PendingBuildKind::Delivery {
                                 params,
-                                message: Box::new(entry.message.clone()),
+                                message: Box::new(entry.message().clone()),
                                 auto_compress: self.node.config().auto_compress_resources,
                             },
                         });
                         self.builds_outstanding.insert(id);
                         output.events.push(RouterEvent::ResourceBuildPending(id));
-                        entry.state = MessageState::Outbound;
-                        entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                         self.outbound.insert(id, entry);
                         continue;
                     }
                     Err(error) => Err(error),
                 }
             } else {
-                self.node.send(node, &entry.message)
+                self.node.send(node, entry.message())
             };
 
             match submitted {
                 Ok(sent) => {
                     record_successful_submission_attempt(&mut entry, &representation);
-                    entry.state = MessageState::Sending;
+                    entry.set_state(MessageState::Sending, &mut self.build_epochs);
                     entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                     output.core.merge(sent.core);
                     self.outbound.insert(id, entry);
@@ -1632,7 +1653,7 @@ impl LxmfRouter {
                     }
                 }
                 Err(LxmfNodeError::DirectLinkUnavailable) => {
-                    let destination = DestinationHash::new(entry.message.destination_hash);
+                    let destination = DestinationHash::new(entry.message().destination_hash);
                     match self.node.ensure_direct_link(node, destination) {
                         Ok((state, link)) => {
                             output.core.merge(link.core);
@@ -1772,7 +1793,7 @@ impl LxmfRouter {
         // persisted. Preserve durable retry and prepared-upload data, but make
         // every restored entry immediately eligible for a fresh attempt.
         for entry in self.outbound.values_mut() {
-            entry.state = MessageState::Outbound;
+            entry.set_state(MessageState::Outbound, &mut self.build_epochs);
             entry.next_attempt_ms = 0;
             entry.progress = 0.01;
         }
@@ -1814,17 +1835,17 @@ impl LxmfRouter {
         validate_ticket_count(&self.tickets, self.config.max_tickets)?;
 
         if self.outbound.iter().any(|(message_id, entry)| {
-            *message_id != entry.message.message_id
-                || !entry.message.timestamp.is_finite()
+            *message_id != entry.message().message_id
+                || !entry.message().timestamp.is_finite()
                 || !entry.progress.is_finite()
                 || !(0.0..=1.0).contains(&entry.progress)
-                || entry.message.method == DeliveryMethod::Paper
-                || (entry.message.method != DeliveryMethod::Propagated
-                    && entry.propagation.is_some())
-                || entry.propagation.as_ref().is_some_and(|propagation| {
+                || entry.message().method == DeliveryMethod::Paper
+                || (entry.message().method != DeliveryMethod::Propagated
+                    && entry.propagation().is_some())
+                || entry.propagation().is_some_and(|propagation| {
                     !propagation.timebase.is_finite()
                         || propagation.unstamped_lxmf.len() <= LXMF_OVERHEAD
-                        || propagation.unstamped_lxmf[..16] != entry.message.destination_hash
+                        || propagation.unstamped_lxmf[..16] != entry.message().destination_hash
                         || full_hash(&propagation.unstamped_lxmf) != propagation.transient_id
                         || (propagation.stamp.is_some() && propagation.target_cost.is_none())
                 })
@@ -1856,7 +1877,7 @@ impl LxmfRouter {
         Ok(())
     }
 
-    fn decode_snapshot(&self, data: &[u8]) -> Result<RestoredRouterState, RouterError> {
+    fn decode_snapshot(&mut self, data: &[u8]) -> Result<RestoredRouterState, RouterError> {
         let mut p = 0;
         if msgpack::array_len(data, &mut p)? != SNAPSHOT_FIELDS {
             return Err(RouterError::CorruptSnapshot);
@@ -1870,7 +1891,16 @@ impl LxmfRouter {
             return Err(RouterError::CorruptSnapshot);
         }
 
-        let outbound = decode_outbound(data, &mut p, self.config.max_outbound, snapshot_version)?;
+        // Restored entries get fresh epochs from the live counter. The epoch
+        // is deliberately not persisted: a restored value would validate a
+        // build captured before the restore.
+        let outbound = decode_outbound(
+            data,
+            &mut p,
+            self.config.max_outbound,
+            snapshot_version,
+            &mut self.build_epochs,
+        )?;
         let delivered_ids = decode_id_times(data, &mut p, self.config.max_delivered_ids)?;
         let processed_ids = decode_id_times(data, &mut p, self.config.max_processed_ids)?;
         let outbound_stamp_costs = decode_stamp_costs(data, &mut p, self.config.max_stamp_costs)?;
@@ -1933,7 +1963,7 @@ fn encode_outbound(
 ) -> Result<(), RouterError> {
     msgpack::array(out, entries.len());
     for entry in entries.values() {
-        let packed = entry.message.pack();
+        let packed = entry.message().pack();
         if u32::try_from(packed.len()).is_err()
             || packed.len() > max_snapshot_bytes.saturating_sub(out.len())
         {
@@ -1941,13 +1971,13 @@ fn encode_outbound(
         }
         msgpack::array(out, 8);
         msgpack::bin(out, &packed);
-        msgpack::uint(out, entry.message.method as u64);
-        msgpack::uint(out, entry.state as u64);
-        msgpack::uint(out, verification_value(entry.message.verification));
+        msgpack::uint(out, entry.message().method as u64);
+        msgpack::uint(out, entry.state() as u64);
+        msgpack::uint(out, verification_value(entry.message().verification));
         msgpack::uint(out, entry.attempts as u64);
         msgpack::uint(out, entry.next_attempt_ms);
         msgpack::f64(out, entry.progress as f64);
-        if let Some(propagation) = &entry.propagation {
+        if let Some(propagation) = entry.propagation() {
             if u32::try_from(propagation.unstamped_lxmf.len()).is_err()
                 || propagation.unstamped_lxmf.len() > max_snapshot_bytes.saturating_sub(out.len())
             {
@@ -1975,6 +2005,7 @@ fn decode_outbound(
     p: &mut usize,
     limit: usize,
     snapshot_version: u64,
+    epochs: &mut BuildEpochs,
 ) -> Result<BTreeMap<[u8; 32], OutboundEntry>, RouterError> {
     let count = decode_count(data, p, limit)?;
     let mut entries = BTreeMap::new();
@@ -2047,14 +2078,15 @@ fn decode_outbound(
         if entries
             .insert(
                 id,
-                OutboundEntry {
+                OutboundEntry::new(
                     message,
                     state,
                     attempts,
                     next_attempt_ms,
-                    progress: progress as f32,
+                    progress as f32,
                     propagation,
-                },
+                    epochs,
+                ),
             )
             .is_some()
         {
@@ -2515,7 +2547,7 @@ mod persistence_tests {
         let queued_id = queued.message_id;
         let _ = router.enqueue(&node, queued).unwrap();
         let outbound = router.outbound.get_mut(&queued_id).unwrap();
-        outbound.state = MessageState::Sending;
+        outbound.set_state(MessageState::Sending, &mut router.build_epochs);
         outbound.attempts = 3;
         outbound.next_attempt_ms = 98_765;
         outbound.progress = 0.625;
@@ -2557,7 +2589,7 @@ mod persistence_tests {
         let mut restored = router(config);
         restored.restore(&storage).expect("restore");
         for entry in original.outbound.values_mut() {
-            entry.state = MessageState::Outbound;
+            entry.set_state(MessageState::Outbound, &mut original.build_epochs);
             entry.next_attempt_ms = 0;
             entry.progress = 0.01;
         }
@@ -2850,7 +2882,7 @@ mod persistence_tests {
         let _ = router.enqueue(&node, queued).unwrap();
         let entry = router.outbound.get_mut(&id).expect("queued direct message");
         entry.attempts = MAX_DELIVERY_ATTEMPTS;
-        entry.state = MessageState::Sending;
+        entry.set_state(MessageState::Sending, &mut router.build_epochs);
         entry.next_attempt_ms = 1_000;
 
         let output = router.tick(&mut node).expect("tick");
@@ -2860,7 +2892,7 @@ mod persistence_tests {
             .expect("active direct delivery remains tracked");
 
         assert_eq!(entry.attempts, MAX_DELIVERY_ATTEMPTS);
-        assert_eq!(entry.state, MessageState::Sending);
+        assert_eq!(entry.state(), MessageState::Sending);
         assert_eq!(
             entry.next_attempt_ms,
             1_000_u64.saturating_add(PROCESSING_INTERVAL_MS)
@@ -2932,7 +2964,7 @@ mod persistence_tests {
             .get_mut(&id)
             .expect("queued direct fallback");
         entry.attempts = MAX_DELIVERY_ATTEMPTS;
-        entry.state = MessageState::Sending;
+        entry.set_state(MessageState::Sending, &mut router.build_epochs);
         entry.next_attempt_ms = 1_000;
 
         let output = router.tick(&mut node).expect("tick");
@@ -2942,7 +2974,7 @@ mod persistence_tests {
             .expect("active direct fallback remains tracked");
 
         assert_eq!(entry.attempts, MAX_DELIVERY_ATTEMPTS);
-        assert_eq!(entry.state, MessageState::Sending);
+        assert_eq!(entry.state(), MessageState::Sending);
         assert_eq!(
             entry.next_attempt_ms,
             1_000_u64.saturating_add(PROCESSING_INTERVAL_MS)
@@ -3016,7 +3048,7 @@ mod persistence_tests {
             &mut events,
         );
 
-        assert_eq!(router.outbound[&id].state, MessageState::Sent);
+        assert_eq!(router.outbound[&id].state(), MessageState::Sent);
         assert!(events.is_empty());
     }
 
@@ -3147,7 +3179,8 @@ mod persistence_tests {
         let id = queued.message_id;
         let _ = router.enqueue(&node, queued).unwrap();
         checkpoint(&mut router);
-        router.outbound.get_mut(&id).unwrap().state = MessageState::Sending;
+        let entry = router.outbound.get_mut(&id).unwrap();
+        entry.set_state(MessageState::Sending, &mut router.build_epochs);
 
         let mut failure_events = Vec::new();
         router.handle_node_event(
@@ -3164,7 +3197,7 @@ mod persistence_tests {
             events: failure_events,
         });
         let entry = router.outbound.get(&id).unwrap();
-        assert_eq!(entry.state, MessageState::Outbound);
+        assert_eq!(entry.state(), MessageState::Outbound);
         assert_eq!(
             entry.next_attempt_ms,
             node.now_ms() + DELIVERY_RETRY_WAIT_MS
@@ -3197,7 +3230,8 @@ mod persistence_tests {
         let id = queued.message_id;
         let _ = router.enqueue(&node, queued).unwrap();
         checkpoint(&mut router);
-        router.outbound.get_mut(&id).unwrap().state = MessageState::Sending;
+        let entry = router.outbound.get_mut(&id).unwrap();
+        entry.set_state(MessageState::Sending, &mut router.build_epochs);
 
         let mut events = Vec::new();
         router.handle_node_event(
@@ -3320,7 +3354,7 @@ mod persistence_tests {
                 .expect("attach queued stamp");
             let entry = router.outbound.get(&id).expect("queued entry");
             assert_eq!(
-                entry.message.stamp.as_deref(),
+                entry.message().stamp.as_deref(),
                 Some(&vec![seed; length][..])
             );
             assert_eq!(entry.next_attempt_ms, now_ms);
@@ -3342,7 +3376,7 @@ mod persistence_tests {
             Err(RouterError::Message(MessageError::InvalidFormat))
         ));
         let entry = router.outbound.get(&id).expect("queued entry");
-        assert!(entry.message.stamp.is_none());
+        assert!(entry.message().stamp.is_none());
         assert_eq!(entry.next_attempt_ms, node.now_ms());
     }
 
@@ -3363,7 +3397,7 @@ mod persistence_tests {
             router.set_outbound_stamp_result(&node, &stale, vec![0x46; STAMP_SIZE]),
             Err(RouterError::StaleStampRequest)
         ));
-        assert!(router.outbound[&message_id].message.stamp.is_none());
+        assert!(router.outbound[&message_id].message().stamp.is_none());
 
         let current = router
             .outbound_stamp_request(&node, &message_id)
@@ -3372,7 +3406,7 @@ mod persistence_tests {
             .set_outbound_stamp_result(&node, &current, vec![0x47; STAMP_SIZE])
             .expect("attach current result");
         assert_eq!(
-            router.outbound[&message_id].message.stamp.as_deref(),
+            router.outbound[&message_id].message().stamp.as_deref(),
             Some(&[0x47; STAMP_SIZE][..])
         );
     }
@@ -3386,34 +3420,27 @@ mod persistence_tests {
         let mut unstamped_lxmf = outbound.destination_hash.to_vec();
         unstamped_lxmf.extend_from_slice(&[0x91; 96]);
         let transient_id = full_hash(&unstamped_lxmf);
-        router.outbound.insert(
-            message_id,
-            OutboundEntry {
-                message: outbound,
-                state: MessageState::Outbound,
-                attempts: 0,
-                next_attempt_ms: 0,
-                progress: 0.01,
-                propagation: Some(OutboundPropagation {
-                    timebase: 1_700_000_000.0,
-                    unstamped_lxmf,
-                    transient_id,
-                    target_cost: Some(8),
-                    stamp: None,
-                }),
-            },
+        let entry = OutboundEntry::new(
+            outbound,
+            MessageState::Outbound,
+            0,
+            0,
+            0.01,
+            Some(OutboundPropagation {
+                timebase: 1_700_000_000.0,
+                unstamped_lxmf,
+                transient_id,
+                target_cost: Some(8),
+                stamp: None,
+            }),
+            &mut router.build_epochs,
         );
+        router.outbound.insert(message_id, entry);
         let stale = router
             .outbound_propagation_stamp_request(&message_id)
             .expect("detached request");
-        router
-            .outbound
-            .get_mut(&message_id)
-            .unwrap()
-            .propagation
-            .as_mut()
-            .unwrap()
-            .target_cost = Some(9);
+        let entry = router.outbound.get_mut(&message_id).unwrap();
+        entry.retarget_propagation(Some(9), &mut router.build_epochs);
 
         assert!(matches!(
             router.set_outbound_propagation_stamp_result(&stale, [0x92; STAMP_SIZE], 1_000),
@@ -3427,8 +3454,7 @@ mod persistence_tests {
             .expect("attach current result");
         assert_eq!(
             router.outbound[&message_id]
-                .propagation
-                .as_ref()
+                .propagation()
                 .and_then(|prepared| prepared.stamp),
             Some([0x93; STAMP_SIZE])
         );
@@ -3559,11 +3585,14 @@ mod persistence_tests {
 
         let entry = router.outbound.get(&message_id).expect("queued entry");
         assert_eq!(
-            entry.message.stamp.as_deref(),
+            entry.message().stamp.as_deref(),
             Some(&crate::stamp::ticket_stamp(&ticket.secret, &message_id)[..])
         );
-        assert_eq!(entry.message.stamp.as_ref().map(Vec::len), Some(16));
-        assert!(entry.propagation.is_none(), "outer stamp remains separate");
+        assert_eq!(entry.message().stamp.as_ref().map(Vec::len), Some(16));
+        assert!(
+            entry.propagation().is_none(),
+            "outer stamp remains separate"
+        );
     }
 
     #[test]
@@ -3583,17 +3612,16 @@ mod persistence_tests {
             target_cost: Some(11),
             stamp: Some([0x82; STAMP_SIZE]),
         };
-        original.outbound.insert(
-            message_id,
-            OutboundEntry {
-                message: outbound,
-                state: MessageState::Sending,
-                attempts: 2,
-                next_attempt_ms: 12_000,
-                progress: 0.4,
-                propagation: Some(propagation.clone()),
-            },
+        let entry = OutboundEntry::new(
+            outbound,
+            MessageState::Sending,
+            2,
+            12_000,
+            0.4,
+            Some(propagation.clone()),
+            &mut original.build_epochs,
         );
+        original.outbound.insert(message_id, entry);
         let mut storage = MemoryLxmfStorage::new(128 * 1024);
 
         original.persist(&mut storage).expect("persist v4 snapshot");
@@ -3602,14 +3630,14 @@ mod persistence_tests {
 
         assert_eq!(restored.next_job_ms, 0);
         let restored_entry = restored.outbound.get(&message_id).expect("restored entry");
-        assert_eq!(restored_entry.state, MessageState::Outbound);
+        assert_eq!(restored_entry.state(), MessageState::Outbound);
         assert_eq!(restored_entry.attempts, 2);
         assert_eq!(restored_entry.next_attempt_ms, 0);
         assert_eq!(restored_entry.progress, 0.01);
-        assert_eq!(restored_entry.propagation.as_ref(), Some(&propagation));
+        assert_eq!(restored_entry.propagation(), Some(&propagation));
         assert_eq!(
-            restored_entry.message.pack(),
-            original.outbound[&message_id].message.pack()
+            restored_entry.message().pack(),
+            original.outbound[&message_id].message().pack()
         );
     }
 
@@ -3645,9 +3673,9 @@ mod persistence_tests {
         source.restore(&storage).expect("restore v3 snapshot");
 
         let restored = source.outbound.get(&message_id).expect("restored message");
-        assert!(restored.propagation.is_none());
-        assert_eq!(restored.message.pack(), outbound.pack());
-        assert_eq!(restored.state, MessageState::Outbound);
+        assert!(restored.propagation().is_none());
+        assert_eq!(restored.message().pack(), outbound.pack());
+        assert_eq!(restored.state(), MessageState::Outbound);
         assert_eq!(restored.attempts, 3);
         assert_eq!(restored.next_attempt_ms, 0);
         assert_eq!(restored.progress, 0.01);
@@ -3668,7 +3696,7 @@ mod persistence_tests {
             .enqueue(&node, outbound)
             .expect("queue propagated message");
         let mut unstamped_lxmf = router.outbound[&message_id]
-            .message
+            .message()
             .destination_hash
             .to_vec();
         unstamped_lxmf.extend_from_slice(&[0xa1; 128]);
@@ -3679,7 +3707,8 @@ mod persistence_tests {
             target_cost: Some(8),
             stamp: Some([0xa2; STAMP_SIZE]),
         };
-        router.outbound.get_mut(&message_id).unwrap().propagation = Some(prepared.clone());
+        let entry = router.outbound.get_mut(&message_id).unwrap();
+        entry.set_propagation(Some(prepared.clone()), &mut router.build_epochs);
 
         let output = router
             .set_outbound_propagation_node(&mut node, Some(DestinationHash::new([0x92; 16])))
@@ -3687,13 +3716,13 @@ mod persistence_tests {
 
         assert_eq!(persistence_request_count(&output), 1);
         let entry = router.outbound.get(&message_id).expect("queued entry");
-        let after = entry.propagation.as_ref().expect("ciphertext retained");
+        let after = entry.propagation().expect("ciphertext retained");
         assert_eq!(after.timebase, prepared.timebase);
         assert_eq!(after.unstamped_lxmf, prepared.unstamped_lxmf);
         assert_eq!(after.transient_id, prepared.transient_id);
         assert_eq!(after.target_cost, None);
         assert_eq!(after.stamp, None);
-        assert_eq!(entry.state, MessageState::Outbound);
+        assert_eq!(entry.state(), MessageState::Outbound);
         assert_eq!(entry.next_attempt_ms, node.now_ms());
     }
 }
