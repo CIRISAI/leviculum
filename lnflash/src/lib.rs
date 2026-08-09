@@ -20,10 +20,9 @@
 //! Commit `362c1c2d` records a T114 image landing on a RAK4631 when that
 //! rule was absent.
 //!
-//! This module set is the pure-data half: the formats every later decision
-//! is read out of, and nothing that touches a device.
-
 pub mod ihex;
 pub mod infouf2;
+pub mod manifest;
 pub mod softdevice;
 pub mod uf2;
+pub mod usb;

@@ -8,4 +8,14 @@ homepage.workspace = true
 description = "Self-contained flasher for LNode boards — identifies a board from its bootloader, checks preconditions, and writes our firmware over UF2 mass storage"
 
 [dependencies]
+# The manifest is the only configuration surface, and it is declarative
+# data by design (docs/src/concepts/lnode-flashing.md, "Deliberately not").
+serde = { workspace = true }
+toml = { workspace = true }
+# Payload checksums. Nothing here is a security boundary — the bundle is
+# handed over as a unit — but a truncated download must not reach flash.
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
