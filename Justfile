@@ -47,6 +47,18 @@ spawn-coder:
     echo "[spawn-coder] bundle promoted to bridge: $BRIDGE/instructions.md"; \
     echo "[spawn-coder] source: $BRIDGE/auto-bug/instructions.md (left in place for re-promotion)"
 
+# Build the lnflash tarball a stranger can unpack and run:
+#   tar xzf lnflash-<version>.tar.gz && cd lnflash-<version> && sudo ./lnflash
+# Contains the musl-static binary, our T114 firmware, Nordic's SoftDevice
+# with LICENSE-NORDIC beside it, a manifest with checksums, and a
+# user-facing README. Everything comes from this checkout — a bundle built
+# out of a Meshtastic checkout is the hidden dependency our clone-and-deploy
+# policy forbids. Cross-compiles the firmware, so the first run takes
+# minutes; SKIP_FIRMWARE=1 reuses an existing ELF while iterating on the
+# bundle itself. Output under target/lnflash/.
+lnflash-bundle:
+    bash scripts/lnflash-bundle.sh
+
 # Lint the embedded firmware workspace. leviculum-nrf is its OWN cargo
 # workspace — `--workspace` invocations in the repo root never reach it,
 # which let 11 clippy findings accumulate unseen (audit 2026-06-11).
