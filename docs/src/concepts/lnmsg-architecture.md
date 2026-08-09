@@ -142,6 +142,23 @@ oversight is unclear. And the whole page is laid out eagerly on every
 relayout (`lnomad/src/tui.rs:910-934`), including on every keystroke in a
 form field (`:1657-1660`).
 
+**Scriptability, and the absence of settings.** `--print` fetches, renders
+and prints once (`print_once`, `lnomad/src/browser.rs:133-141`). Output is
+raw ANSI page text and nothing else: no link markers, no legend, and with
+`--no-color` links are indistinguishable from body text
+(`lnomad/src/render.rs:143-146`). There is no JSON output anywhere in the
+crate: `serde_json` is not a dependency. Non-interactive detection is
+automatic: `interactive = !args.print && stdin().is_terminal() &&
+stdout().is_terminal()` (`lnomad/src/main.rs:167-168`), so piping never
+blocks on the UI. Exit codes: 0 success, 1 operational failure, 2 argument
+or URL error (`lnomad/src/main.rs:174`, `:188`, `:222`, `:238`).
+
+`lnomad` has no settings file at all. `--config` points at the *Reticulum*
+config directory; the `lnomad/` directory holds only data. The theme is
+auto-detected via OSC 11 before raw mode is entered
+(`lnomad/src/tui.rs:5956-5963`) and toggled at runtime with `t`; theme
+colours are hard-coded (`lnomad/src/theme.rs:112-193`).
+
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
@@ -610,8 +627,7 @@ needs no UI at all.
 
 Non-interactive subcommands from the start, following `lnomad`'s automatic
 non-tty detection (`lnomad/src/main.rs:167-168`) and its exit-code
-convention (0 success, 1 operational failure, 2 argument or URL error,
-`lnomad/src/main.rs:174`):
+convention (0, 1, 2):
 
 ```
 lnmsg send <address> [--title T] [--attach F] [--via direct|propagated] [-]
