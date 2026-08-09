@@ -117,7 +117,9 @@ success, and blocks at or above it are rejected outright.
 Both bounds are measurable without reading a single constant, because
 the bootloader generates `CURRENT.UF2` from exactly that window. On both
 rig boards it covers `0x1000` to `0x000EA000`. So `USER_FLASH_START` is
-`0x1000`, one MBR page, and `USER_FLASH_END` is `0xEA000`.
+`0x1000`, one MBR page, and `USER_FLASH_END` is `0xEA000`. Nordic's own
+header agrees: `MBR_SIZE` is 4096, as carried through into the
+`nrf-softdevice-s140` bindings.
 
 The consequence is the important part: **the writable window opens
 directly above the MBR and includes the whole SoftDevice region.** An
@@ -158,6 +160,28 @@ reset button (commit `43d25830`).
 Our firmware links against S140 v7.x and places its application at
 `0x27000` (`leviculum-nrf/memory.x:15`). A board carrying S140 6.1.1
 puts the boundary at `0x26000` instead, so the version is not cosmetic.
+
+The bindings we compile against are generated from S140 **7.0.1**
+(`SD_VERSION = 7000001`, which decodes as major 7, minor 0, bugfix 1 —
+not 7.0.0 as `docs/ble5-broadcast-protocol3-spike.md:39` states). The
+boards run 7.3.0. That works because Nordic keeps the ABI stable within
+a major version, which is what makes `>=7.0.1, <8.0.0` the honest
+version constraint rather than a guess.
+
+### Reading the version without trusting the bootloader
+
+`INFO_UF2.TXT` is the convenient source, but it depends on the
+bootloader choosing to emit the line. The SoftDevice states its own
+version in flash, independently: `nrf_sdm.h` puts the info struct at
+offset `0x2000` above the MBR, with the version word `0x14` into it, so
+the absolute address is `0x3014`. The encoding is
+`major * 1000000 + minor * 1000 + bugfix`.
+
+That address sits inside the range `CURRENT.UF2` dumps, so it can be
+read without writing anything. Verified 2026-08-09 on both rig boards:
+the word reads `7003000`, decoding to S140 7.3.0 and agreeing exactly
+with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
+the two is immune to a bootloader too old to report the line at all.
 
 **The image lives outside this repo.** No SoftDevice binary, download
 URL or checksum is stored here; the crate dependency
@@ -246,20 +270,30 @@ The practical consequence: **the SoftDevice must not be linked into an
 `lnflash` binary via `include_bytes!`.** That would make it part of the
 executable and put the two licences in direct conflict. Shipping it
 alongside as a separate file, with `LICENSE-NORDIC` next to it, is
-ordinary aggregation and does not have that problem. The "one single
-binary" goal survives for our own firmware, which is ours to license,
-and stops at the SoftDevice.
+ordinary aggregation and does not have that problem.
+
+**Decided (2026-08-09): we ship it, as a separate file with its licence
+beside it.** Our own firmware images travel the same way, even though
+being ours they could be embedded. One payload layout beats a split
+where some images live inside the binary and others outside, and it is
+what makes the bundle below the extension point for new boards. The
+binary stays a single static executable; it just is not the only file.
 
 Note also that Meshtastic vendors the blob under GPL-3 without any
 accompanying Nordic notice, so their practice is not the precedent it
-was taken for; it fails clause 2 on its face.
+was taken for; it fails clause 2 on its face. The `nrf-softdevice`
+project is the counter-example worth copying: it is MIT/Apache licensed
+and places a `LICENSE-NORDIC` in every crate that carries Nordic
+material. Our copy of that licence is byte-identical to the one shipped
+with `nrf-softdevice-s140` (md5 `d86fff2d6237b5a565289c1fa208f1ec`),
+which settles its provenance — the file itself names no product or
+version. Note that project has no copyleft conflict to solve, so it
+demonstrates correct attribution, not that the AGPL question goes away.
 
-Two further details worth keeping straight. Converting the hex to UF2
-does not alter a byte, only the container, so it is hard to read as the
-"modification" clause 5 prohibits; still, distributing the untouched hex
-and converting at runtime avoids the question entirely. And the licence
-file itself names no product, so whoever vendors it must record which
-Nordic download it accompanied.
+One further detail. Converting the hex to UF2 does not alter a byte,
+only the container, so it is hard to read as the "modification" clause 5
+prohibits; still, distributing the untouched hex and converting at
+runtime avoids the question entirely.
 
 ## CURRENT.UF2 as a backup
 
@@ -303,16 +337,140 @@ application re-enumerated and that the bootloader drive is gone
 periodic `[FW_BUILD]` banner off the debug port and compare the git SHA,
 as `scripts/flash-lnodes-from-head.sh:133` does.
 
+## Structuring a flashing tool
+
+Everything above is mechanism. What follows is the shape a tool takes
+if it has to survive more boards than the two we support today.
+
+Start with how wide the field actually is. The Meshtastic tree carries
+162 variants, and they collapse onto very few flashing mechanisms:
+
+| chip family | variants | how it is flashed |
+| --- | --- | --- |
+| nRF52840 | 50 | UF2 mass storage |
+| RP2040 / RP2350 | 12 | UF2 mass storage |
+| ESP32 / S3 / C3 / C6 / S2 | 93 | ESP ROM bootloader over serial |
+| STM32 | 5 | its own path |
+
+**Two transports cover 155 of the 160 flashable variants**, and we
+already own both: the UF2 path in `leviculum-nrf/tools/uf2-runner.sh`
+and the ESP path behind `Justfile:575`, which drives `esptool`. The
+work is not building 162 things. It is separating two mechanisms
+cleanly and turning everything else into data.
+
+### Four axes, not one "board"
+
+Treating a board as one indivisible unit is the design mistake to
+avoid. A board is four independent answers, and a new device rarely
+changes all four:
+
+**Identify** — what is attached? For UF2 boards the truth is the
+`Board-ID` in `INFO_UF2.TXT`; for ESP32 it is the chip identity the ROM
+bootloader reports. Never the USB ID of the running application, which
+belongs to whatever firmware happens to be installed.
+
+**Enter** — how does it reach a programmable state? 1200-baud touch,
+physical double-tap, a DTR/RTS sequence on ESP32, BOOTSEL on RP2040.
+
+**Transport** — how do the bytes get in? The two above.
+
+**Verify** — did it take? Re-enumeration plus the `[FW_BUILD]` banner
+with a matching git SHA.
+
+Crossing all four sit **preconditions**. The SoftDevice version is the
+only one today; a bootloader minimum version would be the next. A
+precondition must be data that names its own remedy, never a special
+case in code.
+
+Separated this way, a new nRF or RP2040 board is data entry, and a new
+chip family costs exactly one new transport.
+
+### The bundle is the extension point
+
+Since third-party blobs cannot be linked in anyway, the payload lives
+beside the binary and the manifest describes it:
+
+```
+lnflash                     # board-agnostic binary
+firmware/
+  manifest.toml             # index, checksums, licences
+  t114/
+    leviculum-t114-0.8.0.uf2
+    s140_nrf52_7.3.0_softdevice.hex
+    LICENSE-NORDIC
+```
+
+```toml
+[board.t114]
+family      = "nrf52840"
+transport   = "uf2-msc"
+entry       = ["touch-1200", "double-tap"]
+identify    = { info_uf2_board_id = "HT-n5262" }
+app         = { file = "t114/leviculum-t114-0.8.0.uf2", sha256 = "..." }
+requires.softdevice = ">=7.0.1, <8.0.0"
+remedy.softdevice   = { file = "t114/s140_nrf52_7.3.0_softdevice.hex",
+                        license = "t114/LICENSE-NORDIC",
+                        convert = "hex-to-uf2" }
+```
+
+A new board then needs no new binary. The `license` field is not
+bureaucracy: it makes shipping a third-party blob without its licence
+impossible by construction, which is exactly the mistake described
+above. Board names stay identical to the firmware-side ones in
+`leviculum-nrf/src/boards/mod.rs:11`, so that two namespaces never
+diverge.
+
+### Identify in two stages, write only after
+
+Before entering the bootloader we know only "some USB device". The
+reliable identity exists only afterwards. The order is therefore:
+find candidates, enter, **confirm identity there**, check
+preconditions, check the checksum, and only then write. No write may
+rest on a guessed identity. Commit `362c1c2d` records why: a T114 image
+once landed on a RAK4631 during bring-up. Several devices on the bus
+must each be resolved individually rather than assuming "the one UF2
+drive".
+
+### The real bottleneck is not the tool
+
+A manifest invites the belief that the whole palette is a matter of
+configuration lines. It is not. **Our firmware supports exactly two
+boards today**, `bsp-t114` and `bsp-rak4631`. A manifest entry without a
+matching firmware build is an empty promise, and a LoRa board needs more
+than an entry: pin mapping, TCXO voltage, SPI frequency and maximum
+transmit power all live in `BoardConfig` and have to be right per device
+and measured.
+
+The structure should therefore follow the firmware side's growth rather
+than anticipate it. The value appears immediately and independently of
+it: a tool that identifies a board reliably, checks the SoftDevice
+precondition, and says "I do not know this board" instead of writing to
+it is what is missing today.
+
+### Deliberately not
+
+No plugin system with shared libraries; it contradicts the statically
+linked binary. No scripting language in the manifest — such fields
+become a programming language within a year; when declarative data is
+not enough, the answer is a new transport in Rust. And no fetching
+firmware from the network: it contradicts "no infrastructure" and adds
+an attack surface to a tool that overwrites other people's devices with
+root privileges.
+
+The structure proves itself on the second board, not the first. Building
+the UF2 transport for the T114 alone, but already split along the four
+axes and driven by the manifest, is only a claim until the RAK4631 —
+same transport, different board ID, different bootloader — runs through
+without a code change.
+
 ## Open questions
 
 - Does the touch handler exist in Meshcore, microReticulum or RNode
   firmware on nRF? Unmeasured; assume no, and fall back to the
   double-tap prompt.
-- Do we vendor the SoftDevice as a separate file with its licence
-  alongside, or point users at Nordic's download? Either is defensible;
-  linking it into a binary is not. Until one is chosen, the image is
-  reachable only through a Meshtastic checkout, which is exactly the
-  hidden dependency the clone-and-deploy policy forbids.
+- Nothing further on the SoftDevice. Provenance, version constraint and
+  the two independent ways to read the installed version are settled
+  above.
 - Whether boards leaving the factory *today* still carry 6.1.1 is
   unknown; the measured board is one unit from one batch. A tool must
   read `INFO_UF2.TXT` and decide, never assume a version.
