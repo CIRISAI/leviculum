@@ -223,6 +223,44 @@ harmless, since the MBR is already present and identical, but it means
 an application-family UF2 can never replace an MBR, and a report that
 counts copied blocks is not evidence that all of them landed.
 
+### Why we cannot simply ship it
+
+The SoftDevice is under Nordic's five-clause BSD variant, and two of
+those clauses decide the architecture of any flashing tool we build.
+This is a reading of the licence text, not legal advice.
+
+Clause 2 permits redistribution in binary form, provided the copyright
+notice, the conditions and the disclaimer travel with the distribution.
+Clause 4 restricts use to Nordic silicon, which our case satisfies.
+Clause 3 is trivially satisfiable. So handing the blob to a user is
+allowed, as long as the licence goes with it.
+
+The obstacle is the combination with our own licence. Clause 4 limits
+what the software may be used *for*, and clause 5 forbids modification,
+decompilation and disassembly outright. AGPL-3.0 grants every recipient
+the right to use and modify the whole work for any purpose, and permits
+no additional restrictions of that kind. A blob carrying clauses 4 and 5
+therefore cannot become part of one combined work with AGPL code.
+
+The practical consequence: **the SoftDevice must not be linked into an
+`lnflash` binary via `include_bytes!`.** That would make it part of the
+executable and put the two licences in direct conflict. Shipping it
+alongside as a separate file, with `LICENSE-NORDIC` next to it, is
+ordinary aggregation and does not have that problem. The "one single
+binary" goal survives for our own firmware, which is ours to license,
+and stops at the SoftDevice.
+
+Note also that Meshtastic vendors the blob under GPL-3 without any
+accompanying Nordic notice, so their practice is not the precedent it
+was taken for; it fails clause 2 on its face.
+
+Two further details worth keeping straight. Converting the hex to UF2
+does not alter a byte, only the container, so it is hard to read as the
+"modification" clause 5 prohibits; still, distributing the untouched hex
+and converting at runtime avoids the question entirely. And the licence
+file itself names no product, so whoever vendors it must record which
+Nordic download it accompanied.
+
 ## CURRENT.UF2 as a backup
 
 The bootloader exposes the installed flash as `CURRENT.UF2`, 1.9 MB
@@ -270,11 +308,11 @@ as `scripts/flash-lnodes-from-head.sh:133` does.
 - Does the touch handler exist in Meshcore, microReticulum or RNode
   firmware on nRF? Unmeasured; assume no, and fall back to the
   double-tap prompt.
-- May we ship the Nordic SoftDevice blob ourselves? Meshtastic vendors
-  it under GPL-3, which is precedent rather than a licence reading. Until
-  that is settled, the image is reachable only through a Meshtastic
-  checkout, which is a hidden dependency the clone-and-deploy policy does
-  not tolerate.
+- Do we vendor the SoftDevice as a separate file with its licence
+  alongside, or point users at Nordic's download? Either is defensible;
+  linking it into a binary is not. Until one is chosen, the image is
+  reachable only through a Meshtastic checkout, which is exactly the
+  hidden dependency the clone-and-deploy policy forbids.
 - Whether boards leaving the factory *today* still carry 6.1.1 is
   unknown; the measured board is one unit from one batch. A tool must
   read `INFO_UF2.TXT` and decide, never assume a version.
