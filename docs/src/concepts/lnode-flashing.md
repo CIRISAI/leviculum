@@ -118,8 +118,8 @@ Both bounds are measurable without reading a single constant, because
 the bootloader generates `CURRENT.UF2` from exactly that window. On both
 rig boards it covers `0x1000` to `0x000EA000`. So `USER_FLASH_START` is
 `0x1000`, one MBR page, and `USER_FLASH_END` is `0xEA000`. Nordic's own
-header agrees: `MBR_SIZE` is 4096, as carried through into the
-`nrf-softdevice-s140` bindings.
+`nrf_mbr.h` agrees: `#define MBR_SIZE (0x1000)`, carried through into
+the `nrf-softdevice-s140` bindings as 4096.
 
 The consequence is the important part: **the writable window opens
 directly above the MBR and includes the whole SoftDevice region.** An
@@ -183,14 +183,28 @@ the word reads `7003000`, decoding to S140 7.3.0 and agreeing exactly
 with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
 the two is immune to a bootloader too old to report the line at all.
 
-**The image lives outside this repo.** No SoftDevice binary, download
-URL or checksum is stored here; the crate dependency
+**The image is not part of this repo's source.** The crate dependency
 (`leviculum-nrf/Cargo.toml:76`) supplies Rust bindings, not the blob.
-The only copy on our machines is inside the Meshtastic firmware checkout
-at `~/coding/meshtastic/bin/s140_nrf52_7.3.0_softdevice.hex`, present on
-both hosts. Parsed, it covers `0x0`-`0xB00` (MBR) and
-`0x1000`-`0x26498` (the SoftDevice itself, 149 KiB), which lands exactly
-below our `0x27000` origin once page-aligned.
+The authoritative copy is Nordic's own distribution, downloaded
+2026-08-10 to `~/coding/s140_nrf52_730/`, containing
+`s140_nrf52_7.3.0_softdevice.hex` (md5
+`29013ba2d0507c25f62dffa96b6c67af`), the API headers, release notes and
+`s140_nrf52_7.3.0_license-agreement.txt`. Parsed, the hex covers
+`0x0`-`0xB00` (MBR) and `0x1000`-`0x26498` (the SoftDevice itself,
+149 KiB), which lands exactly below our `0x27000` origin once
+page-aligned.
+
+For a while the only copy on our machines was inside a Meshtastic
+checkout. That copy is authentic — byte-identical after stripping CR,
+both files 9726 lines — but it had been converted to LF, whereas
+Nordic ships CRLF. Two consequences: an Intel-HEX parser must handle
+both, and the vendored image should be Nordic's original so that no
+build path leads through somebody else's repository.
+
+Nordic's headers also settle two constants this page derived by other
+means. `nrf_mbr.h` defines `MBR_SIZE (0x1000)`, and `nrf_sdm.h` gives
+`SD_MAJOR_VERSION 7`, `SD_MINOR_VERSION 3`, `SD_BUGFIX_VERSION 0` —
+encoding to exactly the `7003000` both rig boards report from `0x3014`.
 
 ### The mismatch is a soft brick, not a dead board
 
@@ -273,21 +287,29 @@ alongside as a separate file, with `LICENSE-NORDIC` next to it, is
 ordinary aggregation and does not have that problem.
 
 **Decided (2026-08-09): we ship it, as a separate file with its licence
-beside it.** Our own firmware images travel the same way, even though
+beside it**, sourced from Nordic's own distribution rather than a
+third-party checkout. Our own firmware images travel the same way, even though
 being ours they could be embedded. One payload layout beats a split
 where some images live inside the binary and others outside, and it is
 what makes the bundle below the extension point for new boards. The
 binary stays a single static executable; it just is not the only file.
+
+**Ship Nordic's own licence file, not a copy of the text.** The
+distribution includes `s140_nrf52_7.3.0_license-agreement.txt`, and it
+differs from the widely circulated `LICENSE-NORDIC` in exactly one line:
+its notice reads `Copyright (c) 2007 - 2020, Nordic Semiconductor ASA`
+where the other says only `Copyright (c) Nordic Semiconductor ASA`.
+Clause 2 obliges us to reproduce *the above copyright notice*, so the
+file that travels with the blob should be the one Nordic shipped
+alongside it. It also names its own product and version, which the
+circulated variant does not.
 
 Note also that Meshtastic vendors the blob under GPL-3 without any
 accompanying Nordic notice, so their practice is not the precedent it
 was taken for; it fails clause 2 on its face. The `nrf-softdevice`
 project is the counter-example worth copying: it is MIT/Apache licensed
 and places a `LICENSE-NORDIC` in every crate that carries Nordic
-material. Our copy of that licence is byte-identical to the one shipped
-with `nrf-softdevice-s140` (md5 `d86fff2d6237b5a565289c1fa208f1ec`),
-which settles its provenance — the file itself names no product or
-version. Note that project has no copyleft conflict to solve, so it
+material. That project has no copyleft conflict to solve, so it
 demonstrates correct attribution, not that the AGPL question goes away.
 
 One further detail. Converting the hex to UF2 does not alter a byte,
@@ -409,7 +431,7 @@ identify    = { info_uf2_board_id = "HT-n5262" }
 app         = { file = "t114/leviculum-t114-0.8.0.uf2", sha256 = "..." }
 requires.softdevice = ">=7.0.1, <8.0.0"
 remedy.softdevice   = { file = "t114/s140_nrf52_7.3.0_softdevice.hex",
-                        license = "t114/LICENSE-NORDIC",
+                        license = "t114/s140_nrf52_7.3.0_license-agreement.txt",
                         convert = "hex-to-uf2" }
 ```
 
