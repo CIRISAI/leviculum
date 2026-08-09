@@ -11,6 +11,7 @@ members = [
     "leviculum-ffi",
     "leviculum-cli",
     "leviculum-proxy",
+    "lnflash",
 ]
 
 # leviculum-ffi is a gnu-target cdylib (built via the `build-ffi` alias). It is
@@ -27,6 +28,7 @@ default-members = [
     "leviculum-std",
     "leviculum-cli",
     "leviculum-proxy",
+    "lnflash",
 ]
 
 # leviculum-nrf requires cross-compilation (thumbv7em-none-eabihf) and
