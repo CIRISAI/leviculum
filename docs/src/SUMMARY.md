@@ -17,6 +17,11 @@
 - [Time and clocks](concepts/time-and-clocks.md)
 - [Wire field semantics](concepts/wire-field-semantics.md)
 - [Regulatory airtime](concepts/regulatory-airtime.md)
+- [lnmsg: a terminal LXMF messenger](concepts/lnmsg.md)
+  - [lnmsg: architecture](concepts/lnmsg-architecture.md)
+  - [lnmsg: the user interface](concepts/lnmsg-ui.md)
+  - [lnmsg: conversation storage](concepts/lnmsg-storage.md)
+  - [lnmsg: the mailbox, and who you talk to](concepts/lnmsg-mailbox.md)
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 - [Checks that are actually checks](concepts/checks-and-citations.md)
 
