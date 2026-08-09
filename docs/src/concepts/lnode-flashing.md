@@ -485,6 +485,41 @@ axes and driven by the manifest, is only a claim until the RAK4631 —
 same transport, different board ID, different bootloader — runs through
 without a code change.
 
+## Verified on hardware
+
+The factory path was exercised end to end on 2026-08-10, on the T114 with
+serial `183004F712B4A7FE`, using the tarball rather than the repo build.
+
+A genuine factory state was reconstructed rather than waited for: the
+6.1.1 SoftDevice was extracted from Meshtastic's combined hex and
+trimmed to the window `0x1000`-`0x27000`, which drops 11 MBR blocks and
+**135 blocks that would have written bootloader, bootloader settings and
+UICR**. Without that trim the bootloader rejects those blocks and the
+whole copy fails; had it accepted them, it would have been the brick
+path. The board then went dark exactly as predicted, and did not stay in
+DFU — a physical double-tap was required, confirming the 2026-08-08
+observation.
+
+From there the tool ran unattended: it read `SoftDevice 6.1.1` with
+bootloader and flash agreeing, found `>=7.0.1, <8.0.0` violated,
+installed the SoftDevice (608 blocks, 11 declined), and then — the part
+worth naming — the board rebooted into the *old* application, which now
+booted because its base finally matched the installed SoftDevice. The
+tool touched it back into the bootloader, re-read the version as 7.3.0,
+and wrote the current application. That re-entry is the step a naive
+implementation gets wrong by answering "wait for the bootloader" with the
+pre-reboot sysfs entry.
+
+That the application runs at all is the independent proof that the
+SoftDevice is 7.3.0: an image based at `0x27000` cannot start on 6.1.1.
+The board was confirmed afterwards over the debug port at
+`git_sha=d82ccfc` with LoRa cycling normally.
+
+Also confirmed in the same session: a board already sitting in its
+bootloader is handled without a redundant touch, several devices on one
+bus are resolved individually, and a RAK4631 on the same hub is neither
+offered nor written to, because it has no manifest entry.
+
 ## Open questions
 
 - Does the touch handler exist in Meshcore, microReticulum or RNode
