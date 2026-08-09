@@ -79,6 +79,30 @@ pub fn wait_for_bootloader(
     }
 }
 
+/// Wait for a device to leave the bus.
+///
+/// Needed because a board that reboots is still listed in sysfs for a
+/// moment afterwards. Without this, "wait for the bootloader" answers
+/// instantly with the pre-reboot entry, and the next mount lands on a
+/// device that is in the middle of going away. Returns `false` if it never
+/// left, which is itself a fact the caller may act on.
+pub fn wait_until_gone(sysfs: &Sysfs, device: &Device, within: Duration) -> io::Result<bool> {
+    let deadline = Instant::now() + within;
+    loop {
+        let still_there = sysfs
+            .devices()?
+            .iter()
+            .any(|d| d.name == device.name && d.id == device.id);
+        if !still_there {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// Wait for an application to come back on one of `ids`, for the verify
 /// step. Same correlation rule, no drive expected.
 pub fn wait_for_application(
@@ -176,6 +200,32 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn a_device_still_on_the_bus_is_not_reported_as_gone() {
+        // The trap this closes: a board that just rebooted is still listed
+        // for a moment, so "wait for the bootloader" would answer instantly
+        // with the entry that is on its way out.
+        let sysfs = Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+        let boot = sysfs
+            .devices_matching(&[UsbId::new(0x239a, 0x0071)])
+            .unwrap()
+            .remove(0);
+        assert!(!wait_until_gone(&sysfs, &boot, Duration::from_millis(300)).unwrap());
+    }
+
+    #[test]
+    fn a_device_that_is_not_there_reads_as_gone_immediately() {
+        let sysfs = Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+        let mut absent = sysfs
+            .devices_matching(&[UsbId::new(0x239a, 0x0071)])
+            .unwrap()
+            .remove(0);
+        absent.name = "9-9.9".into();
+        let started = Instant::now();
+        assert!(wait_until_gone(&sysfs, &absent, Duration::from_secs(30)).unwrap());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

@@ -702,6 +702,10 @@ fn back_to_bootloader(
 ) -> Result<Device, Error> {
     let board = manifest.board(board_name)?;
     let ids = board.bootloader_ids(board_name)?;
+    // Let the drive we just wrote go away first. Without this the wait below
+    // answers instantly with the pre-reboot sysfs entry and the next mount
+    // lands on a device in the middle of detaching.
+    entry::wait_until_gone(sysfs, was, opts.appear_within)?;
     if let Some(found) = entry::wait_for_bootloader(sysfs, &ids, Some(was), opts.appear_within)? {
         return Ok(found);
     }
@@ -739,6 +743,10 @@ fn verify_boot(
 ) -> Result<Verdict, Error> {
     let board = confirmed.board();
     let ids = board.candidate_ids(confirmed.name())?;
+    // The bootloader drive going away is the first half of "it took"; the
+    // application coming back is the second. Waiting for the first also
+    // keeps a stale sysfs entry from answering the second.
+    entry::wait_until_gone(sysfs, was, opts.appear_within)?;
     let Some(app) = entry::wait_for_application(sysfs, &ids, Some(was), opts.appear_within)? else {
         ui.say(&format!("{port}: the application never came back."));
         return Ok(Verdict::Absent);
