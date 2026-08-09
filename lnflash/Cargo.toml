@@ -16,6 +16,16 @@ toml = { workspace = true }
 # handed over as a unit — but a truncated download must not reach flash.
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+# termios for the 1200-baud touch, mount(2) for the bootloader drive: "no
+# external programs" means syscalls, not stty and mount(8).
+libc = { workspace = true }
+# Scratch mount point for the bootloader drive, and bundle fixtures in tests.
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bin]]
+name = "lnflash"
+path = "src/main.rs"
