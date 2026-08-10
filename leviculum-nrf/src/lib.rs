@@ -24,6 +24,12 @@ pub mod interface;
 pub mod log;
 pub mod lora;
 pub mod rng;
+// T114 ST7789 status display — rides with the BSP (not the V2's
+// `display` feature): the panel is write-only, presence detection is
+// impossible, and blind-driving it is safe on panel-less boards, so one
+// t114 UF2 serves both populations. See `st7789.rs` module docs.
+#[cfg(feature = "bsp-t114")]
+pub mod st7789;
 pub mod sx1262;
 pub mod usb;
 
@@ -86,6 +92,7 @@ pub fn set_irq_priorities() {
     Interrupt::TWISPI0.set_priority(Priority::P5);
     Interrupt::SAADC.set_priority(Priority::P5);
     Interrupt::SPI2.set_priority(Priority::P5);
+    Interrupt::SPIM3.set_priority(Priority::P5);
     Interrupt::UARTE0.set_priority(Priority::P5);
 
     // GPIOTE + RTC1 already at P2 via embassy_nrf config; assert
@@ -104,12 +111,13 @@ pub fn log_irq_priorities() {
     log::log_fmt_critical(
         "[NVIC_PRIO] ",
         format_args!(
-            "rng={:?} usbd={:?} twispi0={:?} saadc={:?} spi2={:?} uarte0={:?} gpiote={:?} rtc1={:?}",
+            "rng={:?} usbd={:?} twispi0={:?} saadc={:?} spi2={:?} spim3={:?} uarte0={:?} gpiote={:?} rtc1={:?}",
             Interrupt::RNG.get_priority(),
             Interrupt::USBD.get_priority(),
             Interrupt::TWISPI0.get_priority(),
             Interrupt::SAADC.get_priority(),
             Interrupt::SPI2.get_priority(),
+            Interrupt::SPIM3.get_priority(),
             Interrupt::UARTE0.get_priority(),
             Interrupt::GPIOTE.get_priority(),
             Interrupt::RTC1.get_priority(),

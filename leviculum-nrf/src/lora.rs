@@ -22,15 +22,14 @@ use static_cell::StaticCell;
 use crate::sx1262::Sx1262;
 
 /// Cumulative count of LoRa frames successfully transmitted at the radio
-/// boundary (one increment per `[LORA] TX done`). Read by the OLED status
-/// task on RAK4631 baseboard builds.
-#[cfg(feature = "display")]
+/// boundary (one increment per `[LORA] TX done`). Read by the status
+/// display tasks (SSD1306 on the Pocket V2, ST7789 on the T114); two
+/// always-present atomics cost nothing on display-less builds.
 pub static LORA_TX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Cumulative count of fully reassembled LoRa packets handed off to NodeCore
 /// (one increment per `[LORA] RX … bytes` followed by a successful
 /// reassembler feed).
-#[cfg(feature = "display")]
 pub static LORA_RX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 // SPIM2, works on T114 (SPIM3 has a MISO read bug)
@@ -416,11 +415,9 @@ async fn transmit_all_frames(
     let tx_ms = tx_start.elapsed().as_millis();
     if tx_ok {
         crate::log::log_fmt("[LORA] ", format_args!("TX done"));
+        LORA_TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "display")]
-        {
-            LORA_TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            crate::baseboard::LORA_TX_FLASH.signal(());
-        }
+        crate::baseboard::LORA_TX_FLASH.signal(());
     }
     crate::log::log_fmt(
         "[T114_LORA_LOOP] ",
@@ -476,11 +473,9 @@ async fn rx_once(
                         status.snr
                     ),
                 );
+                LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 #[cfg(feature = "display")]
-                {
-                    LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    crate::baseboard::LORA_RX_FLASH.signal(());
-                }
+                crate::baseboard::LORA_RX_FLASH.signal(());
                 let plen = data.len();
                 let d = data.as_slice();
                 let m = d.len().min(8);

@@ -16,7 +16,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select4, Either4};
-use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_nrf::gpio::Level;
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
 
@@ -109,7 +109,9 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    let _vext = Output::new(p.P0_21, Level::Low, OutputDrive::Standard);
+    // VEXT (P0.21) is owned by the display task, which drives it HIGH:
+    // both references power the TFT chain from that rail at boot
+    // (Meshtastic main.cpp "turn on the display power"; RNode setup()).
     let mut led = t114::led(p.P1_03);
 
     let rng = leviculum_nrf::rng::RawHwRng::new();
@@ -233,6 +235,32 @@ async fn main(spawner: Spawner) {
     );
     let ble_channels = leviculum_nrf::ble::channels();
     info!("BLE ready");
+
+    // ST7789 status display — blind-driven (the panel is write-only, no
+    // probe possible; see leviculum_nrf::st7789 module docs). Safe and
+    // default-on for panel-less boards, so this single UF2 serves both
+    // populations. The task owns the VEXT/VTFT power rails. The cfg only
+    // exists because the workspace-wide clippy run also checks this bin
+    // under the rak4631 feature set; the real t114 build always has it.
+    #[cfg(feature = "bsp-t114")]
+    {
+        leviculum_nrf::st7789::init(
+            &spawner,
+            leviculum_nrf::st7789::TftWiring {
+                spi: p.SPI3,
+                sck: p.P1_08,
+                mosi: p.P1_09,
+                cs: p.P0_11,
+                dc: p.P0_12,
+                rst: p.P0_02,
+                vext: p.P0_21,
+                vtft: p.P0_03,
+                leda: p.P0_15,
+            },
+            identity_hash,
+        );
+        info!("display task spawned (ST7789 blind-drive)");
+    }
 
     let (hu, hf) = leviculum_nrf::heap_stats();
     let sf = leviculum_nrf::stack_free();

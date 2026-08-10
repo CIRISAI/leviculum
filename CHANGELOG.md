@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The T114 firmware drives the board's optional ST7789 TFT with the same
+  status screen the WisMesh Pocket V2 shows, blind and default-on (the
+  write-only panel cannot be probed), painted by a shared host-tested
+  crate with dirty-rectangle SPI updates.
+
 - A TCP server interface configured with port 0 reports its kernel-assigned
   address: `tcp_listen_addrs()` on the node, `lev_tcp_listen_addr` in the C
   API (Codeberg #221).

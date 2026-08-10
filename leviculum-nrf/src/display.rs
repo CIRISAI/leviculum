@@ -22,13 +22,7 @@ use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{Duration, Timer};
 
-use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
-    pixelcolor::BinaryColor,
-    prelude::*,
-    primitives::{PrimitiveStyle, Rectangle},
-    text::{Baseline, Text},
-};
+use leviculum_screen::{ident_short, BatteryStatus, FrameKey, GnssStatus, StatusModel};
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 use static_cell::StaticCell;
 
@@ -109,17 +103,6 @@ async fn detect(twim: &mut Twim<'_>) -> Detected {
     }
 }
 
-/// Format the identity hash as 10 hex chars (5 bytes).
-fn ident_short(hash: &[u8; 16]) -> heapless::String<10> {
-    let mut s: heapless::String<10> = heapless::String::new();
-    let hex = b"0123456789abcdef";
-    for b in &hash[..5] {
-        let _ = s.push(hex[(*b >> 4) as usize] as char);
-        let _ = s.push(hex[(*b & 0x0F) as usize] as char);
-    }
-    s
-}
-
 #[embassy_executor::task]
 pub async fn display_task(
     twispi0: Peri<'static, peripherals::TWISPI0>,
@@ -181,10 +164,6 @@ pub async fn display_task(
         }
     };
 
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
-        .text_color(BinaryColor::On)
-        .build();
     let id_short = ident_short(&identity_hash);
 
     // Receivers for shared baseboard state — held outside the loop so the
@@ -208,30 +187,9 @@ pub async fn display_task(
         .expect("DISPLAY_ON_REQ watch capacity (display reader)");
     let mut display_on = true;
 
-    // Frame key — when nothing relevant has changed since last render, we
-    // skip the I²C flush entirely. lat/lon are quantized to 5 decimal
-    // places (≈1 m); receiver-jitter below that level no longer flips the
-    // frame. The heartbeat phase bumps the key every 5 s so the screen
-    // refreshes itself slowly (lifetime indicator).
-    #[derive(PartialEq, Eq)]
-    struct FrameKey {
-        rx: u32,
-        tx: u32,
-        sat: u8,
-        valid: bool,
-        // Latitude/longitude quantized to 5dp via int(round(value * 1e5)).
-        // Option<i64> survives the no-fix transition.
-        lat_e5: Option<i64>,
-        lon_e5: Option<i64>,
-        // Battery percent — None when feature off; quantized to 1 % so
-        // ADC-noise doesn't trigger every-render flushes.
-        bat_pct: Option<u8>,
-        // Pack voltage rounded to 100 mV so noise on the LSDigit doesn't
-        // wake the renderer. Same Option-treatment as bat_pct.
-        bat_dv: Option<u16>,
-        heartbeat: bool,
-    }
-
+    // Frame key (see `leviculum_screen::FrameKey`) — when nothing
+    // relevant has changed since last render, we skip the I²C flush
+    // entirely.
     let mut last_key: Option<FrameKey> = None;
     let mut tick: u32 = 0;
 
@@ -270,99 +228,40 @@ pub async fn display_task(
         let rx = crate::lora::LORA_RX_COUNT.load(Ordering::Relaxed);
         let tx = crate::lora::LORA_TX_COUNT.load(Ordering::Relaxed);
 
-        let mut line2 = heapless::String::<24>::new();
-        let _ = core::fmt::write(&mut line2, format_args!("ID: {}", id_short));
-
-        let mut line3 = heapless::String::<24>::new();
-        let _ = core::fmt::write(&mut line3, format_args!("RX: {:<5} TX: {:<5}", rx, tx));
-
-        let mut line4_buf = heapless::String::<24>::new();
-        #[allow(unused_assignments, unused_mut)]
-        let mut bat_pct: Option<u8> = None;
-        #[allow(unused_assignments, unused_mut)]
-        let mut bat_dv: Option<u16> = None;
         #[cfg(feature = "battery")]
-        {
-            match bat_rx.try_get() {
-                Some(b) if b.voltage_mv > 0 => {
-                    bat_pct = Some(b.percent);
-                    // Voltage in deci-volts (e.g. 3.92 V → 39 dV) so the
-                    // frame key only flips on visible 100 mV changes.
-                    bat_dv = Some(b.voltage_mv / 100);
-                    let v_int = b.voltage_mv / 1000;
-                    let v_frac = (b.voltage_mv % 1000) / 10;
-                    let _ = core::fmt::write(
-                        &mut line4_buf,
-                        format_args!("Bat: {:>3}% {}.{:02}V", b.percent, v_int, v_frac),
-                    );
-                }
-                _ => {
-                    let _ = core::fmt::write(&mut line4_buf, format_args!("Bat: --"));
-                }
-            }
-        }
+        let battery = match bat_rx.try_get() {
+            Some(b) if b.voltage_mv > 0 => BatteryStatus::Data {
+                percent: b.percent,
+                voltage_mv: b.voltage_mv,
+            },
+            _ => BatteryStatus::NoData,
+        };
         #[cfg(not(feature = "battery"))]
-        {
-            let _ = core::fmt::write(&mut line4_buf, format_args!("Bat: -- (no feature)"));
-        }
-
-        // Defaults — overwritten if `gnss` is on.
-        let mut line5_buf = heapless::String::<24>::new();
-        let mut line6_buf = heapless::String::<24>::new();
-        #[allow(unused_assignments, unused_mut)]
-        let mut sat: u8 = 0;
-        #[allow(unused_assignments, unused_mut)]
-        let mut valid = false;
-        #[allow(unused_assignments, unused_mut)]
-        let mut lat_e5: Option<i64> = None;
-        #[allow(unused_assignments, unused_mut)]
-        let mut lon_e5: Option<i64> = None;
+        let battery = BatteryStatus::FeatureOff;
 
         #[cfg(feature = "gnss")]
-        {
-            let fix_opt = gnss_rx.try_get();
-            let (label, sats) = match fix_opt {
-                Some(f) if f.valid => ("fix", f.sat_in_use),
-                Some(f) => ("search", f.sat_in_use),
-                None => ("init", 0),
-            };
-            sat = sats;
-            valid = matches!(fix_opt, Some(f) if f.valid);
-            let _ = core::fmt::write(&mut line5_buf, format_args!("GPS: {} sat {}", sats, label));
-            match fix_opt.and_then(|f| f.latitude.zip(f.longitude)) {
-                Some((lat, lon)) => {
-                    // 5dp in the displayed string and the frame key.
-                    // `as i64` truncates toward zero; that's fine for change
-                    // detection — a single LSB flip from rounding semantics
-                    // would just trigger one extra render, and at 5dp each
-                    // unit equals ~1.1 m so coordinate jitter rarely flips
-                    // the truncated key at all.
-                    let _ = core::fmt::write(&mut line6_buf, format_args!("{:.5},{:.5}", lat, lon));
-                    lat_e5 = Some((lat * 1e5) as i64);
-                    lon_e5 = Some((lon * 1e5) as i64);
-                }
-                None => {
-                    let _ = core::fmt::write(&mut line6_buf, format_args!("(no fix)"));
-                }
-            }
-        }
+        let gnss = match gnss_rx.try_get() {
+            Some(f) => GnssStatus::Data {
+                sats: f.sat_in_use,
+                valid: f.valid,
+                coords: f.latitude.zip(f.longitude),
+            },
+            None => GnssStatus::NoData,
+        };
         #[cfg(not(feature = "gnss"))]
-        {
-            let _ = core::fmt::write(&mut line5_buf, format_args!("GPS: -- (no feature)"));
-            let _ = core::fmt::write(&mut line6_buf, format_args!(""));
-        }
+        let gnss = GnssStatus::FeatureOff;
 
-        let key = FrameKey {
+        let model = StatusModel {
+            title: "leviculum RAK4631",
+            id_short: id_short.as_str(),
             rx,
             tx,
-            sat,
-            valid,
-            lat_e5,
-            lon_e5,
-            bat_pct,
-            bat_dv,
+            battery,
+            gnss,
             heartbeat,
         };
+
+        let key = model.key();
         if last_key.as_ref() == Some(&key) {
             // Nothing meaningful changed since last render and the
             // heartbeat phase is the same. Skip the I²C flush entirely.
@@ -370,30 +269,11 @@ pub async fn display_task(
             continue;
         }
 
-        let _ = display.clear(BinaryColor::Off);
-
-        let lines: [&str; 6] = [
-            "leviculum RAK4631",
-            line2.as_str(),
-            line3.as_str(),
-            line4_buf.as_str(),
-            line5_buf.as_str(),
-            line6_buf.as_str(),
-        ];
-        for (i, s) in lines.iter().enumerate() {
-            let y = (i as i32) * 10;
-            let _ = Text::with_baseline(s, Point::new(0, y), text_style, Baseline::Top)
-                .draw(&mut display);
-        }
-
-        // Heartbeat marker — a 2×2 dot in the top-right corner, drawn only
-        // during the "on" phase. Tells you "the firmware loop is alive"
-        // without redrawing the rest of the screen at any visible rate.
-        if heartbeat {
-            let _ = Rectangle::new(Point::new(125, 0), Size::new(2, 2))
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-                .draw(&mut display);
-        }
+        // The SSD1306's buffered-graphics mode is itself the paint
+        // target; the shared painter clears, draws the six lines, and
+        // sets the heartbeat dot at (128-3, 0) = (125, 0), exactly as
+        // the in-loop drawing here always did.
+        let _ = model.paint(&mut display, 128);
 
         if let Err(e) = display.flush() {
             crate::log::log_fmt("[DISP] ", format_args!("flush failed: {:?}", e));
