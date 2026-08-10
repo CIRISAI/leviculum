@@ -417,7 +417,14 @@ pub const PANIC_MSG_MAX: usize = 1024;
 /// Snapshot returned by `take_panic_postmortem()`.
 #[derive(Clone, Copy)]
 pub struct PanicPostMortem {
+    /// Bytes valid in `bytes` (== `total` unless the message overflowed
+    /// the buffer, in which case these are the LAST `PANIC_MSG_MAX`
+    /// bytes of it).
     pub len: usize,
+    /// Total bytes the panic formatter produced. `total > len` means
+    /// the front of the message was dropped — never the tail, where SD
+    /// fault panics carry PC/PREGION.
+    pub total: usize,
     pub bytes: [u8; PANIC_MSG_MAX],
 }
 
@@ -442,16 +449,23 @@ pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
         if magic != PANIC_PM_MAGIC {
             return None;
         }
-        let raw_len = core::ptr::read_volatile(core::ptr::addr_of!((*p).len)) as usize;
-        let len = raw_len.min(PANIC_MSG_MAX);
+        let total = core::ptr::read_volatile(core::ptr::addr_of!((*p).len)) as usize;
+        // The panic handler writes the buffer as a ring keeping the LAST
+        // `PANIC_MSG_MAX` bytes; on overflow the oldest surviving byte
+        // sits at `total % PANIC_MSG_MAX`. Linearise on the way out.
+        let (start, len) = if total > PANIC_MSG_MAX {
+            (total % PANIC_MSG_MAX, PANIC_MSG_MAX)
+        } else {
+            (0, total)
+        };
         let mut bytes = [0u8; PANIC_MSG_MAX];
         let src = core::ptr::addr_of!((*p).bytes).cast::<u8>();
         for (i, slot) in bytes.iter_mut().enumerate().take(len) {
-            *slot = core::ptr::read_volatile(src.add(i));
+            *slot = core::ptr::read_volatile(src.add((start + i) % PANIC_MSG_MAX));
         }
         // Clear magic so subsequent boots don't re-log.
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), 0);
-        Some(PanicPostMortem { len, bytes })
+        Some(PanicPostMortem { len, total, bytes })
     }
 }
 
@@ -460,9 +474,12 @@ mod panic_handler {
     use core::panic::PanicInfo;
     use core::sync::atomic::Ordering;
 
-    /// Slice writer for `core::fmt::write` — pushes bytes into a caller-
-    /// supplied buffer, silently truncating on overflow. Used inside the
-    /// panic handler where allocation must not happen.
+    /// Ring writer for `core::fmt::write` — keeps the LAST `buf.len()`
+    /// bytes of everything written (`pos` counts total bytes, storage
+    /// wraps). On overflow the front of the message is sacrificed, not
+    /// the tail: SD fault panics put PC/PREGION at the END, behind an
+    /// expendable source-path prefix. Used inside the panic handler
+    /// where allocation must not happen.
     struct ByteWriter<'a> {
         buf: &'a mut [u8],
         pos: usize,
@@ -470,10 +487,7 @@ mod panic_handler {
     impl core::fmt::Write for ByteWriter<'_> {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
             for &b in s.as_bytes() {
-                if self.pos >= self.buf.len() {
-                    return Ok(());
-                }
-                self.buf[self.pos] = b;
+                self.buf[self.pos % self.buf.len()] = b;
                 self.pos += 1;
             }
             Ok(())

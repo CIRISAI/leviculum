@@ -93,7 +93,26 @@ async fn main(spawner: Spawner) {
     }
     if let Some(pm) = panic_pm {
         let msg = core::str::from_utf8(&pm.bytes[..pm.len]).unwrap_or("<non-utf8 panic msg>");
-        log_critical!("[PANIC_PMRT] len={} msg={}", pm.len, msg);
+        // EscapeCtrl keeps this ONE line: the SD fault panic embeds a
+        // raw '\n' after the source location, which split the line and
+        // cost us the PC/PREGION tail in capture.
+        log_critical!(
+            "[PANIC_PMRT] len={} total={} msg={}",
+            pm.len,
+            pm.total,
+            leviculum_nrf::log::EscapeCtrl(msg)
+        );
+        // Tail again on its own short line — PC/PREGION ride at the END
+        // of SD fault messages, and a short line survives any reader-
+        // side line-length cap.
+        let mut tail_start = msg.len().saturating_sub(96);
+        while !msg.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        log_critical!(
+            "[PANIC_PMRT_TAIL] {}",
+            leviculum_nrf::log::EscapeCtrl(&msg[tail_start..])
+        );
     }
     // Persistent-log replay from previous boot's last ~2 KiB. Each
     // line is emitted as a `[PERSISTENT_LOG]`-prefixed critical line

@@ -180,6 +180,27 @@ pub fn log_fmt_critical(prefix: &str, args: core::fmt::Arguments) {
     LOG_SIGNAL.signal(());
 }
 
+/// Display adapter that escapes CR/LF as `\r`/`\n` literals so a
+/// multi-line payload stays ONE log line. The SoftDevice fault panic
+/// message embeds a raw `\n` after the source location; replaying it
+/// verbatim split the `[PANIC_PMRT]` line mid-message and every
+/// line-oriented capture reader lost the PC/PREGION tail.
+pub struct EscapeCtrl<'a>(pub &'a str);
+
+impl core::fmt::Display for EscapeCtrl<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use core::fmt::Write;
+        for c in self.0.chars() {
+            match c {
+                '\n' => f.write_str("\\n")?,
+                '\r' => f.write_str("\\r")?,
+                c => f.write_char(c)?,
+            }
+        }
+        Ok(())
+    }
+}
+
 // Macros
 /// Log an informational message over USB CDC-ACM debug port.
 #[macro_export]
