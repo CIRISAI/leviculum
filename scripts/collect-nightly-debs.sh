@@ -11,6 +11,8 @@
 #   leviculum_*_{amd64,arm64}.deb
 #   lnomad_*_{amd64,arm64}.deb
 #   lblogd_*_{amd64,arm64}.deb
+# and the lnflash firmware bundle from scripts/lnflash-bundle.sh:
+#   target/lnflash/lnflash-<version>.tar.gz
 # plus:
 #   git available on PATH
 #   LEVICULUM_BUILD_ID env var (embedded in the per-arch VERSION file)
@@ -20,8 +22,9 @@
 # and arm64:
 #   dist/<pkg>-nightly-<arch>.deb          + .sha256
 #   dist/<pkg>-nightly-<arch>.tar.gz       + .sha256   (just the binaries)
-# plus one source tarball:
+# plus one source tarball and one lnflash bundle:
 #   dist/leviculum-nightly-source.tar.gz   + .sha256
+#   dist/lnflash-nightly-amd64.tar.gz      + .sha256
 # The .deb version lives in the control metadata and the embedded
 # --version string, not in the filename. Binaries are pre-stripped
 # at link time via [profile.release] strip = "debuginfo" in the
@@ -117,6 +120,31 @@ pack_bin_tarball lnomad amd64 x86_64-unknown-linux-musl lnomad/README.md lnomad
 pack_bin_tarball lnomad arm64 aarch64-unknown-linux-musl lnomad/README.md lnomad
 pack_bin_tarball lblogd amd64 x86_64-unknown-linux-musl lblogd/README.md lblogd
 pack_bin_tarball lblogd arm64 aarch64-unknown-linux-musl lblogd/README.md lblogd
+
+# The lnflash bundle is already a finished tarball — binary, firmware
+# UF2, SoftDevice, licences and a manifest of checksums over all of it —
+# so it is renamed rather than repacked. Repacking would invalidate
+# nothing (the checksums are over the payload files, not the archive)
+# but would put a second archive layout in the release for no reason.
+#
+# amd64 only: the UF2 and the SoftDevice are architecture-independent,
+# the host binary inside is not, and the bundle script builds it for the
+# runner's own architecture.
+#
+# Named exactly, not globbed: target/ survives between runs on a
+# developer machine, so a glob would happily stage last release's
+# bundle. The version comes from the same place the bundle script takes
+# it from, so the two cannot disagree.
+lnflash_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+lnflash_src="target/lnflash/lnflash-${lnflash_version}.tar.gz"
+if [ ! -f "$lnflash_src" ]; then
+    echo "error: no lnflash bundle at ${lnflash_src}" >&2
+    echo "       run scripts/lnflash-bundle.sh first" >&2
+    exit 1
+fi
+cp "$lnflash_src" "$DIST/lnflash-nightly-amd64.tar.gz"
+(cd "$DIST" && sha256sum lnflash-nightly-amd64.tar.gz \
+    >lnflash-nightly-amd64.tar.gz.sha256)
 
 # Source tarball at the same commit as the binaries. git archive
 # emits only tracked files, so vendor/ submodules and target/ never

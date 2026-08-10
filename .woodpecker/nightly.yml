@@ -24,6 +24,16 @@
 # leviculum stack's; scripts/deb-stamp.sh derives one Debian version per
 # package.
 #
+# The lnflash firmware bundle is not a package at all — it is the
+# stranger-unpacks-it tarball (one binary, the t114 UF2, Nordic's S140
+# SoftDevice and its licence), so it ships as a tarball only:
+#
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+#
+# amd64 only: the firmware and the SoftDevice in it are architecture-
+# independent, but the host binary is not, and the bundle's own
+# --check-bundle gate cannot run an aarch64 binary on the amd64 runner.
+#
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
 # file only reacts to the `event: cron` trigger it produces. Suggested
@@ -58,6 +68,27 @@ when:
         - 'leviculum-cli/Cargo.toml'
         - 'lnomad/Cargo.toml'
         - 'lblogd/Cargo.toml'
+        # lnflash bundle inputs. lnflash/** in full rather than just its
+        # Cargo.toml, because the crate carries payload/ — the SoftDevice
+        # blob, its licence file and the bundle README all end up inside
+        # the tarball, and lnflash's own --check-bundle is the gate the
+        # bundle script runs before packing. A missing licence file is a
+        # packaging break, not a code change.
+        #
+        # From leviculum-nrf only the files that decide whether the
+        # firmware can be built and converted at all: the linker script,
+        # the build script, the dependency set and the UF2 writer. Not
+        # src/** — firmware source churn is ordinary commit traffic here,
+        # and making every one of those commits pay for a full .deb
+        # pipeline is exactly what the paragraph above is avoiding. A
+        # firmware compile break still turns the next nightly red.
+        - 'scripts/lnflash-bundle.sh'
+        - 'lnflash/**'
+        - 'leviculum-nrf/Cargo.toml'
+        - 'leviculum-nrf/Cargo.lock'
+        - 'leviculum-nrf/build.rs'
+        - 'leviculum-nrf/memory.x'
+        - 'leviculum-nrf/tools/bin2uf2.rs'
 
 # Skip submodule init: reference/ holds the Python reference Reticulum
 # implementation and two firmware reference repos, none of which the
@@ -112,6 +143,37 @@ steps:
       # reads them rather than deriving versions of its own, which is
       # what makes reusing them the default instead of a discipline.
       - bash scripts/build-deb.sh arm64
+
+  build-lnflash:
+    image: rust:bookworm
+    commands:
+      # The firmware toolchain, derived from what scripts/lnflash-bundle.sh
+      # actually invokes:
+      #   flip-link            — leviculum-nrf/.cargo/config.toml names it as
+      #                          the linker for thumbv7em-none-eabihf; without
+      #                          it the firmware build fails at link.
+      #   thumbv7em-none-eabihf — the firmware target itself.
+      #   llvm-tools           — supplies llvm-objcopy, which the script finds
+      #                          under the rustc sysroot to flatten the ELF
+      #                          before bin2uf2. (arm-none-eabi-binutils would
+      #                          do, but it is a ~150 MB apt pull for one tool
+      #                          rustup already ships.)
+      #   x86_64-unknown-linux-musl — the host binary in the bundle, per the
+      #                          workspace-wide musl default. rust-lld links
+      #                          it, so no musl-tools here.
+      # No C toolchain: the t114 feature set pulls no bindgen/cc build
+      # scripts. git is already in the image and is needed both for the
+      # nrf-softdevice git dependency and for the git_sha the manifest
+      # records.
+      - rustup target add thumbv7em-none-eabihf x86_64-unknown-linux-musl
+      - rustup component add llvm-tools
+      - cargo install --locked flip-link
+      # No SKIP_FIRMWARE: a published bundle must carry a firmware image
+      # built from the commit it claims, and the vendored Nordic S140
+      # blob it ships beside it. The script ends by running the bundle's
+      # own --check-bundle, so a mismatched checksum fails the step here
+      # rather than on somebody's board.
+      - bash scripts/lnflash-bundle.sh
 
   # Staging and publishing are cron-only. A push build exists to prove
   # the packages still build; letting it reach these two steps would let

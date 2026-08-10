@@ -78,6 +78,14 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/lblogd-nightly-arm64.t
 
 \`lnomad\` and \`lblogd\` carry their own version numbers, independent of the \`leviculum\` packages above.
 
+**lnflash — firmware flasher for LNode boards** (self-contained bundle: the flasher, the T114 firmware image, and Nordic's S140 SoftDevice with its licence):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+\`\`\`
+
+\`tar xzf lnflash-nightly-amd64.tar.gz && cd lnflash-* && sudo ./lnflash\` — nothing is downloaded and nothing is installed; everything it writes to the board is in the directory. The flasher binary is amd64; the firmware image and SoftDevice inside are not architecture-specific.
+
 **Source tarball** (tracked files at the same commit as the .debs above, no submodules):
 
 \`\`\`
