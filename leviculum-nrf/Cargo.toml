@@ -6,18 +6,8 @@ authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
 description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T114)"
 
-# leviculum-nrf is excluded from the root workspace (embedded target,
-# own .cargo config); it is itself the root of a two-member workspace so
-# the pure, host-testable painter crate can live next to the firmware.
-[workspace]
-members = ["screen"]
-
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
-# Board-independent status-screen painter (pure, host-testable golden
-# frames). Pulled by both display backends: the V2 SSD1306 path via
-# `display`, the T114 ST7789 path via `bsp-t114` directly.
-leviculum-screen = { path = "screen", optional = true }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
@@ -123,14 +113,9 @@ softdevice = [
 # Per-board BSPs: same SoftDevice stack, board-specific peripherals
 # layered on top. Mutex enforced via compile_error! in lib.rs.
 bsp-rak4631 = ["softdevice"]
-# bsp-t114 pulls the ST7789 status display unconditionally: the panel is
-# write-only (MISO not connected), presence detection is physically
-# impossible, and both references (Meshtastic, RNode firmware) drive it
-# blind. One t114 UF2 therefore serves panel-equipped and panel-less
-# boards alike; on the latter the SPI writes go nowhere, harmlessly.
-bsp-t114 = ["softdevice", "dep:leviculum-screen"]
+bsp-t114 = ["softdevice"]
 
-display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
+display = ["dep:ssd1306", "dep:embedded-graphics"]
 gnss = ["dep:nmea0183"]
 battery = []
 rak-baseboard = ["display", "gnss", "battery"]

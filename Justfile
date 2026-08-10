@@ -68,11 +68,6 @@ lnflash-bundle:
 lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
-    # leviculum-screen is the pure, host-testable painter crate inside the
-    # leviculum-nrf workspace: clippy + golden-frame tests run on the host
-    # triple (the workspace's .cargo/config defaults to thumbv7em).
-    cd leviculum-nrf && cargo clippy -p leviculum-screen --target $(rustc -vV | sed -n 's/host: //p') -- -D warnings
-    cd leviculum-nrf && cargo test -p leviculum-screen --target $(rustc -vV | sed -n 's/host: //p')
 
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
