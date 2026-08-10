@@ -424,6 +424,20 @@ pub fn run(
             "It carries: {}. Nothing to do.",
             manifest.names().join(", ")
         ));
+        // A board that is physically plugged in and still lands here is the
+        // common case, not the exotic one: firmware that crashes before USB
+        // comes up leaves nothing on the bus to find, and firmware without a
+        // touch handler leaves nothing to knock on. Both are the same advice.
+        // The hint goes here rather than on a per-device branch because
+        // `Sysfs::devices` enumerates the whole bus — hubs included — so
+        // "something is attached, but nothing we can act on" is true on every
+        // host and carries no signal. A board we *do* see but cannot touch
+        // already gets the double-tap prompt from `enter_bootloader`.
+        ui.say(
+            "If one is plugged in, what it is running neither enumerates nor answers the \
+             1200-baud touch, so there is nothing here to knock on.",
+        );
+        ui.say("Double-tap RESET to hold it in its bootloader, then run this again.");
         return Ok(Vec::new());
     }
 
@@ -1083,8 +1097,14 @@ convert = "hex-to-uf2"
         )
         .unwrap();
         assert!(outcomes.is_empty());
-        assert!(ui.transcript().contains("No board this bundle knows"));
-        assert!(ui.transcript().contains("t114"));
+        let said = ui.transcript();
+        assert!(said.contains("No board this bundle knows"));
+        assert!(said.contains("t114"));
+        // A dark board — crashed firmware, or firmware linked for a base this
+        // bootloader does not run — is invisible on USB and lands exactly
+        // here, so the only way out has to be said.
+        assert!(said.contains("Double-tap RESET"), "{said}");
+        assert!(said.contains("1200-baud touch"), "{said}");
     }
 
     #[test]

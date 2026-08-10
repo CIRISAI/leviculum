@@ -65,6 +65,35 @@ can be fully automatic for boards already carrying our firmware, which
 is every re-flash, and must fall back to one clearly announced key press
 otherwise.
 
+### RNode firmware on the T114 lands a board in exactly that state
+
+Mark's official RNode build for the Heltec T114
+(`rnode_firmware_heltec_t114.zip`, v1.85/1.86) is an app-only Nordic DFU
+package. Its application vector table reads SP `0x20040000` and reset
+vector `0x00051819`, so the image is linked for a flash base around
+`0x51000`. This board's factory bootloader with S140 7.3.0 runs
+applications at `0x27000`, which is the base our own image is linked for
+as well (`leviculum-nrf/memory.x:15`). `rnodeconf` pushes the app-only
+package through the factory bootloader (`adafruit-nrfutil dfu serial
+--package … -t 1200`), so it lands at `0x27000`; the bootloader jumps
+there, reads a reset vector pointing into unprogrammed flash, and
+hard-faults before USB comes up. The same dark board as the SoftDevice
+mismatch below, from a different cause. `rnodeconf` itself calls the
+T114 target experimental and AS-IS.
+
+The operational consequence is the one this page keeps arriving at:
+nothing is running to answer the 1200-baud touch, and a board that never
+enumerates is not even a candidate for a tool to find, so it takes a
+double-tap. After that nothing further is special — `lnflash` writes our
+application at `0x27000` over whatever was resident and it boots. Where
+the previous firmware was linked does not affect where the next one is
+written. Measured on 2026-08-10 on serial `183004F712B4A7FE`:
+`rnodeconf` v1.86 reported "Device programmed" and then could not reopen
+the port, the board did not re-enumerate, a double-tap brought the
+`HT-n5262` bootloader back, and `CURRENT.UF2` showed the RNode vector
+table with reset `0x51819` sitting at `0x27000`. `lnflash` then flashed
+over it and the board came up as `1209:0001` "leviculum T114".
+
 ## What the bootloader tells you
 
 Mounting the mass-storage drive gives three files: `INFO_UF2.TXT`,

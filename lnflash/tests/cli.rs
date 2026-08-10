@@ -266,7 +266,11 @@ fn an_empty_bus_is_a_clean_report_rather_than_an_error_message() {
         None,
     );
     assert!(out.status.success());
-    assert!(stdout(&out).contains("No board this bundle knows is attached"));
+    let said = stdout(&out);
+    assert!(said.contains("No board this bundle knows is attached"));
+    // The board that produces this is usually attached, just dark: nothing to
+    // enumerate and nothing to touch. Saying so is the whole use of the run.
+    assert!(said.contains("Double-tap RESET"), "{said}");
 }
 
 #[test]
