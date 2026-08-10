@@ -100,10 +100,40 @@ fn the_image_states_its_own_version_at_the_address_nrf_sdm_names() {
 }
 
 #[test]
+fn the_vendored_hex_is_nordics_crlf_original() {
+    // Nordic ships CRLF. A checkout that silently normalised it to LF would
+    // still parse, so nothing else here would notice — but the file would no
+    // longer be the bytes Nordic distributes, and its sha256 in a built
+    // bundle would stop matching Nordic's.
+    assert!(SOFTDEVICE_HEX.contains(":020000040000FA\r\n"));
+    assert_eq!(SOFTDEVICE_HEX.matches("\r\n").count(), 9726);
+    assert_eq!(SOFTDEVICE_HEX.lines().count(), 9726);
+}
+
+#[test]
+fn the_same_image_with_lf_endings_decodes_to_the_same_blocks() {
+    // The LF fixture: Nordic's records, the other ending. The vendored file
+    // exercises CRLF; this keeps the LF path covered against the real image
+    // rather than a toy one, and states that the ending carries no content.
+    let lf = SOFTDEVICE_HEX.replace("\r\n", "\n");
+    assert!(!lf.contains('\r'));
+
+    let from_lf = ihex::parse(&lf).expect("the LF form of the vendored S140 hex parses");
+    assert_eq!(from_lf, spans());
+    assert_eq!(
+        Image::from_spans(&from_lf, uf2::FAMILY_NRF52840_APP),
+        converted()
+    );
+}
+
+#[test]
 fn the_vendored_licence_travels_with_the_vendored_blob() {
     // Clause 2 in one assertion: the blob is in the tree, so the licence is
     // too. `manifest` enforces the same thing for the bundle.
-    let licence = include_str!("../payload/t114/LICENSE-NORDIC");
-    assert!(licence.contains("Nordic Semiconductor ASA"));
+    let licence = include_str!("../payload/t114/s140_nrf52_7.3.0_license-agreement.txt");
+    // Nordic's own file, not the circulated variant: clause 2 obliges us to
+    // reproduce *the above copyright notice*, and only this one carries the
+    // years. The variant reads "Copyright (c) Nordic Semiconductor ASA".
+    assert!(licence.contains("Copyright (c) 2007 - 2020, Nordic Semiconductor ASA"));
     assert!(!licence.trim().is_empty());
 }

@@ -506,7 +506,7 @@ mod tests {
             f.write("t114/leviculum-t114-0.8.0.uf2", b"application image");
             f.write("t114/s140_nrf52_7.3.0_softdevice.hex", b":00000001FF\n");
             f.write(
-                "t114/LICENSE-NORDIC",
+                "t114/s140_nrf52_7.3.0_license-agreement.txt",
                 b"Copyright (c) Nordic Semiconductor ASA",
             );
             f.write_manifest(&f.manifest_text());
@@ -560,7 +560,7 @@ softdevice = ">=7.0.1, <8.0.0"
 [board.t114.remedy.softdevice]
 file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
 sha256  = "{sd}"
-license = "t114/LICENSE-NORDIC"
+license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
 convert = "hex-to-uf2"
 "#,
                 app = self.sha("t114/leviculum-t114-0.8.0.uf2"),
@@ -656,10 +656,15 @@ convert = "hex-to-uf2"
     #[test]
     fn a_remedy_without_its_licence_file_will_not_load() {
         let f = Fixture::new();
-        fs::remove_file(f.dir.path().join("t114/LICENSE-NORDIC")).unwrap();
+        fs::remove_file(
+            f.dir
+                .path()
+                .join("t114/s140_nrf52_7.3.0_license-agreement.txt"),
+        )
+        .unwrap();
         let err = f.load().unwrap_err();
         assert!(
-            format!("{err}").contains("LICENSE-NORDIC"),
+            format!("{err}").contains("s140_nrf52_7.3.0_license-agreement.txt"),
             "the licence must be named in the error: {err}"
         );
     }
@@ -674,10 +679,10 @@ convert = "hex-to-uf2"
     #[test]
     fn a_payload_path_may_not_escape_the_bundle() {
         let f = Fixture::new();
-        f.write_manifest(
-            &f.manifest_text()
-                .replace("\"t114/LICENSE-NORDIC\"", "\"../../../etc/passwd\""),
-        );
+        f.write_manifest(&f.manifest_text().replace(
+            "\"t114/s140_nrf52_7.3.0_license-agreement.txt\"",
+            "\"../../../etc/passwd\"",
+        ));
         let err = f.load().unwrap_err();
         assert!(
             format!("{err}").contains("must stay inside the bundle"),

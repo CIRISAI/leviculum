@@ -50,7 +50,7 @@ spawn-coder:
 # Build the lnflash tarball a stranger can unpack and run:
 #   tar xzf lnflash-<version>.tar.gz && cd lnflash-<version> && sudo ./lnflash
 # Contains the musl-static binary, our T114 firmware, Nordic's SoftDevice
-# with LICENSE-NORDIC beside it, a manifest with checksums, and a
+# with Nordic's own licence file beside it, a manifest with checksums, and a
 # user-facing README. Everything comes from this checkout — a bundle built
 # out of a Meshtastic checkout is the hidden dependency our clone-and-deploy
 # policy forbids. Cross-compiles the firmware, so the first run takes

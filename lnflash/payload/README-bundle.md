@@ -80,9 +80,11 @@ reappear as a drive.
     firmware/manifest.toml                   what is here, and its checksums
     firmware/t114/leviculum-t114-*.uf2       our firmware
     firmware/t114/s140_nrf52_7.3.0_*.hex     Nordic's SoftDevice
-    firmware/t114/LICENSE-NORDIC             its licence
+    firmware/t114/s140_nrf52_7.3.0_license-agreement.txt
+                                             its licence, Nordic's own
 
 The SoftDevice is Nordic Semiconductor's, not ours, and is redistributed
-under the terms in `LICENSE-NORDIC` — which is why it is a separate file
+under the terms in `s140_nrf52_7.3.0_license-agreement.txt`, the file
+Nordic ships beside the blob — which is why it is a separate file
 here rather than built into the program. Everything else is
 AGPL-3.0-or-later: <https://codeberg.org/Lew_Palm/leviculum>.

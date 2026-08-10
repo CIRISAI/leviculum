@@ -99,7 +99,7 @@ install -m 0644 "$OUT_DIR/t114.uf2.tmp" "$STAGE/firmware/t114/leviculum-t114-$VE
 # into the binary, because Nordic's clauses 4 and 5 cannot become part of one
 # combined work with AGPL code.
 install -m 0644 "$ROOT/lnflash/payload/t114/s140_nrf52_7.3.0_softdevice.hex" "$STAGE/firmware/t114/"
-install -m 0644 "$ROOT/lnflash/payload/t114/LICENSE-NORDIC" "$STAGE/firmware/t114/"
+install -m 0644 "$ROOT/lnflash/payload/t114/s140_nrf52_7.3.0_license-agreement.txt" "$STAGE/firmware/t114/"
 install -m 0644 "$ROOT/lnflash/payload/README-bundle.md" "$STAGE/README.md"
 install -m 0644 "$ROOT/LICENSE" "$STAGE/LICENSE"
 rm -f "$OUT_DIR/t114.bin.tmp" "$OUT_DIR/t114.uf2.tmp"
@@ -162,7 +162,7 @@ file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
 sha256  = "$(sha t114/s140_nrf52_7.3.0_softdevice.hex)"
 # Mandatory, and lnflash refuses to load a bundle whose licence file is
 # missing. Nordic's clause 2 requires the notice to travel with the blob.
-license = "t114/LICENSE-NORDIC"
+license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
 # The hex is distributed untouched and converted at run time, which avoids the
 # question of whether repacking counts as the modification clause 5 forbids.
 convert = "hex-to-uf2"

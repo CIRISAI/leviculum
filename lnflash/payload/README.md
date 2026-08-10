@@ -13,13 +13,22 @@ SoftDevice on our machines used to live at
 recipe reaching sideways into an unrelated checkout is not reproducible
 for anyone else. So the blob is vendored.
 
-`s140_nrf52_7.3.0_softdevice.hex` is byte-identical to that file
-(sha256 `ef75b7621c2b64a5e8101a8fb8a74d07b5f7b530396d0f368644f6e8b7415660`).
+`s140_nrf52_7.3.0_softdevice.hex` is the file out of Nordic's own
+`s140_nrf52_7.3.0.zip`, taken from their CDN and vendored untouched
+(sha256 `5f460d35efcb4ab0f280e83cd15f804e979172a3646c5b66e86af6b7b2975ba6`,
+md5 `29013ba2d0507c25f62dffa96b6c67af`, 437 538 bytes). It carries
+Nordic's CRLF line endings, which is why the hex parser tolerates a
+trailing `\r` on every record and is tested on both endings. The records
+themselves are identical to the copy Meshtastic ships; the point of
+vendoring Nordic's original is that its provenance is checkable against
+Nordic rather than against a third party's checkout.
+
 It is Nordic's, not ours, and it is distributed under
-`LICENSE-NORDIC` — Nordic's five-clause BSD variant. Our copy of that
-licence is byte-identical to the one `nrf-softdevice` ships with its
-S140 crate (md5 `d86fff2d6237b5a565289c1fa208f1ec`), which settles its
-provenance; the file itself names no product or version.
+`s140_nrf52_7.3.0_license-agreement.txt` — Nordic's five-clause BSD
+variant, in the exact file they ship alongside the blob. Its notice
+reads `Copyright (c) 2007 - 2020, Nordic Semiconductor ASA` and it names
+its own product and version, which the widely circulated `LICENSE-NORDIC`
+variant does not.
 
 ## The two rules that shape this directory
 

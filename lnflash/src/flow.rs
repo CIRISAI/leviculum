@@ -808,7 +808,8 @@ mod tests {
         let hex = include_str!("../payload/t114/s140_nrf52_7.3.0_softdevice.hex");
         fs::write(dir.path().join("t114/sd.hex"), hex).unwrap();
         fs::write(
-            dir.path().join("t114/LICENSE-NORDIC"),
+            dir.path()
+                .join("t114/s140_nrf52_7.3.0_license-agreement.txt"),
             "Nordic Semiconductor ASA",
         )
         .unwrap();
@@ -856,7 +857,7 @@ softdevice = ">=7.0.1, <8.0.0"
 [board.t114.remedy.softdevice]
 file    = "t114/sd.hex"
 sha256  = "{sd_sha}"
-license = "t114/LICENSE-NORDIC"
+license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
 convert = "hex-to-uf2"
 "#,
             app_sha = manifest::hex_digest(&app),

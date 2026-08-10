@@ -24,7 +24,7 @@ fn unpacked_bundle() -> TempDir {
     fs::create_dir_all(&firmware).unwrap();
 
     let hex = include_str!("../payload/t114/s140_nrf52_7.3.0_softdevice.hex");
-    let licence = include_str!("../payload/t114/LICENSE-NORDIC");
+    let licence = include_str!("../payload/t114/s140_nrf52_7.3.0_license-agreement.txt");
     // A minimal but real UF2 at the application base.
     let app = lnflash::uf2::Image::from_spans(
         &[lnflash::ihex::Span {
@@ -37,7 +37,11 @@ fn unpacked_bundle() -> TempDir {
     .unwrap();
 
     fs::write(firmware.join("s140_nrf52_7.3.0_softdevice.hex"), hex).unwrap();
-    fs::write(firmware.join("LICENSE-NORDIC"), licence).unwrap();
+    fs::write(
+        firmware.join("s140_nrf52_7.3.0_license-agreement.txt"),
+        licence,
+    )
+    .unwrap();
     fs::write(firmware.join("leviculum-t114-0.8.0.uf2"), &app).unwrap();
     fs::write(
         dir.path().join("firmware/manifest.toml"),
@@ -85,7 +89,7 @@ softdevice = ">=7.0.1, <8.0.0"
 [board.t114.remedy.softdevice]
 file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
 sha256  = "{sd_sha}"
-license = "t114/LICENSE-NORDIC"
+license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
 convert = "hex-to-uf2"
 "#
     )
@@ -178,7 +182,12 @@ fn a_tampered_payload_fails_the_bundle_check_and_the_exit_code_says_so() {
 #[test]
 fn a_bundle_missing_the_nordic_licence_will_not_even_load() {
     let bundle = unpacked_bundle();
-    fs::remove_file(bundle.path().join("firmware/t114/LICENSE-NORDIC")).unwrap();
+    fs::remove_file(
+        bundle
+            .path()
+            .join("firmware/t114/s140_nrf52_7.3.0_license-agreement.txt"),
+    )
+    .unwrap();
     let out = run(
         &[
             "--bundle",
@@ -188,7 +197,7 @@ fn a_bundle_missing_the_nordic_licence_will_not_even_load() {
         None,
     );
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("LICENSE-NORDIC"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("s140_nrf52_7.3.0_license-agreement.txt"));
 }
 
 #[test]

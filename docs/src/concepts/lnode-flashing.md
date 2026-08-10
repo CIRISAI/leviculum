@@ -283,8 +283,8 @@ therefore cannot become part of one combined work with AGPL code.
 The practical consequence: **the SoftDevice must not be linked into an
 `lnflash` binary via `include_bytes!`.** That would make it part of the
 executable and put the two licences in direct conflict. Shipping it
-alongside as a separate file, with `LICENSE-NORDIC` next to it, is
-ordinary aggregation and does not have that problem.
+alongside as a separate file, with Nordic's own licence file next to it,
+is ordinary aggregation and does not have that problem.
 
 **Decided (2026-08-09): we ship it, as a separate file with its licence
 beside it**, sourced from Nordic's own distribution rather than a
@@ -300,9 +300,10 @@ differs from the widely circulated `LICENSE-NORDIC` in exactly one line:
 its notice reads `Copyright (c) 2007 - 2020, Nordic Semiconductor ASA`
 where the other says only `Copyright (c) Nordic Semiconductor ASA`.
 Clause 2 obliges us to reproduce *the above copyright notice*, so the
-file that travels with the blob should be the one Nordic shipped
-alongside it. It also names its own product and version, which the
-circulated variant does not.
+file that travels with the blob is the one Nordic shipped alongside it.
+It also names its own product and version, which the circulated variant
+does not. That is what `lnflash/payload/t114/` vendors, next to Nordic's
+CRLF original of the hex.
 
 Note also that Meshtastic vendors the blob under GPL-3 without any
 accompanying Nordic notice, so their practice is not the precedent it
@@ -419,7 +420,7 @@ firmware/
   t114/
     leviculum-t114-0.8.0.uf2
     s140_nrf52_7.3.0_softdevice.hex
-    LICENSE-NORDIC
+    s140_nrf52_7.3.0_license-agreement.txt
 ```
 
 ```toml

@@ -294,6 +294,28 @@ mod tests {
     }
 
     #[test]
+    fn the_two_line_endings_parse_to_the_same_spans() {
+        // Nordic ships the S140 hex with CRLF, so that is the ending the
+        // vendored payload exercises. This keeps the LF path covered, and
+        // pins the property that decides it: the ending is not content.
+        let records = [
+            record(REC_EXT_LINEAR, 0, &[0x00, 0x01]),
+            record(REC_DATA, 0x2000, &[1, 2, 3, 4]),
+            record(REC_DATA, 0x2004, &[5, 6]),
+            eof(),
+        ];
+        let lf = records.join("\n") + "\n";
+        let crlf = records.join("\r\n") + "\r\n";
+        assert!(!lf.contains('\r'));
+
+        let from_lf = parse(&lf).unwrap();
+        assert_eq!(from_lf.len(), 1);
+        assert_eq!(from_lf[0].start, 0x0001_2000);
+        assert_eq!(from_lf[0].data, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(parse(&crlf).unwrap(), from_lf);
+    }
+
+    #[test]
     fn a_flipped_checksum_byte_is_an_error() {
         let mut good = record(REC_DATA, 0x0000, &[1, 2, 3, 4]);
         good.pop();
