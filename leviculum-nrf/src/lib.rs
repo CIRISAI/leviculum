@@ -302,32 +302,76 @@ pub fn panic_count() -> u32 {
     }
 }
 
-/// Returns approximate unused stack bytes (in 4-byte units, summed).
-/// Requires `paint_stack()` to have been called at boot.
+/// Sentinel word `paint_stack` fills the unused stack with. Distinct
+/// from both `.uninit` post-mortem magics, so a stray match cannot be
+/// mistaken for a valid record.
+const STACK_CANARY: u32 = 0xDEAD_BEEF;
+
+/// Low and high address of the stack region, straight from the linker.
 ///
-/// Scans 0xDEADBEEF canary words upward starting `UNINIT_SKIP` bytes
-/// above `__ebss`. The skip is needed because `.uninit` lives just
-/// above `__ebss` and several of our `.uninit` statics
-/// (`PERSISTENT_TAIL_RAW`, `PANIC_PM`, `HARDFAULT_PM`) are written by
-/// the running app immediately after boot — overwriting the canary
-/// `paint_stack` had placed there. Without the skip, this function
-/// always returned ~36 bytes regardless of actual stack usage.
+/// **flip-link layout** (this crate links with `flip-link`, see
+/// `.cargo/config.toml`): the stack sits at the BOTTOM of RAM, below
+/// `.data`/`.bss`, and grows DOWN toward `_stack_end`:
 ///
-/// Bug #32 spike: the persistent-log infrastructure added in Stage 1B
-/// (commit `12d1206`) pushed `.uninit` to ~3.1 KiB; we round up to
-/// 4 KiB (`UNINIT_SKIP`) to keep a margin and avoid coincidental
-/// `0xDEADBEEF` words in `.uninit` data being mis-counted as stack.
-pub fn stack_free() -> usize {
-    const UNINIT_SKIP: usize = 4096;
+/// ```text
+///   _stack_end  = ORIGIN(RAM) = 0x200030e0   <- SoftDevice RAM floor
+///        |  stack, grows DOWN  ^
+///   _stack_start = __sdata     |             <- SP at reset
+///        .data / .bss
+///   __ebss
+///        .uninit (post-mortems, persistent tail)
+///   RAM end     = 0x20040000
+/// ```
+///
+/// That is the exact inverse of the classic cortex-m-rt layout, where
+/// the stack is at the TOP and `__ebss` is its floor. The pre-flip-link
+/// implementation of these helpers scanned UPWARD from `__ebss` — i.e.
+/// straight through `.uninit` — and reported numbers that had nothing to
+/// do with the stack. Use these symbols, never `__ebss`.
+///
+/// Returns `(low, high)` = `(_stack_end, _stack_start)`.
+pub fn stack_region() -> (usize, usize) {
     extern "C" {
-        static __ebss: u8;
+        static _stack_end: u8;
+        static _stack_start: u8;
     }
-    let scan_start = (core::ptr::addr_of!(__ebss) as usize + UNINIT_SKIP) as *const u32;
-    let stack_top = 0x2004_0000 as *const u32; // RAM end
+    (
+        core::ptr::addr_of!(_stack_end) as usize,
+        core::ptr::addr_of!(_stack_start) as usize,
+    )
+}
+
+/// Current stack pointer. Only meaningful relative to
+/// [`stack_region`] — an SP approaching `_stack_end` is an overflow in
+/// progress.
+pub fn stack_pointer() -> usize {
+    let sp: usize;
+    // SAFETY: reads a core register, no memory effects.
+    unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack)) };
+    sp
+}
+
+/// Minimum free stack bytes since boot: the distance from `_stack_end`
+/// (the low end, where an overflow lands first) up to the lowest word
+/// the stack has ever touched.
+///
+/// Requires [`paint_stack`] to have run at boot. Scans `STACK_CANARY`
+/// words UPWARD from `_stack_end`; the first non-canary word is the
+/// deepest the stack has ever reached.
+///
+/// A monotonically shrinking value across the periodic `[STACK]` lines
+/// is a stack overflow in progress; reaching 0 means the stack has
+/// already run into the SoftDevice's RAM.
+///
+/// Conservative by construction: an interrupt taken while `paint_stack`
+/// was running could leave non-canary words in the region, which only
+/// ever makes the reported figure SMALLER than the truth, never larger.
+pub fn stack_min_free() -> usize {
+    let (lo, hi) = stack_region();
+    let mut p = lo as *const u32;
     let mut untouched = 0usize;
-    let mut p = scan_start;
-    while (p as usize) < (stack_top as usize) {
-        if unsafe { core::ptr::read_volatile(p) } != 0xDEAD_BEEF {
+    while (p as usize) < hi {
+        if unsafe { core::ptr::read_volatile(p) } != STACK_CANARY {
             break;
         }
         untouched += 1;
@@ -336,23 +380,88 @@ pub fn stack_free() -> usize {
     untouched * 4
 }
 
-/// Paint stack with canary pattern. Call once at start of main, before heavy work.
+/// Bytes [`paint_stack`] actually covered. This is the CEILING on
+/// [`stack_min_free`]: everything above the paint limit was already in
+/// use when the paint ran and can never read back as free.
+static STACK_PAINTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Paint the unused stack with [`STACK_CANARY`]. Call once at the start
+/// of main, before any heavy work.
+///
+/// Paints `[_stack_end, SP - SP_MARGIN)` — everything below the live
+/// frame. The margin keeps this function's own frame and any interrupt
+/// frame stacked on top of it out of the painted range.
+///
+/// Note that main's own frame is ALREADY allocated at this point (the
+/// `async fn main` body is one big `TaskStorage::poll` with a single
+/// entry `sub sp`), so the painted extent is much smaller than the
+/// region: `painted ≈ SP_at_paint - _stack_end`. `[STACK]` reports both,
+/// so the reviewer can read `min_free` against its own ceiling.
 ///
 /// # Safety
-/// Must be called before any concurrent tasks or interrupts use the stack.
+/// Must be called before any concurrent tasks or interrupts use the
+/// stack below `SP - SP_MARGIN`.
 pub unsafe fn paint_stack() {
-    extern "C" {
-        static mut __ebss: u8;
-    }
-    let stack_bottom = core::ptr::addr_of_mut!(__ebss) as *mut u32;
-    let current_sp: u32;
-    core::arch::asm!("mov {}, sp", out(reg) current_sp);
-    // Paint up to 1 KB below current SP (leave headroom for this function)
-    let safe_limit = ((current_sp as usize).saturating_sub(1024)) as *mut u32;
-    let mut p = stack_bottom;
-    while (p as usize) < (safe_limit as usize) {
-        core::ptr::write_volatile(p, 0xDEAD_BEEF);
+    /// Headroom below the live SP left unpainted: this function's frame
+    /// plus room for an interrupt frame taken mid-paint.
+    const SP_MARGIN: usize = 1024;
+    let (lo, hi) = stack_region();
+    let limit = stack_pointer().saturating_sub(SP_MARGIN).min(hi);
+    let mut p = lo as *mut u32;
+    while (p as usize) < limit {
+        core::ptr::write_volatile(p, STACK_CANARY);
         p = p.add(1);
+    }
+    STACK_PAINTED.store(
+        limit.saturating_sub(lo),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Emit one `[STACK]` telemetry line.
+///
+/// Exact format (one line, `log_fmt_critical` so it bypasses the
+/// runtime-drain gate and always reaches the persistent tail):
+///
+/// ```text
+/// [STACK] min_free=<dec> painted=<dec> region=0x<lo>..0x<hi> size=<dec> peak_used=<dec> sp=0x<hex> tag=<label>
+/// ```
+///
+/// `min_free` is the diagnostic of record — bytes above `_stack_end`
+/// never touched. `painted` is its ceiling (see [`paint_stack`]);
+/// `min_free == painted` means nothing has yet gone below the paint
+/// limit, `min_free → 0` means the stack is about to run into the
+/// SoftDevice's RAM. `peak_used = size - min_free`, `sp` is the
+/// instantaneous depth at the sampling point.
+pub fn log_stack(tag: &str) {
+    let (lo, hi) = stack_region();
+    let size = hi.saturating_sub(lo);
+    let min_free = stack_min_free();
+    log::log_fmt_critical(
+        "[STACK] ",
+        format_args!(
+            "min_free={} painted={} region=0x{:08x}..0x{:08x} size={} peak_used={} sp=0x{:08x} tag={}",
+            min_free,
+            STACK_PAINTED.load(core::sync::atomic::Ordering::Relaxed),
+            lo,
+            hi,
+            size,
+            size.saturating_sub(min_free),
+            stack_pointer(),
+            tag,
+        ),
+    );
+}
+
+/// Periodic `[STACK]` telemetry. 2 s cadence: fast enough that a
+/// collapsing `min_free` is visible as a trajectory in the ~2 KiB
+/// persistent tail before the crash truncates it, coarse enough not to
+/// lap the tail on its own.
+#[embassy_executor::task]
+pub async fn stack_watermark_task() {
+    loop {
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(2)).await;
+        log_stack("tick");
     }
 }
 
@@ -435,7 +544,15 @@ struct PanicPmRaw {
     bytes: [u8; PANIC_MSG_MAX],
 }
 
-const PANIC_PM_MAGIC: u32 = 0xBADD_CAFE;
+/// Record version, encoded in the magic. `.uninit` survives a reflash,
+/// so a record written by an older image is still there on the first
+/// boot of a new one. `len` used to mean "bytes stored, clamped"; it now
+/// means "total bytes produced", with `bytes` a ring keeping the last
+/// `PANIC_MSG_MAX` of them — the same word read the old way linearises
+/// an overlong message at the wrong offset. Bump this whenever the
+/// record's layout or the meaning of a field changes, so stale records
+/// are rejected instead of misparsed.
+const PANIC_PM_MAGIC: u32 = 0xBADD_CAF1;
 
 #[link_section = ".uninit"]
 static mut PANIC_PM: core::mem::MaybeUninit<PanicPmRaw> = core::mem::MaybeUninit::uninit();
@@ -581,8 +698,11 @@ pub struct HardfaultPostMortem {
     pub xpsr: u32,
 }
 
-/// Distinct from `paint_stack`'s `0xDEADBEEF` canary so a post-paint read
-/// of `.uninit` (which the canary fills) cannot masquerade as a valid PM.
+/// Distinct from `paint_stack`'s `0xDEADBEEF` canary so a stray canary
+/// word cannot masquerade as a valid PM. Versioned like
+/// [`PANIC_PM_MAGIC`]: bump it if this record's layout ever changes, so
+/// a record left in `.uninit` by an older image is rejected rather than
+/// misparsed.
 const HARDFAULT_PM_MAGIC: u32 = 0xC0FF_EE12;
 
 /// Survives `sys_reset` because `.uninit` is `NOLOAD` in cortex-m-rt's

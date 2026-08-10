@@ -45,13 +45,17 @@ async fn main(spawner: Spawner) {
     init_heap();
     leviculum_nrf::init_tracing();
 
-    // Boot diagnostics from previous run — read BEFORE paint_stack
-    // (the canary fill walks `.uninit` upward and would clobber).
+    // Boot diagnostics from the previous run. Read before the first log
+    // call of this boot: `take_persistent_log` must snapshot the PREVIOUS
+    // boot's tail before we start writing this boot's into the same ring.
     let hardfault_pm = leviculum_nrf::take_hardfault_postmortem();
     let panic_pm = leviculum_nrf::take_panic_postmortem();
     let persistent_log = leviculum_nrf::log::take_persistent_log();
 
-    // SAFETY: called once before any complex work or concurrent tasks
+    // SAFETY: called once before any complex work or concurrent tasks.
+    // Under flip-link the painted region is `[_stack_end, SP-1KiB)` at
+    // the BOTTOM of RAM — disjoint from `.uninit`, so the post-mortem
+    // reads above are no longer order-critical against it.
     unsafe {
         leviculum_nrf::paint_stack();
     }
@@ -71,6 +75,7 @@ async fn main(spawner: Spawner) {
         env!("LEVICULUM_GIT_SHA"),
         env!("LEVICULUM_GIT_DIRTY")
     );
+    leviculum_nrf::log_stack("boot");
     log_critical!("[PANIC_COUNT] total={}", leviculum_nrf::panic_count());
     // Boot-loop instrumentation: what kind of reset got us here? Must
     // stay ahead of ble::init — after Softdevice::enable the POWER
@@ -171,6 +176,7 @@ async fn main(spawner: Spawner) {
     spawner.must_spawn(boot_log_repeater(initial_path_len));
     spawner.must_spawn(fw_build_banner());
     spawner.must_spawn(leviculum_nrf::heap_watermark_task());
+    spawner.must_spawn(leviculum_nrf::stack_watermark_task());
 
     if !identity_loaded {
         use leviculum_core::identity_store::IdentityStore;
@@ -289,8 +295,8 @@ async fn main(spawner: Spawner) {
     }
 
     let (hu, hf) = leviculum_nrf::heap_stats();
-    let sf = leviculum_nrf::stack_free();
-    info!("heap u={} f={} stack f={}", hu, hf, sf);
+    info!("heap u={} f={}", hu, hf);
+    leviculum_nrf::log_stack("post-init");
 
     // Interface adapters
     let mut serial_iface = EmbeddedInterface::new(serial.outgoing_tx);

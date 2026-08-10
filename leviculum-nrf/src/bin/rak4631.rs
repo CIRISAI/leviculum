@@ -46,14 +46,17 @@ async fn main(spawner: Spawner) {
     init_heap();
     leviculum_nrf::init_tracing();
 
-    // Read post-mortems BEFORE paint_stack runs — `.uninit` is above
-    // `__ebss` and paint_stack walks upward, so it would otherwise
-    // overwrite the captured data with the `0xDEADBEEF` canary.
+    // Read post-mortems before the first log call of this boot:
+    // `take_persistent_log` must snapshot the PREVIOUS boot's tail
+    // before we start writing this boot's into the same ring.
     let hardfault_pm = leviculum_nrf::take_hardfault_postmortem();
     let panic_pm = leviculum_nrf::take_panic_postmortem();
     let persistent_log = leviculum_nrf::log::take_persistent_log();
 
-    // SAFETY: called once before any complex work or concurrent tasks
+    // SAFETY: called once before any complex work or concurrent tasks.
+    // Under flip-link the painted region is `[_stack_end, SP-1KiB)` at
+    // the BOTTOM of RAM — disjoint from `.uninit`, so the post-mortem
+    // reads above are no longer order-critical against it.
     unsafe {
         leviculum_nrf::paint_stack();
     }
@@ -82,6 +85,7 @@ async fn main(spawner: Spawner) {
         env!("LEVICULUM_GIT_SHA"),
         env!("LEVICULUM_GIT_DIRTY")
     );
+    leviculum_nrf::log_stack("boot");
     log_critical!("[PANIC_COUNT] total={}", leviculum_nrf::panic_count());
     leviculum_nrf::log_irq_priorities();
 
@@ -320,8 +324,8 @@ async fn main(spawner: Spawner) {
     }
 
     let (hu, hf) = leviculum_nrf::heap_stats();
-    let sf = leviculum_nrf::stack_free();
-    info!("heap u={} f={} stack f={}", hu, hf, sf);
+    info!("heap u={} f={}", hu, hf);
+    leviculum_nrf::log_stack("post-init");
 
     // Interface adapters
     let mut serial_iface = EmbeddedInterface::new(serial.outgoing_tx);
@@ -450,10 +454,10 @@ async fn fw_build_banner() {
 async fn diag_mem_log() {
     loop {
         Timer::after(Duration::from_secs(5)).await;
-        let stack = leviculum_nrf::stack_free();
+        let stack = leviculum_nrf::stack_min_free();
         let (hu, hf) = leviculum_nrf::heap_stats();
         info!(
-            "[DIAG_MEM] stack_free={} heap_used={} heap_free={}",
+            "[DIAG_MEM] stack_min_free={} heap_used={} heap_free={}",
             stack, hu, hf
         );
     }

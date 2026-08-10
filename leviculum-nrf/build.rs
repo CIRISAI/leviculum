@@ -34,6 +34,15 @@ fn emit_build_sha() {
         println!("cargo:rerun-if-changed={git_dir}/HEAD");
         println!("cargo:rerun-if-changed={git_dir}/index");
     }
+    // Emitting ANY rerun-if-changed replaces cargo's default
+    // "rerun on any package file change", so the sources have to be
+    // listed explicitly. Without this an edit under `src/` left the
+    // embedded `dirty` flag stale, and `[FW_BUILD]` then claimed a
+    // clean tree for an image built from modified sources.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=memory.x");
 }
 
 fn run_git(args: &[&str]) -> Option<String> {

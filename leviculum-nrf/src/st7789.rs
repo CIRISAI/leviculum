@@ -384,10 +384,18 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
             if let Some(dirty) = work.diff(shown) {
                 if first_frame {
                     stage("first-frame-push").await;
+                    // The FONT_6X10 render into `work` above is
+                    // the deepest frame on this task's stack, and the
+                    // whole task runs on the single thread-mode stack.
+                    // Bracketing the first push isolates what the
+                    // display path costs from what the rest of the
+                    // firmware costs.
+                    crate::log_stack("disp-pre-first-frame");
                 }
                 panel.push_rect(work, dirty, rowbuf).await;
                 shown.copy_from(work);
                 if first_frame {
+                    crate::log_stack("disp-post-first-frame");
                     crate::log::log_fmt(
                         "[DISP] ",
                         format_args!(
