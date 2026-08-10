@@ -110,6 +110,16 @@ const COLOR_OFF: u16 = 0x0000;
 /// source for the init clear.
 const ROWBUF_LEN: usize = 240 * 2;
 
+/// Boot-loop instrumentation (t114-2 silent-reset hunt): one line
+/// BEFORE each display-path step, at the same log level as FW_BUILD,
+/// followed by a flush window so the USB debug writer can drain the
+/// line before the named step gets a chance to kill the board. The
+/// last [DISP_STG] marker in a capture names the fatal operation.
+async fn stage(name: &str) {
+    crate::log::log_fmt_critical("[DISP_STG] ", format_args!("{}", name));
+    Timer::after(Duration::from_millis(40)).await;
+}
+
 struct St7789 {
     spim: Spim<'static>,
     cs: Output<'static>,
@@ -168,13 +178,17 @@ impl St7789 {
     /// this driver is blind — we cannot re-verify a "cleaned-up"
     /// sequence on a panel we don't have.
     async fn init(&mut self) {
+        stage("cmd-swreset").await;
         self.cmd(CMD_SWRESET, &[]).await;
         Timer::after(Duration::from_millis(150)).await;
+        stage("cmd-slpout").await;
         self.cmd(CMD_SLPOUT, &[]).await;
         Timer::after(Duration::from_millis(10)).await;
         // 16-bit RGB565.
+        stage("cmd-colmod").await;
         self.cmd(CMD_COLMOD, &[0x55]).await;
         Timer::after(Duration::from_millis(10)).await;
+        stage("cmd-madctl-caset-raset").await;
         self.cmd(CMD_MADCTL, &[0x08]).await;
         self.cmd(CMD_CASET, &[0x00, 0x00, 0x00, 240]).await;
         self.cmd(
@@ -182,16 +196,21 @@ impl St7789 {
             &[0x00, 0x00, (320 >> 8) as u8, (320 & 0xFF) as u8],
         )
         .await;
+        stage("cmd-slpout2").await;
         self.cmd(CMD_SLPOUT, &[]).await;
         Timer::after(Duration::from_millis(10)).await;
+        stage("cmd-noron").await;
         self.cmd(CMD_NORON, &[]).await;
         Timer::after(Duration::from_millis(10)).await;
+        stage("cmd-dispon").await;
         self.cmd(CMD_DISPON, &[]).await;
         Timer::after(Duration::from_millis(10)).await;
         // This panel wants inversion on for nominal colours (both
         // references send INVON).
+        stage("cmd-invon").await;
         self.cmd(CMD_INVON, &[]).await;
         Timer::after(Duration::from_millis(10)).await;
+        stage("cmd-madctl-landscape").await;
         self.cmd(CMD_MADCTL, &[MADCTL_LANDSCAPE]).await;
         Timer::after(Duration::from_millis(10)).await;
     }
@@ -270,12 +289,18 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
         vtft,
         leda,
     } = wiring;
+    stage("task-entry").await;
+
     // Supply chain first: VEXT high (both references, see module
     // header), TFT rail on (active low), backlight OFF until the panel
     // is initialised and cleared — no flash of garbage.
+    stage("vext-high").await;
     let _vext = Output::new(vext, Level::High, OutputDrive::Standard);
+    stage("vtft-on").await;
     let _vtft = Output::new(vtft, Level::Low, OutputDrive::Standard);
+    stage("backlight-off").await;
     let mut leda = Output::new(leda, Level::High, OutputDrive::Standard);
+    stage("rst-idle-high").await;
     let mut rst = Output::new(rst, Level::High, OutputDrive::Standard);
 
     let mut config = spim::Config::default();
@@ -283,15 +308,19 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
     // SPIM3's maximum, 2.5× RNode's nRF rate; Meshtastic runs this very
     // wiring at 32+ MHz, so plenty of margin.
     config.frequency = spim::Frequency::M16;
+    stage("spim3-create").await;
     let spim = Spim::new_txonly(spi, TftIrqs, sck, mosi, config);
 
+    stage("cs-dc-outputs").await;
     let cs = Output::new(cs, Level::High, OutputDrive::Standard);
     let dc = Output::new(dc, Level::High, OutputDrive::Standard);
     let mut panel = St7789 { spim, cs, dc };
 
     // Rail settle, then the RNode reset pulse (ST7789.h `connect()`:
     // 1 ms high, 10 ms low, high).
+    stage("rail-settle-100ms").await;
     Timer::after(Duration::from_millis(100)).await;
+    stage("reset-pulse").await;
     rst.set_high();
     Timer::after(Duration::from_millis(1)).await;
     rst.set_low();
@@ -307,8 +336,10 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
     let rowbuf: &'static mut [u8; ROWBUF_LEN] = ROWBUF.init([0u8; ROWBUF_LEN]);
 
     panel.init().await;
+    stage("ram-clear").await;
     panel.clear_ram(rowbuf).await;
     // Panel is black now — light it up.
+    stage("backlight-on").await;
     leda.set_low();
 
     crate::log::log_fmt(
@@ -351,6 +382,9 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
             // MonoFb painting is infallible.
             let _ = model.paint(work, FB_W as u32);
             if let Some(dirty) = work.diff(shown) {
+                if first_frame {
+                    stage("first-frame-push").await;
+                }
                 panel.push_rect(work, dirty, rowbuf).await;
                 shown.copy_from(work);
                 if first_frame {

@@ -72,6 +72,10 @@ async fn main(spawner: Spawner) {
         env!("LEVICULUM_GIT_DIRTY")
     );
     log_critical!("[PANIC_COUNT] total={}", leviculum_nrf::panic_count());
+    // Boot-loop instrumentation: what kind of reset got us here? Must
+    // stay ahead of ble::init — after Softdevice::enable the POWER
+    // registers belong to the SD.
+    leviculum_nrf::log_reset_reason();
     leviculum_nrf::log_irq_priorities();
 
     if let Some(pm) = hardfault_pm {
@@ -187,6 +191,7 @@ async fn main(spawner: Spawner) {
     }
 
     // LoRa (SPIM2. SPIM3 has a MISO read bug on T114)
+    log_critical!("[STG] lora-init");
     let lora = leviculum_nrf::lora::init(
         p.SPI2,
         p.P0_19.into(),
@@ -209,6 +214,7 @@ async fn main(spawner: Spawner) {
     // BLE — full init restored. RAM ORIGIN bumped to 40K (memory.x) to give
     // Softdevice::enable headroom for our config (att_mtu=256, …).
     let identity_hash = *node.identity().hash();
+    log_critical!("[STG] ble-init");
     leviculum_nrf::ble::init(
         &spawner,
         identity_hash,
@@ -244,6 +250,7 @@ async fn main(spawner: Spawner) {
     // under the rak4631 feature set; the real t114 build always has it.
     #[cfg(feature = "bsp-t114")]
     {
+        log_critical!("[STG] display-spawn");
         leviculum_nrf::st7789::init(
             &spawner,
             leviculum_nrf::st7789::TftWiring {
@@ -279,6 +286,7 @@ async fn main(spawner: Spawner) {
     }
     led.set_level(Level::High);
 
+    log_critical!("[STG] main-loop");
     // Event-driven main loop, four event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
