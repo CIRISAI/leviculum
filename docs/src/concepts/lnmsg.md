@@ -101,7 +101,7 @@ able to say "this will take a while" with a number that was measured on
 that class of hardware.
 
 **The core lock is the real budget.** 5 ms per hook call
-(`PROCESSOR_TICK_BUDGET`, `leviculum-std/src/driver/processor.rs:137`),
+(`PROCESSOR_TICK_BUDGET`, `leviculum-std/src/driver/processor.rs:172`),
 against 3.2 ms to verify a 1 MiB message's signature per
 [The core lock budget](core-lock-budget.md). A messenger doing anything
 expensive inside the hook stalls the node's inbound path for every other

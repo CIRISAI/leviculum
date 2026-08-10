@@ -78,6 +78,41 @@
 //! Beyond that it is prose, and [`CoreProcessor`] says so where a consumer
 //! writing one will read it.
 //!
+//! # A hook owns the events of the core calls it makes
+//!
+//! The tap is fed from `output.events` inside the driver's `dispatch_output`,
+//! i.e. from what the *driver's* tick produced. A core call made inside a hook
+//! body is a different thing: `announce_destination`, `request_path`, and
+//! everything else a consumer reaches on `&mut StdNodeCore` return their
+//! events **synchronously**, on the `TickOutput` handed back to the caller.
+//! Those events never pass the tap, and there is no later tick on which they
+//! will — `run_event_tap` dispatches a hook's merged output with the
+//! processor detached (see "The recursion bound is one" on that function), and
+//! the driver has no other route back in.
+//!
+//! So the obligation is the consumer's, and it is the price of the seam rather
+//! than a defect in it: **a hook owns the events returned by the core calls it
+//! makes.** Putting them on the `TickOutput` the hook returns forwards them to
+//! the application's event sink, which is usually what a consumer wants; it
+//! does *not* route them back through the processor. A consumer whose own
+//! state machine has to see them must feed them back itself, inside the same
+//! hook call — and must bound that loop. A state machine that legitimately
+//! emits events in response to events has no fixpoint the seam can promise,
+//! and an unbounded loop under the core lock is a node hang rather than a bug
+//! report.
+//!
+//! Both consumers in this tree already do exactly that, which is why the rule
+//! is written here rather than rediscovered a third time:
+//!
+//! * `absorb_core` (leviculum-std/tests/rnsd_interop/lxmf_interop_tests.rs:139)
+//!   walks a work queue of `TickOutput`s, routing every event through
+//!   `LxmfRouter::handle_event` and pushing the output that produces back onto
+//!   the queue.
+//! * `absorb` (leviculum-lxmf-node/src/processor.rs:394) is the same loop
+//!   inside a real hook: it re-feeds each event to the router *and* forwards
+//!   it on the returned `TickOutput`, under a round cap —
+//!   `MAX_ABSORB_ROUNDS` (leviculum-lxmf-node/src/processor.rs:84).
+//!
 //! # Registration happens before the channel exists
 //!
 //! A processor is installed on [`super::ReticulumNodeBuilder`], i.e. before
@@ -164,11 +199,23 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 /// the `core` handle and return the resulting `TickOutput`; the driver
 /// dispatches it before it returns from the same `dispatch_output`.
 ///
-/// # Recursion
+/// # Recursion, and the events you have to re-feed yourself
 ///
 /// A processor does **not** see the events of its own `TickOutput`, from
 /// either method. The bound is one, and `run_event_tap` in this module
 /// carries the reasoning.
+///
+/// That bound has a consequence a consumer has to plan for. A core call made
+/// from inside a hook — `announce_destination`, `request_path`, anything else
+/// on the `core` handle — returns its events *synchronously*, on the
+/// `TickOutput` it hands back to you. Those events are yours: the driver
+/// dispatches your merged output with this processor detached, so nothing
+/// routes them back through `on_event`. Returning them forwards them to the
+/// application's event sink; if your own state machine has to see them, feed
+/// them back to it inside the same hook call, under a round cap — a machine
+/// that emits events in response to events has no fixpoint this seam can
+/// promise, and an unbounded loop under the core lock is a node hang. The
+/// module documentation names the two places in this tree that already do it.
 ///
 /// # Talking to the rest of the application
 ///
@@ -283,6 +330,10 @@ impl ProcessorSlot {
 ///   where the tap is live again — with one exception the driver closes by
 ///   hand: a `SendPacket` onto a dying interface produces a `FramesDropped`
 ///   inside this very `dispatch_output`, which is why those are tapped too.
+///   Note the scope: this is about *applying* a `TickOutput`. A core call the
+///   hook made while building one did run the core, and its events came back
+///   on that output — never through here. See "A hook owns the events of the
+///   core calls it makes" in the module documentation.
 /// * The only events in a processor's `TickOutput` are ones it synthesised
 ///   itself. Feeding those back is a self-cycle with no fixpoint anyone can
 ///   guarantee — `LxmfNode::handle_event` legitimately emits events in

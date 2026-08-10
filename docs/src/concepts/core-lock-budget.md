@@ -192,7 +192,7 @@ reads a little above the send table at the same size; the gap is under
 It is recorded here rather than in the issue because this page is where
 a caller looks for it, and because a number that lives only in a tracker
 cannot be cited from the tree: `PROCESSOR_TICK_BUDGET`
-(`leviculum-std/src/driver/processor.rs:137`) is set against this
+(`leviculum-std/src/driver/processor.rs:172`) is set against this
 measurement, and until it was written down the only number behind a
 public constant could not be traced at all.
 
