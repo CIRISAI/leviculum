@@ -15,7 +15,7 @@
 //! Python drop-in interop tests (against both `lnsd` and `rnsd`) additionally
 //! cover the large `is_response` Resource path and byte-identity with Python.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use leviculum_core::RequestPolicy;
@@ -55,12 +55,6 @@ fn large_page() -> Vec<u8> {
         page.push_str(&format!("Entry {i:03} in the node directory listing.\n"));
     }
     page.into_bytes()
-}
-
-/// Grab a currently-free localhost TCP port by binding and immediately dropping.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    listener.local_addr().expect("local addr").port()
 }
 
 /// Encode a byte slice as a single msgpack bin value (how RNS packs a `bytes`
@@ -196,8 +190,6 @@ async fn setup() -> (
     tempfile::TempDir,
     String,
 ) {
-    let daemon_tcp_port = free_port();
-    let daemon_tcp: SocketAddr = format!("127.0.0.1:{daemon_tcp_port}").parse().unwrap();
     static SETUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let instance_name = format!(
         "lnomad-selftest-{}-{}",
@@ -210,11 +202,17 @@ async fn setup() -> (
         .enable_transport(true)
         .share_instance(true)
         .instance_name(instance_name.clone())
-        .add_tcp_server(daemon_tcp)
+        // `:0`: the daemon binds the port itself and reports it below, so no
+        // free-port probe races the bind (Codeberg #221).
+        .add_tcp_server("127.0.0.1:0".parse().unwrap())
         .storage_path(daemon_storage.path().to_path_buf())
         .build_sync()
         .expect("build daemon");
     daemon.start().await.expect("start daemon");
+    let daemon_tcp: SocketAddr = *daemon
+        .tcp_listen_addrs()
+        .first()
+        .expect("daemon has a TCP listener");
     // Let the abstract Unix socket listener come up before clients connect.
     tokio::time::sleep(Duration::from_millis(500)).await;
 

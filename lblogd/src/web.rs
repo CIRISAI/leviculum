@@ -274,6 +274,29 @@ async fn serve_plain(router: Router, http_bind: SocketAddr) -> Result<(), WebErr
         .map_err(WebError::Http)
 }
 
+/// [`run_web`]'s plaintext mode on a listener the caller already bound.
+///
+/// The caller binding `:0` and keeping the listener is the only way to serve
+/// on a kernel-assigned port without a probe-then-rebind window (Codeberg
+/// #221); the tests use this so no free-port probe races the bind.
+pub async fn run_web_plain_on(
+    listener: std::net::TcpListener,
+    content: SnapshotRx,
+    counter: Arc<Counter>,
+) -> Result<(), WebError> {
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|_| ([127, 0, 0, 1], 0).into());
+    let listener = listener
+        .set_nonblocking(true)
+        .and_then(|()| tokio::net::TcpListener::from_std(listener))
+        .map_err(|source| WebError::Bind { addr, source })?;
+    let router = build_router_counting(content, counter);
+    axum::serve(listener, router.into_make_service())
+        .await
+        .map_err(WebError::Http)
+}
+
 /// Deployment mode: HTTPS with Let's Encrypt certificates, plain HTTP
 /// redirecting to it.
 ///

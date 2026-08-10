@@ -13,7 +13,7 @@
 //! per link, on the client side of the IPC, is an assumption about the stack
 //! that only this shape can check.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,15 +26,12 @@ use lblogd::render::BlogMeta;
 use lnomad::fetch::Session;
 use lnomad::url::parse_url;
 
-/// Grab a currently-free localhost TCP port by binding and immediately dropping.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    listener.local_addr().expect("local addr").port()
-}
-
 #[tokio::test]
 async fn two_requests_on_one_link_are_one_session_and_two_requests() {
-    let daemon_tcp: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    // `:0`: the kernel assigns the port at bind and nothing dials this
+    // server; the test wires everything over the shared instance
+    // (Codeberg #221).
+    let daemon_tcp: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let instance_name = format!("lblogd-counter-test-{}", std::process::id());
     let daemon_storage = tempfile::tempdir().expect("daemon storage");
     let mut daemon = ReticulumNodeBuilder::new()

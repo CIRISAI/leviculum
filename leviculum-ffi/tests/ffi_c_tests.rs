@@ -88,21 +88,26 @@ fn compile(source: &str, bin_name: &str) -> Option<PathBuf> {
     Some(out_bin)
 }
 
-/// A TCP port on loopback the kernel has just confirmed free: bind `:0`, read
-/// the number, drop the listener.
-///
-/// This is the tree's existing idiom — `tests/support/mod.rs:165` in this same
-/// crate, `lblogd/tests/web_plain.rs:24`,
-/// `leviculum-lxmf-node/tests/two_node_loopback.rs:84` — and the point of
-/// Codeberg #206 is that the C examples were the one family that did not use
-/// it. It is a narrow race (the consumer binds a moment after the probe
-/// releases), which #206 rules out as the mechanism it saw and names as the
-/// next suspect should the failure recur.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("bind an ephemeral loopback port")
-        .port()
+/// Host-wide unique listener ports for the two-process C tools (lncp,
+/// levcat), whose listener and dialer are separate processes wired together
+/// through argv — neither can bind `:0` and hand the number to the other.
+/// Shared source with the leviculum-std suites (Codeberg #221: the band sits
+/// above the kernel's ephemeral range and the flock'd counter keeps
+/// concurrent test processes from drawing the same number).
+#[path = "../../leviculum-std/tests/support/port_alloc.rs"]
+#[allow(dead_code)]
+mod port_alloc;
+
+/// A machine-unique token for abstract-socket instance names. Not a port: no
+/// kernel resource is consumed.
+fn unique_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Compile `source` against the cdylib and run it with `args`. Panics on any
@@ -129,18 +134,15 @@ fn compile_and_run(source: &str, bin_name: &str) {
     compile_and_run_args(source, bin_name, &[]);
 }
 
-/// Compile `source` and run it with a freshly allocated loopback address as
-/// `argv[1]`.
+/// Compile `source` and run it with `127.0.0.1:0` as `argv[1]`.
 ///
-/// The two-node C examples used to carry a literal `127.0.0.1:4587x`, which
-/// sits inside this host's `ip_local_port_range` (32768-60999): any concurrent
-/// `bind("127.0.0.1:0")` in the workspace could be handed exactly that number,
-/// and while it held it the example's server could not bind, its announce
-/// timed out, and every check downstream of a working node failed with it
-/// (Codeberg #206).
+/// The two-node C examples used to carry a literal `127.0.0.1:4587x`
+/// (Codeberg #206), then a harness-probed free port — which left the
+/// probe-to-bind window every co-tenant could win (Codeberg #221). Now the
+/// example's node A binds `:0` itself and node B dials the kernel-assigned
+/// port A reports, so no port number ever exists unbound.
 fn compile_and_run_on_free_addr(source: &str, bin_name: &str) {
-    let addr = format!("127.0.0.1:{}", free_port());
-    compile_and_run_args(source, bin_name, &[addr]);
+    compile_and_run_args(source, bin_name, &["127.0.0.1:0".to_string()]);
 }
 
 #[test]
@@ -170,11 +172,9 @@ fn c_phase_e_acceptance() {
 
 #[test]
 fn c_daemon_acceptance() {
-    compile_and_run_args(
-        "examples/c/daemon.c",
-        "daemon_c",
-        &[free_port().to_string()],
-    );
+    // Port 0: the kernel assigns the config-file node's listen port at bind;
+    // nothing dials it (Codeberg #221).
+    compile_and_run_args("examples/c/daemon.c", "daemon_c", &["0".to_string()]);
 }
 
 /// Standing canary for Codeberg #206
@@ -256,13 +256,14 @@ fn c_lnsd_runs_as_daemon() {
     };
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = free_port();
-    let name = format!("clnsd-test-{port}");
+    let name = format!("clnsd-test-{}", unique_token());
+    // listen_port 0: the kernel assigns it at bind and nothing dials this
+    // server (Codeberg #221).
     let cfg = format!(
         "[reticulum]\n  enable_transport = no\n  share_instance = yes\n  \
          instance_name = {name}\n\n[interfaces]\n  [[Test TCP Server]]\n    \
          type = TCPServerInterface\n    enabled = yes\n    listen_ip = 127.0.0.1\n    \
-         listen_port = {port}\n    mode = gateway\n"
+         listen_port = 0\n    mode = gateway\n"
     );
     std::fs::write(dir.path().join("config"), cfg).expect("write config");
 
@@ -317,7 +318,9 @@ fn c_lncp_copies_a_file_end_to_end() {
     let Some(bin) = compile("examples/c/lncp.c", "lncp_c") else {
         return;
     };
-    let port = free_port();
+    // Two separate processes share the address through argv, so it comes
+    // from the host-wide allocator (Codeberg #221 class 2).
+    let port = port_alloc::free_tcp_port();
     let addr = format!("127.0.0.1:{port}");
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -388,8 +391,7 @@ fn c_lncp_copies_via_shared_instance() {
     };
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = free_port();
-    let instance = format!("lncp-ipc-{port}");
+    let instance = format!("lncp-ipc-{}", unique_token());
 
     // The daemon: shares an instance, no interfaces of its own needed since the
     // two clients are local.
@@ -494,7 +496,9 @@ fn c_levcat_pipes_a_line_end_to_end() {
     let Some(bin) = compile("examples/c/levcat.c", "levcat_c") else {
         return;
     };
-    let port = free_port();
+    // Two separate processes share the address through argv, so it comes
+    // from the host-wide allocator (Codeberg #221 class 2).
+    let port = port_alloc::free_tcp_port();
     let addr = format!("127.0.0.1:{port}");
 
     let dir = tempfile::tempdir().expect("tempdir");

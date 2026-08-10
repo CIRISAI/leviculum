@@ -223,3 +223,8 @@ pub fn try_free_udp_port() -> Option<u16> {
 pub fn free_tcp_port() -> u16 {
     try_free_tcp_port().expect("exhausted the test port band 61000-65000")
 }
+
+/// [`try_free_udp_port`], panicking on an exhausted band.
+pub fn free_udp_port() -> u16 {
+    try_free_udp_port().expect("exhausted the test port band 61000-65000")
+}

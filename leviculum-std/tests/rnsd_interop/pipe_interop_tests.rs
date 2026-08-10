@@ -12,7 +12,6 @@
 //! A second test drives the robustness path: a child that keeps exiting must be
 //! respawned by the interface without ever taking the node down.
 
-use std::net::TcpListener;
 use std::time::Duration;
 
 use leviculum_std::driver::ReticulumNodeBuilder;
@@ -23,13 +22,13 @@ use crate::common::{init_tracing, temp_storage, wait_for_event};
 /// Absolute path to the stdio<->TCP bridge helper.
 const BRIDGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/pipe_bridge.py");
 
-/// Grab an ephemeral loopback TCP port for the two bridge halves to rendezvous
-/// on. We bind, read the assigned port, then drop the listener; the listening
-/// bridge half rebinds it with SO_REUSEADDR and the connecting half retries, so
-/// the brief unbound window is harmless.
+/// A loopback TCP port for the two bridge halves to rendezvous on. The number
+/// crosses a process boundary through argv, so it cannot be a kept `:0`
+/// listener; it comes from the host-wide allocator band above the ephemeral
+/// range instead (Codeberg #221). `SO_REUSEADDR` on the listening half and the
+/// connecting half's retry cover the allocator's own probe release.
 fn free_tcp_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    l.local_addr().expect("local addr").port()
+    crate::harness::port_alloc::free_tcp_port()
 }
 
 /// Positive path: an announce crosses the pipe bridge between two Rust nodes.

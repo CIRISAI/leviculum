@@ -138,6 +138,11 @@ pub(crate) struct ListenerRow {
     /// bank them explicitly when a child goes away.
     pub departed_rxb: u64,
     pub departed_txb: u64,
+    /// The socket address the listener actually bound, when it listens on an
+    /// IP socket. For a listener configured with port 0 this carries the
+    /// kernel-assigned port, which is how a caller learns it (Codeberg #221);
+    /// `None` for non-IP listeners (the shared-instance Unix socket).
+    pub bound_addr: Option<SocketAddr>,
 }
 
 /// The reporting-side interface inventory (see the module docs).
@@ -267,6 +272,7 @@ mod tests {
                 ifac_size_bits: None,
                 departed_rxb: 0,
                 departed_txb: 0,
+                bound_addr: Some("127.0.0.1:1".parse().unwrap()),
             },
         );
         inv.add_spawned(

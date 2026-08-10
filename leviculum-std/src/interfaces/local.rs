@@ -265,6 +265,7 @@ pub(crate) fn spawn_local_server(
             ifac_size_bits: None,
             departed_rxb: 0,
             departed_txb: 0,
+            bound_addr: None,
         },
     );
 

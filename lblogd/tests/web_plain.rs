@@ -10,7 +10,6 @@
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
-use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -19,13 +18,7 @@ use lblogd::content::{Reloader, SnapshotRx, Sources};
 use lblogd::counter::Counter;
 use lblogd::files::FileArea;
 use lblogd::render::BlogMeta;
-use lblogd::web::{run_web, AcmeSettings, WebConfig, WebError};
-
-/// Grab a currently-free localhost TCP port by binding and immediately dropping.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    listener.local_addr().expect("local addr").port()
-}
+use lblogd::web::{run_web, run_web_plain_on, AcmeSettings, WebConfig, WebError};
 
 fn write_fixture_posts(dir: &Path) {
     std::fs::write(
@@ -33,18 +26,6 @@ fn write_fixture_posts(dir: &Path) {
         "+++\ntitle = \"Hello Mesh\"\ndate = \"2026-07-01\"\n+++\n\nFirst post, **small** enough for one packet.\n",
     )
     .expect("write hello.md");
-}
-
-/// Wait until something accepts connections on `addr`, so the assertions do
-/// not race the listener coming up.
-async fn wait_for_listener(addr: SocketAddr) {
-    for _ in 0..100 {
-        if TcpStream::connect(addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("no listener on {addr} after 2 s");
 }
 
 /// One plain HTTP/1.1 GET, returning the response's raw bytes. Needed where
@@ -82,26 +63,50 @@ async fn http_get(addr: SocketAddr, path: &str) -> String {
     String::from_utf8_lossy(&raw).into_owned()
 }
 
-/// Start a plaintext server over `content` on a free port and wait until it
-/// accepts connections.
+/// Start a plaintext server over `content` on a kernel-assigned port.
+///
+/// The test binds `:0` itself, keeps the listener, and hands it over
+/// (Codeberg #221): the port is held from the instant it exists, so no
+/// free-port probe races the bind, and connections queue in the backlog even
+/// before the server task first accepts — no listener-poll needed.
 async fn serve_plain(content: SnapshotRx) -> SocketAddr {
-    let bind: SocketAddr = format!("127.0.0.1:{}", free_port())
-        .parse()
-        .expect("parse bind addr");
-    tokio::spawn(run_web(
-        WebConfig {
-            acme: None,
-            http_bind: bind,
-            // Unused in plaintext mode; a bogus value must not be bound.
-            https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
-        },
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind :0");
+    let bind = listener.local_addr().expect("local addr");
+    tokio::spawn(run_web_plain_on(
+        listener,
         content,
         // These tests are about serving, not counting; a disabled counter
         // keeps them off the filesystem.
         std::sync::Arc::new(Counter::disabled()),
     ));
-    wait_for_listener(bind).await;
     bind
+}
+
+/// `run_web`'s own plaintext bind path, pinned via its error branch: an
+/// occupied address is a `WebError::Bind`, deterministically — the test holds
+/// the occupant itself.
+#[tokio::test]
+async fn run_web_reports_a_taken_address_as_bind_error() {
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    write_fixture_posts(posts_dir.path());
+    let (_reloader, content) =
+        Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial load");
+
+    let occupant = TcpListener::bind("127.0.0.1:0").expect("bind :0");
+    let taken = occupant.local_addr().expect("local addr");
+    let err = run_web(
+        WebConfig {
+            acme: None,
+            http_bind: taken,
+            // Unused in plaintext mode; a bogus value must not be bound.
+            https_bind: "127.0.0.1:1".parse().expect("parse https bind"),
+        },
+        content,
+        std::sync::Arc::new(Counter::disabled()),
+    )
+    .await
+    .expect_err("binding an occupied address must fail");
+    assert!(matches!(err, WebError::Bind { .. }), "{err}");
 }
 
 #[tokio::test]

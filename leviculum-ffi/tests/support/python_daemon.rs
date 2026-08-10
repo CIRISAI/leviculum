@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use leviculum_std::process::spawn_supervised;
 
-use super::free_port;
+use super::port_alloc;
 
 /// Path to the shared daemon script (sibling `scripts/` of the repo root).
 fn daemon_script() -> PathBuf {
@@ -42,8 +42,16 @@ impl PyDaemon {
 
     /// Like [`start`], with extra daemon flags (e.g. `--echo-channel`).
     pub fn start_with_args(extra: &[&str]) -> Option<PyDaemon> {
-        let rns_port = free_port();
-        let cmd_port = free_port();
+        // The ports cross a process boundary through argv, so the daemon
+        // cannot bind `:0` and hand a listener back; the numbers come from
+        // the host-wide allocator band above the ephemeral range instead
+        // (Codeberg #221 class 2 — class-1 conversion would need the daemon
+        // to report its RNS listener's kernel-assigned port). The command
+        // port additionally self-heals: the script falls back to `:0` when
+        // its requested port is taken and reports the actual port in the
+        // READY line, which `start_with_args` reads back below.
+        let rns_port = port_alloc::free_tcp_port();
+        let cmd_port = port_alloc::free_tcp_port();
         let script = daemon_script();
         if !script.exists() {
             eprintln!("skipping interop: {} not found", script.display());
@@ -64,26 +72,31 @@ impl PyDaemon {
         let mut child = spawn_supervised(cmd).ok()?;
 
         // Read stdout on a thread, signalling when "READY" appears or stdout
-        // closes (the daemon exited, e.g. RNS not importable).
+        // closes (the daemon exited, e.g. RNS not importable). READY carries
+        // `READY <rns_port> <cmd_port>` — the ports the daemon actually uses,
+        // which for cmd_port may differ from the request (see above).
         let stdout = child.stdout.take()?;
-        let (tx, rx) = mpsc::channel::<bool>();
+        let (tx, rx) = mpsc::channel::<Option<(u16, u16)>>();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 match line {
                     Ok(l) if l.starts_with("READY ") => {
-                        let _ = tx.send(true);
+                        let mut fields = l.split_whitespace().skip(1);
+                        let rns = fields.next().and_then(|f| f.parse().ok());
+                        let cmd = fields.next().and_then(|f| f.parse().ok());
+                        let _ = tx.send(rns.zip(cmd));
                         return;
                     }
                     Ok(_) => {}
                     Err(_) => break,
                 }
             }
-            let _ = tx.send(false);
+            let _ = tx.send(None);
         });
 
         match rx.recv_timeout(Duration::from_secs(20)) {
-            Ok(true) => {
+            Ok(Some((rns_port, cmd_port))) => {
                 // Let interfaces settle, matching the reference harness.
                 std::thread::sleep(Duration::from_millis(300));
                 Some(PyDaemon {

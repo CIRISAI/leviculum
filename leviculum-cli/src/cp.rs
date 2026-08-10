@@ -996,12 +996,6 @@ mod tests {
         *dest.hash()
     }
 
-    /// Find an available TCP port by binding to :0 and extracting the OS-assigned port.
-    fn find_available_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    }
-
     /// Poll for a path to appear, up to a bounded timeout.
     ///
     /// `run_send` returns on sender-side completion, but the listener persists
@@ -1047,20 +1041,22 @@ mod tests {
         EventReceiver,
         tempfile::TempDir,
     ) {
-        let port = find_available_port();
         let tmp = tempfile::tempdir().unwrap();
 
+        // The listener binds `:0` itself and reports the kernel-assigned
+        // port, so no free-port probe races the bind (Codeberg #221).
         let mut listener = ReticulumNodeBuilder::new()
-            .add_tcp_server(format!("127.0.0.1:{port}").parse().unwrap())
+            .add_tcp_server("127.0.0.1:0".parse().unwrap())
             .storage_path(tmp.path().join("listener"))
             .build()
             .await
             .unwrap();
         listener.start().await.unwrap();
+        let listener_addr = *listener.tcp_listen_addrs().first().unwrap();
         let listener_events = listener.take_event_receiver().unwrap();
 
         let mut sender = ReticulumNodeBuilder::new()
-            .add_tcp_client(format!("127.0.0.1:{port}").parse().unwrap())
+            .add_tcp_client(listener_addr)
             .storage_path(tmp.path().join("sender"))
             .build()
             .await

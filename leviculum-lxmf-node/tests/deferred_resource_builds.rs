@@ -28,10 +28,9 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use common::{body_b64, free_port, pump_until, Helper, Setup, Wire};
+use common::{body_b64, pump_until, Helper, Setup, Wire};
 use leviculum_lxmf_node::processor::{BuildJob, Input};
 
 /// Over `DIRECT_PACKET_MDU` (431 bytes, `leviculum-lxmf/src/node.rs`), so the
@@ -50,12 +49,13 @@ fn resource_sized_body() -> String {
 /// helper (flag off, worker on), because the receive direction is the
 /// control, not the subject.
 async fn bring_up(defer: bool, build_worker: bool) -> (Helper, Helper, String, String) {
-    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
-    let mut alice_setup = Setup::new("Alice", Wire::Listen(addr));
+    // Alice listens on `:0` and reports her port; Bob dials it (Codeberg
+    // #221 — no free-port probe, so no probe-to-bind window).
+    let mut alice_setup = Setup::new("Alice", Wire::listen_any());
     alice_setup.defer_resource_builds = defer;
     alice_setup.build_worker = build_worker;
     let mut alice = Helper::start(alice_setup).await;
-    let mut bob = Helper::start(Setup::new("Bob", Wire::Dial(addr))).await;
+    let mut bob = Helper::start(Setup::new("Bob", Wire::Dial(alice.listen_addr()))).await;
 
     let ready = pump_until(&mut alice, &mut bob, Duration::from_secs(20), |a, b| {
         a.delivery_hash.is_some() && b.delivery_hash.is_some()

@@ -5,10 +5,10 @@
  * announces it; node B observes the announce as an event over its pollable
  * event fd, identified by the destination hash.
  *
- * Takes the loopback listen address as argv[1]; the Rust harness allocates a
- * free port and passes it in (Codeberg #206). Running it by hand needs one
- * too: `./phase_b_c 127.0.0.1:0` will not do, the address is used verbatim
- * by both nodes.
+ * Takes the loopback listen address as argv[1]. `127.0.0.1:0` is the
+ * intended form: node A binds it, reads the kernel-assigned port back with
+ * lev_tcp_listen_addr, and node B dials that (Codeberg #221). The Rust
+ * harness in tests/ffi_c_tests.rs passes exactly this.
  *
  * Returns 0 on success, non-zero on failure. Compiled and run by the Rust
  * harness in tests/ffi_c_tests.rs.
@@ -61,13 +61,11 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <host:port>\n"
-                "  Listen address for node A's TCP server; node B connects to\n"
-                "  it. There is no default on purpose: a literal port lands in\n"
-                "  the kernel's ephemeral range (32768-60999 by default), so\n"
-                "  any concurrent bind(\"127.0.0.1:0\") in the suite can be\n"
-                "  handed it and this program then cannot bind (Codeberg #206).\n"
-                "  The Rust harness in tests/ffi_c_tests.rs allocates one and\n"
-                "  passes it here.\n",
+                "  Listen address for node A's TCP server; 127.0.0.1:0 is the\n"
+                "  intended form. A binds it and B dials the kernel-assigned\n"
+                "  port A reports (Codeberg #221). No default on purpose: a\n"
+                "  compiled-in literal is what made ports collide across the\n"
+                "  suite (Codeberg #206).\n",
                 argv[0]);
         return 2;
     }
@@ -89,10 +87,18 @@ int main(int argc, char **argv) {
     CHECK(a != NULL);
     CHECK(lev_start(a) == LEV_OK);
 
+    /* The listen address is normally "127.0.0.1:0": A binds it and reports
+     * the kernel-assigned port, which B dials (Codeberg #221). */
+    char bound[64];
+    size_t bound_len = 0;
+    CHECK(lev_tcp_listen_addr(a, 0, (uint8_t *)bound, sizeof(bound) - 1,
+                              &bound_len) == LEV_OK);
+    bound[bound_len] = '\0';
+
     /* Node B: TCP client to A. */
     lev_builder_t *bb = lev_builder_new();
     CHECK(lev_builder_storage_path(bb, "/tmp/leviculum-c-phase-b-b") == LEV_OK);
-    CHECK(lev_builder_add_tcp_client(bb, addr) == LEV_OK);
+    CHECK(lev_builder_add_tcp_client(bb, bound) == LEV_OK);
     CHECK(lev_builder_enable_transport(bb, 1) == LEV_OK);
     leviculum_t *b = lev_builder_build(bb);
     lev_builder_free(bb);

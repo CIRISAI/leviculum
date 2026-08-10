@@ -2102,6 +2102,7 @@ mod tests {
                     // 100 bytes already carried by a client that left.
                     departed_rxb: 100,
                     departed_txb: 10,
+                    bound_addr: Some("127.0.0.1:4242".parse().unwrap()),
                 },
             );
             inv.add_spawned(

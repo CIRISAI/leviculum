@@ -2671,6 +2671,20 @@ impl ReticulumNode {
             .collect()
     }
 
+    /// The bound socket addresses of this node's TCP server listeners, in
+    /// daemon start order. Each listener binds synchronously during
+    /// `start()`, so after a successful start the list is complete. A server
+    /// configured with port 0 reports the kernel-assigned port here — the
+    /// caller binds `:0` and reads the chosen port back instead of probing a
+    /// free port up front and racing every co-tenant for the re-bind
+    /// (Codeberg #221).
+    pub fn tcp_listen_addrs(&self) -> Vec<std::net::SocketAddr> {
+        let inv = self.inventory.lock_recover();
+        inv.listeners()
+            .filter_map(|(_, row)| row.bound_addr)
+            .collect()
+    }
+
     /// Change the announce bandwidth cap on a registered interface at runtime.
     ///
     /// `cap_percent` is the share (1..=100) of the interface's bandwidth the

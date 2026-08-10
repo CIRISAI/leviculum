@@ -50,30 +50,30 @@ struct Pair {
 /// connects straight to A and the proxy is `None`. `keepalive` overrides the
 /// link keepalive on both nodes (shrinks the stale timeout for stale tests).
 fn build_pair(use_proxy: bool, keepalive: Option<u64>) -> (Pair, Option<FaultProxy>) {
-    let aport = support::free_port();
-    let proxy = if use_proxy {
-        Some(FaultProxy::spawn(aport))
-    } else {
-        None
-    };
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
     let id_ptr = ida.0;
 
-    let server_addr = cstr(&format!("127.0.0.1:{aport}"));
-    let server_ptr = server_addr.as_ptr();
-    let client_port = proxy.as_ref().map(|p| p.port).unwrap_or(aport);
-    let client_addr = cstr(&format!("127.0.0.1:{client_port}"));
-    let client_ptr = client_addr.as_ptr();
-
-    let a = start_node(da.path(), |b| unsafe {
+    // A binds `:0` and reports its port (Codeberg #221); the proxy, when
+    // used, points at whatever A got. It only dials upstream per accepted
+    // connection, so A being up first changes nothing for it.
+    let (a, _a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
         if let Some(k) = keepalive {
             assert_eq!(lev_builder_link_keepalive(b, k), LEV_OK);
         }
     });
+    let aport = support::tcp_listen_port(&a, 0);
+    let proxy = if use_proxy {
+        Some(FaultProxy::spawn(aport))
+    } else {
+        None
+    };
+    let client_port = proxy.as_ref().map(|p| p.port).unwrap_or(aport);
+    let client_addr = cstr(&format!("127.0.0.1:{client_port}"));
+    let client_ptr = client_addr.as_ptr();
+
     let bnode = start_node(db.path(), |b| unsafe {
         assert_eq!(lev_builder_add_tcp_client(b, client_ptr), LEV_OK);
         if let Some(k) = keepalive {
@@ -241,17 +241,14 @@ fn cutting_the_interface_emits_path_lost() {
     // per-peer connection. B (the client) announces a destination that A (the
     // server) learns over that peer connection; cutting the proxy closes it on
     // A, so A culls the path and emits PATH_LOST.
-    let aport = support::free_port();
-    let proxy = FaultProxy::spawn(aport);
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let bid = Identity::generate();
 
-    let server_addr = cstr(&format!("127.0.0.1:{aport}"));
+    let (a, _a_addr) = support::start_tcp_server_node(da.path(), |_b| {});
+    let aport = support::tcp_listen_port(&a, 0);
+    let proxy = FaultProxy::spawn(aport);
     let client_addr = cstr(&format!("127.0.0.1:{}", proxy.port));
-    let a = start_node(da.path(), |b| unsafe {
-        assert_eq!(lev_builder_add_tcp_server(b, server_addr.as_ptr()), LEV_OK);
-    });
     let bnode = start_node(db.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, bid.0), LEV_OK);
         assert_eq!(lev_builder_add_tcp_client(b, client_addr.as_ptr()), LEV_OK);

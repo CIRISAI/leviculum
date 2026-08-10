@@ -10,6 +10,37 @@ use crate::error::*;
 use crate::node::leviculum_t;
 use crate::{guard, write_out, LEV_ADDR_LEN};
 
+/// Write the bound address (`ip:port`) of the node's TCP server listener
+/// number `index` (in start order) into `buf`, read(2) style (a NULL `buf`
+/// queries the length). A server added with port 0 reports the
+/// kernel-assigned port here once the node has started — bind `:0` and read
+/// the chosen port back instead of probing a free port up front and racing
+/// every co-tenant for the re-bind (Codeberg #221). `LEV_ERR_INVALID_ARG` if
+/// `index` is out of range (including "before start": the listeners bind
+/// during `lev_start`).
+#[no_mangle]
+pub unsafe extern "C" fn lev_tcp_listen_addr(
+    node: *const leviculum_t,
+    index: usize,
+    buf: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        match h.node().tcp_listen_addrs().get(index) {
+            Some(addr) => write_out(addr.to_string().as_bytes(), buf, cap, out_len),
+            None => {
+                set_last_error("TCP listener index out of range");
+                LEV_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
 /// Read the transport counters into the provided out-parameters: packets sent,
 /// received, forwarded, announces processed, packets dropped, and the current
 /// path-table size. Any out-pointer may be NULL to skip that counter. Returns

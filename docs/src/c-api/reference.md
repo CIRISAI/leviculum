@@ -567,6 +567,9 @@ int  lev_interface_stats_entry(const struct lev_interface_stats_t *table, uintpt
 int  lev_interface_stats_id(const struct lev_interface_stats_t *table, uintptr_t index,
                             uint64_t *out_id);
 void lev_interface_stats_free(struct lev_interface_stats_t *table);
+
+int  lev_tcp_listen_addr(const struct leviculum_t *node, uintptr_t index,
+                         uint8_t *buf, uintptr_t cap, uintptr_t *out_len);
 ```
 
 - `lev_transport_stats` reads the node's transport counters and the current
@@ -595,6 +598,12 @@ void lev_interface_stats_free(struct lev_interface_stats_t *table);
   This is the accessor that resolves the ids the rest of the API hands out —
   `lev_path_table_entry`'s `interface_index` and `lev_event_interface_id` — to an
   entry whose name and counters can be read.
+- `lev_tcp_listen_addr` writes the bound `ip:port` of the node's TCP server
+  listener number `index` (in start order), read(2) style. A server added
+  with port 0 reports the kernel-assigned port here after `lev_start` — bind
+  `:0` and read the port back instead of probing a free port up front and
+  racing other processes for the re-bind. `LEV_ERR_INVALID_ARG` if `index`
+  is out of range, including before start.
 
 ## Helpers
 

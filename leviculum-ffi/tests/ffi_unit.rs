@@ -767,12 +767,13 @@ fn interface_stats_snapshot_guards_and_bare_node() {
 fn config_file_brings_up_a_node() {
     unsafe {
         let dir = tempfile::tempdir().unwrap();
-        let port = support::free_port();
-        let cfg = format!(
-            "[reticulum]\n  enable_transport = no\n\n[interfaces]\n  \
+        // listen_port 0: the kernel assigns the port at bind, so the test
+        // needs no free-port probe (Codeberg #221). Nothing dials this
+        // server; the test only asserts the config brings a node up.
+        let cfg = "[reticulum]\n  enable_transport = no\n\n[interfaces]\n  \
              [[Test TCP Server]]\n    type = TCPServerInterface\n    enabled = yes\n    \
-             listen_ip = 127.0.0.1\n    listen_port = {port}\n    mode = gateway\n"
-        );
+             listen_ip = 127.0.0.1\n    listen_port = 0\n    mode = gateway\n"
+            .to_string();
         let cfg_path = dir.path().join("config");
         std::fs::write(&cfg_path, cfg).unwrap();
 

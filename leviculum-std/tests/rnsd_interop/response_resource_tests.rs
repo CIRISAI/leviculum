@@ -24,12 +24,6 @@ use leviculum_std::{Error, NodeEvent};
 
 use crate::common::{init_tracing, temp_storage};
 
-/// Reserve a free localhost TCP port, then release it for the server to bind.
-fn free_tcp_addr() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap()
-}
-
 /// Over TCP, link-MTU discovery raises the link MDU up to the interface
 /// HW_MTU (262144 B), so the response must exceed that ceiling to genuinely
 /// require the resource path.
@@ -53,13 +47,11 @@ fn large_response_value() -> Vec<u8> {
 async fn test_send_response_resource_delivers_large_response() {
     init_tracing();
 
-    let server_addr = free_tcp_addr();
-
     // Responder: serves the request handler over a TCP server interface.
     let responder_storage = temp_storage("test_send_response_resource", "responder");
     let mut responder = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(server_addr)
+        .add_tcp_server("127.0.0.1:0".parse().expect("loopback addr"))
         .storage_path(responder_storage.path().to_path_buf())
         .build()
         .await
@@ -81,6 +73,10 @@ async fn test_send_response_resource_delivers_large_response() {
     responder.register_request_handler(dest_hash, "/page/large.mu", RequestPolicy::AllowAll);
 
     responder.start().await.expect("start responder node");
+    let server_addr = *responder
+        .tcp_listen_addrs()
+        .first()
+        .expect("server reports its bound TCP listener (Codeberg #221)");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Requester: an edge node with a direct TCP client to the responder.

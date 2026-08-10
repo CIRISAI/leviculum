@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A TCP server interface configured with port 0 reports its kernel-assigned
+  address: `tcp_listen_addrs()` on the node, `lev_tcp_listen_addr` in the C
+  API (Codeberg #221).
+
 - `lblogd` counts what it served, one appended `key=value` record per UTC
   day in `<data_dir>/counts.log` (`[counter]` moves it or switches it
   off). Requests and links, named as such: a Reticulum link is a session

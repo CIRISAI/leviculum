@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -69,20 +69,19 @@ impl Event {
     }
 }
 
-/// A free loopback port. The listener is dropped before the node binds, which
-/// is the same small race every TCP test in the tree runs.
-pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
-
 pub enum Wire {
     Listen(SocketAddr),
     Dial(SocketAddr),
     Alone,
+}
+
+impl Wire {
+    /// Listen on `127.0.0.1:0`: the node binds the port itself and the test
+    /// reads the kernel-assigned address back via [`Helper::listen_addr`], so
+    /// no free-port probe races the bind (Codeberg #221).
+    pub fn listen_any() -> Wire {
+        Wire::Listen("127.0.0.1:0".parse().expect("loopback addr"))
+    }
 }
 
 /// How one helper is to be built. [`Setup::new`] is the shape the original
@@ -168,6 +167,16 @@ impl Helper {
             delivery_hash: None,
             _storage: storage,
         }
+    }
+
+    /// The bound address of this helper's TCP listener (a
+    /// [`Wire::listen_any`] helper reports the kernel-assigned port here).
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.node
+            .tcp_listen_addrs()
+            .first()
+            .copied()
+            .expect("helper has a TCP server listener")
     }
 
     pub fn command(&self, line: &str) {

@@ -22,7 +22,6 @@
 //! All three are `#[ignore]` — they spawn a Python interpreter (and `socat`),
 //! so they run under `--include-ignored`, not in the default fast pass.
 
-use std::net::TcpListener;
 use std::time::Duration;
 
 use leviculum_core::DestinationHash;
@@ -39,12 +38,13 @@ const BRIDGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/pipe_bridg
 /// both ends must agree on the configured value so the interfaces match.
 const SERIAL_SPEED: u32 = 115200;
 
-/// Grab an ephemeral loopback TCP port for the two Pipe bridge halves to
-/// rendezvous on, then release it (the listening half rebinds with
-/// `SO_REUSEADDR`, the connecting half retries).
+/// A loopback TCP port for the two bridge halves to rendezvous on. The number
+/// crosses a process boundary through argv, so it cannot be a kept `:0`
+/// listener; it comes from the host-wide allocator band above the ephemeral
+/// range instead (Codeberg #221). `SO_REUSEADDR` on the listening half and the
+/// connecting half's retry cover the allocator's own probe release.
 fn free_tcp_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    l.local_addr().expect("local addr").port()
+    crate::harness::port_alloc::free_tcp_port()
 }
 
 /// Drive both announce directions across a serial-family link between a live

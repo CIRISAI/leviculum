@@ -25,21 +25,17 @@ struct Pair {
 }
 
 fn setup_pair() -> Pair {
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
     let id_ptr = ida.0;
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let server_ptr = addr_c.as_ptr();
 
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
     let bnode = start_node(db.path(), |b| unsafe {
-        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, addr_c.as_ptr()), LEV_OK);
     });
 
     let dest = register_single_dest(a.0, id_ptr, "levtest", &["integ"]);
@@ -191,19 +187,15 @@ fn announce_then_link_message_both_directions() {
 fn control_overflow_reports_a_dropped_count() {
     // B's control plane holds a single event; a flood of announces it never
     // drains overflows it, and the overflow marker carries the dropped count.
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let sp = addr_c.as_ptr();
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, ida.0), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, sp), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
     let bnode = start_node(db.path(), |b| unsafe {
-        assert_eq!(lev_builder_add_tcp_client(b, sp), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, addr_c.as_ptr()), LEV_OK);
         assert_eq!(lev_builder_event_capacity(b, 1, 1), LEV_OK);
     });
 
@@ -287,9 +279,12 @@ fn event_progress_rejects_non_progress_events() {
 
 #[test]
 fn udp_interface_carries_announce_and_link() {
-    // A and B over a symmetric UDP loopback pair.
-    let pa = support::free_port();
-    let pb = support::free_port();
+    // A and B over a symmetric UDP loopback pair. Each side must know the
+    // other's port before either starts, so neither can bind `:0` and report
+    // back; the ports come from the host-wide allocator instead (Codeberg
+    // #221 class 2 — convert to `:0` if UDP ever gains a bound-port getter).
+    let pa = support::port_alloc::free_udp_port();
+    let pb = support::port_alloc::free_udp_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
@@ -411,20 +406,16 @@ fn connect_with_key_establishes_link() {
 /// destination hash (the documented event contract behind `lev_request_path`).
 #[test]
 fn announce_emits_path_found_event() {
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
     let id_ptr = ida.0;
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let server_ptr = addr_c.as_ptr();
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
     let bnode = start_node(db.path(), |b| unsafe {
-        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, addr_c.as_ptr()), LEV_OK);
     });
     let dest = register_single_dest(a.0, id_ptr, "levtest", &["pathfound"]);
 
@@ -450,20 +441,16 @@ fn announce_emits_path_found_event() {
 fn message_metadata_rejected_on_non_message_events() {
     // Build a fresh pair so B's first announce (before it has a path) is
     // available as a non-message event to probe.
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
     let id_ptr = ida.0;
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let server_ptr = addr_c.as_ptr();
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
     let bnode = start_node(db.path(), |b| unsafe {
-        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, addr_c.as_ptr()), LEV_OK);
     });
     let dest = register_single_dest(a.0, id_ptr, "levtest", &["meta"]);
 
@@ -974,21 +961,17 @@ fn transport_stats_reflect_traffic_and_paths() {
 
 #[test]
 fn app_proof_strategy_requests_and_sends_proof() {
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
     let idb = Identity::generate();
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let sp = addr_c.as_ptr();
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, ida.0), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, sp), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
     let bnode = start_node(db.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, idb.0), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_client(b, sp), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, addr_c.as_ptr()), LEV_OK);
     });
 
     // A's destination uses the App proof strategy.
@@ -1056,19 +1039,15 @@ fn app_proof_strategy_requests_and_sends_proof() {
 
 #[test]
 fn all_proof_strategy_does_not_request_proof() {
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let sp = addr_c.as_ptr();
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, ida.0), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, sp), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
     let bnode = start_node(db.path(), |b| unsafe {
-        assert_eq!(lev_builder_add_tcp_client(b, sp), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, addr_c.as_ptr()), LEV_OK);
     });
 
     let app = cstr("levtest");
@@ -1125,18 +1104,15 @@ fn all_proof_strategy_does_not_request_proof() {
 
 #[test]
 fn ratchet_enabled_destination_links_and_exposes_key() {
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
     let id_ptr = ida.0;
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let server_ptr = addr_c.as_ptr();
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
+    let server_ptr = addr_c.as_ptr();
     let bnode = start_node(db.path(), |b| unsafe {
         assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
     });
@@ -1253,7 +1229,7 @@ fn serial_interface_comes_up_over_pty() {
 #[test]
 fn shared_instance_forwards_announce() {
     // A unique abstract-socket name per run (the namespace is machine-wide).
-    let name = format!("levtest-{}", support::free_port());
+    let name = format!("levtest-{}", support::unique_token());
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
@@ -1345,20 +1321,16 @@ fn send_on_closed_link_fails() {
 /// pins that on a snapshot with gaps.
 #[test]
 fn announce_interface_id_resolves_to_an_interface() {
-    let port = support::free_port();
     let da = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let ida = Identity::generate();
     let id_ptr = ida.0;
-    let addr = format!("127.0.0.1:{port}");
-    let addr_c = cstr(&addr);
-    let server_ptr = addr_c.as_ptr();
-    let a = start_node(da.path(), |b| unsafe {
+    let (a, a_addr) = support::start_tcp_server_node(da.path(), |b| unsafe {
         assert_eq!(lev_builder_identity(b, id_ptr), LEV_OK);
-        assert_eq!(lev_builder_add_tcp_server(b, server_ptr), LEV_OK);
     });
+    let addr_c = cstr(&a_addr);
     let bnode = start_node(db.path(), |b| unsafe {
-        assert_eq!(lev_builder_add_tcp_client(b, server_ptr), LEV_OK);
+        assert_eq!(lev_builder_add_tcp_client(b, addr_c.as_ptr()), LEV_OK);
     });
     let dest = register_single_dest(a.0, id_ptr, "levtest", &["iface"]);
 

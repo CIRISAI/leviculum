@@ -51,12 +51,6 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Reserve a free localhost TCP port, then release it for the server to bind.
-fn free_tcp_addr() -> std::net::SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap()
-}
-
 /// Build a transport-instance server config with remote management enabled and
 /// `allowed` on the ACL.
 fn server_config(allowed: Vec<String>) -> Config {
@@ -134,8 +128,6 @@ async fn test_python_rnstatus_R_against_our_lnsd() {
         .private_key_bytes()
         .expect("management identity must expose its private key bytes");
 
-    let server_addr = free_tcp_addr();
-
     // Server: a transport instance with a TCP server interface and remote
     // management enabled. `without_events()` exercises the daemon path — the
     // `/status` responder must run without an application event sink.
@@ -143,13 +135,17 @@ async fn test_python_rnstatus_R_against_our_lnsd() {
         crate::common::temp_storage("test_python_rnstatus_R_against_our_lnsd", "server");
     let mut server = ReticulumNodeBuilder::new()
         .config(server_config(vec![allowed_hash]))
-        .add_tcp_server(server_addr)
+        .add_tcp_server("127.0.0.1:0".parse().expect("loopback addr"))
         .storage_path(server_storage.path().to_path_buf())
         .without_events()
         .build()
         .await
         .expect("build server node");
     server.start().await.expect("start server node");
+    let server_addr = *server
+        .tcp_listen_addrs()
+        .first()
+        .expect("server reports its bound TCP listener (Codeberg #221)");
     let server_id_hash = server.identity_hash();
     // Let the TCP server interface bind and start listening.
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -236,19 +232,21 @@ async fn test_python_rnstatus_R_rejected_when_not_allowed() {
         .private_key_bytes()
         .expect("client identity must expose its private key bytes");
 
-    let server_addr = free_tcp_addr();
-
     let server_storage =
         crate::common::temp_storage("test_python_rnstatus_R_rejected_when_not_allowed", "server");
     let mut server = ReticulumNodeBuilder::new()
         .config(server_config(vec![allowed_hash]))
-        .add_tcp_server(server_addr)
+        .add_tcp_server("127.0.0.1:0".parse().expect("loopback addr"))
         .storage_path(server_storage.path().to_path_buf())
         .without_events()
         .build()
         .await
         .expect("build server node");
     server.start().await.expect("start server node");
+    let server_addr = *server
+        .tcp_listen_addrs()
+        .first()
+        .expect("server reports its bound TCP listener (Codeberg #221)");
     let server_id_hash = server.identity_hash();
     tokio::time::sleep(Duration::from_secs(1)).await;
 

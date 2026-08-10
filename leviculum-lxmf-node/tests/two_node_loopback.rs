@@ -36,10 +36,9 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use common::{body_b64, free_port, pump_until, Helper, Setup, Wire};
+use common::{body_b64, pump_until, Helper, Setup, Wire};
 
 /// The `wait_for_peer` window, the same on both runs.
 ///
@@ -54,13 +53,19 @@ const WAIT_SECS: u64 = 10;
 /// Returns the two helpers with every event they emitted, so each test can ask
 /// its own questions of the same run.
 async fn run_script(connected: bool) -> (Helper, Helper) {
-    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
-    let (a_wire, b_wire) = if connected {
-        (Wire::Listen(addr), Wire::Dial(addr))
+    // Alice listens on `:0` and reports her port; Bob dials it (Codeberg
+    // #221 — no free-port probe, so no probe-to-bind window).
+    let a_wire = if connected {
+        Wire::listen_any()
     } else {
-        (Wire::Alone, Wire::Alone)
+        Wire::Alone
     };
     let mut alice = Helper::start(Setup::new("Alice", a_wire)).await;
+    let b_wire = if connected {
+        Wire::Dial(alice.listen_addr())
+    } else {
+        Wire::Alone
+    };
     let mut bob = Helper::start(Setup::new("Bob", b_wire)).await;
 
     // lxmf_start: the helper is up once it has named its delivery destination.

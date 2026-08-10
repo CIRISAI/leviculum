@@ -369,6 +369,14 @@ impl Node {
         self.inner.interface_stats()
     }
 
+    /// The bound addresses of this node's TCP server listeners, in start
+    /// order. A server added with port 0 reports the kernel-assigned port
+    /// here after `start()`. See
+    /// [`crate::driver::ReticulumNode::tcp_listen_addrs`].
+    pub fn tcp_listen_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.inner.tcp_listen_addrs()
+    }
+
     /// Change the announce bandwidth cap on a registered interface at runtime.
     /// See [`crate::driver::ReticulumNode::set_interface_announce_cap`].
     pub fn set_interface_announce_cap(

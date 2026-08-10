@@ -21,6 +21,17 @@ use leviculum::*;
 
 pub mod python_daemon;
 
+/// Host-wide unique listener ports for consumers that cannot bind `:0` and
+/// read the result back (a symmetric UDP pair, the Python daemon's config
+/// file). Shared source with the leviculum-std suites — see that file's
+/// module docs for the allocator's contract. Codeberg #221: the band sits
+/// above the kernel's ephemeral range, so no `bind(":0")` co-tenant can be
+/// handed one of its numbers, and the flock'd counter keeps two test
+/// processes from ever drawing the same number.
+#[path = "../../../leviculum-std/tests/support/port_alloc.rs"]
+#[allow(dead_code)]
+pub mod port_alloc;
+
 /// Runtime control for a [`FaultProxy`]: a silent-drop gate and a hard-cut flag.
 struct ProxyCtrl {
     /// When set, bytes are read from both sides but discarded (sockets stay
@@ -161,12 +172,54 @@ pub fn last_error() -> String {
     }
 }
 
-/// A free TCP port on loopback (bind to :0, read the port, release it).
-pub fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = l.local_addr().expect("local_addr").port();
-    drop(l);
-    port
+/// The bound `ip:port` of `node`'s TCP server listener number `index`.
+///
+/// Codeberg #221: the node binds `:0` itself and the test reads the chosen
+/// port back here, so there is no window in which another process can take a
+/// pre-probed port between probe and bind.
+pub fn tcp_listen_addr(node: &Node, index: usize) -> String {
+    let v = read2(|b, c, l| unsafe { lev_tcp_listen_addr(node.0, index, b, c, l) })
+        .expect("tcp listen addr");
+    String::from_utf8(v).expect("utf-8 listen addr")
+}
+
+/// The bound port of `node`'s TCP server listener number `index`.
+pub fn tcp_listen_port(node: &Node, index: usize) -> u16 {
+    let addr = tcp_listen_addr(node, index);
+    addr.rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no port in listen addr {addr}"))
+}
+
+/// Build and start a node whose first interface is a TCP server on
+/// `127.0.0.1:0`, returning it together with the listener's actual `ip:port`
+/// (see [`tcp_listen_addr`]). The closure configures the rest of the builder
+/// (identity, more interfaces, …).
+pub fn start_tcp_server_node(
+    storage: &Path,
+    configure: impl FnOnce(*mut lev_builder_t),
+) -> (Node, String) {
+    let node = start_node(storage, |b| unsafe {
+        let addr = cstr("127.0.0.1:0");
+        assert_eq!(lev_builder_add_tcp_server(b, addr.as_ptr()), LEV_OK);
+        configure(b);
+    });
+    let addr = tcp_listen_addr(&node, 0);
+    (node, addr)
+}
+
+/// A workspace-unique token for names that must not collide between
+/// concurrently running test processes (shared-instance socket names). Not a
+/// port: pid plus a process-local counter, no kernel resource involved.
+pub fn unique_token() -> String {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Owning wrapper for a node handle; frees on drop.

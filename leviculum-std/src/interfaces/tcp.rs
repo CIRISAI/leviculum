@@ -375,6 +375,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
             ifac_size_bits: ifac.as_ref().map(|c| (c.ifac_size() * 8) as i64),
             departed_rxb: 0,
             departed_txb: 0,
+            bound_addr: Some(bound),
         },
     );
 

@@ -14,7 +14,7 @@
 //! over the `send_response_resource` fallback, and a clean client timeout
 //! for an unknown path.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,12 +27,6 @@ use lblogd::post::load_posts_dir;
 use lblogd::render::{render_index_micron, render_post_micron, BlogMeta};
 use lnomad::fetch::{FetchError, Session};
 use lnomad::url::parse_url;
-
-/// Grab a currently-free localhost TCP port by binding and immediately dropping.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    listener.local_addr().expect("local addr").port()
-}
 
 /// Write the fixture posts: two small ones and one whose body pushes the
 /// rendered Micron well past the 262144 byte negotiated TCP/IPC link MDU, so
@@ -62,7 +56,10 @@ fn write_fixture_posts(dir: &Path) {
 async fn blog_node_serves_pages_end_to_end() {
     // The daemon: a transport node sharing its instance over IPC, standing in
     // for a production lnsd.
-    let daemon_tcp: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    // `:0`: the kernel assigns the port at bind and nothing dials this
+    // server; the test wires everything over the shared instance
+    // (Codeberg #221).
+    let daemon_tcp: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let instance_name = format!("lblogd-b2-test-{}", std::process::id());
     let daemon_storage = tempfile::tempdir().expect("daemon storage");
     let mut daemon = ReticulumNodeBuilder::new()

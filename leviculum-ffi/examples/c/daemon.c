@@ -7,8 +7,10 @@
  * config-file driven node coming up, and a node offering a shared instance
  * that a second node attaches to as a local client.
  *
- * Takes the config-file node's TCP listen port as argv[1]; the Rust harness
- * allocates a free one and passes it in (Codeberg #206).
+ * Takes the config-file node's TCP listen port as argv[1]. `0` is the
+ * intended form: the kernel assigns the port at bind and nothing dials this
+ * server (Codeberg #221). The Rust harness in tests/ffi_c_tests.rs passes
+ * exactly this.
  *
  * Links the real libleviculum.so. Returns 0 on success, non-zero on the first
  * failed check. Compiled and run by the Rust harness in tests/ffi_c_tests.rs.
@@ -131,18 +133,20 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <port>\n"
-                "  TCP port for the config-file node's TCPServerInterface.\n"
-                "  There is no default on purpose: a literal port lands in the\n"
-                "  kernel's ephemeral range (32768-60999 by default), so any\n"
-                "  concurrent bind(\"127.0.0.1:0\") in the suite can be handed\n"
-                "  it and this program then cannot bind (Codeberg #206). The\n"
-                "  Rust harness in tests/ffi_c_tests.rs allocates one and\n"
-                "  passes it here.\n",
+                "  TCP port for the config-file node's TCPServerInterface;\n"
+                "  0 is the intended form (the kernel assigns the port at\n"
+                "  bind, nothing dials this server; Codeberg #221). No\n"
+                "  default on purpose: a compiled-in literal is what made\n"
+                "  ports collide across the suite (Codeberg #206).\n",
                 argv[0]);
         return 2;
     }
+    if (strspn(argv[1], "0123456789") != strlen(argv[1]) || strlen(argv[1]) == 0) {
+        fprintf(stderr, "not a port: %s\n", argv[1]);
+        return 2;
+    }
     int port = atoi(argv[1]);
-    if (port <= 0 || port > 65535) {
+    if (port < 0 || port > 65535) {
         fprintf(stderr, "not a port: %s\n", argv[1]);
         return 2;
     }
