@@ -173,6 +173,13 @@ pub fn next_port_candidate() -> u16 {
     let mut state = CHUNK_STATE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    next_candidate_locked(&mut state)
+}
+
+/// [`next_port_candidate`] with the chunk lock already held, so a caller that
+/// needs *two related* numbers can take them without another thread drawing
+/// between the two.
+fn next_candidate_locked(state: &mut Chunk) -> u16 {
     if state.next >= state.end {
         let path = counter_path();
         let (base, end) = reserve_chunk(&path).unwrap_or_else(|err| {
@@ -218,6 +225,46 @@ pub fn try_free_udp_port() -> Option<u16> {
     None
 }
 
+/// Two *consecutive* UDP ports, both confirmed bindable; returns the first.
+///
+/// For consumers that do not choose their second port: AutoInterface derives
+/// its unicast discovery port as `discovery_port + 1`, so a test needs `p`
+/// and `p + 1` (Codeberg #207). Drawing only `p` and using `p + 1` implicitly
+/// would leave the successor in the pool for the next caller — the collision
+/// the allocator exists to prevent, moved one number along.
+///
+/// Both numbers are therefore consumed, and both are drawn under one hold of
+/// the chunk lock: two separate calls interleave with the other threads of a
+/// parallel test binary, which is why they almost never come back adjacent.
+/// The counter is sequential, so a pair that is *not* adjacent means either
+/// the chunk ran out between the two (the next chunk starts wherever other
+/// processes left the shared counter) or the probe skipped an occupant; both
+/// are handled by trying again with the next pair.
+pub fn try_free_udp_port_pair() -> Option<u16> {
+    let mut state = CHUNK_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for _ in 0..(PORT_RANGE_END - PORT_RANGE_BASE) {
+        let first = next_candidate_locked(&mut state);
+        let second = next_candidate_locked(&mut state);
+        if second != first + 1 {
+            continue;
+        }
+        // Held together: releasing the first before probing the second would
+        // let an outside process take it back in between.
+        let Ok(a) = UdpSocket::bind(("127.0.0.1", first)) else {
+            continue;
+        };
+        let Ok(b) = UdpSocket::bind(("127.0.0.1", second)) else {
+            continue;
+        };
+        drop(a);
+        drop(b);
+        return Some(first);
+    }
+    None
+}
+
 /// [`try_free_tcp_port`], panicking on an exhausted band. For call sites that
 /// have no error path worth taking.
 pub fn free_tcp_port() -> u16 {
@@ -227,4 +274,9 @@ pub fn free_tcp_port() -> u16 {
 /// [`try_free_udp_port`], panicking on an exhausted band.
 pub fn free_udp_port() -> u16 {
     try_free_udp_port().expect("exhausted the test port band 61000-65000")
+}
+
+/// [`try_free_udp_port_pair`], panicking on an exhausted band.
+pub fn free_udp_port_pair() -> u16 {
+    try_free_udp_port_pair().expect("exhausted the test port band 61000-65000")
 }

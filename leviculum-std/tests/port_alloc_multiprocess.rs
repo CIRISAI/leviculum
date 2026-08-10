@@ -165,6 +165,63 @@ fn port_alloc_worker() {
     }
 }
 
+/// The pair primitive under the concurrency it lives in: the successor of a
+/// pair is reserved too, so no other drawer in the process is handed it.
+///
+/// Codeberg #207 needs two consecutive numbers, because AutoInterface derives
+/// its unicast discovery port as `discovery_port + 1` and a test therefore
+/// occupies both. The first attempt at that drew twice from
+/// [`port_alloc::free_udp_port`] and checked adjacency in the caller. That is
+/// right in a single-threaded run and wrong in every real one: a test binary
+/// runs its tests in parallel, another thread draws between the two calls,
+/// and the two numbers come back adjacent almost never — three AutoInterface
+/// tests panicked on it. Hence threads here rather than a loop: a
+/// single-threaded version of this test passes against the broken
+/// implementation.
+#[test]
+fn port_pairs_reserve_their_successor_under_concurrency() {
+    const PAIR_THREADS: usize = 4;
+    const SINGLE_THREADS: usize = 4;
+    const DRAWS: usize = 12;
+
+    let mut handles = Vec::new();
+    for _ in 0..PAIR_THREADS {
+        handles.push(std::thread::spawn(|| {
+            let mut claimed = Vec::new();
+            for _ in 0..DRAWS {
+                let first = port_alloc::free_udp_port_pair();
+                claimed.push(first);
+                claimed.push(first + 1);
+            }
+            claimed
+        }));
+    }
+    for _ in 0..SINGLE_THREADS {
+        handles.push(std::thread::spawn(|| {
+            (0..DRAWS).map(|_| port_alloc::free_udp_port()).collect()
+        }));
+    }
+
+    let claimed: Vec<u16> = handles
+        .into_iter()
+        .flat_map(|h| h.join().expect("worker thread"))
+        .collect();
+
+    let distinct: BTreeSet<u16> = claimed.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        claimed.len(),
+        "a number was handed to two drawers: either a pair's successor was \
+         left in the pool, or the pair was not adjacent"
+    );
+    for port in &claimed {
+        assert!(
+            (port_alloc::PORT_RANGE_BASE..port_alloc::PORT_RANGE_END).contains(port),
+            "{port} is outside the test port band"
+        );
+    }
+}
+
 #[test]
 fn concurrent_processes_are_never_handed_the_same_port() {
     let state = tempfile::tempdir().expect("state dir");
