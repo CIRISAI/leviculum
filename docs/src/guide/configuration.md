@@ -172,7 +172,14 @@ multicast. No router or DHCP needed; the link must carry multicast.
 ### RNode and Serial (`RNodeInterface`, `SerialInterface`)
 
 `RNodeInterface` drives an RNode LoRa modem; `SerialInterface` is a raw
-serial KISS link. They share the serial-port and (for RNode) LoRa keys.
+serial HDLC link. They share the serial-port and LoRa keys.
+
+Divergence from Python: there, only `RNodeInterface` honours the LoRa
+keys (`frequency`, `bandwidth`, `spreadingfactor`, `codingrate`,
+`txpower`) and `SerialInterface` reads port settings only. Leviculum's
+`SerialInterface` honours them too and configures the attached LNode's
+radio over the serial port — the LNode frames HDLC, so it cannot be
+driven by the KISS-framed `RNodeInterface`.
 
 Serial keys:
 
@@ -184,8 +191,8 @@ Serial keys:
 | `parity` | string | unset | `none`, `even`, or `odd`. (`ini_config.rs:216`; `config.rs:194-195`) |
 | `stopbits` | u8 | unset | Stop bits. (`ini_config.rs:217`; `config.rs:196-197`) |
 
-LoRa keys (RNode), derived from source — the meanings below describe the
-RNode radio parameters the interface configures (`config.rs:231-249`):
+LoRa keys, derived from source — the meanings below describe the
+radio parameters the interface configures (`config.rs:231-249`):
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
