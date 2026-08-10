@@ -111,7 +111,11 @@ echo "[install-ci] cargo target dir: ~/.cache/leviculum-ci-target"
 #    crate that is already present at the requested version.
 rustup target add thumbv7em-none-eabihf
 cargo install --locked flip-link
-echo "[install-ci] firmware toolchain: thumbv7em-none-eabihf + flip-link"
+#    llvm-tools ships llvm-objdump, which `just nrf-stack-frames` uses to
+#    read the frame-allocating `sub sp` immediates out of the linked ELF
+#    when binutils-arm-none-eabi is absent.
+rustup component add llvm-tools
+echo "[install-ci] firmware toolchain: thumbv7em-none-eabihf + flip-link + llvm-tools"
 
 # 7. Install systemd user units, patching the hardcoded
 #    %h/coding/libreticulum literal to point at the worktree this

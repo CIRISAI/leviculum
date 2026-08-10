@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The nRF firmware no longer builds its `NodeCore` on the stack: the
+  94 KB `main` frame that left the T114 ~13 KB of stack margin is gone.
+  New `NodeCoreBuilder::build_boxed`, plus a `just nrf-stack-frames` gate
+  that fails any firmware frame above 16 KB.
+
 - LXMF message timestamps carry microsecond precision, so two identical
   messages sent back to back are two messages and not a duplicate
   (Codeberg #217).

@@ -203,6 +203,11 @@ impl NodeCoreBuilder {
     ///
     /// If no identity was provided, a new one will be generated using the RNG.
     ///
+    /// Returns by value, so the caller's frame carries a whole `NodeCore`.
+    /// Fine when `S` keeps its data on the heap; use [`Self::build_boxed`]
+    /// when `S` stores inline, or the value lands on a stack that cannot
+    /// hold it.
+    ///
     /// # Arguments
     /// * `rng` - Random number generator (moved into NodeCore)
     /// * `clock` - Clock instance (moved into NodeCore)
@@ -229,6 +234,59 @@ impl NodeCoreBuilder {
             clock,
             storage,
         );
+
+        if self.respond_to_probes {
+            node.enable_probe_responder();
+        }
+
+        if self.remote_management {
+            node.enable_remote_management(self.remote_management_allowed);
+        }
+
+        node
+    }
+
+    /// Build the NodeCore straight into a heap allocation.
+    ///
+    /// Same result as `Box::new(builder.build(..))`, but the value is never
+    /// held as a by-value local of this function: the allocation is made
+    /// first and the post-construction configuration (`respond_to_probes`,
+    /// `remote_management`) runs through the box. `build()` cannot do that —
+    /// it owns a `NodeCore` local it mutates before returning, which forces
+    /// the caller's frame to carry a full-size temporary plus the return
+    /// slot.
+    ///
+    /// That matters on embedded, where `S` is an inline-storage type: with
+    /// `EmbeddedStorage` a `NodeCore` is >40 KB, and `Box::new(build(..))`
+    /// put two of those on the T114's 128 KB stack (a 94 KB `main` frame,
+    /// leaving ~13 KB of margin and corrupting SoftDevice RAM on the deeper
+    /// paths). Drivers with a large `S` must use this instead of `build()`.
+    pub fn build_boxed<R, Clk, S>(
+        self,
+        mut rng: R,
+        clock: Clk,
+        storage: S,
+    ) -> alloc::boxed::Box<NodeCore<R, Clk, S>>
+    where
+        R: CryptoRngCore,
+        Clk: crate::traits::Clock,
+        S: crate::traits::Storage,
+    {
+        let identity = match self.identity {
+            Some(id) => id,
+            None => Identity::generate(&mut rng),
+        };
+
+        let mut node = alloc::boxed::Box::new(NodeCore::new(
+            identity,
+            self.transport_config,
+            self.proof_strategy,
+            self.max_incoming_resource_size,
+            self.resource_window_policy,
+            rng,
+            clock,
+            storage,
+        ));
 
         if self.respond_to_probes {
             node.enable_probe_responder();
@@ -362,6 +420,50 @@ mod tests {
         let hash = node.probe_dest_hash().unwrap();
         let dest = node.destination(hash).unwrap();
         assert_eq!(dest.proof_strategy(), ProofStrategy::All);
+    }
+
+    #[test]
+    fn test_build_boxed_matches_build() {
+        // `build_boxed` exists so a driver with a large inline `S` never puts
+        // a `NodeCore` on its own stack. It must stay behaviourally identical
+        // to `Box::new(build(..))`, including the post-construction steps
+        // (`respond_to_probes`, `remote_management`) that now run through the
+        // box instead of through a local.
+        let identity = Identity::generate(&mut OsRng);
+        let id_hash = *identity.hash();
+        let mgmt_allowed = alloc::vec![[7u8; crate::constants::TRUNCATED_HASHBYTES]];
+
+        let node = NodeCoreBuilder::new()
+            .identity(identity)
+            .proof_strategy(ProofStrategy::All)
+            .enable_transport(true)
+            .max_hops(9)
+            .respond_to_probes(true)
+            .remote_management(true, mgmt_allowed)
+            .build_boxed(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+
+        assert_eq!(node.identity().hash(), &id_hash);
+        assert_eq!(node.default_proof_strategy(), ProofStrategy::All);
+        assert!(node.transport_config().enable_transport);
+        assert_eq!(node.transport_config().max_hops, 9);
+
+        let probe_hash = node.probe_dest_hash().expect("probe destination");
+        assert!(node.destination(probe_hash).is_some());
+        assert_eq!(
+            node.destination(probe_hash).unwrap().proof_strategy(),
+            ProofStrategy::All
+        );
+        assert!(node.remote_mgmt_dest_hash().is_some());
+        assert_eq!(node.next_deadline(), Some(TEST_TIME_MS + 15_000));
+    }
+
+    #[test]
+    fn test_build_boxed_generates_identity_when_unset() {
+        let node =
+            NodeCoreBuilder::new().build_boxed(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+        assert!(node.probe_dest_hash().is_none());
+        // A generated identity is a real one, not a zeroed placeholder.
+        assert_ne!(node.identity().hash(), &[0u8; 16]);
     }
 
     #[test]

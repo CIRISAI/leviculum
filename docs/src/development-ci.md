@@ -9,7 +9,7 @@ external runners.
 
 | Tier | Name | Trigger | Budget | Test scope |
 |------|------|---------|--------|------------|
-| 0 | `fast` | pre-push hook | ~3 min | fmt + clippy (host + nrf firmware workspace, both BSPs) + rustdoc gate + workspace lib tests |
+| 0 | `fast` | pre-push hook | ~3 min | fmt + clippy (host + nrf firmware workspace, both BSPs) + the firmware stack-frame gate + rustdoc gate + workspace lib tests |
 | 1 | `standard` | on demand: `just standard`, once per batch | ~15 min (first run: 20-40 min cold compile) | Tier 0 + core/tests + ffi + proxy + rnsd_interop + TCP-hub endurance smoke soak (see [Soak and endurance](soak-and-endurance.md)) + the `status_parity` two-daemon suite + the ignored-test census |
 | 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + the periculum `conformance/` and `regression/` corpora (docker) |
 | 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LNode flash-from-HEAD + the periculum `hardware/` corpus |
@@ -64,6 +64,29 @@ The synced commit hash is appended to `last-results.txt` as
 `<timestamp> tier2 sync HEAD=<short-hash>` (or `tier3-hw` for the
 nightly), so you can correlate scheduled runs with the master commit
 they tested.
+
+## The firmware stack-frame gate
+
+`just nrf-stack-frames` builds both firmware binaries and reads the
+frame-allocating `sub sp` immediates out of the linked ELF. Any frame
+above 16 KB fails the gate.
+
+The T114 stack is 128 008 B and grows down into the SoftDevice's RAM
+floor. An overflow past `_stack_end` does not fault: it overwrites SD
+state, and the board dies later in an SD internal assertion with a
+useless PC. So a single oversized frame is both fatal and invisible,
+which is why this is checked statically on every push rather than
+observed at runtime.
+
+The frame it was written for: `Box::new(builder.build(..))` materialised
+a by-value `NodeCore` — over 40 KB once `EmbeddedStorage`'s inline
+collections are counted — twice in `main`'s poll frame. 94 720 B, 74 % of
+the stack, ~13 KB of margin left for the whole call tree.
+`NodeCoreBuilder::build_boxed` allocates first and configures through the
+box, which drops that frame to 12 672 B.
+
+The gate prefers `arm-none-eabi-objdump` and falls back to the rustup
+`llvm-tools` `llvm-objdump`; `install-ci.sh` installs the latter.
 
 ## Manual operation
 

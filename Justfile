@@ -74,6 +74,15 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy -p leviculum-screen --target $(rustc -vV | sed -n 's/host: //p') -- -D warnings
     cd leviculum-nrf && cargo test -p leviculum-screen --target $(rustc -vV | sed -n 's/host: //p')
 
+# Stack-frame gate for the firmware. The T114 stack grows down into the
+# SoftDevice RAM floor, so one oversized frame eats the whole margin and
+# surfaces as an SD internal assertion rather than a clean fault. A 94 KB
+# `main` frame (a by-value `NodeCore` materialised twice) did exactly that
+# and left ~13 KB of margin. Reads the `sub sp` immediates out of the linked
+# ELF, so it measures the shipped binary.
+nrf-stack-frames:
+    bash scripts/check-nrf-stack-frames.sh
+
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -167,7 +176,7 @@ supervised-spawn:
 # trailers + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
 # gates + workspace lib tests + the citation guard + the process-supervision
 # pair (census over the sources, proof against the kernel).
-fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf doc-gate core-no-tracing m0-build-gate citation-guard
+fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames doc-gate core-no-tracing m0-build-gate citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

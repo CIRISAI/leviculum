@@ -13,7 +13,6 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select4, Either4};
@@ -199,7 +198,7 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    let mut node = Box::new(builder.build(rng, EmbassyClock, EmbeddedStorage::new()));
+    let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
     let initial_path_len = node.path_count();
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
