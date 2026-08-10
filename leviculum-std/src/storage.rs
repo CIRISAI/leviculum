@@ -71,7 +71,17 @@ impl Storage {
     ///
     /// Loads known_destinations and packet_hashlist from the given path
     /// and feeds them into the inner MemoryStorage for runtime use.
-    pub(crate) fn new<P: AsRef<Path>>(base_path: P) -> Result<Self> {
+    ///
+    /// `pub` for Codeberg #202: the type is already public as
+    /// [`StdStorage`](crate::driver::StdStorage), because the alias
+    /// [`StdNodeCore`](crate::driver::StdNodeCore) that a
+    /// [`CoreProcessor`](crate::driver::CoreProcessor) is handed names it. A
+    /// downstream crate that wants to drive its processor against a real core
+    /// — in production, or in a unit test of its own hooks — needs to build
+    /// one, and this is the only constructor. Everything else on this type
+    /// stays `pub(crate)`; the core reaches it through
+    /// [`leviculum_core::traits::Storage`], which is public already.
+    pub fn new<P: AsRef<Path>>(base_path: P) -> Result<Self> {
         let base_path = base_path.as_ref().to_path_buf();
 
         // Create directories if they don't exist

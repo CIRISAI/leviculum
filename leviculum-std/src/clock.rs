@@ -16,7 +16,11 @@ pub struct SystemClock {
 
 impl SystemClock {
     /// Create a new system clock (epoch = now)
-    pub(crate) fn new() -> Self {
+    ///
+    /// `pub` for Codeberg #202: this is one of the three arguments a
+    /// downstream crate has to pass to build the `StdNodeCore` the processor
+    /// seam hands its hooks. Nameable without constructible is not a seam.
+    pub fn new() -> Self {
         Self {
             start: Instant::now(),
         }

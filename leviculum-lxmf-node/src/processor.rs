@@ -880,6 +880,85 @@ impl CoreProcessor for LxmfHelperProcessor {
 mod tests {
     use super::*;
 
+    use leviculum_core::node::NodeCoreBuilder;
+    use leviculum_std::driver::{StdClock, StdStorage};
+
+    /// Everything the helper needs to be driven, minus the node.
+    ///
+    /// The receivers are kept alive by the caller: a dropped `lines_rx` turns
+    /// every emit into a silent no-op, which would make the assertions below
+    /// vacuous rather than failing.
+    fn helper(name: &'static str) -> (LxmfHelperProcessor, std::sync::mpsc::Receiver<Out>) {
+        let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Out>();
+        let (_inputs_tx, inputs_rx) = std::sync::mpsc::channel::<Input>();
+        let (builds_tx, _builds_rx) = std::sync::mpsc::channel::<BuildJob>();
+        let (stamps_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (shutdown_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let processor = LxmfHelperProcessor::new(
+            HelperConfig {
+                display_name: name.as_bytes().to_vec(),
+                defer_resource_builds: false,
+            },
+            Emitter::new(lines_tx, Instant::now()),
+            inputs_rx,
+            stamps_tx,
+            builds_tx,
+            shutdown_tx,
+        );
+        // The senders the processor does not own are deliberately dropped
+        // here; nothing in this test feeds it from outside.
+        (processor, lines_rx)
+    }
+
+    /// Codeberg #202: a downstream crate must be able to *construct* the
+    /// handle the seam gives its hooks, not merely name it.
+    ///
+    /// This crate is a separate package on purpose — the compiler refuses
+    /// anything neither `leviculum-std` nor `leviculum-lxmf` marks `pub`, so
+    /// this test failing to compile is the whole assertion. Before #202 it
+    /// could not be written: [`StdNodeCore`] is a public alias for
+    /// `NodeCore<OsRng, SystemClock, Storage>`, but `SystemClock::new` and
+    /// `Storage::new` were both `pub(crate)`, so the only way to reach a core
+    /// from here was to start a whole `ReticulumNode` and wait for the driver
+    /// to call the hooks — which is why the unit test below this one tests a
+    /// method that takes no core at all, and everything touching `on_tick`
+    /// lives in the async loopback harness.
+    ///
+    /// The behavioural half is the cheapest thing that proves the core is
+    /// real: `on_tick` runs `register_if_needed`, which mints an LXMF delivery
+    /// destination *in the core's storage* and emits `lxmf_ready`. A stub
+    /// would not get that far.
+    #[test]
+    fn a_downstream_crate_can_construct_the_core_the_seam_hands_it() {
+        let storage = tempfile::tempdir().expect("tempdir");
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(storage.path()).expect("storage under a fresh temp dir"),
+        );
+
+        let (mut processor, lines) = helper("construct-test");
+        // `now_ms` off the core's own clock, which is what the driver passes.
+        let now_ms = core.now_ms();
+        let out = processor.on_tick(&mut core, now_ms);
+
+        let ready = std::iter::from_fn(|| lines.try_recv().ok())
+            .filter_map(|line| match line {
+                Out::Event(line) => Some(line),
+                Out::Log(_) => None,
+            })
+            .find(|line| line.contains("lxmf_ready"))
+            .expect("registering against a real core emits lxmf_ready");
+        assert!(
+            ready.contains("hash="),
+            "lxmf_ready must carry the delivery hash: {ready}"
+        );
+        assert!(
+            out.next_deadline_ms.is_some(),
+            "on_tick always asks the driver back for the command queue"
+        );
+    }
+
     /// A refused commit must never escalate to `lxmf_error`: a
     /// `StaleBuild` is normal operation (the router refused superseded
     /// bytes and retries the message itself), and every other refusal is
@@ -891,22 +970,7 @@ mod tests {
     /// the refusal *semantics* are the router's own tests' subject.
     #[test]
     fn a_commit_refusal_is_a_log_line_not_an_error() {
-        let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Out>();
-        let (_inputs_tx, inputs_rx) = std::sync::mpsc::channel::<Input>();
-        let (builds_tx, _builds_rx) = std::sync::mpsc::channel::<BuildJob>();
-        let (stamps_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let (shutdown_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let processor = LxmfHelperProcessor::new(
-            HelperConfig {
-                display_name: b"refusal-test".to_vec(),
-                defer_resource_builds: true,
-            },
-            Emitter::new(lines_tx, Instant::now()),
-            inputs_rx,
-            stamps_tx,
-            builds_tx,
-            shutdown_tx,
-        );
+        let (processor, lines_rx) = helper("refusal-test");
 
         // Both refusal classes: the normal-operation one and the
         // build-spent-anyway one.
