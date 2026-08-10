@@ -162,20 +162,61 @@ struct Citation {
     ident: Option<String>,
 }
 
-/// A path with a letters-only extension (or the extensionless `Justfile`)
-/// followed by `:` and a line spec. The extension must be alphabetic so
-/// `127.0.0.1:4242` and Python slices like `packed[:16]` do not match.
-const PATH_PATTERN: &str = r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z]+|Justfile)";
+/// Directories whose files carry no extension, admitted by their directory.
+///
+/// The extension requirement below is load-bearing, so extensionless files
+/// cannot simply be let in: dropping it would match `127.0.0.1:4242`, Python
+/// slices, and any prose word followed by a number, and a guard with false
+/// positives gets switched off (`docs/src/concepts/checks-and-citations.md`).
+/// The hook scripts have neither an extension nor a name the pattern knows,
+/// so until Codeberg #213 the guard's coverage of them was exactly zero: the
+/// best-written possible citation into a hook was silently skipped while the
+/// identical citation one file over resolved.
+///
+/// Admitting them by directory keeps the pattern as tight as it was —
+/// `.githooks/` matches nothing else in the corpus, where a bare
+/// extensionless token would match ordinary prose. It fails closed like
+/// `NON_FILE_EXTENSIONS` beside it: a new extensionless file outside these
+/// directories is uncovered rather than falsely flagged.
+const EXTENSIONLESS_DIRS: &[&str] = &[".githooks"];
+
+/// A path with a letters-only extension (or the extensionless `Justfile`, or
+/// a file under an [`EXTENSIONLESS_DIRS`] directory) followed by `:` and a
+/// line spec. The extension must be alphabetic so `127.0.0.1:4242` and Python
+/// slices like `packed[:16]` do not match.
+///
+/// `word` is the left-hand boundary, and it sits *inside* the alternation
+/// rather than in front of it. `Corpus::Source` matches bare, so a longer
+/// word ending in a cited filename must not match at the inner offset — but
+/// a `.githooks/` citation begins with a `.`, and `\b` before that only
+/// matches when the preceding character is a word character, which after a
+/// space or at the start of a comment it is not.
+fn path_pattern(corpus: Corpus) -> String {
+    let word = match corpus {
+        Corpus::Source => r"\b",
+        Corpus::Book => "",
+    };
+    let mut alts = vec![
+        format!(r"{word}[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z]+"),
+        format!("{word}Justfile"),
+    ];
+    alts.extend(
+        EXTENSIONLESS_DIRS
+            .iter()
+            .map(|dir| format!(r"{}/[A-Za-z0-9_-]+", regex::escape(dir))),
+    );
+    format!("({})", alts.join("|"))
+}
+
 const SPEC_PATTERN: &str = r"(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)";
 
 fn cite_regex(corpus: Corpus) -> Regex {
-    let body = format!("{PATH_PATTERN}:{SPEC_PATTERN}");
+    let body = format!("{}:{SPEC_PATTERN}", path_pattern(corpus));
     match corpus {
         Corpus::Book => Regex::new(&format!("`{body}`")).unwrap(),
-        // `\b` on the left stops a longer word ending in a cited filename from
-        // matching at the inner offset; the right side is anchored by the line
-        // spec.
-        Corpus::Source => Regex::new(&format!(r"\b{body}")).unwrap(),
+        // The right side is anchored by the line spec; the left by the `\b`
+        // inside `path_pattern`.
+        Corpus::Source => Regex::new(&body).unwrap(),
     }
 }
 
@@ -938,6 +979,109 @@ fn run_canary() {
 fn citation_guard_canary() {
     run_canary();
     run_figure_canary();
+}
+
+/// Codeberg #213: a citation into an extensionless hook under `.githooks/`
+/// is seen, and nothing else became visible with it.
+///
+/// The guard's coverage of that directory used to be exactly zero — the
+/// hooks have neither an extension nor a name the pattern knew, so the
+/// best-written possible citation into one was skipped while the identical
+/// citation one file over resolved. `post-commit` was then deleted with
+/// seven references to it across five files and the guard ran green in the
+/// same invocation.
+///
+/// Both directions are pinned, because the extension requirement that
+/// caused the blind spot is also what keeps `127.0.0.1:4242` and Python
+/// slices out, and a guard with false positives gets switched off.
+#[test]
+fn githook_citations_match_without_loosening_the_pattern() {
+    let source = cite_regex(Corpus::Source);
+    let book = cite_regex(Corpus::Book);
+
+    // The leading dot is part of the captured path: the directory is spelled
+    // `.githooks` on disk and `check` resolves the path as written, so a
+    // capture that dropped it would resolve to nothing.
+    let caps = source
+        .captures("lints the pipelines, .githooks/pre-push:21, before Tier 0")
+        .expect("a .githooks citation in a source comment must match");
+    assert_eq!(&caps[1], ".githooks/pre-push");
+    assert_eq!(&caps[2], "21");
+
+    let caps = book
+        .captures("the commit-msg hook (`.githooks/commit-msg:5`) does the same")
+        .expect("a .githooks citation in the book must match");
+    assert_eq!(&caps[1], ".githooks/commit-msg");
+
+    // A citation into a hook that has been deleted must now be *matched*, so
+    // that `check` can report it missing — that is the whole point, and the
+    // half no green run can demonstrate. Built rather than spelled out: a
+    // literal here would be scanned as part of the corpus this file guards
+    // and would fail the guard it is testing.
+    let deleted = format!(".githooks/{}-commit:10", "post");
+    assert!(
+        source.is_match(&deleted),
+        "a citation into a deleted hook must be matched so it can be reported"
+    );
+
+    // The false-positive side. Extensionless *tokens* stay out; only paths
+    // under an allowlisted directory come in.
+    for prose in [
+        "pre-push:21",
+        "post-commit:10",
+        "commit-msg:5",
+        "127.0.0.1:4242",
+        "packed[:16]",
+        // A path is a citation only with a line spec; that has not changed.
+        ".githooks/pre-push",
+    ] {
+        assert!(
+            !source.is_match(prose),
+            "`{prose}` must not be read as a citation -- the pattern has been \
+             loosened into matching prose"
+        );
+    }
+
+    // End to end through the real `scan` + `check`, on a fixture repo: a
+    // hook citation that resolves must stay quiet, and one into a hook that
+    // is not there must be reported missing.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join(".githooks")).unwrap();
+    fs::write(
+        root.join(".githooks/pre-push"),
+        "#!/bin/bash\nset -e\njust fast\n",
+    )
+    .unwrap();
+    let docs = root.join("docs/src");
+    fs::create_dir_all(&docs).unwrap();
+    let gone = format!(".githooks/{}-commit:1", "post");
+    fs::write(
+        docs.join("hooks.md"),
+        format!("Tier 0 runs from `.githooks/pre-push:3`, and once from `{gone}`.\n"),
+    )
+    .unwrap();
+
+    let citations = scan(root, &[docs.join("hooks.md")], Corpus::Book);
+    assert_eq!(
+        citations.len(),
+        2,
+        "the fixture's two hook citations were not both parsed"
+    );
+    let (_, failures) = check(root, &citations);
+    let messages: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "expected exactly the citation into the absent hook: {}",
+        messages.join("\n\n")
+    );
+    assert_eq!(failures[0].kind, FailureKind::Missing);
+    assert!(
+        failures[0].message.contains(&gone),
+        "the reported failure names the wrong citation: {}",
+        failures[0].message
+    );
 }
 
 /// Guarantee C, kind 2: a figure a doc comment attributes to a document

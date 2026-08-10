@@ -121,8 +121,9 @@ mount first and is lock-protected.
 ## Before pushing
 
 Nothing to type. `git push` triggers `.githooks/pre-push`, which lints
-the Woodpecker pipelines and then runs `just fast` (Tier 0). A red Tier 0
-aborts the push — fix, stage, and push again.
+the Woodpecker pipelines (`.githooks/pre-push:21`) and then runs
+`just fast` (Tier 0, `.githooks/pre-push:24`). A red Tier 0 aborts the
+push — fix, stage, and push again.
 
 That is the whole hook. It used to also block on Tier 2 staleness, at
 5 commits/8 h (warn) and 10 commits/24 h (block); the block was
