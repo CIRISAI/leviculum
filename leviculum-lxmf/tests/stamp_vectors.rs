@@ -25,7 +25,7 @@ impl StampExecutor for RecordingExecutor {
         material: &'a [u8],
         cost: u8,
         rounds: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + Send + 'a>> {
         assert_eq!(material, self.material);
         assert_eq!(cost, self.cost);
         assert_eq!(rounds, self.rounds);

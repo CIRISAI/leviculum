@@ -222,11 +222,10 @@ async fn run(args: Args) -> Result<(), String> {
     // registers with `stamp_cost=0`.
     //
     // Its own thread with its own current-thread runtime, not `tokio::spawn`:
-    // `StampExecutor::generate` returns `Pin<Box<dyn Future<…>>>` with no
-    // `+ Send` bound (`leviculum-lxmf/src/stamp.rs`), so the future
-    // `DeliveryStampRequest::generate_with` builds around it is `!Send` and
-    // the multi-thread scheduler will not take it. Mining is also pure CPU, so
-    // keeping it off the runtime's workers is the right shape regardless.
+    // mining is pure CPU that can run for minutes at a peer-chosen cost, so it
+    // stays off the runtime's workers. `StampExecutor::generate` is `Send`
+    // (Codeberg #203), so `tokio::spawn` would now accept it — this thread is a
+    // scheduling choice, no longer a `!Send` workaround.
     let stamp_inputs = inputs_tx.clone();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()

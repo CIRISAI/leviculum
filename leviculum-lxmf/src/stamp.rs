@@ -35,7 +35,7 @@ impl core::fmt::Display for StampError {
 }
 #[cfg(feature = "pow")]
 pub trait Yield {
-    type Fut<'a>: Future<Output = ()> + 'a
+    type Fut<'a>: Future<Output = ()> + Send + 'a
     where
         Self: 'a;
     fn yield_now(&mut self) -> Self::Fut<'_>;
@@ -81,12 +81,15 @@ impl Yield for CooperativeYield {
 /// Override point for a threaded (for example Rayon) implementation.
 #[cfg(feature = "pow")]
 pub trait StampExecutor {
+    /// Mine a PoW stamp. The future is `Send` so a host can hand a
+    /// peer-priced grind to a work-stealing runtime instead of pinning it to
+    /// the thread that started it; that is also why [`Yield::Fut`] is `Send`.
     fn generate<'a>(
         &'a mut self,
         material: &'a [u8],
         cost: u8,
         rounds: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + Send + 'a>>;
 
     /// Validate a PoW stamp without blocking the protocol event loop. Custom
     /// executors can move this work to Rayon or hardware; the default streams
@@ -215,13 +218,13 @@ impl<R: CryptoRngCore> CooperativeStamper<R, CooperativeYield> {
     }
 }
 #[cfg(feature = "pow")]
-impl<R: CryptoRngCore, Y: Yield> StampExecutor for CooperativeStamper<R, Y> {
+impl<R: CryptoRngCore + Send, Y: Yield + Send> StampExecutor for CooperativeStamper<R, Y> {
     fn generate<'a>(
         &'a mut self,
         m: &'a [u8],
         c: u8,
         r: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + Send + 'a>> {
         Box::pin(self.generate(m, c, r))
     }
 

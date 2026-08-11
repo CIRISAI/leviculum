@@ -59,6 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `StampExecutor::generate` returns a `Send` future, so a host can spawn a
+  stamp mine on a work-stealing runtime. Custom executors and `Yield`
+  implementations must be `Send` (Codeberg #203).
+
 - Every long-lived external process this repository spawns now dies with
   its parent because the kernel kills it, not because a destructor got to
   run. `leviculum_std::process::spawn_supervised` sets
