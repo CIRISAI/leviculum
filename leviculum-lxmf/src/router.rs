@@ -9,8 +9,8 @@ use alloc::{
     vec::Vec,
 };
 use leviculum_core::{
-    crypto::full_hash, resource::ResourceError, Clock, DestinationHash, LinkId, NodeCore,
-    NodeEvent, Storage, TickOutput,
+    crypto::full_hash, resource::ResourceError, Clock, Destination, DestinationHash, LinkId,
+    NodeCore, NodeEvent, Storage, TickOutput,
 };
 use rand_core::CryptoRngCore;
 
@@ -21,7 +21,8 @@ use crate::{
     msgpack,
     node::{
         DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundRejection, LxmfNode,
-        LxmfNodeError, LxmfNodeEvent, LxmfResourceSendParams, PreparedLxmfSend,
+        LxmfNodeError, LxmfNodeEvent, LxmfResourceSendParams, PreparedLxmfSend, APP_NAME,
+        DELIVERY_ASPECT,
     },
     propagation::PropagationError,
     propagation_client::{
@@ -282,6 +283,17 @@ pub enum RouterEvent {
         is_initiator: bool,
     },
     Duplicate([u8; 32]),
+    /// A peer announced its `lxmf.delivery` destination, with the announce the
+    /// router decoded for its own outbound stamp-cost cache.
+    ///
+    /// The router already filters announces by the delivery name hash and runs
+    /// [`DeliveryAnnounce::decode`] on the app data. Emitting the result is
+    /// what keeps every client from re-implementing both, and it is the only
+    /// path on which a peer's display name reaches an application.
+    PeerAnnounced {
+        destination: DestinationHash,
+        announce: DeliveryAnnounce,
+    },
     InvalidSignature([u8; 32]),
     InvalidStamp([u8; 32]),
     /// A Resource build is waiting in [`LxmfRouter::take_resource_builds`].
@@ -1153,13 +1165,26 @@ impl LxmfRouter {
             }
         }
         if let NodeEvent::AnnounceReceived { announce, .. } = event {
-            let data = announce.app_data();
-            if !data.is_empty() {
+            // Only `lxmf.delivery` app data is a `DeliveryAnnounce`. Python
+            // reaches the same restriction by registering its announce handler
+            // on that aspect (LXMRouter.py:270-276); here the whole NodeEvent
+            // stream arrives, so the filter is explicit. Without it a
+            // propagation-node announce would decode into a peer with a
+            // nonsense display name.
+            if announce.name_hash() == &Destination::compute_name_hash(APP_NAME, &[DELIVERY_ASPECT])
+            {
+                let data = announce.app_data();
                 if let Ok(decoded) = DeliveryAnnounce::decode(data) {
-                    self.insert_bounded_stamp_cost(
-                        announce.destination_hash().into_bytes(),
-                        (now_unix, decoded.stamp_cost, decoded.compression_supported),
-                    );
+                    if !data.is_empty() {
+                        self.insert_bounded_stamp_cost(
+                            announce.destination_hash().into_bytes(),
+                            (now_unix, decoded.stamp_cost, decoded.compression_supported),
+                        );
+                    }
+                    output.events.push(RouterEvent::PeerAnnounced {
+                        destination: *announce.destination_hash(),
+                        announce: decoded,
+                    });
                 }
             }
         }
@@ -2741,6 +2766,93 @@ mod persistence_tests {
             Some(9)
         );
         assert_eq!(persistence_request_count(&output), 1);
+    }
+
+    /// The decoded announce reaches the application. Without this the display
+    /// name is read for the stamp cost and then dropped, and every client
+    /// re-filters the announce stream and re-runs `DeliveryAnnounce::decode`.
+    #[test]
+    fn delivery_announce_reports_the_peer_and_its_display_name() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let identity = identity_from(71);
+        let mut destination =
+            LxmfNode::delivery_destination(identity).expect("remote delivery destination");
+        let app_data = announce::delivery(Some(b"Anna"), Some(9));
+        let packet = destination
+            .announce(Some(&app_data), &mut OsRng, 1_000, 1_000 / 1000)
+            .expect("delivery announce");
+        let destination_hash = *destination.hash();
+        let mut packed = alloc::vec![0; packet.packed_size()];
+        let length = packet.pack(&mut packed).expect("pack announce");
+        let announce_event = node
+            .handle_packet(InterfaceId(0), &packed[..length])
+            .events
+            .into_iter()
+            .find(|event| matches!(event, NodeEvent::AnnounceReceived { .. }))
+            .expect("announce event");
+
+        let output = router
+            .handle_event(&mut node, &announce_event)
+            .expect("handle delivery announce");
+
+        let reported = output
+            .events
+            .iter()
+            .find_map(|event| match event {
+                RouterEvent::PeerAnnounced {
+                    destination,
+                    announce,
+                } => Some((*destination, announce.clone())),
+                _ => None,
+            })
+            .expect("the announce is reported to the application");
+        assert_eq!(reported.0, destination_hash);
+        assert_eq!(reported.1.display_name.as_deref(), Some(&b"Anna"[..]));
+        assert_eq!(reported.1.stamp_cost, Some(9));
+    }
+
+    /// Only `lxmf.delivery` app data is a `DeliveryAnnounce`. A propagation
+    /// node's announce decodes into a peer with a nonsense display name unless
+    /// the aspect is checked, and its destination is not a peer at all.
+    #[test]
+    fn non_delivery_announce_is_not_reported_as_a_peer() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let identity = identity_from(72);
+        let mut destination =
+            PropagationTransport::destination(identity).expect("propagation destination");
+        // Not msgpack: `DeliveryAnnounce::decode` would take the whole blob as
+        // a display name.
+        let app_data = alloc::vec![0x01, 0x02, 0x03];
+        let packet = destination
+            .announce(Some(&app_data), &mut OsRng, 1_000, 1_000 / 1000)
+            .expect("propagation announce");
+        let destination_hash = *destination.hash();
+        let mut packed = alloc::vec![0; packet.packed_size()];
+        let length = packet.pack(&mut packed).expect("pack announce");
+        let announce_event = node
+            .handle_packet(InterfaceId(0), &packed[..length])
+            .events
+            .into_iter()
+            .find(|event| matches!(event, NodeEvent::AnnounceReceived { .. }))
+            .expect("announce event");
+
+        let output = router
+            .handle_event(&mut node, &announce_event)
+            .expect("handle propagation announce");
+
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|event| matches!(event, RouterEvent::PeerAnnounced { .. })),
+            "a propagation announce is not a peer announce"
+        );
+        assert!(
+            !router
+                .outbound_stamp_costs
+                .contains_key(destination_hash.as_bytes()),
+            "and it carries no delivery stamp cost"
+        );
     }
 
     /// A peer announcing a cost the reference itself would never announce does

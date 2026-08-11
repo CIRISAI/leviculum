@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `RouterEvent::PeerAnnounced` reports a peer's decoded delivery announce,
+  so an application reads a display name without filtering announces and
+  decoding app data itself.
+
 - The T114 firmware drives the board's optional ST7789 TFT with the same
   status screen the WisMesh Pocket V2 shows, blind and default-on (the
   write-only panel cannot be probed), painted by a shared host-tested
