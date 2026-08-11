@@ -254,6 +254,12 @@ fn opt_int(v: Option<i64>) -> Value {
 ///   - `battery_state` (string) / `battery_percent` (int) -> only once the
 ///     reported state leaves `Unknown` (Python emits these keys only when
 ///     `r_battery_state != 0x00`).
+///   - `last_rssi` (int dBm) / `last_snr` (float dB) -> only once the device
+///     has reported a received packet via `apply_radio_stat`
+///     (interfaces/rnode.rs:758-766). These two are ours: Python does not
+///     place them in the dict (its RSSI feeds per-packet reporting), so they
+///     are emitted as additive keys and omitted while `None` — rnstatus
+///     renders by key lookup (rnstatus.py:475-533) and ignores them.
 fn radio_stat_fields(r: &crate::interfaces::RadioStats) -> Vec<(HashableValue, Value)> {
     let opt_int = |v: Option<i16>| match v {
         Some(x) => pickle_int(x as i64),
@@ -285,6 +291,12 @@ fn radio_stat_fields(r: &crate::interfaces::RadioStats) -> Vec<(HashableValue, V
             pickle_str_key("battery_percent"),
             pickle_int(r.battery_percent as i64),
         ));
+    }
+    if let Some(rssi) = r.last_rssi {
+        fields.push((pickle_str_key("last_rssi"), pickle_int(rssi as i64)));
+    }
+    if let Some(snr) = r.last_snr {
+        fields.push((pickle_str_key("last_snr"), pickle_float(snr)));
     }
     fields
 }
@@ -1783,6 +1795,8 @@ mod tests {
         assert_eq!(get(&f, "cpu_temp"), Some(Value::None));
         assert!(get(&f, "battery_state").is_none());
         assert!(get(&f, "battery_percent").is_none());
+        assert!(get(&f, "last_rssi").is_none());
+        assert!(get(&f, "last_snr").is_none());
 
         // Populated values, charging battery.
         let r = RadioStats {
@@ -1809,9 +1823,10 @@ mod tests {
             Some(Value::String("charging".into()))
         );
         assert_eq!(get(&f, "battery_percent"), Some(Value::I64(85)));
-        // RSSI/SNR are stored on state but not surfaced in interface_stats
-        // (Python does not place them in the dict either).
-        assert!(get(&f, "last_rssi").is_none());
+        // RSSI/SNR are additive keys of ours, present once reported (Python
+        // does not place them in the dict; rnstatus ignores unknown keys).
+        assert_eq!(get(&f, "last_rssi"), Some(Value::I64(-57)));
+        assert_eq!(get(&f, "last_snr"), Some(Value::F64(10.0)));
         assert!(get(&f, "r_stat_rssi").is_none());
     }
 
@@ -1844,6 +1859,8 @@ mod tests {
             r.cpu_temp = Some(25);
             r.battery_state = BatteryState::Charging;
             r.battery_percent = 85;
+            r.last_rssi = Some(-42);
+            r.last_snr = Some(9.5);
         });
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(0usize, counters)])));
         let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
@@ -1876,6 +1893,8 @@ mod tests {
         assert_eq!(get("cpu_temp"), Some(Value::I64(25)));
         assert_eq!(get("battery_state"), Some(Value::String("charging".into())));
         assert_eq!(get("battery_percent"), Some(Value::I64(85)));
+        assert_eq!(get("last_rssi"), Some(Value::I64(-42)));
+        assert_eq!(get("last_snr"), Some(Value::F64(9.5)));
     }
 
     /// Codeberg #190: what a client tool two hops from the radio has to be

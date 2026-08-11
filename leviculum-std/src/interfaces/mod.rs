@@ -102,9 +102,11 @@ struct SpeedState {
 /// - `battery_state`/`battery_percent`: only surfaced once the state leaves
 ///   `Unknown` (Python only emits the keys when `r_battery_state != 0x00`).
 /// - `last_rssi`/`last_snr`: most recent `CMD_STAT_RSSI` (dBm) and
-///   `CMD_STAT_SNR` (dB, `raw * 0.25`). Stored for completeness; Python does
-///   not place these in the `interface_stats` dict (they feed per-packet RSSI/
-///   SNR reporting), so they are not emitted there either.
+///   `CMD_STAT_SNR` (dB, `raw * 0.25`). Python does not place these in the
+///   `interface_stats` dict (they feed per-packet RSSI/SNR reporting); we
+///   emit them as additive keys, omitted until the first report, so the
+///   operator can read the last packet's signal off lnstatus (the instrument
+///   for rig-verifying txpower changes, Codeberg #76).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RadioStats {
     pub airtime_short: f64,

@@ -832,6 +832,26 @@ fn render_optional_hw_fields(out: &mut String, ifstat: &Value) {
             pln(out, "    Noise Fl. : Unknown");
         }
     }
+    // Last packet RSSI/SNR, stored by `apply_radio_stat`
+    // (interfaces/rnode.rs:758-766). These lines are OURS: rnstatus has no
+    // per-interface RSSI line (rnstatus.py:475-533 never reads the keys), and
+    // only lnsd emits them, so against rnsd this still renders byte-identical
+    // to rnstatus. On lnsd they are additive labelled lines inside the
+    // presence-gated hardware block — the tolerance any parser of this block
+    // already needs for Noise Fl./Battery. The machine surface stays `-j`,
+    // where the keys pass through the stats dict untouched.
+    if not_null(ifstat, "last_rssi") {
+        pln(
+            out,
+            &format!("    Last RSSI : {} dBm", num_str(ifstat, "last_rssi")),
+        );
+    }
+    if not_null(ifstat, "last_snr") {
+        pln(
+            out,
+            &format!("    Last SNR  : {} dB", num_str(ifstat, "last_snr")),
+        );
+    }
     if has(ifstat, "cpu_load") {
         if not_null(ifstat, "cpu_load") {
             pln(

@@ -281,6 +281,37 @@ fn default_hides_local_and_client_interfaces() {
     assert!(shown.contains("LocalInterface[shared]"));
 }
 
+#[test]
+fn last_rssi_snr_render_when_present_and_omit_when_absent() {
+    // The daemon emits `last_rssi`/`last_snr` only once the radio has
+    // reported a packet (radio_stat_fields gates on `Some`), so the render
+    // contract is presence-keyed: keys present -> the two labelled lines,
+    // keys absent -> neither line, and `-j` passes the dict through as-is.
+    let mut with = iface("RNodeInterface[/dev/ttyUSB0]", 292, 0, 0);
+    with["last_rssi"] = serde_json::json!(-42);
+    with["last_snr"] = serde_json::json!(9.5);
+    let without = iface("RNodeInterface[/dev/ttyUSB1]", 292, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [with, without],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let text = render_status(&stats, None, &StatusOptions::default());
+    let blocks: Vec<&str> = text.split("RNodeInterface[").collect();
+    assert_eq!(blocks.len(), 3, "both interfaces render:\n{text}");
+    assert!(blocks[1].contains("    Last RSSI : -42 dBm\n"), "{text}");
+    assert!(blocks[1].contains("    Last SNR  : 9.5 dB\n"), "{text}");
+    assert!(!blocks[2].contains("Last RSSI"), "{text}");
+    assert!(!blocks[2].contains("Last SNR"), "{text}");
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    let ifs = json["interfaces"].as_array().unwrap();
+    assert_eq!(ifs[0]["last_rssi"], serde_json::json!(-42));
+    assert_eq!(ifs[0]["last_snr"], serde_json::json!(9.5));
+    assert!(ifs[1].get("last_rssi").is_none());
+    assert!(ifs[1].get("last_snr").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // -d / -D discovered interfaces (Codeberg #32)
 // ---------------------------------------------------------------------------
