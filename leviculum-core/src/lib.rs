@@ -122,6 +122,7 @@ pub mod memory_storage;
 pub mod node;
 pub mod packet;
 pub mod packet_hash_store;
+pub mod radio_config_store;
 pub(crate) mod ratchet;
 pub mod ratchet_store;
 pub(crate) mod receipt;

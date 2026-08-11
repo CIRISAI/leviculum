@@ -21,6 +21,11 @@ pub struct BoardConfig {
     pub log_prefix: &'static str,
     /// Internal-flash byte address of the page reserved for identity storage.
     pub identity_flash_page: u32,
+    /// Internal-flash byte address of the page reserved for the persisted
+    /// LoRa radio configuration (see [`crate::radio_store`]). Distinct from
+    /// [`identity_flash_page`](Self::identity_flash_page) and, like it,
+    /// outside the linker's FLASH region (`memory.x`).
+    pub radio_config_flash_page: u32,
     /// SX1262 TCXO voltage select byte for `SetDIO3AsTcxoCtrl`
     /// (0x02 = 1.8 V, see datasheet §13.3.6).
     pub lora_tcxo_voltage_reg: u8,

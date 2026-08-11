@@ -182,8 +182,17 @@ impl RadioConfig {
     ///
     /// Returns `None` for invalid data (wrong length, unknown bandwidth).
     pub fn from_wire(data: &[u8]) -> Option<Self> {
-        let wire = leviculum_core::rnode::parse_radio_config(data)?;
+        Self::from_wire_config(leviculum_core::rnode::parse_radio_config(data)?)
+    }
 
+    /// Build a radio config from an already-parsed wire config.
+    ///
+    /// Same conversion `from_wire` performs, split out so a config that did
+    /// not arrive as wire bytes — the one restored from flash at boot by
+    /// [`crate::radio_store::load`] — takes the identical path.
+    ///
+    /// Returns `None` if the bandwidth has no SX1262 register code.
+    pub fn from_wire_config(wire: leviculum_core::rnode::RadioConfigWire) -> Option<Self> {
         // SX1262 bandwidth register codes (datasheet Table 14-47)
         let bw = match wire.bandwidth_hz {
             7_810 => 0x00,

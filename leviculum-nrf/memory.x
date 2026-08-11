@@ -10,9 +10,17 @@ MEMORY
     /* (Was v6.1.1 at 0x26000=152K.)                                         */
     /* Heltec reserves 0xED000-0xF4000 (28K) for license/version data        */
     /* (HARD_VERSION_ADDR, HT_LICENSE_ADDR in variant.h). Bootloader at      */
-    /* 0xF4000. Last app page (0xEC000) reserved for identity persistence.  */
-    /* Safe app space = 0xEC000 - 0x27000 = 0xC5000 (788K).                 */
-    FLASH : ORIGIN = 0x00027000, LENGTH = 0xC5000
+    /* 0xF4000. The bootloader's own USER_FLASH_END is 0xEA000: it declines  */
+    /* every block at or above that address, so 0xEA000-0xF4000 survives a   */
+    /* UF2 flash untouched (docs/src/concepts/lnode-flashing.md:139-167).    */
+    /* Both persistence pages live in that band and therefore survive a      */
+    /* firmware update:                                                      */
+    /*   0xEC000  identity          (BoardConfig::identity_flash_page)       */
+    /*   0xEB000  radio config      (BoardConfig::radio_config_flash_page)   */
+    /* Safe app space = the bootloader's window, 0xEA000 - 0x27000 =         */
+    /* 0xC3000 (780K). Was 0xC5000 (788K), which promised 8K the bootloader  */
+    /* would have refused to write and reached into both pages above.        */
+    FLASH : ORIGIN = 0x00027000, LENGTH = 0xC3000
 
     /*
      * RAM ORIGIN derived empirically via local Cargo [patch] on

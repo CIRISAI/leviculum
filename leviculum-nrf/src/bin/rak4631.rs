@@ -261,13 +261,32 @@ async fn main(spawner: Spawner) {
     .await;
     info!("SX1262 ready");
 
-    let radio_cfg = leviculum_nrf::lora::RadioConfig::eu_medium();
+    // Radio profile: whatever a host last set and we persisted, else the
+    // compiled default. A blank or corrupt page decodes to None.
+    let radio_cfg = match leviculum_nrf::radio_store::load(rak4631::CONFIG.radio_config_flash_page)
+        .and_then(leviculum_nrf::lora::RadioConfig::from_wire_config)
+    {
+        Some(cfg) => {
+            leviculum_nrf::log::log_fmt(
+                "[RADIO] ",
+                format_args!(
+                    "persisted freq={} bw={} sf={} cr={} pwr={}",
+                    cfg.frequency_hz, cfg.bw_hz, cfg.sf, cfg.cr_denom, cfg.tx_power_dbm
+                ),
+            );
+            cfg
+        }
+        None => {
+            leviculum_nrf::log::log_fmt("[RADIO] ", format_args!("default eu_medium"));
+            leviculum_nrf::lora::RadioConfig::eu_medium()
+        }
+    };
     let lora_channels = leviculum_nrf::lora::channels();
     spawner.must_spawn(leviculum_nrf::lora::lora_task(lora, radio_cfg));
 
     // BLE — same Columba v2.2 service the T114 exposes.
     let identity_hash = *node.identity().hash();
-    leviculum_nrf::ble::init(
+    let sd = leviculum_nrf::ble::init(
         &spawner,
         identity_hash,
         vbus,
@@ -293,6 +312,15 @@ async fn main(spawner: Spawner) {
     );
     let ble_channels = leviculum_nrf::ble::channels();
     info!("BLE ready");
+
+    // Radio-config persistence. Must come after `ble::init`: writing internal
+    // flash with the SoftDevice enabled is only legal through its own
+    // `sd_flash_*` syscalls, which need the enabled SoftDevice.
+    leviculum_nrf::radio_store::spawn_store_task(
+        &spawner,
+        sd,
+        rak4631::CONFIG.radio_config_flash_page,
+    );
 
     // Optional baseboard peripherals (RAK19026 VC). Each spawn is gated on
     // its own feature; absent features leave the bare-module build clean.

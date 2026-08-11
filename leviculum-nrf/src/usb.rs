@@ -328,6 +328,19 @@ async fn retic_serial_task(
                                 if let Some(cfg) = crate::lora::RadioConfig::from_wire(&data[2..]) {
                                     log("SER: radio config received");
                                     config_tx.send(cfg).await;
+                                    // Persist what we just applied, so a reset
+                                    // comes back on the host's frequency instead
+                                    // of the compiled default. Non-blocking: the
+                                    // store task does the read-compare-write and
+                                    // skips flash entirely if nothing changed
+                                    // (lnsd re-sends this frame on every
+                                    // connect). The parse cannot fail here — the
+                                    // same bytes just parsed above.
+                                    if let Some(wire) =
+                                        leviculum_core::rnode::parse_radio_config(&data[2..])
+                                    {
+                                        crate::radio_store::request_save(&wire);
+                                    }
                                     // Send ACK back over serial
                                     frame(&crate::lora::CONFIG_ACK[..], &mut frame_buf);
                                     let mut ack_ok = true;

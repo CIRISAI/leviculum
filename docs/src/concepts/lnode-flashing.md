@@ -157,16 +157,17 @@ the rest installed, which is precisely what the `skip MBR included in SD
 hex` comment describes. A SoftDevice can therefore be replaced through
 the ordinary mass-storage path, without touching the bootloader.
 
-**This contradicts a comment in `leviculum-nrf/memory.x:14`**, which
-computes safe application space as `0xEC000 - 0x27000` (788 KiB). The
-bootloader stops accepting at `0xEA000`, so the real ceiling is
-`0xC3000` (780 KiB). Our image is 330 KiB
-(`0x27000`-`0x79900`), so nothing is broken today, but a firmware that
-grew past 780 KiB would hit rejected blocks rather than the 788 KiB the
-comment promises. The 8 KiB difference is `DFU_APP_DATA_RESERVED`, which
-is also why the identity page at `0xEC000`
-(`leviculum-nrf/src/boards/t114.rs:144`) survives every UF2 flash: it
-lies above what the bootloader will write.
+`leviculum-nrf/memory.x` used to contradict this, computing safe
+application space as `0xEC000 - 0x27000` (788 KiB) — 8 KiB the
+bootloader would have refused to write. It now links the application
+against the bootloader's own window, `0xEA000 - 0x27000` = `0xC3000`
+(780 KiB); the image is 344 KiB, so the change costs nothing today.
+
+Everything at or above `0xEA000` survives every UF2 flash, because the
+bootloader declines those blocks. Both persistence pages live there:
+identity at `0xEC000` and the radio configuration at `0xEB000`
+(`leviculum-nrf/src/boards/t114.rs`, `radio_store.rs`). A user's chosen
+frequency therefore survives a firmware update as well as a reset.
 
 Family IDs seen in practice:
 

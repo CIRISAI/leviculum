@@ -283,6 +283,10 @@ async fn gatt_events(
 /// owned by MPSL/SDC (RTC0/TIMER0/PPI/RNG/etc.) are kept in the signature
 /// for ABI compatibility with the binaries; the SoftDevice claims them
 /// internally.
+///
+/// Returns the enabled SoftDevice, which anything needing a SoftDevice
+/// syscall after this point has to hold — the flash writes in
+/// [`crate::radio_store`] are the current caller.
 #[allow(clippy::too_many_arguments)]
 pub fn init(
     spawner: &Spawner,
@@ -307,7 +311,7 @@ pub fn init(
     _ppi_ch28: Peri<'static, peripherals::PPI_CH28>,
     _ppi_ch29: Peri<'static, peripherals::PPI_CH29>,
     _rng_periph: Peri<'static, peripherals::RNG>,
-) {
+) -> &'static Softdevice {
     let config = nrf_softdevice::Config {
         clock: Some(raw::nrf_clock_lf_cfg_t {
             // Synthesized LF from HF crystal; matches Heltec/RAK/Adafruit
@@ -352,4 +356,6 @@ pub fn init(
 
     spawner.must_spawn(softdevice_task(sd, vbus));
     spawner.must_spawn(ble_task(sd, server, identity_hash));
+
+    sd
 }

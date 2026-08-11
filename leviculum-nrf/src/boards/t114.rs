@@ -142,6 +142,7 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_product: "leviculum T114",
     log_prefix: "T114",
     identity_flash_page: 0xEC000,
+    radio_config_flash_page: 0xEB000,
     lora_tcxo_voltage_reg: 0x02, // 1.8 V
     lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
     lora_max_power_dbm: LORA_MAX_POWER_DBM,

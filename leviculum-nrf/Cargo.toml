@@ -58,6 +58,10 @@ heapless = { version = "0.9", default-features = false }
 # 0.8 one only inside ble.rs for the characteristic value types.
 heapless_v8 = { package = "heapless", version = "0.8", default-features = false }
 embedded-storage = "0.3"
+# Async NorFlash trait, implemented by `nrf_softdevice::Flash`: the only
+# legal way to write internal flash while the SoftDevice is enabled
+# (`radio_store`). Same version nrf-softdevice itself pulls.
+embedded-storage-async = "0.4"
 
 # Optional baseboard peripherals (RAK19026 VC on the WisMesh Pocket V2).
 # All gated behind features so the bare nRF52840 + SX1262 build (T114, or a
