@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A transport relay forwards path-directed packets back onto the
+  receiving interface (same-interface relay, as Python-RNS does), so
+  multi-hop on a single shared LoRa channel delivers.
+
 - The nRF firmware no longer builds its `NodeCore` on the stack: the
   94 KB `main` frame that left the T114 ~13 KB of stack margin is gone.
   New `NodeCoreBuilder::build_boxed`, plus a `just nrf-stack-frames` gate

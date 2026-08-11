@@ -68,7 +68,11 @@ as long as wire and semantic compatibility are preserved.
 ## Consequences
 
 - The same routing logic runs unchanged over LoRa, TCP, UDP, serial,
-  and the in-process local socket.
+  and the in-process local socket. That includes relaying a packet
+  back out of the interface it arrived on — the
+  [same-interface relay](python-rns-compatibility.md#same-interface-relay-on-shared-media)
+  decision is taken in the media-agnostic core; the interface is not
+  involved.
 - New media are added by implementing one trait, not by threading
   medium-specific cases through the protocol core.
 - Collision-avoidance bugs are debugged in one place — the interface —

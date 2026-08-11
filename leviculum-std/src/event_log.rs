@@ -297,7 +297,6 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "lrproof_invalid",
             "forward_max_hops",
             "blackholed_announce",
-            "same_interface_relay",
             "total",
         ],
     },

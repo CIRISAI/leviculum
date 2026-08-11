@@ -192,3 +192,47 @@ to ignore. The narrowband alarm bands between the wideband sub-bands
 refuse a LoRa carrier at interface build outright
 (`rnode::erp_band_gap`): a 125 kHz signal cannot meet their ≤ 25 kHz
 channel spacing on any power.
+
+## Same-interface relay on shared media
+
+Path-directed transport forwarding transmits on the next-hop
+interface even when it equals the receiving interface. Same-interface
+relay is NOT suppressed — it is how multi-hop works on one shared
+medium. In the fundamental single-channel LoRa topology A-B-C (A↔B
+and B↔C in range, A↮C), B's only route to A is back out of the very
+interface C's packet arrived on; a relay that declines that hop kills
+every data flow the announce flood just made possible.
+
+The reference behaves this way on every forwarding path:
+
+- Path-table data and link requests: the outbound interface IS the
+  receiving-side path interface — `outbound_interface`
+  (`Transport.py:1583`) — and `Transport.transmit`
+  (`Transport.py:1635`) sends there with no receiving-interface
+  guard.
+- Link-table data: when next-hop and receiving interface are equal,
+  "direction doesn't matter, and we simply repeat the packet"
+  (`Transport.py:1651`).
+- Proofs: an LRPROOF goes back out of the interface the link request
+  arrived on (`Transport.py:2197`), a data proof out of the reverse
+  table's receiving interface (`Transport.py:2263`) — on one shared
+  channel, each is the interface the proof itself arrived on.
+
+Loop-freedom never came from interface suppression. It comes from
+transport_id addressing (only the addressed relay processes a Type2
+transport packet), the hop-count limit, and packet-hash dedup —
+`has_packet_hash` (`leviculum-core/src/transport.rs:2251`) drops a
+repeated copy, `add_packet_hash`
+(`leviculum-core/src/transport.rs:2292`) records it.
+
+The forwarding decision lives in the media-agnostic core
+(`forward_on_interface_from`,
+`leviculum-core/src/transport.rs:5554`). Whether the relayed echo
+needs TX spacing on a half-duplex channel is the interface's business
+— see [Interface Isolation](interface-isolation.md).
+
+Pinned by `test_pkt_journey_same_interface_relay_forward` (one relay,
+one interface, forward asserted with `iface_out == iface_in`) and the
+three-node `test_shared_medium_multihop_data_forward` (announce flood
+A→C via B, then data C→A delivered through B's single shared
+interface), both in `leviculum-core/src/transport.rs`.

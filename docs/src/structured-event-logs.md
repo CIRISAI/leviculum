@@ -46,15 +46,12 @@ to stitch one packet's path across nodes:
   receiver's `PKT_RX`, or in the `PKT_DROP`/`DEDUP_DROP` where the
   packet died.
 - `PKT_DROP` renders its `reason` as the kebab-case `DropReason`
-  (`no-path`, `plain-group-multihop`, `forward-max-hops`,
-  `same-interface-relay`, ...).
-- `same-interface-relay` is the one drop reason that reports a
-  DELIBERATE non-forward: on a shared medium a relay's only outbound
-  interface can be the one the packet arrived on, and putting it back on
-  that air is suppressed on purpose.  It is still where the packet died,
-  and a journey that simply stopped at the relay's `PKT_RX` could not be
-  told apart from a lost log line, so the suppression emits a `PKT_DROP`
-  with the arrival interface as `iface_in`.  Seeing it is not an error.
+  (`no-path`, `plain-group-multihop`, `forward-max-hops`, ...).
+- A relay whose outbound path points back out of the arrival interface
+  forwards there — same-interface relay on a shared medium is a normal
+  hop, not a drop (see
+  [Python-RNS Compatibility](concepts/python-rns-compatibility.md#same-interface-relay-on-shared-media)).
+  Its `PKT_FORWARD` carries `iface_out` equal to `iface_in`.
 - `PKT_TX` on a `Broadcast` action reports `iface=bcast`: the sans-I/O
   core does not know the concrete interface set the driver expands the
   broadcast to; journeys stitch by `ph`.

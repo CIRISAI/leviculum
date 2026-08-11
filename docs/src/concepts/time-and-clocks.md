@@ -181,7 +181,7 @@ serial channel (the radio-config envelope of
 ### 4. Learned from validated announces
 
 The clockless fallback: `learn_emission_timebase`
-(`transport.rs:2974`) adopts the highest emission timestamp seen in
+(`transport.rs:2956`) adopts the highest emission timestamp seen in
 any signature-valid announce as the node's timebase, then advances it
 with the monotonic clock (`transport.rs:2846`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —
