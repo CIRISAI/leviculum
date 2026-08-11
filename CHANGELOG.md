@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FileLxmfStorage` in `leviculum-std` persists LXMF state to a directory,
+  so a host application no longer writes its own `LxmfStorage`.
+
 - `MessageState::AwaitingCollection` reports a message a propagation node
   holds for a recipient who has not collected it, instead of the `Sent` a
   direct delivery gets. Local bookkeeping; nothing changes on the wire.

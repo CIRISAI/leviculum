@@ -24,6 +24,10 @@ __compile_fail_fixtures = []
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = true }
+# `file_lxmf_store` persists an LXMF router's state, so the LXMF storage trait
+# is part of this crate's API. The dependency is one-way: leviculum-lxmf is
+# no_std and knows nothing about this crate.
+leviculum-lxmf = { path = "../leviculum-lxmf" }
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
 
 tokio.workspace = true
@@ -71,6 +75,3 @@ tempfile = "3"
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.
 lnomad = { path = "../lnomad" }
-# The LXMF interop tests drive the sans-io LXMF router over a live TCP
-# connection against the vendored Python LXMF reference.
-leviculum-lxmf = { path = "../leviculum-lxmf" }
