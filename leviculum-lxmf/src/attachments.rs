@@ -39,6 +39,14 @@ pub enum AttachmentError {
     InvalidFormat,
 }
 
+impl core::fmt::Display for AttachmentError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "malformed attachment field")
+    }
+}
+
+impl core::error::Error for AttachmentError {}
+
 impl From<msgpack::Error> for AttachmentError {
     fn from(_: msgpack::Error) -> Self {
         Self::InvalidFormat

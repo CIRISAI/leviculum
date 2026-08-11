@@ -23,6 +23,16 @@ pub enum StampError {
     InvalidCost,
     Cancelled,
 }
+
+#[cfg(feature = "pow")]
+impl core::fmt::Display for StampError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidCost => write!(f, "stamp cost cannot be mined"),
+            Self::Cancelled => write!(f, "stamp generation cancelled"),
+        }
+    }
+}
 #[cfg(feature = "pow")]
 pub trait Yield {
     type Fut<'a>: Future<Output = ()> + 'a

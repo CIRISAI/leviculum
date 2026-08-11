@@ -108,6 +108,31 @@ pub enum InboundRejection {
     Resource(ResourceError),
 }
 
+impl core::fmt::Display for DeliveryFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Opportunistic(error) => write!(f, "opportunistic delivery: {error}"),
+            Self::DirectPacketTimeout => write!(f, "direct packet was not acknowledged"),
+            // `LinkCloseReason` has no `Display` in leviculum-core; its
+            // variant name is the whole reason.
+            Self::LinkClosed(reason) => write!(f, "delivery link closed ({reason:?})"),
+            Self::Resource(error) => write!(f, "delivery transfer: {error}"),
+        }
+    }
+}
+
+impl core::fmt::Display for InboundRejection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Message(error) => write!(f, "inbound message: {error}"),
+            Self::WrongDestination => write!(f, "inbound message is for another destination"),
+            Self::ResourceSequence => write!(f, "inbound transfer arrived out of sequence"),
+            Self::ResourceTooLarge => write!(f, "inbound transfer exceeds the accepted size"),
+            Self::Resource(error) => write!(f, "inbound transfer: {error}"),
+        }
+    }
+}
+
 /// LXMF-level events derived from [`NodeEvent`] values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LxmfNodeEvent {
@@ -194,6 +219,25 @@ pub enum LxmfNodeError {
     ProofFailed,
     IdentityUnavailable,
 }
+
+impl core::fmt::Display for LxmfNodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidDeliveryDestination => write!(f, "not an LXMF delivery destination"),
+            Self::Destination(error) => write!(f, "destination: {error}"),
+            Self::Message(error) => write!(f, "message: {error}"),
+            Self::UnsupportedMethod => write!(f, "delivery method is not supported here"),
+            Self::UnknownPeer => write!(f, "peer identity is unknown"),
+            Self::DirectLinkUnavailable => write!(f, "no direct link to the peer"),
+            Self::Send(error) => write!(f, "send: {error}"),
+            Self::Resource(error) => write!(f, "resource: {error}"),
+            Self::ProofFailed => write!(f, "delivery proof was not accepted"),
+            Self::IdentityUnavailable => write!(f, "no identity for this destination"),
+        }
+    }
+}
+
+impl core::error::Error for LxmfNodeError {}
 
 impl From<DestinationError> for LxmfNodeError {
     fn from(value: DestinationError) -> Self {

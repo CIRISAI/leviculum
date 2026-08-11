@@ -374,6 +374,34 @@ pub enum RouterError {
     Storage(StorageError),
     CorruptSnapshot,
 }
+impl core::fmt::Display for RouterError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::QueueFull => write!(f, "outbound queue is full"),
+            Self::Duplicate => write!(f, "message is already queued"),
+            Self::NotFound => write!(f, "no such message"),
+            Self::IdentityMismatch => write!(f, "state belongs to another identity"),
+            Self::UnsupportedMethod => write!(f, "delivery method is not supported here"),
+            Self::PropagationNodeUnavailable => write!(f, "no propagation node selected"),
+            Self::PropagationStampUnavailable => write!(f, "propagation stamp is missing"),
+            Self::StaleStampRequest => write!(f, "stamp result no longer matches the message"),
+            Self::StaleBuild => write!(f, "resource build no longer matches the queue entry"),
+            Self::NoWallClock => write!(f, "node has no wall clock"),
+            Self::Node(error) => write!(f, "node: {error}"),
+            Self::Message(error) => write!(f, "message: {error}"),
+            Self::Propagation(error) => write!(f, "propagation: {error}"),
+            Self::PropagationTransport(error) => write!(f, "propagation transport: {error}"),
+            Self::Paper(error) => write!(f, "paper: {error}"),
+            #[cfg(feature = "pow")]
+            Self::Stamp(error) => write!(f, "stamp: {error}"),
+            Self::Storage(error) => write!(f, "storage: {error}"),
+            Self::CorruptSnapshot => write!(f, "stored router state is corrupt"),
+        }
+    }
+}
+
+impl core::error::Error for RouterError {}
+
 impl From<LxmfNodeError> for RouterError {
     fn from(v: LxmfNodeError) -> Self {
         Self::Node(v)
@@ -2541,6 +2569,31 @@ mod persistence_tests {
             .handle_event(node, &announce_event)
             .expect("remember remote announce");
         destination_hash
+    }
+
+    /// The wording of an error belongs to the library, once, and not to each
+    /// client that has to show one.
+    #[test]
+    fn error_display_names_the_wrapped_error() {
+        assert_eq!(
+            alloc::format!("{}", RouterError::QueueFull),
+            "outbound queue is full"
+        );
+        assert_eq!(
+            alloc::format!("{}", RouterError::Storage(StorageError::Full)),
+            "storage: storage is full"
+        );
+        assert_eq!(
+            alloc::format!(
+                "{}",
+                RouterError::Node(LxmfNodeError::Message(MessageError::TooShort))
+            ),
+            "node: message: message is shorter than the LXMF header"
+        );
+        // And a std host can put one in a `Box<dyn Error>` without wrapping it
+        // first.
+        let error: &dyn core::error::Error = &RouterError::QueueFull;
+        assert_eq!(alloc::format!("{error}"), "outbound queue is full");
     }
 
     #[test]

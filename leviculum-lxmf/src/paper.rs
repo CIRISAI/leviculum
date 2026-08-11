@@ -54,6 +54,8 @@ impl core::fmt::Display for PaperError {
     }
 }
 
+impl core::error::Error for PaperError {}
+
 /// The binary representation carried by a paper-message URI or QR code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaperMessage {

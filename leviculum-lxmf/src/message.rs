@@ -48,6 +48,22 @@ pub enum MessageError {
     /// A caller asked us to sign a timestamp that is `NaN` or infinite.
     NonFiniteTimestamp,
 }
+impl core::fmt::Display for MessageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TooShort => write!(f, "message is shorter than the LXMF header"),
+            Self::InvalidFormat => write!(f, "malformed message"),
+            Self::InvalidField => write!(f, "malformed message field"),
+            Self::Identity => write!(f, "message identity operation failed"),
+            Self::WrongDestination => write!(f, "message is for another destination"),
+            Self::InvalidTimestamp => write!(f, "message timestamp is not a number"),
+            Self::NonFiniteTimestamp => write!(f, "message timestamp is not finite"),
+        }
+    }
+}
+
+impl core::error::Error for MessageError {}
+
 impl From<msgpack::Error> for MessageError {
     fn from(_: msgpack::Error) -> Self {
         Self::InvalidFormat

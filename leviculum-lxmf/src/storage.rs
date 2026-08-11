@@ -15,6 +15,19 @@ pub enum StorageError {
     Io,
 }
 
+impl core::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Full => write!(f, "storage is full"),
+            Self::NotFound => write!(f, "no such storage entry"),
+            Self::Corrupt => write!(f, "stored data is corrupt"),
+            Self::Io => write!(f, "storage I/O failed"),
+        }
+    }
+}
+
+impl core::error::Error for StorageError {}
+
 pub trait LxmfStorage {
     fn load(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
     fn store(&mut self, key: &[u8], value: &[u8]) -> Result<(), StorageError>;

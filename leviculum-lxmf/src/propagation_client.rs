@@ -52,6 +52,18 @@ pub enum PropagationUploadFailure {
     LinkClosed(LinkCloseReason),
 }
 
+impl core::fmt::Display for PropagationUploadFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PacketTimeout => write!(f, "upload packet was not acknowledged"),
+            Self::Resource(error) => write!(f, "upload transfer: {error}"),
+            // `LinkCloseReason` has no `Display` in leviculum-core; its
+            // variant name is the whole reason.
+            Self::LinkClosed(reason) => write!(f, "upload link closed ({reason:?})"),
+        }
+    }
+}
+
 /// A verified remote propagation-node announce remembered by the adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnownPropagationNode {
@@ -139,6 +151,23 @@ pub enum PropagationTransportError {
     Resource(ResourceError),
     Send(SendError),
 }
+
+impl core::fmt::Display for PropagationTransportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidDestination => write!(f, "not a propagation node destination"),
+            Self::Destination(error) => write!(f, "propagation destination: {error}"),
+            Self::UnknownNode => write!(f, "propagation node is not known"),
+            Self::LinkUnavailable => write!(f, "no link to the propagation node"),
+            Self::UploadInProgress => write!(f, "an upload is already in progress"),
+            Self::Request(error) => write!(f, "propagation request: {error}"),
+            Self::Resource(error) => write!(f, "propagation transfer: {error}"),
+            Self::Send(error) => write!(f, "propagation send: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for PropagationTransportError {}
 
 impl From<DestinationError> for PropagationTransportError {
     fn from(value: DestinationError) -> Self {

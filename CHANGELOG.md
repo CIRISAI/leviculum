@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `leviculum-lxmf` error types implement `Display` and
+  `core::error::Error`, so a client shows an error instead of wording one.
+
 - `FileLxmfStorage` in `leviculum-std` persists LXMF state to a directory,
   so a host application no longer writes its own `LxmfStorage`.
 

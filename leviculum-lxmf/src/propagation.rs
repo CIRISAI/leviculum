@@ -186,6 +186,8 @@ impl core::fmt::Display for PropagationError {
     }
 }
 
+impl core::error::Error for PropagationError {}
+
 impl From<msgpack::Error> for PropagationError {
     fn from(error: msgpack::Error) -> Self {
         match error {
@@ -219,6 +221,24 @@ impl PeerError {
         self as u8
     }
 }
+
+impl core::fmt::Display for PeerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let text = match self {
+            Self::NoIdentity => "propagation node has no identity for us",
+            Self::NoAccess => "propagation node refused access",
+            Self::InvalidKey => "propagation node rejected the key",
+            Self::InvalidData => "propagation node rejected the data",
+            Self::InvalidStamp => "propagation node rejected the stamp",
+            Self::Throttled => "propagation node is throttling us",
+            Self::NotFound => "propagation node has no such message",
+            Self::Timeout => "propagation node timed out",
+        };
+        f.write_str(text)
+    }
+}
+
+impl core::error::Error for PeerError {}
 
 impl TryFrom<u64> for PeerError {
     type Error = PropagationError;

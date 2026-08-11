@@ -15,6 +15,19 @@ pub enum Error {
     Trailing,
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Truncated => write!(f, "msgpack value is truncated"),
+            Self::Type => write!(f, "unexpected msgpack type"),
+            Self::Overflow => write!(f, "msgpack value does not fit its target type"),
+            Self::Trailing => write!(f, "trailing bytes after the msgpack value"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
+
 /// Coarse wire type used to decode protocol unions without exposing `rmp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
