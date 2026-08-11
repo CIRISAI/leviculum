@@ -1965,6 +1965,7 @@ name = "lnflash"
 version = "0.8.0"
 dependencies = [
  "clap",
+ "leviculum-core",
  "libc",
  "serde",
  "sha2",

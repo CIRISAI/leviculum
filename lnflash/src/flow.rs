@@ -9,6 +9,7 @@
 //!   -> verify the image checksum
 //!   -> write the application
 //!   -> verify it booted
+//!   -> set the radio configuration it will remember
 //! ```
 //!
 //! **No write may rest on a guessed identity.** Commit `362c1c2d` records a
@@ -27,6 +28,7 @@ use std::time::Duration;
 use crate::entry;
 use crate::infouf2::InfoUf2;
 use crate::manifest::{self, Board, Manifest, Payload};
+use crate::radio::{self, RadioChoice, RadioPlan, RadioSettings};
 use crate::softdevice::{self, Version, VersionReq};
 use crate::transport::{self, Drive, Written};
 use crate::uf2::Image;
@@ -323,6 +325,9 @@ pub struct Options {
     pub appear_within: Duration,
     /// How long to listen for the `[FW_BUILD]` banner.
     pub banner_window: Duration,
+    /// What to do about the radio configuration once the board is up: ask,
+    /// send what the flags already decided, or leave it alone.
+    pub radio: RadioPlan,
 }
 
 impl Default for Options {
@@ -332,6 +337,7 @@ impl Default for Options {
             dry_run: false,
             appear_within: entry::BOOTLOADER_APPEARS_WITHIN,
             banner_window: verify::BANNER_WINDOW,
+            radio: RadioPlan::default(),
         }
     }
 }
@@ -401,13 +407,29 @@ pub struct Outcome {
     pub softdevice_installed: Option<Written>,
     pub application_written: Option<Written>,
     pub verdict: Option<Verdict>,
+    /// What the radio step did, if it ran.
+    pub radio: Option<RadioOutcome>,
 }
 
 impl Outcome {
+    /// Whether the firmware is on the board and confirmed.
+    ///
+    /// The radio configuration is deliberately not part of this. The flash
+    /// has happened by the time that step runs, and a board that did not ACK
+    /// is a board running our firmware on the compiled default — worth a
+    /// warning, not worth reporting the flash as failed.
     pub fn is_good(&self) -> bool {
         self.application_written.is_some()
             && self.verdict.as_ref().is_some_and(Verdict::is_confirmed)
     }
+}
+
+/// What the radio step did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RadioOutcome {
+    pub settings: RadioSettings,
+    /// Whether the board acknowledged the frame.
+    pub acked: bool,
 }
 
 /// Resolve every candidate on the bus, individually.
@@ -596,6 +618,7 @@ fn resolve(
         softdevice_installed: None,
         application_written: None,
         verdict: None,
+        radio: None,
     };
 
     let mut drive = drive;
@@ -628,15 +651,125 @@ fn resolve(
     drive.close()?;
     outcome.application_written = Some(written);
 
-    outcome.verdict = Some(verify_boot(
-        sysfs,
-        ui,
-        opts,
-        &bootloader,
-        &confirmed,
-        &port,
-    )?);
+    let booted = verify_boot(sysfs, ui, opts, &bootloader, &confirmed, &port)?;
+    // The radio step needs a port to talk to, so it runs whenever the
+    // application came back — including on an unconfirmed banner, where the
+    // board is up and the only thing missing is the proof of which build.
+    if let Some(app) = &booted.app {
+        outcome.radio = set_radio(sysfs, ui, opts, app, &port)?;
+    }
+    outcome.verdict = Some(booted.verdict);
     Ok(Some(outcome))
+}
+
+/// Choose a radio configuration, send it, and say what happened.
+///
+/// Never fails the run: by the time this is reached the firmware is written
+/// and confirmed, and a board that does not take the configuration is a
+/// board running the compiled default. Only a prompt that cannot be read at
+/// all propagates, and that is the user's terminal going away.
+fn set_radio(
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    app: &Device,
+    port: &str,
+) -> Result<Option<RadioOutcome>, Error> {
+    let choice = match &opts.radio {
+        RadioPlan::Skip => return Ok(None),
+        RadioPlan::Fixed(choice) => choice.clone(),
+        RadioPlan::Ask => ask_for_radio(ui)?,
+    };
+    let settings = choice.settings();
+
+    let Some(tty) =
+        entry::wait_for_interface_tty(sysfs, app, radio::TRANSPORT_INTERFACE, opts.appear_within)?
+    else {
+        ui.say(&format!(
+            "{port}: the firmware is on the board, but its transport port (if{:02}) never \
+             appeared, so the radio settings were not sent. The board is running whatever it \
+             had stored. Re-run lnflash once it enumerates to set them.",
+            radio::TRANSPORT_INTERFACE
+        ));
+        return Ok(Some(RadioOutcome {
+            settings,
+            acked: false,
+        }));
+    };
+
+    ui.say(&format!(
+        "{port}: sending radio settings to {} — {}",
+        tty.display(),
+        settings.describe()
+    ));
+    let acked = match radio::send(&tty, &settings) {
+        Ok(acked) => acked,
+        Err(err) => {
+            ui.say(&format!(
+                "{port}: the transport port could not be used ({err})"
+            ));
+            false
+        }
+    };
+    if acked {
+        ui.say(&format!(
+            "{port}: radio settings written and persisted: {}",
+            settings.describe()
+        ));
+    } else {
+        ui.say(&format!(
+            "{port}: the firmware flashed fine, but the board did not acknowledge the radio \
+             settings, so it is still on whatever it had stored — the compiled default on a \
+             board that never had any. Nothing is broken: re-run lnflash, or set them from the \
+             host that binds the board."
+        ));
+    }
+    Ok(Some(RadioOutcome { settings, acked }))
+}
+
+/// The prompts. The default answer to every one of them is the EU868 value,
+/// so a user who holds Enter down gets a board configured explicitly rather
+/// than a half-finished one.
+fn ask_for_radio(ui: &mut dyn Ui) -> Result<RadioChoice, Error> {
+    let defaults = radio::EU868;
+    let answer = ui.ask(&format!(
+        "\nFlash default radio settings (EU868: {:.3} MHz, SF{}, BW{}, CR4/{}, {} dBm)? [Y/n]",
+        defaults.frequency_hz as f64 / 1e6,
+        defaults.sf,
+        defaults.bandwidth_hz / 1000,
+        defaults.cr,
+        defaults.tx_power_dbm
+    ))?;
+    let wants_default = !matches!(
+        answer
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "n" | "no"
+    );
+    if wants_default {
+        return Ok(RadioChoice::Default);
+    }
+
+    // TODO(presets): this is where a region/band preset menu goes once the
+    // table exists. Until then "not the defaults" means "state the five
+    // numbers", which is the whole user-facing surface.
+    let mut settings = defaults;
+    for field in radio::FIELDS {
+        loop {
+            let prompt = format!("  {} [{}]", field.label(), field.value_of(&settings));
+            let Some(answer) = ui.ask(&prompt)? else {
+                // Enter, or no terminal to ask: the shown default stands.
+                break;
+            };
+            match field.apply(&mut settings, &answer) {
+                Ok(()) => break,
+                Err(err) => ui.say(&format!("  {err}")),
+            }
+        }
+    }
+    Ok(RadioChoice::Custom(settings))
 }
 
 fn report_write(ui: &mut dyn Ui, port: &str, what: &str, written: &Written) {
@@ -747,6 +880,17 @@ fn application_after(
     )?)
 }
 
+/// What the verify step saw: the judgement, and the device it judged.
+///
+/// The device is carried out rather than dropped because the radio step
+/// needs a port on the board that just came back, and re-deriving "which
+/// device is that" from the bus a second time is how the wrong board gets
+/// written to.
+struct Booted {
+    verdict: Verdict,
+    app: Option<Device>,
+}
+
 fn verify_boot(
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
@@ -754,7 +898,7 @@ fn verify_boot(
     was: &Device,
     confirmed: &Confirmed,
     port: &str,
-) -> Result<Verdict, Error> {
+) -> Result<Booted, Error> {
     let board = confirmed.board();
     let ids = board.candidate_ids(confirmed.name())?;
     // The bootloader drive going away is the first half of "it took"; the
@@ -763,7 +907,10 @@ fn verify_boot(
     entry::wait_until_gone(sysfs, was, opts.appear_within)?;
     let Some(app) = entry::wait_for_application(sysfs, &ids, Some(was), opts.appear_within)? else {
         ui.say(&format!("{port}: the application never came back."));
-        return Ok(Verdict::Absent);
+        return Ok(Booted {
+            verdict: Verdict::Absent,
+            app: None,
+        });
     };
     ui.say(&format!(
         "{port}: back as {} [{}]",
@@ -790,7 +937,10 @@ fn verify_boot(
         )),
         Verdict::Absent => {}
     }
-    Ok(verdict)
+    Ok(Booted {
+        verdict,
+        app: Some(app),
+    })
 }
 
 #[cfg(test)]
@@ -1105,6 +1255,100 @@ convert = "hex-to-uf2"
         // here, so the only way out has to be said.
         assert!(said.contains("Double-tap RESET"), "{said}");
         assert!(said.contains("1200-baud touch"), "{said}");
+    }
+
+    #[test]
+    fn pressing_enter_at_the_radio_prompt_flashes_the_eu_defaults() {
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        assert_eq!(ask_for_radio(&mut ui).unwrap(), RadioChoice::Default);
+        let said = ui.transcript();
+        assert!(said.contains("[Y/n]"), "{said}");
+        assert!(said.contains("869.525 MHz"), "{said}");
+        assert!(said.contains("SF7") && said.contains("BW125"), "{said}");
+        assert!(said.contains("CR4/5") && said.contains("17 dBm"), "{said}");
+        // Saying yes must not then walk the user through five prompts.
+        assert!(!said.contains("spreadingfactor"), "{said}");
+    }
+
+    #[test]
+    fn yes_mode_takes_the_defaults_rather_than_waiting_on_the_prompt() {
+        // The automation case: --yes must not block on a question nobody is
+        // there to answer.
+        let mut ui = crate::ui::Assumed::new(true);
+        assert_eq!(ask_for_radio(&mut ui).unwrap(), RadioChoice::Default);
+    }
+
+    #[test]
+    fn declining_the_defaults_asks_for_each_field_and_offers_the_eu_value() {
+        let mut ui =
+            crate::ui::testing::Fake::typing(&["n", "867100000", "250000", "9", "7", "14"]);
+        let choice = ask_for_radio(&mut ui).unwrap();
+        assert_eq!(
+            choice,
+            RadioChoice::Custom(RadioSettings {
+                frequency_hz: 867_100_000,
+                bandwidth_hz: 250_000,
+                sf: 9,
+                cr: 7,
+                tx_power_dbm: 14,
+            })
+        );
+        let said = ui.transcript();
+        for prompt in [
+            "frequency (Hz) [869525000]",
+            "bandwidth (Hz) [125000]",
+            "spreadingfactor [7]",
+            "codingrate [5]",
+            "txpower (dBm) [17]",
+        ] {
+            assert!(said.contains(prompt), "{prompt} not offered:\n{said}");
+        }
+    }
+
+    #[test]
+    fn a_field_left_empty_keeps_the_value_the_prompt_showed() {
+        // Only the frequency is stated; everything else is Enter.
+        let mut ui = crate::ui::testing::Fake::typing(&["n", "433175000"]);
+        assert_eq!(
+            ask_for_radio(&mut ui).unwrap(),
+            RadioChoice::Custom(RadioSettings {
+                frequency_hz: 433_175_000,
+                ..radio::EU868
+            })
+        );
+    }
+
+    #[test]
+    fn an_impossible_value_is_asked_again_rather_than_sent() {
+        let mut ui = crate::ui::testing::Fake::typing(&[
+            "n",
+            "869525000",
+            "100000", // not an SX1262 bandwidth
+            "125000",
+            "13", // no such spreading factor
+            "12",
+            "5",
+            "99", // beyond the PA
+            "22",
+        ]);
+        let choice = ask_for_radio(&mut ui).unwrap();
+        assert_eq!(
+            choice,
+            RadioChoice::Custom(RadioSettings {
+                frequency_hz: 869_525_000,
+                bandwidth_hz: 125_000,
+                sf: 12,
+                cr: 5,
+                tx_power_dbm: 22,
+            })
+        );
+        let said = ui.transcript();
+        assert!(said.contains("not a bandwidth"), "{said}");
+        assert!(said.contains("SF13 is outside"), "{said}");
+        assert!(said.contains("99 dBm is outside"), "{said}");
+        // The rejected value must not have half-landed: the re-prompt offers
+        // the value that is still in force, not the one just refused.
+        assert!(said.contains("spreadingfactor [7]"), "{said}");
     }
 
     #[test]

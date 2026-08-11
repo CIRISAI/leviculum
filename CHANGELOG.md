@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An LNode keeps its radio configuration in flash, so a host-set frequency
   survives a reset instead of falling back to the compiled default.
 
+- `lnflash` sets that configuration at flash time: the EU868 defaults, five
+  prompted values, or the `--radio-*` flags.
+
 - The `leviculum-lxmf` error types implement `Display` and
   `core::error::Error`, so a client shows an error instead of wording one.
 

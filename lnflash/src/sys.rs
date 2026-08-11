@@ -79,6 +79,19 @@ impl Fd {
     /// without them a healthy board reads as silent** — a false "no banner"
     /// would then be reported as an unverified flash.
     pub fn set_debug_port(&self) -> io::Result<()> {
+        self.set_raw_115200_dtr_rts()
+    }
+
+    /// The same line settings for the transport CDC (if02), where the radio
+    /// configuration is sent. DTR is not cosmetic there either: the firmware's
+    /// serial task waits on `cdc.wait_connection()` — DTR — before it reads a
+    /// single byte (`leviculum-nrf/src/usb.rs`), so a port opened without it
+    /// would swallow the frame.
+    pub fn set_transport_port(&self) -> io::Result<()> {
+        self.set_raw_115200_dtr_rts()
+    }
+
+    fn set_raw_115200_dtr_rts(&self) -> io::Result<()> {
         let mut tio = self.termios()?;
         unsafe {
             libc::cfmakeraw(&mut tio);
@@ -95,6 +108,59 @@ impl Fd {
             return last_error("ioctl(TIOCMBIS, DTR|RTS)");
         }
         Ok(())
+    }
+
+    /// Write every byte, or fail. The descriptor is non-blocking, so a short
+    /// write and `EAGAIN` are both ordinary and the loop waits the port out
+    /// rather than reporting a failure that did not happen.
+    pub fn write_all(&self, data: &[u8], deadline: Instant) -> io::Result<()> {
+        let mut sent = 0;
+        while sent < data.len() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("wrote {sent} of {} bytes before the deadline", data.len()),
+                ));
+            }
+            if !self.wait_writable(remaining)? {
+                continue;
+            }
+            let n = unsafe { libc::write(self.0, data[sent..].as_ptr().cast(), data.len() - sent) };
+            if n > 0 {
+                sent += n as usize;
+            } else if n < 0 {
+                let err = io::Error::last_os_error();
+                match err.kind() {
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue,
+                    _ => return Err(err),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One read, waiting up to `timeout` for something to arrive.
+    ///
+    /// `None` is end of file — the board went away — which the caller has to
+    /// tell apart from "nothing yet", or a reboot mid-wait becomes a spin.
+    pub fn read_available(&self, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
+        if !self.wait_readable(timeout)? {
+            return Ok(Some(Vec::new()));
+        }
+        let mut buf = [0u8; 4096];
+        let n = unsafe { libc::read(self.0, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            return Ok(Some(buf[..n as usize].to_vec()));
+        }
+        if n == 0 {
+            return Ok(None);
+        }
+        let err = io::Error::last_os_error();
+        match err.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(Some(Vec::new())),
+            _ => Err(err),
+        }
     }
 
     /// Read whatever arrives until `deadline`, returning the bytes.
@@ -127,9 +193,17 @@ impl Fd {
     }
 
     fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
+        self.wait(libc::POLLIN, timeout)
+    }
+
+    fn wait_writable(&self, timeout: Duration) -> io::Result<bool> {
+        self.wait(libc::POLLOUT, timeout)
+    }
+
+    fn wait(&self, events: libc::c_short, timeout: Duration) -> io::Result<bool> {
         let mut pfd = libc::pollfd {
             fd: self.0,
-            events: libc::POLLIN,
+            events,
             revents: 0,
         };
         let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;

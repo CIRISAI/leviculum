@@ -484,6 +484,48 @@ once landed on a RAK4631 during bring-up. Several devices on the bus
 must each be resolved individually rather than assuming "the one UF2
 drive".
 
+### The radio configuration belongs to the flash
+
+A board that has just been written runs the compiled `eu_medium`
+profile, and until the firmware learned to remember a configuration
+(`radio_store.rs`) there was nowhere else for one to live: every host
+that bound the board had to send the frequency again, and a standalone
+LNode with no host had no way to be on anything else.
+
+With the flash page in place the honest moment to choose is the flash
+itself, once. `lnflash` therefore ends its sequence with a fifth step:
+after the `[FW_BUILD]` banner confirms the write, it offers the EU868
+defaults, takes five numbers instead if the user declines them, and
+sends the choice to the board's transport CDC as the same
+magic-prefixed control frame `lnsd` uses
+(`leviculum_core::rnode::build_radio_config_frame`, HDLC-framed), then
+waits for `RADIO_CONFIG_ACK`.
+
+Three details are not obvious:
+
+**The step cannot fail the flash.** It runs after the firmware is on
+the board and confirmed. A board that does not answer is a board
+running the compiled default, which is a warning and a re-run, not a
+failed flash.
+
+**Two of the seven wire fields are not the user's to state.** The
+preamble is derived from the PHY the way the RNode firmware derives it
+(`derive_preamble_symbols`); a preamble belonging to a different SF
+mis-prices airtime on both sides. The long-term airtime lock is sent at
+the value the firmware would have derived for the chosen frequency,
+because the frame's own presence (`lt_alock_present`) switches that
+derivation off — sending zero would persist "no duty-cycle limit" onto
+a board whose operator only picked a frequency.
+
+**Validation happens before the board is touched.** `--radio-sf 3` and
+a bandwidth the SX1262 has no register code for are refused at the
+command line. Left to the board, an unparseable frame is silently
+dropped and looks exactly like a dead port.
+
+Region and band presets are deliberately absent. `--radio-preset`
+exists and refuses, so the shape of the answer is fixed while the table
+behind it is still being worked out.
+
 ### The real bottleneck is not the tool
 
 A manifest invites the belief that the whole palette is a matter of

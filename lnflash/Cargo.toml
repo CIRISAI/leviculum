@@ -8,6 +8,12 @@ homepage.workspace = true
 description = "Self-contained flasher for LNode boards — identifies a board from its bootloader, checks preconditions, and writes our firmware over UF2 mass storage"
 
 [dependencies]
+# The radio-configuration frame and its HDLC framing. There is one wire
+# format for this and `lnsd` already speaks it; a second copy here would be
+# the copy that drifts. No feature of it is used at run time beyond those two
+# modules, so the default `tracing` feature stays off and the bundle keeps
+# its "one static binary, no dependencies" property.
+leviculum-core = { path = "../leviculum-core", default-features = false }
 # The manifest is the only configuration surface, and it is declarative
 # data by design (docs/src/concepts/lnode-flashing.md, "Deliberately not").
 serde = { workspace = true }

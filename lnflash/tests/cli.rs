@@ -305,7 +305,68 @@ fn the_help_text_says_it_needs_root_and_never_uses_the_network() {
         "--bundle",
         "--board",
         "--check-bundle",
+        "--radio-freq",
+        "--radio-bw",
+        "--radio-sf",
+        "--radio-cr",
+        "--radio-txpower",
+        "--radio-preset",
+        "--no-radio",
     ] {
         assert!(help.contains(flag), "{flag} missing from --help:\n{help}");
     }
+    // What the radio flags do has to be readable without the source.
+    assert!(help.contains("Spreading factor, 7 to 12"), "{help}");
+    assert!(help.contains("comes back up on that frequency"), "{help}");
+}
+
+#[test]
+fn a_preset_is_refused_before_anything_is_enumerated() {
+    // The flag exists so scripts can be written against it; the table it
+    // needs does not. Refusing beats guessing a band on somebody's behalf,
+    // and it has to happen before a board is touched.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--yes",
+            "--radio-preset",
+            "eu868",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("presets not yet defined"), "{err}");
+    assert!(
+        stdout(&out).is_empty(),
+        "nothing should have run: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn an_impossible_radio_value_stops_the_run_at_the_command_line() {
+    // A board written and then handed a configuration its firmware refuses
+    // is the outcome this prevents: the check happens before enumeration.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--yes",
+            "--radio-sf",
+            "3",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("SF3 is outside SF7-SF12"), "{err}");
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
 }

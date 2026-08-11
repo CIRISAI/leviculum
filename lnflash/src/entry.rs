@@ -127,6 +127,39 @@ pub fn wait_for_application(
     }
 }
 
+/// Wait for the kernel to bind a serial driver to one interface of a device
+/// that is already on the bus.
+///
+/// Enumeration is not one event. A device directory appears in sysfs before
+/// every interface under it has a driver, so a board that has just come back
+/// can be found, named and confirmed while `/dev/ttyACMn` for its transport
+/// port does not exist yet. Asking once and concluding "no transport port"
+/// would report a healthy board as unreachable.
+pub fn wait_for_interface_tty(
+    sysfs: &Sysfs,
+    device: &Device,
+    interface: u8,
+    within: Duration,
+) -> io::Result<Option<std::path::PathBuf>> {
+    let deadline = Instant::now() + within;
+    loop {
+        // Re-read rather than reuse the `Device` we were handed: its
+        // interface list is a snapshot from before the driver bound.
+        let found = sysfs
+            .devices()?
+            .into_iter()
+            .find(|d| d.name == device.name && d.id == device.id)
+            .and_then(|d| d.tty(interface));
+        if found.is_some() {
+            return Ok(found);
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// What to tell a user who has to reach for the board.
 ///
 /// Named here rather than written inline at the call site because it is the
