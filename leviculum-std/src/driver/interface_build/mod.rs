@@ -220,8 +220,7 @@ mod tests {
     #[test]
     fn drop_direct_ingress_with_ifac_is_a_config_error() {
         let owner = CtxOwner::new();
-        for (iface_type, extra_port_keys) in
-            [("RNodeInterface", true), ("SerialInterface", false)]
+        for (iface_type, extra_port_keys) in [("RNodeInterface", true), ("SerialInterface", false)]
         {
             let mut config = InterfaceConfig {
                 name: "deaf".to_string(),
@@ -241,7 +240,10 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{iface_type}: IFAC + knob must not build"));
             let msg = err.to_string();
-            assert!(msg.contains("incompatible with IFAC"), "{iface_type}: {msg}");
+            assert!(
+                msg.contains("incompatible with IFAC"),
+                "{iface_type}: {msg}"
+            );
         }
     }
 
