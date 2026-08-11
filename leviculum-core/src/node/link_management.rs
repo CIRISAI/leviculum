@@ -2838,7 +2838,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // peer reassembled this whole (segment's) transfer — credit its
                 // bytes as delivered on the link. Per-segment for split
                 // transfers, so the counter advances as the transfer does.
-                let delivered = res.transfer_size() as u64;
+                let delivered = res.transfer_size();
                 if let Some(l) = self.links.get_mut(&link_id) {
                     l.add_resource_bytes_delivered(delivered);
                 }
