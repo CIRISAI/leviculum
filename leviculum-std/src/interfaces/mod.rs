@@ -143,6 +143,9 @@ pub(crate) struct RadioStats {
 pub(crate) struct InterfaceCounters {
     pub rx_bytes: AtomicU64,
     pub tx_bytes: AtomicU64,
+    /// Frames dropped by the TEST-ONLY `test_drop_direct_ingress` filter
+    /// (see [`test_drop_direct_ingress_frame`]). Always 0 in production.
+    pub test_direct_ingress_drops: AtomicU64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
     tx_gate: OnceLock<Arc<TxGate>>,
@@ -153,6 +156,7 @@ impl InterfaceCounters {
         Self {
             rx_bytes: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
+            test_direct_ingress_drops: AtomicU64::new(0),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,
                 prev_tx: 0,
@@ -367,6 +371,48 @@ pub(crate) type InterfaceReadyMap =
 /// Packet received from an interface, ready for the event loop
 pub(crate) struct IncomingPacket {
     pub data: Vec<u8>,
+}
+
+/// TEST-ONLY range emulation for co-located rigs (the 3-node relay
+/// scenario): with `test_drop_direct_ingress` on a LoRa-capable interface,
+/// every deframed frame whose wire hops byte is 0 is dropped on ingress,
+/// before it reaches the transport. The wire format is `flags(1) hops(1)
+/// ...`, so the hops byte is `raw[1]` (`Packet::pack`/`unpack`,
+/// leviculum-core/src/packet.rs). A frame transmitted by its originator
+/// carries wire hops 0; a copy relayed by a transport hop carries >= 1 —
+/// a filtered endpoint is deaf to co-located originators but hears every
+/// relay, emulating out-of-range placement without attenuators. Frames
+/// are dropped locally on RX only; nothing on the air changes, so this is
+/// a test-harness affordance, not a wire or semantic deviation
+/// (Python-RNS has no such option). Incompatible with IFAC, which
+/// prepends material before the flags byte; the interface builder refuses
+/// that combination (`driver::interface_build::build_interface`).
+///
+/// Returns `true` when the frame must be dropped, counting it in
+/// `counters.test_direct_ingress_drops` with one debug event per drop.
+pub(crate) fn test_drop_direct_ingress_frame(
+    enabled: bool,
+    name: &str,
+    data: &[u8],
+    counters: &InterfaceCounters,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+    // A frame too short to carry a hops byte is not dropped here; the
+    // transport's own unpack validation rejects it.
+    if data.len() < 2 || data[1] != 0 {
+        return false;
+    }
+    let total = counters
+        .test_direct_ingress_drops
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    tracing::debug!(
+        "DIRECT_INGRESS_DROP iface={name} len={} total={total}",
+        data.len()
+    );
+    true
 }
 
 /// Packet to send out through an interface

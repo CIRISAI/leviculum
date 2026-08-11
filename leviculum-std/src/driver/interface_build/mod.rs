@@ -71,6 +71,34 @@ pub(super) fn build_interface(
     ctx: &InterfaceBuildCtx<'_>,
     auto_peer_count: &AutoPeerCount,
 ) -> Result<Built, Error> {
+    // TEST-ONLY `test_drop_direct_ingress` (range emulation for co-located
+    // rigs) reads the wire hops byte at `raw[1]`, which only exists on an
+    // unwrapped Reticulum frame: IFAC prepends authentication material
+    // before the flags byte, so the two cannot coexist. And only the
+    // LoRa-capable single-port types implement the filter. Both refused
+    // here, centrally, so a misconfiguration fails daemon startup instead
+    // of silently running without range emulation.
+    if config.test_drop_direct_ingress {
+        if !matches!(
+            config.interface_type.as_str(),
+            "RNodeInterface" | "SerialInterface"
+        ) {
+            return Err(Error::Config(format!(
+                "interface '{}': test_drop_direct_ingress is only supported on \
+                 RNodeInterface and SerialInterface, not {}",
+                config.name, config.interface_type
+            )));
+        }
+        if config.networkname.is_some() || config.passphrase.is_some() {
+            return Err(Error::Config(format!(
+                "interface '{}': test_drop_direct_ingress is incompatible with IFAC \
+                 (networkname/passphrase): IFAC prepends material before the flags \
+                 byte, so the wire hops byte is no longer at raw[1]; remove the IFAC \
+                 keys or the test knob",
+                config.name
+            )));
+        }
+    }
     match config.interface_type.as_str() {
         "TCPClientInterface" => tcp::build_client(idx, config, ctx),
         "TCPServerInterface" => tcp::build_server(idx, config, ctx),
@@ -183,6 +211,59 @@ mod tests {
             .expect("868.65 MHz / 125 kHz must not build");
         let msg = err.to_string();
         assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
+    }
+
+    /// TEST-ONLY `test_drop_direct_ingress` is refused together with IFAC:
+    /// IFAC prepends material before the flags byte, so the wire hops byte
+    /// the filter reads is no longer at `raw[1]`. The refusal is a config
+    /// error at build time, on both LoRa-capable types.
+    #[test]
+    fn drop_direct_ingress_with_ifac_is_a_config_error() {
+        let owner = CtxOwner::new();
+        for (iface_type, extra_port_keys) in
+            [("RNodeInterface", true), ("SerialInterface", false)]
+        {
+            let mut config = InterfaceConfig {
+                name: "deaf".to_string(),
+                interface_type: iface_type.to_string(),
+                port: Some("/dev/nonexistent-test-port".to_string()),
+                frequency: Some(869_525_000),
+                test_drop_direct_ingress: true,
+                networkname: Some("testnet".to_string()),
+                ..Default::default()
+            };
+            if extra_port_keys {
+                config.bandwidth = Some(125_000);
+                config.spreading_factor = Some(7);
+                config.coding_rate = Some(5);
+            }
+            let err = build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default())
+                .err()
+                .unwrap_or_else(|| panic!("{iface_type}: IFAC + knob must not build"));
+            let msg = err.to_string();
+            assert!(msg.contains("incompatible with IFAC"), "{iface_type}: {msg}");
+        }
+    }
+
+    /// The knob on a type that does not implement the filter is refused
+    /// rather than silently ignored — a rig config that thinks it emulates
+    /// range but does not would invalidate a hardware run.
+    #[test]
+    fn drop_direct_ingress_on_an_unsupported_type_is_a_config_error() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            name: "deaf-tcp".to_string(),
+            interface_type: "TCPClientInterface".to_string(),
+            target_host: Some("127.0.0.1".to_string()),
+            target_port: Some(4242),
+            test_drop_direct_ingress: true,
+            ..Default::default()
+        };
+        let err = build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default())
+            .err()
+            .expect("knob on TCP must not build");
+        let msg = err.to_string();
+        assert!(msg.contains("only supported on"), "{msg}");
     }
 
     /// The multi builder checks each subinterface's own frequency.

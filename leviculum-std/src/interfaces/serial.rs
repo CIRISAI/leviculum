@@ -115,6 +115,9 @@ pub(crate) struct SerialInterfaceConfig {
     pub buffer_size: usize,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     pub radio_config: Option<SerialRadioConfig>,
+    /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
+    /// (see [`super::test_drop_direct_ingress_frame`]).
+    pub test_drop_direct_ingress: bool,
 }
 
 /// Spawn a serial interface with automatic reconnection.
@@ -343,6 +346,7 @@ async fn serial_reconnect_task(
                     incoming_tx.clone(),
                     outgoing_rx,
                     Arc::clone(&counters),
+                    config.test_drop_direct_ingress,
                 )
                 .await;
                 tracing::warn!("Serial interface {}: port lost, will reconnect", name);
@@ -380,13 +384,17 @@ async fn serial_reconnect_task(
 /// - HW_MTU: deframer buffer exceeding 564 bytes is reset (prevents OOM on embedded)
 ///
 /// Returns `outgoing_rx` on port loss for reconnect reuse.
-async fn serial_io_task(
+async fn serial_io_task<S>(
     name: String,
-    mut port: tokio_serial::SerialStream,
+    mut port: S,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
-) -> mpsc::Receiver<OutgoingPacket> {
+    drop_direct_ingress: bool,
+) -> mpsc::Receiver<OutgoingPacket>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut deframer = Deframer::new();
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
@@ -421,6 +429,14 @@ async fn serial_io_task(
                         let results = deframer.process(&read_buf[..n]);
                         for r in results {
                             if let DeframeResult::Frame(data) = r {
+                                // TEST-ONLY range emulation: an out-of-range
+                                // frame was never heard, so it is dropped
+                                // before any counter or the transport sees it.
+                                if super::test_drop_direct_ingress_frame(
+                                    drop_direct_ingress, &name, &data, &counters,
+                                ) {
+                                    continue;
+                                }
                                 counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
                                 if incoming_tx.send(IncomingPacket { data }).await.is_err() {
                                     return outgoing_rx;
@@ -755,7 +771,76 @@ mod tests {
             buffer_size: SERIAL_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
             radio_config: radio,
+            test_drop_direct_ingress: false,
         }
+    }
+
+    /// The TEST-ONLY `test_drop_direct_ingress` knob at the interface level
+    /// (HDLC deframe → filter, no daemon): a frame whose wire hops byte
+    /// (`raw[1]`) is 0 is dropped before the transport channel, a relayed
+    /// copy (hops >= 1) passes, and with the knob off (the default) the
+    /// hops-0 frame passes too.
+    #[tokio::test]
+    async fn test_drop_direct_ingress_filters_hops0_at_the_serial_boundary() {
+        async fn rx_through_io_task(
+            drop_direct: bool,
+            frames: &[Vec<u8>],
+        ) -> (Vec<Vec<u8>>, Arc<InterfaceCounters>) {
+            let (port, mut peer) = tokio::io::duplex(8192);
+            let (incoming_tx, mut incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+            let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+            let counters = Arc::new(InterfaceCounters::new());
+            let task_counters = Arc::clone(&counters);
+            let task = tokio::spawn(async move {
+                serial_io_task(
+                    "test_serial_deaf".to_string(),
+                    port,
+                    incoming_tx,
+                    outgoing_rx,
+                    task_counters,
+                    drop_direct,
+                )
+                .await;
+            });
+            for f in frames {
+                let mut out = Vec::new();
+                frame(f, &mut out);
+                peer.write_all(&out).await.expect("write frame");
+            }
+            let mut got = Vec::new();
+            while let Ok(Some(pkt)) =
+                tokio::time::timeout(Duration::from_millis(300), incoming_rx.recv()).await
+            {
+                got.push(pkt.data);
+            }
+            drop(outgoing_tx);
+            drop(peer);
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+            (got, counters)
+        }
+
+        // flags(1) hops(1) tail — the filter reads only raw[1].
+        let direct = vec![0x00u8, 0x00, 0xAA, 0xBB];
+        let relayed = vec![0x00u8, 0x01, 0xAA, 0xBB];
+
+        let (got, counters) = rx_through_io_task(true, &[direct.clone(), relayed.clone()]).await;
+        assert_eq!(got, vec![relayed.clone()], "only the relayed copy passes");
+        assert_eq!(
+            counters.test_direct_ingress_drops.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            counters.rx_bytes.load(Ordering::Relaxed),
+            relayed.len() as u64,
+            "a dropped frame was never heard, so it must not count as RX"
+        );
+
+        let (got, counters) = rx_through_io_task(false, &[direct.clone(), relayed.clone()]).await;
+        assert_eq!(got, vec![direct, relayed]);
+        assert_eq!(
+            counters.test_direct_ingress_drops.load(Ordering::Relaxed),
+            0
+        );
     }
 
     /// With a radio config present, the spawned handle carries an

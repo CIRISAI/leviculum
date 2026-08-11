@@ -483,6 +483,10 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),
         "csma_enabled" => iface.csma_enabled = Some(parse_bool(value)),
+        // TEST-ONLY range emulation for co-located rigs: drop hops=0 ingress
+        // frames (see `InterfaceConfig::test_drop_direct_ingress`). No Python
+        // equivalent; consumed by the 3-node relay hardware scenario.
+        "test_drop_direct_ingress" => iface.test_drop_direct_ingress = parse_bool(value),
         // Ingress control (Codeberg #8, Python `ingress_control`,
         // Reticulum.py:768-769). An explicit value overrides the medium-class
         // default; unset (None) resolves per medium at registration.
@@ -1153,6 +1157,48 @@ mod tests {
         assert_eq!(iface.tx_power, Some(17));
         assert_eq!(iface.preamble_symbols, Some(18));
         assert_eq!(iface.csma_enabled, Some(true));
+    }
+
+    /// The TEST-ONLY `test_drop_direct_ingress` key parses on the INI path
+    /// (the periculum-generated lnsd config is INI) and defaults off when
+    /// absent.
+    #[test]
+    fn test_parse_test_drop_direct_ingress_key() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Deaf RNode]]
+    type = RNodeInterface
+    port = /dev/ttyACM0
+    frequency = 869525000
+    bandwidth = 125000
+    spreadingfactor = 7
+    codingrate = 5
+    test_drop_direct_ingress = yes
+  [[Normal RNode]]
+    type = RNodeInterface
+    port = /dev/ttyACM1
+    frequency = 869525000
+    bandwidth = 125000
+    spreadingfactor = 7
+    codingrate = 5
+"#,
+        )
+        .unwrap();
+        assert!(
+            config
+                .interfaces
+                .get("Deaf RNode")
+                .expect("deaf iface")
+                .test_drop_direct_ingress
+        );
+        assert!(
+            !config
+                .interfaces
+                .get("Normal RNode")
+                .expect("normal iface")
+                .test_drop_direct_ingress
+        );
     }
 
     /// Two guarantees the new key has to keep. Omitting `preamble_symbols`

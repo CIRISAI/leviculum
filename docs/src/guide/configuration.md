@@ -207,6 +207,20 @@ radio parameters the interface configures (`config.rs:231-249`):
 | `csma_enabled` | bool | unset | Enable CSMA/CA on the T114 LoRa interface (needs CAD-capable firmware). (`ini_config.rs:242`; `config.rs:248-249`) |
 | `preamble_symbols` | u16 (symbols) | unset (derived from the PHY) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Unset derives what an RNode peer programs for the same PHY — 24 symbols at SF7/BW125, the 18-symbol floor from SF8 down — so a mixed pair agrees on the wire; set it only to pin a value against a non-conforming peer. Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`ini_config.rs:465`; `config.rs:439`; `rnode.rs:derive_preamble_symbols`) |
 
+**Test-only:** `test_drop_direct_ingress` (bool, default off) emulates
+out-of-range placement on a co-located rig: the interface drops every
+received frame whose wire hops byte (`raw[1]`) is 0 — frames heard
+directly from their originator — before they reach the transport, while
+relayed copies (hops ≥ 1) pass. Two endpoints with this knob on one
+bench are mutually deaf but both hear a relay, giving the A–B–C
+repeater topology without attenuators; the consumer is the 3-node relay
+hardware scenario (periculum `hardware/lora_3node_relay.toml`).
+Python-RNS has no such option — frames are dropped locally on ingress
+and nothing on the air changes, so this is a test-harness affordance,
+not a wire or semantic deviation. Supported on `RNodeInterface` and
+`SerialInterface`; incompatible with IFAC (which prepends material
+before the flags byte), and that combination is refused at startup.
+
 ### IFAC (Interface Access Codes)
 
 IFAC keys apply to any interface and authenticate / isolate a virtual

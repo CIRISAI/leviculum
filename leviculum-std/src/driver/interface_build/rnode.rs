@@ -90,6 +90,7 @@ pub(super) fn build(
             flow_control,
             buffer_size,
             reconnect_notify: Some(ctx.reconnect_tx.clone()),
+            test_drop_direct_ingress: config.test_drop_direct_ingress,
         },
     );
 

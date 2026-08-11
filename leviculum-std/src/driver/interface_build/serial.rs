@@ -57,6 +57,7 @@ pub(super) fn build(
             buffer_size,
             reconnect_notify: Some(ctx.reconnect_tx.clone()),
             radio_config,
+            test_drop_direct_ingress: config.test_drop_direct_ingress,
         },
     );
     handle.info.bitrate = Some(speed);

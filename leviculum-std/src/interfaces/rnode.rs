@@ -350,6 +350,9 @@ pub(crate) struct RNodeInterfaceConfig {
     pub flow_control: bool,
     pub buffer_size: usize,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
+    /// (see [`super::test_drop_direct_ingress_frame`]).
+    pub test_drop_direct_ingress: bool,
 }
 
 impl RNodeInterfaceConfig {
@@ -824,6 +827,7 @@ async fn rnode_io_task<S>(
     _sf: u8,
     _cr: u8,
     mut lock_ctl: AirtimeLockCtl,
+    drop_direct_ingress: bool,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -867,6 +871,16 @@ where
                                 match command {
                                     rnode::CMD_DATA => {
                                         tracing::debug!("{}: RX {} bytes from radio", name, payload.len());
+                                        // TEST-ONLY range emulation: an
+                                        // out-of-range frame was never heard,
+                                        // so it is dropped before any counter
+                                        // or trace event that the delivery
+                                        // analysis reads.
+                                        if super::test_drop_direct_ingress_frame(
+                                            drop_direct_ingress, &name, &payload, &counters,
+                                        ) {
+                                            continue;
+                                        }
                                         // Bug #25 capture-compare: structured
                                         // event at the RNode → host serial
                                         // boundary. Mirrors `LORA_TX` on the
@@ -1233,6 +1247,9 @@ struct RNodeReconnectCtx {
     /// Airtime-lock TX gate (Codeberg #121), shared with the
     /// `InterfaceHandle` via `InterfaceCounters::set_tx_gate`.
     gate: Arc<TxGate>,
+    /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
+    /// (see [`super::test_drop_direct_ingress_frame`]).
+    test_drop_direct_ingress: bool,
 }
 
 /// Reconnect loop: open channel → configure → I/O → on disconnect → wait → retry.
@@ -1319,6 +1336,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     radio.sf,
                     radio.cr,
                     lock_ctl,
+                    ctx.test_drop_direct_ingress,
                 )
                 .await;
 
@@ -1569,6 +1587,7 @@ fn reconnect_ctx_from_radio(
     radio: RadioParams,
     flow_control: bool,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    test_drop_direct_ingress: bool,
 ) -> RNodeReconnectCtx {
     let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.bandwidth);
     RNodeReconnectCtx {
@@ -1579,6 +1598,7 @@ fn reconnect_ctx_from_radio(
         reconnect_notify,
         jitter_max_ms,
         gate: TxGate::new(),
+        test_drop_direct_ingress,
     }
 }
 
@@ -1594,6 +1614,7 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
         config.radio_params(),
         config.flow_control,
         config.reconnect_notify,
+        config.test_drop_direct_ingress,
     );
     let buffer_size = config.buffer_size;
     let port_path = config.port_path;
@@ -1623,6 +1644,9 @@ pub(crate) fn spawn_rnode_channel_interface(
         config.radio_params(),
         config.flow_control,
         config.reconnect_notify,
+        // Range emulation is a rig affordance; the phone-attached channel
+        // path never needs it.
+        false,
     );
     let buffer_size = config.buffer_size;
     let factory = config.channel_factory;
@@ -2685,6 +2709,7 @@ mod tests {
             flow_control: true,
             buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
+            test_drop_direct_ingress: false,
         };
 
         let mut handle = spawn_rnode_interface(config);
@@ -2766,6 +2791,7 @@ mod tests {
                 7,
                 5,
                 AirtimeLockCtl::new(TxGate::new(), None, None),
+                /* drop_direct_ingress = */ false,
             )
             .await;
         });
@@ -2836,6 +2862,89 @@ mod tests {
         frames
     }
 
+    /// The TEST-ONLY `test_drop_direct_ingress` knob at the interface level
+    /// (deframe → filter, no daemon): a deframed CMD_DATA frame whose wire
+    /// hops byte (`raw[1]`) is 0 must be dropped before the transport
+    /// channel, a relayed copy (hops >= 1) must pass, and with the knob off
+    /// (the default) the hops-0 frame passes too.
+    #[tokio::test]
+    async fn test_drop_direct_ingress_filters_hops0_at_the_rnode_boundary() {
+        async fn rx_through_io_task(
+            drop_direct: bool,
+            frames: &[Vec<u8>],
+        ) -> (Vec<Vec<u8>>, Arc<InterfaceCounters>) {
+            let (port, mut peer) = tokio::io::duplex(8192);
+            let (incoming_tx, mut incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+            let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+            let counters = Arc::new(InterfaceCounters::new());
+            let task_counters = Arc::clone(&counters);
+            let task = tokio::spawn(async move {
+                rnode_io_task(
+                    "test_rnode_deaf".to_string(),
+                    port,
+                    incoming_tx,
+                    outgoing_rx,
+                    task_counters,
+                    /* flow_control = */ false,
+                    /* jitter_max_ms = */ 1,
+                    125_000,
+                    7,
+                    5,
+                    AirtimeLockCtl::new(TxGate::new(), None, None),
+                    drop_direct,
+                )
+                .await;
+            });
+            for f in frames {
+                let mut out = Vec::new();
+                kiss::frame(rnode::CMD_DATA, f, &mut out);
+                peer.write_all(&out).await.expect("write frame");
+            }
+            let mut got = Vec::new();
+            while let Ok(Some(pkt)) =
+                tokio::time::timeout(Duration::from_millis(300), incoming_rx.recv()).await
+            {
+                got.push(pkt.data);
+            }
+            drop(outgoing_tx);
+            drop(peer);
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+            (got, counters)
+        }
+
+        // flags(1) hops(1) tail — the filter reads only raw[1]. A frame
+        // transmitted by its originator carries wire hops 0; a copy relayed
+        // by one transport hop carries 1.
+        let direct = vec![0x00, 0x00, 0xAA, 0xBB];
+        let relayed = vec![0x00, 0x01, 0xAA, 0xBB];
+
+        // Knob on: the direct frame vanishes before the transport channel
+        // and is counted; the relayed copy arrives.
+        let (got, counters) = rx_through_io_task(true, &[direct.clone(), relayed.clone()]).await;
+        assert_eq!(got, vec![relayed.clone()], "only the relayed copy passes");
+        assert_eq!(
+            counters
+                .test_direct_ingress_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            counters.rx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            relayed.len() as u64,
+            "a dropped frame was never heard, so it must not count as RX"
+        );
+
+        // Default off: both frames arrive, nothing is counted as dropped.
+        let (got, counters) = rx_through_io_task(false, &[direct.clone(), relayed.clone()]).await;
+        assert_eq!(got, vec![direct, relayed]);
+        assert_eq!(
+            counters
+                .test_direct_ingress_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
     /// Steady-state throughput sanity for the default `flow_control = false`
     /// path: pushed packets must all reach `peer` without anyone feeding
     /// CMD_READY back. This is the configuration that lnsd (and Python-RNS)
@@ -2863,6 +2972,7 @@ mod tests {
                 7,
                 5,
                 AirtimeLockCtl::new(TxGate::new(), None, None),
+                /* drop_direct_ingress = */ false,
             )
             .await;
         });
@@ -2942,6 +3052,7 @@ mod tests {
                 7,
                 5,
                 AirtimeLockCtl::new(TxGate::new(), None, None),
+                /* drop_direct_ingress = */ false,
             )
             .await;
         });
@@ -3354,6 +3465,7 @@ mod tests {
                 7,
                 5,
                 AirtimeLockCtl::new(TxGate::new(), None, None),
+                /* drop_direct_ingress = */ false,
             )
             .await;
         });
@@ -3841,6 +3953,7 @@ mod tests {
                 7,
                 5,
                 lock_ctl,
+                /* drop_direct_ingress = */ false,
             )
             .await;
         });

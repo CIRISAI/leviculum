@@ -476,6 +476,21 @@ pub struct InterfaceConfig {
     /// Enable CSMA/CA on the T114 LoRa interface (requires CAD-capable firmware).
     pub csma_enabled: Option<bool>,
 
+    /// TEST-ONLY (range emulation for co-located rigs): drop received frames
+    /// whose wire hops byte (`raw[1]`) is 0, i.e. frames heard directly from
+    /// their originator, before they reach the transport. Makes two endpoints
+    /// on one bench mutually deaf while both still hear a relay's forwarded
+    /// copies (wire hops >= 1) — the A-B-C repeater topology on co-located
+    /// boards. Consumed by the 3-node relay hardware scenario
+    /// (periculum `hardware/lora_3node_relay.toml`). Supported on
+    /// `RNodeInterface` and `SerialInterface`; incompatible with IFAC
+    /// (which prepends material before the flags byte) — the interface
+    /// builder refuses that combination. Python-RNS has no such option:
+    /// frames are dropped locally on ingress, nothing on the air changes,
+    /// so this is a harness affordance, not a wire or semantic deviation.
+    #[serde(default)]
+    pub test_drop_direct_ingress: bool,
+
     // RNodeMultiInterface only.
     /// Nested subinterface blocks (`[[[name]]]`) of an `RNodeMultiInterface`.
     /// Each becomes one vport logical interface. Empty for every other type.
@@ -609,6 +624,7 @@ impl Default for InterfaceConfig {
             airtime_limit_short: None,
             airtime_limit_long: None,
             csma_enabled: None,
+            test_drop_direct_ingress: false,
             subinterfaces: Vec::new(),
         }
     }
