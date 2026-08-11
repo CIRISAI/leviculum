@@ -91,7 +91,7 @@ pub(crate) fn serial_radio_config(
         bandwidth,
         spreading_factor,
         coding_rate,
-        tx_power: leviculum_core::rnode::resolve_tx_power(cfg.tx_power),
+        tx_power: leviculum_core::rnode::resolve_tx_power(cfg.tx_power, frequency),
         preamble_len: cfg
             .preamble_symbols
             .unwrap_or_else(|| derive_preamble_symbols(spreading_factor, coding_rate, bandwidth)),
@@ -675,6 +675,21 @@ mod tests {
             leviculum_core::rnode::DEFAULT_TX_POWER_DBM,
             "the serial path and the resolver must not drift apart"
         );
+    }
+
+    /// The frequency cap reaches the serial path: the same block on a 25 mW
+    /// sub-band (867.2 MHz, ERC 70-03 h1.4) resolves an absent `txpower` to
+    /// the lawful 14 dBm, not the board maximum it gets at 869.525 MHz.
+    #[test]
+    fn absent_txpower_is_capped_on_a_25_mw_band() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(867_200_000),
+            ..Default::default()
+        };
+        let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.tx_power, 14);
     }
 
     /// And an explicit `txpower = 0` still reaches the modem as 0. This

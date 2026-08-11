@@ -27,6 +27,22 @@ pub(super) fn build(
     let iface_name = format!("serial_{}", idx);
     let id = InterfaceId(idx);
 
+    // A `frequency` makes this a LoRa modem, and a carrier occupying one of
+    // the ERC 70-03 narrowband alarm bands is a config error, not a default.
+    // Checked before `serial_radio_config` resolves any radio parameter. The
+    // bandwidth default mirrors `serial_radio_config`'s.
+    if let Some(frequency) = config.frequency {
+        let bandwidth = config.bandwidth.unwrap_or(125_000);
+        if let Some(gap) = leviculum_core::rnode::erp_band_gap(frequency, bandwidth) {
+            return Err(Error::Config(format!(
+                "SerialInterface: frequency {} Hz with bandwidth {} Hz overlaps the {} band, \
+                 where ERC 70-03 permits only <= 25 kHz channel spacing; \
+                 choose a centre frequency whose signal fits a listed sub-band",
+                frequency, bandwidth, gap
+            )));
+        }
+    }
+
     let radio_config = crate::interfaces::serial::serial_radio_config(config);
 
     let mut handle = crate::interfaces::serial::spawn_serial_interface(

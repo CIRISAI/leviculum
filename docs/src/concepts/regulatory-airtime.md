@@ -24,7 +24,7 @@ the transmit queue on it — `if (!airtime_lock && queue_height > 0)`
 *enforcement* never leaves the device.
 
 Our LNode firmware enforces the same way: `AirtimeTracker`
-(`leviculum-core/src/rnode.rs:1246`) mirrors the RNode ledger, and
+(`leviculum-core/src/rnode.rs:1389`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`leviculum-nrf/src/lora.rs:725`),
 continuing to listen so RX is not starved.
@@ -44,23 +44,40 @@ long-term limit from the TX frequency (`resolve_lt_alock`,
 `leviculum-std/src/driver/mod.rs:329`) and sends it to the modem; a
 standalone LNode whose host never sent one derives it in the firmware
 from its own frequency (`firmware_default_lt_alock`,
-`leviculum-core/src/rnode.rs:1159`). Both read the same table,
-`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1131`), which
+`leviculum-core/src/rnode.rs:1302`). Both read the same table,
+`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1195`), which
 carries the EU 863-870 MHz sub-bands with their 0.1 % / 1 % / 10 %
-duty cycles. An explicit configured value always wins — including an
-explicit `0`, which the firmware reads as unlimited.
+duty cycles and the 433.05-434.79 MHz band at 10 %. An explicit
+configured value always wins — including an explicit `0`, which the
+firmware reads as unlimited.
 
-Two honesty notes, both deliberate:
+Every row of the table has been verified against the standard text:
+ERC Recommendation 70-03, Annex 1, sub-bands h1.3-h1.9 for
+863-870 MHz and the 433.05-434.79 MHz entry of the same annex. The
+duty cycle is also the *only* compliance route open to a
+fixed-frequency LNode: every sub-band's requirement reads "≤ x % duty
+cycle **or** LBT+AFA", and AFA — adaptive frequency agility, changing
+channel — is impossible here by construction.
 
-- The table is *attributed* to EN 300 220-2 / ERC 70-03 but has not
-  been verified against the standard text itself. If you have the
-  standard in front of you, checking the table against it is welcome
-  and overdue.
-- The table covers only EU 863-870 MHz. Other bands (US 902-928,
-  AU/NZ, ...) have no citable source in this tree, so they get *no*
-  auto-limit and a warning that says so — a limit invented from
-  memory would read as authoritative to exactly the operator who most
-  needs it not to be. Supply the citation and the table grows.
+One honesty note, deliberate: the table covers only the bands above.
+Other bands (US 902-928, AU/NZ, ...) have no citable source in this
+tree, so they get *no* auto-limit and a warning that says so — a
+limit invented from memory would read as authoritative to exactly the
+operator who most needs it not to be. Supply the citation and the
+table grows.
+
+TX power follows the same lawful-by-default shape (`resolve_tx_power`
+capped by `lawful_erp_dbm`, `leviculum-core/src/rnode.rs:1240`): an
+absent `txpower` asks for the board maximum, capped by the sub-band's
+e.r.p. limit — 25 mW everywhere in the European SRD spectrum except
+500 mW in 869.4-869.65 MHz and 10 mW in 433.05-434.79 MHz. An
+explicit `txpower` wins even above the cap (the operator may hold a
+licence or know the jurisdiction); the excess is logged. The
+narrowband bands *between* the wideband sub-bands (868.6-868.7 MHz
+and its four siblings, alarms, ≤ 25 kHz channel spacing) refuse a
+LoRa carrier at interface build (`erp_band_gap`,
+`leviculum-core/src/rnode.rs:1270`) — a gap is a configuration error,
+not an unlimited band.
 
 Python-Reticulum does not do lawful-by-default; the cap only shapes
 local TX and is invisible to receivers, so this is a Priority-1

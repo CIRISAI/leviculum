@@ -66,11 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - BREAKING: an interface with no `txpower` asks for the board maximum
-  (22 dBm) instead of 0 dBm. A board that can do less clamps and says so;
-  an explicit `txpower = 0` still means 0. A deliberate deviation from
-  Python-Reticulum, pinned in the compatibility document. Above roughly
-  7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP
-  allowance and has to be set down.
+  (22 dBm) instead of 0 dBm, capped by the lawful ERP limit for the
+  frequency from ERC 70-03 (14 dBm on the EU 25 mW sub-bands, 10 dBm on
+  433 MHz). A board that can do less clamps and says so; an explicit
+  `txpower` wins even above the cap and is logged; `txpower = 0` still
+  means 0. A deliberate deviation from Python-Reticulum, pinned in the
+  compatibility document.
+
+- A carrier whose occupied bandwidth touches one of the narrowband alarm
+  bands between the EU sub-bands (868.6-868.7 MHz and siblings) is a
+  config error at interface build, not an unlimited band.
+
+- The derived airtime limit covers 433.05-434.79 MHz at 10% duty cycle.
 
 - The LNode firmware's compiled profile transmits at 22 dBm, not 17.
 

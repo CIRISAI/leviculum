@@ -662,23 +662,73 @@ pub fn validate_firmware(major: u8, minor: u8) -> bool {
 /// unusual, and is simply not heard; 22 dBm is 158 mW. See
 /// `docs/src/concepts/python-rns-compatibility.md`.
 ///
-/// Regulatory note, EU 863-870 MHz: 22 dBm *conducted* stays inside the
-/// permitted 27 dBm ERP up to roughly 7 dBi of antenna gain (22 + 7 - 2.15 dBd
-/// correction ≈ 26.9 dBm ERP). Above that the operator has to reduce power
-/// explicitly. This is stated here and in the documentation rather than warned
-/// about at runtime: the stack does not know the antenna.
+/// Regulatory note, EU 863-870 MHz: 27 dBm e.r.p. is permitted **only** in
+/// 869.4-869.65 MHz (ERC Recommendation 70-03, Annex 1, sub-band h1.7). There,
+/// 22 dBm *conducted* stays inside the limit up to roughly 7 dBi of antenna
+/// gain (22 + 7 - 2.15 dBd correction ≈ 26.9 dBm e.r.p.); above that the
+/// operator has to reduce power explicitly, and that residual is stated in the
+/// documentation rather than warned about at runtime, because the stack does
+/// not know the antenna. Every other listed European sub-band permits at most
+/// 25 mW e.r.p. = 14 dBm, which is why this constant is only ever applied
+/// through [`resolve_tx_power`], where [`lawful_erp_dbm`] caps it by frequency.
 pub const DEFAULT_TX_POWER_DBM: i8 = 22;
 
 /// Resolve a configured `txpower` to the value the radio is asked for.
 ///
 /// `None` — the key is absent from the interface block — resolves to
-/// [`DEFAULT_TX_POWER_DBM`]. `Some(x)` is returned verbatim, **including an
-/// explicit `Some(0)`**: an operator who writes `txpower = 0` means 0, the same
-/// way an explicit `airtime_limit_long = 0` means unlimited
-/// ([`firmware_default_lt_alock`]). Callers must not collapse `None` into
+/// [`DEFAULT_TX_POWER_DBM`] capped by the lawful e.r.p. limit for `freq_hz`
+/// ([`lawful_erp_dbm`]): the out-of-box default reaches as far as the board
+/// can, but no further than the band allows. A frequency the table has no
+/// entry for gets the uncapped board maximum and a warning — a limit is not
+/// invented for a band this tree cannot cite, mirroring
+/// [`firmware_default_lt_alock`]'s treatment of the airtime lock.
+///
+/// `Some(x)` is returned verbatim, **including an explicit `Some(0)`** (an
+/// operator who writes `txpower = 0` means 0, the same way an explicit
+/// `airtime_limit_long = 0` means unlimited) **and including a value above
+/// the derived cap**: the operator may know something the table does not — a
+/// licence, a different jurisdiction — so the explicit value wins and the
+/// excess is logged, not clamped. Callers must not collapse `None` into
 /// `Some(0)` before this point, or the two become indistinguishable.
-pub fn resolve_tx_power(configured: Option<i8>) -> i8 {
-    configured.unwrap_or(DEFAULT_TX_POWER_DBM)
+pub fn resolve_tx_power(configured: Option<i8>, freq_hz: u64) -> i8 {
+    match (configured, lawful_erp_dbm(freq_hz)) {
+        (Some(x), Some(cap)) if x > cap => {
+            crate::tracing::warn!(
+                "txpower {} dBm exceeds the derived ERP limit {} dBm for {} Hz; \
+                 honouring the explicit value",
+                x,
+                cap,
+                freq_hz
+            );
+            x
+        }
+        (Some(x), _) => x,
+        (None, Some(cap)) if cap < DEFAULT_TX_POWER_DBM => {
+            crate::tracing::info!(
+                "no txpower configured, using {} dBm (board max {} dBm, capped by \
+                 ERC 70-03 for {} MHz)",
+                cap,
+                DEFAULT_TX_POWER_DBM,
+                freq_hz as f64 / 1e6
+            );
+            cap
+        }
+        (None, Some(_)) => {
+            crate::tracing::info!(
+                "no txpower configured, using board maximum {} dBm",
+                DEFAULT_TX_POWER_DBM
+            );
+            DEFAULT_TX_POWER_DBM
+        }
+        (None, None) => {
+            crate::tracing::warn!(
+                "no ERP limit known for {} Hz; using board maximum {} dBm",
+                freq_hz,
+                DEFAULT_TX_POWER_DBM
+            );
+            DEFAULT_TX_POWER_DBM
+        }
+    }
 }
 
 /// Validate radio configuration parameters
@@ -1103,25 +1153,39 @@ pub fn alock_u16_to_fraction(at: u16) -> f32 {
     }
 }
 
-/// ETSI duty-cycle cap for an EU 863-870 MHz frequency, as a fraction of the
-/// long-term window, or `None` if the frequency is outside the band or in a
-/// guard gap.
+/// ETSI duty-cycle cap for a European SRD frequency, as a fraction of the
+/// long-term window, or `None` if the frequency is outside every listed band
+/// or in a guard gap.
 ///
-/// The sub-bands follow EN 300 220-2 / ERC 70-03 for 863-870 MHz:
+/// The rows are read from ERC Recommendation 70-03, Annex 1 — the 863-870 MHz
+/// wideband sub-bands h1.3-h1.9 (also carried by EN 300 220-2) and the
+/// 433.05-434.79 MHz entry. The letters K-Q are this tree's historical row
+/// names; the standard's own designations are given alongside:
 ///
-/// | Sub-band | Range (MHz)     | Duty cycle | Fraction |
-/// |----------|-----------------|------------|----------|
-/// | K        | 863.0 - 865.0   | 0.1%       | 0.001    |
-/// | L        | 865.0 - 868.0   | 1%         | 0.01     |
-/// | M        | 868.0 - 868.6   | 1%         | 0.01     |
-/// | N        | 868.7 - 869.2   | 0.1%       | 0.001    |
-/// | P        | 869.4 - 869.65  | 10%        | 0.10     |
-/// | Q        | 869.7 - 870.0   | 1%         | 0.01     |
+/// | Sub-band  | Range (MHz)     | Duty cycle | Fraction |
+/// |-----------|-----------------|------------|----------|
+/// | g1        | 433.05 - 434.79 | 10%        | 0.10     |
+/// | K (h1.3)  | 863.0 - 865.0   | 0.1%       | 0.001    |
+/// | L (h1.4)  | 865.0 - 868.0   | 1%         | 0.01     |
+/// | M (h1.5)  | 868.0 - 868.6   | 1%         | 0.01     |
+/// | N (h1.6)  | 868.7 - 869.2   | 0.1%       | 0.001    |
+/// | P (h1.7)  | 869.4 - 869.65  | 10%        | 0.10     |
+/// | Q (h1.9)  | 869.7 - 870.0   | 1%         | 0.01     |
 ///
-/// Guard gaps (868.6-868.7, 869.2-869.4, 869.65-869.7 MHz) and frequencies
-/// outside 863-870 MHz return `None` (no regulatory auto cap applies). The
-/// returned fraction maps to the firmware `lt_alock` via `fraction * 10000`
-/// (see `alock_u16_to_fraction`).
+/// The name says `eu868` for historical reasons; the 433.05-434.79 MHz row
+/// was added when the table was verified against the standard text, because
+/// without it a 433 MHz node derived no airtime limit at all.
+///
+/// Guard gaps (868.6-868.7, 869.2-869.4, 869.65-869.7 MHz — narrowband-only
+/// bands a LoRa carrier is refused on at interface build, see
+/// [`erp_band_gap`]) and frequencies outside every listed band return `None`
+/// (no regulatory auto cap applies). The returned fraction maps to the
+/// firmware `lt_alock` via `fraction * 10000` (see `alock_u16_to_fraction`).
+///
+/// Every sub-band's requirement reads "<= x% duty cycle **or** LBT+AFA". AFA
+/// (adaptive frequency agility, i.e. changing channel) is impossible for a
+/// fixed-frequency node by construction, so the duty cycle is the only
+/// compliance route open here.
 ///
 /// This is a lawful-by-default helper: it lets a LoRa interface derive the
 /// long-term airtime limit from its own TX frequency when the operator has not
@@ -1130,14 +1194,93 @@ pub fn alock_u16_to_fraction(at: u16) -> f32 {
 /// than a wire/semantic requirement.
 pub fn etsi_eu868_duty_cycle(freq_hz: u64) -> Option<f64> {
     match freq_hz {
-        863_000_000..=864_999_999 => Some(0.001), // K 863.0-865.0: 0.1%
-        865_000_000..=867_999_999 => Some(0.01),  // L 865.0-868.0: 1%
-        868_000_000..=868_599_999 => Some(0.01),  // M 868.0-868.6: 1%
-        868_700_000..=869_199_999 => Some(0.001), // N 868.7-869.2: 0.1%
-        869_400_000..=869_649_999 => Some(0.10),  // P 869.4-869.65: 10%
-        869_700_000..=869_999_999 => Some(0.01),  // Q 869.7-870.0: 1%
-        _ => None,                                // guard gaps + out-of-band
+        433_050_000..=434_789_999 => Some(0.10), // g1 433.05-434.79: 10%
+        863_000_000..=864_999_999 => Some(0.001), // K (h1.3) 863.0-865.0: 0.1%
+        865_000_000..=867_999_999 => Some(0.01), // L (h1.4) 865.0-868.0: 1%
+        868_000_000..=868_599_999 => Some(0.01), // M (h1.5) 868.0-868.6: 1%
+        868_700_000..=869_199_999 => Some(0.001), // N (h1.6) 868.7-869.2: 0.1%
+        869_400_000..=869_649_999 => Some(0.10), // P (h1.7) 869.4-869.65: 10%
+        869_700_000..=869_999_999 => Some(0.01), // Q (h1.9) 869.7-870.0: 1%
+        _ => None,                               // guard gaps + out-of-band
     }
+}
+
+/// Lawful e.r.p. limit in dBm for a LoRa TX frequency, or `None` when the
+/// table has no entry for it.
+///
+/// The rows are read from ERC Recommendation 70-03, Annex 1 ("Non-specific
+/// Short Range Devices") — the same sub-bands the duty-cycle table
+/// ([`etsi_eu868_duty_cycle`]) is built from:
+///
+/// | Sub-band | Range (MHz)     | Max power     | dBm |
+/// |----------|-----------------|---------------|-----|
+/// | g1       | 433.05 - 434.79 | 10 mW e.r.p.  | 10  |
+/// | h1.3     | 863.0 - 865.0   | 25 mW e.r.p.  | 14  |
+/// | h1.4     | 865.0 - 868.0   | 25 mW e.r.p.  | 14  |
+/// | h1.5     | 868.0 - 868.6   | 25 mW e.r.p.  | 14  |
+/// | h1.6     | 868.7 - 869.2   | 25 mW e.r.p.  | 14  |
+/// | h1.7     | 869.4 - 869.65  | 500 mW e.r.p. | 27  |
+/// | h1.9     | 869.7 - 870.0   | 25 mW e.r.p.  | 14  |
+///
+/// 869.7-870 MHz carries two options in the standard: h1.8 at 5 mW with no
+/// duty-cycle requirement, and h1.9 at 25 mW with <= 1% duty cycle. A 125 kHz
+/// LoRa carrier here uses the h1.9 option — 25 mW under the duty cycle the
+/// airtime lock already enforces — so the row reads 14 dBm, not 7.
+///
+/// 500 mW is the exception, not the rule: every other listed European band
+/// allows 25 mW e.r.p. or less. The bands *between* the h1.x entries are not
+/// "no entry" — they are narrowband allocations a LoRa carrier is refused on
+/// at interface build ([`erp_band_gap`]); by the time this table is consulted
+/// for a default, a frequency in one of them has already been rejected.
+///
+/// `None` means the tree cannot cite a limit for the frequency (US 902-928,
+/// AU/NZ, ...): no cap is derived and the caller warns, exactly as the
+/// airtime lock behaves — a limit invented from memory would read as
+/// authoritative to exactly the operator who most needs it not to be.
+pub fn lawful_erp_dbm(freq_hz: u64) -> Option<i8> {
+    match freq_hz {
+        433_050_000..=434_789_999 => Some(10), // g1 433.05-434.79: 10 mW
+        863_000_000..=864_999_999 => Some(14), // h1.3 863.0-865.0: 25 mW
+        865_000_000..=867_999_999 => Some(14), // h1.4 865.0-868.0: 25 mW
+        868_000_000..=868_599_999 => Some(14), // h1.5 868.0-868.6: 25 mW
+        868_700_000..=869_199_999 => Some(14), // h1.6 868.7-869.2: 25 mW
+        869_400_000..=869_649_999 => Some(27), // h1.7 869.4-869.65: 500 mW
+        869_700_000..=869_999_999 => Some(14), // h1.9 869.7-870.0: 25 mW
+        _ => None,
+    }
+}
+
+/// The narrowband band a LoRa signal's occupied bandwidth would overlap, or
+/// `None` when the signal stays clear of all of them.
+///
+/// The bands between the wideband h1.x entries of ERC Recommendation 70-03,
+/// Annex 1 — 868.6-868.7, 869.2-869.25, 869.25-869.3, 869.3-869.4 and
+/// 869.65-869.7 MHz, allocated to alarms in Annex 7 of the same
+/// recommendation — permit only <= 25 kHz channel spacing, which no LoRa
+/// bandwidth this stack configures can satisfy. A configured centre frequency
+/// whose occupied bandwidth (approximated by the signal bandwidth) touches
+/// one of them is therefore a **configuration error at interface build**, not
+/// an "unlisted frequency": falling through to "no known limit, board
+/// maximum" would be the most permissive outcome exactly where the correct
+/// one is refusal.
+///
+/// The overlap test is strict on both edges: a signal whose occupied band
+/// *ends* exactly where an alarm band begins (e.g. an upper edge at precisely
+/// 868.6 MHz) does not overlap it.
+pub fn erp_band_gap(centre_hz: u64, bandwidth_hz: u32) -> Option<&'static str> {
+    const GAPS: [(u64, u64, &str); 5] = [
+        (868_600_000, 868_700_000, "868.6-868.7 MHz"),
+        (869_200_000, 869_250_000, "869.2-869.25 MHz"),
+        (869_250_000, 869_300_000, "869.25-869.3 MHz"),
+        (869_300_000, 869_400_000, "869.3-869.4 MHz"),
+        (869_650_000, 869_700_000, "869.65-869.7 MHz"),
+    ];
+    let half = u64::from(bandwidth_hz) / 2;
+    let lo = centre_hz.saturating_sub(half);
+    let hi = centre_hz.saturating_add(half);
+    GAPS.iter()
+        .find(|&&(gap_lo, gap_hi, _)| lo < gap_hi && hi > gap_lo)
+        .map(|&(_, _, name)| name)
 }
 
 /// Resolve the long-term airtime lock (`lt_alock` u16) a standalone LNode's
@@ -2114,11 +2257,30 @@ mod tests {
 
     /// The defect this default exists to close: a config with no `txpower`
     /// line used to resolve to 0 dBm — 1 mW — which a node has no symptom
-    /// for. Absent means "as far as this board reaches".
+    /// for. Absent means "as far as this board reaches" — where the band
+    /// permits it. 869.525 MHz sits in the 500 mW sub-band h1.7, whose
+    /// 27 dBm limit is above the board maximum, so the board maximum wins.
     #[test]
     fn an_absent_txpower_resolves_to_the_board_maximum() {
-        assert_eq!(resolve_tx_power(None), DEFAULT_TX_POWER_DBM);
-        assert_eq!(resolve_tx_power(None), 22);
+        assert_eq!(resolve_tx_power(None, 869_525_000), DEFAULT_TX_POWER_DBM);
+        assert_eq!(resolve_tx_power(None, 869_525_000), 22);
+    }
+
+    /// The hole the frequency cap closes: a community frequency in a 25 mW
+    /// sub-band (867.2 MHz, h1.4 — Rotterdam/Duffel sit there) with no
+    /// configured `txpower` must not transmit 22 dBm. The default is capped
+    /// to the lawful 14 dBm.
+    #[test]
+    fn an_absent_txpower_is_capped_by_the_erp_limit_of_the_band() {
+        assert_eq!(resolve_tx_power(None, 867_200_000), 14);
+    }
+
+    /// A frequency the table cannot cite derives no cap: the board maximum
+    /// is used (and the resolution warns). No limit is invented for a band
+    /// without a citable entry — same policy as the airtime lock.
+    #[test]
+    fn an_absent_txpower_on_an_unlisted_frequency_stays_the_board_maximum() {
+        assert_eq!(resolve_tx_power(None, 915_000_000), 22);
     }
 
     /// The distinction the whole `Option` is carried for: an operator who
@@ -2126,8 +2288,19 @@ mod tests {
     /// because 0 is also what the absent case used to produce.
     #[test]
     fn an_explicit_zero_txpower_stays_zero() {
-        assert_eq!(resolve_tx_power(Some(0)), 0);
-        assert_ne!(resolve_tx_power(Some(0)), resolve_tx_power(None));
+        assert_eq!(resolve_tx_power(Some(0), 867_200_000), 0);
+        assert_ne!(
+            resolve_tx_power(Some(0), 867_200_000),
+            resolve_tx_power(None, 867_200_000)
+        );
+    }
+
+    /// An explicit value wins even above the derived cap: the operator may
+    /// know the jurisdiction or hold a licence. 20 dBm on 867.2 MHz is 6 dB
+    /// over the 14 dBm h1.4 limit and is honoured (and logged), not clamped.
+    #[test]
+    fn an_explicit_txpower_above_the_derived_cap_is_honoured() {
+        assert_eq!(resolve_tx_power(Some(20), 867_200_000), 20);
     }
 
     /// Every other stated value passes through untouched, negatives included
@@ -2135,8 +2308,95 @@ mod tests {
     #[test]
     fn an_explicit_txpower_is_returned_verbatim() {
         for stated in [-9i8, 1, 7, 14, 17, 20, 22, 37] {
-            assert_eq!(resolve_tx_power(Some(stated)), stated, "txpower {stated}");
+            assert_eq!(
+                resolve_tx_power(Some(stated), 869_525_000),
+                stated,
+                "txpower {stated}"
+            );
         }
+    }
+
+    /// 867.2 MHz — sub-band h1.4 (865-868 MHz), 25 mW e.r.p. The band real
+    /// communities sit in (Rotterdam/Duffel 867.2, UK 867.5, Bern 868.0 is
+    /// h1.4's upper edge into h1.5, Madrid 868.2).
+    #[test]
+    fn erp_limit_for_867_2_mhz_is_14_dbm() {
+        assert_eq!(lawful_erp_dbm(867_200_000), Some(14));
+    }
+
+    /// 869.525 MHz — the shipped default, sub-band h1.7 (869.4-869.65 MHz),
+    /// the single 500 mW band in the European SRD spectrum.
+    #[test]
+    fn erp_limit_for_869_525_mhz_is_27_dbm() {
+        assert_eq!(lawful_erp_dbm(869_525_000), Some(27));
+    }
+
+    /// 869.463 MHz — the coming NL-consensus default — is in h1.7 too.
+    #[test]
+    fn erp_limit_for_869_463_mhz_is_27_dbm() {
+        assert_eq!(lawful_erp_dbm(869_463_000), Some(27));
+    }
+
+    /// 433.575 MHz — 433.05-434.79 MHz (sub-band g1), 10 mW e.r.p.
+    #[test]
+    fn erp_limit_for_433_575_mhz_is_10_dbm() {
+        assert_eq!(lawful_erp_dbm(433_575_000), Some(10));
+    }
+
+    /// 869.85 MHz — 869.7-870 MHz. Two options exist there: h1.8 (5 mW, no
+    /// duty cycle) and h1.9 (25 mW, 1%). A LoRa carrier uses h1.9.
+    #[test]
+    fn erp_limit_for_869_85_mhz_is_14_dbm() {
+        assert_eq!(lawful_erp_dbm(869_850_000), Some(14));
+    }
+
+    /// A frequency with no table entry yields `None`, never an invented
+    /// number: 915 MHz (US 902-928) has no citable source in this tree.
+    #[test]
+    fn erp_limit_for_an_unlisted_frequency_is_none() {
+        assert_eq!(lawful_erp_dbm(915_000_000), None);
+    }
+
+    /// Every remaining table row, pinned so a range typo names its band.
+    #[test]
+    fn erp_limit_covers_every_listed_sub_band() {
+        assert_eq!(lawful_erp_dbm(864_000_000), Some(14)); // h1.3
+        assert_eq!(lawful_erp_dbm(868_300_000), Some(14)); // h1.5
+        assert_eq!(lawful_erp_dbm(869_000_000), Some(14)); // h1.6
+    }
+
+    /// A 125 kHz carrier centred at 868.65 MHz sits wholly inside the
+    /// 868.6-868.7 MHz alarm band, where only <= 25 kHz channel spacing is
+    /// permitted. That is a named gap, not an unlisted frequency.
+    #[test]
+    fn a_carrier_centred_in_an_alarm_band_names_the_gap() {
+        assert_eq!(erp_band_gap(868_650_000, 125_000), Some("868.6-868.7 MHz"));
+    }
+
+    /// A carrier centred in a listed sub-band whose occupied bandwidth leaks
+    /// into an adjacent alarm band is refused too: 868.55 MHz +- 62.5 kHz
+    /// reaches 868.6125 MHz, inside 868.6-868.7.
+    #[test]
+    fn a_carrier_leaking_into_an_alarm_band_names_the_gap() {
+        assert_eq!(erp_band_gap(868_550_000, 125_000), Some("868.6-868.7 MHz"));
+    }
+
+    /// The shipped default stays clear: 869.525 +- 62.5 kHz is wholly inside
+    /// h1.7. Edge-exact occupancy is also clear — an upper edge at precisely
+    /// 868.6 MHz does not overlap the band that begins there.
+    #[test]
+    fn a_carrier_inside_a_listed_sub_band_has_no_gap() {
+        assert_eq!(erp_band_gap(869_525_000, 125_000), None);
+        assert_eq!(erp_band_gap(868_537_500, 125_000), None); // upper edge = 868.6
+        assert_eq!(erp_band_gap(915_000_000, 125_000), None); // unlisted != gap
+    }
+
+    /// The 433.05-434.79 MHz row of the duty-cycle table: 10%. Before it was
+    /// added, a 433 MHz node derived no airtime limit at all.
+    #[test]
+    fn duty_cycle_for_433_band_is_10_percent() {
+        assert_eq!(etsi_eu868_duty_cycle(433_575_000), Some(0.10));
+        assert_eq!(firmware_default_lt_alock(433_575_000, None), 1000);
     }
 
     #[test]

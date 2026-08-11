@@ -138,13 +138,17 @@ ingress-limited on either stack — the reference hard-wires
 
 The reference resolves an omitted `txpower` key to **0 dBm**
 (`RNodeInterface.py:153`: `int(c["txpower"]) if "txpower" in c else 0`).
-Leviculum resolves it to **22 dBm**, the ceiling of the SX1262
-high-power PA and the highest value an RNode-firmware board takes
-before clamping (`rnode::resolve_tx_power` and `DEFAULT_TX_POWER_DBM`,
-`leviculum-core/src/rnode.rs:670`, applied in both interface builders
-and in the `SerialInterface` LNode path). The standalone LNode
-firmware's compiled profile carries the same value
-(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:136-161`).
+Leviculum resolves it to **the board maximum, capped by the lawful
+e.r.p. limit for the configured frequency**: 22 dBm — the ceiling of
+the SX1262 high-power PA and the highest value an RNode-firmware board
+takes before clamping — or the sub-band's limit from ERC 70-03,
+whichever is lower (`rnode::resolve_tx_power` and
+`DEFAULT_TX_POWER_DBM`, `leviculum-core/src/rnode.rs:674`, capped by
+`lawful_erp_dbm`, applied in both interface builders and in the
+`SerialInterface` LNode path). The standalone LNode firmware's
+compiled profile carries the uncapped board maximum
+(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:136-161`), which
+is the capped resolution's own result at that profile's 869.525 MHz.
 
 Against the rule: TX power is a local modem setting. It is never on the
 wire, and no peer — Python or otherwise — learns or expects anything
@@ -169,10 +173,22 @@ strict check: a board that cannot deliver a value the operator chose
 must say so. A confirmation *above* the request is a mismatch either
 way.
 
-**Regulatory note (EU 863-870 MHz).** 22 dBm is *conducted* power. It
-stays inside the permitted 27 dBm ERP up to roughly 7 dBi of antenna
-gain (22 + 7 - 2.15 dBd ≈ 26.9 dBm ERP). Above that the operator has to
-set `txpower` down explicitly. This is documentation, not a runtime
+**Regulatory note (EU 863-870 MHz).** 27 dBm e.r.p. is permitted only
+in 869.4-869.65 MHz (ERC Recommendation 70-03, Annex 1, sub-band
+h1.7); every other listed European sub-band allows at most 25 mW
+e.r.p. = 14 dBm. That is why the derived default is capped by
+frequency (`rnode::lawful_erp_dbm`): a node on a community frequency
+like 867.2 MHz (Rotterdam/Duffel), 867.5 (UK), 868.0 (Bern) or 868.2
+(Madrid) resolves an absent `txpower` to 14 dBm, not 22. An explicit
+`txpower` wins even above the cap — the operator may hold a licence
+or sit in another jurisdiction — and the excess is logged. Inside
+869.4-869.65 MHz, 22 dBm *conducted* stays under the 500 mW limit up
+to roughly 7 dBi of antenna gain (22 + 7 - 2.15 dBd ≈ 26.9 dBm
+e.r.p.); above that the operator has to set `txpower` down
+explicitly, and that residual is documentation, not a runtime
 warning: the stack does not know what antenna is attached, and a
-warning it cannot condition on anything is a warning operators learn to
-ignore.
+warning it cannot condition on anything is a warning operators learn
+to ignore. The narrowband alarm bands between the wideband sub-bands
+refuse a LoRa carrier at interface build outright
+(`rnode::erp_band_gap`): a 125 kHz signal cannot meet their ≤ 25 kHz
+channel spacing on any power.

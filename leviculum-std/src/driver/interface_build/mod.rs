@@ -88,3 +88,125 @@ pub(super) fn build_interface(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Owned wiring a test `InterfaceBuildCtx` borrows from.
+    struct CtxOwner {
+        next_id: Arc<AtomicUsize>,
+        new_iface_tx: mpsc::Sender<InterfaceHandle>,
+        reconnect_tx: mpsc::Sender<InterfaceId>,
+        tunnel_notify_tx: mpsc::Sender<InterfaceId>,
+        inventory: crate::interfaces::inventory::SharedInventory,
+    }
+
+    impl CtxOwner {
+        fn new() -> Self {
+            let (new_iface_tx, _new_iface_rx) = mpsc::channel(4);
+            let (reconnect_tx, _reconnect_rx) = mpsc::channel(4);
+            let (tunnel_notify_tx, _tunnel_notify_rx) = mpsc::channel(4);
+            Self {
+                next_id: Arc::new(AtomicUsize::new(100)),
+                new_iface_tx,
+                reconnect_tx,
+                tunnel_notify_tx,
+                inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+            }
+        }
+
+        fn ctx(&self) -> InterfaceBuildCtx<'_> {
+            InterfaceBuildCtx {
+                next_id: &self.next_id,
+                new_iface_tx: &self.new_iface_tx,
+                reconnect_tx: &self.reconnect_tx,
+                tunnel_notify_tx: &self.tunnel_notify_tx,
+                corrupt_every: None,
+                storage_path: None,
+                outbound_socket_hook: None,
+                inventory: self.inventory.clone(),
+                transport_enabled: false,
+            }
+        }
+    }
+
+    fn rnode_config(frequency: u64) -> InterfaceConfig {
+        InterfaceConfig {
+            interface_type: "RNodeInterface".to_string(),
+            port: Some("/dev/nonexistent-test-port".to_string()),
+            frequency: Some(frequency),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(7),
+            coding_rate: Some(5),
+            ..Default::default()
+        }
+    }
+
+    /// A 125 kHz carrier centred at 868.65 MHz sits in the 868.6-868.7 MHz
+    /// alarm band (<= 25 kHz channel spacing only): interface build must
+    /// refuse with a config error naming the band, not fall through to a
+    /// "no known limit" default. The check fires before any port is opened.
+    #[test]
+    fn rnode_build_refuses_a_carrier_in_an_alarm_band() {
+        let owner = CtxOwner::new();
+        let err = rnode::build(0, &rnode_config(868_650_000), &owner.ctx())
+            .err()
+            .expect("868.65 MHz / 125 kHz must not build");
+        let msg = err.to_string();
+        assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
+    }
+
+    /// The same block one sub-band over builds fine — the refusal is the gap,
+    /// not the neighbourhood. Needs a runtime because a successful build
+    /// spawns the interface tasks (the port itself may fail later; the
+    /// reconnect loop owns that).
+    #[tokio::test]
+    async fn rnode_build_accepts_a_carrier_in_a_listed_sub_band() {
+        let owner = CtxOwner::new();
+        assert!(rnode::build(0, &rnode_config(869_525_000), &owner.ctx()).is_ok());
+    }
+
+    /// The `SerialInterface` LNode path refuses the same carrier the same
+    /// way, before `serial_radio_config` resolves anything.
+    #[test]
+    fn serial_build_refuses_a_carrier_in_an_alarm_band() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/nonexistent-test-port".to_string()),
+            frequency: Some(868_650_000),
+            ..Default::default()
+        };
+        let err = serial::build(0, &config, &owner.ctx())
+            .err()
+            .expect("868.65 MHz / 125 kHz must not build");
+        let msg = err.to_string();
+        assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
+    }
+
+    /// The multi builder checks each subinterface's own frequency.
+    #[test]
+    fn rnode_multi_build_refuses_a_subinterface_in_an_alarm_band() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            interface_type: "RNodeMultiInterface".to_string(),
+            port: Some("/dev/nonexistent-test-port".to_string()),
+            subinterfaces: vec![crate::config::SubinterfaceConfig {
+                name: "gap".to_string(),
+                vport: Some(0),
+                frequency: Some(868_650_000),
+                bandwidth: Some(125_000),
+                spreading_factor: Some(7),
+                coding_rate: Some(5),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = rnode_multi::build(0, &config, &owner.ctx())
+            .err()
+            .expect("868.65 MHz / 125 kHz must not build");
+        let msg = err.to_string();
+        assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
+    }
+}

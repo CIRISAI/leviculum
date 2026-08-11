@@ -33,18 +33,27 @@ pub(super) fn build(
     let cr = config
         .coding_rate
         .ok_or_else(|| Error::Config("RNodeInterface requires coding_rate".to_string()))?;
-    // Absent `txpower` asks for the board maximum, not 0 dBm. Resolved before
-    // the value loses its `Option`, because `None` and `Some(0)` must stay
-    // distinguishable: an explicit `txpower = 0` still means 0.
-    let requested_tx_power = leviculum_core::rnode::resolve_tx_power(config.tx_power);
-    let tx_power_derived = config.tx_power.is_none();
-    if tx_power_derived {
-        tracing::info!(
-            "rnode_{}: no txpower configured, using board maximum {} dBm",
-            idx,
-            requested_tx_power
-        );
+    // A carrier whose occupied bandwidth touches one of the narrowband alarm
+    // bands between the ERC 70-03 wideband sub-bands is refused outright: no
+    // LoRa bandwidth fits their <= 25 kHz channel spacing, so "no known
+    // limit, board maximum" would be the wrong default exactly there.
+    if let Some(gap) = leviculum_core::rnode::erp_band_gap(u64::from(frequency), bandwidth) {
+        return Err(Error::Config(format!(
+            "RNodeInterface: frequency {} Hz with bandwidth {} Hz overlaps the {} band, \
+             where ERC 70-03 permits only <= 25 kHz channel spacing; \
+             choose a centre frequency whose signal fits a listed sub-band",
+            frequency, bandwidth, gap
+        )));
     }
+
+    // Absent `txpower` asks for the board maximum capped by the lawful ERP
+    // limit for the frequency. Resolved before the value loses its `Option`,
+    // because `None` and `Some(0)` must stay distinguishable: an explicit
+    // `txpower = 0` still means 0. The resolution logs its outcome (capped,
+    // board maximum, or no citable limit) itself.
+    let requested_tx_power =
+        leviculum_core::rnode::resolve_tx_power(config.tx_power, u64::from(frequency));
+    let tx_power_derived = config.tx_power.is_none();
     let tx_power: u8 = requested_tx_power.try_into().map_err(|_| {
         Error::Config(format!(
             "tx_power {} out of range (0-37)",

@@ -316,8 +316,9 @@ struct RadioParams {
     /// Whether `tx_power` came from the absent-key default
     /// (`rnode::resolve_tx_power`) rather than an explicit `txpower` line.
     ///
-    /// The default asks for the board maximum without probing what this board's
-    /// maximum is, which the RNode firmware answers by clamping to its own
+    /// The default asks for the board maximum — capped by the lawful ERP limit
+    /// for the frequency (`rnode::lawful_erp_dbm`) — without probing what this
+    /// board's maximum is, which the RNode firmware answers by clamping to its own
     /// ceiling and echoing the clamped value
     /// (`RNode_Firmware/RNode_Firmware.ino:861-879`) — 17 dBm on an SX127x
     /// board, `PA_MAX_OUTPUT` on an SX1262 with an external PA. Confirmation is

@@ -74,18 +74,23 @@ pub(super) fn build(
                 sub.name
             ))
         })?;
-        // Absent `txpower` asks for the board maximum, not 0 dBm; an explicit
-        // `txpower = 0` still means 0. See the single-interface builder.
-        let requested_tx_power = leviculum_core::rnode::resolve_tx_power(sub.tx_power);
-        let tx_power_derived = sub.tx_power.is_none();
-        if tx_power_derived {
-            tracing::info!(
-                "{}[{}]: no txpower configured, using board maximum {} dBm",
-                parent_name,
-                sub.name,
-                requested_tx_power
-            );
+        // A carrier occupying one of the ERC 70-03 narrowband alarm bands is
+        // a config error, not a default. See the single-interface builder.
+        if let Some(gap) = leviculum_core::rnode::erp_band_gap(u64::from(frequency), bandwidth) {
+            return Err(Error::Config(format!(
+                "RNodeMultiInterface subinterface '{}': frequency {} Hz with bandwidth {} Hz \
+                 overlaps the {} band, where ERC 70-03 permits only <= 25 kHz channel spacing; \
+                 choose a centre frequency whose signal fits a listed sub-band",
+                sub.name, frequency, bandwidth, gap
+            )));
         }
+
+        // Absent `txpower` asks for the board maximum capped by the lawful
+        // ERP limit for the frequency; an explicit `txpower = 0` still means
+        // 0. See the single-interface builder.
+        let requested_tx_power =
+            leviculum_core::rnode::resolve_tx_power(sub.tx_power, u64::from(frequency));
+        let tx_power_derived = sub.tx_power.is_none();
         let tx_power: u8 = requested_tx_power.try_into().map_err(|_| {
             Error::Config(format!(
                 "tx_power {} out of range (0-37)",
