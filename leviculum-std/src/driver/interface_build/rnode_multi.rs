@@ -74,10 +74,22 @@ pub(super) fn build(
                 sub.name
             ))
         })?;
-        let tx_power: u8 = sub.tx_power.unwrap_or(0).try_into().map_err(|_| {
+        // Absent `txpower` asks for the board maximum, not 0 dBm; an explicit
+        // `txpower = 0` still means 0. See the single-interface builder.
+        let requested_tx_power = leviculum_core::rnode::resolve_tx_power(sub.tx_power);
+        let tx_power_derived = sub.tx_power.is_none();
+        if tx_power_derived {
+            tracing::info!(
+                "{}[{}]: no txpower configured, using board maximum {} dBm",
+                parent_name,
+                sub.name,
+                requested_tx_power
+            );
+        }
+        let tx_power: u8 = requested_tx_power.try_into().map_err(|_| {
             Error::Config(format!(
                 "tx_power {} out of range (0-37)",
-                sub.tx_power.unwrap_or(0)
+                requested_tx_power
             ))
         })?;
 
@@ -103,6 +115,7 @@ pub(super) fn build(
             frequency,
             bandwidth,
             tx_power,
+            tx_power_derived,
             sf,
             cr,
             st_alock: sub.airtime_limit_short.map(|p| (p * 100.0) as u16),

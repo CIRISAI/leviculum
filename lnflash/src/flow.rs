@@ -1265,7 +1265,7 @@ convert = "hex-to-uf2"
         assert!(said.contains("[Y/n]"), "{said}");
         assert!(said.contains("869.525 MHz"), "{said}");
         assert!(said.contains("SF7") && said.contains("BW125"), "{said}");
-        assert!(said.contains("CR4/5") && said.contains("17 dBm"), "{said}");
+        assert!(said.contains("CR4/5") && said.contains("22 dBm"), "{said}");
         // Saying yes must not then walk the user through five prompts.
         assert!(!said.contains("spreadingfactor"), "{said}");
     }
@@ -1299,7 +1299,7 @@ convert = "hex-to-uf2"
             "bandwidth (Hz) [125000]",
             "spreadingfactor [7]",
             "codingrate [5]",
-            "txpower (dBm) [17]",
+            "txpower (dBm) [22]",
         ] {
             assert!(said.contains(prompt), "{prompt} not offered:\n{said}");
         }

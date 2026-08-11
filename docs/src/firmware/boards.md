@@ -128,10 +128,10 @@ RNode configuration on the same LoRa network.
 | Spreading factor | SF7 |
 | Bandwidth | 125 kHz |
 | Coding rate | CR4/5 |
-| TX power | 17 dBm |
+| TX power | 22 dBm |
 
 (`leviculum-nrf/README.md:8`. The `eu_medium` profile the firmware loads
-at boot: `leviculum-nrf/src/lora.rs:124-138`, applied at
+at boot: `leviculum-nrf/src/lora.rs:136-161`, applied at
 `leviculum-nrf/src/bin/t114.rs:200` and
 `leviculum-nrf/src/bin/rak4631.rs:239`.)
 

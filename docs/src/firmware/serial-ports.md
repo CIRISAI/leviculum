@@ -89,7 +89,7 @@ same wire protocol `lnsd`/`rnsd` use for an RNode. Configure it as an
 The radio parameters in the config **must match** the firmware's
 compiled-in defaults (the EU medium profile), otherwise the two sides
 talk past each other on the air. (`leviculum-nrf/README.md:8`;
-`leviculum-nrf/src/lora.rs:124-138`.)
+`leviculum-nrf/src/lora.rs:136-161`.)
 
 ```ini
 [interfaces]
@@ -100,7 +100,7 @@ talk past each other on the air. (`leviculum-nrf/README.md:8`;
     port = /dev/leviculum-transport
     frequency = 869525000
     bandwidth = 125000
-    txpower = 17
+    txpower = 22
     spreadingfactor = 7
     codingrate = 5
 ```
@@ -108,8 +108,8 @@ talk past each other on the air. (`leviculum-nrf/README.md:8`;
 The key names and types come from the `[[RNode Interface]]` config
 schema (`port`, `frequency`, `bandwidth`, `txpower`, `spreadingfactor`,
 `codingrate`; `docs/src/rnode-protocol.md:674-684`). The values above are
-the firmware's compiled defaults: 869.525 MHz, BW 125 kHz, 17 dBm, SF7,
-CR4/5 (`leviculum-nrf/src/lora.rs:124-138`).
+the firmware's compiled defaults: 869.525 MHz, BW 125 kHz, 22 dBm, SF7,
+CR4/5 (`leviculum-nrf/src/lora.rs:136-161`).
 
 For a RAK4631 / WisMesh Pocket V2 the only change is the port:
 
@@ -120,7 +120,7 @@ For a RAK4631 / WisMesh Pocket V2 the only change is the port:
     port = /dev/leviculum-rak-transport
     frequency = 869525000
     bandwidth = 125000
-    txpower = 17
+    txpower = 22
     spreadingfactor = 7
     codingrate = 5
 ```

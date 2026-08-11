@@ -200,7 +200,7 @@ radio parameters the interface configures (`config.rs:231-249`):
 | `bandwidth` | u32 (Hz) | unset | LoRa bandwidth. (`ini_config.rs:227`; `config.rs:234-235`) |
 | `spreadingfactor` / `spreading_factor` | u8 | unset | LoRa spreading factor (either spelling). (`ini_config.rs:228`; `config.rs:236-237`) |
 | `codingrate` / `coding_rate` | u8 | unset | LoRa coding rate (either spelling). (`ini_config.rs:229`; `config.rs:238-239`) |
-| `txpower` / `tx_power` | i8 (dBm) | unset | Transmit power (either spelling). (`ini_config.rs:230`; `config.rs:240-241`) |
+| `txpower` / `tx_power` | i8 (dBm) | unset (resolves to the board maximum, 22 dBm) | Transmit power (either spelling). Unset asks the board for its maximum — a board that can do less clamps and says so — rather than the 0 dBm (1 mW) Python-Reticulum resolves it to, which has no symptom at the node. An explicit `txpower = 0` still means 0. Above roughly 7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP allowance and has to be set down. (`ini_config.rs:230`; `config.rs:240-241`; `rnode::resolve_tx_power`; [deviation](../concepts/python-rns-compatibility.md)) |
 | `flow_control` | bool | unset | Wait for the RNode's `CMD_READY` before the next TX. (`ini_config.rs:239`; `config.rs:242-243`) |
 | `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`ini_config.rs:240`; `config.rs:244-245`) |
 | `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`ini_config.rs:241`; `config.rs:246-247`) |

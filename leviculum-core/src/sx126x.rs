@@ -242,6 +242,42 @@ pub fn ldro_enabled(bw_hz: u32, sf: u8) -> bool {
     (1u64 << sf) / bw_khz > 16
 }
 
+/// Output powers the high-power PA has a documented `SetPaConfig` setting for
+/// (datasheet Table 13-21), ascending.
+///
+/// These are the only four points the driver can program. Everything else is
+/// an approximation, and the whole reason this table is public is that the
+/// approximation used to happen silently: `configure_lora` matched 22/20/17
+/// and sent a fourth arm's 14 dBm setting for every other value, so a
+/// configured 21, 18 or 15 dBm — all of which pass `rnode::validate_config` —
+/// transmitted 14 dBm with nothing said.
+pub const PA_PROFILES_DBM: [i8; 4] = [14, 17, 20, 22];
+
+/// Which PA profile a requested output power is programmed as.
+///
+/// The requested value is rounded **down** to the nearest profile: never
+/// transmit above what the operator asked for, because the margin between a
+/// configured power and the regulatory ceiling is the operator's to spend.
+///
+/// A request below the lowest profile has nothing to round down to. The PA
+/// setting saturates at [`PA_PROFILES_DBM`]`[0]` (14 dBm) and the caller is
+/// expected to log the substitution — the driver programs `SetTxParams` at the
+/// profile's power, so sub-14 dBm requests are not reachable by profile
+/// selection alone and would need the `SetTxParams` power field driven from
+/// the request instead. `lnflash` accepts -9..=22 dBm
+/// (`lnflash/src/radio.rs:79`), so this case is reachable from a real flash,
+/// and it is the one direction in which the programmed power exceeds the
+/// request. Saying so beats the silent 14 dBm that preceded it.
+pub fn pa_profile_dbm(requested_dbm: i8) -> i8 {
+    let mut chosen = PA_PROFILES_DBM[0];
+    for profile in PA_PROFILES_DBM {
+        if profile <= requested_dbm {
+            chosen = profile;
+        }
+    }
+    chosen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,5 +597,47 @@ mod tests {
             .expect("guard must fire");
         let pre8 = rx_extend_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, 8).expect("guard must fire");
         assert!(pre18 - pre8 >= 163, "preamble delta {}ms", pre18 - pre8);
+    }
+
+    /// A request that is one of the four documented settings is programmed
+    /// as asked, with nothing to log.
+    #[test]
+    fn a_supported_pa_profile_is_programmed_as_asked() {
+        for profile in PA_PROFILES_DBM {
+            assert_eq!(pa_profile_dbm(profile), profile, "profile {profile}");
+        }
+    }
+
+    /// The defect: 21, 18 and 15 dBm all pass `rnode::validate_config`, all
+    /// fell through the driver's `_` arm, and all transmitted 14 dBm in
+    /// silence. Each now lands on the profile below it — never above, the
+    /// margin to the regulatory ceiling is the operator's to spend.
+    #[test]
+    fn an_unsupported_pa_value_rounds_down_never_up() {
+        assert_eq!(pa_profile_dbm(21), 20);
+        assert_eq!(pa_profile_dbm(19), 17);
+        assert_eq!(pa_profile_dbm(18), 17);
+        assert_eq!(pa_profile_dbm(16), 14);
+        assert_eq!(pa_profile_dbm(15), 14);
+        // Above the top profile there is nothing higher to round to.
+        assert_eq!(pa_profile_dbm(37), 22);
+        for requested in -9i8..=37 {
+            assert!(
+                pa_profile_dbm(requested) <= requested.max(PA_PROFILES_DBM[0]),
+                "{requested} dBm was rounded up past its own request"
+            );
+        }
+    }
+
+    /// Below the lowest profile there is nothing to round down to: the PA
+    /// setting saturates at 14 dBm and the caller logs it. This is the one
+    /// direction in which the programmed power exceeds the request, and it
+    /// is reachable — `lnflash` accepts -9 dBm.
+    #[test]
+    fn a_request_below_the_lowest_pa_profile_saturates_at_it() {
+        assert_eq!(pa_profile_dbm(13), PA_PROFILES_DBM[0]);
+        assert_eq!(pa_profile_dbm(0), 14);
+        assert_eq!(pa_profile_dbm(-9), 14);
+        assert_eq!(pa_profile_dbm(i8::MIN), 14);
     }
 }

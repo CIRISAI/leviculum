@@ -91,7 +91,7 @@ pub(crate) fn serial_radio_config(
         bandwidth,
         spreading_factor,
         coding_rate,
-        tx_power: cfg.tx_power.unwrap_or(17),
+        tx_power: leviculum_core::rnode::resolve_tx_power(cfg.tx_power),
         preamble_len: cfg
             .preamble_symbols
             .unwrap_or_else(|| derive_preamble_symbols(spreading_factor, coding_rate, bandwidth)),
@@ -654,6 +654,66 @@ mod tests {
         // And a value below the reference's own floor, which the derivation
         // would never produce.
         assert_eq!(pinned(10, 8), 8);
+    }
+
+    /// An LNode whose block names no `txpower` is programmed to the board
+    /// maximum, which is also the firmware's own compiled default — the
+    /// invariant this function's doc comment states, that every PHY default
+    /// here is `RadioConfig::eu_medium`'s.
+    #[test]
+    fn absent_txpower_programs_the_board_maximum() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(869_525_000),
+            ..Default::default()
+        };
+        let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.tx_power, 22);
+        assert_eq!(
+            radio.tx_power,
+            leviculum_core::rnode::DEFAULT_TX_POWER_DBM,
+            "the serial path and the resolver must not drift apart"
+        );
+    }
+
+    /// And an explicit `txpower = 0` still reaches the modem as 0. This
+    /// drives the same chain the driver does — config to
+    /// `serial_radio_config` to the wire frame and back out of the parser —
+    /// so it fails if any link collapses the absent case into the zero case.
+    #[test]
+    fn an_explicit_zero_txpower_reaches_the_radio_as_zero() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(869_525_000),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(7),
+            coding_rate: Some(5),
+            tx_power: Some(0),
+            ..Default::default()
+        };
+        let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+        assert_eq!(radio.tx_power, 0);
+
+        let payload = leviculum_core::rnode::build_radio_config_frame(
+            &leviculum_core::rnode::RadioConfigWire {
+                frequency_hz: radio.frequency as u32,
+                bandwidth_hz: radio.bandwidth,
+                sf: radio.spreading_factor,
+                cr: radio.coding_rate,
+                tx_power_dbm: radio.tx_power,
+                preamble_len: radio.preamble_len,
+                csma_enabled: radio.csma_enabled,
+                radio_silent: false,
+                st_alock: 0,
+                lt_alock: radio.lt_alock,
+                lt_alock_present: true,
+            },
+        );
+        let parsed =
+            leviculum_core::rnode::parse_radio_config(&payload[2..]).expect("frame parses back");
+        assert_eq!(parsed.tx_power_dbm, 0);
     }
 
     /// No `frequency` means a plain serial pipe, not a LoRa modem: no radio

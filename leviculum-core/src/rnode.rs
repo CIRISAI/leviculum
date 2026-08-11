@@ -646,6 +646,41 @@ pub fn validate_firmware(major: u8, minor: u8) -> bool {
     (major, minor) >= (REQUIRED_FW_MAJ, REQUIRED_FW_MIN)
 }
 
+/// TX power a LoRa interface asks for when its config names no `txpower`.
+///
+/// 22 dBm is the ceiling of the SX1262 high-power PA and the highest value an
+/// RNode-firmware board accepts before it clamps
+/// (`RNode_Firmware/RNode_Firmware.ino:861-875`), so "the board maximum" is
+/// what a board that can do less will clamp this request down to.
+///
+/// **This is a deliberate deviation from Python-Reticulum**, which resolves an
+/// absent `txpower` to 0 dBm (`RNS/Interfaces/RNodeInterface.py`, `txpower`
+/// defaulting to 0). The deviation is admissible under the project's rule: no
+/// wire field changes, no behaviour a Python peer expects from a neighbour
+/// changes — no peer ever learns our TX power — and it removes a failure mode
+/// with no symptom at the node. A 0 dBm node is 1 mW, transmits, logs nothing
+/// unusual, and is simply not heard; 22 dBm is 158 mW. See
+/// `docs/src/concepts/python-rns-compatibility.md`.
+///
+/// Regulatory note, EU 863-870 MHz: 22 dBm *conducted* stays inside the
+/// permitted 27 dBm ERP up to roughly 7 dBi of antenna gain (22 + 7 - 2.15 dBd
+/// correction ≈ 26.9 dBm ERP). Above that the operator has to reduce power
+/// explicitly. This is stated here and in the documentation rather than warned
+/// about at runtime: the stack does not know the antenna.
+pub const DEFAULT_TX_POWER_DBM: i8 = 22;
+
+/// Resolve a configured `txpower` to the value the radio is asked for.
+///
+/// `None` — the key is absent from the interface block — resolves to
+/// [`DEFAULT_TX_POWER_DBM`]. `Some(x)` is returned verbatim, **including an
+/// explicit `Some(0)`**: an operator who writes `txpower = 0` means 0, the same
+/// way an explicit `airtime_limit_long = 0` means unlimited
+/// ([`firmware_default_lt_alock`]). Callers must not collapse `None` into
+/// `Some(0)` before this point, or the two become indistinguishable.
+pub fn resolve_tx_power(configured: Option<i8>) -> i8 {
+    configured.unwrap_or(DEFAULT_TX_POWER_DBM)
+}
+
 /// Validate radio configuration parameters
 ///
 /// Returns `Ok(())` if all parameters are within valid ranges,
@@ -2075,6 +2110,33 @@ mod tests {
             validate_config(868_000_000, 125_000, 38, 7, 5),
             Err(ConfigError::TxPowerOutOfRange)
         );
+    }
+
+    /// The defect this default exists to close: a config with no `txpower`
+    /// line used to resolve to 0 dBm — 1 mW — which a node has no symptom
+    /// for. Absent means "as far as this board reaches".
+    #[test]
+    fn an_absent_txpower_resolves_to_the_board_maximum() {
+        assert_eq!(resolve_tx_power(None), DEFAULT_TX_POWER_DBM);
+        assert_eq!(resolve_tx_power(None), 22);
+    }
+
+    /// The distinction the whole `Option` is carried for: an operator who
+    /// writes `txpower = 0` means 0, and must not be given the default just
+    /// because 0 is also what the absent case used to produce.
+    #[test]
+    fn an_explicit_zero_txpower_stays_zero() {
+        assert_eq!(resolve_tx_power(Some(0)), 0);
+        assert_ne!(resolve_tx_power(Some(0)), resolve_tx_power(None));
+    }
+
+    /// Every other stated value passes through untouched, negatives included
+    /// (`lnflash` accepts down to -9 dBm).
+    #[test]
+    fn an_explicit_txpower_is_returned_verbatim() {
+        for stated in [-9i8, 1, 7, 14, 17, 20, 22, 37] {
+            assert_eq!(resolve_tx_power(Some(stated)), stated, "txpower {stated}");
+        }
     }
 
     #[test]

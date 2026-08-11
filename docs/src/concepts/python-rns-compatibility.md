@@ -133,3 +133,46 @@ connection it accepts, as in the reference
 ingress-limited on either stack — the reference hard-wires
 `should_ingress_limit` to `False` for them
 (`LocalInterface.py:137-138`) — so that is not a deviation.
+
+### Pinned deviation: an absent `txpower` is the board maximum
+
+The reference resolves an omitted `txpower` key to **0 dBm**
+(`RNodeInterface.py:153`: `int(c["txpower"]) if "txpower" in c else 0`).
+Leviculum resolves it to **22 dBm**, the ceiling of the SX1262
+high-power PA and the highest value an RNode-firmware board takes
+before clamping (`rnode::resolve_tx_power` and `DEFAULT_TX_POWER_DBM`,
+`leviculum-core/src/rnode.rs:670`, applied in both interface builders
+and in the `SerialInterface` LNode path). The standalone LNode
+firmware's compiled profile carries the same value
+(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:136-161`).
+
+Against the rule: TX power is a local modem setting. It is never on the
+wire, and no peer — Python or otherwise — learns or expects anything
+about a neighbour's transmit power, so (1) and (2) are untouched. What
+it gains (3) is the whole failure mode: 0 dBm is 1 mW, and a 1 mW node
+has **no symptom at the node**. It boots, configures, transmits, logs
+nothing unusual, and is simply not heard. 22 dBm is 158 mW. An operator
+who wants 0 dBm writes `txpower = 0` and gets 0 — the resolution keeps
+`None` and `Some(0)` distinct, the same way an explicit
+`airtime_limit_long = 0` beats the derived lawful default.
+
+Because the request is not preceded by a capability probe, a board
+whose maximum is lower answers by clamping and echoing the clamped
+value (`RNode_Firmware/RNode_Firmware.ino:861-879` — 17 dBm on an
+SX127x, `PA_MAX_OUTPUT` on an SX1262 with an external PA). Confirmation
+is otherwise an exact match on both stacks (ours at
+`leviculum-std/src/interfaces/rnode.rs:694`, the reference at
+`RNodeInterface.py:677`), so the derived default — and only the derived
+default — accepts a confirmation *below* what it asked for, logs the
+board's ceiling, and runs. An explicitly configured power keeps the
+strict check: a board that cannot deliver a value the operator chose
+must say so. A confirmation *above* the request is a mismatch either
+way.
+
+**Regulatory note (EU 863-870 MHz).** 22 dBm is *conducted* power. It
+stays inside the permitted 27 dBm ERP up to roughly 7 dBi of antenna
+gain (22 + 7 - 2.15 dBd ≈ 26.9 dBm ERP). Above that the operator has to
+set `txpower` down explicitly. This is documentation, not a runtime
+warning: the stack does not know what antenna is attached, and a
+warning it cannot condition on anything is a warning operators learn to
+ignore.

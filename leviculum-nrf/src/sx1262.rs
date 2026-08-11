@@ -403,12 +403,31 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.rx_ext_bw_hz = bw_code_to_hz(bw);
         self.rx_ext_cr_denom = cr.saturating_add(4);
         self.set_rf_frequency(freq_hz).await?;
-        // PA config for target power (datasheet Table 13-21)
-        let (pa_duty, hp_max) = match power_dbm {
+        // PA config for target power (datasheet Table 13-21). The chip has a
+        // setting for four output powers and nothing in between, so a request
+        // that is not one of them is rounded DOWN to the nearest one — never
+        // up, the margin to the regulatory ceiling is the operator's to spend.
+        // The decision is `sx126x::pa_profile_dbm` in core so it has a host
+        // test target; this driver holds only SPI. The substitution is logged
+        // rather than silent: a configured 21 dBm used to fall through a `_`
+        // arm and transmit 14 dBm with nothing said.
+        let profile_dbm = leviculum_core::sx126x::pa_profile_dbm(power_dbm);
+        if profile_dbm != power_dbm {
+            crate::log::log_fmt(
+                "[SX_PA_PROFILE] ",
+                format_args!(
+                    "requested={} dBm is not a supported PA profile, using={} dBm",
+                    power_dbm, profile_dbm
+                ),
+            );
+        }
+        let (pa_duty, hp_max) = match profile_dbm {
             22 => (0x04, 0x07),
             20 => (0x03, 0x05),
             17 => (0x02, 0x03),
-            _ => (0x02, 0x02), // 14 dBm
+            // `pa_profile_dbm` returns only the four values in
+            // `sx126x::PA_PROFILES_DBM`, so this arm is the 14 dBm profile.
+            _ => (0x02, 0x02),
         };
         self.write_command(opcode::SET_PA_CONFIG, &[pa_duty, hp_max, 0x00, 0x01])
             .await?;

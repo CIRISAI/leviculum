@@ -679,7 +679,7 @@ The `[[RNode Interface]]` section accepts these config keys:
 | `port` | string | Yes | -- | Serial port path, `tcp://host`, or `ble://...` |
 | `frequency` | int | Yes | 0 | Operating frequency in Hz |
 | `bandwidth` | int | Yes | 0 | Channel bandwidth in Hz |
-| `txpower` | int | Yes | 0 | TX power in dBm |
+| `txpower` | int | No | 22 (board maximum) | TX power in dBm. Absent asks for the board maximum, not the reference's 0 — see the [pinned deviation](concepts/python-rns-compatibility.md). An explicit `0` still means 0. |
 | `spreadingfactor` | int | Yes | 0 | Spreading factor (5-12) |
 | `codingrate` | int | Yes | 0 | Coding rate (5-8) |
 | `flow_control` | bool | No | False | Enable TX flow control |
@@ -702,7 +702,7 @@ Each sub-interface is defined as a nested section with:
 | `vport` | int | Yes | -- | Virtual port index on device |
 | `frequency` | int | Yes | -- | Frequency in Hz |
 | `bandwidth` | int | Yes | -- | Bandwidth in Hz |
-| `txpower` | int | Yes | -- | TX power in dBm |
+| `txpower` | int | No | 22 (board maximum) | TX power in dBm, resolved per subinterface the same way as above |
 | `spreadingfactor` | int | Yes | -- | Spreading factor |
 | `codingrate` | int | Yes | -- | Coding rate |
 | `flow_control` | bool | No | False | TX flow control |

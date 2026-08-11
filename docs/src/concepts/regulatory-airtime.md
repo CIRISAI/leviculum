@@ -24,9 +24,9 @@ the transmit queue on it — `if (!airtime_lock && queue_height > 0)`
 *enforcement* never leaves the device.
 
 Our LNode firmware enforces the same way: `AirtimeTracker`
-(`leviculum-core/src/rnode.rs:1211`) mirrors the RNode ledger, and
+(`leviculum-core/src/rnode.rs:1246`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
-while the tracker is locked (`leviculum-nrf/src/lora.rs:716`),
+while the tracker is locked (`leviculum-nrf/src/lora.rs:725`),
 continuing to listen so RX is not starved.
 
 The host-side airtime credit bucket
@@ -44,8 +44,8 @@ long-term limit from the TX frequency (`resolve_lt_alock`,
 `leviculum-std/src/driver/mod.rs:329`) and sends it to the modem; a
 standalone LNode whose host never sent one derives it in the firmware
 from its own frequency (`firmware_default_lt_alock`,
-`leviculum-core/src/rnode.rs:1125`). Both read the same table,
-`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1096`), which
+`leviculum-core/src/rnode.rs:1159`). Both read the same table,
+`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1131`), which
 carries the EU 863-870 MHz sub-bands with their 0.1 % / 1 % / 10 %
 duty cycles. An explicit configured value always wins — including an
 explicit `0`, which the firmware reads as unlimited.

@@ -33,10 +33,22 @@ pub(super) fn build(
     let cr = config
         .coding_rate
         .ok_or_else(|| Error::Config("RNodeInterface requires coding_rate".to_string()))?;
-    let tx_power: u8 = config.tx_power.unwrap_or(0).try_into().map_err(|_| {
+    // Absent `txpower` asks for the board maximum, not 0 dBm. Resolved before
+    // the value loses its `Option`, because `None` and `Some(0)` must stay
+    // distinguishable: an explicit `txpower = 0` still means 0.
+    let requested_tx_power = leviculum_core::rnode::resolve_tx_power(config.tx_power);
+    let tx_power_derived = config.tx_power.is_none();
+    if tx_power_derived {
+        tracing::info!(
+            "rnode_{}: no txpower configured, using board maximum {} dBm",
+            idx,
+            requested_tx_power
+        );
+    }
+    let tx_power: u8 = requested_tx_power.try_into().map_err(|_| {
         Error::Config(format!(
             "tx_power {} out of range (0-37)",
-            config.tx_power.unwrap_or(0)
+            requested_tx_power
         ))
     })?;
 
@@ -61,6 +73,7 @@ pub(super) fn build(
             frequency,
             bandwidth,
             tx_power,
+            tx_power_derived,
             sf,
             cr,
             st_alock,

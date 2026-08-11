@@ -133,14 +133,22 @@ pub struct RadioConfig {
 }
 
 impl RadioConfig {
-    /// EU medium profile: 869.525 MHz, SF7, BW125, CR4/5, 17 dBm, preamble 24.
+    /// EU medium profile: 869.525 MHz, SF7, BW125, CR4/5, 22 dBm, preamble 24.
     pub fn eu_medium() -> Self {
         Self {
             frequency_hz: 869_525_000,
             sf: 7,
             bw: 0x04,
             cr: 0x01,
-            tx_power_dbm: 17,
+            // The board maximum, not a middle value: a board that boots on its
+            // compiled default has nobody to tell it how far it has to reach,
+            // and an under-powered LNode has no symptom at the node — only
+            // missing range. Same resolution the host applies to an absent
+            // `txpower` (`rnode::resolve_tx_power`), and the two are held
+            // together by `lnflash`'s
+            // `the_default_matches_the_firmwares_compiled_profile`. See the
+            // ERP note on `DEFAULT_TX_POWER_DBM`.
+            tx_power_dbm: leviculum_core::rnode::DEFAULT_TX_POWER_DBM,
             // 24 is not an SF-independent constant, it is what the RNode
             // firmware's own derivation yields at this profile's SF7/BW125
             // (`leviculum_core::rnode::derive_preamble_symbols`). The host

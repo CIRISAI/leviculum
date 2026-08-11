@@ -5,7 +5,7 @@ Firmware for the Heltec Mesh Node T114 (nRF52840 + SX1262) and the Wismesh Pocke
 
 The firmware speaks the RNode LoRa framing protocol, so T114 and RNode devices interoperate on the same LoRa network. On the BLE side, it implements the Columba v2.2 protocol and can be used with the Columba Android app. On the host side, it connects to `lnsd` or `rnsd` over USB serial with HDLC framing.
 
-The default radio profile uses 869.525 MHz (EU ISM band), SF7, 125 kHz bandwidth, and 17 dBm TX power. These parameters are compiled into the firmware and must match the RNode configuration on the same network.
+The default radio profile uses 869.525 MHz (EU ISM band), SF7, 125 kHz bandwidth, and 22 dBm TX power. These parameters are compiled into the firmware and must match the RNode configuration on the same network.
 
 ## Prerequisites
 

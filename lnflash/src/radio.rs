@@ -106,7 +106,7 @@ pub const EU868: RadioSettings = RadioSettings {
     bandwidth_hz: 125_000,
     sf: 7,
     cr: 5,
-    tx_power_dbm: 17,
+    tx_power_dbm: leviculum_core::rnode::DEFAULT_TX_POWER_DBM,
 };
 
 /// Why a value was not accepted. Every variant says the offending value and
@@ -471,15 +471,19 @@ mod tests {
 
     #[test]
     fn the_default_matches_the_firmwares_compiled_profile() {
-        // `RadioConfig::eu_medium()`: 869.525 MHz, SF7, BW125, CR4/5, 17 dBm,
+        // `RadioConfig::eu_medium()`: 869.525 MHz, SF7, BW125, CR4/5, 22 dBm,
         // preamble 24. Sending the defaults must be a no-op in effect, or
-        // "flash the defaults" would quietly change a board.
+        // "flash the defaults" would quietly change a board. The TX power is
+        // the board maximum, the same value the host resolves an absent
+        // `txpower` to (`rnode::DEFAULT_TX_POWER_DBM`) — this assertion is
+        // what keeps the flash-time choice and the compiled profile from
+        // drifting apart.
         let wire = round_trip(&EU868.framed());
         assert_eq!(wire.frequency_hz, 869_525_000);
         assert_eq!(wire.bandwidth_hz, 125_000);
         assert_eq!(wire.sf, 7);
         assert_eq!(wire.cr, 5);
-        assert_eq!(wire.tx_power_dbm, 17);
+        assert_eq!(wire.tx_power_dbm, 22);
         assert_eq!(wire.preamble_len, 24);
     }
 
@@ -649,7 +653,7 @@ mod tests {
         assert_eq!(Field::Bandwidth.value_of(&EU868), "125000");
         assert_eq!(Field::SpreadingFactor.value_of(&EU868), "7");
         assert_eq!(Field::CodingRate.value_of(&EU868), "5");
-        assert_eq!(Field::TxPower.value_of(&EU868), "17");
+        assert_eq!(Field::TxPower.value_of(&EU868), "22");
     }
 
     #[test]
@@ -668,7 +672,7 @@ mod tests {
             "bw=125000",
             "sf=7",
             "cr=4/5",
-            "txpower=17dBm",
+            "txpower=22dBm",
             "preamble=24",
             "lt_alock=1000",
         ] {

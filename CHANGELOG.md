@@ -65,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- BREAKING: an interface with no `txpower` asks for the board maximum
+  (22 dBm) instead of 0 dBm. A board that can do less clamps and says so;
+  an explicit `txpower = 0` still means 0. A deliberate deviation from
+  Python-Reticulum, pinned in the compatibility document. Above roughly
+  7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP
+  allowance and has to be set down.
+
+- The LNode firmware's compiled profile transmits at 22 dBm, not 17.
+
+- A configured TX power the SX1262 has no PA setting for is rounded down
+  to the nearest one and logged, instead of silently becoming 14 dBm.
+
 - `StampExecutor::generate` returns a `Send` future, so a host can spawn a
   stamp mine on a work-stealing runtime. Custom executors and `Yield`
   implementations must be `Send` (Codeberg #203).

@@ -313,6 +313,19 @@ struct RadioParams {
     frequency: u32,
     bandwidth: u32,
     tx_power: u8,
+    /// Whether `tx_power` came from the absent-key default
+    /// (`rnode::resolve_tx_power`) rather than an explicit `txpower` line.
+    ///
+    /// The default asks for the board maximum without probing what this board's
+    /// maximum is, which the RNode firmware answers by clamping to its own
+    /// ceiling and echoing the clamped value
+    /// (`RNode_Firmware/RNode_Firmware.ino:861-879`) — 17 dBm on an SX127x
+    /// board, `PA_MAX_OUTPUT` on an SX1262 with an external PA. Confirmation is
+    /// otherwise an exact match, so without this flag every such board would
+    /// fail startup with `RadioMismatch` instead of running at its maximum.
+    /// An explicitly configured power keeps the strict check: it is a value the
+    /// operator chose, and a board that cannot deliver it must say so.
+    tx_power_derived: bool,
     sf: u8,
     cr: u8,
     st_alock: Option<u16>,
@@ -327,6 +340,8 @@ pub(crate) struct RNodeInterfaceConfig {
     pub frequency: u32,
     pub bandwidth: u32,
     pub tx_power: u8,
+    /// See [`RadioParams::tx_power_derived`].
+    pub tx_power_derived: bool,
     pub sf: u8,
     pub cr: u8,
     pub st_alock: Option<u16>,
@@ -342,6 +357,7 @@ impl RNodeInterfaceConfig {
             frequency: self.frequency,
             bandwidth: self.bandwidth,
             tx_power: self.tx_power,
+            tx_power_derived: self.tx_power_derived,
             sf: self.sf,
             cr: self.cr,
             st_alock: self.st_alock,
@@ -670,7 +686,20 @@ where
         }
     }
     if let Some(ct) = confirmed_txp {
-        if ct != radio.tx_power {
+        // A derived board-maximum request is allowed to come back clamped
+        // DOWN: that is the board reporting its own ceiling, which is what the
+        // absent-key default asked for in the first place. Coming back HIGHER
+        // than requested is a mismatch either way — nothing may transmit above
+        // what was asked for.
+        if ct < radio.tx_power && radio.tx_power_derived {
+            tracing::info!(
+                "{}: board maximum is {} dBm, below the {} dBm default request; using {} dBm",
+                name,
+                ct,
+                radio.tx_power,
+                ct
+            );
+        } else if ct != radio.tx_power {
             return Err(RNodeError::RadioMismatch(format!(
                 "tx_power: requested {} dBm, got {} dBm",
                 radio.tx_power, ct
@@ -1372,6 +1401,10 @@ impl RNodeChannelInterfaceConfig {
             frequency: self.frequency,
             bandwidth: self.bandwidth,
             tx_power: self.tx_power,
+            // The channel API spells `tx_power` as a plain `u8`: the caller
+            // always states one, so it is never the absent-key default and the
+            // strict confirmation check applies.
+            tx_power_derived: false,
             sf: self.sf,
             cr: self.cr,
             st_alock: self.st_alock,
@@ -1637,6 +1670,8 @@ pub(crate) struct RNodeSubinterfaceParams {
     pub frequency: u32,
     pub bandwidth: u32,
     pub tx_power: u8,
+    /// See [`RadioParams::tx_power_derived`].
+    pub tx_power_derived: bool,
     pub sf: u8,
     pub cr: u8,
     pub st_alock: Option<u16>,
@@ -1651,6 +1686,7 @@ impl RNodeSubinterfaceParams {
             frequency: self.frequency,
             bandwidth: self.bandwidth,
             tx_power: self.tx_power,
+            tx_power_derived: self.tx_power_derived,
             sf: self.sf,
             cr: self.cr,
             st_alock: self.st_alock,
@@ -2594,6 +2630,7 @@ mod tests {
             frequency: 868_000_000,
             bandwidth: 125_000,
             tx_power: 17,
+            tx_power_derived: false,
             sf: 7,
             cr: 5,
             st_alock: None,
@@ -2639,6 +2676,7 @@ mod tests {
             frequency: 868_000_000,
             bandwidth: 125_000,
             tx_power: 17,
+            tx_power_derived: false,
             sf: 7,
             cr: 5,
             st_alock: None,
@@ -3077,6 +3115,7 @@ mod tests {
                     frequency: 865_600_000,
                     bandwidth: 125_000,
                     tx_power: 0,
+                    tx_power_derived: false,
                     sf: 7,
                     cr: 5,
                     st_alock: None,
@@ -3094,6 +3133,7 @@ mod tests {
                     frequency: 2_400_000_000,
                     bandwidth: 500_000,
                     tx_power: 0,
+                    tx_power_derived: false,
                     sf: 5,
                     cr: 5,
                     st_alock: None,
@@ -3225,6 +3265,7 @@ mod tests {
                 frequency: 868_000_000,
                 bandwidth: 125_000,
                 tx_power: 0,
+                tx_power_derived: false,
                 sf: 7,
                 cr: 5,
                 st_alock: None,
@@ -3845,5 +3886,181 @@ mod tests {
 
         drop(outgoing_tx);
         let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+    }
+
+    // -----------------------------------------------------------------
+    // Derived board-maximum TX power vs. a board that clamps
+    // -----------------------------------------------------------------
+
+    /// Firmware stub that echoes every config command back verbatim EXCEPT
+    /// `CMD_TXPOWER`, which it clamps at `ceiling` before echoing — exactly
+    /// what the RNode firmware does (`RNode_Firmware.ino:861-879`: an
+    /// SX127x board caps at 17 dBm, an SX1262 without an external PA at 22).
+    async fn rnode_stub_clamping_txpower(mut peer: tokio::io::DuplexStream, ceiling: u8) {
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut buf = [0u8; 512];
+        let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
+            let mut one = Vec::new();
+            kiss::frame(cmd, payload, &mut one);
+            reply.extend_from_slice(&one);
+        };
+        loop {
+            let n = match peer.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let mut reply: Vec<u8> = Vec::new();
+            for f in deframer.process(&buf[..n]) {
+                if let KissDeframeResult::Frame { command, payload } = f {
+                    match command {
+                        rnode::CMD_DETECT => {
+                            push(&mut reply, rnode::CMD_DETECT, &[rnode::DETECT_RESP]);
+                            push(
+                                &mut reply,
+                                rnode::CMD_FW_VERSION,
+                                &[rnode::REQUIRED_FW_MAJ, rnode::REQUIRED_FW_MIN],
+                            );
+                            push(&mut reply, rnode::CMD_PLATFORM, &[rnode::PLATFORM_ESP32]);
+                            push(&mut reply, rnode::CMD_MCU, &[0x00]);
+                        }
+                        rnode::CMD_TXPOWER => {
+                            let asked = payload.first().copied().unwrap_or(0);
+                            push(&mut reply, command, &[asked.min(ceiling)]);
+                        }
+                        rnode::CMD_FREQUENCY
+                        | rnode::CMD_BANDWIDTH
+                        | rnode::CMD_SF
+                        | rnode::CMD_CR
+                        | rnode::CMD_RADIO_STATE => push(&mut reply, command, &payload),
+                        _ => {}
+                    }
+                }
+            }
+            if !reply.is_empty() && peer.write_all(&reply).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    fn radio_at(tx_power: u8, tx_power_derived: bool) -> RadioParams {
+        RadioParams {
+            frequency: 869_525_000,
+            bandwidth: 125_000,
+            tx_power,
+            tx_power_derived,
+            sf: 7,
+            cr: 5,
+            st_alock: None,
+            lt_alock: None,
+        }
+    }
+
+    /// The derived board maximum asks for 22 dBm without probing what this
+    /// board can do. An SX127x RNode answers 17 — and because confirmation
+    /// is otherwise an exact match, without the derived-value tolerance
+    /// every such board would refuse to start rather than run at its own
+    /// ceiling. Startup must succeed.
+    #[tokio::test]
+    async fn a_derived_board_maximum_accepts_a_board_that_clamps_lower() {
+        let (mut port, peer) = tokio::io::duplex(64 * 1024);
+        let stub = tokio::spawn(rnode_stub_clamping_txpower(peer, 17));
+
+        let result = configure_stream(
+            &mut port,
+            &radio_at(leviculum_core::rnode::DEFAULT_TX_POWER_DBM as u8, true),
+            "clamping-board",
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "a board clamping the derived maximum must still start: {:?}",
+            result.err()
+        );
+        stub.abort();
+    }
+
+    /// An explicitly configured power keeps the strict check. 17 dBm is a
+    /// value the operator chose; a board that silently delivers 14 has to
+    /// say so rather than run 3 dB down in silence.
+    #[tokio::test]
+    async fn an_explicit_txpower_the_board_clamps_is_still_a_mismatch() {
+        let (mut port, peer) = tokio::io::duplex(64 * 1024);
+        let stub = tokio::spawn(rnode_stub_clamping_txpower(peer, 14));
+
+        let result = configure_stream(&mut port, &radio_at(17, false), "clamping-board").await;
+
+        match result {
+            Err(RNodeError::RadioMismatch(m)) => {
+                assert!(m.contains("tx_power"), "wrong mismatch reported: {m}");
+                assert!(m.contains("17"), "mismatch must name the request: {m}");
+                assert!(m.contains("14"), "mismatch must name what came back: {m}");
+            }
+            other => panic!("expected a tx_power RadioMismatch, got {other:?}"),
+        }
+        stub.abort();
+    }
+
+    /// The tolerance is one-directional. A board reporting MORE than was
+    /// asked for is a mismatch even for the derived default: nothing may
+    /// transmit above the requested power, that margin belongs to the
+    /// operator's regulatory budget.
+    #[tokio::test]
+    async fn a_confirmation_above_the_request_is_a_mismatch_even_when_derived() {
+        let (mut port, peer) = tokio::io::duplex(64 * 1024);
+        // Ceiling above the request, so `min` never bites and the stub
+        // answers with a power the interface did not ask for.
+        let stub = tokio::spawn(async move {
+            let mut peer = peer;
+            let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+            let mut buf = [0u8; 512];
+            let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
+                let mut one = Vec::new();
+                kiss::frame(cmd, payload, &mut one);
+                reply.extend_from_slice(&one);
+            };
+            loop {
+                let n = match peer.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let mut reply: Vec<u8> = Vec::new();
+                for f in deframer.process(&buf[..n]) {
+                    if let KissDeframeResult::Frame { command, payload } = f {
+                        match command {
+                            rnode::CMD_DETECT => {
+                                push(&mut reply, rnode::CMD_DETECT, &[rnode::DETECT_RESP]);
+                                push(
+                                    &mut reply,
+                                    rnode::CMD_FW_VERSION,
+                                    &[rnode::REQUIRED_FW_MAJ, rnode::REQUIRED_FW_MIN],
+                                );
+                                push(&mut reply, rnode::CMD_PLATFORM, &[rnode::PLATFORM_ESP32]);
+                                push(&mut reply, rnode::CMD_MCU, &[0x00]);
+                            }
+                            // Answers 30 dBm to a 22 dBm request.
+                            rnode::CMD_TXPOWER => push(&mut reply, command, &[30]),
+                            rnode::CMD_FREQUENCY
+                            | rnode::CMD_BANDWIDTH
+                            | rnode::CMD_SF
+                            | rnode::CMD_CR
+                            | rnode::CMD_RADIO_STATE => push(&mut reply, command, &payload),
+                            _ => {}
+                        }
+                    }
+                }
+                if !reply.is_empty() && peer.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let result = configure_stream(&mut port, &radio_at(22, true), "overshooting-board").await;
+
+        assert!(
+            matches!(result, Err(RNodeError::RadioMismatch(_))),
+            "a board answering above the request must fail startup, got {result:?}"
+        );
+        stub.abort();
     }
 }
