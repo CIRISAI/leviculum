@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MessageState::AwaitingCollection` reports a message a propagation node
+  holds for a recipient who has not collected it, instead of the `Sent` a
+  direct delivery gets. Local bookkeeping; nothing changes on the wire.
+
 - `RouterEvent::PeerAnnounced` reports a peer's decoded delivery announce,
   so an application reads a display name without filtering announces and
   decoding app data itself.

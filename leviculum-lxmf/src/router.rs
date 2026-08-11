@@ -66,6 +66,21 @@ pub enum MessageState {
     Sending = 0x02,
     Sent = 0x04,
     Delivered = 0x08,
+    /// A propagation node accepted the message and holds it for the
+    /// recipient, who has not collected it yet.
+    ///
+    /// Terminal here: nothing on the wire tells an origin that a mailbox was
+    /// emptied, so the router never leaves this state on its own. It exists
+    /// because `Sent` cannot carry the difference — a direct message that
+    /// reached `Sent` was handed to the recipient's own destination, and a
+    /// client that shows both the same way tells the user a message arrived
+    /// when it is sitting in someone else's mailbox.
+    ///
+    /// Local bookkeeping only. Python has no such state (LXMessage.py:15-23)
+    /// and derives the same distinction from the delivery method; the value
+    /// is deliberately outside the range Python assigns, is never encoded
+    /// into a wire field, and reaches no peer.
+    AwaitingCollection = 0x10,
     Rejected = 0xfd,
     Cancelled = 0xfe,
     Failed = 0xff,
@@ -2342,6 +2357,7 @@ fn state_from(value: u64) -> Result<MessageState, RouterError> {
         2 => Ok(MessageState::Sending),
         4 => Ok(MessageState::Sent),
         8 => Ok(MessageState::Delivered),
+        0x10 => Ok(MessageState::AwaitingCollection),
         0xfd => Ok(MessageState::Rejected),
         0xfe => Ok(MessageState::Cancelled),
         0xff => Ok(MessageState::Failed),

@@ -375,9 +375,16 @@ impl PropagationRuntime {
             PropagationTransportEvent::UploadCompleted { message_id, .. } => {
                 if router.remove_outbound(&message_id).is_some() {
                     router.persistence_dirty = true;
+                    // The node has it, the recipient does not. Reporting
+                    // `Sent` here would make this indistinguishable from a
+                    // message handed to the recipient's own destination, and
+                    // no later event corrects it: a collection from the
+                    // mailbox is not signalled to the origin. The queue entry
+                    // still goes — this leg of delivery is over and nothing
+                    // is retried — so the state travels on the event.
                     output.events.push(RouterEvent::MessageState {
                         message_id,
-                        state: super::MessageState::Sent,
+                        state: super::MessageState::AwaitingCollection,
                     });
                 }
             }

@@ -734,7 +734,7 @@ fn receiving_progress_emits_updated_sync_status_without_a_state_change() {
 }
 
 #[test]
-fn router_encrypts_stamps_uploads_and_marks_a_propagated_message_sent() {
+fn router_encrypts_stamps_uploads_and_awaits_collection_of_a_propagated_message() {
     let client_identity = identity(10);
     let client_identity_hash = *client_identity.hash();
     let client_delivery =
@@ -910,13 +910,26 @@ fn router_encrypts_stamps_uploads_and_marks_a_propagated_message_sent() {
     pump_upload(&mut client, &mut sink, to_sink, Vec::new());
 
     assert!(!client.router.outbound().contains_key(&message_id));
+    // The node accepted it; the recipient has not collected it. Reporting
+    // `Sent` here would be indistinguishable from a direct delivery that
+    // reached the recipient's own destination.
     assert!(client.events.iter().any(|event| matches!(
         event,
         RouterEvent::MessageState {
             message_id: completed,
-            state: super::super::MessageState::Sent,
+            state: super::super::MessageState::AwaitingCollection,
         } if completed == &message_id
     )));
+    assert!(
+        !client.events.iter().any(|event| matches!(
+            event,
+            RouterEvent::MessageState {
+                message_id: completed,
+                state: super::super::MessageState::Sent,
+            } if completed == &message_id
+        )),
+        "an upload to a propagation node is never reported as sent to the recipient"
+    );
     assert_eq!(sink.uploads.len(), 1);
 
     let upload = &sink.uploads[0];
