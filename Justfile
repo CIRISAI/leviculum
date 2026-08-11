@@ -83,6 +83,15 @@ lint-nrf:
 nrf-stack-frames:
     bash scripts/check-nrf-stack-frames.sh
 
+# SoftDevice guard for the flash runner. Our image is linked at 0x27000 and a
+# factory board still carrying S140 6.1.1 forwards to 0x26000, so writing to
+# one soft-bricks it (docs/src/concepts/lnode-flashing.md). The runner refuses
+# that write; this drives the refusal against fixture INFO_UF2.TXT files, so
+# the logic is covered without a board. That a real 6.1.1 board is refused
+# stays a rig check.
+nrf-sd-guard:
+    bash leviculum-nrf/tools/test-softdevice-guard.sh
+
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -176,7 +185,7 @@ supervised-spawn:
 # trailers + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
 # gates + workspace lib tests + the citation guard + the process-supervision
 # pair (census over the sources, proof against the kernel).
-fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames doc-gate core-no-tracing m0-build-gate citation-guard
+fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -498,6 +507,8 @@ install-ci:
 
 # Touch-free; double-tap RESET only if the runner prompts for a crashed
 # device. Details: leviculum-nrf/README.md §Build and flash.
+# The runner refuses a board whose SoftDevice our image is not linked for,
+# because that write is a soft brick: docs/src/concepts/lnode-flashing.md.
 # The firmware crate is outside the workspace (cross-compiled), so we
 # invoke cargo from its own directory.
 # Flash every attached T114 with the current firmware.

@@ -25,6 +25,12 @@
 # bumped from 0x26000 for v6.1.1 in bug32-softdevice-spike Day 3).
 # Both T114 and RAK4631 share this layout, so FLASH_BASE / FAMILY_ID are not
 # parameterized — they are fixed properties of the Adafruit nRF52 UF2 family.
+#
+# Because that base assumes a SoftDevice, no write happens before
+# guard_softdevice (tools/softdevice-guard.sh) has read the board's own
+# `SoftDevice:` line. Everything about the SoftDevice — why the mismatch is a
+# soft brick, how to remedy one, why we cannot simply link the blob in — is in
+# docs/src/concepts/lnode-flashing.md.
 
 set -euo pipefail
 
@@ -55,6 +61,16 @@ noninteractive() {
 
 FLASH_BASE=0x27000
 FAMILY_ID=0xADA52840
+
+# The SoftDevice guard. Sourced rather than inlined so its parsing and its
+# decision can be driven from tools/test-softdevice-guard.sh without a board.
+if [ ! -f "$SCRIPT_DIR/softdevice-guard.sh" ]; then
+    echo "Error: $SCRIPT_DIR/softdevice-guard.sh is missing; refusing to flash" >&2
+    echo "       without the SoftDevice check that keeps a 6.1.1 board alive." >&2
+    exit 1
+fi
+# shellcheck source=leviculum-nrf/tools/softdevice-guard.sh
+. "$SCRIPT_DIR/softdevice-guard.sh"
 
 # Per-board parameters (default to T114 values for backward compatibility).
 BOARD_VID="${LEVICULUM_USB_VID:-1209}"
@@ -272,11 +288,21 @@ poll_matching_drive() {
 # magic. Write via cp (same approach as uf2conv.py / the Heltec toolchain).
 # sync may return I/O errors because the bootloader resets after the final UF2
 # block — normal and tolerated. Returns 0 on a successful copy, 2 on a write
-# failure (write-protect, FS error, mid-flight unplug).
+# failure (write-protect, FS error, mid-flight unplug), 3 when the SoftDevice
+# guard refused.
+#
+# The guard runs here rather than at each call site because this is the single
+# place the application image reaches a board: a refusal here cannot be routed
+# around. 3 is separate from 2 on purpose — a write failure is worth retrying,
+# a wrong SoftDevice is not, and it will still be wrong three attempts later.
 # Args: $1 = drive path, $2 = hint
 copy_uf2_to_drive() {
     local drive="$1" hint="$2"
     local uf2_size uf2_blocks
+
+    if ! guard_softdevice "$drive" "$hint"; then
+        return 3
+    fi
     uf2_size="$(stat -c%s "$UF2_FILE")"
     uf2_blocks=$((uf2_size / 512))
     echo "==> $hint: deploying firmware.uf2 (${uf2_size} bytes, ${uf2_blocks} blocks) to $drive"
@@ -397,7 +423,14 @@ flash_one_device() {
         fi
 
         echo "==> $hint: found UF2 drive at $drive ($(basename "$drive"))"
-        if ! copy_uf2_to_drive "$drive" "$hint"; then
+        local copy_rc=0
+        copy_uf2_to_drive "$drive" "$hint" || copy_rc=$?
+        if [ "$copy_rc" -eq 3 ]; then
+            # Refused by the SoftDevice guard, which already said why. Retrying
+            # or prompting for a double-tap would only repeat the refusal.
+            return 3
+        fi
+        if [ "$copy_rc" -ne 0 ]; then
             echo "[uf2-runner] $hint: attempt $attempt — copy failed" >&2
             continue
         fi
@@ -510,6 +543,13 @@ while true; do
     fi
     echo ""
     echo "==> Extra UF2 drive at $EXTRA_DRIVE — flashing crashed-firmware $BOARD_NAME (no transport port)"
+    # This path writes without going through copy_uf2_to_drive, so it needs
+    # the guard of its own. `break` rather than `continue`: a refused drive
+    # stays mounted, and looping would refuse the same board forever.
+    if ! guard_softdevice "$EXTRA_DRIVE" "(crashed-recovery)"; then
+        FAILED_PORTS="$FAILED_PORTS"$'\n'"(crashed-recovery)"
+        break
+    fi
     if [ -w "$EXTRA_DRIVE" ]; then
         if cp "$UF2_FILE" "$EXTRA_DRIVE/NEW.UF2" 2>/dev/null; then
             sync 2>/dev/null || true

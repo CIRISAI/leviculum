@@ -25,7 +25,7 @@ squatted pid.codes test IDs, flagged as a TODO at
 
 **Bootloader (UF2/DFU).** A different USB ID entirely, which is why an
 application-ID match can never be true while a board sits in DFU
-(`leviculum-nrf/tools/uf2-runner.sh:306`). Measured on the rig:
+(`leviculum-nrf/tools/uf2-runner.sh:332`). Measured on the rig:
 
 | board | bootloader USB ID | mass-storage label |
 | --- | --- | --- |
@@ -123,7 +123,7 @@ the SoftDevice actually installed, so it answers the version question
 directly rather than by inference. The T114's `Board-ID` is exactly
 `HT-n5262`, not a substring of something longer, which retroactively
 justifies the substring match at
-`leviculum-nrf/tools/uf2-runner.sh:206`.
+`leviculum-nrf/tools/uf2-runner.sh:222`.
 
 Note the T114 bootloader build date matches Heltec's published
 `HT-n5262-bootloader-20240709.hex`, so that board still carries its
@@ -369,7 +369,7 @@ out; keeping it would only re-write identical bytes.
 bootloader: the two 32-bit words are swapped. Anything correlating a
 device across app to bootloader to app must know both forms. The
 existing runner is unaffected because it only compares serials in
-application mode (`leviculum-nrf/tools/uf2-runner.sh:314`).
+application mode (`leviculum-nrf/tools/uf2-runner.sh:340`).
 
 **Writing needs root.** The mass-storage device appears as `/dev/sdX`
 owned `root:disk`. Automounting assumes a desktop stack that a headless
@@ -381,11 +381,11 @@ tool, but it cannot write the drive unprivileged.
 the moment the final UF2 block lands, while the filesystem still wants
 to flush metadata, producing `device offline error ... lost async page
 write`. This is the normal completion path, not a failure
-(`leviculum-nrf/tools/uf2-runner.sh:274`).
+(`leviculum-nrf/tools/uf2-runner.sh:290`).
 
 **A copy returning 0 does not mean the flash took.** Verify that the
 application re-enumerated and that the bootloader drive is gone
-(`leviculum-nrf/tools/uf2-runner.sh:335`). Stronger still, read the
+(`leviculum-nrf/tools/uf2-runner.sh:361`). Stronger still, read the
 periodic `[FW_BUILD]` banner off the debug port and compare the git SHA,
 as `scripts/flash-lnodes-from-head.sh:133` does.
 
