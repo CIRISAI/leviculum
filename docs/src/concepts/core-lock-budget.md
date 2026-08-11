@@ -55,7 +55,7 @@ Resource to the same link cannot build at all
 (`ResourceError::TransferInProgress`), so re-using one would not repeat
 the measurement. Both harnesses are `#[ignore]`d and print every number
 below:
-`measure_send_lock_costs` (`leviculum-lxmf/src/node.rs:2331`) for the
+`measure_send_lock_costs` (`leviculum-lxmf/src/node.rs:2375`) for the
 send tables, `measure_deferred_tick_costs`
 (`leviculum-lxmf/tests/direct_delivery_attempts.rs:1421`) for the tick
 table.
@@ -166,7 +166,7 @@ That figure is consistent with the table above: eight times the
 
 `LxmfRouter` can hand the build out instead, under
 `RouterConfig::defer_resource_builds`
-(`leviculum-lxmf/src/router.rs:96`). What the tick then costs, for one
+(`leviculum-lxmf/src/router.rs:112`). What the tick then costs, for one
 due message, measured the same way:
 
 | payload | deferred tick | composed tick (incompressible) |

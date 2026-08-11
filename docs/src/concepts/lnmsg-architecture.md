@@ -170,7 +170,7 @@ handoff, and wiring the two together is an explicit goal.
 Three layers, all sans-IO: `NodeCore` (Reticulum transport, owned by the
 app), `LxmfNode` (`leviculum-lxmf/src/node.rs:255`, the `lxmf.delivery`
 destination adapter), and `LxmfRouter`
-(`leviculum-lxmf/src/router.rs:387`, the queue, retry scheduler, stamp and
+(`leviculum-lxmf/src/router.rs:442`, the queue, retry scheduler, stamp and
 ticket policy, dedup caches and propagation client). The application builds
 on `LxmfRouter` and owns both it and the core; the router never owns the
 core, every method takes it as a parameter.
@@ -232,7 +232,7 @@ There is also no event for `Sending`, for `Outbound`, or for progress: the
 router folds `LxmfNodeEvent::Progress` into `OutboundEntry::progress`
 without emitting anything (`leviculum-lxmf/src/router.rs:1288-1300`), so
 progress must be polled through `outbound()`
-(`leviculum-lxmf/src/router.rs:617`).
+(`leviculum-lxmf/src/router.rs:672`).
 
 ### `MessageState` and what it honestly means
 
@@ -256,10 +256,10 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    Direct delivery goes `Outbound -> Sending -> Delivered | Rejected |
    Failed` and never passes through `Sent`, because the `Submitted` handler
    matches only `DeliveryMethod::Opportunistic`
-   (`leviculum-lxmf/src/router.rs:1273-1277`).
+   (`leviculum-lxmf/src/router.rs:1341-1345`).
 3. **`Delivered` is a Reticulum transport proof, not an application
    receipt.** It comes from `PacketDeliveryConfirmed` /
-   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1011-1033`) or from
+   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1055-1077`) or from
    `ResourceCompleted { is_sender: true }`
    (`leviculum-lxmf/src/node.rs:949-960`). It proves the bytes arrived at
    the destination identity. It does not prove an LXMF client parsed them
@@ -290,9 +290,9 @@ message afterwards, and it cannot offer a retry button.
 Setup requires the client to mint a second destination
 (`lxmf.propagation`, `leviculum-lxmf/src/propagation_client.rs:253-263`),
 register it, and hand it to `enable_propagation_client`
-(`leviculum-lxmf/src/router.rs:522`); the transport identity must equal the
+(`leviculum-lxmf/src/router.rs:577`); the transport identity must equal the
 router's or you get `RouterError::IdentityMismatch`
-(`leviculum-lxmf/src/router.rs:527-529`).
+(`leviculum-lxmf/src/router.rs:582-584`).
 
 Node discovery is automatic from announces (`remember_announce`,
 `leviculum-lxmf/src/propagation_client.rs:355-371`, driven from the
@@ -363,9 +363,10 @@ pub trait LxmfStorage {          // leviculum-lxmf/src/storage.rs:18-26
 
 There is no conversation, thread, contact or history concept in it. Two
 implementations exist, both in that file: `MemoryLxmfStorage`
-(`leviculum-lxmf/src/storage.rs:29`) and `NoLxmfStorage`
-(`leviculum-lxmf/src/storage.rs:103`). No file-backed implementation exists
-anywhere in the workspace.
+(`leviculum-lxmf/src/storage.rs:42`) and `NoLxmfStorage`
+(`leviculum-lxmf/src/storage.rs:116`). The file-backed one is `FileLxmfStorage`
+(`leviculum-std/src/file_lxmf_store.rs:27`), in the std crate because the LXMF
+crate is `no_std`.
 
 The router writes exactly one key, `b"lxmf/router-state"`
 (`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:53`), holding the
@@ -375,7 +376,7 @@ should stay off the `lxmf/` prefix and is otherwise free.
 
 Restore resets every queued message to `Outbound` with
 `next_attempt_ms = 0` and `progress = 0.01`
-(`leviculum-lxmf/src/router.rs:1795-1798`), because in-flight correlation
+(`leviculum-lxmf/src/router.rs:1863-1866`), because in-flight correlation
 is expressed in a process-local monotonic clock that does not survive a
 restart. A UI therefore cannot show a stable "sending" progress across
 restarts, and must not pretend to.
@@ -601,7 +602,7 @@ Three specific things `lnomad` does that must change:
    (`lnomad/src/tui.rs:6157`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
-   (`leviculum-lxmf/src/router.rs:1741`).
+   (`leviculum-lxmf/src/router.rs:1809`).
 
 Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/tui.rs:5305-5346`), the tick-counted
@@ -680,6 +681,12 @@ understood is delay, not empiricism. Gaps 10 and 11 are already covered by
 the queued #204/#202/#203 batch; gap 7 shares its core-side prerequisite
 with the S2 test-infrastructure question from the #212 work.
 
+**Closed 2026-08-11.** The four are done: `RouterEvent::PeerAnnounced` (1),
+`MessageState::AwaitingCollection` (2), `FileLxmfStorage` in `leviculum-std`
+(3), and `Display` plus `core::error::Error` on the error types (8). The
+entries below are left as written — they are the record of what was missing,
+not a list of open work.
+
 1. **No display name reaches the application.**
    `LxmfNodeEvent::PeerAnnounced` carries the destination hash only
    (`leviculum-lxmf/src/node.rs:113-115`), the router drops the name after
@@ -695,8 +702,8 @@ with the S2 test-infrastructure question from the #212 work.
    own shadow record. This is the single biggest obstacle to an honest
    delivery display.
 3. **No file-backed `LxmfStorage`.** Two implementations exist, both
-   in-memory or null (`leviculum-lxmf/src/storage.rs:29`,
-   `leviculum-lxmf/src/storage.rs:103`). Every host application writes the
+   in-memory or null (`leviculum-lxmf/src/storage.rs:42`,
+   `leviculum-lxmf/src/storage.rs:116`). Every host application writes the
    same one.
 4. **No periodic sync scheduler and no interval config.**
    `PropagationClientConfig` has three fields
@@ -715,9 +722,9 @@ with the S2 test-infrastructure question from the #212 work.
    support (`leviculum-lxmf/src/node.rs:377-378`). A user receiving a large
    attachment they do not want can only watch.
 8. **Most error types are `Debug` only.** `RouterError`
-   (`leviculum-lxmf/src/router.rs:313`), `LxmfNodeError`
-   (`leviculum-lxmf/src/node.rs:185`), `PropagationTransportError`
-   (`leviculum-lxmf/src/propagation_client.rs:132`), `MessageError`
+   (`leviculum-lxmf/src/router.rs:340`), `LxmfNodeError`
+   (`leviculum-lxmf/src/node.rs:210`), `PropagationTransportError`
+   (`leviculum-lxmf/src/propagation_client.rs:144`), `MessageError`
    (`leviculum-lxmf/src/message.rs:39`) and `StorageError` have no
    `Display`. Every user-facing string is the client's to write, and two
    clients will word them differently.

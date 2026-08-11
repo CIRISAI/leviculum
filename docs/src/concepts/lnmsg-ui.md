@@ -171,7 +171,7 @@ method before the entry disappears. "Your mailbox refused this message" and
 different fixes.
 
 **Handle the restart discontinuity honestly.** `restore` resets every
-queued message to `Outbound` (`leviculum-lxmf/src/router.rs:1795-1798`). So
+queued message to `Outbound` (`leviculum-lxmf/src/router.rs:1863-1866`). So
 after a restart, a message that was "sending" is "queued" again, and the UI
 must show that rather than a frozen progress bar. NomadNet's equivalent,
 forcing a stale mid-flight message to `FAILED` on load (NomadNet's
