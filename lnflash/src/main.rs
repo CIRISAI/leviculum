@@ -24,9 +24,10 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
     long_about = "Finds attached boards, brings each into its bootloader, confirms what it is \
                   from the bootloader itself, checks the SoftDevice precondition, and writes \
                   our firmware.\n\n\
-                  Once a board is back up it is offered the EU868 radio defaults, or the \
-                  settings the --radio-* flags name. The board stores what it is given, so it \
-                  comes back up on that frequency after a reset and after the next flash.\n\n\
+                  Once a board is back up it is offered the eu868 radio defaults (ReticulumNet \
+                  consensus), a preset menu (eu868, us915, au915, custom), or the settings the \
+                  --radio-preset / --radio-* flags name. The board stores what it is given, so \
+                  it comes back up on that frequency after a reset and after the next flash.\n\n\
                   Needs root: the bootloader's drive is a root:disk block device and \
                   automounting assumes a desktop stack a headless host does not have.\n\n\
                   No network access, ever — everything it writes is in the bundle."
@@ -82,8 +83,9 @@ struct Cli {
     #[arg(long, value_name = "DBM", allow_hyphen_values = true)]
     radio_txpower: Option<i32>,
 
-    /// Region/band preset. Reserved: the presets are not defined yet, so
-    /// this refuses rather than guessing a band for somebody.
+    /// Region preset: eu868 (ReticulumNet consensus), us915 (US community,
+    /// see the FCC note it prints), or au915. Skips the prompt. Cannot be
+    /// combined with the --radio-* value flags.
     #[arg(long, value_name = "NAME")]
     radio_preset: Option<String>,
 
@@ -115,11 +117,6 @@ fn main() -> ExitCode {
 /// run at the command line, not after a board has been written and is
 /// waiting for a configuration the firmware would refuse.
 fn radio_plan(cli: &Cli) -> Result<RadioPlan, Box<dyn std::error::Error>> {
-    if let Some(name) = &cli.radio_preset {
-        // TODO(presets): the flag exists so scripts can be written against
-        // it; the region/band table it needs is still being researched.
-        return Err(format!("presets not yet defined (asked for {name:?})").into());
-    }
     if cli.no_radio {
         return Ok(RadioPlan::Skip);
     }
@@ -130,6 +127,19 @@ fn radio_plan(cli: &Cli) -> Result<RadioPlan, Box<dyn std::error::Error>> {
         cli.radio_cr.is_some(),
         cli.radio_txpower.is_some(),
     ];
+    if let Some(name) = &cli.radio_preset {
+        // A preset and explicit values are two ways to state one
+        // configuration; honouring one and dropping the other would do
+        // silently what the user should decide.
+        if given.iter().any(|given| *given) {
+            return Err(
+                "--radio-preset and the --radio-freq/-bw/-sf/-cr/-txpower flags are two ways \
+                 to state one configuration; pick one"
+                    .into(),
+            );
+        }
+        return Ok(RadioPlan::Fixed(RadioChoice::Preset(radio::preset(name)?)));
+    }
     if !given.iter().any(|given| *given) {
         return Ok(RadioPlan::Ask);
     }
@@ -321,10 +331,43 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_refuses_rather_than_guessing_a_band() {
-        let err = plan(&["--radio-preset", "eu868"]).unwrap_err();
-        assert!(err.contains("presets not yet defined"), "{err}");
-        assert!(err.contains("eu868"), "{err}");
+    fn a_named_preset_decides_the_question_with_the_tables_values() {
+        for (name, frequency_hz) in [
+            ("eu868", 869_463_000),
+            ("us915", 914_875_000),
+            ("au915", 925_875_000),
+        ] {
+            let RadioPlan::Fixed(RadioChoice::Preset(preset)) =
+                plan(&["--radio-preset", name]).unwrap()
+            else {
+                panic!("{name} has to decide the question");
+            };
+            assert_eq!(preset.name, name);
+            assert_eq!(preset.settings.frequency_hz, frequency_hz);
+        }
+    }
+
+    #[test]
+    fn eu433_is_refused_with_the_reason_rather_than_shipped_4_db_hot() {
+        let err = plan(&["--radio-preset", "eu433"]).unwrap_err();
+        assert!(err.contains("10 dBm"), "{err}");
+        assert!(err.contains("not offered"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_preset_is_refused_with_the_choices() {
+        let err = plan(&["--radio-preset", "mars"]).unwrap_err();
+        assert!(err.contains("mars"), "{err}");
+        assert!(err.contains("eu868, us915, au915"), "{err}");
+    }
+
+    #[test]
+    fn a_preset_and_an_explicit_field_together_are_a_usage_error() {
+        let err = plan(&["--radio-preset", "eu868", "--radio-freq", "867100000"]).unwrap_err();
+        assert!(err.contains("pick one"), "{err}");
+        // Any of the five value flags collides, not just the frequency.
+        let err = plan(&["--radio-preset", "us915", "--radio-sf", "9"]).unwrap_err();
+        assert!(err.contains("pick one"), "{err}");
     }
 
     #[test]

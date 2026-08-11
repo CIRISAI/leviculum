@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- EU default → ReticulumNet consensus 869.463 MHz/SF8.
+
 ### Added
+
+- `lnflash`: radio preset menu (eu868/us915/au915), `--radio-preset`.
 
 - An LNode keeps its radio configuration in flash, so a host-set frequency
   survives a reset instead of falling back to the compiled default.

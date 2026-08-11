@@ -148,7 +148,7 @@ whichever is lower (`rnode::resolve_tx_power` and
 `SerialInterface` LNode path). The standalone LNode firmware's
 compiled profile carries the uncapped board maximum
 (`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:136-161`), which
-is the capped resolution's own result at that profile's 869.525 MHz.
+is the capped resolution's own result at that profile's 869.463 MHz.
 
 Against the rule: TX power is a local modem setting. It is never on the
 wire, and no peer — Python or otherwise — learns or expects anything

@@ -675,10 +675,8 @@ fn set_radio(
     app: &Device,
     port: &str,
 ) -> Result<Option<RadioOutcome>, Error> {
-    let choice = match &opts.radio {
-        RadioPlan::Skip => return Ok(None),
-        RadioPlan::Fixed(choice) => choice.clone(),
-        RadioPlan::Ask => ask_for_radio(ui)?,
+    let Some(choice) = resolve_radio_choice(ui, opts)? else {
+        return Ok(None);
     };
     let settings = choice.settings();
 
@@ -727,13 +725,37 @@ fn set_radio(
     Ok(Some(RadioOutcome { settings, acked }))
 }
 
-/// The prompts. The default answer to every one of them is the EU868 value,
+/// Turn the plan into a choice, and say what the chosen preset obliges the
+/// user to read (the us915 FCC note) — here, so the flag path and the menu
+/// path cannot diverge on whether the note is printed. `None` is `Skip`.
+fn resolve_radio_choice(ui: &mut dyn Ui, opts: &Options) -> Result<Option<RadioChoice>, Error> {
+    let choice = match &opts.radio {
+        RadioPlan::Skip => return Ok(None),
+        RadioPlan::Fixed(choice) => choice.clone(),
+        RadioPlan::Ask => ask_for_radio(ui)?,
+    };
+    if let RadioChoice::Preset(preset) = &choice {
+        if let Some(caveat) = preset.caveat {
+            ui.say(caveat);
+        }
+    }
+    Ok(Some(choice))
+}
+
+/// The eu868 preset, which is what "the default radio settings" means.
+fn default_preset() -> &'static radio::PresetDef {
+    radio::preset("eu868").expect("the shipped table carries eu868")
+}
+
+/// The prompts. The default answer to every one of them is the eu868 value,
 /// so a user who holds Enter down gets a board configured explicitly rather
 /// than a half-finished one.
 fn ask_for_radio(ui: &mut dyn Ui) -> Result<RadioChoice, Error> {
-    let defaults = radio::EU868;
+    let eu868 = default_preset();
+    let defaults = eu868.settings;
     let answer = ui.ask(&format!(
-        "\nFlash default radio settings (EU868: {:.3} MHz, SF{}, BW{}, CR4/{}, {} dBm)? [Y/n]",
+        "\nFlash default radio settings (eu868, ReticulumNet consensus: {:.3} MHz, SF{}, BW{}, \
+         CR4/{}, {} dBm)? [Y/n]",
         defaults.frequency_hz as f64 / 1e6,
         defaults.sf,
         defaults.bandwidth_hz / 1000,
@@ -749,12 +771,35 @@ fn ask_for_radio(ui: &mut dyn Ui) -> Result<RadioChoice, Error> {
         "n" | "no"
     );
     if wants_default {
-        return Ok(RadioChoice::Default);
+        return Ok(RadioChoice::Preset(eu868));
     }
 
-    // TODO(presets): this is where a region/band preset menu goes once the
-    // table exists. Until then "not the defaults" means "state the five
-    // numbers", which is the whole user-facing surface.
+    // "Not the defaults" opens the preset menu; the last entry is the
+    // field-by-field path. The menu is built from the table, so an entry
+    // added there appears here without a second list to update.
+    let presets: Vec<_> = radio::selectable().collect();
+    loop {
+        for (i, preset) in presets.iter().enumerate() {
+            ui.say(&format!("  {}) {}", i + 1, preset.menu_label));
+        }
+        ui.say(&format!("  {}) custom", presets.len() + 1));
+        let Some(answer) = ui.ask("  preset [1]")? else {
+            // Enter, or no terminal to ask: the pre-selected eu868 stands.
+            return Ok(RadioChoice::Preset(eu868));
+        };
+        match answer.trim().parse::<usize>() {
+            Ok(n) if (1..=presets.len()).contains(&n) => {
+                return Ok(RadioChoice::Preset(presets[n - 1]));
+            }
+            Ok(n) if n == presets.len() + 1 => break,
+            _ => ui.say(&format!(
+                "  {:?} is not one of the options; 1-{}",
+                answer,
+                presets.len() + 1
+            )),
+        }
+    }
+
     let mut settings = defaults;
     for field in radio::FIELDS {
         loop {
@@ -1260,14 +1305,19 @@ convert = "hex-to-uf2"
     #[test]
     fn pressing_enter_at_the_radio_prompt_flashes_the_eu_defaults() {
         let mut ui = crate::ui::testing::Fake::agreeing();
-        assert_eq!(ask_for_radio(&mut ui).unwrap(), RadioChoice::Default);
+        assert_eq!(
+            ask_for_radio(&mut ui).unwrap(),
+            RadioChoice::Preset(default_preset())
+        );
         let said = ui.transcript();
         assert!(said.contains("[Y/n]"), "{said}");
-        assert!(said.contains("869.525 MHz"), "{said}");
-        assert!(said.contains("SF7") && said.contains("BW125"), "{said}");
+        assert!(said.contains("ReticulumNet consensus"), "{said}");
+        assert!(said.contains("869.463 MHz"), "{said}");
+        assert!(said.contains("SF8") && said.contains("BW125"), "{said}");
         assert!(said.contains("CR4/5") && said.contains("22 dBm"), "{said}");
-        // Saying yes must not then walk the user through five prompts.
+        // Saying yes must not then walk the user through menu or prompts.
         assert!(!said.contains("spreadingfactor"), "{said}");
+        assert!(!said.contains("us915"), "{said}");
     }
 
     #[test]
@@ -1275,13 +1325,99 @@ convert = "hex-to-uf2"
         // The automation case: --yes must not block on a question nobody is
         // there to answer.
         let mut ui = crate::ui::Assumed::new(true);
-        assert_eq!(ask_for_radio(&mut ui).unwrap(), RadioChoice::Default);
+        assert_eq!(
+            ask_for_radio(&mut ui).unwrap(),
+            RadioChoice::Preset(default_preset())
+        );
+    }
+
+    #[test]
+    fn declining_the_defaults_opens_the_menu_and_two_picks_us915() {
+        let mut ui = crate::ui::testing::Fake::typing(&["n", "2"]);
+        let choice = ask_for_radio(&mut ui).unwrap();
+        assert_eq!(choice, RadioChoice::Preset(radio::preset("us915").unwrap()));
+        let said = ui.transcript();
+        assert!(said.contains("1) eu868 (ReticulumNet consensus)"), "{said}");
+        assert!(
+            said.contains("2) us915 (US community — see FCC note)"),
+            "{said}"
+        );
+        assert!(said.contains("3) au915"), "{said}");
+        assert!(said.contains("4) custom"), "{said}");
+        assert!(said.contains("preset [1]"), "{said}");
+    }
+
+    #[test]
+    fn an_empty_answer_at_the_menu_takes_the_preselected_eu868() {
+        // "n" opens the menu, Enter takes the pre-selection.
+        let mut ui = crate::ui::testing::Fake::typing(&["n"]);
+        assert_eq!(
+            ask_for_radio(&mut ui).unwrap(),
+            RadioChoice::Preset(default_preset())
+        );
+    }
+
+    #[test]
+    fn a_menu_answer_that_is_not_an_option_is_asked_again() {
+        let mut ui = crate::ui::testing::Fake::typing(&["n", "5", "3"]);
+        assert_eq!(
+            ask_for_radio(&mut ui).unwrap(),
+            RadioChoice::Preset(radio::preset("au915").unwrap())
+        );
+        let said = ui.transcript();
+        assert!(said.contains("not one of the options"), "{said}");
+    }
+
+    #[test]
+    fn the_us915_caveat_is_said_when_the_menu_picks_it() {
+        let mut ui = crate::ui::testing::Fake::typing(&["n", "2"]);
+        let opts = Options::default(); // RadioPlan::Ask
+        let choice = resolve_radio_choice(&mut ui, &opts).unwrap().unwrap();
+        assert_eq!(choice, RadioChoice::Preset(radio::preset("us915").unwrap()));
+        assert!(
+            ui.transcript().contains("15.247(a)(2)"),
+            "{}",
+            ui.transcript()
+        );
+    }
+
+    #[test]
+    fn the_us915_caveat_is_said_when_the_flag_picked_it() {
+        // The --radio-preset us915 path arrives here as a Fixed plan; the
+        // note has to reach the operator on this path too, not only from the
+        // menu.
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let opts = Options {
+            radio: RadioPlan::Fixed(RadioChoice::Preset(radio::preset("us915").unwrap())),
+            ..Options::default()
+        };
+        resolve_radio_choice(&mut ui, &opts).unwrap().unwrap();
+        let said = ui.transcript();
+        assert!(said.contains("15.247(a)(2)"), "{said}");
+        assert!(said.contains("ensure this is lawful"), "{said}");
+    }
+
+    #[test]
+    fn presets_without_a_caveat_say_nothing_and_skip_resolves_to_nothing() {
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let opts = Options {
+            radio: RadioPlan::Fixed(RadioChoice::Preset(radio::preset("eu868").unwrap())),
+            ..Options::default()
+        };
+        resolve_radio_choice(&mut ui, &opts).unwrap().unwrap();
+        assert!(ui.transcript().is_empty(), "{}", ui.transcript());
+
+        let opts = Options {
+            radio: RadioPlan::Skip,
+            ..Options::default()
+        };
+        assert_eq!(resolve_radio_choice(&mut ui, &opts).unwrap(), None);
     }
 
     #[test]
     fn declining_the_defaults_asks_for_each_field_and_offers_the_eu_value() {
         let mut ui =
-            crate::ui::testing::Fake::typing(&["n", "867100000", "250000", "9", "7", "14"]);
+            crate::ui::testing::Fake::typing(&["n", "4", "867100000", "250000", "9", "7", "14"]);
         let choice = ask_for_radio(&mut ui).unwrap();
         assert_eq!(
             choice,
@@ -1295,9 +1431,9 @@ convert = "hex-to-uf2"
         );
         let said = ui.transcript();
         for prompt in [
-            "frequency (Hz) [869525000]",
+            "frequency (Hz) [869463000]",
             "bandwidth (Hz) [125000]",
-            "spreadingfactor [7]",
+            "spreadingfactor [8]",
             "codingrate [5]",
             "txpower (dBm) [22]",
         ] {
@@ -1308,7 +1444,7 @@ convert = "hex-to-uf2"
     #[test]
     fn a_field_left_empty_keeps_the_value_the_prompt_showed() {
         // Only the frequency is stated; everything else is Enter.
-        let mut ui = crate::ui::testing::Fake::typing(&["n", "433175000"]);
+        let mut ui = crate::ui::testing::Fake::typing(&["n", "4", "433175000"]);
         assert_eq!(
             ask_for_radio(&mut ui).unwrap(),
             RadioChoice::Custom(RadioSettings {
@@ -1322,6 +1458,7 @@ convert = "hex-to-uf2"
     fn an_impossible_value_is_asked_again_rather_than_sent() {
         let mut ui = crate::ui::testing::Fake::typing(&[
             "n",
+            "4",
             "869525000",
             "100000", // not an SX1262 bandwidth
             "125000",
@@ -1348,7 +1485,7 @@ convert = "hex-to-uf2"
         assert!(said.contains("99 dBm is outside"), "{said}");
         // The rejected value must not have half-landed: the re-prompt offers
         // the value that is still in force, not the one just refused.
-        assert!(said.contains("spreadingfactor [7]"), "{said}");
+        assert!(said.contains("spreadingfactor [8]"), "{said}");
     }
 
     #[test]

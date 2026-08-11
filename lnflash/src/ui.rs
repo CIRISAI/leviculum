@@ -229,7 +229,7 @@ mod tests {
         // Unlike a double-tap, a prompt with a stated default needs no
         // human, so --yes answers it instead of refusing.
         let mut ui = Assumed::new(true);
-        assert_eq!(ui.ask("frequency (Hz) [869525000]").unwrap(), None);
+        assert_eq!(ui.ask("frequency (Hz) [869463000]").unwrap(), None);
     }
 
     #[test]

@@ -98,18 +98,19 @@ talk past each other on the air. (`leviculum-nrf/README.md:8`;
     type = RNodeInterface
     enabled = yes
     port = /dev/leviculum-transport
-    frequency = 869525000
+    frequency = 869463000
     bandwidth = 125000
     txpower = 22
-    spreadingfactor = 7
+    spreadingfactor = 8
     codingrate = 5
 ```
 
 The key names and types come from the `[[RNode Interface]]` config
 schema (`port`, `frequency`, `bandwidth`, `txpower`, `spreadingfactor`,
 `codingrate`; `docs/src/rnode-protocol.md:674-684`). The values above are
-the firmware's compiled defaults: 869.525 MHz, BW 125 kHz, 22 dBm, SF7,
-CR4/5 (`leviculum-nrf/src/lora.rs:136-161`).
+the firmware's compiled defaults — the ReticulumNet consensus channel:
+869.463 MHz, BW 125 kHz, 22 dBm, SF8, CR4/5
+(`leviculum-nrf/src/lora.rs`, `RadioConfig::eu_medium`).
 
 For a RAK4631 / WisMesh Pocket V2 the only change is the port:
 
@@ -118,10 +119,10 @@ For a RAK4631 / WisMesh Pocket V2 the only change is the port:
     type = RNodeInterface
     enabled = yes
     port = /dev/leviculum-rak-transport
-    frequency = 869525000
+    frequency = 869463000
     bandwidth = 125000
     txpower = 22
-    spreadingfactor = 7
+    spreadingfactor = 8
     codingrate = 5
 ```
 

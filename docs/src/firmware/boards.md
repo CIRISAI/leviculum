@@ -124,8 +124,8 @@ RNode configuration on the same LoRa network.
 
 | Parameter | Value |
 |-----------|-------|
-| Frequency | 869.525 MHz (EU ISM band) |
-| Spreading factor | SF7 |
+| Frequency | 869.463 MHz (ReticulumNet consensus, EU ISM band) |
+| Spreading factor | SF8 |
 | Bandwidth | 125 kHz |
 | Coding rate | CR4/5 |
 | TX power | 22 dBm |

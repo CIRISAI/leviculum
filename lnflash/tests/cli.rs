@@ -321,10 +321,36 @@ fn the_help_text_says_it_needs_root_and_never_uses_the_network() {
 }
 
 #[test]
-fn a_preset_is_refused_before_anything_is_enumerated() {
-    // The flag exists so scripts can be written against it; the table it
-    // needs does not. Refusing beats guessing a band on somebody's behalf,
-    // and it has to happen before a board is touched.
+fn an_unavailable_preset_is_refused_before_anything_is_enumerated() {
+    // eu433 is decided but needs 10 dBm, which the PA driver cannot produce
+    // yet. Refusing beats transmitting 4 dB over the limit, and it has to
+    // happen before a board is touched.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--yes",
+            "--radio-preset",
+            "eu433",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("10 dBm"), "{err}");
+    assert!(err.contains("not offered"), "{err}");
+    assert!(
+        stdout(&out).is_empty(),
+        "nothing should have run: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_preset_and_explicit_values_together_stop_the_run() {
     let bundle = unpacked_bundle();
     let out = run(
         &[
@@ -333,6 +359,8 @@ fn a_preset_is_refused_before_anything_is_enumerated() {
             "--yes",
             "--radio-preset",
             "eu868",
+            "--radio-freq",
+            "867100000",
             "--sysfs",
             &fixture_sysfs().display().to_string(),
         ],
@@ -340,12 +368,8 @@ fn a_preset_is_refused_before_anything_is_enumerated() {
     );
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("presets not yet defined"), "{err}");
-    assert!(
-        stdout(&out).is_empty(),
-        "nothing should have run: {}",
-        stdout(&out)
-    );
+    assert!(err.contains("pick one"), "{err}");
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
 }
 
 #[test]

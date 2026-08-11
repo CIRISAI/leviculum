@@ -494,12 +494,57 @@ LNode with no host had no way to be on anything else.
 
 With the flash page in place the honest moment to choose is the flash
 itself, once. `lnflash` therefore ends its sequence with a fifth step:
-after the `[FW_BUILD]` banner confirms the write, it offers the EU868
-defaults, takes five numbers instead if the user declines them, and
-sends the choice to the board's transport CDC as the same
-magic-prefixed control frame `lnsd` uses
+after the `[FW_BUILD]` banner confirms the write, it asks "Flash
+default radio settings? [Y/n]". Enter takes the eu868 preset; "n"
+opens a preset menu — eu868, us915, au915, custom — where custom is
+the five-number field-by-field path. The choice goes to the board's
+transport CDC as the same magic-prefixed control frame `lnsd` uses
 (`leviculum_core::rnode::build_radio_config_frame`, HDLC-framed), then
-waits for `RADIO_CONFIG_ACK`.
+`lnflash` waits for `RADIO_CONFIG_ACK`. Non-interactively,
+`--radio-preset <eu868|us915|au915>` names a preset outright; it
+cannot be combined with the `--radio-*` value flags (two ways to state
+one configuration).
+
+### The presets are community profiles, not conformance claims
+
+The names look like regulatory bands, which is why the menu spells out
+what they actually are: the settings each regional Reticulum community
+has converged on (the Reticulum wiki's "Popular RNode Settings"), with
+the regulatory situation documented next to them rather than implied
+by the name.
+
+| preset | freq (Hz)  | BW (Hz) | SF | CR  | txpower |
+|--------|------------|---------|----|-----|---------|
+| eu868  | 869463000  | 125000  | 8  | 4/5 | 22 dBm  |
+| us915  | 914875000  | 125000  | 8  | 4/5 | 22 dBm  |
+| au915  | 925875000  | 250000  | 9  | 4/5 | 22 dBm  |
+
+**eu868** is the ReticulumNet consensus channel and the compiled
+firmware default. The channel sits in the band ERC 70-03 Annex 1
+designates as h1.7 (869.4-869.65 MHz, 500 mW e.r.p.), so 22 dBm
+conducted stays lawful up to roughly 7 dBi of antenna gain, and the
+derived long-term airtime lock arms the ETSI 10 % duty cycle.
+
+**us915** follows the US community, and the tool prints a note when it
+is chosen because power conformance is not the whole story: FCC
+15.247(a)(2) requires at least 500 kHz of occupied bandwidth for
+non-hopping digital systems, which a fixed-frequency 125 kHz node does
+not meet. The preset ships the profile the entire known US Reticulum
+scene runs; whether that is lawful for a given deployment is the
+operator's call, and the note says so at selection time, not in a
+footnote.
+
+**au915** matches the Western Sydney and Brisbane communities. Under
+the ACMA LIPD class licence (915-928 MHz, digital modulation, 1 W
+EIRP, no minimum bandwidth) 22 dBm plus a typical antenna sits far
+under the limit — sourced from two agreeing secondary references, as
+the primary ACMA text could not be retrieved.
+
+**eu433** is decided but deferred: ERC 70-03 allows 10 mW e.r.p. at
+433.05-434.79 MHz, i.e. 10 dBm, and the SX1262 driver's lowest PA
+profile is 14 dBm. Offering the preset today would transmit 4 dB over
+the limit, so asking for it is refused with that reason until the
+driver can produce 10 dBm.
 
 Three details are not obvious:
 
@@ -522,9 +567,9 @@ a bandwidth the SX1262 has no register code for are refused at the
 command line. Left to the board, an unparseable frame is silently
 dropped and looks exactly like a dead port.
 
-Region and band presets are deliberately absent. `--radio-preset`
-exists and refuses, so the shape of the answer is fixed while the table
-behind it is still being worked out.
+An unavailable preset refuses the same way: `--radio-preset eu433`
+stops the run with the 10 dBm reason before any board is enumerated,
+rather than shipping a board 4 dB over the limit.
 
 ### The real bottleneck is not the tool
 

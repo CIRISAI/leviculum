@@ -133,11 +133,17 @@ pub struct RadioConfig {
 }
 
 impl RadioConfig {
-    /// EU medium profile: 869.525 MHz, SF7, BW125, CR4/5, 22 dBm, preamble 24.
+    /// EU medium profile — the ReticulumNet NL consensus channel: 869.463
+    /// MHz, SF8, BW125, CR4/5, 22 dBm, preamble derived (18).
     pub fn eu_medium() -> Self {
         Self {
-            frequency_hz: 869_525_000,
-            sf: 7,
+            // The ReticulumNet NL consensus channel, verbatim (869463000, not
+            // a "corrected" 869462500 — the value of an agreed number is its
+            // identity). Inside ERC 70-03 h1.7 (869.4-869.65 MHz, 500 mW
+            // e.r.p.); the lower occupied edge at BW125 is 869.4005 MHz, just
+            // inside the band, so this channel only fits at BW125.
+            frequency_hz: 869_463_000,
+            sf: 8,
             bw: 0x04,
             cr: 0x01,
             // The board maximum, not a middle value: a board that boots on its
@@ -149,14 +155,12 @@ impl RadioConfig {
             // `the_default_matches_the_firmwares_compiled_profile`. See the
             // ERP note on `DEFAULT_TX_POWER_DBM`.
             tx_power_dbm: leviculum_core::rnode::DEFAULT_TX_POWER_DBM,
-            // 24 is not an SF-independent constant, it is what the RNode
-            // firmware's own derivation yields at this profile's SF7/BW125
-            // (`leviculum_core::rnode::derive_preamble_symbols`). The host
-            // sends the derived value for whatever PHY it configures; this
-            // compiled default only ever applies at SF7, where the two agree.
-            // A firmware that ever changes SF without a host frame would have
-            // to derive it here too.
-            preamble_len: 24,
+            // Derived, never a fixed number: the RNode firmware picks the
+            // preamble from the PHY, and a hardcoded value is how a later SF
+            // change ships a mismatched preamble. This profile's SF8/BW125
+            // lands on the 18-symbol floor. The arguments are this profile's
+            // SF, CR denominator, and bandwidth.
+            preamble_len: leviculum_core::rnode::derive_preamble_symbols(8, 5, 125_000),
             bw_hz: 125_000,
             cr_denom: 5,
             csma_enabled: true,

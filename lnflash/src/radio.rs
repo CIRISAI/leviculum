@@ -26,7 +26,7 @@
 //! busywork. A 21-byte frame sets `lt_alock_present`, and the firmware reads
 //! that as "the host has an opinion", which switches off its own lawful
 //! ETSI default. Sending `0` would therefore persist "no duty-cycle limit"
-//! onto a board the operator only asked to put on 869.525 MHz. Sending
+//! onto a board the operator only asked to put on 869.463 MHz. Sending
 //! `firmware_default_lt_alock(freq, None)` persists the same cap the
 //! firmware would have chosen for itself.
 
@@ -96,18 +96,142 @@ pub struct RadioSettings {
     pub tx_power_dbm: i8,
 }
 
-/// What a board gets unless the user says otherwise: the EU 868 MHz
-/// profile the firmware compiles in (`RadioConfig::eu_medium`), stated here
-/// so the flash-time choice and the compiled default cannot drift apart
-/// silently — `the_default_matches_the_firmwares_compiled_profile` asserts
-/// the numbers.
+/// What a board gets unless the user says otherwise: the ReticulumNet NL
+/// consensus profile the firmware compiles in (`RadioConfig::eu_medium`),
+/// stated here so the flash-time choice and the compiled default cannot
+/// drift apart silently — `the_default_matches_the_firmwares_compiled_profile`
+/// asserts the numbers.
 pub const EU868: RadioSettings = RadioSettings {
-    frequency_hz: 869_525_000,
+    // Verbatim the agreed number, 869463000, not a rounder 869462500: the
+    // value of a consensus is the identity of its number.
+    frequency_hz: 869_463_000,
     bandwidth_hz: 125_000,
-    sf: 7,
+    sf: 8,
     cr: 5,
     tx_power_dbm: leviculum_core::rnode::DEFAULT_TX_POWER_DBM,
 };
+
+/// The us915 note, printed whenever us915 is chosen — visibly, not as a
+/// docs footnote, because the preset follows the community rather than the
+/// regulation and the person keying it in is the one who has to know.
+pub const US915_CAVEAT: &str =
+    "us915 uses the common community 125 kHz setting, which does NOT meet FCC 15.247(a)(2) \
+     (>=500 kHz occupied bandwidth for non-hopping systems). You are choosing the widely-used \
+     community profile; ensure this is lawful for your deployment.";
+
+/// Why eu433 is in the table but cannot be chosen: the SX1262 driver's
+/// lowest PA profile (`leviculum-nrf/src/sx1262.rs`) is 14 dBm, and ERC
+/// 70-03 allows 10 mW e.r.p. at 433 MHz. Offering it would transmit 4 dB
+/// over the limit without a word.
+pub const EU433_UNAVAILABLE: &str =
+    "eu433 needs 10 dBm output, which this radio driver cannot yet produce (lowest PA profile \
+     is 14 dBm); not offered.";
+
+/// One region preset: a community profile under a name people use, not a
+/// conformance claim — which is why the menu label spells the community and
+/// the caveat is part of the definition rather than of some caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresetDef {
+    /// The flag value: `--radio-preset <name>`.
+    pub name: &'static str,
+    /// How the menu shows it: a community profile, not a regulatory claim.
+    pub menu_label: &'static str,
+    pub settings: RadioSettings,
+    /// Printed when this preset is chosen, menu or flag.
+    pub caveat: Option<&'static str>,
+    /// Why this preset cannot be chosen yet; `None` means it ships.
+    pub unavailable: Option<&'static str>,
+}
+
+/// Every preset the tool knows, shipped or waiting. Values are the
+/// community consensus per region (the Reticulum wiki's "Popular RNode
+/// Settings"), decided in #75 part 2b — not invented here.
+pub const PRESETS: [PresetDef; 4] = [
+    PresetDef {
+        name: "eu868",
+        menu_label: "eu868 (ReticulumNet consensus)",
+        // The compiled firmware default: one definition, so the preset and
+        // the default cannot disagree.
+        settings: EU868,
+        caveat: None,
+        unavailable: None,
+    },
+    PresetDef {
+        name: "us915",
+        menu_label: "us915 (US community — see FCC note)",
+        settings: RadioSettings {
+            frequency_hz: 914_875_000,
+            bandwidth_hz: 125_000,
+            sf: 8,
+            cr: 5,
+            tx_power_dbm: 22,
+        },
+        caveat: Some(US915_CAVEAT),
+        unavailable: None,
+    },
+    PresetDef {
+        name: "au915",
+        menu_label: "au915",
+        settings: RadioSettings {
+            frequency_hz: 925_875_000,
+            bandwidth_hz: 250_000,
+            sf: 9,
+            cr: 5,
+            tx_power_dbm: 22,
+        },
+        caveat: None,
+        unavailable: None,
+    },
+    PresetDef {
+        name: "eu433",
+        menu_label: "eu433",
+        settings: RadioSettings {
+            frequency_hz: 433_575_000,
+            bandwidth_hz: 125_000,
+            sf: 8,
+            cr: 5,
+            // ERC 70-03: 10 mW e.r.p. The reason it is unavailable: the PA
+            // driver cannot produce this yet.
+            tx_power_dbm: 10,
+        },
+        caveat: None,
+        unavailable: Some(EU433_UNAVAILABLE),
+    },
+];
+
+/// The presets a user can actually pick, in menu order.
+pub fn selectable() -> impl Iterator<Item = &'static PresetDef> {
+    PRESETS.iter().filter(|p| p.unavailable.is_none())
+}
+
+/// Why `--radio-preset <name>` was not accepted.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PresetError {
+    #[error(
+        "{0:?} is not a preset; the presets are: {choices}",
+        choices = PRESETS
+            .iter()
+            .filter(|p| p.unavailable.is_none())
+            .map(|p| p.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )]
+    Unknown(String),
+    #[error("{0}")]
+    Unavailable(&'static str),
+}
+
+/// Look a preset up by its flag name. An unavailable preset is refused with
+/// its reason rather than shipped with the wrong power.
+pub fn preset(name: &str) -> Result<&'static PresetDef, PresetError> {
+    let Some(def) = PRESETS.iter().find(|p| p.name == name) else {
+        return Err(PresetError::Unknown(name.to_string()));
+    };
+    match def.unavailable {
+        Some(why) => Err(PresetError::Unavailable(why)),
+        None => Ok(def),
+    }
+}
 
 /// Why a value was not accepted. Every variant says the offending value and
 /// what would have been allowed, because a re-prompt that only says "no" is
@@ -337,17 +461,13 @@ impl RadioSettings {
     }
 }
 
-/// What the user chose. The two arms are the whole surface today.
-///
-// TODO(presets): a `Preset(name)` arm, once the region/band table is
-// researched and written down. `--radio-preset` already exists as a flag
-// that refuses, so the shape of the answer is fixed and only the table is
-// missing; nothing else here has to move.
+/// What the user chose. The two arms are the whole surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RadioChoice {
-    /// The EU868 defaults, sent rather than assumed so what the board has
-    /// stored is a fact somebody chose, not a compiled-in leftover.
-    Default,
+    /// A named preset from [`PRESETS`], sent rather than assumed so what the
+    /// board has stored is a fact somebody chose, not a compiled-in
+    /// leftover. The default answer is the eu868 entry.
+    Preset(&'static PresetDef),
     /// Field by field, from the prompts or from the flags.
     Custom(RadioSettings),
 }
@@ -355,7 +475,7 @@ pub enum RadioChoice {
 impl RadioChoice {
     pub fn settings(&self) -> RadioSettings {
         match self {
-            RadioChoice::Default => EU868,
+            RadioChoice::Preset(preset) => preset.settings,
             RadioChoice::Custom(settings) => *settings,
         }
     }
@@ -471,20 +591,134 @@ mod tests {
 
     #[test]
     fn the_default_matches_the_firmwares_compiled_profile() {
-        // `RadioConfig::eu_medium()`: 869.525 MHz, SF7, BW125, CR4/5, 22 dBm,
-        // preamble 24. Sending the defaults must be a no-op in effect, or
-        // "flash the defaults" would quietly change a board. The TX power is
-        // the board maximum, the same value the host resolves an absent
-        // `txpower` to (`rnode::DEFAULT_TX_POWER_DBM`) — this assertion is
-        // what keeps the flash-time choice and the compiled profile from
-        // drifting apart.
+        // `RadioConfig::eu_medium()`: the ReticulumNet NL consensus,
+        // 869.463 MHz, SF8, BW125, CR4/5, 22 dBm, preamble derived to 18.
+        // Sending the defaults must be a no-op in effect, or "flash the
+        // defaults" would quietly change a board. The TX power is the board
+        // maximum, the same value the host resolves an absent `txpower` to
+        // (`rnode::DEFAULT_TX_POWER_DBM`) — this assertion is what keeps the
+        // flash-time choice and the compiled profile from drifting apart.
         let wire = round_trip(&EU868.framed());
-        assert_eq!(wire.frequency_hz, 869_525_000);
+        assert_eq!(wire.frequency_hz, 869_463_000);
         assert_eq!(wire.bandwidth_hz, 125_000);
-        assert_eq!(wire.sf, 7);
+        assert_eq!(wire.sf, 8);
         assert_eq!(wire.cr, 5);
         assert_eq!(wire.tx_power_dbm, 22);
-        assert_eq!(wire.preamble_len, 24);
+        assert_eq!(wire.preamble_len, 18);
+    }
+
+    #[test]
+    fn the_eu868_preset_is_the_reticulumnet_consensus() {
+        let def = preset("eu868").unwrap();
+        assert_eq!(
+            def.settings,
+            RadioSettings {
+                frequency_hz: 869_463_000,
+                bandwidth_hz: 125_000,
+                sf: 8,
+                cr: 5,
+                tx_power_dbm: 22,
+            }
+        );
+        // One definition: the preset IS the compiled default.
+        assert_eq!(def.settings, EU868);
+        assert_eq!(def.menu_label, "eu868 (ReticulumNet consensus)");
+        assert_eq!(def.caveat, None);
+        // Inside ERC 70-03 h1.7: the ETSI 10% duty cycle applies, and the
+        // gap check does not refuse the channel's BW125 occupied width.
+        assert_eq!(def.settings.lt_alock(), 1000);
+        assert_eq!(
+            leviculum_core::rnode::erp_band_gap(869_463_000, 125_000),
+            None
+        );
+    }
+
+    #[test]
+    fn the_us915_preset_is_the_community_profile_with_its_fcc_note() {
+        let def = preset("us915").unwrap();
+        assert_eq!(
+            def.settings,
+            RadioSettings {
+                frequency_hz: 914_875_000,
+                bandwidth_hz: 125_000,
+                sf: 8,
+                cr: 5,
+                tx_power_dbm: 22,
+            }
+        );
+        let caveat = def.caveat.expect("us915 carries the FCC note");
+        assert!(caveat.contains("15.247(a)(2)"), "{caveat}");
+        assert!(caveat.contains("500 kHz"), "{caveat}");
+        // No US duty cycle: the derived long-term lock is off.
+        assert_eq!(def.settings.lt_alock(), 0);
+    }
+
+    #[test]
+    fn the_au915_preset_is_the_community_profile() {
+        let def = preset("au915").unwrap();
+        assert_eq!(
+            def.settings,
+            RadioSettings {
+                frequency_hz: 925_875_000,
+                bandwidth_hz: 250_000,
+                sf: 9,
+                cr: 5,
+                tx_power_dbm: 22,
+            }
+        );
+        assert_eq!(def.caveat, None);
+        assert_eq!(def.settings.lt_alock(), 0);
+    }
+
+    #[test]
+    fn eu433_is_in_the_table_but_refused_by_name() {
+        // The tuple is decided (ERC 70-03: 10 mW e.r.p.) and waits only on a
+        // PA profile below 14 dBm; the table carries it so the decision is
+        // not re-researched when the driver catches up.
+        let def = PRESETS.iter().find(|p| p.name == "eu433").unwrap();
+        assert_eq!(
+            def.settings,
+            RadioSettings {
+                frequency_hz: 433_575_000,
+                bandwidth_hz: 125_000,
+                sf: 8,
+                cr: 5,
+                tx_power_dbm: 10,
+            }
+        );
+        let err = preset("eu433").unwrap_err();
+        assert_eq!(err, PresetError::Unavailable(EU433_UNAVAILABLE));
+        let said = format!("{err}");
+        assert!(said.contains("10 dBm"), "{said}");
+        assert!(said.contains("14"), "{said}");
+        assert!(said.contains("not offered"), "{said}");
+        // And it is not in the menu.
+        assert!(selectable().all(|p| p.name != "eu433"));
+    }
+
+    #[test]
+    fn an_unknown_preset_name_is_refused_with_the_choices() {
+        let err = preset("as923").unwrap_err();
+        assert_eq!(err, PresetError::Unknown("as923".to_string()));
+        let said = format!("{err}");
+        assert!(said.contains("as923"), "{said}");
+        assert!(said.contains("eu868, us915, au915"), "{said}");
+    }
+
+    #[test]
+    fn the_menu_offers_the_shipped_presets_in_the_decided_order() {
+        let names: Vec<_> = selectable().map(|p| p.name).collect();
+        assert_eq!(names, ["eu868", "us915", "au915"]);
+    }
+
+    #[test]
+    fn every_preset_derives_the_same_preamble_floor() {
+        // SF8/BW125 and SF9/BW250 both sit at 2.048 ms symbol time, so all
+        // four presets land on the 18-symbol minimum — the control that the
+        // derivation path, not a fixed number, is what goes on the wire.
+        for def in &PRESETS {
+            assert_eq!(def.settings.preamble_symbols(), 18, "{}", def.name);
+        }
     }
 
     #[test]
@@ -505,7 +739,7 @@ mod tests {
         // duty cycle limit" onto a board that only asked for a frequency.
         let wire = round_trip(&EU868.framed());
         assert!(wire.lt_alock_present);
-        // 869.525 MHz is sub-band P: 10%, which is 1000 in the u16 encoding.
+        // 869.463 MHz is sub-band P: 10%, which is 1000 in the u16 encoding.
         assert_eq!(wire.lt_alock, 1000);
         assert_eq!(wire.st_alock, 0);
 
@@ -649,16 +883,25 @@ mod tests {
 
     #[test]
     fn the_prompt_default_of_a_field_is_the_value_that_field_holds() {
-        assert_eq!(Field::Frequency.value_of(&EU868), "869525000");
+        assert_eq!(Field::Frequency.value_of(&EU868), "869463000");
         assert_eq!(Field::Bandwidth.value_of(&EU868), "125000");
-        assert_eq!(Field::SpreadingFactor.value_of(&EU868), "7");
+        assert_eq!(Field::SpreadingFactor.value_of(&EU868), "8");
         assert_eq!(Field::CodingRate.value_of(&EU868), "5");
         assert_eq!(Field::TxPower.value_of(&EU868), "22");
     }
 
     #[test]
-    fn the_choice_of_default_is_the_eu_profile() {
-        assert_eq!(RadioChoice::Default.settings(), EU868);
+    fn a_choice_resolves_to_the_settings_that_were_chosen() {
+        assert_eq!(
+            RadioChoice::Preset(preset("eu868").unwrap()).settings(),
+            EU868
+        );
+        assert_eq!(
+            RadioChoice::Preset(preset("us915").unwrap())
+                .settings()
+                .frequency_hz,
+            914_875_000
+        );
         let custom = RadioSettings { sf: 11, ..EU868 };
         assert_eq!(RadioChoice::Custom(custom).settings(), custom);
         assert_eq!(RadioPlan::default(), RadioPlan::Ask);
@@ -668,12 +911,12 @@ mod tests {
     fn the_transcript_line_names_every_value_that_went_on_the_wire() {
         let said = EU868.describe();
         for expected in [
-            "freq=869525000",
+            "freq=869463000",
             "bw=125000",
-            "sf=7",
+            "sf=8",
             "cr=4/5",
             "txpower=22dBm",
-            "preamble=24",
+            "preamble=18",
             "lt_alock=1000",
         ] {
             assert!(said.contains(expected), "{expected} missing from {said}");

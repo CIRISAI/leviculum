@@ -59,16 +59,16 @@ pub(crate) struct SerialRadioConfig {
 /// (non-LoRa) serial pipe.
 ///
 /// Every PHY default here is the firmware's own compiled default
-/// (`leviculum_nrf::lora::RadioConfig::eu_medium`), with one exception the
-/// preamble makes necessary. The firmware's compiled 24 is a constant for
-/// every spreading factor, while the RNode firmware — our reference for LoRa
-/// PHY behaviour — scales the preamble to a target duration and floors it at
-/// 18 symbols. The two agree at SF7/BW125 and disagree from SF8 down, so a
-/// constant here is a wire-level deviation that costs interop with every
-/// RNode peer in the long-range regime. The default is therefore
-/// [`derive_preamble_symbols`], and `preamble_symbols` in the config file
-/// still overrides it — which is how the corner gets re-measured, and how a
-/// node with a non-conforming peer copes.
+/// (`leviculum_nrf::lora::RadioConfig::eu_medium`, the ReticulumNet
+/// consensus: BW125, SF8, CR4/5), so a block that names only a `frequency`
+/// puts the board on the same PHY it would boot on standalone. The preamble
+/// is not a number but the RNode firmware's own derivation — our reference
+/// for LoRa PHY behaviour scales the preamble to a target duration and
+/// floors it at 18 symbols, and a constant here was a wire-level deviation
+/// that cost interop with every RNode peer in the long-range regime. The
+/// default is therefore [`derive_preamble_symbols`], and `preamble_symbols`
+/// in the config file still overrides it — which is how the corner gets
+/// re-measured, and how a node with a non-conforming peer copes.
 ///
 /// The airtime lock resolves the same way, and for the same reason. An
 /// LNode is configured by this function and by nothing else, so a hardcoded
@@ -84,7 +84,7 @@ pub(crate) fn serial_radio_config(
 ) -> Option<SerialRadioConfig> {
     let frequency = cfg.frequency?;
     let bandwidth = cfg.bandwidth.unwrap_or(125_000);
-    let spreading_factor = cfg.spreading_factor.unwrap_or(7);
+    let spreading_factor = cfg.spreading_factor.unwrap_or(8);
     let coding_rate = cfg.coding_rate.unwrap_or(5);
     Some(SerialRadioConfig {
         frequency,
@@ -581,21 +581,20 @@ mod tests {
     }
 
     /// A block that omits the key gets the preamble the RNode firmware would
-    /// program for the same PHY, not a constant. At the block's own defaults
-    /// (SF7/BW125) that derives 24 — the value this code pushed before the
-    /// derivation existed — so every config file that named no spreading
-    /// factor still means exactly what it meant.
+    /// program for the same PHY, not a constant. The block's own defaults
+    /// are the firmware's compiled profile — the ReticulumNet consensus,
+    /// SF8/BW125 — where the derivation lands on the 18-symbol floor.
     #[test]
     fn absent_preamble_symbols_derives_the_reference_value() {
         let cfg = crate::config::InterfaceConfig {
             interface_type: "SerialInterface".to_string(),
             port: Some("/dev/ttyACM0".to_string()),
-            frequency: Some(869_525_000),
+            frequency: Some(869_463_000),
             ..Default::default()
         };
         let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
-        assert_eq!(radio.spreading_factor, 7);
-        assert_eq!(radio.preamble_len, 24);
+        assert_eq!(radio.spreading_factor, 8);
+        assert_eq!(radio.preamble_len, 18);
     }
 
     /// The defect this closes, at the interface boundary. The same block at

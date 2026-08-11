@@ -182,7 +182,7 @@ exercises the duty-cycle lock opts back in explicitly:
 
 ```toml
 [radio]
-frequency = 869525000
+frequency = 869463000
 airtime_limit_long = 10   # percent; arms the 10 % ETSI cap
 ```
 
