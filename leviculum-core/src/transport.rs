@@ -5410,15 +5410,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // that direction is validated and we will forward: on a
                     // shared medium a re-heard copy of this repeat dies in the
                     // ingress dedup instead of being forwarded again (#226).
-                    // Resource retransmissions stay forwardable — the Resource
-                    // contexts are exempt from the ingress dedup CHECK, so the
-                    // insert is inert for them (matching Python's filter).
-                    // Local client traffic stays exempt from the insert:
-                    // resource retransmissions over IPC produce identical raw
-                    // bytes, caching would block future retransmits.
-                    if !self.is_local_client(interface_index) {
-                        self.storage.add_packet_hash(full_packet_hash);
-                    }
+                    // Unconditional, exactly Python :1675 — including local-client
+                    // ingress. Retransmissions over IPC (identical raw bytes)
+                    // survive anyway because the ingress dedup CHECK exempts
+                    // local-client link relays (is_local_link_relay) and the
+                    // Resource/Channel/Keepalive contexts, so the insert is inert
+                    // for them. Skipping the insert here instead opened a phantom
+                    // self-delivery: the relay's own repeat, re-heard off the
+                    // shared medium, passed dedup and was forwarded back onto the
+                    // ipc leg to the sender.
+                    self.storage.add_packet_hash(full_packet_hash);
 
                     // Forward data via link table
                     crate::tracing::trace!(

@@ -82,6 +82,7 @@ fn test_two_relay_shared_medium_link_data() {
     let mut hs_outcome = None;
     let mut data_outcome = None;
     let mut r_data_count = 0usize;
+    let mut i_echo_count = 0usize;
     let mut beta_data_tx = 0usize;
     let mut gamma_data_tx = 0usize;
     let mut hs_wire_dump = String::new();
@@ -205,6 +206,11 @@ fn test_two_relay_shared_medium_link_data() {
             .iter()
             .filter(|(node, data)| *node == 4 && data == PAYLOAD)
             .count();
+        i_echo_count = dp
+            .link_data
+            .iter()
+            .filter(|(node, data)| *node == 5 && data == PAYLOAD)
+            .count();
         let link_id_bytes = *link_id.as_bytes();
         beta_data_tx = dp
             .wires
@@ -232,6 +238,22 @@ fn test_two_relay_shared_medium_link_data() {
         r_data_count, 1,
         "R must receive the link data exactly once — every further copy is \
          an echo Python would silently drop (Transport.py:1653-1656).\n\
+         --- data wires ---\n{data_wire_dump}\n--- logs ---\n{logs}"
+    );
+
+    // Contract 2b: the sender must never hear its own payload back. delta
+    // repeats I's data ipc->air; if that repeat skips add_packet_hash
+    // (local-client ingress exemption), gamma's air repeat re-enters delta,
+    // passes ingress dedup, and the cross-interface arm forwards it back
+    // onto the ipc leg — a phantom self-delivery at I, decryptable with the
+    // symmetric link key. Python caches the hash on EVERY repeat
+    // (Transport.py:1675), so the re-heard copy dies in the dedup filter.
+    assert_eq!(
+        i_echo_count, 0,
+        "the initiator I must NOT receive its own payload back — a phantom \
+         self-delivery means the relay skipped the hash-add on its \
+         local-client-ingress repeat (Python Transport.py:1675 adds \
+         unconditionally).\n\
          --- data wires ---\n{data_wire_dump}\n--- logs ---\n{logs}"
     );
 
