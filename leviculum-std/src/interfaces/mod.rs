@@ -390,6 +390,21 @@ pub(crate) struct IncomingPacket {
 ///
 /// Returns `true` when the frame must be dropped, counting it in
 /// `counters.test_direct_ingress_drops` with one debug event per drop.
+/// Companion to [`test_drop_direct_ingress_frame`]: one unmistakable line
+/// announcing that the TEST-ONLY range-emulation filter is live on this
+/// interface. Called from the top of the io task that passes the very same
+/// `enabled` flag to the drop filter — so the line's presence proves the
+/// production drop path is armed, not merely that a config key parsed
+/// (Codeberg #223: an old daemon silently ignoring the knob produced a
+/// green run over an open channel). Info level, so it survives log
+/// filtering that keeps only the default level: per-drop events are debug
+/// volume, this is one line per connection.
+pub(crate) fn log_direct_ingress_filter_armed(enabled: bool, name: &str) {
+    if enabled {
+        tracing::info!("DIRECT_INGRESS_FILTER armed iface={name}");
+    }
+}
+
 pub(crate) fn test_drop_direct_ingress_frame(
     enabled: bool,
     name: &str,

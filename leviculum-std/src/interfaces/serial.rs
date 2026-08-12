@@ -395,6 +395,7 @@ async fn serial_io_task<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    super::log_direct_ingress_filter_armed(drop_direct_ingress, &name);
     let mut deframer = Deframer::new();
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
@@ -840,6 +841,82 @@ mod tests {
         assert_eq!(
             counters.test_direct_ingress_drops.load(Ordering::Relaxed),
             0
+        );
+    }
+
+    /// The filter announces itself (Codeberg #223): when
+    /// `test_drop_direct_ingress` is on, the io task emits exactly the
+    /// armed line the periculum cells assert on — from the same task that
+    /// holds the flag the drop filter reads, so the line proves the
+    /// production drop path is live and not merely that a config key
+    /// parsed. Off (the default), the line must be absent.
+    #[tokio::test]
+    async fn test_drop_direct_ingress_announces_arming_at_the_serial_boundary() {
+        /// Capture tracing output for the duration of the returned guard.
+        /// Thread-local default subscriber + current-thread tokio runtime,
+        /// same pattern as the rnode airtime-lock tests.
+        #[derive(Clone)]
+        struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for LogSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+            type Writer = LogSink;
+            fn make_writer(&'a self) -> LogSink {
+                self.clone()
+            }
+        }
+
+        async fn logs_from_io_task(drop_direct: bool) -> String {
+            let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(LogSink(Arc::clone(&buf)))
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+
+            let (port, peer) = tokio::io::duplex(8192);
+            let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+            let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+            let counters = Arc::new(InterfaceCounters::new());
+            let task = tokio::spawn(async move {
+                serial_io_task(
+                    "test_serial_armed".to_string(),
+                    port,
+                    incoming_tx,
+                    outgoing_rx,
+                    counters,
+                    drop_direct,
+                )
+                .await;
+            });
+            // Let the io task start and emit (or not emit) the armed line,
+            // then shut it down by closing its peer and channels.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(outgoing_tx);
+            drop(peer);
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+            let captured = buf.lock().unwrap();
+            String::from_utf8_lossy(&captured).into_owned()
+        }
+
+        let logs = logs_from_io_task(true).await;
+        assert!(
+            logs.contains("DIRECT_INGRESS_FILTER armed iface=test_serial_armed"),
+            "armed line missing with the knob on; logs:\n{logs}"
+        );
+
+        let logs = logs_from_io_task(false).await;
+        assert!(
+            !logs.contains("DIRECT_INGRESS_FILTER"),
+            "armed line must be absent with the knob off; logs:\n{logs}"
         );
     }
 
