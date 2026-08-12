@@ -22,6 +22,7 @@
   - [lnmsg: the user interface](concepts/lnmsg-ui.md)
   - [lnmsg: conversation storage](concepts/lnmsg-storage.md)
   - [lnmsg: the mailbox, and who you talk to](concepts/lnmsg-mailbox.md)
+- [Public channels over LXMF](concepts/public-channels.md)
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 - [Checks that are actually checks](concepts/checks-and-citations.md)
 

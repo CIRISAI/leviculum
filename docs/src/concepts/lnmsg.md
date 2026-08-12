@@ -46,7 +46,9 @@ two client modules repeat the exclusion in their own headers
 (`leviculum-lxmf/src/router/propagation_runtime.rs:3-5`,
 `leviculum-lxmf/src/propagation_client.rs:5-8`). A client cannot become a
 node without new library work. That is a separate program and a separate
-argument.
+argument — and it now exists: the channel design record
+([Public channels over LXMF](public-channels.md)) reopens hosting,
+because the channel retrieval side only works on nodes we run.
 
 ### The name
 
