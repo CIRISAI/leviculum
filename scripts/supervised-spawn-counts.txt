@@ -54,5 +54,13 @@
 # `wait()`ed in the same function, from one `Command` built in a loop.
 1    leviculum-std/tests/port_alloc_multiprocess.rs
 
+# The wrapper under test (`scripts/run-with-manifest.py` around a 0.4 s sleep),
+# spawned twice to race itself and once for the sweep; every child is
+# `wait_with_output()`ed in the function that spawned it, runs well under a
+# second and holds no port, socket, lock or device. PDEATHSIG supervision is
+# for daemon children that may outlive the harness, not for a harness that
+# joins.
+2    leviculum-std/tests/manifest_tmp_race.rs
+
 # Floor, not a pin. See the header.
 28   supervised-call-sites-minimum
