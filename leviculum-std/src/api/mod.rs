@@ -20,10 +20,13 @@ use std::path::PathBuf;
 use crate::driver::{ReticulumNode, ReticulumNodeBuilder};
 
 pub use crate::config::InterfaceConfig;
+pub use crate::driver::{CoreProcessor, StdNodeCore};
 pub use crate::error::{Error as ApiError, Result};
 pub use crate::{Destination, DestinationHash, DestinationType, Direction, LinkHandle, LinkId};
+pub use leviculum_core::node::NodeEvent;
 pub use leviculum_core::resource::ResourceStrategy;
 pub use leviculum_core::transport::InterfaceId;
+pub use leviculum_core::transport::TickOutput;
 pub use leviculum_core::{Identity, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
@@ -158,6 +161,22 @@ impl NodeBuilder {
     /// [`ReticulumNodeBuilder::outbound_socket_hook`](crate::driver::ReticulumNodeBuilder::outbound_socket_hook).
     pub fn outbound_socket_hook(mut self, hook: crate::socket_hook::OutboundSocketHook) -> Self {
         self.inner = self.inner.outbound_socket_hook(hook);
+        self
+    }
+
+    /// Install an in-driver core processor. See [`CoreProcessor`] for what a
+    /// hook body may and may not do.
+    ///
+    /// The event stream is not an alternative feed for one: it classifies
+    /// `PacketReceived` and `LinkDataReceived` as `EventClass::Data`, which is
+    /// droppable under load and, for a messaging stack, lost messages.
+    ///
+    /// [`StdNodeCore`], [`NodeEvent`] and [`TickOutput`] are re-exported for
+    /// the `impl`. `TickOutput` appears nowhere else in this crate's public
+    /// surface, so without it writing one still means depending on
+    /// `leviculum-core` directly.
+    pub fn core_processor(mut self, processor: impl CoreProcessor) -> Self {
+        self.inner = self.inner.core_processor(processor);
         self
     }
 
