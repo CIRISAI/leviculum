@@ -346,6 +346,22 @@ mod tests {
     }
 
     #[test]
+    fn test_ifac_roundtrip_packet_larger_than_hkdf_rfc_limit() {
+        // The mask spans the whole packet, so a packet above 8160 bytes needs
+        // more key material than RFC 5869 allows. TCP negotiates an MTU of
+        // 262144, so these packets do occur on IFAC-enabled interfaces.
+        let config = IfacConfig::new(Some("testnet"), Some("secret"), 16).unwrap();
+
+        let original: Vec<u8> = (0..16384u32).map(|i| i as u8).collect();
+
+        let masked = config.apply_ifac(&original).unwrap();
+        assert_eq!(masked.len(), original.len() + config.ifac_size());
+
+        let clean = config.verify_ifac(&masked).unwrap();
+        assert_eq!(clean, original);
+    }
+
+    #[test]
     fn test_ifac_flag_detection() {
         assert!(IfacConfig::has_ifac_flag(&[0x80]));
         assert!(IfacConfig::has_ifac_flag(&[0xFF]));

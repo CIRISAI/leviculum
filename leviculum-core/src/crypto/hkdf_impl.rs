@@ -1,22 +1,50 @@
 //! HKDF (HMAC-based Key Derivation Function) implementation
 
 use hkdf::Hkdf;
+use hmac::Mac;
 use sha2::Sha256;
 
+use super::hmac_impl::HmacSha256;
+
+const HASH_LEN: usize = 32;
+
 /// Derive a key using HKDF-SHA256
+///
+/// Extraction follows RFC 5869. Expansion uses the block counter of
+/// `RNS/Cryptography/HKDF.py`, which is taken modulo 256 rather than capped at
+/// 255 blocks, so outputs longer than 8160 bytes keep going instead of being
+/// rejected. Up to 8160 bytes the two are byte-for-byte identical. Reticulum
+/// needs the longer outputs: an IFAC mask spans a whole packet, and interfaces
+/// negotiate MTUs far above 8160 bytes.
 ///
 /// # Arguments
 /// * `ikm` - Input key material
 /// * `salt` - Optional salt (use None for zero-length salt)
 /// * `info` - Optional context/application-specific info
 /// * `output` - Buffer to write derived key material
-///
-/// # Panics
-/// Panics if output length exceeds 255 * 32 bytes
 pub fn derive_key(ikm: &[u8], salt: Option<&[u8]>, info: Option<&[u8]>, output: &mut [u8]) {
-    let hk = Hkdf::<Sha256>::new(salt, ikm);
-    hk.expand(info.unwrap_or(&[]), output)
-        .expect("output length should not exceed 255 * hash length");
+    let (prk, _) = Hkdf::<Sha256>::extract(salt, ikm);
+    let info = info.unwrap_or(&[]);
+
+    let keyed = HmacSha256::new_from_slice(&prk).expect("HMAC can take key of any size");
+    let mut block = [0u8; HASH_LEN];
+    let mut counter: u8 = 1;
+    let mut written = 0;
+
+    while written < output.len() {
+        let mut mac = keyed.clone();
+        if written > 0 {
+            mac.update(&block);
+        }
+        mac.update(info);
+        mac.update(&[counter]);
+        block = mac.finalize().into_bytes().into();
+
+        let take = HASH_LEN.min(output.len() - written);
+        output[written..written + take].copy_from_slice(&block[..take]);
+        written += take;
+        counter = counter.wrapping_add(1);
+    }
 }
 
 #[cfg(test)]
@@ -134,12 +162,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "output length should not exceed")]
-    fn test_hkdf_output_too_large() {
-        // Output > 8160 bytes should panic
+    fn test_hkdf_beyond_rfc_limit_matches_python() {
+        // Reference: RNS.Cryptography.HKDF.hkdf(length=8192, derive_from=ikm, salt=salt).
+        // 8192 bytes is 256 blocks, one past the 255 RFC 5869 allows, so the
+        // counter wraps to 0 for the final block.
         let ikm = b"input key material";
-        let mut output = [0u8; 8161]; // One byte too many
-        derive_key(ikm, None, None, &mut output);
+        let salt = b"salt";
+
+        let mut output = [0u8; 8192];
+        derive_key(ikm, Some(salt), None, &mut output);
+
+        let expected_tail = [
+            0xb3, 0x4c, 0x94, 0xd8, 0xe5, 0xfe, 0xa4, 0x1f, 0x87, 0xe5, 0x27, 0x82, 0x23, 0x01,
+            0xf0, 0x46, 0xbc, 0x52, 0xc2, 0xca, 0x4a, 0xd2, 0x74, 0xfb, 0x3c, 0x90, 0x5f, 0x7a,
+            0x82, 0x24, 0x4c, 0xcb,
+        ];
+        assert_eq!(&output[8160..], &expected_tail);
+
+        // Everything up to the RFC limit is unchanged.
+        let mut capped = [0u8; 8160];
+        derive_key(ikm, Some(salt), None, &mut capped);
+        assert_eq!(&output[..8160], &capped[..]);
     }
 
     #[test]
