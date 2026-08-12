@@ -25,9 +25,9 @@
 //! ## Topology
 //!
 //! ```text
-//!   initiator ──tcp──> relay-1 ──tcp──> [UNDERCOUNT SHIM] ──tcp──> relay-2 ──tcp──> Python responder
-//!   (Python A, or       (our lnsd,                                  (our lnsd,        (TestDaemon B,
-//!    Rust control)       transport on)                              transport on)     link-accepting)
+//!   initiator ──tcp──> relay-1 ──tcp──> [SHIM] ──tcp──> relay-2 ──tcp──> relay-3 ──tcp──> Python responder
+//!   (Python A, or       (our lnsd,                       (our lnsd,       (our lnsd,        (TestDaemon B,
+//!    Rust control)       transport on)                   transport on)    transport on)     link-accepting)
 //! ```
 //!
 //! The UNDERCOUNT SHIM is an in-test TCP forwarder. It copies bytes verbatim in
@@ -35,11 +35,16 @@
 //! DECREMENTS the hop-count byte of every ANNOUNCE frame by one (the hop byte is
 //! packet byte[1], outside the Ed25519-signed announce payload — #38 STEP-0 Q4),
 //! leaving the signature valid. Effect: relay-1 (and the initiator behind it)
-//! learn the responder one hop too close. When the initiator links to the
-//! responder, relay-1 freezes `remaining_hops` at the undercounted value; the
-//! LRPROOF returns over the true (longer) path; relay-1 logs the asymmetry and
-//! forwards anyway; the Python initiator's `create_link` times out, while a Rust
-//! initiator on the SAME running relays establishes.
+//! learn the responder one hop too close: the true chain relay-1..B is 3 hops,
+//! relay-1 stores 2. Two hops still need a relay, so relay-1 forwards the link
+//! request DESIGNATED (Type2, transport_id = relay-2) — with the overheard-
+//! link-request gate (Python Transport.py:1559) an undercounted "direct"
+//! (1-hop) view would instead strand the request at relay-2, on our relay and
+//! on a real rnsd alike, before any proof exists. When the initiator links to
+//! the responder, relay-1 freezes `remaining_hops = 2`; the LRPROOF returns
+//! over the true 3-hop path; relay-1 logs the asymmetry and forwards anyway
+//! with the hop count rewritten to the frozen 2, so the strict Python
+//! initiator (expected_hops = 3 after its own increment) accepts it.
 //!
 //! ## Running
 //!
@@ -176,8 +181,9 @@ async fn spawn_undercount_shim(relay2_addr: SocketAddr) -> (SocketAddr, Arc<Atom
 }
 
 // ----------------------------------------------------------------------------
-// Shared topology: two Rust relays with the undercount shim between them, a
-// Python responder B behind relay-2, relay-1 having learned B UNDERCOUNTED.
+// Shared topology: three Rust relays with the undercount shim between the
+// first two, a Python responder B behind relay-3, relay-1 having learned B
+// UNDERCOUNTED (2 hops stored, 3 hops true).
 // ----------------------------------------------------------------------------
 
 /// A running hop-undercount relay chain, ready for an initiator to link through
@@ -191,21 +197,25 @@ struct UndercountChain {
     dest_b_signing_key: [u8; 32],
     relay1: ReticulumNode,
     relay2: ReticulumNode,
+    relay3: ReticulumNode,
     relay1_addr: SocketAddr,
     relay1_port: u16,
     _relay1_storage: tempfile::TempDir,
     _relay2_storage: tempfile::TempDir,
+    _relay3_storage: tempfile::TempDir,
 }
 
 /// Build and start the shared topology and drive B's announce down the chain
 /// until relay-1 has learned an UNDERCOUNTED path to B. Panics on any setup
 /// failure. Same chain used by both the establish and the data-transfer tests.
 async fn setup_undercount_chain() -> UndercountChain {
-    // --- Ports for the two Rust relay servers (the shim binds :0 itself). ---
+    // --- Ports for the three Rust relay servers (the shim binds :0 itself). ---
     let relay1_port = pick_free_tcp_port().expect("relay-1 port");
     let relay2_port = pick_free_tcp_port().expect("relay-2 port");
+    let relay3_port = pick_free_tcp_port().expect("relay-3 port");
     let relay1_addr: SocketAddr = format!("127.0.0.1:{relay1_port}").parse().unwrap();
     let relay2_addr: SocketAddr = format!("127.0.0.1:{relay2_port}").parse().unwrap();
+    let relay3_addr: SocketAddr = format!("127.0.0.1:{relay3_port}").parse().unwrap();
 
     // --- Python responder B (link-accepting destination). ---
     let responder = TestDaemon::start().await.expect("start Python responder B");
@@ -225,12 +235,27 @@ async fn setup_undercount_chain() -> UndercountChain {
     let mut dest_b_signing_key = [0u8; 32];
     dest_b_signing_key.copy_from_slice(&dest_b_key_bytes[32..64]);
 
-    // --- relay-2: transport on, TCP server for the shim, TCP client to B. ---
+    // --- relay-3: transport on, TCP server for relay-2, TCP client to B. ---
+    let _relay3_storage = temp_storage("lrproof_hop_undercount", "relay3");
+    let mut relay3 = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_server(relay3_addr)
+        .add_tcp_client(responder.rns_addr())
+        .storage_path(_relay3_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build relay-3");
+    relay3.start().await.expect("start relay-3");
+
+    // --- relay-2: transport on, TCP server for the shim, TCP client to
+    //     relay-3 (lengthens the true chain to 3 hops from relay-1, so the
+    //     undercounted view at relay-1 is still a 2-hop RELAYED path and the
+    //     link request stays designated at every hop). ---
     let _relay2_storage = temp_storage("lrproof_hop_undercount", "relay2");
     let mut relay2 = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .add_tcp_server(relay2_addr)
-        .add_tcp_client(responder.rns_addr())
+        .add_tcp_client(relay3_addr)
         .storage_path(_relay2_storage.path().to_path_buf())
         .build()
         .await
@@ -279,12 +304,14 @@ async fn setup_undercount_chain() -> UndercountChain {
         .into_iter()
         .find(|e| e.hash == dest_b_hash_bytes)
         .map(|e| e.hops);
-    // True chain initiator..B is 2 transport hops; the undercount makes relay-1
-    // store 1. (We assert < 2 rather than == 1 to stay robust to re-announce
-    // ordering, while still proving the undercount.)
+    // True chain relay-1..B is 3 transport hops; the undercount makes relay-1
+    // store 2. (We assert 1 < h < 3 rather than == 2: still a RELAYED path —
+    // a 1-hop view would strand the designated forward — while staying robust
+    // to re-announce ordering.)
     assert!(
-        matches!(relay1_hops_to_b, Some(h) if h < 2),
-        "relay-1's path to B must be undercounted (< 2 hops); got {relay1_hops_to_b:?}"
+        matches!(relay1_hops_to_b, Some(h) if h > 1 && h < 3),
+        "relay-1's path to B must be undercounted but still relayed (2 hops); \
+         got {relay1_hops_to_b:?}"
     );
 
     UndercountChain {
@@ -295,10 +322,12 @@ async fn setup_undercount_chain() -> UndercountChain {
         dest_b_signing_key,
         relay1,
         relay2,
+        relay3,
         relay1_addr,
         relay1_port,
         _relay1_storage,
         _relay2_storage,
+        _relay3_storage,
     }
 }
 
@@ -321,6 +350,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
         dest_b_signing_key,
         mut relay1,
         mut relay2,
+        mut relay3,
         relay1_addr,
         relay1_port,
         ..
@@ -422,6 +452,7 @@ async fn lrproof_hop_undercount_python_client_and_rust_client_both_establish() {
     let _ = initiator_rs.stop().await;
     let _ = relay1.stop().await;
     let _ = relay2.stop().await;
+    let _ = relay3.stop().await;
 }
 
 /// #38 completion: the link established over the hop-undercount asymmetry must
@@ -449,6 +480,7 @@ async fn lrproof_hop_undercount_data_transfer_both_ways() {
         dest_b_hash_typed: dest_b_hash,
         mut relay1,
         mut relay2,
+        mut relay3,
         relay1_port,
         ..
     } = setup_undercount_chain().await;
@@ -541,4 +573,5 @@ async fn lrproof_hop_undercount_data_transfer_both_ways() {
     // Tidy up async nodes.
     let _ = relay1.stop().await;
     let _ = relay2.stop().await;
+    let _ = relay3.stop().await;
 }

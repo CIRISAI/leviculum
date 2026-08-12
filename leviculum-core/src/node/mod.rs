@@ -74,6 +74,8 @@ mod mvr_lnode_pathresolve;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]
+mod mvr_lrproof_echo_storm;
+#[cfg(all(test, feature = "tracing"))]
 mod mvr_obs_endpoint;
 #[cfg(test)]
 mod mvr_orphaned_path_cache;
@@ -3860,6 +3862,11 @@ mod tests {
         );
         let _ = transport_node.handle_packet(InterfaceId(1), &announce_raw);
         assert!(transport_node.has_path(&dest_hash));
+        // A reaches T over the shared-instance leg (the lncp shape). The
+        // local-client arm is what lets T forward A's un-addressed broadcast
+        // request; a non-local relay only transports link requests naming it
+        // as the designated hop (Python Transport.py:1559).
+        transport_node.set_interface_local_client(0, true);
 
         // Initiator A (non-transport): connect broadcasts the request.
         let clock = MockClock::new(TEST_TIME_MS);

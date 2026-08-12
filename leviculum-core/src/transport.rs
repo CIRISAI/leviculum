@@ -985,7 +985,9 @@ pub enum DropReason {
     /// Incoming announce for an unknown destination dropped while the receiving
     /// interface's ingress burst limiter is active (Codeberg #87).
     IngressBurstAnnounce,
-    /// LRPROOF dropped during validation (bad size, bad signature, or bad key).
+    /// LRPROOF dropped during validation (bad size, bad signature, bad key,
+    /// or a same-interface link repeat whose hop count matches neither frozen
+    /// operand — an echo of a forward already on the shared medium).
     LrproofInvalid,
     /// Outbound forward/rebroadcast that would exceed `max_hops`.
     ForwardMaxHops,
@@ -4407,6 +4409,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // (Python Transport.py:1404)
         let from_local = self.is_local_client(interface_index);
         let for_local = self.is_for_local_client(&dest_hash);
+
+        // Python transports a link request ONLY as the packet's DESIGNATED
+        // next hop (`packet.transport_id == Transport.identity.hash`,
+        // Transport.py:1559-1560); the link entry anchoring the returning
+        // proof is created nowhere else (:1625). For a destination behind a
+        // local client the missing transport id is synthesized (:1543-1548),
+        // which the from_local/for_local arms mirror. An overheard copy — a
+        // neighbour's final-hop Type1 repeat on the same shared medium —
+        // must be ignored: processing it OVERWRITES the entry keyed by this
+        // link id with the overheard direction, severing the local-client
+        // leg and arming the LRPROOF echo storm (rig lora_3node_relay,
+        // 2026-08-12). Same class as the HEADER_2 overheard filter: a
+        // counter, no per-packet event.
+        let designated_hop = packet.transport_id == Some(*self.identity.hash());
+        if !(designated_hop || from_local || for_local) {
+            crate::tracing::trace!(
+                "Ignoring overheard link request for <{}> on {}, not the designated hop",
+                HexShort(&dest_hash),
+                self.iface_name(interface_index)
+            );
+            self.stats.record_drop(DropReason::OverheardTransportId);
+            return Ok(());
+        }
+
         if self.config.enable_transport || from_local || for_local {
             // Read path data into locals (releases immutable borrow)
             let (target_iface, path_hops, needs_relay, next_hop) =
@@ -4700,15 +4726,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // (interface gate), Ed25519 signature and size are still enforced
                 // below; loops stay bounded by the global max_hops drop. This is a
                 // deliberate deviation from Python's relay (Transport.py:2112),
-                // which drops on hop mismatch.
-                // On a hop mismatch we forward anyway, but REWRITE the forwarded
-                // proof's hop count to the value a strict Python peer expects
-                // (#38, Python Transport.py:2176 forwards only if
-                // packet.hops == remaining_hops). forward_on_interface_from does
-                // not re-increment, so the value set here is exactly what leaves
-                // on the wire: a local client 0 hops away reads remaining_hops; a
-                // client N hops away reads target+N == its own frozen count.
+                // which drops on hop mismatch — and it holds ONLY across
+                // interfaces. On ONE shared interface the frozen hop counts are
+                // the sole loop breaker (same_iface arm below).
+                // On a cross-interface hop mismatch we forward anyway, but
+                // REWRITE the forwarded proof's hop count to the value a strict
+                // Python peer expects (#38, Python Transport.py:2176 forwards
+                // only if packet.hops == remaining_hops).
+                // forward_on_interface_from does not re-increment, so the value
+                // set here is exactly what leaves on the wire: a local client 0
+                // hops away reads remaining_hops; a client N hops away reads
+                // target+N == its own frozen count.
                 let mut rewrite_hops: Option<u8> = None;
+                let same_iface =
+                    link_entry.next_hop_interface_index == link_entry.received_interface_index;
                 // Observability (#38): log BOTH frozen counts and WHICH interface
                 // branch we took on every asymmetry. We pick the direction from
                 // the receiving interface, then check packet.hops against the one
@@ -4721,7 +4752,43 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // dir on both branches makes the journal decisive: packet_hops ==
                 // hops while dir = "next_hop" would prove an asymmetry Python would
                 // never see.
-                let target_iface = if interface_index == link_entry.next_hop_interface_index {
+                let target_iface = if same_iface {
+                    // Both legs of the link ride ONE shared medium: direction
+                    // cannot be told from the interface, and the relay's own
+                    // forward comes straight back as an echo. Python repeats a
+                    // packet here ONLY when its taken hops equal a frozen
+                    // operand: the LRPROOF arm checks `remaining_hops` alone
+                    // (Transport.py:2176), the general link repeat accepts
+                    // either count (Transport.py:1656). Everything else is an
+                    // echo and dies SILENTLY ("hop mismatch, not transporting",
+                    // Transport.py:2207) — never rewritten: a rewrite resets
+                    // the count every cycle, so not even the max-hops bound
+                    // ends the loop, and the proof storm saturates the channel
+                    // (rig lora_3node_relay, 2026-08-12).
+                    let hop_match = packet.hops == link_entry.remaining_hops
+                        || (packet.context != PacketContext::Lrproof
+                            && packet.hops == link_entry.hops);
+                    if interface_index != link_entry.next_hop_interface_index || !hop_match {
+                        crate::tracing::debug!(
+                            link_id = %HexShort(&dest_hash),
+                            dest = %HexShort(&link_entry.destination_hash),
+                            packet_hops = packet.hops,
+                            hops = link_entry.hops,
+                            remaining_hops = link_entry.remaining_hops,
+                            iface = %self.iface_name(interface_index),
+                            "same-interface link repeat: hops match neither frozen count, dropping echo"
+                        );
+                        self.pkt_drop_event(
+                            &cache_hash,
+                            &packet,
+                            interface_index,
+                            DropReason::LrproofInvalid,
+                        );
+                        self.stats.record_drop(DropReason::LrproofInvalid);
+                        return Ok(());
+                    }
+                    link_entry.next_hop_interface_index
+                } else if interface_index == link_entry.next_hop_interface_index {
                     // From destination side. The proof travelled destination ->
                     // this relay -> initiator; the operand that direction expects
                     // is `remaining_hops`. This maps to:
@@ -14481,9 +14548,15 @@ mod tests {
                 },
             );
 
-            // Build a link request arriving on if0
+            // Build a link request arriving on if0, addressed to this node as
+            // the DESIGNATED next hop (a Python peer only ever hands a link
+            // request to the relay named in transport_id, Transport.py:1559).
             let mut link = Link::new_outgoing(dest_hash.into(), &mut OsRng);
-            let raw = link.build_link_request_packet(None);
+            let raw = link.build_link_request_packet_with_transport(
+                Some(*transport.identity.hash()),
+                2,
+                None,
+            );
             transport.process_incoming(0, &raw).unwrap();
 
             assert!(
@@ -14533,9 +14606,14 @@ mod tests {
                 },
             );
 
-            // Build a link request arriving on if0
+            // Build a link request arriving on if0, addressed to this node as
+            // the DESIGNATED next hop (Python Transport.py:1559).
             let mut link = Link::new_outgoing(dest_hash.into(), &mut OsRng);
-            let raw = link.build_link_request_packet(None);
+            let raw = link.build_link_request_packet_with_transport(
+                Some(*transport.identity.hash()),
+                4,
+                None,
+            );
             transport.process_incoming(0, &raw).unwrap();
 
             assert!(
