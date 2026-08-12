@@ -1,3 +1,26 @@
+/// Per-transfer limit for message propagation, in kilobytes: Python
+/// `PROPAGATION_LIMIT` (`reference/LXMF/LXMF/LXMRouter.py:55`).
+///
+/// No consumer in this crate yet. It binds in the propagation-node hosting
+/// paths this crate does not implement: announce field 3
+/// (`reference/LXMF/LXMF/LXMRouter.py:331`) and the incoming sync-resource
+/// refusal in `propagation_resource_advertised`
+/// (`reference/LXMF/LXMF/LXMRouter.py:2206`). The client-side `/get` request
+/// limit is the delivery limit instead, see
+/// [`DELIVERY_LIMIT_KB`].
+pub const PROPAGATION_LIMIT_KB: u64 = 256;
+
+/// Per-transfer limit for one LXMF delivery, in kilobytes: Python
+/// `DELIVERY_LIMIT` (`reference/LXMF/LXMF/LXMRouter.py:60`).
+pub const DELIVERY_LIMIT_KB: u64 = 1000;
+
+/// The delivery limit in bytes, converted exactly as the reference applies
+/// it: a receiver refuses an advertised delivery Resource strictly above
+/// `delivery_per_transfer_limit*1000` uncompressed bytes
+/// (`reference/LXMF/LXMF/LXMRouter.py:1979`). Exactly at the limit is
+/// accepted; the comparison is `size > limit`.
+pub const DELIVERY_LIMIT_BYTES: u64 = DELIVERY_LIMIT_KB * 1000;
+
 pub const DESTINATION_LENGTH: usize = 16;
 pub const SIGNATURE_LENGTH: usize = 64;
 pub const TICKET_LENGTH: usize = 16;

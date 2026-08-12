@@ -35,7 +35,10 @@ pub const PROPAGATION_PATH_TIMEOUT_MS: u64 = 10_000;
 pub struct PropagationClientConfig {
     /// Do not tell the node to purge messages already present locally.
     pub retain_synced_on_node: bool,
-    /// Maximum `/get` response payload requested from the remote node.
+    /// Maximum `/get` response payload requested from the remote node, in
+    /// kilobytes. Python sends its `delivery_per_transfer_limit` here
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1592`), default
+    /// [`DELIVERY_LIMIT_KB`](crate::constants::DELIVERY_LIMIT_KB).
     pub delivery_transfer_limit_kb: u64,
     /// Maximum time to wait for a path before reporting [`PropagationClientState::NoPath`].
     pub path_timeout_ms: u64,
@@ -45,7 +48,7 @@ impl Default for PropagationClientConfig {
     fn default() -> Self {
         Self {
             retain_synced_on_node: false,
-            delivery_transfer_limit_kb: 1_000,
+            delivery_transfer_limit_kb: crate::constants::DELIVERY_LIMIT_KB,
             path_timeout_ms: PROPAGATION_PATH_TIMEOUT_MS,
         }
     }

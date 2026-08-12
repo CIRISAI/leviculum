@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- LXMF enforces Python's per-transfer limits in both directions: over-limit
+  sends are refused before any build, and incoming delivery Resources above
+  1 000 000 bytes are refused by default.
+
 - EU default → ReticulumNet consensus 869.463 MHz/SF8.
 
 ### Added

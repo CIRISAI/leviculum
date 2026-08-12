@@ -21,7 +21,8 @@ use leviculum_core::{
 use rand_core::CryptoRngCore;
 
 use crate::constants::{
-    DESTINATION_LENGTH, ENCRYPTED_PACKET_MAX_CONTENT, LINK_PACKET_MAX_CONTENT, LXMF_OVERHEAD,
+    DELIVERY_LIMIT_BYTES, DESTINATION_LENGTH, ENCRYPTED_PACKET_MAX_CONTENT,
+    LINK_PACKET_MAX_CONTENT, LXMF_OVERHEAD,
 };
 use crate::{DeliveryMethod, Message, MessageError};
 
@@ -41,11 +42,29 @@ pub const DIRECT_PACKET_MDU: usize = LINK_PACKET_MAX_CONTENT + LXMF_OVERHEAD;
 /// Runtime policy for the NodeCore adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LxmfNodeConfig {
-    /// Maximum uncompressed size of one incoming LXMF Resource.
+    /// Maximum uncompressed size of one incoming LXMF Resource, in bytes.
     ///
-    /// `None` preserves Python's unlimited default. Embedded applications
-    /// should set this as well as NodeCore's global incoming Resource limit.
+    /// Python's default is not unlimited: `delivery_resource_advertised`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1977`) refuses an advertised
+    /// delivery Resource strictly above `delivery_per_transfer_limit*1000`
+    /// bytes — 1 000 000 with the default
+    /// [`DELIVERY_LIMIT_KB`](crate::constants::DELIVERY_LIMIT_KB). Exactly at
+    /// the limit is accepted, matching the reference's `size > limit`.
+    /// Embedded applications should set this as well as NodeCore's global
+    /// incoming Resource limit.
     pub max_incoming_resource_size: Option<u64>,
+    /// Maximum packed size of one outgoing delivery, in bytes.
+    ///
+    /// A Python peer refuses an advertised delivery Resource strictly above
+    /// its own limit before a byte of payload moves, so packing, compressing,
+    /// encrypting and advertising an over-limit message is pure waste. The
+    /// send paths refuse such a message up front with
+    /// [`LxmfNodeError::DeliveryLimitExceeded`]. The measure is the packed
+    /// message size — what the receiver's `resource.get_data_size()` reports,
+    /// since the reference hands `self.packed` to the Resource uncompressed
+    /// (`reference/LXMF/LXMF/LXMessage.py:654`) and the advertised data size
+    /// is the pre-compression size.
+    pub max_outgoing_delivery_size: Option<u64>,
     /// Ask Reticulum's Resource engine to use BZ2 when beneficial.
     pub auto_compress_resources: bool,
 }
@@ -53,7 +72,8 @@ pub struct LxmfNodeConfig {
 impl Default for LxmfNodeConfig {
     fn default() -> Self {
         Self {
-            max_incoming_resource_size: None,
+            max_incoming_resource_size: Some(DELIVERY_LIMIT_BYTES),
+            max_outgoing_delivery_size: Some(DELIVERY_LIMIT_BYTES),
             auto_compress_resources: true,
         }
     }
@@ -192,6 +212,9 @@ pub struct LxmfResourceSendParams {
     core: leviculum_core::resource::ResourceSendParams,
     link_id: LinkId,
     message_id: [u8; 32],
+    /// [`LxmfNodeConfig::max_outgoing_delivery_size`] captured in phase 1, so
+    /// the off-lock phase 2 can refuse an over-limit message before building.
+    max_outgoing_delivery_size: Option<u64>,
 }
 
 /// A message packed and built into a transfer off the node, ready for
@@ -214,6 +237,14 @@ pub enum LxmfNodeError {
     UnsupportedMethod,
     UnknownPeer,
     DirectLinkUnavailable,
+    /// The packed message exceeds
+    /// [`LxmfNodeConfig::max_outgoing_delivery_size`]; a Python peer would
+    /// refuse the transfer at the advertisement, so nothing was packed into a
+    /// transfer, compressed, encrypted or advertised.
+    DeliveryLimitExceeded {
+        size: u64,
+        limit: u64,
+    },
     Send(SendError),
     Resource(ResourceError),
     ProofFailed,
@@ -229,6 +260,10 @@ impl core::fmt::Display for LxmfNodeError {
             Self::UnsupportedMethod => write!(f, "delivery method is not supported here"),
             Self::UnknownPeer => write!(f, "peer identity is unknown"),
             Self::DirectLinkUnavailable => write!(f, "no direct link to the peer"),
+            Self::DeliveryLimitExceeded { size, limit } => write!(
+                f,
+                "packed message of {size} bytes exceeds the {limit} byte delivery transfer limit"
+            ),
             Self::Send(error) => write!(f, "send: {error}"),
             Self::Resource(error) => write!(f, "resource: {error}"),
             Self::ProofFailed => write!(f, "delivery proof was not accepted"),
@@ -260,6 +295,23 @@ impl From<SendError> for LxmfNodeError {
 impl From<ResourceError> for LxmfNodeError {
     fn from(value: ResourceError) -> Self {
         Self::Resource(value)
+    }
+}
+
+/// Refuse a packed message a Python peer would reject at the Resource
+/// advertisement. Strictly greater refuses; exactly at the limit passes,
+/// matching `delivery_resource_advertised`
+/// (`reference/LXMF/LXMF/LXMRouter.py:1980`).
+fn check_outgoing_delivery_size(
+    limit: Option<u64>,
+    packed_len: usize,
+) -> Result<(), LxmfNodeError> {
+    match limit {
+        Some(limit) if packed_len as u64 > limit => Err(LxmfNodeError::DeliveryLimitExceeded {
+            size: packed_len as u64,
+            limit,
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -551,6 +603,7 @@ impl LxmfNode {
         S: Storage,
     {
         let packed = message.pack();
+        check_outgoing_delivery_size(self.config.max_outgoing_delivery_size, packed.len())?;
         let representation = Self::representation_of(message.method, packed.len())?;
         let destination = DestinationHash::new(message.destination_hash);
 
@@ -632,6 +685,7 @@ impl LxmfNode {
             core: node.resource_send_params(&link_id)?,
             link_id,
             message_id: message.message_id,
+            max_outgoing_delivery_size: self.config.max_outgoing_delivery_size,
         })
     }
 
@@ -644,6 +698,7 @@ impl LxmfNode {
         rng: &mut impl CryptoRngCore,
     ) -> Result<PreparedLxmfSend, LxmfNodeError> {
         let packed = message.pack();
+        check_outgoing_delivery_size(params.max_outgoing_delivery_size, packed.len())?;
         let prepared = leviculum_core::resource::prepare_resource_send(
             &params.core,
             &packed,
@@ -2525,5 +2580,222 @@ mod tests {
     fn median(mut samples: Vec<core::time::Duration>) -> core::time::Duration {
         samples.sort();
         samples[samples.len() / 2]
+    }
+
+    /// `peer` with an explicit adapter config, for the transfer-limit tests.
+    fn peer_with_config(seed: u8, config: LxmfNodeConfig) -> Peer {
+        let mut node = test_node();
+        let identity = identity_from(seed);
+        let private = identity.private_key_bytes().expect("private delivery key");
+        let destination = LxmfNode::delivery_destination(identity).expect("delivery destination");
+        let destination_hash = *destination.hash();
+        let lxmf = LxmfNode::register(&mut node, destination, config)
+            .expect("register delivery destination");
+        Peer {
+            node,
+            lxmf,
+            signing_identity: Identity::from_private_key_bytes(&private)
+                .expect("signing identity copy"),
+            destination: destination_hash,
+        }
+    }
+
+    /// A direct message whose packed wire size is exactly `target` bytes.
+    ///
+    /// Two-pass: measure the fixed packing overhead once, then size the
+    /// content so `pack()` lands on the byte. Both passes stay in msgpack's
+    /// bin32 range so the header width cannot change between them.
+    fn message_packed_exactly(
+        destination: DestinationHash,
+        source: &Identity,
+        source_hash: DestinationHash,
+        target: usize,
+    ) -> Message {
+        let probe_len = 100_000;
+        let probe = message(
+            destination,
+            source,
+            source_hash,
+            DeliveryMethod::Direct,
+            probe_len,
+        );
+        let overhead = probe.pack().len() - probe_len;
+        let m = message(
+            destination,
+            source,
+            source_hash,
+            DeliveryMethod::Direct,
+            target - overhead,
+        );
+        assert_eq!(m.pack().len(), target, "two-pass sizing must land exactly");
+        m
+    }
+
+    fn linked_pair(sender: Peer, receiver: Peer) -> (Peer, Peer) {
+        let mut sender = sender;
+        let mut receiver = receiver;
+        exchange_announces(&mut sender, &mut receiver);
+        let (_, out) = sender
+            .lxmf
+            .ensure_direct_link(&mut sender.node, receiver.destination)
+            .expect("link");
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(out.core.actions),
+            &mut a,
+            &mut b,
+        );
+        (sender, receiver)
+    }
+
+    /// The defaults are Python's: `DELIVERY_LIMIT` kilobytes times 1000 in
+    /// both directions (`reference/LXMF/LXMF/LXMRouter.py:60`).
+    #[test]
+    fn default_config_carries_python_delivery_limits() {
+        let config = LxmfNodeConfig::default();
+        assert_eq!(config.max_incoming_resource_size, Some(1_000_000));
+        assert_eq!(config.max_outgoing_delivery_size, Some(1_000_000));
+    }
+
+    /// An over-limit direct send is refused before any build: the error names
+    /// the sizes, no core actions are produced, no advertisement reaches the
+    /// receiver, and no outbound Resource is tracked.
+    #[test]
+    fn over_limit_direct_send_is_refused_and_nothing_advertised() {
+        let (mut sender, mut receiver) = linked_pair(peer(31), peer(131));
+        let m = message_packed_exactly(
+            receiver.destination,
+            &sender.signing_identity,
+            sender.destination,
+            1_000_001,
+        );
+        assert_eq!(
+            LxmfNode::representation(&m),
+            Ok(DeliveryRepresentation::DirectResource)
+        );
+
+        let refused = sender.lxmf.send(&mut sender.node, &m);
+        assert_eq!(
+            refused.err(),
+            Some(LxmfNodeError::DeliveryLimitExceeded {
+                size: 1_000_001,
+                limit: 1_000_000,
+            })
+        );
+        assert!(
+            sender.lxmf.resources.is_empty(),
+            "no outbound Resource may be tracked for a refused send"
+        );
+
+        // Action level: drive both nodes; the receiver must never observe an
+        // advertisement or any other LXMF event for the refused message.
+        let mut sender_events = Vec::new();
+        let mut receiver_events = Vec::new();
+        let core = sender.node.handle_timeout();
+        let to_receiver = absorb_core(&mut sender, core, &mut sender_events);
+        pump(
+            &mut sender,
+            &mut receiver,
+            to_receiver,
+            &mut sender_events,
+            &mut receiver_events,
+        );
+        assert!(
+            receiver_events.is_empty(),
+            "receiver saw LXMF events for a refused send: {receiver_events:?}"
+        );
+        assert_eq!(receiver.lxmf.incoming_resource_count(), 0);
+    }
+
+    /// Exactly at the limit passes, as in the reference: the comparison is
+    /// strictly greater (`reference/LXMF/LXMF/LXMRouter.py:1980`), so both
+    /// our send side and a default-configured receiver accept 1 000 000.
+    #[test]
+    fn at_limit_direct_send_is_advertised_and_accepted() {
+        let (mut sender, mut receiver) = linked_pair(peer(32), peer(132));
+        let m = message_packed_exactly(
+            receiver.destination,
+            &sender.signing_identity,
+            sender.destination,
+            1_000_000,
+        );
+
+        let output = sender.lxmf.send(&mut sender.node, &m).expect("send");
+        assert!(
+            !output.core.actions.is_empty(),
+            "an at-limit send must produce the advertisement"
+        );
+
+        let mut sender_events = Vec::new();
+        let mut receiver_events = Vec::new();
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(output.core.actions),
+            &mut sender_events,
+            &mut receiver_events,
+        );
+        assert!(
+            !receiver_events
+                .iter()
+                .any(|e| matches!(e, LxmfNodeEvent::InboundRejected { .. })),
+            "default receiver must accept an at-limit advertisement: {receiver_events:?}"
+        );
+        assert!(
+            receiver.lxmf.incoming_resource_count() > 0
+                || receiver_events
+                    .iter()
+                    .any(|e| matches!(e, LxmfNodeEvent::MessageReceived(_))),
+            "the at-limit transfer must have been accepted"
+        );
+    }
+
+    /// The receive default matches the reference: an unrestricted sender's
+    /// Resource one byte over 1 000 000 is refused by a default-constructed
+    /// node at the advertisement.
+    #[test]
+    fn default_receiver_rejects_resource_above_python_delivery_limit() {
+        let unrestricted = LxmfNodeConfig {
+            max_outgoing_delivery_size: None,
+            ..LxmfNodeConfig::default()
+        };
+        let (mut sender, mut receiver) = linked_pair(peer_with_config(33, unrestricted), peer(133));
+        let m = message_packed_exactly(
+            receiver.destination,
+            &sender.signing_identity,
+            sender.destination,
+            1_000_001,
+        );
+
+        let output = sender.lxmf.send(&mut sender.node, &m).expect("send");
+        let mut sender_events = Vec::new();
+        let mut receiver_events = Vec::new();
+        pump(
+            &mut sender,
+            &mut receiver,
+            take_packets(output.core.actions),
+            &mut sender_events,
+            &mut receiver_events,
+        );
+        assert!(
+            receiver_events.iter().any(|e| matches!(
+                e,
+                LxmfNodeEvent::InboundRejected {
+                    reason: InboundRejection::ResourceTooLarge,
+                    ..
+                }
+            )),
+            "default receiver must refuse an over-limit advertisement: {receiver_events:?}"
+        );
+        assert_eq!(receiver.lxmf.incoming_resource_count(), 0);
+        assert!(
+            !receiver_events
+                .iter()
+                .any(|e| matches!(e, LxmfNodeEvent::MessageReceived(_))),
+            "no over-limit message may be delivered"
+        );
     }
 }

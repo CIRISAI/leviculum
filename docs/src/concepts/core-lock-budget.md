@@ -55,7 +55,7 @@ Resource to the same link cannot build at all
 (`ResourceError::TransferInProgress`), so re-using one would not repeat
 the measurement. Both harnesses are `#[ignore]`d and print every number
 below:
-`measure_send_lock_costs` (`leviculum-lxmf/src/node.rs:2375`) for the
+`measure_send_lock_costs` (`leviculum-lxmf/src/node.rs:2430`) for the
 send tables, `measure_deferred_tick_costs`
 (`leviculum-lxmf/tests/direct_delivery_attempts.rs:1421`) for the tick
 table.

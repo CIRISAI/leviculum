@@ -793,6 +793,24 @@ impl LxmfRouter {
                 crate::stamp::ticket_stamp(&ticket.secret, &message.message_id).to_vec(),
             )?;
         }
+        // Refuse a delivery no Python peer would accept before any send work
+        // happens. The reference has no send-side check and lets the receiver
+        // refuse the advertisement (`delivery_resource_advertised`,
+        // `reference/LXMF/LXMF/LXMRouter.py:1977`); refusing here spares the
+        // pack/compress/encrypt/advertise round trip that ends the same way.
+        // Propagated messages are exempt: their wire form is the propagation
+        // envelope, which the delivery limit does not measure.
+        if message.method != DeliveryMethod::Propagated {
+            if let Some(limit) = self.node.config().max_outgoing_delivery_size {
+                let size = message.pack().len() as u64;
+                if size > limit {
+                    return Err(RouterError::Node(LxmfNodeError::DeliveryLimitExceeded {
+                        size,
+                        limit,
+                    }));
+                }
+            }
+        }
         let id = message.message_id;
         self.outbound.insert(
             id,
@@ -3905,5 +3923,40 @@ mod persistence_tests {
         assert_eq!(after.stamp, None);
         assert_eq!(entry.state(), MessageState::Outbound);
         assert_eq!(entry.next_attempt_ms, node.now_ms());
+    }
+
+    /// A message a Python peer would refuse at the Resource advertisement is
+    /// refused at enqueue with the distinguishable error, and nothing is
+    /// queued: no `MessageQueued`, no outbound entry, no core actions.
+    #[test]
+    fn enqueue_refuses_message_over_delivery_limit() {
+        let (mut router, node) = router_and_node(RouterConfig::default());
+        let source = identity_from(7);
+        let over_limit = Message::create(
+            [0x21; 16],
+            [0x22; 16],
+            &source,
+            1_700_000_000.25,
+            b"too big".to_vec(),
+            alloc::vec![0x5a; 1_000_001],
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let size = over_limit.pack().len() as u64;
+        assert!(size > 1_000_000);
+
+        let refused = router.enqueue(&node, over_limit);
+        match refused {
+            Err(RouterError::Node(LxmfNodeError::DeliveryLimitExceeded {
+                size: reported,
+                limit,
+            })) => {
+                assert_eq!(reported, size);
+                assert_eq!(limit, 1_000_000);
+            }
+            other => panic!("expected DeliveryLimitExceeded, got {other:?}"),
+        }
+        assert!(router.outbound.is_empty(), "nothing may be queued");
     }
 }

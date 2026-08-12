@@ -29,11 +29,12 @@ use leviculum_core::transport::{Action, InterfaceId, TickOutput};
 use leviculum_core::{DestinationHash, MemoryStorage};
 use leviculum_lxmf::announce;
 use leviculum_lxmf::router::{
-    LxmfRouter, MessageState, PropagationClientConfig, RouterConfig, RouterEvent, RouterOutput,
+    LxmfRouter, MessageState, PropagationClientConfig, RouterConfig, RouterError, RouterEvent,
+    RouterOutput,
 };
 use leviculum_lxmf::{
-    CooperativeStamper, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig, Message,
-    PropagationTransport, Verification,
+    CooperativeStamper, DeliveryMethod, DeliveryStampRequest, InboundRejection, LxmfNode,
+    LxmfNodeConfig, LxmfNodeError, Message, PropagationTransport, Verification,
 };
 use leviculum_std::interfaces::hdlc::{DeframeResult, Deframer};
 
@@ -968,4 +969,169 @@ async fn test_lxmf_timestamp_subsecond_precision_interop() {
         "our message ID must be the hash Python computed over the same timestamp"
     );
     assert!(message.timestamp > 1_700_000_000.0);
+}
+
+/// A direct message whose packed wire size is exactly `target` bytes.
+///
+/// Two-pass: measure the fixed packing overhead once, then size the content
+/// so `pack()` lands on the byte. Both passes stay in msgpack's bin32 range
+/// so the header width cannot change between them.
+fn message_packed_exactly(client: &LxmfClient, destination: [u8; 16], target: usize) -> Message {
+    let probe_len = 100_000;
+    let probe = client
+        .router
+        .create_message(
+            &client.node,
+            destination,
+            b"limit title".to_vec(),
+            vec![0x5a; probe_len],
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("probe message");
+    let overhead = probe.pack().len() - probe_len;
+    let message = client
+        .router
+        .create_message(
+            &client.node,
+            destination,
+            b"limit title".to_vec(),
+            vec![0x5a; target - overhead],
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("sized message");
+    assert_eq!(
+        message.pack().len(),
+        target,
+        "two-pass sizing must land exactly"
+    );
+    message
+}
+
+/// Boundary against the real reference: a message packed to exactly the
+/// 1 000 000 byte delivery limit passes our send-side check and arrives at
+/// the Python peer. Python's `delivery_resource_advertised` refuses only
+/// strictly above the limit (LXMRouter.py:1980 `size > limit`), so an
+/// at-limit transfer is the sharpest possible accept case — it proves both
+/// stacks compare with the same operator.
+#[tokio::test]
+async fn test_lxmf_delivery_at_limit_reaches_python() {
+    let (daemon, mut client, py_info) = setup_pair(None).await;
+    let py_hash = crate::common::parse_dest_hash(&py_info.delivery_hash);
+
+    let message = message_packed_exactly(&client, *py_hash.as_bytes(), 1_000_000);
+    let expected_content_len = message.content.len();
+    let message_id = message.message_id;
+    let output = client
+        .router
+        .enqueue(&client.node, message)
+        .expect("an at-limit message must be accepted at enqueue");
+    client.absorb(output).await;
+
+    let delivered = client
+        .pump_until(Duration::from_secs(90), |c| c.delivered(&message_id))
+        .await;
+    assert!(
+        delivered,
+        "at-limit delivery must be confirmed by the Python peer"
+    );
+
+    let received = wait_for_python_received(&daemon, &message_id, Duration::from_secs(30))
+        .await
+        .expect("Python LXMF router must deliver the at-limit message");
+    assert_eq!(received.content.len(), expected_content_len);
+    assert!(received.content.iter().all(|b| *b == 0x5a));
+    assert!(received.signature_validated);
+}
+
+/// One byte over the limit is refused by US, before the wire: enqueue
+/// returns the distinguishable error, nothing is queued, no advertisement
+/// is ever produced, and the Python peer records nothing — the refusal is
+/// ours, not a Python-side drop.
+#[tokio::test]
+async fn test_lxmf_delivery_over_limit_refused_before_wire() {
+    let (daemon, mut client, py_info) = setup_pair(None).await;
+    let py_hash = crate::common::parse_dest_hash(&py_info.delivery_hash);
+
+    let message = message_packed_exactly(&client, *py_hash.as_bytes(), 1_000_001);
+    let message_id = message.message_id;
+    let refused = client.router.enqueue(&client.node, message);
+    match refused {
+        Err(RouterError::Node(LxmfNodeError::DeliveryLimitExceeded { size, limit })) => {
+            assert_eq!(size, 1_000_001);
+            assert_eq!(limit, 1_000_000);
+        }
+        other => panic!("expected DeliveryLimitExceeded, got {other:?}"),
+    }
+    assert!(
+        client.router.outbound().is_empty(),
+        "a refused message must not be queued"
+    );
+
+    // Event/action level: the refusal produced no RouterOutput at all, so no
+    // advertisement exists that could be written to the wire. Keep both
+    // stacks running anyway and assert Python never records the message.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        client.pump_once().await;
+    }
+    assert!(
+        !client
+            .events
+            .iter()
+            .any(|e| matches!(e, RouterEvent::MessageQueued(id) if id == &message_id)),
+        "no queue event may exist for the refused message"
+    );
+    let messages = daemon.lxmf_get_received().await.unwrap_or_default();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.message_hash == hex::encode(message_id)),
+        "Python must never have seen the refused message"
+    );
+}
+
+/// Receive direction against the real reference: Python's sender applies no
+/// outbound limit and advertises a Resource above 1 000 000 bytes; our
+/// default-constructed node must refuse it at the advertisement, exactly as
+/// a Python receiver would.
+#[tokio::test]
+async fn test_lxmf_python_over_limit_delivery_rejected_by_our_default() {
+    let (daemon, mut client, py_info) = setup_pair(None).await;
+    let py_hash = crate::common::parse_dest_hash(&py_info.delivery_hash);
+
+    let content = vec![0x33u8; 1_000_100];
+    let _message_hash = daemon
+        .lxmf_send(
+            &hex::encode(client.delivery_hash),
+            "direct",
+            &content,
+            b"too big",
+            None,
+        )
+        .await
+        .expect("lxmf_send");
+
+    let rejected = client
+        .pump_until(Duration::from_secs(60), |c| {
+            c.events.iter().any(|e| {
+                matches!(
+                    e,
+                    RouterEvent::InboundRejected {
+                        reason: InboundRejection::ResourceTooLarge,
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+    assert!(
+        rejected,
+        "our default receive limit must refuse Python's over-limit advertisement"
+    );
+    assert!(
+        client.received_message(py_hash.as_bytes()).is_none(),
+        "the over-limit message must not be delivered"
+    );
 }
