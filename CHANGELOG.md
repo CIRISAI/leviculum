@@ -5,345 +5,117 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-
-- LXMF enforces Python's per-transfer limits in both directions: over-limit
-  sends are refused before any build, and incoming delivery Resources above
-  1 000 000 bytes are refused by default.
-
-- EU default → ReticulumNet consensus 869.463 MHz/SF8.
+## [0.8.1] - 2026-08-12
 
 ### Added
 
-- `lnflash`: radio preset menu (eu868/us915/au915), `--radio-preset`.
-
-- An LNode keeps its radio configuration in flash, so a host-set frequency
-  survives a reset instead of falling back to the compiled default.
-
-- `lnflash` sets that configuration at flash time: the EU868 defaults, five
-  prompted values, or the `--radio-*` flags.
-
-- The `leviculum-lxmf` error types implement `Display` and
-  `core::error::Error`, so a client shows an error instead of wording one.
-
-- `FileLxmfStorage` in `leviculum-std` persists LXMF state to a directory,
-  so a host application no longer writes its own `LxmfStorage`.
-
-- `MessageState::AwaitingCollection` reports a message a propagation node
-  holds for a recipient who has not collected it, instead of the `Sent` a
-  direct delivery gets. Local bookkeeping; nothing changes on the wire.
-
-- `RouterEvent::PeerAnnounced` reports a peer's decoded delivery announce,
-  so an application reads a display name without filtering announces and
-  decoding app data itself.
-
-- The T114 firmware drives the board's optional ST7789 TFT with the same
-  status screen the WisMesh Pocket V2 shows, blind and default-on (the
-  write-only panel cannot be probed), painted by a shared host-tested
-  crate with dirty-rectangle SPI updates.
-
-- A TCP server interface configured with port 0 reports its kernel-assigned
-  address: `tcp_listen_addrs()` on the node, `lev_tcp_listen_addr` in the C
-  API (Codeberg #221).
-
-- `lblogd` counts what it served, one appended `key=value` record per UTC
-  day in `<data_dir>/counts.log` (`[counter]` moves it or switches it
-  off). Requests and links, named as such: a Reticulum link is a session
-  and not a person, `RequestReceived` carries no identity at all, and the
-  web side never reads a peer address — so there is no visitor number,
-  because neither side can honestly produce one. Each record holds that
-  day's whole running total and the last record for a date wins, so a
-  `kill -9` mid-append costs at most the line it was writing and never an
-  earlier day; a clock stepping backwards keeps the open day open and
-  says so in `clock_behind` rather than rewriting a day already on disk.
-  The day is written every five minutes, at each rollover and on
-  `SIGTERM`, a restart resumes the day from the file, and each start
-  compacts it to one record per date.
-
-### Fixed
-
-- A transport relay forwards path-directed packets back onto the
-  receiving interface (same-interface relay, as Python-RNS does), so
-  multi-hop on a single shared LoRa channel delivers.
-
-- The nRF firmware no longer builds its `NodeCore` on the stack: the
-  94 KB `main` frame that left the T114 ~13 KB of stack margin is gone.
-  New `NodeCoreBuilder::build_boxed`, plus a `just nrf-stack-frames` gate
-  that fails any firmware frame above 16 KB.
-
-- LXMF message timestamps carry microsecond precision, so two identical
-  messages sent back to back are two messages and not a duplicate
-  (Codeberg #217).
+- `lnflash`, a new LNode flashing tool: the full bootloader/SoftDevice
+  sequence with Nordic's S140 7.3.0 vendored (licence included), refusal
+  of an image that would soft-brick the board, `just lnflash-bundle` for
+  the distributable tarball.
+- `lnflash` sets the radio configuration at flash time: prompted values,
+  `--radio-*` flags, or a preset menu (`--radio-preset` eu868/us915/au915).
+- The LNode stores its radio settings in flash, so a host-set
+  configuration survives a reset instead of reverting to the compiled
+  default.
+- `lnstatus` shows a radio interface's last RSSI and SNR (#76).
+- `lnstatus -j --tables` exposes the transport's routing tables as
+  structured JSON (#174).
+- Per-link delivery telemetry — delivery rate, RTT, backpressure — as
+  read-only counters; `lev_link_stats` in the C API (#154, emoore).
+- The propagation-node HOST direction is public, so an external crate
+  can operate a propagation node instead of only being a client of one
+  (#201, emoore).
+- `lxmf-node`, a new crate running `leviculum-lxmf` as a shared-instance
+  client of `lnsd` or `rnsd`, speaking periculum's LXMF helper protocol
+  (#196).
+- `leviculum-std` runs a consumer `CoreProcessor` inside the driver's
+  tick, panic-contained and self-deadlock-reporting (#196, #198).
+- LXMF: `FileLxmfStorage` persists state to a directory,
+  `MessageState::AwaitingCollection` reports a mailboxed message,
+  `RouterEvent::PeerAnnounced` carries a peer's decoded display name,
+  error types implement `Error`, `StampExecutor::generate` is `Send`
+  (#203).
+- Auto-connected discovered peers inherit the bootstrap interface's
+  IFAC (#151).
+- T114: status screen on the board's optional ST7789 TFT, default-on.
+- The LNode honours a host-side reboot frame on its control channel.
+- A TCP server on port 0 reports its kernel-assigned address (#221).
+- lblogd: a file area so a post can carry pictures, Markdown tables
+  rendered as micron tables, per-day served-request counts.
+- lnomad: pictures drawn inline (Kitty/iTerm2/Sixel or half-blocks),
+  with a bounded in-memory cache (`--image-cache`).
 
 ### Changed
 
 - BREAKING: an interface with no `txpower` asks for the board maximum
   (22 dBm) instead of 0 dBm, capped by the lawful ERP limit for the
-  frequency from ERC 70-03 (14 dBm on the EU 25 mW sub-bands, 10 dBm on
-  433 MHz). A board that can do less clamps and says so; an explicit
-  `txpower` wins even above the cap and is logged; `txpower = 0` still
-  means 0. A deliberate deviation from Python-Reticulum, pinned in the
-  compatibility document.
-
-- A carrier whose occupied bandwidth touches one of the narrowband alarm
-  bands between the EU sub-bands (868.6-868.7 MHz and siblings) is a
-  config error at interface build, not an unlimited band.
-
-- The derived airtime limit covers 433.05-434.79 MHz at 10% duty cycle.
-
+  frequency (14 dBm on the EU 25 mW sub-bands, 10 dBm on 433 MHz); an
+  explicit `txpower` wins and is logged. A deliberate, documented
+  deviation from Python-Reticulum.
+- The `lnflash` EU default is the ReticulumNet consensus channel:
+  869.463 MHz, SF8, BW125, CR4/5, 22 dBm.
+- COMPAT: LXMF enforces Python's per-transfer limits in both directions:
+  over-limit sends are refused before any build, incoming delivery
+  Resources above 1 MB are refused by default; both configurable (#218).
+- A carrier touching one of the narrowband alarm bands between the EU
+  sub-bands is a config error; the derived airtime limit covers
+  433.05-434.79 MHz at 10 % duty cycle; a TX power the SX1262 cannot
+  set is rounded down and logged, not silently 14 dBm.
 - The LNode firmware's compiled profile transmits at 22 dBm, not 17.
-
-- A configured TX power the SX1262 has no PA setting for is rounded down
-  to the nearest one and logged, instead of silently becoming 14 dBm.
-
-- `StampExecutor::generate` returns a `Send` future, so a host can spawn a
-  stamp mine on a work-stealing runtime. Custom executors and `Yield`
-  implementations must be `Send` (Codeberg #203).
-
-- Every long-lived external process this repository spawns now dies with
-  its parent because the kernel kills it, not because a destructor got to
-  run. `leviculum_std::process::spawn_supervised` sets
-  `PR_SET_PDEATHSIG` to `SIGKILL` on the child between `fork` and `exec`,
-  and forks from one dedicated thread that never exits — the flag is
-  per-task and fires when the *forking task* exits, so forking from a
-  tokio worker would have killed daemons mid-test. The child also
-  re-reads `getppid()` after setting the flag and stands down if it lost
-  its parent inside that window. It covers the Python `TestDaemon` and
-  its `socat` pty pair, `PyDaemon`, the C `lnsd`/`lncp`/`levcat`
-  programs, `lnsd` and the vendored `rnsd` in the mvr, load-test,
-  reverse-RPC, status-parity and instance-conflict harnesses, and the
-  production `PipeInterface` bridge program. Seven orphaned
-  `scripts/test_daemon.py` processes were found alive on 2026-08-07, the
-  oldest over four hours old and from several different runs, one of
-  which held a pipe that kept `just standard` alive for two hours after
-  its verdict was decided.
-- `just fast` gained both halves of that property: a census over the
-  sources pinning every remaining bare `Command::new(..).spawn()` per
-  file (`scripts/supervised-spawn-counts.txt`), and a test that SIGKILLs
-  a parent and requires its child to be gone within a bounded deadline —
-  paired with the same experiment on a bare spawn, where the child must
-  survive.
-- A gate wrapped by `scripts/run-with-manifest.py` waits for its command
-  to exit rather than for the output pipe to close, so a process a test
-  leaked can no longer hold it open: `just standard` spent two hours
-  alive and silent on 2026-08-07 holding a red it had already decided.
-  The command's process group is killed once it has exited, every
-  survivor is reported by pid and command line, and a gate that exceeds
-  its budget (1800 s by default, `--timeout` per gate,
-  `LEVICULUM_GATE_TIMEOUT` globally) exits 124 naming itself, how long it
-  waited and what was still alive. A standing canary spawns a child that
-  leaks a grandchild holding the pipe and fails if the wrapper stops
-  terminating.
-- `just complete`, in the `extensive` tier, runs the whole workspace by
-  construction instead of the tiers naming packages; 327 tests were
-  executed by no gate (#194).
-- Test listener ports come from one counter per host, so concurrent test
-  processes are never handed the same port (#194).
-- `just standard` runs the `status_parity` two-daemon suite (#191).
-- The number of `#[ignore]`d tests is pinned per test unit and checked
-  in `just standard` (#191).
-- A connection accepted by a listener inherits the listener's
-  `ingress_control` instead of always having it off, and a listener
-  defaults it on as the reference does (#189).
-- `lnstest selftest` sizes its single-packet delivery window from the
-  link's own bitrate and pre-TX jitter ceiling instead of a fixed sleep,
-  and reports an expiry as a budget expiry rather than as loss (#190).
-- `lnstest -c <dir> selftest` asks the daemon that owns the radio for
-  that link profile; without it the phases keep the fixed wait (#190).
-- The drain budget prices the frame as it crosses the air, including the
-  address field a forwarder inserts, not as the tool packed it (#190).
-- `interface_stats` reports a radio interface's own on-air bitrate
-  instead of the TCP `BITRATE_GUESS`, and adds `tx_jitter_max` (#190).
-- `interface_stats` reports the listeners the daemon runs (shared
-  instance, TCP server) next to its routable interfaces, and names every
-  accepted connection like the reference does (#177).
-- Signing an LXMF message with a `NaN` or infinite timestamp is refused
-  (#184).
-- The LXMF router resolves wall time from `NodeCore::emission_secs`
-  instead of a `now_unix` parameter, and refuses to issue a ticket on a
-  node with no plausible clock (#182).
+- Resource sends build off the node lock and inbound packets are
+  pre-hashed outside it (#29 stage 1, emoore); a resource build can be
+  handed to the caller, and superseded builds are refused (#196,
+  PAzter1101).
 
 ### Fixed
 
-- `PyDaemon::drop` reaches the kill on every path. It sent the polite
-  `shutdown` RPC through a helper that `expect`ed a JSON response, and a
-  daemon that is already stopping answers with an empty body — so the
-  destructor panicked, and a panic in a destructor already running during
-  unwinding aborts the process, which meant `child.kill()` two lines
-  below never ran. That is the second, independent reason the same daemon
-  leaked on 2026-08-07 (#215). The polite shutdown now swallows every
-  error it can produce and the kill is unconditional.
-- A propagation upload is refused at the length Python refuses it at.
-  `PropagationUpload::decode` guarded at `STAMP_SIZE +
-  DESTINATION_LENGTH` (48) where `validate_pn_stamp` guards at
-  `LXMF_OVERHEAD + STAMP_SIZE` (144), so a host on this decoder stored
-  bodies in the band 49..=144 that every Python propagation node
-  discards — and that its own `PropagatedMessage::from_unstamped_bytes`
-  then refused. That parser was the same bound off by one from the other
-  side, accepting exactly `LXMF_OVERHEAD`; both now reject where the
-  reference does (#201).
-- `generate_stamp` refuses a cost above the 256-bit hash width instead
-  of searching for a stamp that cannot exist: `stamp_valid` rejects every
-  candidate at that cost, so the loop could not terminate at all and one
-  off-by-one past the legal maximum left the node permanently dead.
-- A `CoreProcessor`'s `on_tick` output is dispatched on its own instead
-  of being merged into the core's, so it no longer re-enters the event
-  tap, the `/status` responder — which answers on the strength of a
-  core-side authorisation that never ran for a synthesised request — or
-  the discovery registry, which would persist a synthesised announce.
-  The two hooks are now isolated identically (#196).
-- A `CoreProcessor` sees the `FramesDropped` its own send caused. The
-  notice is built inside `dispatch_output` and never passes through
-  `handle_packet`, so it was the one #25 loss signal a processor could
-  not learn any other way (#196).
-- The processor budget report is measured from inside the core lock, so
-  another thread's contention is no longer charged to a processor that
-  did nothing (#196).
-- A `next_deadline_ms` returned from `on_event` is honoured, as one
-  returned from `on_tick` already was (#196).
-- The `status_parity` freeze waits out the 1 Hz traffic sampler, so a
-  speed that has not been sampled yet is no longer read as an idle one
-  (#195).
-- Every gate wrapper keeps its full output on disk, and a failure's copy
-  survives the green runs after it (#195).
-- A targeted path response is transmitted once instead of twice, so a
-  requester no longer gets a duplicate announce five seconds later
-  (#192).
-- An LXMF message whose timestamp is any msgpack number, not only
-  float64, is accepted, and an unstamped payload is hashed as received
-  instead of re-encoded; both dropped messages from writers other than
-  Python LXMF (#183).
-- One direct LXMF delivery cycle now consumes one delivery attempt
-  instead of two, and a failed outgoing Resource tears its link down
-  before the retry; a receiver's cancel is terminal and keeps the link
-  (#179, contributed by nilu96).
-- A repeated propagation stamp request no longer writes an identical
-  router snapshot every processing interval (#179, contributed by
-  nilu96).
-- An announced LXMF stamp cost outside the reference's `0 < cost < 255`
-  window is no longer sent, and an announced 255 from a peer is no
-  longer mined; both would run forever (#181).
-- A re-originated recursive path request now honours the per-interface
-  egress limit, so an interface already saturated with path requests is
-  skipped instead of carrying every one (#172).
-- Creating a destination with a dot in `app_name` or an aspect is
-  rejected like the reference, closing a destination-hash collision
-  (#163).
-- A corrupt discovery record is warned about once per record instead of
-  on every scan pass (#157).
-- A path request for a destination hosted on a shared-instance client
-  is now forwarded to that client and answered with the client's fresh
-  path response instead of only the cached announce (#171).
-- A local destination that has not announced since process start now
-  answers its first path request instead of only the retry (#169).
-- A path request from the transport instance that is our own next hop
-  toward the requested destination is no longer answered, matching the
-  reference's loop-avoidance rule (#168).
-- The resource advertisement `o` field carries the salted per-transfer
-  hash like the reference, so a Python receiver can no longer append
-  two transfers of identical content into one reassembly file (#165).
-- Request timestamps carry epoch seconds from the emission timebase
-  instead of process uptime, so a Python peer's request handlers see a
-  real `requested_at` (#164).
+- A transport relay forwards path-directed packets back onto the
+  receiving interface, so multi-hop over a single shared LoRa channel
+  delivers (A-B-C repeater).
+- COMPAT: path handling matches the reference — a shared-instance
+  client's destination answers with a fresh path response (#171), a
+  never-announced local destination answers its first request (#169),
+  no response to the requesting next hop (#168), a targeted response
+  transmits once (#192), a pending rebroadcast survives serving a
+  response (#170), and re-originated path requests honour the
+  per-interface egress limit (#172).
+- COMPAT: announces carry wall-clock unix time (#155), the learned
+  timebase of a clockless node resists capture (#160), request
+  timestamps carry epoch seconds (#164), and `app_data` survives
+  re-announce paths.
+- COMPAT: LXMF timestamps — any msgpack number is accepted and the
+  payload hashed as received (#183), non-finite is refused at signing
+  (#184), wall time comes from the node's timebase (#182), microsecond
+  precision keeps back-to-back messages distinct (#217).
+- COMPAT: propagation length guards reject where Python's do (#201);
+  the resource advertisement `o` field carries the salted per-transfer
+  hash (#165); a dot in `app_name` or an aspect is rejected (#163).
+- One direct LXMF delivery cycle consumes one attempt, and a failed
+  outgoing Resource tears its link down before the retry (#179, nilu96).
+- A stamp cost outside Python's window is neither announced nor mined,
+  and an impossible cost fails instead of hanging the node (#181).
+- An accepted connection inherits its listener's `ingress_control`,
+  default-on like the reference (#189).
+- `lnstest selftest` sizes its delivery windows from the link's own
+  bitrate and asks the daemon that owns the radio (#190);
+  `interface_stats` reports the radio's on-air bitrate, TX jitter and
+  the daemon's listeners (#177, #190).
+- `UDPInterface` accepts a hostname in `forward_ip`, re-resolved at
+  runtime (#148).
+- A corrupt discovery record is warned about once, not per scan (#157).
+- The nRF firmware no longer builds `NodeCore` on the stack: the 94 KB
+  `main` frame that ate the T114's stack margin is gone, and a gate
+  fails any firmware frame above 16 KB.
+- lnomad sizes half-block pictures by half-block geometry and renders
+  table cells as the inline micron they are.
 
-- UDPInterface accepts a hostname in `forward_ip` like rnsd, resolves
-  it at runtime with periodic re-resolution, and reports resolution
-  failures as interface errors instead of config errors (#148).
-- Announces now carry wall-clock unix time in the emission timestamp
-  instead of process uptime, so Python peers order our paths correctly
-  and a restarted node reclaims its own path entries (#155). Clockless
-  nodes (LNode) learn the timebase from received announces or a host
-  injection.
-- The learned emission timebase refuses implausible values, a single
-  announce can only advance an existing timebase by a bounded step,
-  and emitted timestamps saturate at the 40-bit field maximum, so a
-  crafted or wrong-clock announce can no longer capture a clockless
-  node's timebase or truncate its emissions (#160).
+### Internal
 
-### Added
-
-- The propagation-node HOST direction is public: `PropagationUpload::
-  decode`, `MessageGetRequest::decode`, `MessageListResponse::encode`,
-  `MessageGetResponse::encode`, `PropagationNodeAnnounce::encode`,
-  `PropagationSignal::encode`, `PeerError::code` and `PropagatedMessage`,
-  so an external crate can operate a propagation node and not only be a
-  client of one (#201, leviculum#38). `PropagationSignal::encode` emits
-  the `[LXMPeer.ERROR_INVALID_STAMP]` packet a node sends when it refuses
-  an upload; `PropagationError::MultipleMessages` reports the peer
-  `/offer` sync form distinctly from a malformed length.
-- `lxmf-node`, a new `leviculum-lxmf-node` crate, runs `leviculum-lxmf`
-  as a shared-instance client of `lnsd` or `rnsd` and speaks periculum's
-  LXMF helper protocol — the same stdin commands and `EVENT` lines as the
-  Python `lxmf_node.py`. periculum's six LXMF verbs now drive either
-  messaging stack via `lxmf_start`'s `helper` field, so a scenario can
-  hold the daemon constant and vary only the messaging stack. Built
-  entirely on the two crates' public APIs, which is the acceptance
-  evidence for #196's first criterion (#196).
-
-- `leviculum-std` lets a consumer register a `CoreProcessor` that runs
-  inside the driver's tick: it receives `&mut StdNodeCore` plus each
-  `NodeEvent` and returns a `TickOutput` the driver dispatches on its own
-  send path, so `leviculum-lxmf` can be driven on the async runtime
-  without forking the driver. The events are tapped ahead of the lossy
-  application sink, so a processor sees the `EventClass::Data` events the
-  sink is entitled to drop (#196).
-
-- A panic in a registered `CoreProcessor` no longer kills the node. The
-  driver catches the unwind, detaches the processor for good and reports
-  `NodeEvent::CoreProcessorPanicked` on the control plane, so a consumer
-  learns its state machine stopped instead of waiting on an event stream
-  nothing will ever close again (#196).
-
-- `lnstatus -j --tables` adds the transport's path, reverse, link,
-  announce, announce-cache and tunnel tables to the JSON output, so a
-  test can assert on routing state instead of scraping logs. A daemon
-  that cannot answer omits the key rather than reporting empty tables
-  (#174).
-
-- The LNode firmware honours a host-side reboot frame on its control
-  channel and ACKs before resetting, so a test harness can start every
-  run from a defined board state.
-
-- lblogd serves a file area, so a post can carry pictures. Micron has
-  no image construct, so `![Mast](mast.jpg)` publishes the file at
-  `/files/mast.jpg` on the web and at `/file/mast.jpg` on the mesh, in
-  NomadNet's `serve_file` wire form, linked from the page. Configured
-  with `files_dir` and bounded per file by `max_file_bytes` (10 MiB).
-- lnomad draws those pictures in the page: a `/file/` link naming a
-  decodable format and standing alone on its line is fetched and drawn
-  through the terminal's graphics protocol (Kitty, iTerm2, Sixel), else
-  Unicode half-blocks, else a line naming the file, format and size —
-  which is also what a failed decode and `--no-color` give. Fetched
-  after the page is on screen, one at a time, at most eight per page;
-  `Esc` cancels the queue and `--images off` disables it. `Enter` saves
-  a picture and `o` opens it, neither transferring it again.
-- Fetched pictures are kept in a byte-bounded in-memory LRU cache, so a
-  revisit costs no airtime: `--image-cache <megabytes>` (default 10, `0`
-  disables). Memory only, never disk.
-- A Markdown table in a post becomes a micron `` `t `` table instead of
-  plaintext rows: header, the alignment row micron reads as the second
-  line, then the data rows, with a literal `|` in a cell escaped as the
-  reference parser expects.
-
-### Fixed
-
-- lnomad sizes a half-block picture by half-block geometry. A cell there
-  carries one pixel across and two down, but the fit was measured against
-  the terminal's font box, so a 300x300 portrait was drawn as 38x38
-  pixels — recognisable as nothing. It now fills the page width (78x78
-  for that portrait), may run up to two screenfuls tall since height is
-  resolution on that backend, and asks the protocol for that area with
-  `Resize::Scale`, which `Resize::Fit` had been quietly undoing.
-- lnomad renders a table cell's contents as the inline micron they are.
-  Cells were pushed to the screen as plain text, so a style, a colour or
-  a link inside one showed its markup — `` `B333code`b `` instead of
-  `code` — and the column was sized to the markup rather than to the
-  text. Each cell is now parsed and flattened, as the reference does by
-  re-parsing every formatted row line, which also makes a link in a cell
-  followable and sizes columns by visible width. An escaped `\|` splits
-  no column and loses its backslash.
+- Spawned test and bridge processes die with their parent
+  (`PR_SET_PDEATHSIG`), gate wrappers time out and report survivors,
+  the nightly tier runs the whole workspace by construction, test ports
+  come from one per-host counter, citation guards cover Rust source.
 
 ## [0.8.0] - 2026-08-01
 
