@@ -103,7 +103,7 @@ expression. It does not substitute literals and does not mutate consts —
 where this project's semantics live: `PATHFINDER_RETRIES`
 (`leviculum-core/src/constants.rs:115`). The #192 defect was
 `retries: 0` where `PATHFINDER_RETRIES` belonged, and the fixed site
-writes `PATHFINDER_RETRIES` (`leviculum-core/src/transport.rs:7560`)
+writes `PATHFINDER_RETRIES` (`leviculum-core/src/transport.rs:7583`)
 into a literal that spells every field out — so not even the
 field-deletion operator reaches it, and no operator substitutes one
 const for another.

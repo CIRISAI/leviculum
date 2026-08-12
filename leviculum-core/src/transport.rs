@@ -5057,6 +5057,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // forwarding (Python Transport.py:2016-2039).
                 if packet.context != PacketContext::Lrproof {
                     self.storage.add_packet_hash(cache_hash);
+
+                    // Non-LR proofs ride Python's general link-table repeat arm
+                    // (Transport.py:1646 excludes only ANNOUNCE, LINKREQUEST
+                    // and the LRPROOF context), so their repeat also refreshes
+                    // the rolling LINK_TIMEOUT window (Transport.py:1681).
+                    // LRPROOF stays out: Python's LRPROOF relay (:2175-2196)
+                    // touches only IDX_LT_VALIDATED, and our validation branch
+                    // above already stamps the timestamp once.
+                    let now = self.clock.now_ms();
+                    if let Some(entry) = self.storage.get_link_entry_mut(&dest_hash) {
+                        entry.timestamp_ms = now;
+                    }
                 }
 
                 // Forward proof via link table
@@ -5420,6 +5432,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // shared medium, passed dedup and was forwarded back onto the
                     // ipc leg to the sender.
                     self.storage.add_packet_hash(full_packet_hash);
+
+                    // Refresh the link entry on every actual repeat (Python
+                    // Transport.py:1681): LINK_TIMEOUT is a rolling inactivity
+                    // window. Without the refresh the relay expires an ACTIVE
+                    // link at absolute age LINK_TIMEOUT_MS and forces the
+                    // endpoints into teardown + re-establishment every 15
+                    // minutes. Idle expiry is untouched — no repeat, no refresh.
+                    if let Some(entry) = self.storage.get_link_entry_mut(&dest_hash) {
+                        entry.timestamp_ms = now;
+                    }
 
                     // Forward data via link table
                     crate::tracing::trace!(
@@ -12209,6 +12231,169 @@ mod tests {
 
             // Should still be present
             assert!(transport.storage().has_link_entry(&link_id));
+        }
+
+        #[test]
+        fn test_link_entry_survives_active_data_traffic() {
+            // Python refreshes IDX_LT_TIMESTAMP on every actual link-table
+            // repeat (Transport.py:1681): LINK_TIMEOUT is a rolling
+            // inactivity window, not an absolute age. A relayed link that
+            // carries traffic must survive past LINK_TIMEOUT_MS; expiring it
+            // at absolute age tears down every long-held field link at the
+            // relay after 15 minutes regardless of activity.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let now = transport.clock.now_ms();
+
+            let link_id = [0xAA; TRUNCATED_HASHBYTES];
+            transport.storage_mut().set_link_entry(
+                link_id,
+                LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: 1,
+                    remaining_hops: 1,
+                    received_interface_index: 0,
+                    hops: 1,
+                    validated: true,
+                    proof_timeout_ms: now + 30_000,
+                    destination_hash: [0xBB; TRUNCATED_HASHBYTES],
+                    peer_signing_key: None,
+                },
+            );
+
+            // Link data every 5 minutes for 30 minutes — twice the timeout.
+            // Unique payload per round: the repeat itself caches the packet
+            // hash, an identical packet would die in ingress dedup.
+            for round in 0u8..6 {
+                transport.clock.advance(300_000);
+                transport.poll();
+
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type: crate::destination::DestinationType::Link,
+                        packet_type: PacketType::Data,
+                    },
+                    // Wire hops 0: process_incoming() increments to 1, which
+                    // matches link_entry.hops for initiator-side routing.
+                    hops: 0,
+                    transport_id: None,
+                    destination_hash: link_id,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(alloc::vec![round; 100]),
+                };
+                let mut buf = [0u8; 500];
+                let len = packet.pack(&mut buf).unwrap();
+                transport.process_incoming(0, &buf[..len]).unwrap();
+
+                // The refresh only happens on an ACTUAL repeat — prove the
+                // repeat arm ran this round.
+                let actions = transport.drain_actions();
+                assert!(
+                    actions
+                        .iter()
+                        .any(|a| matches!(a, Action::SendPacket { .. })),
+                    "round {round}: link data must be repeated via link table"
+                );
+                assert!(
+                    transport.storage().has_link_entry(&link_id),
+                    "round {round}: entry must survive — every repeat refreshes \
+                     the rolling inactivity window (Python Transport.py:1681)"
+                );
+            }
+
+            // The expiry itself stays intact: idle for LINK_TIMEOUT_MS after
+            // the last repeat, the entry must still die.
+            transport.clock.advance(LINK_TIMEOUT_MS + 1000);
+            transport.poll();
+            assert!(
+                !transport.storage().has_link_entry(&link_id),
+                "an entry with NO traffic for LINK_TIMEOUT_MS must still expire"
+            );
+        }
+
+        #[test]
+        fn test_link_entry_survives_active_proof_traffic() {
+            // Same rolling window through the proof repeat arm: Python's
+            // refresh (Transport.py:1681) sits in the one link-table repeat
+            // arm that covers Data AND non-LRPROOF Proof packets
+            // (Transport.py:1646 excludes only ANNOUNCE, LINKREQUEST and the
+            // LRPROOF context). A link whose only relay-visible traffic is
+            // delivery proofs flowing back must survive too.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let now = transport.clock.now_ms();
+
+            let link_id = [0xAA; TRUNCATED_HASHBYTES];
+            transport.storage_mut().set_link_entry(
+                link_id,
+                LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: 1,
+                    remaining_hops: 1,
+                    received_interface_index: 0,
+                    hops: 1,
+                    validated: true,
+                    proof_timeout_ms: now + 30_000,
+                    destination_hash: [0xBB; TRUNCATED_HASHBYTES],
+                    peer_signing_key: None,
+                },
+            );
+
+            // Proofs flow destination -> initiator: arrival on if1 (next_hop
+            // side), wire hops 0 increments to 1 == remaining_hops. Unique
+            // signature bytes per round (the forward caches the hash).
+            for round in 0u8..6 {
+                transport.clock.advance(300_000);
+                transport.poll();
+
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type: crate::destination::DestinationType::Link,
+                        packet_type: PacketType::Proof,
+                    },
+                    hops: 0,
+                    transport_id: None,
+                    destination_hash: link_id,
+                    context: PacketContext::None,
+                    data: PacketData::Owned(alloc::vec![
+                        round;
+                        crate::constants::IMPLICIT_PROOF_SIZE
+                    ]),
+                };
+                let mut buf = [0u8; 500];
+                let len = packet.pack(&mut buf).unwrap();
+                transport.process_incoming(1, &buf[..len]).unwrap();
+
+                let actions = transport.drain_actions();
+                assert!(
+                    actions
+                        .iter()
+                        .any(|a| matches!(a, Action::SendPacket { .. })),
+                    "round {round}: proof must be repeated via link table"
+                );
+                assert!(
+                    transport.storage().has_link_entry(&link_id),
+                    "round {round}: entry must survive — proof repeats refresh \
+                     the rolling inactivity window (Python Transport.py:1681)"
+                );
+            }
+
+            transport.clock.advance(LINK_TIMEOUT_MS + 1000);
+            transport.poll();
+            assert!(
+                !transport.storage().has_link_entry(&link_id),
+                "an entry with NO traffic for LINK_TIMEOUT_MS must still expire"
+            );
         }
 
         // Stage 3: Path Request Tests
