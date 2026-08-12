@@ -1189,6 +1189,16 @@ def main() -> int:
 
     out_dir = manifest_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Manifest tmp files are per-invocation (see the write below), so one
+    # left lying around belongs to a crashed or killed run. Sweep this
+    # gate's leftovers once they are clearly stale; a fresh one may belong
+    # to a live concurrent invocation and stays.
+    for stale in out_dir.glob(f"{args.gate}.json.*.tmp"):
+        try:
+            if time.time() - stale.stat().st_mtime > 86400:
+                stale.unlink()
+        except OSError:
+            pass  # gone already, or racing with its owner: both fine
     log_path = out_dir / f"{args.gate}.log"
     failed_log_path = out_dir / f"{args.gate}.failed.log"
 
@@ -1272,7 +1282,13 @@ def main() -> int:
     }
 
     out = out_dir / f"{args.gate}.json"
-    tmp = out.with_suffix(".json.tmp")
+    # Unique per invocation (Codeberg #224): two concurrent runs of the same
+    # gate -- a pre-push `just fast` under a running `just standard` -- used
+    # to share `<gate>.json.tmp`, one os.replace consumed it and the other
+    # crashed a green gate with FileNotFoundError. The final replace is
+    # last-writer-wins, which is right for run state: whichever run finished
+    # last is the freshest record of this gate.
+    tmp = out_dir / f"{args.gate}.json.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
     os.replace(tmp, out)
 
