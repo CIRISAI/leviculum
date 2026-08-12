@@ -12,25 +12,53 @@ Reticulum Network Stack Status
 Usage: lnstatus [OPTIONS] [FILTER]
 
 Arguments:
-  [FILTER]  Only display interfaces with names including filter
+  [FILTER]  only display interfaces with names including filter
 
 Options:
-      --config <CONFIG>                  Path to alternative Reticulum config directory
-  -a, --all                              Show all interfaces
-  -A, --announce-stats                   Show announce stats
-  -P, --pr-stats                         Show path request stats
-  -l, --link-stats                       Show link stats
-  -B, --burst                            Only show interfaces with active bursts
-  -t, --totals                           Display traffic totals
-  -s, --sort <SORT>                      Sort interfaces by [rate, traffic, rx, tx, rxs, txs, announces, arx, atx, prx, ptx, held]
-  -r, --reverse                          Reverse sorting
-  -j, --json                             Output in JSON format
-      --tables                           Add the transport's internal tables to the JSON output (requires -j)
-  -m, --monitor                          Continuously monitor status
-  -I, --monitor-interval <INTERVAL>      Refresh interval for monitor mode [default: 1]
-  -v, --verbose...                       Increase verbosity
-  -h, --help                             Print help
-  -V, --version                          Print version
+      --config <CONFIG>
+          path to alternative Reticulum config directory
+  -a, --all
+          show all interfaces
+  -A, --announce-stats
+          show announce stats
+  -P, --pr-stats
+          show path request stats
+  -l, --link-stats
+          show link stats
+  -B, --burst
+          only show interfaces with active bursts
+  -t, --totals
+          display traffic totals
+  -s, --sort <SORT>
+          sort interfaces by [rate, traffic, rx, tx, rxs, txs, announces, arx, atx, prx, ptx, held]
+  -r, --reverse
+          reverse sorting
+  -j, --json
+          output in JSON format
+      --tables
+          add the transport's internal tables to the JSON output (requires -j)
+  -R <REMOTE>
+          transport identity hash of remote instance to get status from
+  -i <IDENTITY>
+          path to identity used for remote management
+  -w <TIMEOUT>
+          timeout before giving up on remote queries
+  -d, --discovered
+          list discovered interfaces
+  -D
+          show details and config entries for discovered interfaces
+  -m, --monitor
+          continuously monitor status
+  -I, --monitor-interval <MONITOR_INTERVAL>
+          refresh interval for monitor mode (default: 1) [default: 1]
+  -v, --verbose...
+          verbose logging (repeatable)
+      --instance-name <INSTANCE_NAME>
+          shared-instance name to query (default: from config, else "default")
+  -h, --help
+          Print help (see more with '--help')
+  -V, --version
+          Print version
 ```
 
 `lnstatus` needs a running daemon (`lnsd` or `rnsd`) on the same shared
@@ -130,12 +158,34 @@ before reading it, and do not treat its absence as an empty table.
 
 Full field lists are in [lnstatus(1)](../man/lnstatus.1.md).
 
-## Not yet supported
+## Remote status (`-R`/`-i`/`-w`)
 
-The remote-management flags `-R/-i/-w` and the discovered-interface flags
-`-d/-D` are accepted for `rnstatus` compatibility but not yet
-implemented. Passing any of them prints a clear notice and exits
-non-zero rather than silently doing nothing.
+`-R <hash>` queries a *remote* transport instance's status over a link,
+the way `rnstatus -R` does, and feeds the result to the same renderer,
+so remote and local output match (`run_remote` (`lnstatus.rs:359`)).
+`<hash>` is the remote instance's transport identity hash (32 hex
+characters). `-i <file>` names the management identity and is
+mandatory; it is proven to the remote over the link, so the remote
+daemon only answers if it has remote management enabled and lists that
+identity as allowed. `-w <seconds>` bounds the query (default 15,
+matching Python's path-request timeout). `-m` re-queries the remote on
+the monitor interval, and `-j` renders the remote status as JSON:
+
+```sh
+lnstatus -R 76fe5751a56067d1e84eef3e88eab85b -i ~/.reticulum/identities/mgmt -w 30
+```
+
+## Discovered interfaces (`-d`/`-D`)
+
+`-d` lists the interfaces this daemon has discovered on the network, in
+the `rnstatus` discovered layout; `-D` renders the detailed layout with
+ready-to-paste config entries (`run_discovered` (`lnstatus.rs:309`)).
+Both read the local daemon's discovered-interface registry over the
+shared-instance RPC and honour `FILTER` and `-j`:
+
+```sh
+lnstatus -D rnode
+```
 
 ## Examples
 
