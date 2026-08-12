@@ -181,11 +181,24 @@ check-supervised-spawns:
 supervised-spawn:
     {{manifest}} supervised-spawn -- cargo test -p leviculum-std --test supervised_spawn
 
-# Tier 0 (~3 min, runs on every git push): submodule pins + commit-message
+# Codeberg #220: `just fast` was green on a tree where eight integration-test
+# targets did not compile. Every Tier-0 gate builds workspace libs only, so an
+# E0616 in tests/ (a field privatised under a test that reads it) rode the
+# pre-push hook unseen and was first caught by `cargo test --workspace`.
+# Compile-only, no execution: every lib, bin, example and integration-test
+# target must build. Measured 2026-08-12 on a warm tree: ~11 s after a batch,
+# ~0.2 s as a no-op — cheap enough for the push path. `--no-tests` declares
+# the empty manifest as intended, so the wrapper's executed-zero failure keeps
+# guarding the gates that do run tests.
+check-all-targets:
+    {{manifest}} check-all-targets --no-tests -- cargo check --workspace --all-targets
+
+# Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
-# gates + workspace lib tests + the citation guard + the process-supervision
-# pair (census over the sources, proof against the kernel).
-fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate citation-guard
+# gates + a compile check of every workspace target (#220) + workspace lib
+# tests + the citation guard + the process-supervision pair (census over the
+# sources, proof against the kernel).
+fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

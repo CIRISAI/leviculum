@@ -1139,6 +1139,15 @@ def main() -> int:
             "$LEVICULUM_GATE_TIMEOUT; 0 disables)"
         ),
     )
+    ap.add_argument(
+        "--no-tests",
+        action="store_true",
+        help=(
+            "the wrapped command compiles or checks but executes no tests "
+            "(e.g. `cargo check`); zero executed tests is the expected "
+            "outcome, and executing any is a failure"
+        ),
+    )
     ap.add_argument("command", nargs=argparse.REMAINDER)
     args = ap.parse_args()
 
@@ -1304,6 +1313,24 @@ def main() -> int:
             "scripts/run-with-manifest.py.\n"
         )
         return 1
+
+    # A gate that runs no tests by design (a compile-only `cargo check`, wrapped
+    # for the timeout, the log retention and the reaping) declares that with
+    # --no-tests. The declaration is checked in both directions: a declared
+    # gate that DOES run tests would carry a manifest step 2 never reads, so
+    # its tests would look unrun forever — which is the same defect the
+    # executed-zero failure below exists for, mirrored.
+    if args.no_tests:
+        if executed:
+            sys.stdout.flush()
+            sys.stderr.write(
+                f"[manifest] FAILED: gate `{args.gate}` is declared --no-tests "
+                f"but executed {executed} test(s).\n"
+                "[manifest] Drop the flag so the executed-count contract covers\n"
+                "[manifest] them, or stop running tests under this gate.\n"
+            )
+            return 1
+        return 0
 
     if executed == 0:
         sys.stdout.flush()
