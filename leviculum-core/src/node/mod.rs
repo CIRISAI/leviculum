@@ -65,6 +65,8 @@ mod mvr_generated_field_pins;
 mod mvr_hop_asymmetry;
 #[cfg(test)]
 mod mvr_identify_relay;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_link_data_echo_storm;
 #[cfg(test)]
 mod mvr_link_delivery_telemetry;
 #[cfg(test)]

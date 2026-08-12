@@ -5316,18 +5316,48 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Check link table for validated links
             if let Some(link_entry) = self.storage.get_link_entry(&dest_hash).cloned() {
                 if link_entry.validated {
-                    // Direction by interface only. A link established over an
-                    // asymmetric path carries data whose hop count differs from
-                    // the relay's frozen counts; dropping it would break the link
-                    // (priority 1). Mirror the LRPROOF forwarding fix: log the
-                    // mismatch, forward anyway. Interface gate stays; loops stay
-                    // bounded by the global max_hops drop. Deviation from Python
-                    // (Transport.py:1594).
+                    // Same-interface entry (the shared-medium relay case):
+                    // direction is undecidable by interface, so mirror Python's
+                    // either-count hop match (Transport.py:1653-1656) — repeat
+                    // ONLY when the taken hops equal the frozen taken or
+                    // remaining count, silent debug-level drop otherwise. Every
+                    // re-heard echo of a repeat arrives with a count matching
+                    // neither; this match is the loop breaker that stops the
+                    // relay<->relay DATA ping-pong on one shared channel (#226,
+                    // the sibling of the LRPROOF echo storm) — and for the
+                    // dedup-exempt contexts (Resource, Channel, Keepalive) it
+                    // is the ONLY one.
+                    //
+                    // Cross-interface entries keep the forwarding deviation: a
+                    // link established over an asymmetric path carries data
+                    // whose hop count differs from the relay's frozen counts;
+                    // dropping it would break the link (priority 1). Log the
+                    // mismatch, forward anyway (deviation from Python
+                    // Transport.py:1664-1668); no self-echo exists across
+                    // interfaces, and loops stay bounded by the global
+                    // max_hops drop.
                     // Deliberate asymmetry vs the LRPROOF path: LRPROOF rewrites
                     // the forwarded hop count to the frozen count, link data does
                     // NOT (no rewrite_hops here), so "forwarding anyway" is
                     // accurate. Do not "fix" this to match the LRPROOF wording.
-                    let target_iface = if interface_index == link_entry.next_hop_interface_index {
+                    let same_iface =
+                        link_entry.next_hop_interface_index == link_entry.received_interface_index;
+                    let target_iface = if same_iface {
+                        if packet.hops == link_entry.remaining_hops
+                            || packet.hops == link_entry.hops
+                        {
+                            link_entry.next_hop_interface_index
+                        } else {
+                            crate::tracing::debug!(
+                                dest = %HexShort(&dest_hash),
+                                packet_hops = packet.hops,
+                                hops = link_entry.hops,
+                                remaining_hops = link_entry.remaining_hops,
+                                "Dropped link data on shared-medium relay, hops match neither count"
+                            );
+                            return Ok(());
+                        }
+                    } else if interface_index == link_entry.next_hop_interface_index {
                         // From destination side.
                         if packet.hops != link_entry.remaining_hops {
                             crate::tracing::trace!(
@@ -5374,19 +5404,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     );
 
                     // Deferred cache insert: hash was skipped in process_incoming()
-                    // because dest_hash is in link_table. Insert now that we've
-                    // validated direction and will forward (Python Transport.py:1543).
-                    //
-                    // Skip hash caching for:
-                    // 1. Local client traffic: resource retransmissions produce
-                    //    identical raw bytes, caching would block future retransmits.
-                    // 2. Link-table-routed data: relay nodes must forward retransmitted
-                    //    resource segments (identical bytes) to the other side of the
-                    //    link. No dedup needed, link-addressed packets follow a fixed
-                    //    link_table path with no routing loop risk.
-                    let is_link_routed = self.storage.has_link_entry(&dest_hash)
-                        && packet.flags.dest_type == DestinationType::Link;
-                    if !self.is_local_client(interface_index) && !is_link_routed {
+                    // because dest_hash is in link_table. Python adds the hash
+                    // exactly when it actually repeats (Transport.py:1675) —
+                    // hash-add-on-repeat, not blanket ingress dedup. Add it now
+                    // that direction is validated and we will forward: on a
+                    // shared medium a re-heard copy of this repeat dies in the
+                    // ingress dedup instead of being forwarded again (#226).
+                    // Resource retransmissions stay forwardable — the Resource
+                    // contexts are exempt from the ingress dedup CHECK, so the
+                    // insert is inert for them (matching Python's filter).
+                    // Local client traffic stays exempt from the insert:
+                    // resource retransmissions over IPC produce identical raw
+                    // bytes, caching would block future retransmits.
+                    if !self.is_local_client(interface_index) {
                         self.storage.add_packet_hash(full_packet_hash);
                     }
 

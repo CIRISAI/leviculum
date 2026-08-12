@@ -40,9 +40,9 @@ use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::Clock;
 use crate::transport::{Action, InterfaceId};
 
-type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
+pub(super) type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
 
-fn make_air_node(name: &'static str) -> Node {
+pub(super) fn make_air_node(name: &'static str) -> Node {
     let clock = MockClock::new(TEST_TIME_MS);
     let mut node = NodeCoreBuilder::new().enable_transport(true).build(
         OsRng,
@@ -59,7 +59,9 @@ fn make_air_node(name: &'static str) -> Node {
 /// Attach a link-accepting destination to `node` and return its hash, the
 /// Ed25519 verifying key (what the initiator learns from the announce) and a
 /// packed announce packet (wire hops 0, as the owner would broadcast it).
-fn attach_link_destination(node: &mut Node) -> (crate::DestinationHash, [u8; 32], Vec<u8>) {
+pub(super) fn attach_link_destination(
+    node: &mut Node,
+) -> (crate::DestinationHash, [u8; 32], Vec<u8>) {
     let identity = Identity::generate(&mut OsRng);
     let signing_key = identity.ed25519_verifying().to_bytes();
     let mut dest = Destination::new(
@@ -227,17 +229,17 @@ fn describe_wires(wires: &[(usize, Vec<u8>)]) -> String {
 // ---------------------------------------------------------------------------
 
 /// A wire transmission in the mesh: (source node, source interface, bytes).
-type MeshWire = (usize, usize, Vec<u8>);
+pub(super) type MeshWire = (usize, usize, Vec<u8>);
 
 /// A (node index, interface index) endpoint in the mesh.
-type MeshPort = (usize, usize);
+pub(super) type MeshPort = (usize, usize);
 
-struct Mesh {
-    nodes: Vec<Node>,
+pub(super) struct Mesh {
+    pub(super) nodes: Vec<Node>,
     /// Point-to-point delivery map: (src node, src iface) -> [(dst, iface)].
-    routes: Vec<(MeshPort, Vec<MeshPort>)>,
+    pub(super) routes: Vec<(MeshPort, Vec<MeshPort>)>,
     /// Interface count per node (Broadcast fans out over all of them).
-    iface_counts: Vec<usize>,
+    pub(super) iface_counts: Vec<usize>,
 }
 
 impl Mesh {
@@ -249,12 +251,13 @@ impl Mesh {
             .unwrap_or_default()
     }
 
-    fn collect_actions(
+    pub(super) fn collect_actions(
         out: &crate::transport::TickOutput,
         src: usize,
         iface_count: usize,
         pending: &mut Vec<MeshWire>,
         established: &mut [bool],
+        link_data: &mut Vec<(usize, Vec<u8>)>,
     ) {
         if out
             .events
@@ -262,6 +265,11 @@ impl Mesh {
             .any(|e| matches!(e, NodeEvent::LinkEstablished { .. }))
         {
             established[src] = true;
+        }
+        for e in &out.events {
+            if let NodeEvent::LinkDataReceived { data, .. } = e {
+                link_data.push((src, data.clone()));
+            }
         }
         for a in &out.actions {
             match a {
@@ -287,11 +295,17 @@ impl Mesh {
 
     /// Same contract as `pump`: timers first, then deliver, small advances
     /// keep retries out of the causal chain. Quiet within the cap or bust.
-    fn pump(&mut self, seed: Vec<MeshWire>, rounds_max: usize, advance_ms: u64) -> MeshOutcome {
+    pub(super) fn pump(
+        &mut self,
+        seed: Vec<MeshWire>,
+        rounds_max: usize,
+        advance_ms: u64,
+    ) -> MeshOutcome {
         let n = self.nodes.len();
         let mut pending = seed;
         let mut wires = Vec::new();
         let mut established = std::vec![false; n];
+        let mut link_data = Vec::new();
         let mut quiet = false;
 
         for _ in 0..rounds_max {
@@ -303,6 +317,7 @@ impl Mesh {
                     self.iface_counts[src],
                     &mut pending,
                     &mut established,
+                    &mut link_data,
                 );
             }
             if pending.is_empty() {
@@ -318,6 +333,7 @@ impl Mesh {
                         self.iface_counts[dst],
                         &mut pending,
                         &mut established,
+                        &mut link_data,
                     );
                 }
                 wires.push((src, src_iface, data));
@@ -332,17 +348,24 @@ impl Mesh {
             quiet,
             wires,
             established,
+            link_data,
         }
     }
 }
 
-struct MeshOutcome {
-    quiet: bool,
-    wires: Vec<MeshWire>,
-    established: Vec<bool>,
+pub(super) struct MeshOutcome {
+    pub(super) quiet: bool,
+    pub(super) wires: Vec<MeshWire>,
+    pub(super) established: Vec<bool>,
+    /// Every `LinkDataReceived` of the run: (node, decrypted payload).
+    pub(super) link_data: Vec<(usize, Vec<u8>)>,
 }
 
-fn describe_mesh_wires(wires: &[MeshWire], names: &[&str], iface_names: &[&[&str]]) -> String {
+pub(super) fn describe_mesh_wires(
+    wires: &[MeshWire],
+    names: &[&str],
+    iface_names: &[&[&str]],
+) -> String {
     use core::fmt::Write;
     let mut s = String::new();
     for (i, (src, src_iface, data)) in wires.iter().enumerate() {
@@ -467,7 +490,14 @@ fn test_rig_cell_local_client_link_handshake() {
         // 2. I opens a REAL link to R's destination (the lncp handshake).
         let (_link_id, _routed, out) = mesh.nodes[4].connect(dest_hash, &signing_key);
         let mut seed = Vec::new();
-        Mesh::collect_actions(&out, 4, 1, &mut seed, &mut std::vec![false; 5]);
+        Mesh::collect_actions(
+            &out,
+            4,
+            1,
+            &mut seed,
+            &mut std::vec![false; 5],
+            &mut Vec::new(),
+        );
         assert!(!seed.is_empty(), "connect() must emit the LinkRequest");
 
         let hs = mesh.pump(seed, 32, 100);
