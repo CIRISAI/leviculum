@@ -62,6 +62,16 @@ firmware-side USB VID/PID constants:
 > (`leviculum-nrf/udev/99-leviculum.rules`, header comment and
 > `SYMLINK+="leviculum-transport-%s{serial}"` lines.)
 
+Without the rules installed there is still a stable path: systemd's own
+`/dev/serial/by-id/` entries carry the firmware's USB strings and the
+board serial, and the CDC interface number distinguishes the two ports
+the same way (`-if00` debug, `-if02` transport):
+
+```
+/dev/serial/by-id/usb-leviculum_leviculum_T114_<SERIAL>-if00   debug
+/dev/serial/by-id/usb-leviculum_leviculum_T114_<SERIAL>-if02   transport
+```
+
 ## Reading the debug port
 
 The debug port is plain text at 115200 baud:
@@ -72,32 +82,53 @@ picocom /dev/leviculum-debug -b 115200
 
 (`leviculum-nrf/README.md:59-60`)
 
-On the debug port you will see the boot banner, the firmware git SHA, the
-node identity, and the periodic diagnostics the firmware emits — for
-example the `LNode started -- identity: …` line and the `[FW_BUILD]`
-banner re-emitted every few seconds.
-(`leviculum-nrf/src/bin/t114.rs:164-168`, `:323-333`.) Do **not** point
-`lnsd` at the debug port; it carries log text, not HDLC frames.
+On the debug port you will see the boot banner, the firmware git SHA and
+the periodic diagnostics the firmware emits: the `[FW_BUILD]` banner
+every 5 s, the `[STACK]` watermark lines, and the LoRa TX/RX events.
+(`leviculum-nrf/src/bin/t114.rs:415-424` for the banner task.) Do
+**not** point `lnsd` at the debug port; it carries log text, not HDLC
+frames.
 
-## Pointing `lnsd` at the transport port
+> **The identity lines are not among them in practice.** The firmware
+> prints `LNode started -- identity: …`, `[IDENTITY] t114_node=…` and
+> `[IDENTITY] t114_probe=…` once during boot
+> (`leviculum-nrf/src/bin/t114.rs:197-215`), but all three go through
+> the runtime-gated log path: with no reader attached yet, `log_fmt`
+> counts the line and returns before it reaches either the ring buffer
+> or the persistent tail (`leviculum-nrf/src/log.rs:159-163`). A reader
+> that attaches after boot sees them replaced by the gate's own
+> summary, `[LOG_GATE] opened, dropped N runtime lines pre-attach`, and
+> nothing re-emits them later. Read the destination hash off the
+> network instead — see [Finding the node's destination
+> hash](#finding-the-nodes-destination-hash).
 
-The transport port speaks the RNode LoRa framing protocol over HDLC, the
-same wire protocol `lnsd`/`rnsd` use for an RNode. Configure it as an
-`RNodeInterface` (the dedicated single-radio RNode driver) with its
-`port` set to the transport symlink.
+## Pointing a daemon at the transport port
 
-The radio parameters in the config **must match** the firmware's
-compiled-in defaults (the EU medium profile), otherwise the two sides
-talk past each other on the air. (`leviculum-nrf/README.md:8`;
-`leviculum-nrf/src/lora.rs:136-161`.)
+The transport port carries HDLC-framed Reticulum packets. It is **not**
+an RNode: a standalone LNode runs a complete stack in its own firmware
+and is the daemon's *neighbour node*, not its radio. The firmware
+implements no RNode KISS command set — there is no `CMD_DETECT`,
+`CMD_FW_VERSION` or `CMD_PLATFORM` responder anywhere in
+`leviculum-nrf/` — so `RNodeInterface` cannot drive it, and neither can
+`rnodeconf`. The interface type is `SerialInterface`.
+
+> `SerialInterface` is a raw serial HDLC link […] Leviculum's
+> `SerialInterface` honours [the LoRa keys] too and configures the
+> attached LNode's radio over the serial port — the LNode frames HDLC,
+> so it cannot be driven by the KISS-framed `RNodeInterface`.
+> (`docs/src/guide/configuration.md:182-191`)
 
 ```ini
 [interfaces]
 
   [[LNode T114]]
-    type = RNodeInterface
+    type = SerialInterface
     enabled = yes
     port = /dev/leviculum-transport
+    speed = 115200
+    databits = 8
+    parity = none
+    stopbits = 1
     frequency = 869463000
     bandwidth = 125000
     txpower = 22
@@ -105,26 +136,21 @@ talk past each other on the air. (`leviculum-nrf/README.md:8`;
     codingrate = 5
 ```
 
-The key names and types come from the `[[RNode Interface]]` config
-schema (`port`, `frequency`, `bandwidth`, `txpower`, `spreadingfactor`,
-`codingrate`; `docs/src/rnode-protocol.md:674-684`). The values above are
-the firmware's compiled defaults — the ReticulumNet consensus channel:
-869.463 MHz, BW 125 kHz, 22 dBm, SF8, CR4/5
-(`leviculum-nrf/src/lora.rs`, `RadioConfig::eu_medium`).
+For a RAK4631 / WisMesh Pocket V2 the only change is the port
+(`/dev/leviculum-rak-transport`).
 
-For a RAK4631 / WisMesh Pocket V2 the only change is the port:
-
-```ini
-  [[LNode Pocket V2]]
-    type = RNodeInterface
-    enabled = yes
-    port = /dev/leviculum-rak-transport
-    frequency = 869463000
-    bandwidth = 125000
-    txpower = 22
-    spreadingfactor = 8
-    codingrate = 5
-```
+**Who applies the LoRa keys.** Under `lnsd` the five LoRa keys are sent
+to the board as a radio-config frame at interface startup
+(`leviculum-std/src/interfaces/serial.rs:186`), so the config decides
+the channel. Under Python-RNS `rnsd` they are inert: its
+`SerialInterface` reads port settings only and pushes nothing to the
+board, which then keeps whatever profile is in its flash — the compiled
+`eu_medium` default (869.463 MHz, BW 125 kHz, SF8, CR4/5, 22 dBm;
+`leviculum-nrf/src/lora.rs:136-165`, `RadioConfig::eu_medium`) or the
+preset chosen at flash time. The values above are that default written
+out, so a Python-driven LNode and an `lnsd`-driven one land on the same
+channel. Changing the channel of a Python-driven board is a reflash
+(`lnflash --radio-preset`), not a config edit.
 
 After editing `/etc/reticulum/config`, restart the daemon so it picks up
 the new interface:
@@ -149,7 +175,54 @@ lnstest diag --config /etc/reticulum
 (`lnstest diag` usage and the `interface_stats` reading are described in the
 [lnsd Quickstart](../lnsd-quickstart.md#check-its-working).)
 
-For the full key-by-key reference of the `[[RNode Interface]]` section
-and the meaning of the optional keys (`flow_control`, `airtime_limit_*`,
-callsign beaconing), see the [Configuration](../guide/configuration.md)
-chapter and `docs/src/rnode-protocol.md`.
+## Finding the node's destination hash
+
+A standalone LNode answers probes on one destination,
+`rnstransport.probe`, and announces it 15 s after boot and then every
+2 hours (`leviculum-core/src/node/mod.rs:513-517`;
+`MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:163`).
+The hash is carried in the announce itself, so the way to learn it is
+to receive one, not to read it off the debug port.
+
+With the interface configured and the daemon running, press the board's
+reset button and wait about 20 s. The daemon reopens the port by itself
+after the board re-enumerates, then records the announce:
+
+```sh
+rnpath -t
+```
+```
+<6a1ab9ea64747f298c1f205dfcf0f5a3> is 1 hop away via <6a1ab9ea64747f298c1f205dfcf0f5a3> on SerialInterface[LNode T114]
+```
+
+The entry on the LNode's own interface is the board. The leading hash
+is the destination; the `via` hash is the node's transport ID, which is
+the same value here because a directly attached neighbour announces at
+hop 0. Probing it takes the aspect name as well, since the name cannot
+be recovered from the hash:
+
+```sh
+rnprobe rnstransport.probe 6a1ab9ea64747f298c1f205dfcf0f5a3
+```
+```
+Valid reply from <6a1ab9ea64747f298c1f205dfcf0f5a3>
+Round-trip time is 126.497 milliseconds over 1 hop
+```
+
+Miss the 15 s window and the next announce is 2 hours out; resetting
+the board again is quicker.
+
+The probe destination is the only addressed service the firmware
+offers. Remote management is not enabled on the standalone binary
+(`leviculum-nrf/src/bin/t114.rs:157` sets `respond_to_probes` and
+nothing else), so `rnstatus -R` and `rnpath -R` have no responder;
+`rncp`, `rnsh` and `rnx` have no counterpart either. What the board
+does beyond that — forwarding announces, answering path requests,
+relaying packets — needs no hash from the operator and shows up as
+paths *via* the LNode in `rnpath -t`.
+
+For the full key-by-key reference of the serial and LoRa keys, and the
+meaning of the optional ones (`flow_control`, `airtime_limit_*`,
+`preamble_symbols`), see the RNode and Serial section of the
+[Configuration](../guide/configuration.md#rnode-and-serial-rnodeinterface-serialinterface)
+chapter.
