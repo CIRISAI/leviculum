@@ -832,6 +832,7 @@ async fn rnode_io_task<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    super::log_direct_ingress_filter_armed(drop_direct_ingress, &name);
     let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
     let mut buf = [0u8; IO_READ_BUF];
     // The RNode firmware emits CMD_READY only *after* a TX as a "next frame
@@ -2942,6 +2943,60 @@ mod tests {
                 .test_direct_ingress_drops
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
+        );
+    }
+
+    /// The filter announces itself (Codeberg #223): when
+    /// `test_drop_direct_ingress` is on, the io task emits exactly the
+    /// armed line the periculum cells assert on — from the same task that
+    /// holds the flag the drop filter reads, so the line proves the
+    /// production drop path is live and not merely that a config key
+    /// parsed. Off (the default), the line must be absent.
+    #[tokio::test]
+    async fn test_drop_direct_ingress_announces_arming_at_the_rnode_boundary() {
+        async fn logs_from_io_task(drop_direct: bool) -> String {
+            let (buf, _guard) = capture_logs();
+            let (port, peer) = tokio::io::duplex(8192);
+            let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+            let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+            let counters = Arc::new(InterfaceCounters::new());
+            let task = tokio::spawn(async move {
+                rnode_io_task(
+                    "test_rnode_armed".to_string(),
+                    port,
+                    incoming_tx,
+                    outgoing_rx,
+                    counters,
+                    /* flow_control = */ false,
+                    /* jitter_max_ms = */ 1,
+                    125_000,
+                    7,
+                    5,
+                    AirtimeLockCtl::new(TxGate::new(), None, None),
+                    drop_direct,
+                )
+                .await;
+            });
+            // Let the io task start and emit (or not emit) the armed line,
+            // then shut it down by closing its peer and channels.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(outgoing_tx);
+            drop(peer);
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+            let captured = buf.lock().unwrap();
+            String::from_utf8_lossy(&captured).into_owned()
+        }
+
+        let logs = logs_from_io_task(true).await;
+        assert!(
+            logs.contains("DIRECT_INGRESS_FILTER armed iface=test_rnode_armed"),
+            "armed line missing with the knob on; logs:\n{logs}"
+        );
+
+        let logs = logs_from_io_task(false).await;
+        assert!(
+            !logs.contains("DIRECT_INGRESS_FILTER"),
+            "armed line must be absent with the knob off; logs:\n{logs}"
         );
     }
 
