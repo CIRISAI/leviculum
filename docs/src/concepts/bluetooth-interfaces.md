@@ -120,6 +120,36 @@ lossy, a fragmented large packet only arrives if both fragments do; reliable
 large transfers use links over a connection oriented path, not broadcast, so
 this is acceptable.
 
+### Coded PHY: automatic range extension, first-class
+
+Coded PHY (S=2/S=8) is a first-class part of the `ble-leviculum` design, not an
+optional add-on. The reason is the range and rate frontier: room scale BLE at
+1M on one end, km scale LoRa at kbit/s on the other, and nothing in between.
+Coded PHY at S=8 trades 1/8 rate for roughly 4x range and fills exactly that
+empty middle, about 200 to 800 m at a ~100 kbit/s class rate.
+
+The architecture keeps it automatic. 1M extended advertising is the universal
+floor: every device transmits and scans it. Controllers that support LE Coded
+(runtime feature detection: the LE Coded feature bit; on Android
+`isLeCodedPhySupported()`) additionally dual advertise the same payload on a
+coded primary advertising chain and scan both PHYs (`scan_phys = 1M | Coded`,
+the controller time shares the scan windows). No user configuration, and no
+parallel meshes: coded capable nodes bridge by construction because 1M always
+stays on. Double reception of the same payload is absorbed by the normal
+Reticulum packet hash dedup.
+
+Costs to tune, stated here and not solved here. Coded TX is about 8x airtime
+at S=8, so coded repeats are rate limited, for example one coded transmission
+per N 1M intervals. Splitting the scan budget across two PHYs lengthens
+discovery latency. Android background scan limits apply.
+
+Capability is unevenly distributed, and the design accounts for that honestly.
+Recent Android flagships largely support Coded PHY, often both scan and
+advertise; midrange devices are mixed, sometimes scan only; iOS exposes no
+Coded PHY at all; cheap BT5 USB dongles often omit it. The nRF52840 on our
+boards and test dongles supports it fully. This asymmetry is why the design
+makes coded an automatic bonus above the 1M floor, never a requirement.
+
 ## Combining the protocols
 
 The broadcast and connection oriented protocols are not mutually exclusive. The
@@ -201,6 +231,10 @@ why a single hybrid interface is not the chosen path here.
 - **Stage broadcast first, then measure.** Build `ble-leviculum` alone, let
   Reticulum's link and resource layers provide reliability over it, and only add
   per peer connections if measured throughput requires it.
+- **Coded PHY is first class and automatic.** It fills the empty middle of the
+  range and rate frontier between 1M BLE and LoRa. 1M stays the universal
+  floor; coded capable nodes dual advertise and dual scan on top of it, so the
+  mesh never partitions and no user configures anything.
 - **Idle timeout governs connection management, not packet routing.** Closing
   idle connections to free slots is fine. Triggering a connection open from a
   per packet destination is not.
