@@ -555,11 +555,41 @@ struct PanicPmRaw {
 /// are rejected instead of misparsed.
 const PANIC_PM_MAGIC: u32 = 0xBADD_CAF1;
 
+/// Same record, already replayed once by a boot. `take_panic_postmortem`
+/// downgrades a fresh record to this instead of erasing it, so the
+/// debug-port query ([`postmortem_query`]) can still retrieve the
+/// evidence after the boot replay was lost to log-ring lapping. The next
+/// panic overwrites the record with a fresh magic; only power loss or a
+/// reflash wipes it.
+const PANIC_PM_MAGIC_SEEN: u32 = 0xBADD_CAF2;
+
 #[link_section = ".uninit"]
 static mut PANIC_PM: core::mem::MaybeUninit<PanicPmRaw> = core::mem::MaybeUninit::uninit();
 
-/// Read and clear the panic message captured before the last soft-reset.
-/// Returns `Some(_)` exactly once after a panic, `None` otherwise.
+/// Decode the ring-stored record at `p`. Caller has validated the magic.
+///
+/// The panic handler writes the buffer as a ring keeping the LAST
+/// `PANIC_MSG_MAX` bytes; on overflow the oldest surviving byte sits at
+/// `total % PANIC_MSG_MAX`. Linearise on the way out.
+unsafe fn read_panic_pm(p: *const PanicPmRaw) -> PanicPostMortem {
+    let total = core::ptr::read_volatile(core::ptr::addr_of!((*p).len)) as usize;
+    let (start, len) = if total > PANIC_MSG_MAX {
+        (total % PANIC_MSG_MAX, PANIC_MSG_MAX)
+    } else {
+        (0, total)
+    };
+    let mut bytes = [0u8; PANIC_MSG_MAX];
+    let src = core::ptr::addr_of!((*p).bytes).cast::<u8>();
+    for (i, slot) in bytes.iter_mut().enumerate().take(len) {
+        *slot = core::ptr::read_volatile(src.add((start + i) % PANIC_MSG_MAX));
+    }
+    PanicPostMortem { len, total, bytes }
+}
+
+/// Read the panic message captured before the last soft-reset and mark
+/// it seen. Returns `Some(_)` exactly once after a panic, `None`
+/// otherwise — but the record itself stays in `.uninit` (downgraded to
+/// [`PANIC_PM_MAGIC_SEEN`]) so [`peek_panic_postmortem`] can re-read it.
 pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
     unsafe {
         let p = core::ptr::addr_of_mut!(PANIC_PM).cast::<PanicPmRaw>();
@@ -567,23 +597,24 @@ pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
         if magic != PANIC_PM_MAGIC {
             return None;
         }
-        let total = core::ptr::read_volatile(core::ptr::addr_of!((*p).len)) as usize;
-        // The panic handler writes the buffer as a ring keeping the LAST
-        // `PANIC_MSG_MAX` bytes; on overflow the oldest surviving byte
-        // sits at `total % PANIC_MSG_MAX`. Linearise on the way out.
-        let (start, len) = if total > PANIC_MSG_MAX {
-            (total % PANIC_MSG_MAX, PANIC_MSG_MAX)
-        } else {
-            (0, total)
-        };
-        let mut bytes = [0u8; PANIC_MSG_MAX];
-        let src = core::ptr::addr_of!((*p).bytes).cast::<u8>();
-        for (i, slot) in bytes.iter_mut().enumerate().take(len) {
-            *slot = core::ptr::read_volatile(src.add((start + i) % PANIC_MSG_MAX));
+        let pm = read_panic_pm(p);
+        // Mark seen (not erased) so boots don't re-log but the query can.
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), PANIC_PM_MAGIC_SEEN);
+        Some(pm)
+    }
+}
+
+/// Read the stored panic post-mortem WITHOUT consuming it. Accepts both
+/// a fresh record and one already replayed at boot. Debug-port query
+/// path; safe to call any number of times.
+pub fn peek_panic_postmortem() -> Option<PanicPostMortem> {
+    unsafe {
+        let p = core::ptr::addr_of!(PANIC_PM).cast::<PanicPmRaw>();
+        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
+        if magic != PANIC_PM_MAGIC && magic != PANIC_PM_MAGIC_SEEN {
+            return None;
         }
-        // Clear magic so subsequent boots don't re-log.
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), 0);
-        Some(PanicPostMortem { len, total, bytes })
+        Some(read_panic_pm(p))
     }
 }
 
@@ -706,15 +737,37 @@ pub struct HardfaultPostMortem {
 /// misparsed.
 const HARDFAULT_PM_MAGIC: u32 = 0xC0FF_EE12;
 
+/// Already-replayed marker, mirroring [`PANIC_PM_MAGIC_SEEN`]: the boot
+/// read downgrades to this instead of erasing, keeping the record
+/// retrievable via the debug-port query until the next fault or power
+/// loss.
+const HARDFAULT_PM_MAGIC_SEEN: u32 = 0xC0FF_EE13;
+
 /// Survives `sys_reset` because `.uninit` is `NOLOAD` in cortex-m-rt's
 /// link.x — values in RAM are not zeroed by the runtime startup.
 #[link_section = ".uninit"]
 static mut HARDFAULT_PM: core::mem::MaybeUninit<HardfaultPostMortem> =
     core::mem::MaybeUninit::uninit();
 
-/// Read and clear the HardFault post-mortem captured before the last
-/// soft-reset. Returns `Some(_)` once after a HardFault, `None`
-/// otherwise (and `None` on every subsequent call until the next fault).
+/// Decode the record at `p`. Caller has validated the magic.
+unsafe fn read_hardfault_pm(p: *const HardfaultPostMortem) -> HardfaultPostMortem {
+    HardfaultPostMortem {
+        magic: 0,
+        pc: core::ptr::read_volatile(core::ptr::addr_of!((*p).pc)),
+        lr: core::ptr::read_volatile(core::ptr::addr_of!((*p).lr)),
+        r0: core::ptr::read_volatile(core::ptr::addr_of!((*p).r0)),
+        r1: core::ptr::read_volatile(core::ptr::addr_of!((*p).r1)),
+        r2: core::ptr::read_volatile(core::ptr::addr_of!((*p).r2)),
+        r3: core::ptr::read_volatile(core::ptr::addr_of!((*p).r3)),
+        r12: core::ptr::read_volatile(core::ptr::addr_of!((*p).r12)),
+        xpsr: core::ptr::read_volatile(core::ptr::addr_of!((*p).xpsr)),
+    }
+}
+
+/// Read the HardFault post-mortem captured before the last soft-reset
+/// and mark it seen. Returns `Some(_)` once after a HardFault, `None`
+/// otherwise — the record stays in `.uninit` for
+/// [`peek_hardfault_postmortem`].
 pub fn take_hardfault_postmortem() -> Option<HardfaultPostMortem> {
     unsafe {
         let p = core::ptr::addr_of_mut!(HARDFAULT_PM).cast::<HardfaultPostMortem>();
@@ -722,21 +775,104 @@ pub fn take_hardfault_postmortem() -> Option<HardfaultPostMortem> {
         if magic != HARDFAULT_PM_MAGIC {
             return None;
         }
-        let pm = HardfaultPostMortem {
-            magic: 0,
-            pc: core::ptr::read_volatile(core::ptr::addr_of!((*p).pc)),
-            lr: core::ptr::read_volatile(core::ptr::addr_of!((*p).lr)),
-            r0: core::ptr::read_volatile(core::ptr::addr_of!((*p).r0)),
-            r1: core::ptr::read_volatile(core::ptr::addr_of!((*p).r1)),
-            r2: core::ptr::read_volatile(core::ptr::addr_of!((*p).r2)),
-            r3: core::ptr::read_volatile(core::ptr::addr_of!((*p).r3)),
-            r12: core::ptr::read_volatile(core::ptr::addr_of!((*p).r12)),
-            xpsr: core::ptr::read_volatile(core::ptr::addr_of!((*p).xpsr)),
-        };
-        // Invalidate so we don't re-log on subsequent boots.
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), 0);
+        let pm = read_hardfault_pm(p);
+        // Mark seen (not erased) so boots don't re-log but the query can.
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), HARDFAULT_PM_MAGIC_SEEN);
         Some(pm)
     }
+}
+
+/// Read the stored HardFault post-mortem WITHOUT consuming it. Accepts
+/// both a fresh record and one already replayed at boot. Debug-port
+/// query path; safe to call any number of times.
+pub fn peek_hardfault_postmortem() -> Option<HardfaultPostMortem> {
+    unsafe {
+        let p = core::ptr::addr_of!(HARDFAULT_PM).cast::<HardfaultPostMortem>();
+        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
+        if magic != HARDFAULT_PM_MAGIC && magic != HARDFAULT_PM_MAGIC_SEEN {
+            return None;
+        }
+        Some(read_hardfault_pm(p))
+    }
+}
+
+/// Emit the `[PANIC_COUNT]` line. Shared by the boot banner of both
+/// BSPs and the debug-port query.
+pub fn log_panic_count() {
+    log::log_fmt_critical(
+        "[INFO!] ",
+        format_args!("[PANIC_COUNT] total={}", panic_count()),
+    );
+}
+
+/// Emit the post-mortem block: `[HARDFAULT_PMRT]` and/or `[PANIC_PMRT]`
+/// plus `[PANIC_PMRT_TAIL]`. One formatter for the boot replay of both
+/// BSPs and the debug-port query — capture parsers key on these exact
+/// tags.
+pub fn log_postmortems(
+    hardfault_pm: Option<&HardfaultPostMortem>,
+    panic_pm: Option<&PanicPostMortem>,
+) {
+    if let Some(pm) = hardfault_pm {
+        log::log_fmt_critical(
+            "[INFO!] ",
+            format_args!(
+                "[HARDFAULT_PMRT] pc=0x{:08x} lr=0x{:08x} r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x} r12=0x{:08x} xpsr=0x{:08x}",
+                pm.pc, pm.lr, pm.r0, pm.r1, pm.r2, pm.r3, pm.r12, pm.xpsr
+            ),
+        );
+    }
+    if let Some(pm) = panic_pm {
+        let msg = core::str::from_utf8(&pm.bytes[..pm.len]).unwrap_or("<non-utf8 panic msg>");
+        // EscapeCtrl keeps this ONE line: the SD fault panic embeds a
+        // raw '\n' after the source location, which split the line and
+        // cost us the PC/PREGION tail in capture.
+        log::log_fmt_critical(
+            "[INFO!] ",
+            format_args!(
+                "[PANIC_PMRT] len={} total={} msg={}",
+                pm.len,
+                pm.total,
+                log::EscapeCtrl(msg)
+            ),
+        );
+        // Tail again on its own short line — PC/PREGION ride at the END
+        // of SD fault messages, and a short line survives any reader-
+        // side line-length cap.
+        let mut tail_start = msg.len().saturating_sub(96);
+        while !msg.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        log::log_fmt_critical(
+            "[INFO!] ",
+            format_args!("[PANIC_PMRT_TAIL] {}", log::EscapeCtrl(&msg[tail_start..])),
+        );
+    }
+}
+
+/// Debug-port query: replay the persistent panic evidence on demand.
+///
+/// Triggered by a `p` byte on the debug CDC port
+/// (`usb::debug_reader_task`). The boot-time replay is emitted exactly
+/// once into the 8 KiB log ring and is lapped by runtime output before
+/// a late-attaching host can read it; this query re-emits the same
+/// block whenever asked. `[PM_QUERY]` begin/done markers bracket the
+/// response so `scripts/lnode-panic-query.sh` knows when it is
+/// complete.
+pub fn postmortem_query() {
+    log::log_fmt_critical("[INFO!] ", format_args!("[PM_QUERY] begin"));
+    log_panic_count();
+    let hardfault_pm = peek_hardfault_postmortem();
+    let panic_pm = peek_panic_postmortem();
+    log_postmortems(hardfault_pm.as_ref(), panic_pm.as_ref());
+    log::log_fmt_critical(
+        "[INFO!] ",
+        format_args!(
+            "[PM_QUERY] done hardfault={} panic={}",
+            hardfault_pm.is_some() as u8,
+            panic_pm.is_some() as u8
+        ),
+    );
 }
 
 /// Cortex-M HardFault handler — overrides the cortex-m-rt default which

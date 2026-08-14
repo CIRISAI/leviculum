@@ -85,14 +85,14 @@ picocom /dev/leviculum-debug -b 115200
 On the debug port you will see the boot banner, the firmware git SHA and
 the periodic diagnostics the firmware emits: the `[FW_BUILD]` banner
 every 5 s, the `[STACK]` watermark lines, and the LoRa TX/RX events.
-(`leviculum-nrf/src/bin/t114.rs:415-424` for the banner task.) Do
+(`leviculum-nrf/src/bin/t114.rs:389-398` for the banner task.) Do
 **not** point `lnsd` at the debug port; it carries log text, not HDLC
 frames.
 
 > **The identity lines are not among them in practice.** The firmware
 > prints `LNode started -- identity: …`, `[IDENTITY] t114_node=…` and
 > `[IDENTITY] t114_probe=…` once during boot
-> (`leviculum-nrf/src/bin/t114.rs:197-215`), but all three go through
+> (`leviculum-nrf/src/bin/t114.rs:171-189`), but all three go through
 > the runtime-gated log path: with no reader attached yet, `log_fmt`
 > counts the line and returns before it reaches either the ring buffer
 > or the persistent tail (`leviculum-nrf/src/log.rs:159-163`). A reader
@@ -101,6 +101,38 @@ frames.
 > nothing re-emits them later. Read the destination hash off the
 > network instead — see [Finding the node's destination
 > hash](#finding-the-nodes-destination-hash).
+
+## Querying panic evidence over the debug port
+
+The debug port is not entirely write-only: it accepts one command. A
+single `p` byte makes the firmware replay its persistent panic
+evidence — the `[PANIC_COUNT] total=N` line and, if a post-mortem
+record is stored, the full `[HARDFAULT_PMRT]` / `[PANIC_PMRT]` block,
+bracketed by `[PM_QUERY] begin` / `[PM_QUERY] done` markers
+(`leviculum-nrf/src/usb.rs`, `debug_reader_task`;
+`leviculum-nrf/src/lib.rs`, `postmortem_query`).
+
+This exists because the boot-time replay of the same block is emitted
+exactly once into the 8 KiB log ring: after the 30 s headless fallback
+opens the runtime-drain gate, runtime output laps the ring, so a host
+that attaches later never sees it. The post-mortem records in `.uninit`
+RAM survive the boot read (it marks them seen rather than erasing them)
+and soft resets — power loss wipes them, and a reflash must be assumed
+to — so the query can retrieve the evidence any time after the crash,
+as long as the board stays powered.
+
+The committed helper drives the whole exchange:
+
+```sh
+scripts/lnode-panic-query.sh /dev/leviculum-rak-debug
+```
+
+It asserts DTR+RTS (the debug port transmits only with DTR raised),
+sends `p`, and prints the tagged response lines. Exit 0 means a
+complete response was captured; on older firmware without the query
+command it times out with exit 1. **Do not power-cycle a board whose
+evidence you still need** — `.uninit` lives in RAM, and power loss is
+the one thing that wipes it.
 
 ## Pointing a daemon at the transport port
 
@@ -214,7 +246,7 @@ the board again is quicker.
 
 The probe destination is the only addressed service the firmware
 offers. Remote management is not enabled on the standalone binary
-(`leviculum-nrf/src/bin/t114.rs:157` sets `respond_to_probes` and
+(`leviculum-nrf/src/bin/t114.rs:131` sets `respond_to_probes` and
 nothing else), so `rnstatus -R` and `rnpath -R` have no responder;
 `rncp`, `rnsh` and `rnx` have no counterpart either. What the board
 does beyond that — forwarding announces, answering path requests,

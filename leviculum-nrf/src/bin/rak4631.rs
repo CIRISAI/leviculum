@@ -85,38 +85,12 @@ async fn main(spawner: Spawner) {
         env!("LEVICULUM_GIT_DIRTY")
     );
     leviculum_nrf::log_stack("boot");
-    log_critical!("[PANIC_COUNT] total={}", leviculum_nrf::panic_count());
+    leviculum_nrf::log_panic_count();
     leviculum_nrf::log_irq_priorities();
 
-    if let Some(pm) = hardfault_pm {
-        log_critical!(
-            "[HARDFAULT_PMRT] pc=0x{:08x} lr=0x{:08x} r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x} r12=0x{:08x} xpsr=0x{:08x}",
-            pm.pc, pm.lr, pm.r0, pm.r1, pm.r2, pm.r3, pm.r12, pm.xpsr
-        );
-    }
-    if let Some(pm) = panic_pm {
-        let msg = core::str::from_utf8(&pm.bytes[..pm.len]).unwrap_or("<non-utf8 panic msg>");
-        // EscapeCtrl keeps this ONE line: the SD fault panic embeds a
-        // raw '\n' after the source location, which split the line and
-        // cost us the PC/PREGION tail in capture.
-        log_critical!(
-            "[PANIC_PMRT] len={} total={} msg={}",
-            pm.len,
-            pm.total,
-            leviculum_nrf::log::EscapeCtrl(msg)
-        );
-        // Tail again on its own short line — PC/PREGION ride at the END
-        // of SD fault messages, and a short line survives any reader-
-        // side line-length cap.
-        let mut tail_start = msg.len().saturating_sub(96);
-        while !msg.is_char_boundary(tail_start) {
-            tail_start += 1;
-        }
-        log_critical!(
-            "[PANIC_PMRT_TAIL] {}",
-            leviculum_nrf::log::EscapeCtrl(&msg[tail_start..])
-        );
-    }
+    // Shared boot/query formatter — the same block is retrievable at any
+    // later time via the debug-port query (`p` byte, postmortem_query).
+    leviculum_nrf::log_postmortems(hardfault_pm.as_ref(), panic_pm.as_ref());
     // Persistent-log replay from previous boot's last ~2 KiB. Each
     // line is emitted as a `[PERSISTENT_LOG]`-prefixed critical line
     // so it lands ahead of the runtime flood. After this block, the

@@ -18,7 +18,7 @@ use embassy_nrf::{peripherals, usb, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::with_timeout;
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::class::cdc_acm::{self, CdcAcmClass, State};
 use embassy_usb::control::{OutResponse, Recipient, Request, RequestType};
 use embassy_usb::{Builder, Config, Handler, UsbDevice};
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
@@ -129,8 +129,13 @@ pub fn init(
 
     let usb_dev = builder.build();
 
+    // The debug CDC is split: TX drains the log ring, RX carries the
+    // single-byte post-mortem query (`debug_reader_task`).
+    let (cdc_debug_tx, cdc_debug_rx) = cdc_debug.split();
+
     spawner.must_spawn(usb_task(usb_dev));
-    spawner.must_spawn(debug_writer_task(cdc_debug));
+    spawner.must_spawn(debug_writer_task(cdc_debug_tx));
+    spawner.must_spawn(debug_reader_task(cdc_debug_rx));
     spawner.must_spawn(runtime_drain_open_timeout_task());
     spawner.must_spawn(retic_serial_task(
         cdc_retic,
@@ -200,7 +205,7 @@ async fn usb_task(mut usb: UsbDevice<'static, UsbDriver>) {
 }
 
 #[embassy_executor::task]
-async fn debug_writer_task(mut cdc: CdcAcmClass<'static, UsbDriver>) {
+async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
     use embassy_time::{with_timeout, Duration};
 
     let mut chunk = [0u8; 64];
@@ -225,6 +230,26 @@ async fn debug_writer_task(mut cdc: CdcAcmClass<'static, UsbDriver>) {
             match with_timeout(Duration::from_millis(50), cdc.write_packet(&chunk[..n])).await {
                 Ok(Ok(())) => {}
                 _ => break, // USB error or timeout
+            }
+        }
+    }
+}
+
+/// RX side of the debug CDC port. The debug console was historically
+/// write-only; the single command implemented here is the post-mortem
+/// query: any received `p` byte replays `[PANIC_COUNT]` and the stored
+/// post-mortem block through the normal log path (host helper:
+/// `scripts/lnode-panic-query.sh`). All other bytes are ignored, so
+/// terminal line endings and stray input are harmless.
+#[embassy_executor::task]
+async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
+    let mut buf = [0u8; 64];
+    loop {
+        cdc.wait_connection().await;
+        // On read error (USB disconnect) fall back to the outer re-wait.
+        while let Ok(n) = cdc.read_packet(&mut buf).await {
+            if buf[..n].contains(&b'p') {
+                crate::postmortem_query();
             }
         }
     }
