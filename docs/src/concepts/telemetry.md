@@ -294,7 +294,7 @@ cursor of every requester that sees it.
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.
 - **A path, or a request for one.** `send_to_destination`
-  (`leviculum-core/src/transport.rs:2472`) fails without a path entry.
+  (`leviculum-core/src/transport.rs:2489`) fails without a path entry.
   The primitive for obtaining one is `request_path`
   (`leviculum-core/src/node/mod.rs:2362`); a node with the key but no
   path asks and waits rather than giving up.

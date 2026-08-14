@@ -941,6 +941,7 @@ pub struct TransportStats {
     pub(crate) drops_announce_rate_limited: u64,
     pub(crate) drops_ingress_burst_announce: u64,
     pub(crate) drops_lrproof_invalid: u64,
+    pub(crate) drops_link_repeat_echo: u64,
     pub(crate) drops_forward_max_hops: u64,
     pub(crate) drops_blackholed_announce: u64,
 }
@@ -986,9 +987,15 @@ pub enum DropReason {
     /// interface's ingress burst limiter is active (Codeberg #87).
     IngressBurstAnnounce,
     /// LRPROOF dropped during validation (bad size, bad signature, bad key,
-    /// or a same-interface link repeat whose hop count matches neither frozen
-    /// operand — an echo of a forward already on the shared medium).
+    /// or a cross-interface hop asymmetry in strict reference mode).
     LrproofInvalid,
+    /// Same-interface link repeat whose hop count matches neither frozen
+    /// operand — the relay's own forward echoed back on the shared medium.
+    /// Routine on half-duplex shared media (same class as
+    /// [`DropReason::OverheardTransportId`]), kept out of
+    /// [`DropReason::LrproofInvalid`] so that counter stays a clean
+    /// validation-failure signal (Codeberg #227).
+    LinkRepeatEcho,
     /// Outbound forward/rebroadcast that would exceed `max_hops`.
     ForwardMaxHops,
     /// Incoming announce from a blackholed identity (Codeberg #67). The announce
@@ -1053,13 +1060,14 @@ impl DropReason {
             DropReason::AnnounceRateLimited => "announce-rate-limited",
             DropReason::IngressBurstAnnounce => "ingress-burst-announce",
             DropReason::LrproofInvalid => "lrproof-invalid",
+            DropReason::LinkRepeatEcho => "link-repeat-echo",
             DropReason::ForwardMaxHops => "forward-max-hops",
             DropReason::BlackholedAnnounce => "blackholed-announce",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 13] = [
+    pub const ALL: [DropReason; 14] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1071,6 +1079,7 @@ impl DropReason {
         DropReason::AnnounceRateLimited,
         DropReason::IngressBurstAnnounce,
         DropReason::LrproofInvalid,
+        DropReason::LinkRepeatEcho,
         DropReason::ForwardMaxHops,
         DropReason::BlackholedAnnounce,
     ];
@@ -1162,6 +1171,12 @@ impl TransportStats {
         self.drops_lrproof_invalid
     }
 
+    /// Same-interface link repeats dropped as echoes of our own forward
+    /// (routine on shared media, not validation failures; Codeberg #227).
+    pub fn drops_link_repeat_echo(&self) -> u64 {
+        self.drops_link_repeat_echo
+    }
+
     /// Outbound forwards/rebroadcasts dropped for exceeding `max_hops`.
     pub fn drops_forward_max_hops(&self) -> u64 {
         self.drops_forward_max_hops
@@ -1187,6 +1202,7 @@ impl TransportStats {
             + self.drops_announce_rate_limited
             + self.drops_ingress_burst_announce
             + self.drops_lrproof_invalid
+            + self.drops_link_repeat_echo
             + self.drops_forward_max_hops
             + self.drops_blackholed_announce
     }
@@ -1211,6 +1227,7 @@ impl TransportStats {
             DropReason::AnnounceRateLimited => self.drops_announce_rate_limited += 1,
             DropReason::IngressBurstAnnounce => self.drops_ingress_burst_announce += 1,
             DropReason::LrproofInvalid => self.drops_lrproof_invalid += 1,
+            DropReason::LinkRepeatEcho => self.drops_link_repeat_echo += 1,
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
         }
@@ -2649,6 +2666,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 announce_rate_limited = self.stats.drops_announce_rate_limited,
                 ingress_burst_announce = self.stats.drops_ingress_burst_announce,
                 lrproof_invalid = self.stats.drops_lrproof_invalid,
+                link_repeat_echo = self.stats.drops_link_repeat_echo,
                 forward_max_hops = self.stats.drops_forward_max_hops,
                 blackholed_announce = self.stats.drops_blackholed_announce,
                 total = self.stats.packets_dropped,
@@ -4782,9 +4800,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             &cache_hash,
                             &packet,
                             interface_index,
-                            DropReason::LrproofInvalid,
+                            DropReason::LinkRepeatEcho,
                         );
-                        self.stats.record_drop(DropReason::LrproofInvalid);
+                        self.stats.record_drop(DropReason::LinkRepeatEcho);
                         return Ok(());
                     }
                     link_entry.next_hop_interface_index
@@ -11010,6 +11028,7 @@ mod tests {
                 assert_eq!(s.drops_announce_rate_limited, 1);
                 assert_eq!(s.drops_ingress_burst_announce, 1);
                 assert_eq!(s.drops_lrproof_invalid, 1);
+                assert_eq!(s.drops_link_repeat_echo, 1);
                 assert_eq!(s.drops_forward_max_hops, 1);
                 assert_eq!(s.drops_blackholed_announce, 1);
             }

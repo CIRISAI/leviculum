@@ -221,9 +221,9 @@ The reference behaves this way on every forwarding path:
 Loop-freedom never came from interface suppression. It comes from
 transport_id addressing (only the addressed relay processes a Type2
 transport packet), the hop-count limit, and packet-hash dedup —
-`has_packet_hash` (`leviculum-core/src/transport.rs:2251`) drops a
+`has_packet_hash` (`leviculum-core/src/transport.rs:2270`) drops a
 repeated copy, `add_packet_hash`
-(`leviculum-core/src/transport.rs:2292`) records it.
+(`leviculum-core/src/transport.rs:2311`) records it.
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
