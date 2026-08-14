@@ -153,11 +153,11 @@ fi
 # a stubbed periculum and needs no binaries and no rig.
 CACHE_TARGET=~/.cache/leviculum-ci-target
 if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
-log "[CI_HW] building node binaries (lnsd / lnstest / lncp / lora-proxy)"
+log "[CI_HW] building node binaries (lnsd / lnstest / lncp / lnstatus / lora-proxy)"
 find "$REPO_DIR/leviculum-cli/src" "$REPO_DIR/leviculum-proxy/src" \
   -name '*.rs' -exec touch {} +
 CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
-  cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lora-proxy
+  cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy
 
 # regression/c_api_restart_recovery mounts c-lnsd, which is a C build, not a
 # cargo bin, so periculum's force-rebuild cannot produce it.
