@@ -84,12 +84,12 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:1547` | `rnstatus`-style counters |
 | `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:1867` | Relay mode flag |
 
-The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:57`),
-`Node` (`leviculum-std/src/api/mod.rs:215`) — re-projects this surface with core internals
+The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
+`Node` (`leviculum-std/src/api/mod.rs:238`) — re-projects this surface with core internals
 hidden; it is what `leviculum-ffi` wraps. Notable facade-only helpers:
-`api::generate_identity()` (`api/mod.rs:30`), `api::version()` (`api/mod.rs:37`),
-`api::version_string()` (`api/mod.rs:46`), and `Node::connect_with_key`
-(`api/mod.rs:428`) / `Node::accept_link` (`api/mod.rs:444`).
+`api::generate_identity()` (`api/mod.rs:35`), `api::version()` (`api/mod.rs:42`),
+`api::version_string()` (`api/mod.rs:51`), and `Node::connect_with_key`
+(`api/mod.rs:459`) / `Node::accept_link` (`api/mod.rs:475`).
 
 ### `LinkHandle`
 
