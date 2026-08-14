@@ -110,10 +110,16 @@ fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
         lib.contains("used={used} free={free} watermark={watermark} size={HEAP_SIZE}"),
         "the [HEAP] field order or spelling changed in leviculum-nrf/src/lib.rs"
     );
+    // The banner format string lives in the shared helper (48f34f6 moved it
+    // out of the BSP bins); each bin must still invoke it at boot.
+    assert!(
+        lib.contains("[PANIC_COUNT] total="),
+        "leviculum-nrf/src/lib.rs no longer emits the [PANIC_COUNT] banner"
+    );
     for bin in ["bin/t114.rs", "bin/rak4631.rs"] {
         assert!(
-            nrf_source(bin).contains("[PANIC_COUNT] total="),
-            "leviculum-nrf/src/{bin} no longer emits the [PANIC_COUNT] banner"
+            nrf_source(bin).contains("log_panic_count()"),
+            "leviculum-nrf/src/{bin} no longer emits the [PANIC_COUNT] banner at boot"
         );
     }
 }
