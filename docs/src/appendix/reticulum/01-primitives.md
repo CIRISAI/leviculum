@@ -35,6 +35,10 @@ Proven by `[VEC-HASH]`: `full_hash("reticulum-spec") =
 - **HKDF-SHA256** (`Cryptography/HKDF.py:35`), `hkdf(length, derive_from, salt,
   context)`. `[VEC-HKDF]`: `hkdf(32, derive_from=00..1f, salt=00..0f) =
   2bc3faec9f360e81e77086b6e17a9ce8722a4cb3bc0ed90b4d78d37036e43a0f`.
+  The block counter is taken modulo 256 (`Cryptography/HKDF.py:58`), so unlike
+  RFC 5869 there is no 255-block ceiling: outputs beyond 8160 bytes keep
+  deriving, with the counter wrapping to 0 on block 256. IFAC needs this — its
+  mask is as long as the packet.
 
 ## Encryption token (modified Fernet)
 
