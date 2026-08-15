@@ -22,6 +22,11 @@
 //! # tune the sweep and load:
 //! SIZES="1 20 40 60" PACKETS=200 PAYLOAD=32 \
 //!   cargo test -p leviculum-std --test transport_fanout_bench -- --ignored --nocapture
+//! # mode 5 — the consumer's link dance (leviculum#46):
+//! DANCE_SIZES="8 16 32 48 64" ROUNDS=5 RESOURCE_KIB=512 \
+//!   ESTABLISH_TIMEOUT=15 TRANSFER_TIMEOUT=60 STALL_SECS=15 LOAD_DEADLINE=240 \
+//!   cargo test -p leviculum-std --test transport_fanout_bench \
+//!     link_dance_sweep -- --ignored --nocapture
 //! ```
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
@@ -29,9 +34,10 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use leviculum_core::resource::ResourceStrategy;
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
-use leviculum_std::NodeEvent;
+use leviculum_std::{EventReceiver, NodeEvent};
 
 /// Port band chosen to avoid collisions with the mvr/interop suites in a shared
 /// `cargo test` invocation. This bench is `--ignored` so it normally runs alone.
@@ -55,6 +61,22 @@ fn env_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Nearest-rank percentile over a pre-sorted slice (0 if empty).
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        0.0
+    } else {
+        sorted[((sorted.len() - 1) as f64 * q) as usize]
+    }
 }
 
 struct LevelResult {
@@ -461,14 +483,11 @@ async fn outbound_resource_latency_under_flood() {
     }
 
     lat_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let q = |f: f64| -> f64 {
-        if lat_ms.is_empty() {
-            0.0
-        } else {
-            lat_ms[((lat_ms.len() - 1) as f64 * f) as usize]
-        }
-    };
-    let (p50, p95, max) = (q(0.5), q(0.95), q(1.0));
+    let (p50, p95, max) = (
+        percentile(&lat_ms, 0.5),
+        percentile(&lat_ms, 0.95),
+        percentile(&lat_ms, 1.0),
+    );
     let dip_pct = if baseline_rate > 0.0 {
         (1.0 - during_rate / baseline_rate) * 100.0
     } else {
@@ -503,12 +522,6 @@ async fn outbound_resource_latency_under_flood() {
 /// binary). Mirrors CIRISServer's `{schema, commit, date, runner, ...}` shape,
 /// with a `sweep` array for the N-vs-throughput curve.
 fn write_bench_json(path: &str, packets: usize, payload: usize, results: &[LevelResult]) {
-    fn env_or(key: &str, default: &str) -> String {
-        std::env::var(key)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| default.to_string())
-    }
     let commit = env_or("GIT_COMMIT", "unknown");
     let date = env_or("BENCH_DATE", "unknown");
     let runner = env_or(
@@ -810,4 +823,593 @@ async fn announce_verify_flood() {
         std::fs::write(&path, json).expect("write json");
         eprintln!("[bench] wrote {path}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Mode 5 — the "link dance" (leviculum#46): the consumer's real unit of work.
+// connect -> LinkEstablished -> identify_link -> serve-side ready ping ->
+// send_resource(512 KiB, incompressible, no auto-compress) -> sender-side
+// ResourceCompleted -> close_link -> LinkClosed, repeated R rounds per client.
+//
+// Provenance: this is edge's per-peer round shape (CIRISEdge#482), which
+// documents collapse past ~40 peers. This mode is the leviculum-native
+// before/after instrument for #42 (completion futures) and #43 (streamed
+// resources).
+//
+// Methodology:
+//
+// (i)   Shared CI runners swing absolute throughput ±2x with machine phases.
+//       Published numbers are TRENDS; a change's before/after comparison
+//       should use per-item lock-hold deltas, not two throughput runs.
+// (ii)  Stall-stop measurement: elapsed is the time of the LAST completed
+//       dance and a level breaks on a no-progress window, so a tail of
+//       timeouts (or the hard per-level deadline) never dilutes the rate — a
+//       deadline-quotient bench measures the deadline, not the system.
+// (iii) Every row derives service demand (us/dance = elapsed/completed at
+//       saturation), the workload-x-cost matrix input. The model already
+//       fits: ~85-100 us/packet of single-lock loop machinery predicted the
+//       measured ~11.5k pkts/s mode-1 ceiling.
+// (iv)  Upstream Lew_Palm/leviculum#208 (hub delivery ceiling; their bar: lab
+//       PDR < 100% is a bug, not variance) requires separating HOST-OVERLOAD
+//       from PROTOCOL LOSS — hence failure classes reported per N and never
+//       aggregated. Establish/TransferTimeout scale with N under overload;
+//       ResourceFailed while the node still completes other dances is
+//       protocol loss.
+// ---------------------------------------------------------------------------
+
+/// Outcome of one dance attempt, reported by a client task to the level
+/// watcher over the progress channel. Completions are the stall-stop
+/// progress signal; failures are counted but do not extend the window.
+enum DanceOutcome {
+    Completed { establish_ms: f64, transfer_ms: f64 },
+    Failed(DanceFail),
+}
+
+/// Failure classes stay separate per N so host-overload (the timeouts,
+/// which scale with N) never aggregates with protocol loss
+/// (ResourceFailed) — the upstream Lew_Palm/leviculum#208 requirement.
+#[derive(Clone, Copy)]
+enum DanceFail {
+    /// connect/identify/send_resource returned Err (driver/API failure).
+    Api,
+    /// LinkEstablished or the responder ready ping missed the deadline.
+    EstablishTimeout,
+    /// Neither ResourceCompleted nor ResourceFailed arrived in time.
+    TransferTimeout,
+    /// The transfer explicitly failed — protocol loss, not overload.
+    Resource,
+}
+
+/// Level-invariant dance parameters, shared by every client task.
+struct DanceCfg {
+    hash: leviculum_core::DestinationHash,
+    signing_key: [u8; 32],
+    rounds: usize,
+    /// Incompressible (xorshift-filled) blob, sent with auto_compress=false.
+    blob: Vec<u8>,
+    establish_timeout: Duration,
+    transfer_timeout: Duration,
+}
+
+/// Sweep-level knobs parsed once from env in `link_dance_sweep`.
+struct SweepKnobs {
+    rounds: usize,
+    resource_kib: usize,
+    establish_timeout: Duration,
+    transfer_timeout: Duration,
+    stall: Duration,
+    /// Hard per-level cap; stall-stop normally ends the level first.
+    level_deadline: Duration,
+}
+
+struct DanceLevelResult {
+    n: usize,
+    /// Clients that finished path install and entered the round loop
+    /// (JSON field `clients_ready` — NOT mode 1's per-link `established`:
+    /// each client here establishes R links, so that word is ambiguous).
+    clients_ready: usize,
+    target: usize,
+    completed: usize,
+    fail_api: usize,
+    fail_establish: usize,
+    fail_transfer: usize,
+    fail_resource: usize,
+    /// start -> last completed dance (stall-stop; min 1 ms guard).
+    elapsed: Duration,
+    /// One entry per completed dance, sorted ascending (percentile-ready).
+    establish_ms: Vec<f64>,
+    transfer_ms: Vec<f64>,
+}
+
+impl DanceLevelResult {
+    fn dances_per_s(&self) -> f64 {
+        if self.completed == 0 {
+            0.0
+        } else {
+            self.completed as f64 / self.elapsed.as_secs_f64()
+        }
+    }
+
+    fn service_demand_us(&self) -> f64 {
+        if self.completed == 0 {
+            0.0
+        } else {
+            1e6 * self.elapsed.as_secs_f64() / self.completed as f64
+        }
+    }
+}
+
+/// Serve node for the dance: TCP server, one Single destination
+/// ("bench"/["dance"]), event drain that flips each responder link to
+/// AcceptAll and answers with a 1-byte ready ping. The node is Arc'd because
+/// the drain needs `&ReticulumNode` after `take_event_receiver` (which needs
+/// `&mut self`) — receiver first, then wrap. Abort the drain handle before
+/// dropping the level's Arc so the node actually drops.
+async fn build_dance_serve_node() -> (
+    Arc<ReticulumNode>,
+    SocketAddr,
+    leviculum_core::DestinationHash,
+    [u8; 32],
+    tokio::task::JoinHandle<()>,
+) {
+    let addr: SocketAddr = format!("127.0.0.1:{}", next_port()).parse().unwrap();
+    let storage = tempfile::tempdir().expect("serve tempdir");
+    let mut node = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_server(addr)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build dance serve node");
+    std::mem::forget(storage);
+    node.start().await.expect("start dance serve node");
+
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let signing_key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
+    let dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "bench",
+        &["dance"],
+    )
+    .expect("dance serve destination");
+    let hash = *dest.hash();
+    node.register_destination(dest);
+
+    let mut rx = node.take_event_receiver().expect("dance serve event rx");
+    let node = Arc::new(node);
+    let serve = Arc::clone(&node);
+    let drain = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if let NodeEvent::LinkEstablished {
+                link_id,
+                is_initiator: false,
+                ..
+            } = ev
+            {
+                // Per-link resource strategy defaults to AcceptNone and is
+                // only settable AFTER establishment, so a client ADV racing
+                // this drain would be silently rejected — the sender times
+                // out, a harness artifact that would masquerade as protocol
+                // loss in the #208 numbers. Flip the link, then answer with a
+                // 1-byte ready ping the client awaits before sending. Cost is
+                // 1 packet against ~1,130 resource parts per dance. Err is
+                // ignored: the link may already be gone.
+                let _ = serve.set_resource_strategy(&link_id, ResourceStrategy::AcceptAll);
+                // Bounded retry — drain machinery, not measurement.
+                let handle = serve.link_handle(&link_id);
+                for _ in 0..100 {
+                    if handle.try_send(b"go").await.is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+    });
+
+    (node, addr, hash, signing_key, drain)
+}
+
+/// One dance round. Every wait is a `timeout_at` around `rx.recv()`; while
+/// awaiting a specific event, everything else is drained and discarded (the
+/// round loop is the receiver's sole consumer, so the channel never backs up
+/// — including the ~1,130 per-part `ResourceProgress` ticks per transfer and
+/// any `ControlPlaneOverflow` marker; the completion/failure events are
+/// control-plane, lossless, so matching on them stays safe).
+async fn dance_once(
+    node: &ReticulumNode,
+    rx: &mut EventReceiver,
+    cfg: &DanceCfg,
+    identity: &Identity,
+) -> DanceOutcome {
+    let t0 = Instant::now();
+    let handle = match node.connect(&cfg.hash, &cfg.signing_key).await {
+        Ok(h) => h,
+        Err(_) => return DanceOutcome::Failed(DanceFail::Api),
+    };
+    let link_id = *handle.link_id();
+    let dl = tokio::time::Instant::now() + cfg.establish_timeout;
+    loop {
+        match tokio::time::timeout_at(dl, rx.recv()).await {
+            Ok(Some(NodeEvent::LinkEstablished {
+                link_id: lid,
+                is_initiator: true,
+                ..
+            })) if lid == link_id => break,
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => {
+                let _ = node.close_link(&link_id).await;
+                return DanceOutcome::Failed(DanceFail::EstablishTimeout);
+            }
+        }
+    }
+    // Pure protocol establish — the ready-ping wait below shares this round's
+    // establish deadline but lands in NEITHER histogram, keeping both clean
+    // for #42/#43 before/after comparison (it shows up only in dances/s).
+    let establish_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    if node.identify_link(&link_id, identity).await.is_err() {
+        let _ = node.close_link(&link_id).await;
+        return DanceOutcome::Failed(DanceFail::Api);
+    }
+
+    // The ready ping arrives on the client's DATA plane (droppable), which is
+    // safe only because this receiver is idle at this moment — match both
+    // framings in case the serve side's send surfaces as either.
+    loop {
+        match tokio::time::timeout_at(dl, rx.recv()).await {
+            Ok(Some(NodeEvent::MessageReceived { link_id: lid, .. }))
+            | Ok(Some(NodeEvent::LinkDataReceived { link_id: lid, .. }))
+                if lid == link_id =>
+            {
+                break;
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => {
+                let _ = node.close_link(&link_id).await;
+                return DanceOutcome::Failed(DanceFail::EstablishTimeout);
+            }
+        }
+    }
+
+    let t1 = Instant::now();
+    let rhash = match node.send_resource(&link_id, &cfg.blob, None, false).await {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = node.close_link(&link_id).await;
+            return DanceOutcome::Failed(DanceFail::Api);
+        }
+    };
+    // RESOURCE_KIB > 1024 crosses RESOURCE_MAX_EFFICIENT_SIZE into
+    // multi-segment transfers; the guard on segment_index == total_segments
+    // keeps the match correct, but transfer_ms then means whole-transfer
+    // latency across all segments.
+    let xfer_dl = tokio::time::Instant::now() + cfg.transfer_timeout;
+    let transfer_ms = loop {
+        match tokio::time::timeout_at(xfer_dl, rx.recv()).await {
+            Ok(Some(NodeEvent::ResourceCompleted {
+                resource_hash,
+                is_sender: true,
+                segment_index,
+                total_segments,
+                ..
+            })) if resource_hash == rhash && segment_index == total_segments => {
+                break t1.elapsed().as_secs_f64() * 1000.0;
+            }
+            Ok(Some(NodeEvent::ResourceFailed { resource_hash, .. })) if resource_hash == rhash => {
+                let _ = node.close_link(&link_id).await;
+                return DanceOutcome::Failed(DanceFail::Resource);
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => {
+                let _ = node.close_link(&link_id).await;
+                return DanceOutcome::Failed(DanceFail::TransferTimeout);
+            }
+        }
+    };
+
+    let _ = node.close_link(&link_id).await;
+    // Bookkeeping only: bound the wait so a lost close never stalls the loop.
+    let close_dl = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match tokio::time::timeout_at(close_dl, rx.recv()).await {
+            Ok(Some(NodeEvent::LinkClosed { link_id: lid, .. })) if lid == link_id => break,
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    DanceOutcome::Completed {
+        establish_ms,
+        transfer_ms,
+    }
+}
+
+/// One client's whole life: await PathFound (30 s deadline), bump `ready`,
+/// then `cfg.rounds` dances. Sole consumer of its own `EventReceiver`; every
+/// wait is a tokio timeout around `recv()` — no sleep-polling.
+async fn dance_client(
+    node: ReticulumNode,
+    mut rx: EventReceiver,
+    cfg: Arc<DanceCfg>,
+    report: tokio::sync::mpsc::Sender<DanceOutcome>,
+    ready: Arc<AtomicUsize>,
+) {
+    // PathFound is control-plane (lossless), and the level's one announce may
+    // already sit buffered from before this task started — recv() sees it
+    // either way. A miss leaves this client out of the level's clients_ready.
+    let path_dl = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match tokio::time::timeout_at(path_dl, rx.recv()).await {
+            Ok(Some(NodeEvent::PathFound {
+                destination_hash, ..
+            })) if destination_hash == cfg.hash => break,
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => return,
+        }
+    }
+    ready.fetch_add(1, Ordering::Relaxed);
+
+    // One identity per client, stable across rounds — edge's shape.
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    for _ in 0..cfg.rounds {
+        let outcome = dance_once(&node, &mut rx, &cfg, &identity).await;
+        if report.send(outcome).await.is_err() {
+            return; // watcher gone — the level already ended
+        }
+    }
+}
+
+async fn run_dance_level(n: usize, knobs: &SweepKnobs) -> DanceLevelResult {
+    let (serve, serve_addr, hash, signing_key, serve_drain) = build_dance_serve_node().await;
+
+    // TCP first, then one announce every connected client installs the path
+    // from (the same one-announce pattern as bring_up_fleet).
+    let mut nodes = Vec::with_capacity(n);
+    for _ in 0..n {
+        if let Some(c) = bring_up_client_tcp_only(serve_addr).await {
+            nodes.push(c);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    serve
+        .announce_destination(&hash, Some(b"bench"))
+        .await
+        .expect("dance serve announce");
+
+    // Incompressible blob (mode 2's xorshift fill) with auto_compress=false:
+    // models sealed-envelope field payloads and keeps per-dance cost
+    // deterministic (no bz2 variance).
+    let mut blob = vec![0u8; knobs.resource_kib * 1024];
+    let mut x: u64 = 0x9E3779B97F4A7C15;
+    for c in blob.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *c = x as u8;
+    }
+    let cfg = Arc::new(DanceCfg {
+        hash,
+        signing_key,
+        rounds: knobs.rounds,
+        blob,
+        establish_timeout: knobs.establish_timeout,
+        transfer_timeout: knobs.transfer_timeout,
+    });
+
+    let ready = Arc::new(AtomicUsize::new(0));
+    let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(64);
+    let mut tasks = Vec::with_capacity(nodes.len());
+    for mut node in nodes {
+        let Some(rx) = node.take_event_receiver() else {
+            continue;
+        };
+        tasks.push(tokio::spawn(dance_client(
+            node,
+            rx,
+            Arc::clone(&cfg),
+            report_tx.clone(),
+            Arc::clone(&ready),
+        )));
+    }
+    // Natural completion = the channel closing once every client task returns;
+    // the level's own sender must go first for that to ever happen.
+    drop(report_tx);
+
+    let start = tokio::time::Instant::now();
+    let hard = start + knobs.level_deadline;
+    // First-completion grace is one full unit-of-work budget (not the stall
+    // window): at N=64 the first cohort of concurrent 512 KiB transfers
+    // legitimately outlasts any reasonable stall window. The budget includes
+    // establish_timeout because a client's transfer clock starts only after
+    // establish + ping — grace of transfer_timeout alone expires BEFORE any
+    // client's transfer deadline can fire, so a fully-collapsed level would
+    // always report zero counted failures.
+    let mut stall_dl = start + knobs.establish_timeout + knobs.transfer_timeout;
+    let mut last_completion = start;
+    let mut completed = 0usize;
+    let (mut fail_api, mut fail_establish, mut fail_transfer, mut fail_resource) = (0, 0, 0, 0);
+    let mut establish_ms: Vec<f64> = Vec::new();
+    let mut transfer_ms: Vec<f64> = Vec::new();
+    loop {
+        match tokio::time::timeout_at(stall_dl.min(hard), report_rx.recv()).await {
+            Ok(Some(DanceOutcome::Completed {
+                establish_ms: e,
+                transfer_ms: t,
+            })) => {
+                establish_ms.push(e);
+                transfer_ms.push(t);
+                completed += 1;
+                last_completion = tokio::time::Instant::now();
+                stall_dl = last_completion + knobs.stall;
+            }
+            Ok(Some(DanceOutcome::Failed(f))) => match f {
+                DanceFail::Api => fail_api += 1,
+                DanceFail::EstablishTimeout => fail_establish += 1,
+                DanceFail::TransferTimeout => fail_transfer += 1,
+                DanceFail::Resource => fail_resource += 1,
+            },
+            Ok(None) => break, // every client task finished its rounds
+            Err(_) => break,   // stall window or hard deadline expired
+        }
+    }
+    // Stall-stop anchor: elapsed ends at the LAST completed dance, so a tail
+    // of timeouts (or the hard deadline) never dilutes the rate.
+    let elapsed = (last_completion - start).max(Duration::from_millis(1));
+
+    for t in &tasks {
+        t.abort();
+    }
+    serve_drain.abort();
+    drop(serve);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    establish_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    transfer_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let clients_ready = ready.load(Ordering::Relaxed);
+    DanceLevelResult {
+        n,
+        clients_ready,
+        target: clients_ready * knobs.rounds,
+        completed,
+        fail_api,
+        fail_establish,
+        fail_transfer,
+        fail_resource,
+        elapsed,
+        establish_ms,
+        transfer_ms,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "load benchmark; run explicitly with --ignored --nocapture"]
+async fn link_dance_sweep() {
+    let sizes: Vec<usize> = std::env::var("DANCE_SIZES")
+        .ok()
+        .map(|v| {
+            v.split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![8, 16, 32, 48, 64]);
+    let knobs = SweepKnobs {
+        rounds: env_usize("ROUNDS", 5),
+        resource_kib: env_usize("RESOURCE_KIB", 512),
+        establish_timeout: Duration::from_secs(env_usize("ESTABLISH_TIMEOUT", 15) as u64),
+        transfer_timeout: Duration::from_secs(env_usize("TRANSFER_TIMEOUT", 60) as u64),
+        stall: Duration::from_secs(env_usize("STALL_SECS", 15) as u64),
+        level_deadline: Duration::from_secs(env_usize("LOAD_DEADLINE", 240) as u64),
+    };
+
+    println!();
+    println!("link dance — leviculum#46 (connect/identify/resource/close per round)");
+    println!(
+        "rounds/client={} resource={} KiB establish_to={}s transfer_to={}s stall={}s",
+        knobs.rounds,
+        knobs.resource_kib,
+        knobs.establish_timeout.as_secs(),
+        knobs.transfer_timeout.as_secs(),
+        knobs.stall.as_secs(),
+    );
+    println!(
+        "{:>5} | {:>5} | {:>9} | {:>12} | {:>9} | {:>8} | {:>13} | {:>15} | {:>10}",
+        "N",
+        "ready",
+        "dances",
+        "fail a/e/x/r",
+        "elapsed_s",
+        "dances/s",
+        "est p50/p95",
+        "xfer p50/p95",
+        "us/dance"
+    );
+    println!(
+        "{:-<5}-+-{:-<5}-+-{:-<9}-+-{:-<12}-+-{:-<9}-+-{:-<8}-+-{:-<13}-+-{:-<15}-+-{:-<10}",
+        "", "", "", "", "", "", "", "", ""
+    );
+
+    let mut results = Vec::new();
+    for n in sizes {
+        let r = run_dance_level(n, &knobs).await;
+        println!(
+            "{:>5} | {:>5} | {:>9} | {:>12} | {:>9.2} | {:>8.2} | {:>13} | {:>15} | {:>10.0}",
+            r.n,
+            r.clients_ready,
+            format!("{}/{}", r.completed, r.target),
+            format!(
+                "{}/{}/{}/{}",
+                r.fail_api, r.fail_establish, r.fail_transfer, r.fail_resource
+            ),
+            r.elapsed.as_secs_f64(),
+            r.dances_per_s(),
+            format!(
+                "{:.1}/{:.1}",
+                percentile(&r.establish_ms, 0.5),
+                percentile(&r.establish_ms, 0.95)
+            ),
+            format!(
+                "{:.0}/{:.0}",
+                percentile(&r.transfer_ms, 0.5),
+                percentile(&r.transfer_ms, 0.95)
+            ),
+            r.service_demand_us(),
+        );
+        results.push(r);
+    }
+    println!();
+
+    if let Ok(path) = std::env::var("BENCH_JSON_OUT_LINKDANCE") {
+        write_linkdance_json(&path, &knobs, &results);
+        eprintln!("[bench] wrote {path}");
+    }
+}
+
+/// Hand-write the link-dance JSON (dependency-free, same discipline as
+/// `write_bench_json`): `leviculum/bench-results/1` shape with a `sweep`
+/// array carrying the per-N rows, failure classes broken out per #208.
+fn write_linkdance_json(path: &str, knobs: &SweepKnobs, results: &[DanceLevelResult]) {
+    let commit = env_or("GIT_COMMIT", "unknown");
+    let date = env_or("BENCH_DATE", "unknown");
+    let runner = env_or(
+        "BENCH_RUNNER",
+        &format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+    );
+
+    let mut sweep = String::new();
+    for (i, r) in results.iter().enumerate() {
+        if i > 0 {
+            sweep.push(',');
+        }
+        sweep.push_str(&format!(
+            "\n    {{\"n\": {}, \"clients_ready\": {}, \"target_dances\": {}, \"completed\": {}, \"failures\": {{\"api\": {}, \"establish_timeout\": {}, \"transfer_timeout\": {}, \"resource_failed\": {}}}, \"elapsed_s\": {:.3}, \"dances_per_s\": {:.2}, \"establish_ms\": {{\"p50\": {:.1}, \"p95\": {:.1}}}, \"transfer_ms\": {{\"p50\": {:.1}, \"p95\": {:.1}}}, \"service_demand_us_per_dance\": {:.1}}}",
+            r.n,
+            r.clients_ready,
+            r.target,
+            r.completed,
+            r.fail_api,
+            r.fail_establish,
+            r.fail_transfer,
+            r.fail_resource,
+            r.elapsed.as_secs_f64(),
+            r.dances_per_s(),
+            percentile(&r.establish_ms, 0.5),
+            percentile(&r.establish_ms, 0.95),
+            percentile(&r.transfer_ms, 0.5),
+            percentile(&r.transfer_ms, 0.95),
+            r.service_demand_us(),
+        ));
+    }
+
+    let json = format!(
+        "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"link_dance\",\n  \"issue\": \"leviculum#46\",\n  \"commit\": \"{commit}\",\n  \"date\": \"{date}\",\n  \"runner\": \"{runner}\",\n  \"params\": {{\"rounds_per_client\": {}, \"resource_kib\": {}, \"establish_timeout_s\": {}, \"transfer_timeout_s\": {}, \"stall_secs\": {}}},\n  \"sweep\": [{sweep}\n  ]\n}}\n",
+        knobs.rounds,
+        knobs.resource_kib,
+        knobs.establish_timeout.as_secs(),
+        knobs.transfer_timeout.as_secs(),
+        knobs.stall.as_secs(),
+    );
+    std::fs::write(path, json).expect("write linkdance bench json");
 }
