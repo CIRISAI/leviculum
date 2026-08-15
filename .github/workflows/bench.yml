@@ -123,6 +123,22 @@ jobs:
               link_dance_sweep -- --ignored --nocapture
           echo "── emitted bench_linkdance.json ──"; cat bench_linkdance.json
 
+      # Budget: ~3-4 min — 3 phases x 10 s of offered load, plus per-phase
+      # client bring-up and one dance's worth of drain. The published
+      # degradation trend: goodput, latency growth, lock-probe percentiles,
+      # visible shedding, and time-to-recover, past the knee on purpose.
+      - name: Run the overload envelope (mode 6, degradation pattern)
+        run: |
+          OVERLOAD_SIZES="8 32 64" PHASE_SECS=10 RESOURCE_KIB=512 \
+          ESTABLISH_TIMEOUT=15 TRANSFER_TIMEOUT=60 \
+          GIT_COMMIT="$GITHUB_SHA" \
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+          BENCH_RUNNER="github/ubuntu-latest (release)" \
+          BENCH_JSON_OUT_OVERLOAD="$PWD/bench_overload.json" \
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              link_dance_overload -- --ignored --nocapture
+          echo "── emitted bench_overload.json ──"; cat bench_overload.json
+
       - name: Render the interpreted page
         run: |
           python3 scripts/bench_report.py \
@@ -132,10 +148,10 @@ jobs:
             --commit "$GITHUB_SHA" \
             --date "$(date -u +%Y-%m-%d)"
 
-      # bench_report.py does not render modes 3-5 yet; Pages serves the raw
+      # bench_report.py does not render modes 3-6 yet; Pages serves the raw
       # trend JSON alongside the rendered page.
-      - name: Publish the modes 3-5 raw JSON into the Pages site
-        run: cp bench_singledest.json bench_announce.json bench_linkdance.json bench-site/
+      - name: Publish the modes 3-6 raw JSON into the Pages site
+        run: cp bench_singledest.json bench_announce.json bench_linkdance.json bench_overload.json bench-site/
 
       - name: Upload bench_results.json + rendered site as a workflow artifact
         uses: actions/upload-artifact@v4
@@ -147,6 +163,7 @@ jobs:
             bench_singledest.json
             bench_announce.json
             bench_linkdance.json
+            bench_overload.json
             bench-site
           if-no-files-found: error
 

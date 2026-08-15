@@ -901,6 +901,10 @@ struct DanceCfg {
     blob: Vec<u8>,
     establish_timeout: Duration,
     transfer_timeout: Duration,
+    /// Cooperative end-of-phase flag for the time-boxed overload mode; a
+    /// client checks it between dances, so a raised flag drains in at most
+    /// one dance's worth of timeouts. Mode 5 never raises it.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Sweep-level knobs parsed once from env in `link_dance_sweep`.
@@ -963,6 +967,7 @@ async fn build_dance_serve_node() -> (
     leviculum_core::DestinationHash,
     [u8; 32],
     tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
 ) {
     let addr: SocketAddr = format!("127.0.0.1:{}", next_port()).parse().unwrap();
     let storage = tempfile::tempdir().expect("serve tempdir");
@@ -992,8 +997,18 @@ async fn build_dance_serve_node() -> (
     let mut rx = node.take_event_receiver().expect("dance serve event rx");
     let node = Arc::new(node);
     let serve = Arc::clone(&node);
+    // Visible-shedding probe for the overload mode: every control-plane
+    // drop on the serve node surfaces as a ControlPlaneOverflow marker, and
+    // the drain counts them — silent loss is a bug, counted loss is a
+    // measured degradation datum.
+    let overflow = Arc::new(AtomicUsize::new(0));
+    let overflow_in_drain = Arc::clone(&overflow);
     let drain = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
+            if let NodeEvent::ControlPlaneOverflow { dropped_count } = ev {
+                overflow_in_drain.fetch_add(dropped_count as usize, Ordering::Relaxed);
+                continue;
+            }
             if let NodeEvent::LinkEstablished {
                 link_id,
                 is_initiator: false,
@@ -1031,7 +1046,7 @@ async fn build_dance_serve_node() -> (
         }
     });
 
-    (node, addr, hash, signing_key, drain)
+    (node, addr, hash, signing_key, drain, overflow)
 }
 
 /// One dance round. Every wait is a `timeout_at` around `rx.recv()`; while
@@ -1173,6 +1188,9 @@ async fn dance_client(
     // One identity per client, stable across rounds — edge's shape.
     let identity = Identity::generate(&mut rand_core::OsRng);
     for _ in 0..cfg.rounds {
+        if cfg.stop.load(Ordering::Relaxed) {
+            return; // phase over (overload mode)
+        }
         let outcome = dance_once(&node, &mut rx, &cfg, &identity).await;
         if report.send(outcome).await.is_err() {
             return; // watcher gone — the level already ended
@@ -1181,7 +1199,8 @@ async fn dance_client(
 }
 
 async fn run_dance_level(n: usize, knobs: &SweepKnobs) -> DanceLevelResult {
-    let (serve, serve_addr, hash, signing_key, serve_drain) = build_dance_serve_node().await;
+    let (serve, serve_addr, hash, signing_key, serve_drain, _overflow) =
+        build_dance_serve_node().await;
 
     // TCP first, then one announce every connected client installs the path
     // from (the same one-announce pattern as bring_up_fleet).
@@ -1215,6 +1234,7 @@ async fn run_dance_level(n: usize, knobs: &SweepKnobs) -> DanceLevelResult {
         blob,
         establish_timeout: knobs.establish_timeout,
         transfer_timeout: knobs.transfer_timeout,
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     let ready = Arc::new(AtomicUsize::new(0));
@@ -1430,4 +1450,435 @@ fn write_linkdance_json(path: &str, knobs: &SweepKnobs, results: &[DanceLevelRes
         knobs.stall.as_secs(),
     );
     std::fs::write(path, json).expect("write linkdance bench json");
+}
+
+// ---------------------------------------------------------------------------
+// Mode 6 — leviculum#46: the degradation envelope. Mode 5 finds the knee;
+// this mode drives PAST it on purpose and characterizes what the node does
+// there, so saturation is a measured pattern instead of a guess. Each phase
+// is time-boxed (clients loop dances until the flag flips), against ONE
+// serve node that lives through every phase — recovery is only meaningful
+// on the node that just took the beating.
+//
+// Invariants asserted by measurement, not assumption:
+//   liveness — an outside caller's node-lock acquire (has_path on a probe
+//     hash) is sampled at 100 ms through every phase; its percentiles ARE
+//     the "holds stay flat under overload" hypothesis (#29).
+//   bounded memory — VmRSS is read per phase; a growing queue shows here.
+//   visible shedding — control-plane drops surface as ControlPlaneOverflow
+//     markers and are counted; silent loss is a bug.
+//   typed failure — the a/e/x/r taxonomy separates clean rejection from
+//     stall from protocol loss (#208's host-overload vs protocol-loss rule).
+//   recovery — after the last phase: solo dances on a fresh client, until
+//     one matches the unloaded baseline (time-to-recover, first-class).
+// ---------------------------------------------------------------------------
+
+fn read_rss_mib() -> f64 {
+    // VmRSS covers the whole test process — serve node, client fleets, and
+    // harness. Phase-over-phase DELTA is the signal; the absolute value is
+    // context.
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| {
+                l.split_whitespace()
+                    .nth(1)
+                    .and_then(|kb| kb.parse::<f64>().ok())
+            })
+        })
+        .map(|kb| kb / 1024.0)
+        .unwrap_or(f64::NAN)
+}
+
+struct OverloadPhase {
+    n: usize,
+    clients_ready: usize,
+    /// Completions inside the phase window — goodput's numerator.
+    completed: usize,
+    /// Completions that landed during the post-flag drain (still real work,
+    /// not offered-window goodput).
+    drained: usize,
+    fail_api: usize,
+    fail_establish: usize,
+    fail_transfer: usize,
+    fail_resource: usize,
+    window_secs: f64,
+    establish_ms: Vec<f64>,
+    transfer_ms: Vec<f64>,
+    /// Node-lock acquire latency samples (ms) from the outside probe.
+    probe_ms: Vec<f64>,
+    overflow_markers: usize,
+    rss_mib: f64,
+}
+
+impl OverloadPhase {
+    fn goodput(&self) -> f64 {
+        self.completed as f64 / self.window_secs.max(0.001)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_overload_phase(
+    serve: &Arc<ReticulumNode>,
+    hash: leviculum_core::DestinationHash,
+    signing_key: [u8; 32],
+    serve_addr: SocketAddr,
+    overflow: &Arc<AtomicUsize>,
+    n: usize,
+    phase: Duration,
+    knobs: &SweepKnobs,
+) -> OverloadPhase {
+    let mut nodes = Vec::with_capacity(n);
+    for _ in 0..n {
+        if let Some(c) = bring_up_client_tcp_only(serve_addr).await {
+            nodes.push(c);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    serve
+        .announce_destination(&hash, Some(b"bench"))
+        .await
+        .expect("overload announce");
+
+    let mut blob = vec![0u8; knobs.resource_kib * 1024];
+    let mut x: u64 = 0x9E3779B97F4A7C15;
+    for c in blob.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *c = x as u8;
+    }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cfg = Arc::new(DanceCfg {
+        hash,
+        signing_key,
+        rounds: usize::MAX, // time-boxed: the stop flag ends the phase
+        blob,
+        establish_timeout: knobs.establish_timeout,
+        transfer_timeout: knobs.transfer_timeout,
+        stop: Arc::clone(&stop),
+    });
+
+    let ready = Arc::new(AtomicUsize::new(0));
+    let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(64);
+    let mut tasks = Vec::with_capacity(nodes.len());
+    for mut node in nodes {
+        let Some(rx) = node.take_event_receiver() else {
+            continue;
+        };
+        tasks.push(tokio::spawn(dance_client(
+            node,
+            rx,
+            Arc::clone(&cfg),
+            report_tx.clone(),
+            Arc::clone(&ready),
+        )));
+    }
+    drop(report_tx);
+
+    // The liveness probe: how long an OUTSIDE caller waits for the node
+    // lock while the phase load runs. has_path on an unknown hash is the
+    // cheapest lock-taking call the driver exposes.
+    let probe_serve = Arc::clone(serve);
+    let probe_stop = Arc::clone(&stop);
+    let probe = tokio::spawn(async move {
+        let mut samples: Vec<f64> = Vec::new();
+        let unknown = leviculum_core::DestinationHash::new([0u8; 16]);
+        while !probe_stop.load(Ordering::Relaxed) {
+            let t = Instant::now();
+            let _ = probe_serve.has_path(&unknown);
+            samples.push(t.elapsed().as_secs_f64() * 1000.0);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        samples
+    });
+
+    let overflow_before = overflow.load(Ordering::Relaxed);
+    let window_start = Instant::now();
+    let deadline = tokio::time::Instant::now() + phase;
+    let mut completed = 0usize;
+    let mut drained = 0usize;
+    let (mut fail_api, mut fail_establish, mut fail_transfer, mut fail_resource) = (0, 0, 0, 0);
+    let mut establish_ms: Vec<f64> = Vec::new();
+    let mut transfer_ms: Vec<f64> = Vec::new();
+    let mut in_window = true;
+    // Post-flag drain budget: one dance's worth of timeouts, so an
+    // in-flight dance can finish or fail on its own terms.
+    let drain_dl =
+        deadline + knobs.establish_timeout + knobs.transfer_timeout + Duration::from_secs(5);
+    loop {
+        let dl = if in_window { deadline } else { drain_dl };
+        match tokio::time::timeout_at(dl, report_rx.recv()).await {
+            Ok(Some(DanceOutcome::Completed {
+                establish_ms: e,
+                transfer_ms: t,
+            })) => {
+                establish_ms.push(e);
+                transfer_ms.push(t);
+                if in_window {
+                    completed += 1;
+                } else {
+                    drained += 1;
+                }
+            }
+            Ok(Some(DanceOutcome::Failed(f))) => match f {
+                DanceFail::Api => fail_api += 1,
+                DanceFail::EstablishTimeout => fail_establish += 1,
+                DanceFail::TransferTimeout => fail_transfer += 1,
+                DanceFail::Resource => fail_resource += 1,
+            },
+            Ok(None) => break, // every client exited
+            Err(_) if in_window => {
+                // Window over: raise the flag, keep collecting the drain.
+                stop.store(true, Ordering::Relaxed);
+                in_window = false;
+            }
+            Err(_) => break, // drain budget exhausted; abort stragglers below
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let window_secs = phase
+        .as_secs_f64()
+        .min(window_start.elapsed().as_secs_f64());
+    for t in &tasks {
+        t.abort();
+    }
+    let mut probe_ms = probe.await.unwrap_or_default();
+    probe_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    establish_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    transfer_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    OverloadPhase {
+        n,
+        clients_ready: ready.load(Ordering::Relaxed),
+        completed,
+        drained,
+        fail_api,
+        fail_establish,
+        fail_transfer,
+        fail_resource,
+        window_secs,
+        establish_ms,
+        transfer_ms,
+        probe_ms,
+        overflow_markers: overflow.load(Ordering::Relaxed) - overflow_before,
+        rss_mib: read_rss_mib(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "overload benchmark; run explicitly with --ignored --nocapture"]
+async fn link_dance_overload() {
+    let sizes: Vec<usize> = std::env::var("OVERLOAD_SIZES")
+        .ok()
+        .map(|v| {
+            v.split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![8, 32, 64, 96, 128]);
+    let phase = Duration::from_secs(env_usize("PHASE_SECS", 20) as u64);
+    let knobs = SweepKnobs {
+        rounds: usize::MAX,
+        resource_kib: env_usize("RESOURCE_KIB", 512),
+        establish_timeout: Duration::from_secs(env_usize("ESTABLISH_TIMEOUT", 15) as u64),
+        transfer_timeout: Duration::from_secs(env_usize("TRANSFER_TIMEOUT", 60) as u64),
+        stall: Duration::from_secs(0),  // unused: phases are time-boxed
+        level_deadline: Duration::ZERO, // unused: phases are time-boxed
+    };
+
+    let (serve, serve_addr, hash, signing_key, serve_drain, overflow) =
+        build_dance_serve_node().await;
+
+    println!();
+    println!(
+        "link dance OVERLOAD — leviculum#46 (degradation envelope, one serve node throughout)"
+    );
+    println!(
+        "phase={}s resource={} KiB establish_to={}s transfer_to={}s",
+        phase.as_secs(),
+        knobs.resource_kib,
+        knobs.establish_timeout.as_secs(),
+        knobs.transfer_timeout.as_secs(),
+    );
+    println!(
+        "{:>5} | {:>5} | {:>7} | {:>6} | {:>12} | {:>8} | {:>15} | {:>17} | {:>8} | {:>8}",
+        "N",
+        "ready",
+        "in-win",
+        "drain",
+        "fail a/e/x/r",
+        "good/s",
+        "xfer p50/p95",
+        "probe p50/p95/max",
+        "overflow",
+        "rss MiB"
+    );
+
+    let mut phases: Vec<OverloadPhase> = Vec::new();
+    for n in sizes {
+        let r = run_overload_phase(
+            &serve,
+            hash,
+            signing_key,
+            serve_addr,
+            &overflow,
+            n,
+            phase,
+            &knobs,
+        )
+        .await;
+        println!(
+            "{:>5} | {:>5} | {:>7} | {:>6} | {:>12} | {:>8.2} | {:>15} | {:>17} | {:>8} | {:>8.1}",
+            r.n,
+            r.clients_ready,
+            r.completed,
+            r.drained,
+            format!(
+                "{}/{}/{}/{}",
+                r.fail_api, r.fail_establish, r.fail_transfer, r.fail_resource
+            ),
+            r.goodput(),
+            format!(
+                "{:.0}/{:.0}",
+                percentile(&r.transfer_ms, 0.5),
+                percentile(&r.transfer_ms, 0.95)
+            ),
+            format!(
+                "{:.2}/{:.2}/{:.2}",
+                percentile(&r.probe_ms, 0.5),
+                percentile(&r.probe_ms, 0.95),
+                r.probe_ms.last().copied().unwrap_or(0.0)
+            ),
+            r.overflow_markers,
+            r.rss_mib,
+        );
+        phases.push(r);
+    }
+
+    // Recovery: the serve node just absorbed the worst phase. A fresh solo
+    // client dances until its transfer latency is within 3x of the lightest
+    // phase's p50 (or the attempt cap runs out) — time to that dance is the
+    // time-to-recover.
+    let baseline_p50 = percentile(&phases[0].transfer_ms, 0.5);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut recovery_ms: Vec<f64> = Vec::new();
+    let mut recovered_after_s = f64::NAN;
+    let recovery_start = Instant::now();
+    if let Some(mut solo) = bring_up_client_tcp_only(serve_addr).await {
+        if let Some(mut rx) = solo.take_event_receiver() {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = serve.announce_destination(&hash, Some(b"bench")).await;
+            // Wait for the path like dance_client does.
+            let path_dl = tokio::time::Instant::now() + Duration::from_secs(30);
+            let mut have_path = false;
+            while let Ok(Some(ev)) = tokio::time::timeout_at(path_dl, rx.recv()).await {
+                if matches!(ev, NodeEvent::PathFound { destination_hash, .. } if destination_hash == hash)
+                {
+                    have_path = true;
+                    break;
+                }
+            }
+            if have_path {
+                let mut blob = vec![0u8; knobs.resource_kib * 1024];
+                let mut x: u64 = 0x2545F4914F6CDD1D;
+                for c in blob.iter_mut() {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    *c = x as u8;
+                }
+                let cfg = DanceCfg {
+                    hash,
+                    signing_key,
+                    rounds: 1,
+                    blob,
+                    establish_timeout: knobs.establish_timeout,
+                    transfer_timeout: knobs.transfer_timeout,
+                    stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                };
+                let identity = Identity::generate(&mut rand_core::OsRng);
+                for _ in 0..10 {
+                    match dance_once(&solo, &mut rx, &cfg, &identity).await {
+                        DanceOutcome::Completed { transfer_ms: t, .. } => {
+                            recovery_ms.push(t);
+                            if t <= baseline_p50 * 3.0 && recovered_after_s.is_nan() {
+                                recovered_after_s = recovery_start.elapsed().as_secs_f64();
+                                break;
+                            }
+                        }
+                        DanceOutcome::Failed(_) => recovery_ms.push(f64::NAN),
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "recovery: baseline p50 {:.0} ms, solo dances {:?} ms, recovered_after {:.1}s",
+        baseline_p50, recovery_ms, recovered_after_s
+    );
+
+    serve_drain.abort();
+
+    if let Ok(path) = std::env::var("BENCH_JSON_OUT_OVERLOAD") {
+        let commit = env_or("GIT_COMMIT", "unknown");
+        let date = env_or("BENCH_DATE", "unknown");
+        let runner = env_or(
+            "BENCH_RUNNER",
+            &format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        );
+        let mut rows = String::new();
+        for (i, r) in phases.iter().enumerate() {
+            if i > 0 {
+                rows.push(',');
+            }
+            rows.push_str(&format!(
+                "\n    {{\"n\": {}, \"clients_ready\": {}, \"completed_in_window\": {}, \"drained\": {}, \"failures\": {{\"api\": {}, \"establish\": {}, \"transfer\": {}, \"resource\": {}}}, \"window_secs\": {:.1}, \"goodput_dances_s\": {:.2}, \"establish_ms\": {{\"p50\": {:.1}, \"p95\": {:.1}}}, \"transfer_ms\": {{\"p50\": {:.1}, \"p95\": {:.1}}}, \"lock_probe_ms\": {{\"p50\": {:.3}, \"p95\": {:.3}, \"max\": {:.3}}}, \"overflow_markers\": {}, \"rss_mib\": {:.1}}}",
+                r.n,
+                r.clients_ready,
+                r.completed,
+                r.drained,
+                r.fail_api,
+                r.fail_establish,
+                r.fail_transfer,
+                r.fail_resource,
+                r.window_secs,
+                r.goodput(),
+                percentile(&r.establish_ms, 0.5),
+                percentile(&r.establish_ms, 0.95),
+                percentile(&r.transfer_ms, 0.5),
+                percentile(&r.transfer_ms, 0.95),
+                percentile(&r.probe_ms, 0.5),
+                percentile(&r.probe_ms, 0.95),
+                r.probe_ms.last().copied().unwrap_or(0.0),
+                r.overflow_markers,
+                r.rss_mib,
+            ));
+        }
+        let solo = recovery_ms
+            .iter()
+            .map(|v| {
+                if v.is_nan() {
+                    "null".to_string()
+                } else {
+                    format!("{v:.0}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let recovered = if recovered_after_s.is_nan() {
+            "null".to_string()
+        } else {
+            format!("{recovered_after_s:.1}")
+        };
+        let json = format!(
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"link_dance_overload\",\n  \"issue\": \"leviculum#46\",\n  \"commit\": \"{commit}\",\n  \"date\": \"{date}\",\n  \"runner\": \"{runner}\",\n  \"params\": {{\"phase_secs\": {}, \"resource_kib\": {}, \"establish_timeout_s\": {}, \"transfer_timeout_s\": {}}},\n  \"phases\": [{rows}\n  ],\n  \"recovery\": {{\"baseline_transfer_p50_ms\": {:.0}, \"solo_transfer_ms\": [{solo}], \"recovered_after_s\": {recovered}}}\n}}\n",
+            phase.as_secs(),
+            knobs.resource_kib,
+            knobs.establish_timeout.as_secs(),
+            knobs.transfer_timeout.as_secs(),
+            baseline_p50,
+        );
+        std::fs::write(path, json).expect("write overload bench json");
+    }
 }
