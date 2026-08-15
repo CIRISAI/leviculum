@@ -12,8 +12,11 @@ use tempfile::TempDir;
 
 const EXE: &str = env!("CARGO_BIN_EXE_lnflash");
 
+#[path = "fixtures/materialize.rs"]
+mod materialize;
+
 fn fixture_sysfs() -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"))
+    materialize::materialized().to_path_buf()
 }
 
 /// An unpacked bundle: binary at the top, payload under `firmware/`, exactly

@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn waiting_finds_a_bootloader_that_is_already_there_without_sleeping() {
-        let sysfs = Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+        let sysfs = Sysfs::new(crate::sysfs_fixture::materialized());
         let started = Instant::now();
         let found = wait_for_bootloader(
             &sysfs,
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn waiting_correlates_to_the_board_that_was_touched() {
-        let sysfs = Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+        let sysfs = Sysfs::new(crate::sysfs_fixture::materialized());
         let t114 = sysfs
             .devices_matching(&[UsbId::new(0x1209, 0x0001)])
             .unwrap()
@@ -240,7 +240,7 @@ mod tests {
         // The trap this closes: a board that just rebooted is still listed
         // for a moment, so "wait for the bootloader" would answer instantly
         // with the entry that is on its way out.
-        let sysfs = Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+        let sysfs = Sysfs::new(crate::sysfs_fixture::materialized());
         let boot = sysfs
             .devices_matching(&[UsbId::new(0x239a, 0x0071)])
             .unwrap()
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn a_device_that_is_not_there_reads_as_gone_immediately() {
-        let sysfs = Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+        let sysfs = Sysfs::new(crate::sysfs_fixture::materialized());
         let mut absent = sysfs
             .devices_matching(&[UsbId::new(0x239a, 0x0071)])
             .unwrap()
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn waiting_times_out_rather_than_hanging_when_nothing_appears() {
-        let sysfs = Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+        let sysfs = Sysfs::new(crate::sysfs_fixture::materialized());
         let started = Instant::now();
         let found = wait_for_bootloader(
             &sysfs,

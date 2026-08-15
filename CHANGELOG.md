@@ -35,6 +35,16 @@ falls back to the in-lock path (never skips a check). Wire format untouched
 `handle_packet_precomputed`. A parallel worker-pool variant was measured and
 rejected (task overhead ≥ the crypto moved; announce throughput regressed 2×).
 
+### Fixed
+
+**Windows checkout of the tree (upstream #244).** Upstream 0.8.1's lnflash
+sysfs fixtures carry `:` in path names (`3-2.3.1:1.0`), which NTFS cannot
+represent — `git clone` and every cargo fetch of this repo as a Windows git
+dependency (CIRISEdge's `win_amd64` wheel lane) failed at checkout. The
+committed fixture tree now encodes `:` as `+`; lnflash tests materialize the
+decoded tree into a tempdir before walking it, so the enumeration code still
+sees real sysfs names. Reported upstream as Lew_Palm/leviculum#244.
+
 ## [0.14.1+ciris.1] — CIRIS fork
 
 ### Fixed

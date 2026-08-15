@@ -311,7 +311,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> Sysfs {
-        Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"))
+        Sysfs::new(crate::sysfs_fixture::materialized())
     }
 
     #[test]

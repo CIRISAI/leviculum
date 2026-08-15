@@ -73,4 +73,11 @@ mkdir -p sysfs/3-2.9
 # git does not track empty directories; sysfs attribute files fill every
 # directory that matters, except the tty/block leaves.
 find sysfs -type d -empty -exec touch {}/.keep \;
+
+# NTFS cannot represent ':' in a path, so a verbatim tree breaks git checkout
+# (and cargo git-dependency fetches) on Windows. Commit the tree with ':'
+# encoded as '+'; tests decode it back via tests/fixtures/materialize.rs.
+find sysfs -depth -name '*:*' | while read -r p; do
+    mv "$p" "${p%/*}/$(basename "$p" | tr ':' '+')"
+done
 echo "wrote $(find sysfs -type f | wc -l) files under $(pwd)/sysfs"
