@@ -30,6 +30,18 @@ caller owns wall-clock timeouts. This deletes CIRISEdge's six poll loops:
 every await/poll path here takes no node lock at all (upstream #199 pressure
 shrinks). Wire format untouched.
 
+**leviculum#42 surface (b) — bounded multi-consumer event tap.**
+`ReticulumNode::subscribe_events()` returns an `EventTap`: a secondary
+observer fed clones at the dispatch layer, BEFORE the two-plane sink, so it
+never consumes from or races the primary `EventReceiver`, sees events the
+data plane is entitled to drop, and works on a daemon-mode node built
+`without_events()`. Backed by a lazy `tokio::broadcast` (256 slots):
+drop-oldest on overrun, surfaced as `TapEvent::Lagged(n)` with a cumulative
+`lost()` counter; `filtered()` adds consumer-side event filtering. With no
+live subscriber the per-event cost is one atomic load. Requires `Clone` on
+`NodeEvent`/`ReceivedAnnounce` in leviculum-core — derive-only, no_std-clean,
+no wire change.
+
 ## [0.15.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master @ `0d93b29` (+107 since 0.8.1: LnFlash tooling,

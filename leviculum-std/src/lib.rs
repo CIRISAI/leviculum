@@ -62,9 +62,10 @@ pub fn generate_identity() -> Identity {
 
 pub use config::Config;
 pub use driver::{
-    Completion, CompletionError, EventReceiver, InterfaceStatusSnapshot, LinkEstablishedFuture,
-    LinkHandle, PacketSender, RequestResponseFuture, ResourceSentFuture, ResourceSentInfo,
-    ResponseInfo, ReticulumNode, ReticulumNodeBuilder,
+    Completion, CompletionError, EventReceiver, EventTap, FilteredEventTap,
+    InterfaceStatusSnapshot, LinkEstablishedFuture, LinkHandle, PacketSender,
+    RequestResponseFuture, ResourceSentFuture, ResourceSentInfo, ResponseInfo, ReticulumNode,
+    ReticulumNodeBuilder, TapEvent, DEFAULT_EVENT_TAP_CAPACITY,
 };
 pub use error::{Error, Result};
 pub use file_lxmf_store::FileLxmfStorage;
