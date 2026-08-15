@@ -231,14 +231,26 @@ mod tests {
     use super::*;
     use std::process::Stdio;
 
+    /// `sh -c "exit N"` where there is a sh, `cmd /C exit N` where there is
+    /// not. What is under test is the spawn plumbing, not the shell.
+    fn exit_with(code: u32) -> Command {
+        #[cfg(unix)]
+        let mut cmd = Command::new("/bin/sh");
+        #[cfg(unix)]
+        cmd.arg("-c").arg(format!("exit {code}"));
+        #[cfg(windows)]
+        let mut cmd = Command::new("cmd");
+        #[cfg(windows)]
+        cmd.arg("/C").arg(format!("exit {code}"));
+        cmd
+    }
+
     /// The helper is a spawn, not only a flag-setter: an ordinary command runs
     /// and reports its status through it.
     #[test]
     fn a_supervised_child_runs_and_is_reaped_normally() {
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", "exit 7"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let mut cmd = exit_with(7);
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
         let mut child = spawn_supervised(cmd).expect("spawn");
         let status = child.wait().expect("wait");
         assert_eq!(status.code(), Some(7));
@@ -249,10 +261,8 @@ mod tests {
     #[test]
     fn the_forking_thread_serves_more_than_one_spawn() {
         for _ in 0..3 {
-            let mut cmd = Command::new("/bin/sh");
-            cmd.args(["-c", "exit 0"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+            let mut cmd = exit_with(0);
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
             let mut child = spawn_supervised(cmd).expect("spawn");
             assert!(child.wait().expect("wait").success());
         }
@@ -268,10 +278,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_supervised_async_child_runs() {
-        let mut cmd = tokio::process::Command::new("/bin/sh");
-        cmd.args(["-c", "exit 3"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let mut cmd = tokio::process::Command::from(exit_with(3));
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
         let mut child = spawn_supervised_async(cmd).expect("spawn");
         let status = child.wait().await.expect("wait");
         assert_eq!(status.code(), Some(3));
