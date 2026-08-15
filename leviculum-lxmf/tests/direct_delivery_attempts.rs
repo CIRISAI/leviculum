@@ -407,6 +407,62 @@ fn direct_submission_over_an_established_link_consumes_no_extra_attempt() {
     );
 }
 
+/// Every `MessageState` the router reported for one message, in order. The
+/// count is the point: a state that arrives twice is as wrong as one that
+/// never arrives.
+fn reported_states(sender: &Sender, id: &[u8; 32]) -> Vec<MessageState> {
+    sender
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            RouterEvent::MessageState { message_id, state } if message_id == id => Some(*state),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_direct_submission_is_reported_once_before_its_verdict() {
+    let mut sender = sender(29);
+    let mut receiver = receiver(129);
+    exchange_announces(&mut sender, &mut receiver);
+
+    let (id, _link_id, _packets) = queue_and_submit(
+        &mut sender,
+        &mut receiver,
+        b"reported direct payload".to_vec(),
+        11,
+    );
+
+    // The verdict has not been pumped back yet, so this is the whole of what
+    // the caller has been told about a message that is on the air.
+    assert_eq!(
+        reported_states(&sender, &id),
+        vec![MessageState::Sending],
+        "a message in flight must be distinguishable from one still waiting \
+         for a route: {:?}",
+        sender.events
+    );
+
+    // The entry comes due again (DELIVERY_RETRY_WAIT_MS is 10 s) while the
+    // transfer it already owns is still running. `tick` turns it back before
+    // any submission, so there is no second submission to report.
+    sender.advance_ms(11_000);
+    let _ = sender.tick();
+
+    assert_eq!(
+        sender.state(&id),
+        Some(MessageState::Sending),
+        "the message must still be in flight for the retry to mean anything"
+    );
+    assert_eq!(
+        reported_states(&sender, &id),
+        vec![MessageState::Sending],
+        "a due tick that resubmits nothing reports nothing: {:?}",
+        sender.events
+    );
+}
+
 #[test]
 fn a_retryable_outgoing_resource_failure_tears_down_its_direct_link() {
     let mut sender = sender(22);
@@ -578,6 +634,13 @@ fn a_deferred_resource_build_leaves_the_tick_and_starts_on_commit() {
         sender.state(&id),
         Some(MessageState::Sending),
         "the commit is the submission, and must mark the entry Sending"
+    );
+    assert_eq!(
+        reported_states(&sender, &id),
+        vec![MessageState::Sending],
+        "the deferred path owes the caller the same report the composed one \
+         makes, and owes it once: {:?}",
+        sender.events
     );
     pump(&mut sender, &mut receiver, packets);
 

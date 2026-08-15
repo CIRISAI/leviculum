@@ -1001,7 +1001,12 @@ impl LxmfRouter {
                 if let Some(entry) = self.outbound.get_mut(&message_id) {
                     let representation = LxmfNode::representation(entry.message());
                     record_successful_submission_attempt(entry, &representation);
-                    entry.set_state(MessageState::Sending, &mut self.build_epochs);
+                    if entry.set_state(MessageState::Sending, &mut self.build_epochs) {
+                        output.events.push(RouterEvent::MessageState {
+                            message_id,
+                            state: MessageState::Sending,
+                        });
+                    }
                     self.persistence_dirty = true;
                 }
                 for ev in committed.events {
@@ -1010,9 +1015,11 @@ impl LxmfRouter {
                 output
             }
             BuiltKind::Upload(prepared) => {
-                // The upload path takes its `Sending` mark from the transport's
-                // `UploadSubmitted` event, which `commit_upload` runs through
-                // the same handler a composed submission does.
+                // The upload path takes its `Sending` mark, and the report that
+                // goes with it, from the transport's `UploadSubmitted` event,
+                // which `commit_upload` runs through the same handler a
+                // composed submission does. Nothing is marked or reported here,
+                // so neither happens twice.
                 let mut propagation = self
                     .propagation
                     .take()
@@ -1730,7 +1737,23 @@ impl LxmfRouter {
             match submitted {
                 Ok(sent) => {
                     record_successful_submission_attempt(&mut entry, &representation);
-                    entry.set_state(MessageState::Sending, &mut self.build_epochs);
+                    // Every transition into `Sending` is reported, once, wherever
+                    // it is made — here, in `commit_resource_build`, and on the
+                    // transport's `UploadSubmitted` — and only on the transition,
+                    // for the reason a no-op write does not advance the epoch.
+                    //
+                    // This arm carries opportunistic sends as well as direct
+                    // ones, and Python routes those through `LXMessage.SENT`
+                    // (`reference/LXMF/LXMF/LXMessage.py:472`) rather than the
+                    // `LXMessage.SENDING` (`reference/LXMF/LXMF/LXMessage.py:475`)
+                    // it gives a direct one. Older than this report, which is
+                    // only what makes it visible.
+                    if entry.set_state(MessageState::Sending, &mut self.build_epochs) {
+                        output.events.push(RouterEvent::MessageState {
+                            message_id: id,
+                            state: MessageState::Sending,
+                        });
+                    }
                     entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                     output.core.merge(sent.core);
                     self.outbound.insert(id, entry);
@@ -3249,6 +3272,41 @@ mod persistence_tests {
 
         assert_eq!(router.outbound[&id].state(), MessageState::Sent);
         assert!(events.is_empty());
+    }
+
+    /// The `Sending` report is a transition, not an assignment — the same rule
+    /// `OutboundEntry::set_state` applies to the build epoch. Without it a
+    /// submission onto an entry already in that state would report a second
+    /// time, and a caller counting the ticks a message spent in flight would
+    /// count one send twice.
+    #[test]
+    fn a_submission_onto_an_already_sending_entry_reports_nothing() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let destination = announced_peer(&mut router, &mut node, 87);
+        let mut queued = message(88);
+        queued.method = DeliveryMethod::Opportunistic;
+        queued.destination_hash = destination.into_bytes();
+        let id = queued.message_id;
+        let _ = router.enqueue(&node, queued).unwrap();
+        let entry = router.outbound.get_mut(&id).expect("queued message");
+        entry.set_state(MessageState::Sending, &mut router.build_epochs);
+
+        let output = router.tick(&mut node).expect("tick");
+
+        // `Sent` is what the submission handler leaves behind, so reaching it
+        // proves the send ran rather than being skipped before the state write.
+        assert_eq!(router.outbound[&id].state(), MessageState::Sent);
+        assert!(
+            !output.events.iter().any(|event| matches!(
+                event,
+                RouterEvent::MessageState {
+                    message_id,
+                    state: MessageState::Sending
+                } if *message_id == id
+            )),
+            "an entry already Sending has no transition to report: {:?}",
+            output.events
+        );
     }
 
     #[test]

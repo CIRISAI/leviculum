@@ -11,9 +11,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1357`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1365`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1134-1140`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1142-1148`).
 
 ### When to sync
 
@@ -116,7 +116,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1153-1188`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1161-1196`) with no trust
 input at all, because it has no notion of trust.
 
 Your mailbox sees the *envelope* of every message sent to you: who sent it
@@ -130,7 +130,7 @@ counts, their advertised limits and costs (`PropagationNodeAnnounce`,
 `leviculum-lxmf/src/propagation.rs:513-525`), and require one keystroke to
 accept. Automatic *failover* between nodes the user has already approved is
 fine and the library already does it
-(`leviculum-lxmf/src/router/propagation_runtime.rs:817-838`); automatic
+(`leviculum-lxmf/src/router/propagation_runtime.rs:825-846`); automatic
 *adoption* of a stranger is not.
 
 Note that NomadNet's trust propagation makes this worse: trusting a person
@@ -152,9 +152,9 @@ consequence spelled out, not a config-file default nobody reads.
 - The sync schedule (there is none in the library).
 - Persistence of known propagation nodes and of the selection, since
   neither is in the router snapshot (`snapshot`,
-  `leviculum-lxmf/src/router.rs:1896-1913`); replay via
+  `leviculum-lxmf/src/router.rs:1919-1936`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1309`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1317`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.
@@ -194,7 +194,7 @@ Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
 (`leviculum-lxmf/src/message.rs:213-215`), and such messages **are
 delivered to the application anyway**
-(`leviculum-lxmf/src/router.rs:1414-1417`). And the router discards the
+(`leviculum-lxmf/src/router.rs:1421-1424`). And the router discards the
 display name from announces entirely, so **the client must maintain its own
 hash-to-name map** from raw `NodeEvent::AnnounceReceived`.
 

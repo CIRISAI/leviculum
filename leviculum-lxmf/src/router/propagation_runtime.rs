@@ -355,7 +355,15 @@ impl PropagationRuntime {
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
                     // Establishing the propagation link already charged this logical
                     // attempt. Submitting on that link is part of the same attempt.
-                    entry.set_state(super::MessageState::Sending, &mut router.build_epochs);
+                    //
+                    // Reported as at the two direct sites: `PropagationSyncState`
+                    // narrates the link this rides on, never which message is on it.
+                    if entry.set_state(super::MessageState::Sending, &mut router.build_epochs) {
+                        output.events.push(RouterEvent::MessageState {
+                            message_id,
+                            state: super::MessageState::Sending,
+                        });
+                    }
                     entry.next_attempt_ms =
                         node.now_ms().saturating_add(super::DELIVERY_RETRY_WAIT_MS);
                     entry.progress = 0.01;

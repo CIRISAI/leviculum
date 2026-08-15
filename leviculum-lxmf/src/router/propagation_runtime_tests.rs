@@ -116,6 +116,18 @@ impl ClientHarness {
     }
 }
 
+/// Every `MessageState` reported for one message, in order.
+fn reported_states(client: &ClientHarness, id: &[u8; 32]) -> Vec<super::super::MessageState> {
+    client
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            RouterEvent::MessageState { message_id, state } if message_id == id => Some(*state),
+            _ => None,
+        })
+        .collect()
+}
+
 struct MailboxServer {
     node: TestNode,
     propagation_destination: DestinationHash,
@@ -930,6 +942,18 @@ fn router_encrypts_stamps_uploads_and_awaits_collection_of_a_propagated_message(
             } if completed == &message_id
         )),
         "an upload to a propagation node is never reported as sent to the recipient"
+    );
+    // The message's own two moments, in order and once each. The link they
+    // rode on is narrated separately, by `PropagationSyncState`, which cannot
+    // say which message was on it.
+    assert_eq!(
+        reported_states(&client, &message_id),
+        vec![
+            super::super::MessageState::Sending,
+            super::super::MessageState::AwaitingCollection
+        ],
+        "an upload reports its submission and then its verdict: {:?}",
+        client.events
     );
     assert_eq!(sink.uploads.len(), 1);
 

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MessageState::Sending` is reported on `RouterEvent::MessageState` from
+  every path that enters it — direct, opportunistic and propagated — so a
+  message is observable while it is in flight instead of only when it is
+  answered. On the transition only.
 - lnmsg speaks to propagation nodes. `--via auto` (the new default)
   tries the direct delivery link first and, when none comes up inside
   the timeout, uploads the message to a propagation node instead — the
