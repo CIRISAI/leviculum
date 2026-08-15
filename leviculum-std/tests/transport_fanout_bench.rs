@@ -905,6 +905,23 @@ struct DanceCfg {
     /// client checks it between dances, so a raised flag drains in at most
     /// one dance's worth of timeouts. Mode 5 never raises it.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// How a client awaits outcomes: completion futures (the v0.16 API) or
+    /// the pre-#42 consumer shape — a poll loop that touches the node every
+    /// tick and detects outcomes only at tick boundaries (mode 7's A arm).
+    client_mode: ClientMode,
+    /// See `SweepKnobs::fresh_identity_per_dance`.
+    fresh_identity_per_dance: bool,
+}
+
+/// Mode 7: the two consumer shapes under A/B.
+#[derive(Clone, Copy)]
+enum ClientMode {
+    /// `send_resource_awaited` + completion futures (leviculum#42).
+    Future,
+    /// Edge's pre-#42 shape: poll every tick, one `link_is_established`
+    /// node call per tick (the lock tax), outcome detection only at tick
+    /// boundaries (the latency tax).
+    Poll(Duration),
 }
 
 /// Sweep-level knobs parsed once from env in `link_dance_sweep`.
@@ -916,6 +933,10 @@ struct SweepKnobs {
     stall: Duration,
     /// Hard per-level cap; stall-stop normally ends the level first.
     level_deadline: Duration,
+    /// Mode 8: a fresh identity per dance makes every identify dirty the
+    /// serve node's known-destinations store, so the periodic flush always
+    /// has work. Modes 5-7 keep edge's shape (one identity per client).
+    fresh_identity_per_dance: bool,
 }
 
 struct DanceLevelResult {
@@ -969,15 +990,32 @@ async fn build_dance_serve_node() -> (
     tokio::task::JoinHandle<()>,
     Arc<AtomicUsize>,
 ) {
+    build_dance_serve_node_with_flush(None).await
+}
+
+/// `flush_secs: Some(n)` overrides the storage flush interval — mode 8's
+/// deaf-window probe fires the periodic flush DURING load instead of once
+/// an hour where no bench can see it.
+async fn build_dance_serve_node_with_flush(
+    flush_secs: Option<u64>,
+) -> (
+    Arc<ReticulumNode>,
+    SocketAddr,
+    leviculum_core::DestinationHash,
+    [u8; 32],
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
+) {
     let addr: SocketAddr = format!("127.0.0.1:{}", next_port()).parse().unwrap();
     let storage = tempfile::tempdir().expect("serve tempdir");
-    let mut node = ReticulumNodeBuilder::new()
+    let mut builder = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .add_tcp_server(addr)
-        .storage_path(storage.path().to_path_buf())
-        .build()
-        .await
-        .expect("build dance serve node");
+        .storage_path(storage.path().to_path_buf());
+    if let Some(secs) = flush_secs {
+        builder = builder.flush_interval_secs(secs);
+    }
+    let mut node = builder.build().await.expect("build dance serve node");
     std::mem::forget(storage);
     node.start().await.expect("start dance serve node");
 
@@ -1160,6 +1198,134 @@ async fn dance_once(
     }
 }
 
+/// One dance round, the PRE-#42 consumer way (mode 7's poll arm): outcomes
+/// are detected only at `poll_ms` tick boundaries, and every tick makes one
+/// `link_is_established` call into the node — faithfully reproducing both
+/// halves of the poll tax the completion-future API removed: detection lag
+/// (up to one tick per state transition) and per-tick node-lock traffic.
+/// Event drains use `try_recv` so nothing is awaited between ticks — the
+/// mirror-map-fed-by-a-drain shape, collapsed into one task.
+async fn dance_once_poll(
+    node: &ReticulumNode,
+    rx: &mut EventReceiver,
+    cfg: &DanceCfg,
+    identity: &Identity,
+    poll_ms: Duration,
+) -> DanceOutcome {
+    let t0 = Instant::now();
+    let handle = match node.connect(&cfg.hash, &cfg.signing_key).await {
+        Ok(h) => h,
+        Err(_) => return DanceOutcome::Failed(DanceFail::Api),
+    };
+    let link_id = *handle.link_id();
+    let est_dl = tokio::time::Instant::now() + cfg.establish_timeout;
+
+    // Establishment by polling the node, not by awaiting the event.
+    let establish_ms = loop {
+        if node.link_is_established(&link_id) {
+            break t0.elapsed().as_secs_f64() * 1000.0;
+        }
+        if tokio::time::Instant::now() >= est_dl {
+            let _ = node.close_link(&link_id).await;
+            return DanceOutcome::Failed(DanceFail::EstablishTimeout);
+        }
+        tokio::time::sleep(poll_ms).await;
+    };
+
+    if node.identify_link(&link_id, identity).await.is_err() {
+        let _ = node.close_link(&link_id).await;
+        return DanceOutcome::Failed(DanceFail::Api);
+    }
+
+    // Ready ping detected from the drained mirror, once per tick.
+    loop {
+        let mut got_ping = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                NodeEvent::MessageReceived { link_id: lid, .. }
+                | NodeEvent::LinkDataReceived { link_id: lid, .. }
+                    if lid == link_id =>
+                {
+                    got_ping = true;
+                }
+                _ => {}
+            }
+        }
+        if got_ping {
+            break;
+        }
+        if tokio::time::Instant::now() >= est_dl {
+            let _ = node.close_link(&link_id).await;
+            return DanceOutcome::Failed(DanceFail::EstablishTimeout);
+        }
+        let _ = node.link_is_established(&link_id); // the per-tick lock tax
+        tokio::time::sleep(poll_ms).await;
+    }
+
+    let t1 = Instant::now();
+    if node
+        .send_resource(&link_id, &cfg.blob, None, false)
+        .await
+        .is_err()
+    {
+        let _ = node.close_link(&link_id).await;
+        return DanceOutcome::Failed(DanceFail::Api);
+    }
+    // Completion by link-scoped event match at tick boundaries (link-scoped
+    // because a split transfer's final event carries the LAST segment's
+    // hash — the same truth the future API handles internally).
+    let xfer_dl = tokio::time::Instant::now() + cfg.transfer_timeout;
+    let transfer_ms = loop {
+        let mut done = false;
+        let mut failed = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                NodeEvent::ResourceCompleted {
+                    link_id: lid,
+                    is_sender: true,
+                    segment_index,
+                    total_segments,
+                    ..
+                } if lid == link_id && segment_index == total_segments => done = true,
+                NodeEvent::ResourceFailed {
+                    link_id: lid,
+                    is_sender: true,
+                    ..
+                } if lid == link_id => failed = true,
+                _ => {}
+            }
+        }
+        if failed {
+            let _ = node.close_link(&link_id).await;
+            return DanceOutcome::Failed(DanceFail::Resource);
+        }
+        if done {
+            break t1.elapsed().as_secs_f64() * 1000.0;
+        }
+        if tokio::time::Instant::now() >= xfer_dl {
+            let _ = node.close_link(&link_id).await;
+            return DanceOutcome::Failed(DanceFail::TransferTimeout);
+        }
+        let _ = node.link_is_established(&link_id); // the per-tick lock tax
+        tokio::time::sleep(poll_ms).await;
+    };
+
+    let _ = node.close_link(&link_id).await;
+    let close_dl = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match tokio::time::timeout_at(close_dl, rx.recv()).await {
+            Ok(Some(NodeEvent::LinkClosed { link_id: lid, .. })) if lid == link_id => break,
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    DanceOutcome::Completed {
+        establish_ms,
+        transfer_ms,
+    }
+}
+
 /// One client's whole life: await PathFound (30 s deadline), bump `ready`,
 /// then `cfg.rounds` dances. Sole consumer of its own `EventReceiver`; every
 /// wait is a tokio timeout around `recv()` — no sleep-polling.
@@ -1185,13 +1351,26 @@ async fn dance_client(
     }
     ready.fetch_add(1, Ordering::Relaxed);
 
-    // One identity per client, stable across rounds — edge's shape.
-    let identity = Identity::generate(&mut rand_core::OsRng);
+    // One identity per client, stable across rounds — edge's shape. Mode 8
+    // regenerates per dance so every identify dirties the serve's stores.
+    let stable_identity = Identity::generate(&mut rand_core::OsRng);
     for _ in 0..cfg.rounds {
         if cfg.stop.load(Ordering::Relaxed) {
             return; // phase over (overload mode)
         }
-        let outcome = dance_once(&node, &mut rx, &cfg, &identity).await;
+        let fresh;
+        let identity = if cfg.fresh_identity_per_dance {
+            fresh = Identity::generate(&mut rand_core::OsRng);
+            &fresh
+        } else {
+            &stable_identity
+        };
+        let outcome = match cfg.client_mode {
+            ClientMode::Future => dance_once(&node, &mut rx, &cfg, identity).await,
+            ClientMode::Poll(poll_ms) => {
+                dance_once_poll(&node, &mut rx, &cfg, identity, poll_ms).await
+            }
+        };
         if report.send(outcome).await.is_err() {
             return; // watcher gone — the level already ended
         }
@@ -1235,6 +1414,8 @@ async fn run_dance_level(n: usize, knobs: &SweepKnobs) -> DanceLevelResult {
         establish_timeout: knobs.establish_timeout,
         transfer_timeout: knobs.transfer_timeout,
         stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        client_mode: ClientMode::Future,
+        fresh_identity_per_dance: knobs.fresh_identity_per_dance,
     });
 
     let ready = Arc::new(AtomicUsize::new(0));
@@ -1340,6 +1521,7 @@ async fn link_dance_sweep() {
         transfer_timeout: Duration::from_secs(env_usize("TRANSFER_TIMEOUT", 60) as u64),
         stall: Duration::from_secs(env_usize("STALL_SECS", 15) as u64),
         level_deadline: Duration::from_secs(env_usize("LOAD_DEADLINE", 240) as u64),
+        fresh_identity_per_dance: false,
     };
 
     println!();
@@ -1509,6 +1691,11 @@ struct OverloadPhase {
     probe_ms: Vec<f64>,
     overflow_markers: usize,
     rss_mib: f64,
+    /// Largest hole in the completion stream (ms) — the deaf-window signal.
+    max_gap_ms: f64,
+    /// Arm 3 only: events the deliberately-lagging tap lost (proves the lag
+    /// was real while the main-path numbers stayed flat).
+    tap_lost: Option<u64>,
 }
 
 impl OverloadPhase {
@@ -1527,6 +1714,8 @@ async fn run_overload_phase(
     n: usize,
     phase: Duration,
     knobs: &SweepKnobs,
+    client_mode: ClientMode,
+    tap_laggard: bool,
 ) -> OverloadPhase {
     let mut nodes = Vec::with_capacity(n);
     for _ in 0..n {
@@ -1557,6 +1746,8 @@ async fn run_overload_phase(
         establish_timeout: knobs.establish_timeout,
         transfer_timeout: knobs.transfer_timeout,
         stop: Arc::clone(&stop),
+        client_mode,
+        fresh_identity_per_dance: knobs.fresh_identity_per_dance,
     });
 
     let ready = Arc::new(AtomicUsize::new(0));
@@ -1593,8 +1784,18 @@ async fn run_overload_phase(
         samples
     });
 
+    // Mode 7 arm 3: a subscriber that never reads. The broadcast ring fills
+    // and every further event is drop-oldest — the claim under test is that
+    // this costs the MAIN path nothing. Harvested (one read) at phase end so
+    // the lag is real for the whole window.
+    let mut laggard = tap_laggard.then(|| serve.subscribe_events());
+
     let overflow_before = overflow.load(Ordering::Relaxed);
     let window_start = Instant::now();
+    // Max inter-completion gap — mode 8's deaf-window instrument: a flush
+    // that stalls the loop shows up as a hole in the completion stream.
+    let mut last_completion_at = window_start;
+    let mut max_gap_ms: f64 = 0.0;
     let deadline = tokio::time::Instant::now() + phase;
     let mut completed = 0usize;
     let mut drained = 0usize;
@@ -1615,6 +1816,12 @@ async fn run_overload_phase(
             })) => {
                 establish_ms.push(e);
                 transfer_ms.push(t);
+                let now = Instant::now();
+                let gap = now.duration_since(last_completion_at).as_secs_f64() * 1000.0;
+                if gap > max_gap_ms {
+                    max_gap_ms = gap;
+                }
+                last_completion_at = now;
                 if in_window {
                     completed += 1;
                 } else {
@@ -1663,6 +1870,15 @@ async fn run_overload_phase(
         probe_ms,
         overflow_markers: overflow.load(Ordering::Relaxed) - overflow_before,
         rss_mib: read_rss_mib(),
+        max_gap_ms,
+        tap_lost: match laggard.as_mut() {
+            // One read surfaces the Lagged marker and updates lost().
+            Some(tap) => {
+                let _ = tokio::time::timeout(Duration::from_millis(50), tap.recv()).await;
+                Some(tap.lost())
+            }
+            None => None,
+        },
     }
 }
 
@@ -1685,6 +1901,7 @@ async fn link_dance_overload() {
         transfer_timeout: Duration::from_secs(env_usize("TRANSFER_TIMEOUT", 60) as u64),
         stall: Duration::from_secs(0),  // unused: phases are time-boxed
         level_deadline: Duration::ZERO, // unused: phases are time-boxed
+        fresh_identity_per_dance: false,
     };
 
     let (serve, serve_addr, hash, signing_key, serve_drain, overflow) =
@@ -1726,6 +1943,8 @@ async fn link_dance_overload() {
             n,
             phase,
             &knobs,
+            ClientMode::Future,
+            false,
         )
         .await;
         println!(
@@ -1796,6 +2015,8 @@ async fn link_dance_overload() {
                     establish_timeout: knobs.establish_timeout,
                     transfer_timeout: knobs.transfer_timeout,
                     stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    client_mode: ClientMode::Future,
+                    fresh_identity_per_dance: false,
                 };
                 let identity = Identity::generate(&mut rand_core::OsRng);
                 for _ in 0..10 {
@@ -1880,5 +2101,256 @@ async fn link_dance_overload() {
             baseline_p50,
         );
         std::fs::write(path, json).expect("write overload bench json");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mode 7 — poll vs future A/B (leviculum#42's value, measured). Three arms,
+// each on its own fresh serve node, same N and window:
+//   future      — send_resource_awaited + completion futures (v0.16 API)
+//   poll        — the pre-#42 consumer shape: POLL_MS ticks, one node call
+//                 per tick, outcomes seen only at tick boundaries
+//   future+lag  — the future arm with a deliberately never-read event tap on
+//                 the serve node, pinning the "a laggard cannot hurt the
+//                 main path" claim with numbers instead of a code comment
+// Expected shape: the poll arm pays ~POLL_MS/2 extra per state transition
+// (two transitions per dance) and adds N×(1000/POLL_MS) lock acquires/s;
+// the lag arm should be indistinguishable from the future arm, with
+// tap_lost > 0 proving the laggard actually lagged.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "A/B benchmark; run explicitly with --ignored --nocapture"]
+async fn poll_vs_future() {
+    let n = env_usize("AB_N", 32);
+    let window = Duration::from_secs(env_usize("AB_SECS", 15) as u64);
+    let poll_ms = Duration::from_millis(env_usize("POLL_MS", 100) as u64);
+    let knobs = SweepKnobs {
+        rounds: usize::MAX,
+        resource_kib: env_usize("RESOURCE_KIB", 512),
+        establish_timeout: Duration::from_secs(env_usize("ESTABLISH_TIMEOUT", 15) as u64),
+        transfer_timeout: Duration::from_secs(env_usize("TRANSFER_TIMEOUT", 60) as u64),
+        stall: Duration::from_secs(0),
+        level_deadline: Duration::ZERO,
+        fresh_identity_per_dance: false,
+    };
+
+    println!();
+    println!(
+        "poll vs future A/B — leviculum#42 (N={n}, window={}s, poll tick={}ms)",
+        window.as_secs(),
+        poll_ms.as_millis()
+    );
+    println!(
+        "{:>10} | {:>7} | {:>12} | {:>8} | {:>13} | {:>15} | {:>17} | {:>8}",
+        "arm",
+        "in-win",
+        "fail a/e/x/r",
+        "good/s",
+        "est p50/p95",
+        "xfer p50/p95",
+        "probe p50/p95/max",
+        "tap_lost"
+    );
+
+    let arms: [(&str, ClientMode, bool); 3] = [
+        ("future", ClientMode::Future, false),
+        ("poll", ClientMode::Poll(poll_ms), false),
+        ("future+lag", ClientMode::Future, true),
+    ];
+    let mut results: Vec<(&str, OverloadPhase)> = Vec::new();
+    for (name, mode, lag) in arms {
+        let (serve, serve_addr, hash, signing_key, serve_drain, overflow) =
+            build_dance_serve_node().await;
+        let r = run_overload_phase(
+            &serve,
+            hash,
+            signing_key,
+            serve_addr,
+            &overflow,
+            n,
+            window,
+            &knobs,
+            mode,
+            lag,
+        )
+        .await;
+        serve_drain.abort();
+        println!(
+            "{:>10} | {:>7} | {:>12} | {:>8.2} | {:>13} | {:>15} | {:>17} | {:>8}",
+            name,
+            r.completed,
+            format!(
+                "{}/{}/{}/{}",
+                r.fail_api, r.fail_establish, r.fail_transfer, r.fail_resource
+            ),
+            r.goodput(),
+            format!(
+                "{:.1}/{:.1}",
+                percentile(&r.establish_ms, 0.5),
+                percentile(&r.establish_ms, 0.95)
+            ),
+            format!(
+                "{:.0}/{:.0}",
+                percentile(&r.transfer_ms, 0.5),
+                percentile(&r.transfer_ms, 0.95)
+            ),
+            format!(
+                "{:.2}/{:.2}/{:.2}",
+                percentile(&r.probe_ms, 0.5),
+                percentile(&r.probe_ms, 0.95),
+                r.probe_ms.last().copied().unwrap_or(0.0)
+            ),
+            r.tap_lost.map_or("-".to_string(), |l| l.to_string()),
+        );
+        results.push((name, r));
+    }
+
+    if let Ok(path) = std::env::var("BENCH_JSON_OUT_POLLAB") {
+        let commit = env_or("GIT_COMMIT", "unknown");
+        let date = env_or("BENCH_DATE", "unknown");
+        let runner = env_or(
+            "BENCH_RUNNER",
+            &format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        );
+        let mut rows = String::new();
+        for (i, (name, r)) in results.iter().enumerate() {
+            if i > 0 {
+                rows.push(',');
+            }
+            rows.push_str(&format!(
+                "\n    {{\"arm\": \"{name}\", \"completed_in_window\": {}, \"failures\": {{\"api\": {}, \"establish\": {}, \"transfer\": {}, \"resource\": {}}}, \"goodput_dances_s\": {:.2}, \"establish_ms\": {{\"p50\": {:.1}, \"p95\": {:.1}}}, \"transfer_ms\": {{\"p50\": {:.1}, \"p95\": {:.1}}}, \"lock_probe_ms\": {{\"p50\": {:.3}, \"p95\": {:.3}, \"max\": {:.3}}}, \"tap_lost\": {}}}",
+                r.completed,
+                r.fail_api,
+                r.fail_establish,
+                r.fail_transfer,
+                r.fail_resource,
+                r.goodput(),
+                percentile(&r.establish_ms, 0.5),
+                percentile(&r.establish_ms, 0.95),
+                percentile(&r.transfer_ms, 0.5),
+                percentile(&r.transfer_ms, 0.95),
+                percentile(&r.probe_ms, 0.5),
+                percentile(&r.probe_ms, 0.95),
+                r.probe_ms.last().copied().unwrap_or(0.0),
+                r.tap_lost.map_or("null".to_string(), |l| l.to_string()),
+            ));
+        }
+        let json = format!(
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"poll_vs_future\",\n  \"issue\": \"leviculum#42\",\n  \"commit\": \"{commit}\",\n  \"date\": \"{date}\",\n  \"runner\": \"{runner}\",\n  \"params\": {{\"n\": {n}, \"window_secs\": {}, \"poll_ms\": {}, \"resource_kib\": {}}},\n  \"arms\": [{rows}\n  ]\n}}\n",
+            window.as_secs(),
+            poll_ms.as_millis(),
+            knobs.resource_kib,
+        );
+        std::fs::write(path, json).expect("write poll-ab bench json");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mode 8 — flush deaf-window probe (leviculum#44's value, measured). The
+// periodic flush fires hourly in production, so no throughput bench ever
+// sees it; this mode forces it to fire DURING load (flush every 5 s, fresh
+// identity per dance so every identify dirties the known-destinations
+// store) and compares against a control serve whose flush never fires.
+// The instruments: max inter-completion gap (a lock-holding flush is a hole
+// in the completion stream) and the outside lock-probe max. Post-#44 the
+// two phases should be statistically identical; a regression that moves the
+// flush IO back under the lock reopens the gap and this trend line screams.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "flush probe benchmark; run explicitly with --ignored --nocapture"]
+async fn flush_stall_probe() {
+    let n = env_usize("FLUSH_N", 16);
+    let window = Duration::from_secs(env_usize("FLUSH_WINDOW", 25) as u64);
+    let flush_secs = env_usize("FLUSH_SECS", 5) as u64;
+    let knobs = SweepKnobs {
+        rounds: usize::MAX,
+        resource_kib: env_usize("RESOURCE_KIB", 512),
+        establish_timeout: Duration::from_secs(env_usize("ESTABLISH_TIMEOUT", 15) as u64),
+        transfer_timeout: Duration::from_secs(env_usize("TRANSFER_TIMEOUT", 60) as u64),
+        stall: Duration::from_secs(0),
+        level_deadline: Duration::ZERO,
+        fresh_identity_per_dance: true,
+    };
+
+    println!();
+    println!(
+        "flush deaf-window probe — leviculum#44 (N={n}, window={}s, flush every {flush_secs}s vs never)",
+        window.as_secs()
+    );
+    println!(
+        "{:>8} | {:>7} | {:>8} | {:>15} | {:>17} | {:>9}",
+        "phase", "in-win", "good/s", "xfer p50/p95", "probe p50/p95/max", "max gap"
+    );
+
+    let phases: [(&str, Option<u64>); 2] = [("control", None), ("flush", Some(flush_secs))];
+    let mut results: Vec<(&str, OverloadPhase)> = Vec::new();
+    for (name, fs) in phases {
+        let (serve, serve_addr, hash, signing_key, serve_drain, overflow) =
+            build_dance_serve_node_with_flush(fs).await;
+        let r = run_overload_phase(
+            &serve,
+            hash,
+            signing_key,
+            serve_addr,
+            &overflow,
+            n,
+            window,
+            &knobs,
+            ClientMode::Future,
+            false,
+        )
+        .await;
+        serve_drain.abort();
+        println!(
+            "{:>8} | {:>7} | {:>8.2} | {:>15} | {:>17} | {:>7.0}ms",
+            name,
+            r.completed,
+            r.goodput(),
+            format!(
+                "{:.0}/{:.0}",
+                percentile(&r.transfer_ms, 0.5),
+                percentile(&r.transfer_ms, 0.95)
+            ),
+            format!(
+                "{:.2}/{:.2}/{:.2}",
+                percentile(&r.probe_ms, 0.5),
+                percentile(&r.probe_ms, 0.95),
+                r.probe_ms.last().copied().unwrap_or(0.0)
+            ),
+            r.max_gap_ms,
+        );
+        results.push((name, r));
+    }
+
+    if let Ok(path) = std::env::var("BENCH_JSON_OUT_FLUSHPROBE") {
+        let commit = env_or("GIT_COMMIT", "unknown");
+        let date = env_or("BENCH_DATE", "unknown");
+        let runner = env_or(
+            "BENCH_RUNNER",
+            &format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        );
+        let mut rows = String::new();
+        for (i, (name, r)) in results.iter().enumerate() {
+            if i > 0 {
+                rows.push(',');
+            }
+            rows.push_str(&format!(
+                "\n    {{\"phase\": \"{name}\", \"completed_in_window\": {}, \"goodput_dances_s\": {:.2}, \"transfer_ms\": {{\"p50\": {:.1}, \"p95\": {:.1}}}, \"lock_probe_ms\": {{\"p50\": {:.3}, \"p95\": {:.3}, \"max\": {:.3}}}, \"max_completion_gap_ms\": {:.0}}}",
+                r.completed,
+                r.goodput(),
+                percentile(&r.transfer_ms, 0.5),
+                percentile(&r.transfer_ms, 0.95),
+                percentile(&r.probe_ms, 0.5),
+                percentile(&r.probe_ms, 0.95),
+                r.probe_ms.last().copied().unwrap_or(0.0),
+                r.max_gap_ms,
+            ));
+        }
+        let json = format!(
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"flush_stall_probe\",\n  \"issue\": \"leviculum#44\",\n  \"commit\": \"{commit}\",\n  \"date\": \"{date}\",\n  \"runner\": \"{runner}\",\n  \"params\": {{\"n\": {n}, \"window_secs\": {}, \"flush_secs\": {flush_secs}, \"resource_kib\": {}}},\n  \"phases\": [{rows}\n  ]\n}}\n",
+            window.as_secs(),
+            knobs.resource_kib,
+        );
+        std::fs::write(path, json).expect("write flush-probe bench json");
     }
 }
