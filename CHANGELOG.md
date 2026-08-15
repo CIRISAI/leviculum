@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.14.1+ciris.1] — CIRIS fork
+
+### Fixed
+
+A live-node failure chain on large-MTU links (leviculum#39): `Channel`'s MDU is
+now capped at the envelope's `u16` wire ceiling, so an oversized send returns
+`ChannelError::TooLarge` instead of passing the link-MDU-only guard and hitting
+the `Envelope` length assert as a panic in a lock-holding delivery thread
+("envelope data length 115764 exceeds maximum 65535" in the field). The channel
+send path constructs envelopes via the new fallible `Envelope::try_new`, and the
+three production `lock().unwrap()` sites (`link_is_established`,
+`link_destination`, rpc `derive_authkey`) use `lock_recover()`, so a poisoned
+mutex can no longer turn one panic into a deaf node. Wire format untouched.
+Edge-side counterpart: fragment against `min(link_mdu, 65535)` (CIRISEdge).
+
 ## [0.14.0+ciris.1] — CIRIS fork
 
 ### Added
