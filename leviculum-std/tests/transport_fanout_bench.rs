@@ -701,8 +701,14 @@ async fn single_dest_datagram_flood() {
         got as f64 / elapsed
     );
     if let Ok(path) = std::env::var("BENCH_JSON_OUT_SINGLEDEST") {
+        let commit = env_or("GIT_COMMIT", "unknown");
+        let date = env_or("BENCH_DATE", "unknown");
+        let runner = env_or(
+            "BENCH_RUNNER",
+            &format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        );
         let json = format!(
-            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"single_dest_datagram_flood\",\n  \"issue\": \"leviculum#29\",\n  \"params\": {{\"clients\": {established}, \"packets_per_client\": {packets}, \"payload_bytes\": {payload}}},\n  \"received\": {got},\n  \"elapsed_s\": {elapsed:.3},\n  \"throughput_pkts_s\": {:.1}\n}}\n",
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"single_dest_datagram_flood\",\n  \"issue\": \"leviculum#29\",\n  \"commit\": \"{commit}\",\n  \"date\": \"{date}\",\n  \"runner\": \"{runner}\",\n  \"params\": {{\"clients\": {established}, \"packets_per_client\": {packets}, \"payload_bytes\": {payload}}},\n  \"received\": {got},\n  \"elapsed_s\": {elapsed:.3},\n  \"throughput_pkts_s\": {:.1}\n}}\n",
             got as f64 / elapsed
         );
         std::fs::write(&path, json).expect("write json");
@@ -816,8 +822,14 @@ async fn announce_verify_flood() {
         got as f64 / elapsed
     );
     if let Ok(path) = std::env::var("BENCH_JSON_OUT_ANNOUNCE") {
+        let commit = env_or("GIT_COMMIT", "unknown");
+        let date = env_or("BENCH_DATE", "unknown");
+        let runner = env_or(
+            "BENCH_RUNNER",
+            &format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        );
         let json = format!(
-            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"announce_verify_flood\",\n  \"issue\": \"leviculum#29\",\n  \"params\": {{\"clients\": {live}, \"announces_per_client\": {announces}}},\n  \"received\": {got},\n  \"elapsed_s\": {elapsed:.3},\n  \"throughput_ann_s\": {:.1}\n}}\n",
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"announce_verify_flood\",\n  \"issue\": \"leviculum#29\",\n  \"commit\": \"{commit}\",\n  \"date\": \"{date}\",\n  \"runner\": \"{runner}\",\n  \"params\": {{\"clients\": {live}, \"announces_per_client\": {announces}}},\n  \"received\": {got},\n  \"elapsed_s\": {elapsed:.3},\n  \"throughput_ann_s\": {:.1}\n}}\n",
             got as f64 / elapsed
         );
         std::fs::write(&path, json).expect("write json");
@@ -994,17 +1006,27 @@ async fn build_dance_serve_node() -> (
                 // out, a harness artifact that would masquerade as protocol
                 // loss in the #208 numbers. Flip the link, then answer with a
                 // 1-byte ready ping the client awaits before sending. Cost is
-                // 1 packet against ~1,130 resource parts per dance. Err is
-                // ignored: the link may already be gone.
-                let _ = serve.set_resource_strategy(&link_id, ResourceStrategy::AcceptAll);
-                // Bounded retry — drain machinery, not measurement.
-                let handle = serve.link_handle(&link_id);
-                for _ in 0..100 {
-                    if handle.try_send(b"go").await.is_ok() {
-                        break;
+                // 1 packet against ~1,130 resource parts per dance.
+                //
+                // Per-link task, NOT inline: at high N the establishment
+                // burst arrives while earlier links may already be dead
+                // (client gave up), and an inline bounded retry (up to 1 s)
+                // would head-of-line every later link's strategy flip — the
+                // sender then times out on a link whose ADV was rejected,
+                // which masquerades as protocol loss. The drain's only job
+                // is to keep receiving. Err is ignored: the link may
+                // already be gone.
+                let pinger = Arc::clone(&serve);
+                tokio::spawn(async move {
+                    let _ = pinger.set_resource_strategy(&link_id, ResourceStrategy::AcceptAll);
+                    let handle = pinger.link_handle(&link_id);
+                    for _ in 0..100 {
+                        if handle.try_send(b"go").await.is_ok() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
+                });
             }
         }
     });
@@ -1075,38 +1097,34 @@ async fn dance_once(
     }
 
     let t1 = Instant::now();
-    let rhash = match node.send_resource(&link_id, &cfg.blob, None, false).await {
-        Ok(h) => h,
+    // send_resource_awaited (leviculum#42) rather than hand-matching
+    // ResourceCompleted events: the sender's final event of a
+    // multi-segment transfer (RESOURCE_KIB > 1024 crosses
+    // RESOURCE_MAX_EFFICIENT_SIZE) carries the FINAL segment's hash, not
+    // the one send_resource returns, so an exact-hash event match reports
+    // a false transfer timeout for every split transfer. The completion
+    // future resolves at the dispatch layer — correct across segments,
+    // failure-typed, immune to data-plane event drops — and the bench
+    // doubles as the API's under-load integration test.
+    let (_rhash, sent) = match node
+        .send_resource_awaited(&link_id, &cfg.blob, None, false)
+        .await
+    {
+        Ok(pair) => pair,
         Err(_) => {
             let _ = node.close_link(&link_id).await;
             return DanceOutcome::Failed(DanceFail::Api);
         }
     };
-    // RESOURCE_KIB > 1024 crosses RESOURCE_MAX_EFFICIENT_SIZE into
-    // multi-segment transfers; the guard on segment_index == total_segments
-    // keeps the match correct, but transfer_ms then means whole-transfer
-    // latency across all segments.
-    let xfer_dl = tokio::time::Instant::now() + cfg.transfer_timeout;
-    let transfer_ms = loop {
-        match tokio::time::timeout_at(xfer_dl, rx.recv()).await {
-            Ok(Some(NodeEvent::ResourceCompleted {
-                resource_hash,
-                is_sender: true,
-                segment_index,
-                total_segments,
-                ..
-            })) if resource_hash == rhash && segment_index == total_segments => {
-                break t1.elapsed().as_secs_f64() * 1000.0;
-            }
-            Ok(Some(NodeEvent::ResourceFailed { resource_hash, .. })) if resource_hash == rhash => {
-                let _ = node.close_link(&link_id).await;
-                return DanceOutcome::Failed(DanceFail::Resource);
-            }
-            Ok(Some(_)) => continue,
-            Ok(None) | Err(_) => {
-                let _ = node.close_link(&link_id).await;
-                return DanceOutcome::Failed(DanceFail::TransferTimeout);
-            }
+    let transfer_ms = match tokio::time::timeout(cfg.transfer_timeout, sent).await {
+        Ok(Ok(_info)) => t1.elapsed().as_secs_f64() * 1000.0,
+        Ok(Err(_)) => {
+            let _ = node.close_link(&link_id).await;
+            return DanceOutcome::Failed(DanceFail::Resource);
+        }
+        Err(_) => {
+            let _ = node.close_link(&link_id).await;
+            return DanceOutcome::Failed(DanceFail::TransferTimeout);
         }
     };
 
