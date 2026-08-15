@@ -105,6 +105,7 @@ fn parent(mode: &str, report: &Path) {
 }
 
 /// This task's parent-death signal, 0 when none is set.
+#[cfg(target_os = "linux")]
 fn pdeathsig() -> i32 {
     let mut sig: libc::c_int = 0;
     // SAFETY: `PR_GET_PDEATHSIG` writes one `int` through arg2 and reads
@@ -127,4 +128,12 @@ fn pdeathsig() -> i32 {
         std::io::Error::last_os_error()
     );
     sig
+}
+
+/// No `PR_GET_PDEATHSIG` outside Linux — same split as `process::arm`. The
+/// probe still builds and reports its pid everywhere (the Windows and macOS
+/// lanes build every bin), and 0 (none set) is the only honest answer.
+#[cfg(not(target_os = "linux"))]
+fn pdeathsig() -> i32 {
+    0
 }
