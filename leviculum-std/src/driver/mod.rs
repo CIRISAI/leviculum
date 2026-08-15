@@ -59,8 +59,9 @@ use remote_mgmt::RemoteMgmtResponder;
 
 pub use builder::ReticulumNodeBuilder;
 pub use completions::{
-    Completion, CompletionError, LinkEstablishedFuture, RequestResponseFuture, ResourceSentFuture,
-    ResourceSentInfo, ResponseInfo,
+    Completion, CompletionError, EventTap, FilteredEventTap, LinkEstablishedFuture,
+    RequestResponseFuture, ResourceSentFuture, ResourceSentInfo, ResponseInfo, TapEvent,
+    DEFAULT_EVENT_TAP_CAPACITY,
 };
 pub use processor::{CoreProcessor, PROCESSOR_TICK_BUDGET};
 pub use sender::PacketSender;
@@ -3305,6 +3306,18 @@ impl ReticulumNode {
     ) -> RequestResponseFuture {
         self.completions
             .register_request_response(*request_id, *link_id)
+    }
+
+    /// Subscribe a secondary bounded event observer (leviculum#42).
+    ///
+    /// The tap is fed clones at the dispatch layer, BEFORE the two-plane
+    /// sink: it never consumes from or races the primary event receiver, it
+    /// sees events the data plane is entitled to drop, and it works on a
+    /// daemon-mode node built `without_events()`. A slow tap loses oldest
+    /// events (reported via [`TapEvent::Lagged`]); the node never blocks on
+    /// it. With no live subscriber the per-event cost is one atomic load.
+    pub fn subscribe_events(&self) -> EventTap {
+        self.completions.subscribe()
     }
 }
 
@@ -7855,5 +7868,56 @@ mod tests {
         // Immediate-resolve path: the mirror answers a second await without
         // any event in flight.
         assert_eq!(node.await_link_established(&link_id).await, Ok(()));
+    }
+
+    /// Surface (b), C2 pin: a tap subscriber receives the event AND the
+    /// primary `EventReceiver` still gets it — the tap is fed clones at the
+    /// dispatch layer, it never consumes from the two-plane channels.
+    #[tokio::test(flavor = "current_thread")]
+    async fn tap_receives_events_without_consuming_primary() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+        let mut tap = completions.subscribe();
+
+        let mut output = TickOutput::empty();
+        output.events.push(NodeEvent::LinkEstablished {
+            link_id: LinkId::new([0x44; 16]),
+            is_initiator: false,
+            destination_hash: leviculum_core::DestinationHash::new([0xAC; 16]),
+        });
+
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &completions,
+            None,
+        );
+
+        match tap.try_recv() {
+            Some(TapEvent::Event(NodeEvent::LinkEstablished { link_id, .. })) => {
+                assert_eq!(link_id, LinkId::new([0x44; 16]));
+            }
+            other => panic!("the tap must see the event, got {other:?}"),
+        }
+        let ev = rx
+            .recv()
+            .await
+            .expect("the primary receiver must be unaffected by the tap");
+        assert!(
+            matches!(ev, NodeEvent::LinkEstablished { .. }),
+            "expected LinkEstablished, got {ev:?}"
+        );
     }
 }

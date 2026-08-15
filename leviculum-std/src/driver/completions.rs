@@ -34,13 +34,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use leviculum_core::link::{LinkCloseReason, LinkId};
 use leviculum_core::node::NodeEvent;
 use leviculum_core::resource::ResourceError;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 use crate::sync_ext::MutexRecover;
 
@@ -54,6 +55,11 @@ pub(crate) const ESTABLISHED_MIRROR_CAP: usize = 1024;
 /// Recent-terminal-outcomes ring capacity. Entries are markers, never
 /// payloads, so memory is bounded by entry count, not by response size.
 pub(crate) const RECENT_OUTCOMES_CAP: usize = 256;
+
+/// Ring slots of the [`EventTap`] broadcast channel (drop-oldest on overrun,
+/// surfaced as [`TapEvent::Lagged`]). Mirrors the control-plane default scale
+/// in `config.rs`; a driver invariant, not an operator tunable.
+pub const DEFAULT_EVENT_TAP_CAPACITY: usize = 256;
 
 /// Typed terminal error for a completion future. Every failure path the
 /// driver can observe resolves waiters — a future never hangs on a dead
@@ -239,6 +245,10 @@ struct RegistryInner {
     established_order: VecDeque<LinkId>,
     /// Recent terminal outcomes; capped at [`RECENT_OUTCOMES_CAP`].
     recent: VecDeque<(CompletionKey, RecentOutcome)>,
+    /// Lazily-created event-tap fan-out. Kept across a zero-subscriber lull
+    /// (only `tap_active` is cleared) so a later subscribe reuses it; dropped
+    /// by `close()` so every tap sees end-of-stream.
+    tap: Option<broadcast::Sender<NodeEvent>>,
     /// Starts at 1 so the token 0 of immediately-resolved futures never
     /// matches a parked waiter on the drop path.
     next_token: u64,
@@ -313,6 +323,10 @@ impl RegistryInner {
 /// loop. See the module docs for the locking and race-freedom contracts.
 pub(crate) struct CompletionRegistry {
     inner: Mutex<RegistryInner>,
+    /// Fast path for [`observe`](Self::observe): `false` means no live tap
+    /// subscriber, so the tap branch is one relaxed atomic load — the
+    /// zero-subscriber cost the issue requires.
+    tap_active: AtomicBool,
 }
 
 impl CompletionRegistry {
@@ -323,9 +337,11 @@ impl CompletionRegistry {
                 established: HashSet::new(),
                 established_order: VecDeque::new(),
                 recent: VecDeque::new(),
+                tap: None,
                 next_token: 1,
                 closed: false,
             }),
+            tap_active: AtomicBool::new(false),
         })
     }
 
@@ -339,7 +355,14 @@ impl CompletionRegistry {
     /// Waiters are resolved AFTER the registry lock is released: a oneshot
     /// send wakes the waiter's task, and that wake must not run under a lock
     /// this module promises to hold for map ops only.
+    ///
+    /// When a tap subscriber exists, EVERY event is additionally broadcast to
+    /// it — the tap sits at this layer precisely so it also sees events the
+    /// data plane is entitled to drop.
     pub(crate) fn observe(&self, event: &NodeEvent) {
+        if self.tap_active.load(Ordering::Relaxed) {
+            self.broadcast_event(event);
+        }
         match event {
             NodeEvent::LinkEstablished { link_id, .. } => self.on_link_established(*link_id),
             NodeEvent::LinkClosed {
@@ -640,13 +663,53 @@ impl CompletionRegistry {
         }
     }
 
+    /// Subscribe a secondary bounded event observer.
+    ///
+    /// Lazily creates the broadcast fan-out (the first subscriber pays it;
+    /// nodes that never subscribe never allocate it). On a closed registry
+    /// the returned tap yields `None` immediately.
+    pub(crate) fn subscribe(&self) -> EventTap {
+        let mut inner = self.inner.lock_recover();
+        if inner.closed {
+            let (tx, rx) = broadcast::channel(DEFAULT_EVENT_TAP_CAPACITY);
+            drop(tx);
+            return EventTap { rx, lost: 0 };
+        }
+        let sender = inner
+            .tap
+            .get_or_insert_with(|| broadcast::channel(DEFAULT_EVENT_TAP_CAPACITY).0);
+        let rx = sender.subscribe();
+        // Armed under the same lock the broadcast path takes, so an event
+        // observed after this subscribe cannot miss the new receiver.
+        self.tap_active.store(true, Ordering::Relaxed);
+        EventTap { rx, lost: 0 }
+    }
+
+    /// Slow half of the tap: only entered while `tap_active` reads true.
+    fn broadcast_event(&self, event: &NodeEvent) {
+        let inner = self.inner.lock_recover();
+        match &inner.tap {
+            Some(tx) if tx.receiver_count() > 0 => {
+                // Drop-oldest on overrun is the broadcast channel's own
+                // semantics; the receiver surfaces it as `Lagged(n)`.
+                let _ = tx.send(event.clone());
+            }
+            // Every tap was dropped: disarm the fast path. The sender is
+            // kept so a later subscribe reuses it.
+            _ => self.tap_active.store(false, Ordering::Relaxed),
+        }
+    }
+
     /// Event-loop exit: resolve every pending waiter with `NodeStopped` and
     /// mark the registry closed, so registrations against a stopped node
-    /// resolve immediately instead of parking forever.
+    /// resolve immediately instead of parking forever. The tap sender drops
+    /// with the guard, so every `EventTap::recv` returns `None` once drained.
     pub(crate) fn close(&self) {
         let pending: Vec<Waiter> = {
             let mut inner = self.inner.lock_recover();
             inner.closed = true;
+            inner.tap = None;
+            self.tap_active.store(false, Ordering::Relaxed);
             inner.waiters.drain().flat_map(|(_, ws)| ws).collect()
         };
         for w in pending {
@@ -660,6 +723,11 @@ impl CompletionRegistry {
     /// a stop/start cycle, so they still describe it.
     pub(crate) fn reopen(&self) {
         self.inner.lock_recover().closed = false;
+    }
+
+    #[cfg(test)]
+    fn tap_armed(&self) -> bool {
+        self.tap_active.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -680,6 +748,111 @@ impl CompletionRegistry {
     #[cfg(test)]
     fn established_len(&self) -> usize {
         self.inner.lock_recover().established.len()
+    }
+}
+
+/// One item from an [`EventTap`].
+//
+// `large_enum_variant`: the event IS the payload, and consumers match it
+// apart immediately; boxing would add a per-event heap allocation only to
+// appease the size lint on the rare `Lagged` arm.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum TapEvent {
+    /// An observed node event (a clone; the primary stream got the original).
+    Event(NodeEvent),
+    /// The tap fell behind; the ring overwrote `n` oldest events
+    /// (drop-oldest).
+    Lagged(u64),
+}
+
+/// Secondary bounded event observer (leviculum#42 surface b).
+///
+/// Never consumes from or races the primary [`EventReceiver`]: it is fed
+/// clones at the dispatch layer, BEFORE the two-plane sink, so it also sees
+/// events the data plane is entitled to drop, and it works on a daemon-mode
+/// node built `without_events()`. Backpressure is drop-oldest: a slow tap
+/// loses the oldest events and is told so via [`TapEvent::Lagged`], while the
+/// node never blocks on it.
+///
+/// [`EventReceiver`]: super::EventReceiver
+pub struct EventTap {
+    rx: broadcast::Receiver<NodeEvent>,
+    lost: u64,
+}
+
+impl EventTap {
+    /// Next observed event, or `None` once the node has stopped (channel
+    /// closed and drained).
+    pub async fn recv(&mut self) -> Option<TapEvent> {
+        match self.rx.recv().await {
+            Ok(event) => Some(TapEvent::Event(event)),
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                self.lost += n;
+                Some(TapEvent::Lagged(n))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    }
+
+    /// Non-blocking [`recv`](Self::recv): `None` when nothing is buffered
+    /// (or the node has stopped).
+    pub fn try_recv(&mut self) -> Option<TapEvent> {
+        match self.rx.try_recv() {
+            Ok(event) => Some(TapEvent::Event(event)),
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                self.lost += n;
+                Some(TapEvent::Lagged(n))
+            }
+            Err(broadcast::error::TryRecvError::Empty)
+            | Err(broadcast::error::TryRecvError::Closed) => None,
+        }
+    }
+
+    /// Cumulative events lost to lag on this tap.
+    pub fn lost(&self) -> u64 {
+        self.lost
+    }
+
+    /// Consumer-side filter sugar: `recv()` skips events failing `f`.
+    ///
+    /// The filter cannot un-occupy ring slots — a filtered-out event still
+    /// counted against the tap's capacity, and lag is reported for all
+    /// events, not only matching ones.
+    pub fn filtered(self, f: impl Fn(&NodeEvent) -> bool + Send + 'static) -> FilteredEventTap {
+        FilteredEventTap {
+            tap: self,
+            filter: Box::new(f),
+        }
+    }
+}
+
+/// An [`EventTap`] with a consumer-side event filter. See
+/// [`EventTap::filtered`].
+pub struct FilteredEventTap {
+    tap: EventTap,
+    filter: Box<dyn Fn(&NodeEvent) -> bool + Send>,
+}
+
+impl FilteredEventTap {
+    /// Next event passing the filter, a [`TapEvent::Lagged`] notice, or
+    /// `None` once the node has stopped.
+    pub async fn recv(&mut self) -> Option<TapEvent> {
+        loop {
+            match self.tap.recv().await? {
+                TapEvent::Event(event) => {
+                    if (self.filter)(&event) {
+                        return Some(TapEvent::Event(event));
+                    }
+                }
+                lagged @ TapEvent::Lagged(_) => return Some(lagged),
+            }
+        }
+    }
+
+    /// Cumulative events lost to lag on the underlying tap.
+    pub fn lost(&self) -> u64 {
+        self.tap.lost()
     }
 }
 
@@ -1054,5 +1227,99 @@ mod tests {
 
         reg.observe(&established(link(16)));
         assert_eq!(poll_now(&mut sibling), Poll::Ready(Ok(())));
+    }
+
+    // ---- surface (b): the event tap -----------------------------------
+
+    /// Overrun drops OLDEST and says so: with `capacity + K` undrained
+    /// events, the first recv is `Lagged(K)`, then the survivors follow in
+    /// order, and `lost()` totals `K`.
+    #[tokio::test]
+    async fn tap_lag_reports_dropped_oldest_count() {
+        let reg = CompletionRegistry::new();
+        let mut tap = reg.subscribe();
+
+        const K: usize = 16;
+        for i in 0..(DEFAULT_EVENT_TAP_CAPACITY + K) {
+            // A variant the completion match ignores: the tap must carry
+            // every event, not only completion-relevant ones.
+            reg.observe(&NodeEvent::InterfaceDown(i));
+        }
+
+        match tap.recv().await {
+            Some(TapEvent::Lagged(n)) => assert_eq!(n, K as u64),
+            other => panic!("expected Lagged({K}), got {other:?}"),
+        }
+        assert_eq!(tap.lost(), K as u64);
+
+        // The oldest survivor is exactly the K-th event.
+        match tap.recv().await {
+            Some(TapEvent::Event(NodeEvent::InterfaceDown(i))) => assert_eq!(i, K),
+            other => panic!("expected InterfaceDown({K}), got {other:?}"),
+        }
+    }
+
+    /// Dropping the last tap disarms the fast path: the next observe clears
+    /// `tap_active`, and later observes skip the broadcast branch entirely
+    /// (the zero-subscriber cost is one atomic load).
+    #[test]
+    fn zero_subscriber_observe_takes_no_lock_path() {
+        let reg = CompletionRegistry::new();
+        assert!(!reg.tap_armed(), "no subscriber yet: fast path disarmed");
+
+        let tap = reg.subscribe();
+        assert!(reg.tap_armed());
+
+        drop(tap);
+        // Still armed until an observe notices the receiver count hit zero...
+        reg.observe(&NodeEvent::InterfaceDown(1));
+        assert!(
+            !reg.tap_armed(),
+            "first observe after the last tap drops must disarm the fast path"
+        );
+
+        // ...and a re-subscribe re-arms it (the sender was kept).
+        let _tap = reg.subscribe();
+        assert!(reg.tap_armed());
+    }
+
+    /// close() ends the tap stream: recv drains anything buffered, then
+    /// returns None instead of parking forever on a stopped node.
+    #[tokio::test]
+    async fn tap_closes_on_registry_close() {
+        let reg = CompletionRegistry::new();
+        let mut tap = reg.subscribe();
+        reg.observe(&NodeEvent::InterfaceDown(7));
+        reg.close();
+
+        match tap.recv().await {
+            Some(TapEvent::Event(NodeEvent::InterfaceDown(7))) => {}
+            other => panic!("buffered event must still drain, got {other:?}"),
+        }
+        assert!(tap.recv().await.is_none(), "closed tap must end the stream");
+
+        // A subscribe on the closed registry ends immediately too.
+        let mut late = reg.subscribe();
+        assert!(late.recv().await.is_none());
+    }
+
+    /// The filter is consumer-side sugar: non-matching events are skipped
+    /// inside recv(), lag notices pass through.
+    #[tokio::test]
+    async fn filtered_tap_skips_non_matching_events() {
+        let reg = CompletionRegistry::new();
+        let mut tap = reg
+            .subscribe()
+            .filtered(|ev| matches!(ev, NodeEvent::InterfaceDown(9)));
+
+        reg.observe(&NodeEvent::InterfaceDown(1));
+        reg.observe(&NodeEvent::InterfaceDown(9));
+        reg.close();
+
+        match tap.recv().await {
+            Some(TapEvent::Event(NodeEvent::InterfaceDown(9))) => {}
+            other => panic!("filter must skip to the matching event, got {other:?}"),
+        }
+        assert!(tap.recv().await.is_none());
     }
 }
