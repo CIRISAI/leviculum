@@ -18,6 +18,9 @@ that is wrong but inside the sanity window — including a plausible
 time-bounded by the healing loop. The sections below define the
 estimate, the anchor's provenance rank, the one filter every time
 source passes, and the loop that heals a wrong calendar.
+[Testing the model](#testing-the-model) closes the page: the
+rule-by-tier matrix that binds every one of these rules to a named
+test cell, Periculum included.
 
 ## The two poisons
 
@@ -829,6 +832,209 @@ reasoned commit, never load-bearing for the model itself.
   basis is `Transport::emission_secs` at receive time; the tolerance
   absorbs honest sender/receiver skew, nothing more.
 
+## Testing the model
+
+Every binding rule on this page maps to a named test cell in a
+named tier, and this section is that map. It is a concept-level
+test contract: **each implementing issue lands with its cells from
+this matrix, in the same change, never as a follow-up**, and a
+reviewer ticks the touched rules off against this section before
+merge. Cells that pin behaviour already implemented are cited;
+cells for spec-only mechanisms are named here and land with the
+issue that implements them — for those, named-but-not-landed is
+the intended state until the issue lands, not accumulated debt.
+This page names cells; it writes no scenario files and no test
+code — the implementing issues fill the names in.
+
+### The tiers
+
+Four tiers, in the order a failure should be caught:
+
+- **unit / mvr.** Deterministic, one to two nodes, under five
+  seconds, structured event logs from all sides — the mvr
+  constraints of the project's protocol-debugging discipline.
+  Canonical mvr home: `leviculum-std/tests/mvr/`; unit pins live
+  beside the code they pin. Everything decidable on one node's
+  state machine is decided here.
+- **workspace integration.** The workspace test suite: multi-crate
+  seams, restart persistence, structural API pins.
+- **periculum conformance.** Docker, against real Python-RNS,
+  under the drop-in discipline: the SAME driver (`lns selftest`,
+  `rnstatus`, the same client binary) pointed at `lnsd` and `rnsd`
+  — never parallel per-stack drivers, which smuggle config
+  differences into what claims to be a stack comparison. The
+  project's interop rule applies in full: every cross-stack rule
+  gets a positive AND a negative cell against real Python.
+- **periculum hardware.** The rig, and only where the radio or a
+  real peripheral — a GNSS receiver, an RTC — is itself the
+  subject. Time logic decidable without hardware is decided in a
+  lower tier; this tier verifies the peripheral wiring, not the
+  model.
+
+### The matrix
+
+A dash means the rule has no cell in that tier by design, not that
+one is missing. Names not yet in the tree are the binding intent;
+the implementing issue may adjust a file name, but it updates this
+matrix in the same commit.
+
+| # | Rule | unit / mvr | integration | conformance | hardware |
+|---|------|------------|-------------|-------------|----------|
+| 1 | Stopwatch/calendar separation | `calendar_jump_timer_isolation` | — | — | — |
+| 2 | Sanity window, per source | window trio per arm (arms 2 and 4 pinned) | — | — | — |
+| 3 | Anchor rank predicates | rank-5 pair + build-floor negative | `wall_clock_producer.rs` | — | — |
+| 4 | Stamping asymmetry | never-ahead property + monotonic pair | — | — | — |
+| 5 | Emitted high-water | re-anchor floor | restart persistence | `time_high_water_path_retention` | — |
+| 6 | Healing loop | median / single-sender / backwards / Sybil / RTC write-back | — | — | — |
+| 7 | Echo chamber | — | — | `time_echo_chamber_third_peer` | — |
+| 8 | Ingress clamp + collector | clamp / dedup / unarmed | — | `time_collector_clamp_cursor`, `time_collector_unhealed_heals` | — |
+| 9 | Authorship interop | — | — | `time_cold_authorship_python_receiver`, `time_python_future_stamps` | — |
+| 10 | Peripheral seeding and write-back | — | — | — | `time_gnss_seed_rig`, `time_rtc_writeback_rig` |
+
+### The cells, rule by rule
+
+**1. Stopwatch/calendar separation**
+([Two clocks](#two-clocks-strictly-separated)). mvr
+`calendar_jump_timer_isolation`: a wall-time injection lands in
+the middle of a live link, in both directions — a decades-forward
+jump and a backwards re-seat — and no relative timer moves. Retry
+cadence, keepalive interval and path expiry are observed unchanged
+across the jump on the structured event timeline; the test fails
+if any timer stretches or shrinks. This is the separation rule's
+negative cell and its only cell: the rule forbids exactly one
+thing, and this watches for it.
+
+**2. Sanity window, per source**
+([The sanity window](#the-sanity-window)). One unit trio per
+source arm: a below-build-floor value is refused (the 1999-RTC
+dead-cell shape), an above-margin value is refused (a 2500-RTC),
+an in-window value is accepted. Arm 2 is pinned today at
+`test_implausibly_low_wall_time_injection_is_refused`
+(`transport.rs:17295`) and
+`test_absurd_wall_time_injection_is_refused`
+(`transport.rs:17469`); arm 4's ceiling at
+`test_timebase_floor_cannot_pass_learn_ceiling`
+(`transport.rs:17409`). The arm-1 trio lands with GNSS seeding and
+carries the no-bypass assertion: GNSS passes the SAME filter, and
+the cell is written against the shared filter path so that it
+would go red if a GNSS special case were ever introduced — an
+out-of-window fix must be refused by the same code that refuses an
+out-of-window injection.
+
+**3. Anchor rank predicates**
+([provenance rank](#anchor-provenance-is-first-class-state)).
+Unit, landing with the build-floor plumbing: at rank 5 the
+unbounded first adoption fires AND tickets are refused; after an
+arms-1–3 anchor the per-announce adoption cap binds AND tickets
+are issued; and the negative that catches the value-test misfire —
+the build-floor value alone never satisfies the plausibility
+predicate, even though it clears the sanity window. The value-test
+stand-ins are pinned today at
+`test_clockless_first_timebase_adoption_is_unbounded`
+(`transport.rs:17192`) and
+`test_clockless_timebase_advance_is_bounded_after_first_adoption`
+(`transport.rs:17143`); the rank-keyed cells replace their
+predicates without loosening their assertions. Integration:
+`leviculum-lxmf/tests/wall_clock_producer.rs` remains the
+structural pin that no router entry point takes a caller-supplied
+wall clock.
+
+**4. Stamping asymmetry**
+([Stamping](#stamping-always-author-never-ahead-of-the-estimate)).
+Unit: clockless stamps are exactly build-floor plus uptime;
+consecutive messages are strictly monotonic (the #217 class); and
+the directional guarantee is checked property-style over a
+sequence of anchor changes — adoption, re-anchor, saturation —
+asserting after every step that the stamp never runs ahead of the
+estimate and never repeats. Wire saturation is already pinned at
+`test_emission_secs_saturates_at_wire_field_max`
+(`transport.rs:17493`).
+
+**5. Emitted high-water** ([healing loop](#the-healing-loop)).
+Unit: no re-anchor — including an arms-1–2-quality backwards
+correction — takes the calendar below the highest value this
+identity has emitted; the correction floors at the high-water mark
+(the below-floor attempt is the negative cell). Integration:
+persistence of the mark across a restart where storage exists; the
+RTC-less mitigation is pinned at
+`test_own_announce_echo_reseeds_timebase_before_echo_drop`
+(`transport.rs:17102`). The announce-timebase consequence — a peer
+keeps the newest path — is shown against a Python-shaped peer:
+conformance `time_high_water_path_retention`, where a re-anchored
+`lnsd` keeps its announces ordered above its own high-water and
+the Python peer's path entry keeps updating.
+
+**6. Healing loop** ([healing loop](#the-healing-loop)). mvr, one
+cell per branch of the re-anchor rule: a median over a cohort of
+distinct senders re-anchors a grossly-forward calendar; a single
+sender does NOT re-anchor a calendar past rank 5 (negative; the
+rank-5 single-source adoption is rule 3's cell); a gross backwards
+correction via traffic alone is refused, including a fabricated
+traffic median (negative). The Sybil-style bound —
+N identities from one neighbour advance the calendar no further
+than the documented N × cap — is pinned at
+`test_timebase_walk_is_capped_per_announce_not_per_identity`
+(`transport.rs:17335`) and stays a negative cell: the assertion is
+the bound, not a defence the model does not claim. RTC write-back
+on re-anchor is a unit cell against a mock RTC; the real
+peripheral is rule 10.
+
+**7. Echo chamber** ([the one honest cost](#the-one-honest-cost)).
+Conformance `time_echo_chamber_third_peer`: two cold, build-floor
+nodes adopt each other's birth clocks without harm — traffic
+flows, nothing poisons — and BOTH converge once a third peer with
+real time appears. The provenance transitions (birth → anchored
+from traffic, unconfirmed → healed) are observable in the
+structured event log of both nodes; a run that converges without
+showing the intermediate state fails the cell.
+
+**8. Ingress clamp + collector**
+([Ingress](#ingress-clamp-for-semantics-keep-for-display),
+[Telemetry](telemetry.md), Codeberg #239). Unit: a future-stamped
+row is clamped for cursor and index and served with the clamped
+value; dedup still catches a twice-delivered row despite clamping
+(dedup keys are not clamped); an UNHEALED collector does not clamp
+(the arming rule's negative). Conformance
+`time_collector_clamp_cursor`: the cursor of a synced requester is
+never poisoned by a future-stamped row — the cell reproduces the
+pre-fix starvation shape and asserts it gone. Conformance
+`time_collector_unhealed_heals`: an unhealed collector takes
+in-window stamps as-is and heals from the very traffic it is
+collecting.
+
+**9. End-to-end authorship interop.** Conformance against real
+Python, drop-in discipline both ways.
+`time_cold_authorship_python_receiver`: a cold-start `lnsd`
+authors LXMF to a Python receiver; the message is accepted and
+readable — it sorts old, so the cell asserts delivery, never sort
+order — and after healing, stamps are current. The reverse cell,
+`time_python_future_stamps`: Python sends future-stamped traffic
+at our stack; nothing breaks and nothing poisons — cursors are
+asserted not to advance past local plausible-now, and path tables
+stay intact.
+
+**10. Hardware tier** — only where the subject is real.
+`time_gnss_seed_rig`: GNSS time seeding on the rig boards, lands
+with the GNSS issues (#69/#70). `time_rtc_writeback_rig`: RTC
+write-back on a board with an RTC, lands with the write-back
+implementation. Both are marked "lands with the implementing
+issue", not pre-existing debt: the rows exist precisely so those
+issues cannot land without their cells.
+
+### Meta-rules
+
+- **Every implementing issue carries its cells from this matrix.**
+  The issue is not done until its cells are green in the tier
+  named here, in the same change.
+- **A rule without a named cell is a spec hole.** The fix is a new
+  cell in this matrix — added to it, and to the port checklist
+  where the rule touches a port duty — before the rule is
+  implemented, not after.
+- **Negative cells are mandatory wherever a rule refuses
+  something.** A refusal without a red-path test is a refusal
+  nobody has seen fire; every "refused", "never" and "does not" in
+  this page has its negative cell above.
+
 ## Checklist for a new firmware port
 
 1. **Inventory the arms.** Which of the five can this platform
@@ -857,4 +1063,6 @@ reasoned commit, never load-bearing for the model itself.
    [Record the source](#record-the-source)).
 9. **Leave the pins green.** The tests cited throughout this
    document are the contract; a correct port never needs to change
-   them.
+   them. The full rule-by-tier map is
+   [Testing the model](#testing-the-model) — a port's own issues
+   land with their cells from it.

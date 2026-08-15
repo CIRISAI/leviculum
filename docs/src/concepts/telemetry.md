@@ -433,3 +433,10 @@ has not been designed.
    future timestamps served?**
 8. **What does a viewer that lacks this sensor show?** Answer before
    emitting.
+
+Items 1 and 7 are test-bound beyond this page: the rule-by-tier
+matrix in [Testing the model](time-and-clocks.md#testing-the-model)
+names the cells. For a collector, the ingress-clamp row — clamp,
+cursor safety, dedup, unhealed behaviour, Codeberg #239 — and the
+authorship-interop row are the ones an implementation must land
+green, with its implementing issue.
