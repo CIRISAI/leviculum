@@ -2345,8 +2345,7 @@ impl ReticulumNode {
     /// carries, waits forever, and never sends (CIRISEdge#342).
     pub fn link_is_established(&self, link_id: &LinkId) -> bool {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .link(link_id)
             .is_some_and(leviculum_core::link::Link::is_active)
     }
@@ -2391,8 +2390,7 @@ impl ReticulumNode {
     /// knows which dest it dialed and can map that dest back to a peer.
     pub fn link_destination(&self, link_id: &LinkId) -> Option<DestinationHash> {
         self.inner
-            .lock()
-            .unwrap()
+            .lock_recover()
             .link(link_id)
             .map(|l| *l.destination_hash())
     }
