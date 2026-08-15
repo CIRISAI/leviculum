@@ -400,15 +400,15 @@ restarts, and must not pretend to.
 - **Tickets** (`leviculum-lxmf/src/ticket.rs`): a 16-byte secret you issue
   to a contact so their future messages skip proof-of-work. Mostly
   invisible and automatic: received tickets are remembered from any
-  signature-valid inbound message (`remember_verified_ticket`,
-  `leviculum-lxmf/src/router.rs:1387-1407`) and applied when a message is
-  enqueued (`leviculum-lxmf/src/router.rs:736-740`). Expiry 21 days, renew at 14,
+  signature-valid inbound message — `remember_verified_ticket`
+  (`leviculum-lxmf/src/router.rs:1455`) — and applied when a message is
+  enqueued (`leviculum-lxmf/src/router.rs:791`). Expiry 21 days, renew at 14,
   minimum one day between issuances to the same peer
-  (`leviculum-lxmf/src/constants.rs:11-14`). `issue_ticket_field` refuses
+  (`leviculum-lxmf/src/constants.rs:34-37`). `issue_ticket_field` refuses
   with `RouterError::NoWallClock` when the node's clock is implausible
-  (`leviculum-lxmf/src/router.rs:597-599`), and can also legitimately
+  (`leviculum-lxmf/src/router.rs:652-653`), and can also legitimately
   return `Ok((None, _))` when rate-limited
-  (`leviculum-lxmf/src/router.rs:613`). A UI has to distinguish "granted",
+  (`leviculum-lxmf/src/router.rs:670`). A UI has to distinguish "granted",
   "not yet, try tomorrow" and "cannot, no clock".
 - **Stamps** (`leviculum-lxmf/src/stamp.rs`): proof-of-work over the
   message ID, cost being required leading zero bits, so expected work is

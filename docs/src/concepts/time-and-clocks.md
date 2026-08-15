@@ -8,10 +8,16 @@ stays.
 This page is the binding spec of the anchor model. It replaces the
 earlier doctrine "no verified clock, no authorship": the rule is now
 that **every instance always authors, stamped with its best honest
-estimate, biased backwards when unsure, never forwards** — and that
-foreign garbage timestamps must never break an instance. The sections
-below define the estimate, the one filter every time source passes,
-and the loop that heals a wrong calendar.
+estimate and never ahead of that estimate** — and that foreign
+garbage timestamps must never break an instance. "Never ahead" is
+exactly what the mechanisms deliver, no more: every fallback anchor
+lies in the past, so an *uncertain* calendar errs backwards by
+construction. It is not a claim to detect a wrong source: an anchor
+that is wrong but inside the sanity window — including a plausible
+*forward*-wrong one — is adopted and stamped as-is, a named residual,
+time-bounded by the healing loop. The sections below define the
+estimate, the anchor's provenance rank, the one filter every time
+source passes, and the loop that heals a wrong calendar.
 
 ## The two poisons
 
@@ -24,7 +30,10 @@ stamps `int(time.time())` — epoch seconds — into the announce random
 hash (`reference/Reticulum/RNS/Destination.py:282`) and replaces a
 stored path only when a new announce carries a *newer* emission than
 the stored one (`announce_emitted > path_timebase`,
-`reference/Reticulum/RNS/Transport.py:1772` and `:1809`). The value
+`reference/Reticulum/RNS/Transport.py:1772`; the worse-hop branch
+runs the same newer-wins comparison against a separately computed
+field, `announce_emitted > path_announce_emitted`,
+`Transport.py:1809`). The value
 we stamp is therefore compared on other machines, across our reboots,
 against values our earlier selves emitted. A clock that is merely
 self-consistent — process uptime — restarts from zero on every reboot
@@ -42,7 +51,13 @@ monotonic cursors over the stamps they ingest — the worked case is
 the telemetry collector cursor ([Telemetry](telemetry.md)), which one
 future-stamped row raises past every honest later reading, forever,
 with no refusal logged anywhere. A past-stamped message, by contrast,
-merely sorts too far back: visible, attributable, self-limiting.
+sorts too far back where it is displayed directly: visible,
+attributable, self-limiting. One reader must be priced honestly
+rather than folded into that: a collector serves only rows above a
+requester's cursor, so a past-stamped row below an already-synced
+cursor is not "sorted backwards" — it is *invisible* to that
+requester, indistinguishable from loss, until the sender's calendar
+heals (see [the one honest cost](#the-one-honest-cost)).
 
 These two poisons shape the whole model. A node must always be able
 to author — an instance that falls silent for lack of a clock fails
@@ -55,10 +70,11 @@ direction: backwards, never forwards.
 A node runs two clocks with disjoint jobs, and no time correction
 ever crosses from one to the other.
 
-**The stopwatch** is the monotonic tick counter, `Clock::now_ms`. All
-timeout and deadline arithmetic stays on it (`traits.rs:323`) —
-retries, link timeouts, announce cadences. No anchor change, GNSS
-fix, or healing step ever stretches or shrinks a protocol timer.
+**The stopwatch** is the monotonic tick counter, `Clock::now_ms`
+(`leviculum-core/src/traits.rs:319`). All timeout and deadline
+arithmetic stays on it — retries, link timeouts, announce cadences.
+No anchor change, GNSS fix, or healing step ever stretches or
+shrinks a protocol timer.
 
 **The calendar clock is an estimate, not a measurement:** an anchor
 (unix seconds, obtained from some source) plus the stopwatch time
@@ -73,19 +89,22 @@ construction:
   a drift.
 
 The clockless arm of the implementation already has this shape: a
-learned floor advanced by the monotonic clock (`transport.rs:2846`).
-On std platforms `SystemClock` answers from `SystemTime`
-(`leviculum-std/src/clock.rs:45`) — the same estimate with the
+learned floor advanced by the monotonic clock, inside
+`Transport::emission_secs` (`leviculum-core/src/transport.rs:2845`).
+On std platforms the same estimate answers from the OS: the
+`SystemClock` implementation of `wall_unix_secs`
+(`leviculum-std/src/clock.rs:49`) reads `SystemTime`, with the
 anchor-keeping delegated to the OS and its NTP discipline.
 
 ## One value, one producer
 
-`Transport::emission_secs` (`leviculum-core/src/transport.rs:2841`)
+`Transport::emission_secs` (`leviculum-core/src/transport.rs:2845`)
 is the single point that turns the calendar estimate into the
 unix-seconds value for wire fields that peers compare across our
-process lifetimes: announce emission timestamps
-(`leviculum-core/src/announce.rs:156`) and request timestamps
-(`leviculum-core/src/node/mod.rs:1054`, `:1133`, Codeberg #164). Any
+process lifetimes: announce emission timestamps, built by
+`generate_random_hash` (`leviculum-core/src/announce.rs:156`), and
+request timestamps
+(`leviculum-core/src/node/mod.rs:1049`, `:1154`, Codeberg #164). Any
 new wire field with cross-lifetime semantics draws from it too —
 never from the monotonic `Clock::now_ms`, which is a timer, not a
 calendar.
@@ -151,13 +170,23 @@ keeps a ticket only while `time.time() < expires` on its own machine
 (`reference/LXMF/LXMF/LXMRouter.py:1854`) and says nothing when it
 does not. A backwards-biased expiry from an unhealed calendar is
 therefore already expired on arrival — issuing it is emitting a field
-the peer silently discards. `LxmfRouter::issue_ticket_field` returns
-`RouterError::NoWallClock` while the calendar sits below the
-plausibility floor of the
-[sanity window](#the-sanity-window)
-rather than issue one: a named error is a diagnosis; a discarded
-ticket is a mystery that surfaces months later as "replies from this
-peer are slow".
+the peer silently discards. `LxmfRouter::issue_ticket_field`
+(`leviculum-lxmf/src/router.rs:640`) returns
+`RouterError::NoWallClock` while the calendar is not a plausible wall
+clock, rather than issue one: a named error is a diagnosis; a
+discarded ticket is a mystery that surfaces months later as "replies
+from this peer are slow".
+
+"Plausible" here is a question about the anchor's
+[provenance rank](#anchor-provenance-is-first-class-state), not
+about its value: a birth-anchored (rank 5) calendar holds a value
+that passes the sanity window and is refused anyway, because its
+estimate is recognisably behind real time and every expiry it
+computes is already in the past on every healed peer. Today the gate
+is the value test `NodeCore::has_plausible_wall_clock`
+(`leviculum-core/src/node/mod.rs:2474`), which is correct only until
+a port plumbs its build timestamp — the rank section says why, and
+binds the fix to the same change.
 
 Fields the peer decides nothing on are always emitted. The LXMF
 message timestamp (displayed and sorted, `LXMessage.py:357`
@@ -195,6 +224,13 @@ implausible. A receiver subtly shifted *within* the window (a spoofed
 or faulty fix that still looks plausible) is an accepted residual
 risk, time-bounded by the [healing loop](#the-healing-loop).
 
+The window answers exactly one question: may this *value* seat an
+anchor at all. Every other predicate in the model — is first
+adoption still unbounded, may a ticket be issued, does the calendar
+count as a plausible wall clock — keys on the anchor's provenance
+rank, not on its value clearing the window. The next section is that
+rule; skipping it re-introduces two regressions by accident.
+
 **Implementation status.** Today the window is two fixed-date
 constants: the lower bound `EMISSION_PLAUSIBLE_MIN_SECS`
 (`constants.rs:525`, 2020) and the upper bound
@@ -204,6 +240,53 @@ bounds with constants that need no build plumbing; deriving the floor
 from the build timestamp was already named as the tightening in #161
 §1 and is spec under this model. Until a port plumbs its build
 timestamp through, the fixed dates stand in.
+
+## Anchor provenance is first-class state
+
+An anchor is a pair: the value it seated and the **rank** of the
+source that seated it (the arms of the next section). The calendar
+keeps both, and the model's predicates split cleanly over the two:
+
+- **The sanity window bounds anchor *admission*** — a question about
+  the value, asked once, on the way in.
+- **Adoption, healing and ticket predicates key on the anchor's
+  *rank*** — never on whether its value happens to clear the
+  plausibility floor.
+
+The distinction is load-bearing, because the build floor (arm 5)
+sits *at* the plausibility floor by construction: every firmware is
+built after 2020, so a birth anchor passes every value test from the
+moment arm 5 is plumbed. Two predicates in the tree then misfire if
+they stay keyed on the value:
+
+- **Unbounded first adoption.** `learn_emission_timebase`
+  (`leviculum-core/src/transport.rs:2976`) selects the unbounded
+  branch today by `current < EMISSION_PLAUSIBLE_MIN_SECS`
+  (`transport.rs:2995`). A birth-anchored cold node clears that
+  test, so its first credible announce would fall into the *bounded*
+  branch and the node would crawl to real time at one day per
+  announce — the exact #161 §1 regression this page forbids —
+  instead of healing in one step.
+- **The ticket refusal.** `NodeCore::has_plausible_wall_clock`
+  (`leviculum-core/src/node/mod.rs:2474`) becomes vacuously true at
+  the build floor: the refusal never fires, and a birth-anchored
+  node issues tickets whose expiry is already in the past on every
+  healed peer — the silently-discarded field the refusal exists to
+  prevent.
+
+The binding rule: **while the calendar is anchored at rank 5
+(birth), first adoption is unbounded, tickets are refused, and the
+calendar does not count as a plausible wall clock — regardless of
+the anchor's value.** Stated the other way round: a build-floor
+anchor passes the sanity window for *stamping* — the node authors,
+per the stamping rule below — but it is never "plausible" for
+tickets or for capping adoption.
+
+The value predicates in the tree are correct today only because no
+port has plumbed its build timestamp yet: the sourceless states they
+actually see (uptime seconds) do sit below the floor. The issue that
+lands the build floor must land the rank switch in the same change,
+or it lands both regressions with it.
 
 ## The source ranking
 
@@ -216,6 +299,17 @@ operator, an RTC is whatever it was last set to, and network-learned
 time is arbitrary input from anyone in radio range. Every arm passes
 the same [sanity window](#the-sanity-window). For each: what it
 costs, when it is unavailable, what it guarantees.
+
+> **Rustdoc debt.** Two doc comments in the tree state a different
+> order and must be updated by the issue that implements this
+> ranking: the rustdoc of `set_wall_time_unix_secs`
+> (`leviculum-core/src/node/mod.rs:672`, and on the transport at
+> `transport.rs:2941`) says a platform wall clock always takes
+> precedence over an injection — the reverse of arms 2 and 3 — and
+> the rustdoc of `NodeCore::emission_secs`
+> (`leviculum-core/src/node/mod.rs:2451`) lists the chain as
+> "platform wall clock, learned announce timebase, host injection,
+> uptime". This page is the spec; those comments are the debt.
 
 ### Arm 1: GNSS
 
@@ -240,7 +334,7 @@ carries UTC date and time in every fix.
 ### Arm 2: Host injection
 
 `Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:672`
-→ `transport.rs:2664`), for deployments where a clockless node has a
+→ `transport.rs:2941`), for deployments where a clockless node has a
 host that does know wall time — e.g. a control frame on the LNode
 serial channel (the radio-config envelope of
 `leviculum-core/src/rnode.rs`).
@@ -250,9 +344,13 @@ serial channel (the radio-config envelope of
 - **Unavailable:** standalone nodes with no host attached.
 - **Guarantees:** host-clock quality, sanity-gated: values outside
   `[EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_LEARN_CEILING_SECS]`
-  are refused (`transport.rs:2672`, pinned at `transport.rs:15548`
-  and `:15655`), because an injection *claims* to know wall time, so
-  a value no real clock can hold is self-refuting.
+  are refused (`transport.rs:2949`), because an injection *claims*
+  to know wall time, so a value no real clock can hold is
+  self-refuting. Pinned at
+  `test_implausibly_low_wall_time_injection_is_refused`
+  (`transport.rs:17295`) and
+  `test_absurd_wall_time_injection_is_refused`
+  (`transport.rs:17469`).
 - **Status:** the core API exists and is pinned by tests; no
   production caller wires it to the LNode control channel yet — a
   separate issue tracks that.
@@ -261,7 +359,7 @@ serial channel (the radio-config envelope of
 
 `Clock::wall_unix_secs` (`leviculum-core/src/traits.rs:338`). On std
 platforms `SystemClock` answers from `SystemTime`
-(`leviculum-std/src/clock.rs:45`) — effectively the OS's NTP-managed
+(`leviculum-std/src/clock.rs:49`) — effectively the OS's NTP-managed
 clock. On a board it is a battery-backed RTC, which under this model
 also carries anchors *back*: see
 [the healing loop](#the-healing-loop) for the write-back.
@@ -277,9 +375,9 @@ also carries anchors *back*: see
   only when its value passes the sanity window; below the build
   floor it is a dead cell, not a time source. Note the trait
   contract: this is *not* a timer source; all timeout and deadline
-  arithmetic stays on the monotonic `now_ms` (`traits.rs:323`).
+  arithmetic stays on the monotonic `now_ms` (`traits.rs:319`).
 - **Status:** the implementation consults this arm first when it
-  answers (`transport.rs:2612`). No current platform offers both a
+  answers (`transport.rs:2846`). No current platform offers both a
   platform clock and GNSS or injection, so the difference in order
   has no behavioural effect today; a port that has both follows this
   ranking.
@@ -289,11 +387,13 @@ also carries anchors *back*: see
 The sourceless fallback: `learn_emission_timebase`
 (`transport.rs:2976`) adopts the highest emission timestamp seen in
 any signature-valid announce as the calendar anchor, then advances it
-with the monotonic clock (`transport.rs:2846`). This includes the
+with the monotonic clock (`transport.rs:2851`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —
 learning deliberately runs before the own-destination echo drop, so a
 rebooted node re-seeds past exactly the value its next announce must
-exceed (pinned at `transport.rs:16662`).
+exceed — pinned at
+`test_own_announce_echo_reseeds_timebase_before_echo_drop`
+(`transport.rs:17102`).
 
 - **Cost:** nothing — no hardware, no host.
 - **Unavailable:** on a mesh where no participant has a clock, or
@@ -301,10 +401,13 @@ exceed (pinned at `transport.rs:16662`).
 - **Guarantees:** only as good as radio-range neighbours, and
   `validate()` proves only that the announce signs itself — the
   field is arbitrary input from anyone in range. Hence every
-  hardening rule below and the median rule of the
-  [healing loop](#the-healing-loop). The learned anchor is in-memory
-  only on RTC-less boards: after a reboot the node starts from the
-  build floor again until live traffic re-seeds it.
+  hardening rule below and the re-anchor rules of the
+  [healing loop](#the-healing-loop). A calendar seated by this arm
+  is **anchored from traffic, unconfirmed**: the evidence may itself
+  be another unhealed node's birth clock (see
+  [the one honest cost](#the-one-honest-cost)). The learned anchor
+  is in-memory only on RTC-less boards: after a reboot the node
+  starts from the build floor again until live traffic re-seeds it.
 
 ### Arm 5: The build floor
 
@@ -315,7 +418,11 @@ replaces raw uptime seconds as the bottom of the ranking, and it is a
 unique, monotonic, and non-toxic — it can never poison a peer's
 cursor, because it errs backwards. Nobody stays silent, nobody
 poisons; the cost is confined to
-[the one honest cost](#the-one-honest-cost) below.
+[the one honest cost](#the-one-honest-cost) below. The rank is the
+part that matters beyond the value: a rank-5 anchor stamps, but it
+never counts as a plausible wall clock, never issues tickets, and
+never caps adoption
+([provenance rank](#anchor-provenance-is-first-class-state)).
 
 - **Cost:** none; the build timestamp is compiled in.
 - **Unavailable:** never — that is the point.
@@ -323,21 +430,29 @@ poisons; the cost is confined to
   value that is always in the past, and a floor the sanity window
   can trust.
 - **Status:** spec. Today an instance with no source emits raw
-  uptime seconds (`transport.rs:2619`), which every cross-restart
+  uptime seconds (`transport.rs:2853`), which every cross-restart
   comparison loses (#155) and which the old doctrine treated as a
   defect to declare. Plumbing the build timestamp into each port
   retires that state entirely.
 
-## Stamping: always author, biased backwards
+## Stamping: always author, never ahead of the estimate
 
 Every instance always stamps outgoing fields with its best honest
-estimate of now — the calendar clock, whatever its anchor. When the
-calendar is uncertain, the uncertainty lands backwards, never
-forwards: the poison was never wrong time but *future* time (the
-cursor mechanism in [the two poisons](#the-two-poisons) is why —
-permanent, silent, hurts others), while past time sorts too far back
-and hurts only presentation. A source-less instance therefore anchors
-at build-time plus uptime and authors anyway.
+estimate of now — the calendar clock, whatever its anchor. The
+directional guarantee is stated at its real strength: **we never
+stamp ahead of our own estimate, and every fallback anchor lies in
+the past**, so an *uncertain* calendar errs backwards by
+construction. That is where the safety comes from: the poison was
+never wrong time but *future* time (the cursor mechanism in
+[the two poisons](#the-two-poisons) is why — permanent, silent,
+hurts others), while past time hurts only presentation. What the
+mechanisms do **not** deliver is detection of a wrong source: an
+anchor that is wrong but inside the sanity window — a plausible
+forward-shifted GNSS fix, a mis-set host clock — is adopted and
+stamped as-is. That residual is named here rather than implied away,
+and it is time-bounded by the [healing loop](#the-healing-loop). A
+source-less instance anchors at build-time plus uptime and authors
+anyway.
 
 The old rule — no verified clock, no LXMF authorship — is withdrawn.
 It bought cursor safety by silencing exactly the instances a mesh is
@@ -347,32 +462,89 @@ at the reader.
 
 ### The one honest cost
 
-Between cold start and first healing, outgoing messages carry
-recognisably old stamps and sort backwards at receivers — a Sideband
-conversation shows them out of order until the calendar heals.
-Visible, harmless, and it ends at the first plausible contact:
-the first GNSS fix, host injection, or plausible foreign message
-re-anchors the calendar and normal stamping resumes. We state the
-cost rather than hide it, because the alternatives are the two
-poisons: silence or invented time.
+Between cold start and healing, outgoing messages carry recognisably
+old stamps, and the cost is priced per path. Where a stamp is
+displayed directly, it sorts backwards — a Sideband conversation
+shows messages out of order until the calendar heals: visible,
+attributable. On the collector path the same stamp costs more, and
+the real price is stated rather than rounded down: a collector
+serves only rows above a requester's cursor, so a birth-stamped row
+sits *below* every already-synced requester's cursor — not sorted
+backwards but **invisible to that requester, indistinguishable from
+loss**, until the tracker heals and stamps climb past the cursor
+([Telemetry](telemetry.md)).
+
+How the cost ends is graded by what healed the calendar:
+
+- **Contact with arms-1–3-quality time** — a GNSS fix, a host
+  injection, a plausible platform clock — ends it outright.
+- **Traffic healing (arm 4) ends it provisionally.** A foreign stamp
+  that passes our sanity window may itself be another unhealed
+  node's birth clock: a build-floor stamp from a node built after us
+  (or comparably) clears our own floor. The calendar is then
+  **anchored from traffic, unconfirmed** — better than birth, not
+  yet known-good — and stays in that state until arms-1–3-quality
+  contact confirms or corrects it. Two clockless nodes healing from
+  each other are an echo chamber, and nothing on the wire can fully
+  prevent it: the stamps are signature-valid and in-window. A named
+  residual, not a solved problem.
+
+We state the cost rather than hide it, because the alternatives are
+the two poisons: silence or invented time.
 
 ## Ingress: clamp for semantics, keep for display
 
 The mirror image of backwards-biased stamping protects us from
 everyone else. An incoming stamp beyond the local plausible-now is
-**clamped to receive time for everything semantic**: indexing,
-dedup keys, and above all cursor advancement — in our collector
-(#239) and in any future propagation node. The original stamp is
-kept alongside as display information, so nothing is destroyed and a
-viewer can still show what the sender claimed.
+**clamped to receive time for ordering and cursor semantics**:
+indexing and above all cursor advancement — in our collector (#239)
+and in any future propagation node. The original stamp is kept
+alongside as local display information, so nothing is destroyed and
+a viewer on this node can still show what the sender claimed.
 
-The reason is the cursor mechanism: a cursor that advances over a
-raw foreign stamp hands every sender a lever to starve it. Clamped,
-the worst a garbage stamp can do is index as "arrived now" — wrong
-by presentation, harmless by mechanism. Foreign garbage can no
-longer break us, which is the other half of the always-author rule:
-authorship without ingress protection would just move the poison
-one hop.
+**Local plausible-now, defined.** The basis is the local calendar
+estimate at receive time — `Transport::emission_secs`
+(`leviculum-core/src/transport.rs:2845`) — plus a bounded forward
+tolerance for honest clock skew between sender and receiver. A stamp
+at or below basis-plus-tolerance passes as-is; above it, it is
+clamped to receive time. The tolerance is a practice parameter (see
+[Practice parameters](#practice-parameters-not-dogma)): its job is
+to keep two honestly-synced clocks from clamping each other, not to
+admit the future.
+
+Three boundaries keep the clamp from doing damage of its own:
+
+- **Dedup keys are not clamped.** Deduplication runs on content or
+  transient ID, never on the timestamp, so clamping can neither
+  make two distinct readings collide nor let a replay through. The
+  clamp covers ordering and cursor semantics only.
+- **What is served is the clamped value.** A telemetry stream row
+  has exactly one timestamp slot (the row form in
+  [Telemetry](telemetry.md)), and a collector serves what it
+  indexed. Keep-for-display is local-only — and the limit of the
+  defence is stated with it: the row's `packed_telemetry` payload
+  still carries the sender's raw claim in its own `SID_TIME`, so a
+  downstream reader that parses the payload sees the claim. Cursors
+  — ours and every requester's — advance over the clamped value
+  regardless.
+- **The clamp is armed only by a healed calendar.** Clamping "to
+  receive time" presumes the receiver knows what time it is. An
+  unhealed collector — birth-anchored, or below arms-1–3 quality
+  with no traffic re-anchor yet — would clamp every honest current
+  stamp down to its own ancient notion of now and blackhole the
+  mesh's telemetry into a years-old index. While unhealed, it takes
+  in-window sender stamps as-is; those same stamps are
+  simultaneously its healing evidence (arm 4). Rows ingested before
+  healing keep their index stamps — there is no re-index — and that
+  cost is part of the honest cold-start story above.
+
+The reason for the clamp is the cursor mechanism: a cursor that
+advances over a raw foreign stamp hands every sender a lever to
+starve it. Clamped, the worst a garbage stamp can do is index as
+"arrived now" — wrong by presentation, harmless by mechanism.
+Foreign garbage can no longer break us, which is the other half of
+the always-author rule: authorship without ingress protection would
+just move the poison one hop.
 
 Scope: this clamp lives at the application layer — what we index,
 serve, and advance cursors over. It does **not** touch announce path
@@ -389,46 +561,63 @@ silently drop its high bits on the wire and sort *below* every stored
 path entry — the node instantly loses path replacement everywhere.
 `EMISSION_TIMESTAMP_MAX_SECS`
 (`leviculum-core/src/constants.rs:498`) caps it, enforced at the
-point of resolution (`transport.rs:2627`) and again at the wire
+point of resolution (`transport.rs:2861`) and again at the wire
 producer (`announce.rs:167`), so truncation is unrepresentable
 regardless of which source produced the value. Incident: Codeberg
-#160. Pinned at `transport.rs:15746`.
+#160. Pinned at `test_emission_secs_saturates_at_wire_field_max`
+(`transport.rs:17493`).
 
 ### The timebase never moves backwards, and adoption is windowed
 
 Within arm 4, an older emission never regresses the anchor
-(`emitted_secs <= current`, `transport.rs:2707`), and adoption is
+(`emitted_secs <= current`, `transport.rs:2984`), and adoption is
 bounded by the sanity window: values above
 `EMISSION_LEARN_CEILING_SECS` (`constants.rs:507`, 2200-01-01) cannot
 come from a real clock and are refused outright
-(`transport.rs:2703`); the lower bound `EMISSION_PLAUSIBLE_MIN_SECS`
+(`transport.rs:2980`); the lower bound `EMISSION_PLAUSIBLE_MIN_SECS`
 (`constants.rs:525`, 2020) separates real wall clocks from
 uptime-derived values, which sit orders of magnitude apart.
-Incidents: #160, #161. Pinned at `transport.rs:15258` and `:15662`.
+Incidents: #160, #161. Pinned at
+`test_clockless_node_learns_emission_timebase_from_announce`
+(`transport.rs:17005`) and
+`test_timebase_floor_cannot_pass_learn_ceiling`
+(`transport.rs:17409`).
 The per-announce no-backwards guard is not contradicted by the
-healing loop: a median re-anchor is a deliberate, multi-sender event,
-not one announce dragging the anchor down.
+healing loop: a backwards re-anchor is a deliberate event that
+requires arms-1–2 evidence and respects the emitted high-water mark
+(see [the healing loop](#the-healing-loop)) — never one announce
+dragging the anchor down.
 
-### The FIRST adoption is unbounded while the timebase is implausible
+### The FIRST adoption is unbounded while anchored at rank 5
 
-While the current anchor sits below the plausibility floor, adoption
-is deliberately unbounded (`transport.rs:2718`): a node starting at
-the build floor — or one that adopted a rebooting peer's uptime
-seconds as its first anchor — must climb to real unix time in one
-step. First-plausible-wins is correct *here*, and only here: an
-implausible calendar has nothing worth defending, and instant
-recovery beats attack resistance for it. **Capping this was a real
-regression** (#161 §1): with the bounded advance applied to an
-implausibly low anchor, recovery crawled at one day per announce —
-about 20 602 announces, ~429 days at a 30-minute LoRa cadence —
-where a single credible announce used to recover the node instantly.
-Do not re-introduce that cap. The no-backwards guard above keeps the
-unbounded branch from being abused downwards. Pinned at
-`transport.rs:15445` and `:15486`.
+While the calendar is still on its birth anchor — rank 5, or one of
+today's stand-in states below the value floor — adoption is
+deliberately unbounded (`transport.rs:2995`): a node starting at the
+build floor, or one that adopted a rebooting peer's uptime seconds
+as its first anchor, must climb to real unix time in one step.
+First-plausible-wins is correct *here*, and only here: a birth
+anchor has nothing worth defending, and instant recovery beats
+attack resistance for it. The predicate is the anchor's **rank**,
+not its value: a birth anchor's value clears the plausibility floor
+once the build floor is plumbed, and a value test would then route a
+cold node into the bounded branch below
+([provenance rank](#anchor-provenance-is-first-class-state)).
+**Capping this was a real regression** (#161 §1): with the bounded
+advance applied to an implausibly low anchor, recovery crawled at
+one day per announce — about 20 602 announces, ~429 days at a
+30-minute LoRa cadence — where a single credible announce used to
+recover the node instantly. Do not re-introduce that cap. The
+no-backwards guard above keeps the unbounded branch from being
+abused downwards. Pinned at
+`test_clockless_first_timebase_adoption_is_unbounded`
+(`transport.rs:17192`) and
+`test_clockless_timebase_advance_is_bounded_after_first_adoption`
+(`transport.rs:17143`).
 
-### Advance after plausibility is bounded — per announce, not per peer
+### Advance past rank 5 is bounded — per announce, not per peer
 
-Once the anchor is plausible, one announce may advance it by at
+Once the calendar is no longer birth-anchored (today: once the value
+clears the plausibility floor), one announce may advance it by at
 most `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:539`, one
 day), so a peer whose clock is decades wrong cannot capture the
 calendar in one announce. State the protection level honestly:
@@ -437,11 +626,16 @@ rebroadcast dedup, so *N announces advance the floor by N × cap*
 regardless of how many identities or destinations they came from.
 The real cap on the walk rate is announces-per-second on the air —
 nothing identity-shaped. This measured reality is pinned at
-`transport.rs:15588`; the walk terminates at the learn ceiling,
-pinned at `transport.rs:15662`. The durable defence against the walk
-is the median rule of the [healing loop](#the-healing-loop): a
-calendar walked forward by one sender deviates from the median of
-the others and gets pulled back.
+`test_timebase_walk_is_capped_per_announce_not_per_identity`
+(`transport.rs:17335`); the walk terminates at the learn ceiling,
+pinned at `test_timebase_floor_cannot_pass_learn_ceiling`
+(`transport.rs:17409`). No durable defence is claimed from the
+[healing loop](#the-healing-loop)'s median: a median over free
+identities resists a broken peer, not an attacker. What actually
+bounds a hostile forward walk is the ceiling and the airtime it
+costs; what undoes one afterwards is arms-1–2 evidence, because the
+healing loop deliberately refuses to move a calendar *backwards* on
+traffic alone.
 
 ### We do not validate our own clock, or incoming timestamps
 
@@ -456,19 +650,26 @@ into the path table:
   would desynchronise us from a network that does not validate.
   Under the anchor model an "implausible own clock" collapses to "no
   anchor better than the build floor" — and that state emits too,
-  per the stamping rule. The once-per-process operator warning
-  (`Transport::announce_emission_secs`, `transport.rs:2641`) remains
+  per the stamping rule. The once-per-process operator warning in
+  `Transport::announce_emission_secs` (`transport.rs:2918`) remains
   the only reaction to an implausible value — never an altered
-  emission. Pinned at `transport.rs:15783` and `:15831`.
+  emission. Pinned at
+  `test_own_wall_clock_is_not_plausibility_bounded_on_emission`
+  (`transport.rs:17654`) and
+  `test_implausible_own_wall_clock_warns_once_and_leaves_emission_unchanged`
+  (`transport.rs:17702`).
 - **Incoming emission timestamps are not plausibility-checked on
   path acceptance.** Ordering is per-destination comparison only,
   exactly `announce_emitted > path_timebase`
-  (`Transport.py:1772`/`:1809`). A clockless peer's uptime-seconds
-  announce must enter the path table (that is how a #155 node is
-  reachable at all), and an absurdly high emission must win the
-  newer-emission comparison. Python peers accept both; filtering
-  would only desynchronise our path tables from every other node's
-  view of the same announces. Pinned at `transport.rs:15902`. The
+  (`Transport.py:1772`; the worse-hop branch compares against its
+  own stored field at `Transport.py:1809`). A clockless peer's
+  uptime-seconds announce must enter the path table (that is how a
+  #155 node is reachable at all), and an absurdly high emission must
+  win the newer-emission comparison. Python peers accept both;
+  filtering would only desynchronise our path tables from every
+  other node's view of the same announces. Pinned at
+  `test_incoming_emission_not_plausibility_checked_on_acceptance`
+  (`transport.rs:17773`). The
   [ingress clamp](#ingress-clamp-for-semantics-keep-for-display)
   operates strictly above this layer — on what we index and serve,
   never on what we route.
@@ -478,39 +679,91 @@ injection, GNSS, RTC — never for emission or path acceptance.
 
 ## The healing loop
 
-The protocol self-heals wherever it can; a wrong calendar is a
-transient, not a fate. The loop, binding as spec:
+The protocol self-heals wherever the evidence for healing exists;
+where it does not, this section names the residual instead of
+claiming one. The loop, binding as spec:
 
 1. **Collect.** Plausible foreign times are gathered from live
    traffic the node already receives — LXMF message stamps,
    propagation announces. Plausible means: passes the sanity window.
-2. **Compare against the median.** When the own calendar deviates
-   grossly from the **median of several distinct senders**, the
-   calendar re-anchors to that median. Median, not
-   first-neighbour-wins: a single attacker (or a single broken peer)
-   cannot walk the calendar anywhere, because it takes a majority of
-   the cohort to move the median. The cohort size and the
-   gross-deviation threshold are practice parameters. Re-anchoring
-   works in both directions; the forward walk is the attack the
-   median exists to stop.
+2. **Re-anchor — by rank and by direction.**
+   - **While anchored at rank 5, a single plausible source
+     re-anchors the calendar.** This *is* the unbounded first
+     adoption above, restated as the healing rule: a birth anchor
+     has nothing worth defending. Unless the source was arms 1–3,
+     the result is
+     [anchored from traffic, unconfirmed](#the-one-honest-cost).
+   - **A calendar already anchored to real time is never re-anchored
+     by a single sender.** A *forward* correction requires gross
+     deviation from the **median of several distinct senders**;
+     cohort size and deviation threshold are practice parameters.
+   - **A gross *backwards* correction additionally requires arms-1–2
+     evidence — a GNSS fix or a host injection — never traffic
+     alone.** Announce identities are free (this page already
+     concedes that for the walk cap), so a traffic median in the
+     past is exactly what an attacker can fabricate; a backwards
+     path open to traffic would be a remote lever for dragging any
+     healed calendar down and silencing its announces. Closing it
+     costs a residual, named under "sparse meshes" below.
+   - **The emitted high-water rule, binding on every re-anchor:**
+     the calendar is never re-anchored below the highest value this
+     identity has ever emitted — not even by arms-1–2 evidence; the
+     correction floors at the high-water mark. Peers order our
+     announces by emission timestamp (`announce_emitted >
+     path_timebase`, `reference/Reticulum/RNS/Transport.py:1772`),
+     so dropping below our own emitted high-water silences our
+     announces mesh-wide until the calendar climbs past it again —
+     and re-stamping a range we already stamped would revive the
+     #217 same-stamp class this page claims cannot come back. Where
+     storage exists, the high-water mark is persisted across boots.
+     An RTC-less, storage-less node cannot persist it, and that
+     cost is named: such a node re-enters the same
+     build-plus-uptime stamp range on every boot until re-seeded.
+     The practical mitigation is already in the model — arm 4 hears
+     the node's *own* pre-restart announces echo back and re-seeds
+     past them, pinned at
+     `test_own_announce_echo_reseeds_timebase_before_echo_drop`
+     (`transport.rs:17102`).
 3. **Write back to the RTC.** Every better anchor is also written
    into a present RTC, so the hardware clock itself heals and the
    next boot starts from the healed value instead of the build
    floor. The write-back is what turns arm 3 from
    "whatever it was last set to" into "whatever we last verified".
 
+**What the median is, honestly.** A median over distinct senders
+resists a *broken peer*: one wrong clock in an honest cohort cannot
+move it. It does not resist an *attacker* — identities are free, and
+a cohort of them is one attacker with a loop. The attack-facing
+guarantees come from the other rules: the ceiling and the advance
+cap bound a forward walk, the arms-1–2 requirement closes the
+backwards lever, and the high-water rule caps what any accepted
+correction may do to our own emissions.
+
+**Sparse meshes, honestly.** With one neighbour no cohort exists, so
+a calendar that is *grossly forward* — and no longer at rank 5 —
+does not heal from traffic at all: the median that would justify a
+correction cannot form, and traffic alone may never pull backwards
+anyway. The residual is stated rather than papered over: such a node
+heals through a GNSS fix, a host injection, or a reflash — not from
+listening. Until then it keeps authoring, and the learn ceiling
+keeps it from walking further.
+
 The cold-start story then reads: a device with nothing stamps from
-the build floor; the first plausible message, injection, or GNSS fix
-pulls the calendar straight; the RTC (where present) keeps it across
-power cycles; and a calendar later walked wrong is pulled back by
-the median of its neighbourhood. No operator action at any step —
-switch on and it works.
+its birth anchor; the first plausible contact re-anchors it — to
+known-good time when the contact was arms 1–3, to
+traffic-unconfirmed when it was a foreign stamp, which may itself be
+another unhealed node's birth clock (the echo-chamber residual of
+[the one honest cost](#the-one-honest-cost)); the RTC (where
+present) keeps it across power cycles; and a calendar later walked
+wrong is corrected forward by its cohort's median, backwards only on
+arms-1–2 evidence. No operator action at any step — switch on and it
+works, with the residuals stated.
 
 **Implementation status.** Arm 4's single-announce learning
 (`learn_emission_timebase`, `transport.rs:2976`) implements the
-first-adoption half today. The median re-anchor, the collection of
-LXMF-stamp evidence, and the RTC write-back are spec, tracked as
-implementation issues per platform.
+rank-5 re-anchor today. The median re-anchor, the collection of
+LXMF-stamp evidence, the high-water persistence, and the RTC
+write-back are spec, tracked as implementation issues per platform.
 
 ## GNSS specifics for a board bring-up
 
@@ -538,15 +791,20 @@ implementation issues per platform.
 
 A node should be able to state, at any moment, where its notion of
 time came from: GNSS, host injection, platform clock, learned from
-traffic (whose, and when), a median re-anchor (over which cohort), or
-the build floor. Diagnosis of a path-ordering problem starts with
+traffic (whose, and when, and whether still
+[unconfirmed](#the-one-honest-cost)), a median re-anchor (over which
+cohort), or the build floor. This is more than a breadcrumb: the
+anchor's rank is live state the model's predicates key on
+([provenance rank](#anchor-provenance-is-first-class-state)), so a
+node that cannot answer it cannot even decide whether it may issue a
+ticket. Diagnosis of a path-ordering problem starts with
 "what did this node think the time was, and who told it" — without
 provenance, a wrong timestamp in a peer's path table cannot be
 attributed to a dead RTC, a lying neighbour, or a boot-order race.
 The healing loop raises the stakes: a re-anchor is a calendar jump,
 and an unattributed jump is indistinguishable from a bug. Today the
 only breadcrumb is the once-per-process implausible-own-clock warning
-(`transport.rs:2646`); exposing the current source and its origin
+(`transport.rs:2923`); exposing the current source and its origin
 (status RPC, control-channel query) is part of implementing this
 concept on each platform.
 
@@ -565,6 +823,11 @@ reasoned commit, never load-bearing for the model itself.
   `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:539`).
 - **The healing cohort**: how many distinct senders form a median,
   and how large a deviation counts as gross.
+- **The local plausible-now tolerance**: the bounded forward skew
+  allowance added to the local calendar estimate at the
+  [ingress clamp](#ingress-clamp-for-semantics-keep-for-display) —
+  basis is `Transport::emission_secs` at receive time; the tolerance
+  absorbs honest sender/receiver skew, nothing more.
 
 ## Checklist for a new firmware port
 
@@ -573,9 +836,13 @@ reasoned commit, never load-bearing for the model itself.
 2. **Implement `Clock::wall_unix_secs` only if the platform has a
    real wall clock.** Returning `None` is correct and engages the
    ranking. Never return an uptime-derived value from it.
-3. **Plumb the build timestamp.** It is the sanity floor and the
-   birth anchor; a port without it is still living in the raw-uptime
-   state the model retires.
+3. **Plumb the build timestamp — and the rank switch with it.** The
+   build timestamp is the sanity floor and the birth anchor; a port
+   without it is still living in the raw-uptime state the model
+   retires. The same change must move the adoption and ticket
+   predicates from value tests to the anchor rank
+   ([provenance rank](#anchor-provenance-is-first-class-state)), or
+   it regresses cold-start healing and ticket refusal in one step.
 4. **Wire every available better source.** GNSS: seed from RMC UTC
    through the sanity window. Attached host: implement the
    control-channel frame that calls `set_wall_time_unix_secs`.

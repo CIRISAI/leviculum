@@ -96,7 +96,7 @@ without a fix.
 
 ## Rules that hold regardless of platform
 
-### Telemetry always stamps — biased backwards, never forward
+### Telemetry always stamps — never ahead of the calendar estimate
 
 `SID_TIME` and the location sensor's `last_update` are real UTC seconds,
 and they are load-bearing at the receiver in three separate places:
@@ -122,16 +122,42 @@ exactly the switch-on-and-it-works trackers this feature exists for,
 and it defended the cursor at the wrong end.
 
 The binding rule comes from the anchor model of [Time and
-clocks](time-and-clocks.md): **a telemetry node always stamps with its
-best honest calendar estimate, biased backwards when unsure, never
-forwards.** A node whose calendar is still at the build floor reports
-recognisably old readings that sort to the back of the viewer — the
-honest cost, which ends at the node's first plausible contact. The
-cursor is defended at the reader instead: our collector (#239) clamps
-inbound stamps beyond its local plausible-now to receive time for
-indexing and cursor advancement, keeping the original stamp as display
-information ([ingress clamping](time-and-clocks.md#ingress-clamp-for-semantics-keep-for-display)).
-Foreign future stamps then cannot starve anyone's cursor through us.
+clocks](time-and-clocks.md): **a telemetry node always stamps with
+its best honest calendar estimate, and never ahead of it** — every
+fallback anchor lies in the past, so an uncertain calendar errs
+backwards by construction; a source that is wrong but plausible is
+stamped as-is, the residual the anchor model names. A node whose
+calendar is still at the build floor reports recognisably old
+readings, and the cost is priced per path. Where the reading is
+displayed directly, it sorts to the back of the viewer: visible,
+attributable. Where it travels through a collector, the real price
+is higher: a collector serves only rows above a requester's cursor,
+so a birth-stamped row sits below every already-synced requester's
+cursor — not sorted backwards but **invisible to that requester,
+indistinguishable from loss**, until the tracker heals. The cost
+ends at the node's first plausible contact — outright at
+arms-1–3-quality time, provisionally when healed from traffic
+([the one honest cost](time-and-clocks.md#the-one-honest-cost)).
+
+The cursor is defended at the reader instead: our collector (#239)
+clamps inbound stamps beyond its local plausible-now to receive time
+for indexing and cursor advancement, keeping the original stamp as
+local display information ([ingress
+clamping](time-and-clocks.md#ingress-clamp-for-semantics-keep-for-display)).
+The clamp is armed only while the collector's own calendar is healed:
+an unhealed collector clamping "to receive time" would drag every
+honest current stamp down to its own ancient notion of now and
+blackhole them below every synced cursor. Until it heals, it takes
+in-window sender stamps as-is — the same stamps double as its
+healing evidence — and rows ingested before healing keep their index
+stamps; there is no re-index. Dedup keys are never clamped: dedup
+runs on content and transient ID, the clamp covers ordering and
+cursor semantics only. And what a collector serves is the clamped
+value — a stream row has one timestamp slot — while keep-for-display
+stays local; note the stated limit that the row's `packed_telemetry`
+still carries the sender's raw `SID_TIME` claim to any downstream
+parser. Foreign future stamps then cannot starve anyone's cursor
+through us.
 
 A node still has to know *which* arm anchored its calendar — the
 provenance requirement of [Time and
@@ -300,13 +326,16 @@ Under the ordering above this is step 1, not step 2: one form breaks a
 conforming receiver, so we emit four and the three-element form is a bug
 to report.
 
-A collector additionally never serves a row whose timestamp lies in the
-future relative to its own clock. Serving one permanently starves the
-cursor of every requester that sees it. Under [ingress
+A collector additionally never serves a row whose timestamp lies in
+the future relative to its own healed clock. Serving one permanently
+starves the cursor of every requester that sees it. Under [ingress
 clamping](time-and-clocks.md#ingress-clamp-for-semantics-keep-for-display)
-such a row cannot enter the index in the first place — the stamp is
-clamped to receive time on ingest — so this serving rule is defence in
-depth, not the primary barrier.
+such a row cannot enter the index while the clamp is armed — the
+stamp is clamped to receive time on ingest — so for a healed
+collector this serving rule is defence in depth. It is the primary
+barrier for exactly one population: rows ingested *before* the
+collector's own calendar healed, which were taken as-is and keep
+their index stamps (there is no re-index).
 
 ## What a reporting node owes
 
@@ -319,7 +348,7 @@ depth, not the primary barrier.
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch
   (`reference/Reticulum/RNS/Transport.py:1177-1182`, our equivalent
-  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:2439`)
+  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:2456`)
   applies to a packet that already exists, and building one required the
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.
@@ -387,10 +416,10 @@ has not been designed.
 ## Checklist for a port, or for a new sensor
 
 1. **Does every stamp come from the calendar clock of [Time and
-   clocks](time-and-clocks.md) — best honest estimate, biased
-   backwards, never forwards — and can the node say which arm
-   anchored it?** No clock state blocks reporting; an unanswerable
-   "where did this time come from" does block shipping.
+   clocks](time-and-clocks.md) — best honest estimate, never ahead
+   of it — and can the node say which arm anchored it?** No clock
+   state blocks reporting; an unanswerable "where did this time come
+   from" does block shipping.
 2. **Does every sensor have a "no reading" state that omits its key?**
 3. **Does an existing sensor ID fit?** Climb the ladder from rung one.
 4. **Is the cadence stated as policy alone, with no airtime figure
@@ -398,8 +427,9 @@ has not been designed.
 5. **Are `content` and `title` empty on every reporting message?**
 6. **Does the node announce a delivery destination with a name, and does
    it have a defined answer for a target it has never heard?**
-7. **If it collects for others: allow-list empty by default, set off the
-   radio, four-element rows, inbound stamps clamped on ingest, no
+7. **If it collects for others: allow-list empty by default, set off
+   the radio, four-element rows, inbound stamps clamped on ingest
+   once the own calendar is healed (taken as-is before that), no
    future timestamps served?**
 8. **What does a viewer that lacks this sensor show?** Answer before
    emitting.
