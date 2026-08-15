@@ -140,11 +140,12 @@ pub mod tunnel;
 
 // Re-export key types
 pub use announce::{
-    announce_app_data_budget, announce_payload_fixed_len, AnnounceControl, AnnounceError,
-    ReceivedAnnounce,
+    announce_app_data_budget, announce_payload_fixed_len, verify_announce_packet, AnnounceControl,
+    AnnounceError, ReceivedAnnounce,
 };
 pub use destination::{
     Destination, DestinationError, DestinationHash, DestinationType, Direction, ProofStrategy,
+    SingleDestDecryptor,
 };
 pub use identity::Identity;
 pub use link::{LinkCloseReason, LinkError, LinkId, PeerKeys};

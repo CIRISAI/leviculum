@@ -2004,7 +2004,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         interface_index: usize,
         raw: &[u8],
     ) -> Result<(), TransportError> {
-        self.process_incoming_inner(interface_index, raw, None)
+        self.process_incoming_inner(interface_index, raw, None, false)
     }
 
     /// Like [`process_incoming`](Self::process_incoming), but with the dedup
@@ -2019,7 +2019,23 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         raw: &[u8],
         precomputed_hash: [u8; 32],
     ) -> Result<(), TransportError> {
-        self.process_incoming_inner(interface_index, raw, Some(precomputed_hash))
+        self.process_incoming_inner(interface_index, raw, Some(precomputed_hash), false)
+    }
+
+    /// Like [`process_incoming_prehashed`](Self::process_incoming_prehashed),
+    /// additionally accepting that the caller fully verified an announce's
+    /// signature + destination hash over these exact bytes off-lock
+    /// (leviculum#29 stage 2; see `verify_announce_packet`). The flag only
+    /// skips the redundant Ed25519 re-verify for THIS packet; a non-announce
+    /// packet ignores it.
+    pub fn process_incoming_precomputed(
+        &mut self,
+        interface_index: usize,
+        raw: &[u8],
+        precomputed_hash: Option<[u8; 32]>,
+        announce_verified: bool,
+    ) -> Result<(), TransportError> {
+        self.process_incoming_inner(interface_index, raw, precomputed_hash, announce_verified)
     }
 
     fn process_incoming_inner(
@@ -2027,6 +2043,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         interface_index: usize,
         raw: &[u8],
         precomputed_hash: Option<[u8; 32]>,
+        announce_verified: bool,
     ) -> Result<(), TransportError> {
         self.stats.packets_received += 1;
 
@@ -2316,7 +2333,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // handle_data link-table routing, handle_link_request) so they include the
         // outbound interface index needed for proof routing.
         match packet.flags.packet_type {
-            PacketType::Announce => self.handle_announce(packet, interface_index, &raw, false),
+            PacketType::Announce => {
+                self.handle_announce(packet, interface_index, &raw, false, announce_verified)
+            }
             PacketType::LinkRequest => {
                 self.handle_link_request(packet, interface_index, &raw, truncated_hash)
             }
@@ -3779,6 +3798,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         interface_index: usize,
         raw: &[u8],
         from_held: bool,
+        sig_preverified: bool,
     ) -> Result<(), TransportError> {
         let now = self.clock.now_ms();
         let is_path_response = packet.context == PacketContext::PathResponse;
@@ -3813,8 +3833,23 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             return Ok(());
         }
 
-        // Validate signature and destination hash
-        announce.validate().map_err(TransportError::AnnounceError)?;
+        // Validate signature and destination hash. When the driver already
+        // ran the full verification over these exact bytes off the node lock
+        // (leviculum#29 stage 2), skip only the redundant Ed25519 re-verify;
+        // the cheap structural hash check still runs either way.
+        if sig_preverified {
+            if !announce.verify_destination_hash() {
+                return Err(TransportError::AnnounceError(
+                    crate::announce::AnnounceError::HashMismatch,
+                ));
+            }
+            debug_assert!(
+                announce.validate().is_ok(),
+                "preverified announce must re-validate"
+            );
+        } else {
+            announce.validate().map_err(TransportError::AnnounceError)?;
+        }
 
         // Codeberg #155: on platforms without a wall clock, adopt the
         // highest emission timestamp seen in any validated announce as our
@@ -6969,7 +7004,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         match Packet::unpack(&held.raw) {
             Ok(mut packet) => {
                 packet.hops = held.hops;
-                if let Err(e) = self.handle_announce(packet, iface, &held.raw, true) {
+                if let Err(e) = self.handle_announce(packet, iface, &held.raw, true, false) {
                     crate::tracing::debug!(
                         dest = %HexShort(&dest_hash),
                         iface = %self.iface_name(iface),
@@ -21304,7 +21339,7 @@ mod tests {
 
             // Process announce arriving from the network interface
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
+            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false, false);
             assert!(result.is_ok());
 
             // Check that a SendPacket action was emitted for the local client
@@ -21328,7 +21363,7 @@ mod tests {
             // Simulate process_incoming's receipt hop increment
             let mut packet = Packet::unpack(&raw).unwrap();
             packet.hops = packet.hops.saturating_add(1);
-            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
+            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false, false);
             assert!(result.is_ok());
 
             // Extract the forwarded announce bytes
@@ -21370,7 +21405,7 @@ mod tests {
 
             // Process announce arriving FROM the local client itself
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, LOCAL_CLIENT_IFACE, &raw, false);
+            let result = transport.handle_announce(packet, LOCAL_CLIENT_IFACE, &raw, false, false);
             assert!(result.is_ok());
 
             // Should NOT forward back to the same local client
@@ -21399,7 +21434,7 @@ mod tests {
 
             let (raw, _dest_hash) = make_announce_raw(0, crate::packet::PacketContext::None);
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
+            let result = transport.handle_announce(packet, NETWORK_IFACE, &raw, false, false);
             assert!(result.is_ok());
 
             // Without local clients, no SendPacket to local client should exist
@@ -21429,7 +21464,7 @@ mod tests {
 
             let (raw, dest_hash) = make_announce_raw(0, crate::packet::PacketContext::None);
             let packet = Packet::unpack(&raw).unwrap();
-            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
+            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw, false, false);
 
             assert!(
                 transport.storage.get_announce_cache(&dest_hash).is_some(),
@@ -21811,7 +21846,7 @@ mod tests {
             // Process an announce on the network interface to populate the cache
             let (raw, dest_hash) = make_announce_raw(0, crate::packet::PacketContext::None);
             let packet = Packet::unpack(&raw).unwrap();
-            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw, false);
+            let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw, false, false);
             transport.drain_actions();
             transport.drain_events();
 
@@ -23815,7 +23850,7 @@ mod tests {
                 let (raw, _dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
                 transport
-                    .handle_announce(packet, NET_IFACE, &raw, false)
+                    .handle_announce(packet, NET_IFACE, &raw, false, false)
                     .unwrap();
                 transport.clock.advance(2000);
                 transport.poll();
@@ -23855,7 +23890,7 @@ mod tests {
                 let (raw, _dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
                 transport
-                    .handle_announce(packet, NET_IFACE, &raw, false)
+                    .handle_announce(packet, NET_IFACE, &raw, false, false)
                     .unwrap();
                 transport.clock.advance(100);
             }
@@ -23910,7 +23945,7 @@ mod tests {
                 let (raw, dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
                 transport
-                    .handle_announce(packet, P2P_IFACE, &raw, false)
+                    .handle_announce(packet, P2P_IFACE, &raw, false, false)
                     .unwrap();
                 p2p_dests.push(dest);
                 transport.clock.advance(100);
@@ -23940,7 +23975,7 @@ mod tests {
                 let (raw, _dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
                 transport
-                    .handle_announce(packet, SHARED_IFACE, &raw, false)
+                    .handle_announce(packet, SHARED_IFACE, &raw, false, false)
                     .unwrap();
                 transport.clock.advance(100);
             }
@@ -23983,7 +24018,7 @@ mod tests {
                 let (raw, _dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
                 transport
-                    .handle_announce(packet, NET_IFACE, &raw, false)
+                    .handle_announce(packet, NET_IFACE, &raw, false, false)
                     .unwrap();
                 transport.clock.advance(2000);
             }
@@ -24239,7 +24274,7 @@ mod tests {
                 let (raw, dest) = make_announce_raw();
                 let packet = Packet::unpack(&raw).unwrap();
                 transport
-                    .handle_announce(packet, iface, &raw, false)
+                    .handle_announce(packet, iface, &raw, false, false)
                     .unwrap();
                 dests.push(dest);
                 transport.clock.advance(50);
@@ -24389,7 +24424,7 @@ mod tests {
             for (raw, _) in [(&raw_hi, dest_hi), (&raw_lo, dest_lo), (&raw_mid, dest_mid)] {
                 let packet = Packet::unpack(raw).unwrap();
                 transport
-                    .handle_announce(packet, NET_IFACE, raw, false)
+                    .handle_announce(packet, NET_IFACE, raw, false, false)
                     .unwrap();
                 transport.clock.advance(50);
             }
@@ -24793,7 +24828,7 @@ mod tests {
 
             // Process an announce matching the destination from iface_b
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, IFACE_B, &raw, false);
+            let result = transport.handle_announce(packet, IFACE_B, &raw, false, false);
             assert!(result.is_ok());
 
             // The discovery response should have been sent as a SendPacket
@@ -24894,7 +24929,7 @@ mod tests {
 
             // Process a matching announce, should NOT trigger a discovery response
             let packet = Packet::unpack(&raw).unwrap();
-            let result = transport.handle_announce(packet, IFACE_B, &raw, false);
+            let result = transport.handle_announce(packet, IFACE_B, &raw, false, false);
             assert!(result.is_ok());
 
             // No targeted SendPacket to iface_a
@@ -26128,7 +26163,7 @@ mod blackhole_enforcement_tests {
     fn feed_announce(transport: &mut Transport<MockClock, MemoryStorage>, raw: &[u8]) {
         let packet = Packet::unpack(raw).unwrap();
         transport
-            .handle_announce(packet, NET_IFACE, raw, false)
+            .handle_announce(packet, NET_IFACE, raw, false, false)
             .unwrap();
     }
 
@@ -26332,7 +26367,8 @@ mod blackhole_enforcement_tests {
         // error, not a silent drop.
         let packet = Packet::unpack(&raw).unwrap();
         assert!(
-            t.handle_announce(packet, NET_IFACE, &raw, false).is_err(),
+            t.handle_announce(packet, NET_IFACE, &raw, false, false)
+                .is_err(),
             "corrupted announce must fail signature validation"
         );
 
@@ -26340,7 +26376,8 @@ mod blackhole_enforcement_tests {
         let before = t.stats().drops_blackholed_announce;
         let packet = Packet::unpack(&raw).unwrap();
         assert!(
-            t.handle_announce(packet, NET_IFACE, &raw, false).is_ok(),
+            t.handle_announce(packet, NET_IFACE, &raw, false, false)
+                .is_ok(),
             "blackholed announce is dropped before signature validation"
         );
         assert_eq!(t.stats().drops_blackholed_announce, before + 1);

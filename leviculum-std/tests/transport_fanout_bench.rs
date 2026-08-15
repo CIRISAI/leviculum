@@ -537,3 +537,277 @@ fn write_bench_json(path: &str, packets: usize, payload: usize, results: &[Level
     );
     std::fs::write(path, json).expect("write bench json");
 }
+
+// ---------------------------------------------------------------------------
+// leviculum#29 stages 2-3 — the EXPENSIVE inbound crypto classes. Link data is
+// HMAC+AES (~1µs release); the classes below are the real lock long-poles:
+// single-destination datagrams cost X25519 ECDH + HKDF per packet, announces
+// cost an Ed25519 verify each. These modes measure the serve node's aggregate
+// throughput for each class under N-client fan-out.
+// ---------------------------------------------------------------------------
+
+/// Spawn an event drain on `node` counting events matching `pred`.
+fn count_events<F>(
+    node: &mut ReticulumNode,
+    pred: F,
+) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>)
+where
+    F: Fn(&NodeEvent) -> bool + Send + 'static,
+{
+    let counter = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&counter);
+    let mut rx = node.take_event_receiver().expect("event rx");
+    let h = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if pred(&ev) {
+                c.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    (counter, h)
+}
+
+/// Mode 3 — single-destination datagram flood: every packet costs the serve
+/// node an ECDH decrypt (ratcheted Single destination, the sealed-envelope
+/// field shape), all currently under the one node lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "load benchmark; run explicitly with --ignored --nocapture"]
+async fn single_dest_datagram_flood() {
+    let n = env_usize("FLOOD_N", 20);
+    let packets = env_usize("PACKETS", 200);
+    let payload = env_usize("PAYLOAD", 64);
+
+    // Serve node with a ratcheted Single destination.
+    let addr: SocketAddr = format!("127.0.0.1:{}", next_port()).parse().unwrap();
+    let storage = tempfile::tempdir().expect("serve tempdir");
+    let mut serve = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_server(addr)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build serve node");
+    std::mem::forget(storage);
+    serve.start().await.expect("start serve node");
+
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "bench",
+        &["datagram"],
+    )
+    .expect("serve destination");
+    dest.enable_ratchets(&mut rand_core::OsRng, 1)
+        .expect("ratchets");
+    let hash = *dest.hash();
+    serve.register_destination(dest);
+
+    let (received, _drain) = count_events(&mut serve, |ev| {
+        matches!(ev, NodeEvent::PacketReceived { .. })
+    });
+
+    // Clients: TCP up, install path from one announce, then flood datagrams.
+    let mut nodes = Vec::new();
+    for _ in 0..n {
+        if let Some(c) = bring_up_client_tcp_only(addr).await {
+            nodes.push(c);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    serve
+        .announce_destination(&hash, Some(b"bench"))
+        .await
+        .expect("announce");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut clients = Vec::new();
+    for node in nodes {
+        while Instant::now() < deadline && !node.has_path(&hash) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if node.has_path(&hash) {
+            clients.push(node);
+        }
+    }
+    let established = clients.len();
+    eprintln!("[bench] datagram flood: {established}/{n} clients have the path");
+    assert!(established > 0);
+
+    let target_total = established * packets;
+    received.store(0, Ordering::Relaxed);
+    let start = Instant::now();
+    let mut senders = Vec::new();
+    for node in clients {
+        let data = vec![0xABu8; payload];
+        senders.push(tokio::spawn(async move {
+            for _ in 0..packets {
+                loop {
+                    match node.send_single_packet(&hash, &data).await {
+                        Ok(_) => break,
+                        Err(e) => {
+                            if std::env::var("BENCH_DEBUG").is_ok() {
+                                eprintln!("[send-err] {e:?}");
+                            }
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    // Datagrams are fire-and-forget: a small fraction can drop under burst, so
+    // waiting for ALL would let the deadline dominate the math. Stop when the
+    // count stalls and time to the LAST arrival.
+    let load_deadline = start + Duration::from_secs(180);
+    let mut last_count = 0usize;
+    let mut last_arrival = start;
+    loop {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let now_count = received.load(Ordering::Relaxed);
+        if now_count > last_count {
+            last_count = now_count;
+            last_arrival = Instant::now();
+        }
+        if now_count >= target_total
+            || Instant::now() > load_deadline
+            || last_arrival.elapsed() > Duration::from_secs(5)
+        {
+            break;
+        }
+    }
+    let elapsed = (last_arrival - start).as_secs_f64().max(0.001);
+    for s in senders {
+        s.abort();
+    }
+    let got = received.load(Ordering::Relaxed);
+    println!();
+    println!("single-dest datagram flood — leviculum#29 expensive class (ECDH/packet)");
+    println!(
+        "clients={established} received={got}/{target_total} elapsed={elapsed:.2}s throughput={:.0} pkts/s",
+        got as f64 / elapsed
+    );
+    if let Ok(path) = std::env::var("BENCH_JSON_OUT_SINGLEDEST") {
+        let json = format!(
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"single_dest_datagram_flood\",\n  \"issue\": \"leviculum#29\",\n  \"params\": {{\"clients\": {established}, \"packets_per_client\": {packets}, \"payload_bytes\": {payload}}},\n  \"received\": {got},\n  \"elapsed_s\": {elapsed:.3},\n  \"throughput_pkts_s\": {:.1}\n}}\n",
+            got as f64 / elapsed
+        );
+        std::fs::write(&path, json).expect("write json");
+        eprintln!("[bench] wrote {path}");
+    }
+}
+
+/// Mode 4 — announce flood: every announce costs the serve node an Ed25519
+/// signature verify, all currently under the one node lock. Each client
+/// announces FRESH destinations so no per-destination rate limit engages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "load benchmark; run explicitly with --ignored --nocapture"]
+async fn announce_verify_flood() {
+    let n = env_usize("FLOOD_N", 10);
+    let announces = env_usize("ANNOUNCES", 100);
+
+    let addr: SocketAddr = format!("127.0.0.1:{}", next_port()).parse().unwrap();
+    let storage = tempfile::tempdir().expect("serve tempdir");
+    // ingress_control defaults ON for listeners (#189) and quarantines exactly
+    // the burst this mode measures; the field case (#29) is announce churn from
+    // established peers, so measure the verify path with the limiter off.
+    let mut cfg = leviculum_std::config::Config::default();
+    cfg.interfaces.insert(
+        "bench-listener".to_string(),
+        leviculum_std::config::InterfaceConfig {
+            name: "bench-listener".to_string(),
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: Some(addr.ip().to_string()),
+            listen_port: Some(addr.port()),
+            ingress_control: Some(false),
+            ..Default::default()
+        },
+    );
+    let mut serve = ReticulumNodeBuilder::new()
+        .config(cfg)
+        .enable_transport(false)
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build serve node");
+    std::mem::forget(storage);
+    serve.start().await.expect("start serve node");
+
+    let (received, _drain) = count_events(&mut serve, |ev| {
+        matches!(ev, NodeEvent::AnnounceReceived { .. })
+    });
+
+    let mut clients = Vec::new();
+    for _ in 0..n {
+        if let Some(c) = bring_up_client_tcp_only(addr).await {
+            clients.push(c);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let live = clients.len();
+    eprintln!("[bench] announce flood: {live}/{n} clients connected");
+    assert!(live > 0);
+
+    let target_total = live * announces;
+    received.store(0, Ordering::Relaxed);
+    let start = Instant::now();
+    let mut senders = Vec::new();
+    for c in clients {
+        senders.push(tokio::spawn(async move {
+            for _ in 0..announces {
+                // Fresh identity+destination per announce: unique dest, so the
+                // serve node's per-destination announce policies never engage.
+                let identity = Identity::generate(&mut rand_core::OsRng);
+                let dest = Destination::new(
+                    Some(identity),
+                    Direction::In,
+                    DestinationType::Single,
+                    "bench",
+                    &["annflood"],
+                )
+                .expect("dest");
+                let hash = *dest.hash();
+                c.register_destination(dest);
+                let _ = c.announce_destination(&hash, None).await;
+            }
+        }));
+    }
+    // Same stall-stop math as the datagram mode: a dropped announce must not
+    // let the deadline dominate the rate.
+    let load_deadline = start + Duration::from_secs(180);
+    let mut last_count = 0usize;
+    let mut last_arrival = start;
+    loop {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let now_count = received.load(Ordering::Relaxed);
+        if now_count > last_count {
+            last_count = now_count;
+            last_arrival = Instant::now();
+        }
+        if now_count >= target_total
+            || Instant::now() > load_deadline
+            || last_arrival.elapsed() > Duration::from_secs(5)
+        {
+            break;
+        }
+    }
+    let elapsed = (last_arrival - start).as_secs_f64().max(0.001);
+    for s in senders {
+        s.abort();
+    }
+    let got = received.load(Ordering::Relaxed);
+    println!();
+    println!("announce flood — leviculum#29 expensive class (Ed25519 verify/announce)");
+    println!(
+        "clients={live} received={got}/{target_total} elapsed={elapsed:.2}s throughput={:.0} ann/s",
+        got as f64 / elapsed
+    );
+    if let Ok(path) = std::env::var("BENCH_JSON_OUT_ANNOUNCE") {
+        let json = format!(
+            "{{\n  \"schema\": \"leviculum/bench-results/1\",\n  \"benchmark\": \"announce_verify_flood\",\n  \"issue\": \"leviculum#29\",\n  \"params\": {{\"clients\": {live}, \"announces_per_client\": {announces}}},\n  \"received\": {got},\n  \"elapsed_s\": {elapsed:.3},\n  \"throughput_ann_s\": {:.1}\n}}\n",
+            got as f64 / elapsed
+        );
+        std::fs::write(&path, json).expect("write json");
+        eprintln!("[bench] wrote {path}");
+    }
+}

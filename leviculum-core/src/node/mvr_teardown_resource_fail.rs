@@ -590,3 +590,188 @@ fn link_stats_expose_delivery_telemetry() {
         "the Busy rejection must surface in the stats"
     );
 }
+
+// ---------------------------------------------------------------------------
+// leviculum#29 stages 2-3 — the off-lock precompute memo contracts.
+// ---------------------------------------------------------------------------
+
+/// Node type with real (in-memory) storage: announce processing must retain
+/// the peer identity/ratchet for single-packet encryption, which `NoStorage`
+/// deliberately drops.
+type MemNode = NodeCore<OsRng, MockClock, crate::memory_storage::MemoryStorage>;
+
+fn make_mem_node() -> MemNode {
+    let clock = MockClock::new(TEST_TIME_MS);
+    NodeCoreBuilder::new().build(
+        OsRng,
+        clock,
+        crate::memory_storage::MemoryStorage::with_defaults(),
+    )
+}
+
+fn add_mem_iface(node: &mut MemNode, name: &'static str) -> usize {
+    let idx = node
+        .transport
+        .register_interface(std::boxed::Box::new(MockInterface::new(name, 0)));
+    node.set_interface_name(idx, String::from(name));
+    idx
+}
+
+/// Set up responder (announced Single dest with ratchets) + initiator that has
+/// processed the announce. Returns (initiator, responder, r_iface, dest_hash,
+/// the raw announce bytes).
+fn single_dest_pair() -> (MemNode, MemNode, usize, crate::DestinationHash, Vec<u8>) {
+    let identity = Identity::generate(&mut OsRng);
+    let mut responder = make_mem_node();
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["offlock"],
+    )
+    .unwrap();
+    dest.enable_ratchets(&mut OsRng, TEST_TIME_MS).unwrap();
+    let dest_hash = *dest.hash();
+    responder.register_destination(dest);
+    let r_iface = add_mem_iface(&mut responder, "R_off");
+
+    let mut initiator = make_mem_node();
+    let i_iface = add_mem_iface(&mut initiator, "I_off");
+
+    // Responder announces; capture the raw announce and deliver to initiator.
+    let out = responder.announce_destination(&dest_hash, None).unwrap();
+    let announce_raw = action_data(&out)
+        .into_iter()
+        .next()
+        .expect("announce bytes");
+    let _ = initiator.handle_packet(InterfaceId(i_iface), &announce_raw);
+    (initiator, responder, r_iface, dest_hash, announce_raw)
+}
+
+fn count_packet_received(events: &[NodeEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::PacketReceived { .. }))
+        .count()
+}
+
+/// The single-destination plaintext memo: an off-lock decrypt via the exported
+/// snapshot delivers exactly what the in-lock decrypt would; a memo tagged for
+/// the WRONG destination is ignored and the in-lock fallback still delivers.
+#[test]
+fn offlock_single_dest_memo_delivers_and_wrong_tag_falls_back() {
+    use crate::node::PrecomputedRx;
+
+    let (mut initiator, mut responder, r_iface, dest_hash, _ann) = single_dest_pair();
+
+    // Packet 1: decrypted OFF-lock via the exported snapshot, applied as memo.
+    let (_h, out) = initiator
+        .send_single_packet(&dest_hash, b"memo-payload")
+        .unwrap();
+    let raw1 = action_data(&out).into_iter().next().expect("packet bytes");
+    let pkt1 = crate::packet::Packet::unpack(&raw1).unwrap();
+    let decryptor = responder
+        .export_single_dest_decryptor(&dest_hash)
+        .expect("exportable");
+    let plaintext = decryptor
+        .decrypt(pkt1.data.as_slice())
+        .expect("off-lock decrypt succeeds");
+    let out = responder.handle_packet_precomputed(
+        InterfaceId(r_iface),
+        &raw1,
+        PrecomputedRx {
+            packet_hash: Some(crate::packet::packet_hash(&raw1)),
+            single_dest_plaintext: Some((dest_hash.into_bytes(), plaintext)),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        count_packet_received(&out.events),
+        1,
+        "memo path must deliver the packet"
+    );
+
+    // Packet 2: memo tagged with a WRONG destination hash — must be ignored,
+    // and the in-lock decrypt must still deliver.
+    let (_h, out) = initiator
+        .send_single_packet(&dest_hash, b"fallback-payload")
+        .unwrap();
+    let raw2 = action_data(&out).into_iter().next().expect("packet bytes");
+    let out = responder.handle_packet_precomputed(
+        InterfaceId(r_iface),
+        &raw2,
+        PrecomputedRx {
+            packet_hash: Some(crate::packet::packet_hash(&raw2)),
+            single_dest_plaintext: Some(([0xEE; 16], std::vec![1, 2, 3])),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        count_packet_received(&out.events),
+        1,
+        "wrong-tag memo must fall back to the in-lock decrypt"
+    );
+}
+
+/// The announce memo: `verify_announce_packet` is the same verification core
+/// runs, a pre-verified announce is accepted, and a TAMPERED announce — which
+/// the driver would report as unverified — is still dropped by the in-lock
+/// re-check.
+#[test]
+fn offlock_announce_verify_matches_inlock_and_tampering_is_dropped() {
+    use crate::node::PrecomputedRx;
+
+    let (_initiator, _responder, _r, dest_hash, announce_raw) = single_dest_pair();
+
+    // Off-lock verify succeeds on the genuine bytes.
+    let pkt = crate::packet::Packet::unpack(&announce_raw).unwrap();
+    assert!(crate::verify_announce_packet(&pkt));
+
+    // A fresh node accepts it with the memo (path/identity installed).
+    let mut fresh = make_mem_node();
+    let f_iface = add_mem_iface(&mut fresh, "F_off");
+    let out = fresh.handle_packet_precomputed(
+        InterfaceId(f_iface),
+        &announce_raw,
+        PrecomputedRx {
+            packet_hash: Some(crate::packet::packet_hash(&announce_raw)),
+            announce_verified: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        out.events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::AnnounceReceived { .. })),
+        "pre-verified announce must be accepted"
+    );
+    assert!(fresh.transport.has_path(dest_hash.as_bytes()));
+
+    // Tamper with the signature region: off-lock verify now fails, and the
+    // driver contract passes announce_verified: false — the in-lock re-check
+    // must drop it.
+    let mut tampered = announce_raw.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0xFF;
+    let tpkt = crate::packet::Packet::unpack(&tampered).unwrap();
+    assert!(!crate::verify_announce_packet(&tpkt));
+
+    let mut fresh2 = make_mem_node();
+    let f2 = add_mem_iface(&mut fresh2, "F2_off");
+    let out = fresh2.handle_packet_precomputed(
+        InterfaceId(f2),
+        &tampered,
+        PrecomputedRx {
+            packet_hash: Some(crate::packet::packet_hash(&tampered)),
+            announce_verified: false,
+            ..Default::default()
+        },
+    );
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::AnnounceReceived { .. })),
+        "tampered announce must be dropped"
+    );
+}
