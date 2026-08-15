@@ -1890,6 +1890,7 @@ class TestDaemon:
                 stamp_cost=stamp_cost,
             )
             self.lxmf_router.register_delivery_callback(self._on_lxmf_delivery)
+            self._install_receipt_probe()
             return {"result": {
                 "delivery_hash": self.lxmf_dest.hash.hex(),
                 "public_key": self.lxmf_identity.get_public_key().hex(),
@@ -1969,6 +1970,7 @@ class TestDaemon:
             return {"result": {
                 "state": names.get(message.state, str(message.state)),
                 "transitions": transitions,
+                "receipt_events": getattr(self, "probe_receipt_events", []),
                 "now": time.time(),
             }}
 
@@ -2008,6 +2010,42 @@ class TestDaemon:
 
         else:
             return {"error": f"Unknown method: {method}"}
+
+    def _install_receipt_probe(self):
+        """Codeberg #156 latency probe: timestamp PacketReceipt proof
+        validation and delivery-callback registration. LXMF arms the
+        callback only after Packet.send() returns (LXMessage.py:469), so a
+        proof that comes back faster than the sender thread gets rescheduled
+        is validated with no callback armed - and set_delivery_callback does
+        not fire retroactively. These events make that race observable."""
+        if hasattr(self, "_probe_receipt_patch"):
+            return
+        self.probe_receipt_events = []
+        daemon = self
+        orig_validate = RNS.PacketReceipt.validate_proof
+        def probed_validate(receipt, proof, proof_packet=None):
+            had_callback = receipt.callbacks.delivery is not None
+            result = orig_validate(receipt, proof, proof_packet)
+            daemon.probe_receipt_events.append({
+                "ev": "validate_proof", "t": time.time(),
+                "hash": receipt.hash.hex(),
+                "valid": bool(result),
+                "had_callback": had_callback,
+            })
+            return result
+        RNS.PacketReceipt.validate_proof = probed_validate
+        orig_set_cb = RNS.PacketReceipt.set_delivery_callback
+        def probed_set_cb(receipt, callback):
+            daemon.probe_receipt_events.append({
+                "ev": "set_delivery_callback", "t": time.time(),
+                "hash": receipt.hash.hex(),
+                "already_proved": bool(receipt.proved),
+                "sent_at": receipt.sent_at,
+                "timeout": receipt.timeout,
+            })
+            return orig_set_cb(receipt, callback)
+        RNS.PacketReceipt.set_delivery_callback = probed_set_cb
+        self._probe_receipt_patch = True
 
     def _lxm_state_names(self, LXMF):
         """LXMessage state constant -> name, shared by the status/probe RPCs."""
