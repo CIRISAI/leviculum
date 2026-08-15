@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [Unreleased]
+
+### Changed
+
+**leviculum#44 — periodic storage flush IO off the node lock.** The event
+loop's periodic flush (hourly by default) held the node lock across the full
+known-destinations read+merge+write and the packet-hashlist write; on slow
+storage that was a recurring deaf window for every inbound packet and outbound
+call. The flush now runs in three phases: a brief lock hold snapshots the
+dirty state (memory ops only), the file read+merge+write runs on tokio's
+blocking pool, and a second brief hold clears the dirty flags —
+generation-guarded, so anything dirtied mid-write stays dirty for the next
+interval, and a failed or torn-down write simply retries. The in-flight
+write's JoinHandle doubles as the overlap guard (a timer fire during a write
+re-arms and does nothing), and the shutdown path joins it before `stop()`'s
+synchronous flush so a stale background rename can never clobber the shutdown
+write. Shutdown behavior, on-disk formats, and the Python-compatible disk
+merge are unchanged.
+
 ## [0.15.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master @ `0d93b29` (+107 since 0.8.1: LnFlash tooling,
