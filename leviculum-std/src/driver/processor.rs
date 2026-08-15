@@ -104,7 +104,7 @@
 //! Both consumers in this tree already do exactly that, which is why the rule
 //! is written here rather than rediscovered a third time:
 //!
-//! * `absorb_core` (leviculum-std/tests/rnsd_interop/lxmf_interop_tests.rs:139)
+//! * `absorb_core` (leviculum-std/tests/rnsd_interop/lxmf_interop_tests.rs:177)
 //!   walks a work queue of `TickOutput`s, routing every event through
 //!   `LxmfRouter::handle_event` and pushing the output that produces back onto
 //!   the queue.
