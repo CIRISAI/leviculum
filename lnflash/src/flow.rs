@@ -1078,7 +1078,7 @@ convert = "hex-to-uf2"
     }
 
     fn sysfs() -> Sysfs {
-        Sysfs::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"))
+        Sysfs::new(crate::sysfs_fixture::materialized())
     }
 
     #[test]
