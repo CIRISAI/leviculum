@@ -35,7 +35,7 @@ concurrency:
 jobs:
   bench-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -81,6 +81,42 @@ jobs:
               outbound_resource_latency_under_flood -- --ignored --nocapture
           echo "── emitted bench_outbound.json ──"; cat bench_outbound.json
 
+      # Budget: <=2 min — 5,000 ECDH datagrams are ~1 s of load; wall time is
+      # node bring-up + test spawn.
+      - name: Run the single-dest datagram flood (mode 3, ECDH/packet)
+        run: |
+          FLOOD_N=20 PACKETS=250 PAYLOAD=64 \
+          BENCH_JSON_OUT_SINGLEDEST="$PWD/bench_singledest.json" \
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              single_dest_datagram_flood -- --ignored --nocapture
+          echo "── emitted bench_singledest.json ──"; cat bench_singledest.json
+
+      # Budget: <=2 min — 1,500 Ed25519 verifies are ~1 s of load; wall time
+      # is node bring-up + test spawn.
+      - name: Run the announce flood (mode 4, Ed25519 verify/announce)
+        run: |
+          FLOOD_N=10 ANNOUNCES=150 \
+          BENCH_JSON_OUT_ANNOUNCE="$PWD/bench_announce.json" \
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              announce_verify_flood -- --ignored --nocapture
+          echo "── emitted bench_announce.json ──"; cat bench_announce.json
+
+      # Budget: typical 3-6 min — (8+16+32+64)x3 = 360 dances x ~1,130 parts
+      # ≈ 407k serve-side part-decrypts ≈ 40-60 s at the ~10k pkts/s ceiling,
+      # plus ~35-45 s node bring-up. Hard-bounded at 4 x LOAD_DEADLINE(180 s)
+      # = 12 min even pathologically, keeping modes 3-5 under ~15 min total.
+      - name: Run the link-dance sweep (mode 5, consumer unit of work)
+        run: |
+          DANCE_SIZES="8 16 32 64" ROUNDS=3 RESOURCE_KIB=512 \
+          ESTABLISH_TIMEOUT=15 TRANSFER_TIMEOUT=60 STALL_SECS=15 LOAD_DEADLINE=180 \
+          GIT_COMMIT="$GITHUB_SHA" \
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+          BENCH_RUNNER="github/ubuntu-latest (release)" \
+          BENCH_JSON_OUT_LINKDANCE="$PWD/bench_linkdance.json" \
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              link_dance_sweep -- --ignored --nocapture
+          echo "── emitted bench_linkdance.json ──"; cat bench_linkdance.json
+
       - name: Render the interpreted page
         run: |
           python3 scripts/bench_report.py \
@@ -90,6 +126,11 @@ jobs:
             --commit "$GITHUB_SHA" \
             --date "$(date -u +%Y-%m-%d)"
 
+      # bench_report.py does not render modes 3-5 yet; Pages serves the raw
+      # trend JSON alongside the rendered page.
+      - name: Publish the modes 3-5 raw JSON into the Pages site
+        run: cp bench_singledest.json bench_announce.json bench_linkdance.json bench-site/
+
       - name: Upload bench_results.json + rendered site as a workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -97,6 +138,9 @@ jobs:
           path: |
             bench_results.json
             bench_outbound.json
+            bench_singledest.json
+            bench_announce.json
+            bench_linkdance.json
             bench-site
           if-no-files-found: error
 
