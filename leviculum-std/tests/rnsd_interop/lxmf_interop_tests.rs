@@ -584,7 +584,14 @@ async fn test_lxmf_opportunistic_python_to_rust() {
     // Codeberg #156: every poll is timestamped (request start, response
     // arrival) and the final response carries Python's own timestamped
     // state transitions, so a slow flip separates cleanly into segments.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // 25 s deadline: Python arms the delivery callback only after send()
+    // (LXMessage.py:469) and set_delivery_callback does not fire
+    // retroactively (Packet.py:583-589), so a proof validated before
+    // arming is lost until the opportunistic retry at +10 s
+    // (LXMRouter.py:32, DELIVERY_RETRY_WAIT). 25 s covers one full retry
+    // cycle; an our-side regression (segment B) stays visible in the
+    // PROBE156 breakdown printed on failure.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     let mut state = String::new();
     let mut last_probe = serde_json::Value::Null;
     while tokio::time::Instant::now() < deadline {
