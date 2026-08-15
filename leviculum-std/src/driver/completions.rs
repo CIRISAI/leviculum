@@ -249,6 +249,17 @@ struct RegistryInner {
     /// (only `tap_active` is cleared) so a later subscribe reuses it; dropped
     /// by `close()` so every tap sees end-of-stream.
     tap: Option<broadcast::Sender<NodeEvent>>,
+    /// Per-link count of committed-but-not-yet-terminal outgoing resource
+    /// sends. The link-scoped sweep in `on_resource_sent`/`on_resource_failed`
+    /// is only sound when the arriving terminal event belongs to the SOLE
+    /// outstanding send on that link: a previous transfer can complete in
+    /// core (freeing the `TransferInProgress` slot for a new commit) before
+    /// its event dispatches, and in that window a stale event must not
+    /// resolve a waiter registered for the newer send. Terminal events
+    /// dispatch in creation order, so "count > 1 at dispatch" identifies a
+    /// stale event exactly; the sweep defers to the true final event.
+    /// Entries are removed at zero, on `LinkClosed`, and by `close()`.
+    pending_sends: HashMap<LinkId, u32>,
     /// Starts at 1 so the token 0 of immediately-resolved futures never
     /// matches a parked waiter on the drop path.
     next_token: u64,
@@ -337,6 +348,7 @@ impl CompletionRegistry {
                 established: HashSet::new(),
                 established_order: VecDeque::new(),
                 recent: VecDeque::new(),
+                pending_sends: HashMap::new(),
                 tap: None,
                 next_token: 1,
                 closed: false,
@@ -440,6 +452,9 @@ impl CompletionRegistry {
                 CompletionKey::LinkEstablished { link_id },
                 RecentOutcome::LinkClosed { reason },
             );
+            // A dead link settles its send accounting with it — outstanding
+            // sends will never produce terminal events now.
+            inner.pending_sends.remove(&link_id);
             // One sweep covers the establishment waiters too: every waiter
             // carries the link its outcome depends on, and a dead link is
             // terminal for all of them (the never-hang rule).
@@ -450,17 +465,54 @@ impl CompletionRegistry {
         }
     }
 
+    /// Record that an outgoing resource send committed on `link_id`. Every
+    /// resource-send path in the driver calls this after a successful core
+    /// commit and BEFORE dispatching the commit's output, so the count is
+    /// never behind the events. See `pending_sends` for why the sweep
+    /// depends on it.
+    pub(crate) fn note_send_began(&self, link_id: LinkId) {
+        let mut inner = self.inner.lock_recover();
+        if inner.closed {
+            return;
+        }
+        *inner.pending_sends.entry(link_id).or_insert(0) += 1;
+    }
+
+    /// Saturating-decrement of `pending_sends` for one terminal event;
+    /// returns whether the event was the sole outstanding send (sweep OK).
+    fn settle_pending_send(inner: &mut RegistryInner, link_id: LinkId) -> bool {
+        match inner.pending_sends.get_mut(&link_id) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                false
+            }
+            Some(_) => {
+                inner.pending_sends.remove(&link_id);
+                true
+            }
+            // No note (a send path that predates the counter, or a
+            // receiver-side event routed here by mistake): sweeping is the
+            // pre-counter behavior — keep it rather than strand waiters.
+            None => true,
+        }
+    }
+
     fn on_resource_sent(&self, link_id: LinkId, resource_hash: [u8; 32], info: ResourceSentInfo) {
         let resolved = {
             let mut inner = self.inner.lock_recover();
+            let sweep_ok = Self::settle_pending_send(&mut inner, link_id);
             let mut ws = inner.take_waiters(CompletionKey::ResourceSent { resource_hash });
             // Split transfers: each segment carries its OWN hash, and the
             // sender's single ResourceCompleted carries the FINAL segment's —
             // not the segment-1 hash `send_resource` returned to the caller.
-            // A link carries at most one outgoing transfer at a time
-            // (`TransferInProgress` guard in core), so any resource waiter
-            // still parked on this link belongs to this transfer.
-            ws.extend(inner.sweep_link(link_id, true));
+            // The link-scoped fallback is sound only when this event is the
+            // link's SOLE outstanding send: a stale event (transfer finished
+            // in core, event not yet dispatched, next send already
+            // committed) must defer to the newer send's own terminal event —
+            // that is what `sweep_ok` guards (see `pending_sends`).
+            if sweep_ok {
+                ws.extend(inner.sweep_link(link_id, true));
+            }
             inner.push_recent(
                 CompletionKey::ResourceSent { resource_hash },
                 RecentOutcome::ResourceSent(info),
@@ -475,10 +527,14 @@ impl CompletionRegistry {
     fn on_resource_failed(&self, link_id: LinkId, resource_hash: [u8; 32], error: ResourceError) {
         let resolved = {
             let mut inner = self.inner.lock_recover();
+            let sweep_ok = Self::settle_pending_send(&mut inner, link_id);
             let mut ws = inner.take_waiters(CompletionKey::ResourceSent { resource_hash });
-            // Same link-scoped fallback as completion: a mid-split failure
-            // carries the in-flight segment's hash, not the caller's.
-            ws.extend(inner.sweep_link(link_id, true));
+            // Same link-scoped fallback and same staleness guard as
+            // completion: a mid-split failure carries the in-flight
+            // segment's hash, not the caller's.
+            if sweep_ok {
+                ws.extend(inner.sweep_link(link_id, true));
+            }
             inner.push_recent(
                 CompletionKey::ResourceSent { resource_hash },
                 RecentOutcome::ResourceFailed { error },
@@ -709,6 +765,7 @@ impl CompletionRegistry {
             let mut inner = self.inner.lock_recover();
             inner.closed = true;
             inner.tap = None;
+            inner.pending_sends.clear();
             self.tap_active.store(false, Ordering::Relaxed);
             inner.waiters.drain().flat_map(|(_, ws)| ws).collect()
         };
@@ -993,6 +1050,74 @@ mod tests {
                 segment_index: 4,
                 total_segments: 4,
             }))
+        );
+    }
+
+    /// The reviewer-found race (leviculum#42 integration): a transfer can
+    /// complete in core — freeing the link's `TransferInProgress` slot for a
+    /// new commit — before its terminal event dispatches. The stale event
+    /// must not sweep-resolve a waiter registered for the newer send; the
+    /// pending-sends count identifies it and defers to the newer send's own
+    /// terminal event.
+    #[test]
+    fn stale_terminal_event_defers_sweep_to_the_newer_sends_event() {
+        let reg = CompletionRegistry::new();
+        // Transfer A: plain send, no waiter, committed and completed in core.
+        reg.note_send_began(link(9));
+        // Transfer B commits in the window before A's event dispatches.
+        reg.note_send_began(link(9));
+        let mut fut = reg.register_resource_sent([0xB1; 32], link(9));
+        // A's event arrives late, carrying A's final-segment hash.
+        reg.observe(&resource_completed(link(9), [0xAA; 32], 2, 2));
+        assert_eq!(
+            poll_now(&mut fut),
+            Poll::Pending,
+            "a stale event must not resolve the newer send's waiter"
+        );
+        // B's own final event resolves it.
+        reg.observe(&resource_completed(link(9), [0xBF; 32], 3, 3));
+        assert_eq!(
+            poll_now(&mut fut),
+            Poll::Ready(Ok(ResourceSentInfo {
+                link_id: link(9),
+                segment_index: 3,
+                total_segments: 3,
+            }))
+        );
+    }
+
+    /// An exact hash match is the transfer's identity — it resolves even
+    /// while older sends are outstanding on the link.
+    #[test]
+    fn stale_event_does_not_suppress_exact_hash_resolution() {
+        let reg = CompletionRegistry::new();
+        reg.note_send_began(link(11));
+        reg.note_send_began(link(11));
+        let mut fut = reg.register_resource_sent([0xE1; 32], link(11));
+        reg.observe(&resource_completed(link(11), [0xE1; 32], 1, 1));
+        assert!(matches!(poll_now(&mut fut), Poll::Ready(Ok(_))));
+    }
+
+    /// LinkClosed settles the link's send accounting — a LinkId never
+    /// returns (link ids are per-instance), so a lingering entry would be a
+    /// pure leak.
+    #[test]
+    fn link_close_drops_send_accounting() {
+        let reg = CompletionRegistry::new();
+        reg.note_send_began(link(12));
+        reg.note_send_began(link(12));
+        assert!(reg
+            .inner
+            .lock_recover()
+            .pending_sends
+            .contains_key(&link(12)));
+        reg.observe(&closed(link(12), LinkCloseReason::Timeout));
+        assert!(
+            !reg.inner
+                .lock_recover()
+                .pending_sends
+                .contains_key(&link(12)),
+            "a dead link's send accounting must not outlive it"
         );
     }
 
