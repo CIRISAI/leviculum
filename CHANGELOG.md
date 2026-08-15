@@ -9,8 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-<<<<<<< HEAD
-## [Unreleased] — CIRIS fork
+## [0.16.0+ciris.1] — CIRIS fork
 
 ### Added
 
@@ -42,8 +41,6 @@ drop-oldest on overrun, surfaced as `TapEvent::Lagged(n)` with a cumulative
 live subscriber the per-event cost is one atomic load. Requires `Clone` on
 `NodeEvent`/`ReceivedAnnounce` in leviculum-core — derive-only, no_std-clean,
 no wire change.
-=======
-## [Unreleased]
 
 ### Changed
 
@@ -61,7 +58,25 @@ re-arms and does nothing), and the shutdown path joins it before `stop()`'s
 synchronous flush so a stale background rename can never clobber the shutdown
 write. Shutdown behavior, on-disk formats, and the Python-compatible disk
 merge are unchanged.
->>>>>>> team/44-offlock-flush
+
+**leviculum#46 — the consumer workload is now the benchmark.** Two new
+bench modes in `transport_fanout_bench.rs`, both CI-published: mode 5
+"link_dance" (N concurrent clients each running edge's unit of work —
+connect → identify → 512 KiB resource → completion → close; event-driven,
+stall-stop, per-N failure taxonomy) and mode 6 "link_dance_overload" (the
+degradation envelope: time-boxed phases past the knee against one serve
+node, with an outside lock-acquire probe, VmRSS, counted
+ControlPlaneOverflow shedding, and time-to-recover as a first-class
+metric). First measured envelope (release, N=8..128, 512 KiB dances):
+goodput flat at ~235 dances/s (service demand ~4.2 ms/dance), latency
+growth linear (~2.4 ms/client), ZERO failures in ~23,000 dances, zero
+overflow, RSS ≤ 25 MiB, recovery 0.3 s — the ideal saturation pattern,
+and the documented ~40-peer downstream collapse does not reproduce at
+this layer. Modes 3-6 all publish provenance-stamped JSON
+(commit/date/runner) to the bench page. The dance path rides
+`send_resource_awaited`, so the numbers double as the completion-future
+API's under-load validation.
+
 
 ## [0.15.0+ciris.1] — CIRIS fork
 
