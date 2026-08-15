@@ -47,6 +47,7 @@ pub mod propagation_client;
 pub mod router;
 pub mod stamp;
 pub mod storage;
+pub mod telemetry;
 pub mod ticket;
 
 pub use attachments::{

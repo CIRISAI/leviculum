@@ -113,6 +113,15 @@ m0-build-gate:
     rustup target add thumbv6m-none-eabi
     cargo build -p leviculum-core --target thumbv6m-none-eabi --no-default-features
 
+# Codeberg #237: leviculum-lxmf must stay buildable for the firmware triple —
+# the Telemeter codec is headed for leviculum-nrf, which does not depend on
+# the crate yet, so no firmware build would catch a std leak here. Default
+# features off keeps `pow`/sha2 out, the configuration an embedded consumer
+# would use.
+lxmf-embedded-gate:
+    rustup target add thumbv7em-none-eabihf
+    cargo build -p leviculum-lxmf --target thumbv7em-none-eabihf --no-default-features
+
 # Guarantee C step 1 (docs/src/concepts/checks-and-citations.md): the four
 # vendored references must sit at the commit their gitlink names. One wrong
 # fact — `reference/LXMF` twelve commits behind for five weeks — silently
@@ -198,7 +207,7 @@ check-all-targets:
 # gates + a compile check of every workspace target (#220) + workspace lib
 # tests + the citation guard + the process-supervision pair (census over the
 # sources, proof against the kernel).
-fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
