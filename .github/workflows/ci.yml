@@ -39,6 +39,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # A merge conflict in a non-compiled file (CHANGELOG, yml, docs) sails
+      # through every compiler gate — this caught one in the field.
+      - name: No unresolved conflict markers
+        run: |
+          if git grep -nE '^(<<<<<<< |>>>>>>> )' -- ':!reference' ':!*.lock'; then
+            echo '::error::unresolved merge conflict markers found'; exit 1
+          fi
       # lnomad include_str!s reference/Reticulum at compile time, so a
       # --workspace clippy needs the submodule present.
       - name: init reference/Reticulum submodule
