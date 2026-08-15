@@ -417,7 +417,7 @@ mod tests {
 
     /// Derive the RPC authkey from a NodeCore identity (same as driver).
     fn derive_authkey(core: &Arc<Mutex<StdNodeCore>>) -> [u8; 32] {
-        let core_guard = core.lock().unwrap();
+        let core_guard = core.lock_recover();
         let prv = core_guard.identity().private_key_bytes().unwrap();
         use sha2::Digest;
         let hash = sha2::Sha256::digest(prv);

@@ -276,9 +276,16 @@ impl Channel {
 
     /// Get the maximum data unit for channel messages
     ///
-    /// This is the link MDU minus the envelope header size.
+    /// This is the link MDU minus the envelope header size, capped at the
+    /// envelope's own hard ceiling: the wire length field is `u16`, so no
+    /// channel payload can exceed `u16::MAX` bytes regardless of how large an
+    /// MTU the link negotiated (leviculum#39 — an uncapped value let an
+    /// oversized send pass the `TooLarge` guard and reach the `Envelope`
+    /// length assert as a panic).
     pub fn mdu(&self, link_mdu: usize) -> usize {
-        link_mdu.saturating_sub(CHANNEL_ENVELOPE_HEADER_SIZE)
+        link_mdu
+            .saturating_sub(CHANNEL_ENVELOPE_HEADER_SIZE)
+            .min(u16::MAX as usize)
     }
 
     /// Get the current window size
@@ -557,7 +564,11 @@ impl Channel {
         }
 
         let sequence = self.next_sequence();
-        let envelope = Envelope::new(msgtype, sequence, data.to_vec());
+        // Unreachable while the mdu() cap holds (checked above), but a length
+        // that slipped through must surface as TooLarge, never as the
+        // Envelope assert panicking a lock-holding thread (leviculum#39).
+        let envelope =
+            Envelope::try_new(msgtype, sequence, data.to_vec()).ok_or(ChannelError::TooLarge)?;
         let packed = envelope.pack();
 
         let mut outbound = OutboundEnvelope::new(envelope);
@@ -1066,6 +1077,34 @@ mod tests {
         };
         let result = channel.send(&msg, 100, 1000, 100);
         assert_eq!(result, Err(ChannelError::TooLarge));
+    }
+
+    /// leviculum#39 field regression: on a link that negotiated a large MTU,
+    /// an oversized send must be refused as `TooLarge` — the envelope's wire
+    /// length field is u16, so the channel MDU is capped at `u16::MAX`
+    /// regardless of link MDU. Before the cap, the guard passed and the
+    /// `Envelope` length assert panicked a lock-holding delivery thread
+    /// ("envelope data length 115764 exceeds maximum 65535" on a live node).
+    #[test]
+    fn test_send_oversized_on_large_mtu_link_is_too_large_not_panic() {
+        let mut channel = Channel::new();
+        // The link MDU is far above the envelope ceiling — MTU discovery can
+        // negotiate this; it must not raise the channel's payload ceiling.
+        let link_mdu = 200_000usize;
+        assert_eq!(channel.mdu(link_mdu), u16::MAX as usize);
+
+        // The exact frame length from the field failure.
+        let msg = TestMessage {
+            data: vec![0; 115_764],
+        };
+        let result = channel.send(&msg, link_mdu, 1000, 100);
+        assert_eq!(result, Err(ChannelError::TooLarge));
+
+        // At the ceiling itself the send is accepted.
+        let ok = TestMessage {
+            data: vec![0; u16::MAX as usize],
+        };
+        assert!(channel.send(&ok, link_mdu, 2000, 100).is_ok());
     }
 
     #[test]
