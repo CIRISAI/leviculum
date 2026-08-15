@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.16.0+ciris.1] — CIRIS fork
+
+### Added
+
+**leviculum#42 — completion futures resolved at the dispatch layer.** The
+driver's `dispatch_output` now feeds every event through a leaf-level
+`CompletionRegistry` (Arc-shared like `iface_stats_map`, std mutex held for
+map ops only, never nested inside the node lock), ahead of `EventSink::emit`
+so daemon mode resolves futures too. New `ReticulumNode` API, all additive:
+`connect_awaited`, `send_resource_awaited`, `send_request_awaited` — race-free
+by register-before-dispatch — plus after-the-fact `await_link_established`,
+`await_resource_sent`, `await_request_response`, backed by a bounded
+established-links mirror (cap 1024, FIFO evict + warn) and a 256-entry
+recent-terminal-outcomes ring checked under the same mutex observation takes.
+Futures are oneshot-backed, `select!`/cancel-safe (Drop unregisters), and
+resolve with a typed `CompletionError` on `LinkClosed`, `ResourceFailed`,
+`RequestTimedOut`, or node stop — a waiter never hangs on a dead object; the
+caller owns wall-clock timeouts. This deletes CIRISEdge's six poll loops:
+every await/poll path here takes no node lock at all (upstream #199 pressure
+shrinks). Wire format untouched.
+
+**leviculum#42 surface (b) — bounded multi-consumer event tap.**
+`ReticulumNode::subscribe_events()` returns an `EventTap`: a secondary
+observer fed clones at the dispatch layer, BEFORE the two-plane sink, so it
+never consumes from or races the primary `EventReceiver`, sees events the
+data plane is entitled to drop, and works on a daemon-mode node built
+`without_events()`. Backed by a lazy `tokio::broadcast` (256 slots):
+drop-oldest on overrun, surfaced as `TapEvent::Lagged(n)` with a cumulative
+`lost()` counter; `filtered()` adds consumer-side event filtering. With no
+live subscriber the per-event cost is one atomic load. Requires `Clone` on
+`NodeEvent`/`ReceivedAnnounce` in leviculum-core — derive-only, no_std-clean,
+no wire change.
+
+### Changed
+
+**leviculum#44 — periodic storage flush IO off the node lock.** The event
+loop's periodic flush (hourly by default) held the node lock across the full
+known-destinations read+merge+write and the packet-hashlist write; on slow
+storage that was a recurring deaf window for every inbound packet and outbound
+call. The flush now runs in three phases: a brief lock hold snapshots the
+dirty state (memory ops only), the file read+merge+write runs on tokio's
+blocking pool, and a second brief hold clears the dirty flags —
+generation-guarded, so anything dirtied mid-write stays dirty for the next
+interval, and a failed or torn-down write simply retries. The in-flight
+write's JoinHandle doubles as the overlap guard (a timer fire during a write
+re-arms and does nothing), and the shutdown path joins it before `stop()`'s
+synchronous flush so a stale background rename can never clobber the shutdown
+write. Shutdown behavior, on-disk formats, and the Python-compatible disk
+merge are unchanged.
+
+**leviculum#46 — the consumer workload is now the benchmark.** Two new
+bench modes in `transport_fanout_bench.rs`, both CI-published: mode 5
+"link_dance" (N concurrent clients each running edge's unit of work —
+connect → identify → 512 KiB resource → completion → close; event-driven,
+stall-stop, per-N failure taxonomy) and mode 6 "link_dance_overload" (the
+degradation envelope: time-boxed phases past the knee against one serve
+node, with an outside lock-acquire probe, VmRSS, counted
+ControlPlaneOverflow shedding, and time-to-recover as a first-class
+metric). First measured envelope (release, N=8..128, 512 KiB dances):
+goodput flat at ~235 dances/s (service demand ~4.2 ms/dance), latency
+growth linear (~2.4 ms/client), ZERO failures in ~23,000 dances, zero
+overflow, RSS ≤ 25 MiB, recovery 0.3 s — the ideal saturation pattern,
+and the documented ~40-peer downstream collapse does not reproduce at
+this layer. Modes 3-6 all publish provenance-stamped JSON
+(commit/date/runner) to the bench page. The dance path rides
+`send_resource_awaited`, so the numbers double as the completion-future
+API's under-load validation.
+
+
 ## [0.15.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master @ `0d93b29` (+107 since 0.8.1: LnFlash tooling,
