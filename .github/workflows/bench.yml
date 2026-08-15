@@ -139,6 +139,34 @@ jobs:
               link_dance_overload -- --ignored --nocapture
           echo "── emitted bench_overload.json ──"; cat bench_overload.json
 
+      # Budget: ~1.5 min — three 15 s arms + bring-up. The poll arm pays
+      # ~POLL_MS/2 per state transition and N x 10 lock hits/s; the lag arm
+      # pins tap isolation (tap_lost > 0, main-path numbers flat).
+      - name: Run the poll-vs-future A/B (mode 7, leviculum#42's value)
+        run: |
+          AB_N=32 AB_SECS=15 RESOURCE_KIB=512 POLL_MS=100 \
+          GIT_COMMIT="$GITHUB_SHA" \
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+          BENCH_RUNNER="github/ubuntu-latest (release)" \
+          BENCH_JSON_OUT_POLLAB="$PWD/bench_pollab.json" \
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              poll_vs_future -- --ignored --nocapture
+          echo "── emitted bench_pollab.json ──"; cat bench_pollab.json
+
+      # Budget: ~1.5 min — two 25 s phases + bring-up. Control vs flush-
+      # every-5s must stay statistically identical; a regression that moves
+      # the flush IO back under the node lock reopens max_completion_gap.
+      - name: Run the flush deaf-window probe (mode 8, leviculum#44's value)
+        run: |
+          FLUSH_N=16 FLUSH_WINDOW=25 FLUSH_SECS=5 RESOURCE_KIB=512 \
+          GIT_COMMIT="$GITHUB_SHA" \
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+          BENCH_RUNNER="github/ubuntu-latest (release)" \
+          BENCH_JSON_OUT_FLUSHPROBE="$PWD/bench_flushprobe.json" \
+            cargo test --release -p leviculum-std --test transport_fanout_bench \
+              flush_stall_probe -- --ignored --nocapture
+          echo "── emitted bench_flushprobe.json ──"; cat bench_flushprobe.json
+
       - name: Render the interpreted page
         run: |
           python3 scripts/bench_report.py \
@@ -148,10 +176,10 @@ jobs:
             --commit "$GITHUB_SHA" \
             --date "$(date -u +%Y-%m-%d)"
 
-      # bench_report.py does not render modes 3-6 yet; Pages serves the raw
+      # bench_report.py does not render modes 3-8 yet; Pages serves the raw
       # trend JSON alongside the rendered page.
-      - name: Publish the modes 3-6 raw JSON into the Pages site
-        run: cp bench_singledest.json bench_announce.json bench_linkdance.json bench_overload.json bench-site/
+      - name: Publish the modes 3-8 raw JSON into the Pages site
+        run: cp bench_singledest.json bench_announce.json bench_linkdance.json bench_overload.json bench_pollab.json bench_flushprobe.json bench-site/
 
       - name: Upload bench_results.json + rendered site as a workflow artifact
         uses: actions/upload-artifact@v4
@@ -164,6 +192,8 @@ jobs:
             bench_announce.json
             bench_linkdance.json
             bench_overload.json
+            bench_pollab.json
+            bench_flushprobe.json
             bench-site
           if-no-files-found: error
 
