@@ -89,22 +89,22 @@ unpatched build of both viewers. Three concrete temptations it rules
 out, each of which would work and each of which would leave our node
 broken against every implementation but the patched one — a receiver
 taught to accept an unverifiable signature so a node can skip announcing
-its delivery destination; a receiver taught to tolerate an implausible
-timebase so a node can skip the clock chain; a receiver taught to
-reinterpret a placeholder coordinate so a node can transmit without a
-fix.
+its delivery destination; a receiver taught to ignore timestamps
+entirely so a node can skip keeping a calendar at all; a receiver
+taught to reinterpret a placeholder coordinate so a node can transmit
+without a fix.
 
 ## Rules that hold regardless of platform
 
-### Telemetry requires a wall clock that is not merely learned
+### Telemetry always stamps — biased backwards, never forward
 
 `SID_TIME` and the location sensor's `last_update` are real UTC seconds,
 and they are load-bearing at the receiver in three separate places:
 
 - **Storage keys on them.** Sideband dedups on exact `(source, ts)`
   equality and otherwise inserts, so a wrong timestamp is stored rather
-  than rejected — a node emitting uptime seconds appears in the viewer,
-  dated 1970.
+  than rejected — a node emitting a wrong time appears in the viewer,
+  wrongly dated.
 - **Collection filters on them.** A collector serves only rows strictly
   newer than the requester's stored cursor.
 - **The cursor advances over every row seen, saved or not.** So one row
@@ -112,29 +112,32 @@ and they are load-bearing at the receiver in three separate places:
   permanently: every honest later reading from that collector is "not
   newer" forever, and nothing anywhere logs a refusal.
 
-That third mechanism is why the rule is strict. [Time and
-clocks](time-and-clocks.md) splits wire fields by what the peer does
-with them — a field the peer discards in silence is refused at the
-writer with a named error, a field it decides nothing on is emitted
-regardless. Telemetry is in the first class, alongside the LXMF ticket
-expiry that refuses with `NoWallClock`
-(`leviculum-lxmf/src/router.rs:366`).
+That third mechanism is why stamping is directional. A future stamp is
+poison — permanent, silent, and it hurts every subscriber of a
+collector, not the sender. A past stamp merely sorts too far back:
+visible, attributable, harmless. An earlier version of this page drew
+the conclusion that a node without a verified clock must not report at
+all ("arms 1–3 or silence"); that rule is withdrawn. It silenced
+exactly the switch-on-and-it-works trackers this feature exists for,
+and it defended the cursor at the wrong end.
 
-**The floor is higher here than for any other field.** The existing
-predicate `has_plausible_wall_clock`
-(`leviculum-core/src/node/mod.rs:2474`) tests only that the emission
-timebase is above `EMISSION_PLAUSIBLE_MIN_SECS`
-(`leviculum-core/src/constants.rs:525`), which a *learned* timebase —
-arm 4 of the source chain, adopted from any signature-valid announce in
-radio range — passes. For a ticket that is acceptable: a wrong expiry
-costs one peer one ticket. For telemetry it is not: a learned timebase
-that a neighbour walked into the future poisons the cursor of every
-subscriber to that collector, and none of them can tell why. So
-**telemetry requires arms 1 to 3 — a platform clock, GNSS, or host
-injection — and a learned timebase is not sufficient.** A node
-therefore has to know *which* arm produced its time, which is the
-provenance requirement of [Time and clocks](time-and-clocks.md#record-the-source);
-telemetry is the first feature that cannot be built without it.
+The binding rule comes from the anchor model of [Time and
+clocks](time-and-clocks.md): **a telemetry node always stamps with its
+best honest calendar estimate, biased backwards when unsure, never
+forwards.** A node whose calendar is still at the build floor reports
+recognisably old readings that sort to the back of the viewer — the
+honest cost, which ends at the node's first plausible contact. The
+cursor is defended at the reader instead: our collector (#239) clamps
+inbound stamps beyond its local plausible-now to receive time for
+indexing and cursor advancement, keeping the original stamp as display
+information ([ingress clamping](time-and-clocks.md#ingress-clamp-for-semantics-keep-for-display)).
+Foreign future stamps then cannot starve anyone's cursor through us.
+
+A node still has to know *which* arm anchored its calendar — the
+provenance requirement of [Time and
+clocks](time-and-clocks.md#record-the-source) — not as a gate on
+reporting but as the diagnosis surface: "why does this tracker report
+from 2026-01-01" must be answerable from the node itself.
 
 ### No fix, no position — and absence has one encoding
 
@@ -299,7 +302,11 @@ to report.
 
 A collector additionally never serves a row whose timestamp lies in the
 future relative to its own clock. Serving one permanently starves the
-cursor of every requester that sees it.
+cursor of every requester that sees it. Under [ingress
+clamping](time-and-clocks.md#ingress-clamp-for-semantics-keep-for-display)
+such a row cannot enter the index in the first place — the stamp is
+clamped to receive time on ingest — so this serving rule is defence in
+depth, not the primary barrier.
 
 ## What a reporting node owes
 
@@ -379,10 +386,11 @@ has not been designed.
 
 ## Checklist for a port, or for a new sensor
 
-1. **Can this platform produce time from arm 1, 2 or 3 of [Time and
-   clocks](time-and-clocks.md), and can it say which?** If not,
-   telemetry does not ship on this port. The learned arm does not
-   qualify.
+1. **Does every stamp come from the calendar clock of [Time and
+   clocks](time-and-clocks.md) — best honest estimate, biased
+   backwards, never forwards — and can the node say which arm
+   anchored it?** No clock state blocks reporting; an unanswerable
+   "where did this time come from" does block shipping.
 2. **Does every sensor have a "no reading" state that omits its key?**
 3. **Does an existing sensor ID fit?** Climb the ladder from rung one.
 4. **Is the cadence stated as policy alone, with no airtime figure
@@ -391,6 +399,7 @@ has not been designed.
 6. **Does the node announce a delivery destination with a name, and does
    it have a defined answer for a target it has never heard?**
 7. **If it collects for others: allow-list empty by default, set off the
-   radio, four-element rows, no future timestamps served?**
+   radio, four-element rows, inbound stamps clamped on ingest, no
+   future timestamps served?**
 8. **What does a viewer that lacks this sensor show?** Answer before
    emitting.
