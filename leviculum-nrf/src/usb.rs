@@ -181,12 +181,34 @@ impl Handler for BaudTouchHandler {
                 // Hot path: no `await`, no allocation, no logging between the
                 // GPREGRET write and `sys_reset()`. Any preemption here would
                 // risk the magic being lost before the reset fires.
-                // SAFETY: GPREGRET is a memory-mapped retained-register in the
-                // POWER peripheral; safe to write any u32 value at any time.
+                const DFU_MAGIC_UF2_RESET: u32 = 0x57;
+                // GPREGRET lives in the POWER peripheral, which the S140
+                // SoftDevice owns once `Softdevice::enable` has run: a direct
+                // write post-enable is an MWU MEMACC (info bit 0, POWER) and
+                // records one bogus panic per touch-flash (Codeberg #249).
+                // Post-enable the write must go through the SoC syscalls;
+                // pre-enable (this handler can fire before `ble::init` on a
+                // fast host) the syscalls fail, and the direct write is legal.
+                let mut sd_enabled: u8 = 0;
                 unsafe {
-                    const GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
-                    const DFU_MAGIC_UF2_RESET: u32 = 0x57;
-                    core::ptr::write_volatile(GPREGRET, DFU_MAGIC_UF2_RESET);
+                    // Legal in every SD state, always returns NRF_SUCCESS.
+                    nrf_softdevice_s140::sd_softdevice_is_enabled(&mut sd_enabled);
+                }
+                if sd_enabled != 0 {
+                    unsafe {
+                        // GPREGRET syscalls are bit-mask ops: clear all bits,
+                        // then set the UF2 magic.
+                        nrf_softdevice_s140::sd_power_gpregret_clr(0, 0xFF);
+                        nrf_softdevice_s140::sd_power_gpregret_set(0, DFU_MAGIC_UF2_RESET);
+                    }
+                } else {
+                    // SAFETY: pre-`Softdevice::enable` the POWER peripheral is
+                    // unprotected; a direct GPREGRET write is legal only in
+                    // this window.
+                    unsafe {
+                        const GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
+                        core::ptr::write_volatile(GPREGRET, DFU_MAGIC_UF2_RESET);
+                    }
                 }
                 cortex_m::peripheral::SCB::sys_reset();
                 // sys_reset() is `-> !` and never returns.
