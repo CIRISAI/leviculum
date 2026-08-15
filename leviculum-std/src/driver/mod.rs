@@ -3231,6 +3231,10 @@ async fn run_event_loop(
     let mut shutdown = channels.shutdown;
     let mut next_poll = tokio::time::Instant::now();
     let mut next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
+    // In-flight off-lock flush write (leviculum#44). Doubles as the overlap
+    // guard: a flush timer fire while a write is in flight re-arms and does
+    // nothing. Settled on every exit path, including shutdown.
+    let mut flush_in_flight: Option<tokio::task::JoinHandle<crate::storage::FlushOutcome>> = None;
     let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
     // Track which per-interface queues have already emitted the
     // depth-high warning so we don't spam once the queue is deep.
@@ -3616,6 +3620,15 @@ async fn run_event_loop(
                     // to pop and write_all them to the socket before the runtime
                     // aborts the tasks.
                     flush_outgoing_on_shutdown(&registry).await;
+                    // Join any in-flight storage flush before breaking: stop()
+                    // runs the synchronous shutdown flush the moment the runner
+                    // joins, and an unjoined background write could rename an
+                    // older merge over it. Unbounded await on local disk IO —
+                    // the same exposure the old under-lock flush had here.
+                    if let Some(handle) = flush_in_flight.take() {
+                        let joined = handle.await;
+                        settle_flush(&inner, joined);
+                    }
                     break;
                 }
             }
@@ -3731,14 +3744,27 @@ async fn run_event_loop(
                 tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_mut()));
             }
 
-            // Branch 7: Periodic storage flush (persist identities + packet hashes)
+            // Branch 7: Periodic storage flush (persist identities + packet
+            // hashes). The node lock is held only to snapshot the dirty
+            // state; the file read+merge+write runs on the blocking pool and
+            // Branch 7b settles it (leviculum#44).
             _ = tokio::time::sleep_until(next_flush) => {
-                {
-                    use leviculum_core::traits::Storage as _;
-                    let mut core = inner.lock_recover();
-                    core.storage_mut().flush();
+                if flush_in_flight.is_none() {
+                    flush_in_flight = begin_flush(&inner);
                 }
                 next_flush = tokio::time::Instant::now() + Duration::from_secs(flush_interval_secs);
+            }
+
+            // Branch 7b: the off-lock flush write finished; brief re-lock to
+            // clear the dirty flags the write covered.
+            joined = async {
+                match flush_in_flight.as_mut() {
+                    Some(handle) => handle.await,
+                    None => core::future::pending().await,
+                }
+            }, if flush_in_flight.is_some() => {
+                flush_in_flight = None;
+                settle_flush(&inner, joined);
             }
 
             // Branch 8: Runtime auto-connect of discovered interfaces (#32b).
@@ -4609,6 +4635,30 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
             let max_airtime = credit.lock_recover().max_airtime_ms();
             core.set_interface_max_airtime_ms(iface_idx, max_airtime);
         }
+    }
+}
+
+/// Phases 1+2 of the periodic storage flush (leviculum#44): a brief node-lock
+/// hold to snapshot the dirty state, then the file IO on the blocking pool.
+/// `None` when nothing is dirty. The returned handle is the overlap guard;
+/// the caller must settle it — including on the shutdown path — before the
+/// synchronous shutdown flush may run.
+fn begin_flush(
+    inner: &Arc<Mutex<StdNodeCore>>,
+) -> Option<tokio::task::JoinHandle<crate::storage::FlushOutcome>> {
+    let snapshot = inner.lock_recover().storage_mut().take_flush_snapshot()?;
+    Some(tokio::task::spawn_blocking(move || snapshot.write()))
+}
+
+/// Phase 3: brief re-lock to clear the dirty flags the write covered.
+/// A JoinError leaves the flags set, so the next interval retries.
+fn settle_flush(
+    inner: &Arc<Mutex<StdNodeCore>>,
+    joined: std::result::Result<crate::storage::FlushOutcome, tokio::task::JoinError>,
+) {
+    match joined {
+        Ok(outcome) => inner.lock_recover().storage_mut().finish_flush(outcome),
+        Err(e) => tracing::error!("Storage flush write task failed: {e}"),
     }
 }
 
@@ -7236,6 +7286,284 @@ mod tests {
             !logged.contains(&"CORE_PROCESSOR_OVER_BUDGET".to_string()),
             "a processor that did nothing must not be blamed for {hold:?} of \
              lock contention: {logged:?}"
+        );
+    }
+
+    // ── Off-lock periodic storage flush (leviculum#44) ──
+
+    /// Gate for the blocking flush write: the hook reports each entry on an
+    /// async channel, then std-blocks the blocking-pool thread until the test
+    /// releases it (only the first `block_first_n` calls block). The test body
+    /// itself never std-blocks, so the current_thread flavor works. Dropping
+    /// the gate unblocks the hook (a closed release channel returns Err).
+    struct FlushGate {
+        entered_rx: mpsc::UnboundedReceiver<usize>,
+        release_tx: std::sync::mpsc::Sender<()>,
+    }
+
+    fn gated_flush_hook(block_first_n: usize) -> (crate::storage::FlushIoHook, FlushGate) {
+        let (entered_tx, entered_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let hook: crate::storage::FlushIoHook = Arc::new(move || {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let _ = entered_tx.send(n);
+            if n <= block_first_n {
+                let _ = release_rx.lock().unwrap().recv();
+            }
+        });
+        (
+            hook,
+            FlushGate {
+                entered_rx,
+                release_tx,
+            },
+        )
+    }
+
+    fn dirty_identity(core: &Arc<Mutex<StdNodeCore>>, tag: u8) {
+        let id = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+        let mut guard = core.lock_recover();
+        StorageTrait::set_identity(guard.storage_mut(), [tag; TRUNCATED_HASHBYTES], id);
+    }
+
+    /// A full `run_event_loop` with one readable interface, everything
+    /// optional disabled, and the senders held open for the test's duration.
+    struct FlushLoopHarness {
+        action_tx: mpsc::Sender<TickOutput>,
+        shutdown_tx: watch::Sender<bool>,
+        loop_handle: tokio::task::JoinHandle<()>,
+        out_rx: mpsc::Receiver<crate::interfaces::OutgoingPacket>,
+        _in_tx: mpsc::Sender<IncomingPacket>,
+        _new_iface_tx: mpsc::Sender<InterfaceHandle>,
+        _reconnect_tx: mpsc::Sender<InterfaceId>,
+        _tunnel_tx: mpsc::Sender<InterfaceId>,
+        _remove_tx: mpsc::Sender<InterfaceId>,
+    }
+
+    fn spawn_flush_loop(
+        core: Arc<Mutex<StdNodeCore>>,
+        flush_interval_secs: u64,
+    ) -> FlushLoopHarness {
+        use crate::interfaces::{InterfaceCounters, InterfaceInfo};
+        let mut registry = InterfaceRegistry::new();
+        let (in_tx, in_rx) = mpsc::channel(4);
+        let (out_tx, out_rx) = mpsc::channel(8);
+        registry.register(InterfaceHandle {
+            info: InterfaceInfo {
+                id: InterfaceId(0),
+                name: "test/flush-loop".into(),
+                hw_mtu: None,
+                is_local_client: false,
+                bitrate: None,
+                tx_jitter_max_ms: None,
+                ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
+            },
+            incoming: in_rx,
+            outgoing: out_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
+        });
+
+        let (action_tx, action_rx) = mpsc::channel(8);
+        let (new_iface_tx, new_iface_rx) = mpsc::channel(1);
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(1);
+        let (tunnel_tx, tunnel_rx) = mpsc::channel(1);
+        let (remove_tx, remove_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let loop_handle = tokio::spawn(run_event_loop(
+            core,
+            registry,
+            EventLoopChannels {
+                event_sink: None,
+                action_dispatch_rx: action_rx,
+                new_interface_rx: new_iface_rx,
+                reconnect_rx,
+                tunnel_notify_rx: tunnel_rx,
+                remove_iface_rx: remove_rx,
+                shutdown: shutdown_rx,
+            },
+            Arc::new(Mutex::new(BTreeMap::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
+            Arc::new(AtomicUsize::new(0)),
+            flush_interval_secs,
+            None,
+            None,
+            None,
+            AutoConnectWiring {
+                max: 0,
+                new_iface_tx: new_iface_tx.clone(),
+                reconnect_tx: reconnect_tx.clone(),
+                next_id: Arc::new(AtomicUsize::new(1)),
+                corrupt_every: None,
+                outbound_socket_hook: None,
+            },
+            None,
+            None,
+        ));
+
+        FlushLoopHarness {
+            action_tx,
+            shutdown_tx,
+            loop_handle,
+            out_rx,
+            _in_tx: in_tx,
+            _new_iface_tx: new_iface_tx,
+            _reconnect_tx: reconnect_tx,
+            _tunnel_tx: tunnel_tx,
+            _remove_tx: remove_tx,
+        }
+    }
+
+    /// C1's core claim for this lane: while the flush write is on the
+    /// blocking pool, the node lock is free — free enough to dirty the
+    /// storage mid-write, which the generation guard then keeps dirty.
+    #[tokio::test(flavor = "current_thread")]
+    async fn flush_write_runs_off_the_node_lock() {
+        use crate::known_destinations::{decode_known_destinations, KNOWN_DESTINATIONS_FILE};
+
+        let (core, td) = shared_test_core();
+        let (hook, mut gate) = gated_flush_hook(1);
+        core.lock_recover().storage_mut().set_flush_io_hook(hook);
+        dirty_identity(&core, 0x0A);
+
+        let handle = begin_flush(&core).expect("dirty storage must begin a flush");
+        gate.entered_rx.recv().await.expect("hook must be entered");
+
+        {
+            let mut guard = core
+                .try_lock()
+                .expect("the node lock must be free while the flush write runs");
+            let id = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+            StorageTrait::set_identity(guard.storage_mut(), [0x0B; TRUNCATED_HASHBYTES], id);
+        }
+
+        gate.release_tx.send(()).expect("blocked hook receives");
+        let joined = handle.await;
+        settle_flush(&core, joined);
+
+        assert!(
+            core.lock_recover()
+                .storage_mut()
+                .take_flush_snapshot()
+                .is_some(),
+            "the identity added mid-write must stay dirty for the next interval"
+        );
+
+        let bytes = std::fs::read(td.path().join(KNOWN_DESTINATIONS_FILE)).unwrap();
+        let entries = decode_known_destinations(&bytes).unwrap();
+        assert!(
+            entries.contains_key(&[0x0A; TRUNCATED_HASHBYTES]),
+            "the pre-gate identity must be on disk"
+        );
+    }
+
+    /// The hourly deaf window this lane removes: a SendPacket pushed while
+    /// the flush write is stalled must still reach the interface.
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_stays_responsive_during_slow_flush() {
+        let (core, _td) = shared_test_core();
+        let (hook, mut gate) = gated_flush_hook(1);
+        core.lock_recover().storage_mut().set_flush_io_hook(hook);
+        dirty_identity(&core, 0x1A);
+
+        let mut harness = spawn_flush_loop(Arc::clone(&core), 1);
+        gate.entered_rx.recv().await.expect("first flush begins");
+
+        let mut output = TickOutput::empty();
+        output
+            .actions
+            .push(leviculum_core::transport::Action::SendPacket {
+                iface: InterfaceId(0),
+                data: vec![0xAB; 32],
+            });
+        harness.action_tx.send(output).await.expect("loop is live");
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), harness.out_rx.recv())
+            .await
+            .expect("the loop must dispatch while the flush write is in flight")
+            .expect("interface channel open");
+        assert_eq!(frame.data, vec![0xAB; 32]);
+
+        gate.release_tx.send(()).expect("blocked hook receives");
+        harness.shutdown_tx.send(true).expect("loop is live");
+        harness.loop_handle.await.expect("loop exits cleanly");
+    }
+
+    /// The JoinHandle is the overlap guard: timer fires during an in-flight
+    /// write re-arm and do nothing, and the interval after the write settles
+    /// retries whatever was dirtied mid-write.
+    #[tokio::test(flavor = "current_thread")]
+    async fn flush_intervals_never_overlap_and_retry_next_interval() {
+        let (core, _td) = shared_test_core();
+        let (hook, mut gate) = gated_flush_hook(1);
+        core.lock_recover().storage_mut().set_flush_io_hook(hook);
+        dirty_identity(&core, 0x2A);
+
+        let harness = spawn_flush_loop(Arc::clone(&core), 1);
+        let first = gate.entered_rx.recv().await.expect("first flush begins");
+        assert_eq!(first, 1);
+
+        // More than two timer fires pass while the write is gated; each must
+        // re-arm without starting a second write.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            gate.entered_rx.try_recv().is_err(),
+            "a timer fire during an in-flight write must not begin another"
+        );
+
+        // Dirtied mid-gate: the settle keeps the flag set, so the next
+        // interval retries.
+        dirty_identity(&core, 0x2B);
+        gate.release_tx.send(()).expect("blocked hook receives");
+
+        let second = tokio::time::timeout(Duration::from_secs(5), gate.entered_rx.recv())
+            .await
+            .expect("the mid-gate dirtying must be retried on the next interval")
+            .expect("hook channel open");
+        assert_eq!(second, 2);
+
+        harness.shutdown_tx.send(true).expect("loop is live");
+        harness.loop_handle.await.expect("loop exits cleanly");
+    }
+
+    /// Shutdown joins the in-flight write before the loop exits, so stop()'s
+    /// synchronous flush can never be clobbered by a stale background rename.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_joins_the_in_flight_flush_write() {
+        use crate::known_destinations::{decode_known_destinations, KNOWN_DESTINATIONS_FILE};
+
+        let (core, td) = shared_test_core();
+        let (hook, mut gate) = gated_flush_hook(1);
+        core.lock_recover().storage_mut().set_flush_io_hook(hook);
+        dirty_identity(&core, 0x3A);
+
+        let mut harness = spawn_flush_loop(Arc::clone(&core), 1);
+        gate.entered_rx.recv().await.expect("flush begins");
+
+        harness.shutdown_tx.send(true).expect("loop is live");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut harness.loop_handle)
+                .await
+                .is_err(),
+            "the loop must wait for the in-flight write before exiting"
+        );
+
+        gate.release_tx.send(()).expect("blocked hook receives");
+        harness.loop_handle.await.expect("loop exits cleanly");
+
+        let bytes = std::fs::read(td.path().join(KNOWN_DESTINATIONS_FILE)).unwrap();
+        let entries = decode_known_destinations(&bytes).unwrap();
+        assert!(
+            entries.contains_key(&[0x3A; TRUNCATED_HASHBYTES]),
+            "the joined write must have landed the snapshot on disk"
         );
     }
 }
