@@ -3192,6 +3192,108 @@ fn retire_from_inventory(
     }
 }
 
+// ── leviculum#29 stages 2-3: off-lock inbound precompute ───────────────────
+
+/// One inbound packet plus everything precomputed OFF the node lock for it.
+struct PreparedRx {
+    iface: InterfaceId,
+    data: Vec<u8>,
+    pre: leviculum_core::node::PrecomputedRx,
+    /// The off-lock decrypt failed against the cached key snapshot — evict it
+    /// (most likely a ratchet rotated) and let the in-lock path decrypt.
+    evict_decryptor_for: Option<[u8; 16]>,
+}
+
+/// Inbound crypto class, decided from a header peek (no lock, no decrypt).
+enum RxClass {
+    /// Ed25519 signature verify — pure function of the bytes.
+    Announce,
+    /// Single-destination datagram — X25519 ECDH decrypt against a key
+    /// snapshot. Carries the destination hash from the header.
+    SingleDest([u8; 16]),
+    /// Everything else: cheap crypto or state-entangled; stays inline.
+    Cheap,
+}
+
+fn classify_rx(data: &[u8]) -> RxClass {
+    use leviculum_core::packet::{HeaderType, Packet, PacketContext, PacketType};
+    match Packet::unpack(data) {
+        Ok(p) => match p.flags.packet_type {
+            PacketType::Announce => RxClass::Announce,
+            PacketType::Data
+                if p.flags.header_type == HeaderType::Type1
+                    && p.flags.dest_type == leviculum_core::DestinationType::Single
+                    && p.context == PacketContext::None =>
+            {
+                RxClass::SingleDest(p.destination_hash)
+            }
+            _ => RxClass::Cheap,
+        },
+        Err(_) => RxClass::Cheap,
+    }
+}
+
+/// The no-precompute preparation: just the dedup hash (already off-lock).
+fn prepare_cheap(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
+    let pre = leviculum_core::node::PrecomputedRx {
+        packet_hash: Some(leviculum_core::packet::packet_hash(&data)),
+        ..Default::default()
+    };
+    PreparedRx {
+        iface,
+        data,
+        pre,
+        evict_decryptor_for: None,
+    }
+}
+
+/// Announce job: hash + full parse + Ed25519 verify, all off-lock. A failed
+/// verify passes `announce_verified: false`, so core re-checks and drops the
+/// packet exactly as it would have — the memo can only skip REDUNDANT work.
+fn precompute_announce(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
+    let packet_hash = leviculum_core::packet::packet_hash(&data);
+    let announce_verified = leviculum_core::packet::Packet::unpack(&data)
+        .map(|p| leviculum_core::verify_announce_packet(&p))
+        .unwrap_or(false);
+    PreparedRx {
+        iface,
+        data,
+        pre: leviculum_core::node::PrecomputedRx {
+            packet_hash: Some(packet_hash),
+            announce_verified,
+            ..Default::default()
+        },
+        evict_decryptor_for: None,
+    }
+}
+
+/// Single-destination job: hash + ECDH decrypt against the snapshot, off-lock.
+/// The decrypt is self-authenticating (token HMAC), so a success is exactly
+/// what the in-lock decrypt would produce; a failure falls back in-lock and
+/// evicts the snapshot.
+fn precompute_single_dest(
+    iface: InterfaceId,
+    data: Vec<u8>,
+    dest: [u8; 16],
+    decryptor: std::sync::Arc<leviculum_core::SingleDestDecryptor>,
+) -> PreparedRx {
+    let packet_hash = leviculum_core::packet::packet_hash(&data);
+    let plaintext = leviculum_core::packet::Packet::unpack(&data)
+        .ok()
+        .and_then(|p| decryptor.decrypt(p.data.as_slice()));
+    let failed = plaintext.is_none();
+    PreparedRx {
+        iface,
+        data,
+        pre: leviculum_core::node::PrecomputedRx {
+            packet_hash: Some(packet_hash),
+            single_dest_plaintext: plaintext.map(|pt| (dest, pt)),
+            ..Default::default()
+        },
+        evict_decryptor_for: failed.then_some(dest),
+    }
+}
+
 /// Run the internal event loop (sans-I/O architecture)
 ///
 /// The driver owns the interfaces and acts as the I/O bridge between the
@@ -3287,6 +3389,64 @@ async fn run_event_loop(
         .as_ref()
         .map(|d| tokio::time::Instant::now() + d.job_interval);
 
+    // ── Off-lock inbound precompute (leviculum#29 stages 2-3) ──
+    //
+    // The expensive inbound crypto classes — announce Ed25519 verification and
+    // Single-destination ECDH decryption — are computed BEFORE the node lock
+    // is taken; the in-lock apply consumes the memo (`PrecomputedRx`) instead
+    // of recomputing. Every memo is advisory (core falls back to computing
+    // under the lock), so a stale key snapshot or failed off-lock decrypt
+    // costs duplicate work, never correctness.
+    // Single-destination decrypt-key snapshots, owned by this task (no lock).
+    // Lazily filled from the core; an entry that fails to decrypt is evicted
+    // (ratchet rotation) and refreshed on the next packet for that dest.
+    let mut sd_decryptors: std::collections::HashMap<
+        [u8; 16],
+        std::sync::Arc<leviculum_core::SingleDestDecryptor>,
+    > = std::collections::HashMap::new();
+
+    macro_rules! apply_inbound {
+        ($prepared:expr) => {{
+            let prepared: PreparedRx = $prepared;
+            if let Some(dest) = prepared.evict_decryptor_for {
+                // The snapshot failed against these bytes — most likely a
+                // ratchet rotated. Drop it; the next packet re-exports fresh
+                // keys. The current packet falls back to the in-lock decrypt.
+                sd_decryptors.remove(&dest);
+            }
+            let (output, now_ms) = {
+                let mut core = inner.lock_recover();
+                let output =
+                    core.handle_packet_precomputed(prepared.iface, &prepared.data, prepared.pre);
+                let now_ms = core.now_ms();
+                (output, now_ms)
+            };
+            if let Some(deadline_ms) = output.next_deadline_ms {
+                let delta = deadline_ms.saturating_sub(now_ms);
+                let wake_at = tokio::time::Instant::now() + Duration::from_millis(delta);
+                if wake_at < next_poll {
+                    next_poll = wake_at;
+                }
+            }
+            let processor_delay = dispatch_output(
+                output,
+                &mut registry,
+                event_sink.as_mut(),
+                &inner,
+                &mut retry_queues,
+                &mut retry_queue_warned,
+                &mut retry_queue_max_depth,
+                &ifac_configs,
+                remote_mgmt.as_ref(),
+                discovery_storage.as_deref(),
+                discovery_network_identity.as_deref(),
+                &mut discovery_heard_ifac,
+                core_processor.as_mut(),
+            );
+            tighten_next_poll(&mut next_poll, processor_delay);
+        }};
+    }
+
     loop {
         // Auto-connect poll wake — only armed while the feature is enabled.
         let autoconnect_wake = autoconnect.as_ref().map(|_| next_autoconnect);
@@ -3334,47 +3494,56 @@ async fn run_event_loop(
                             iface_id,
                             registry.name_of(iface_id),
                         );
-                        // Dedup SHA-256 is a pure function of the raw bytes —
-                        // compute it BEFORE taking the node lock so it never
-                        // contributes to the serialized critical section
-                        // (leviculum#29). Core recomputes it itself in the one
-                        // case the bytes change under it (IFAC strip).
-                        let pre_hash = leviculum_core::packet::packet_hash(&pkt.data);
-                        let (output, now_ms) = {
-                            let mut core = inner.lock_recover();
-                            let output =
-                                core.handle_packet_prehashed(iface_id, &pkt.data, pre_hash);
-                            let now_ms = core.now_ms();
-                            (output, now_ms)
-                        };
-                        tracing::debug!(
-                            "driver: handle_packet produced {} actions, {} events",
-                            output.actions.len(),
-                            output.events.len(),
-                        );
-                        // Packet handling may schedule new deadlines (e.g. announce
-                        // rebroadcast retries), advance next_poll if sooner.
-                        if let Some(deadline_ms) = output.next_deadline_ms {
-                            let delta = deadline_ms.saturating_sub(now_ms);
-                            let wake_at = tokio::time::Instant::now()
-                                + Duration::from_millis(delta);
-                            if wake_at < next_poll {
-                                next_poll = wake_at;
+                        // leviculum#29 stages 2-3: precompute the expensive
+                        // inbound crypto OFF the node lock. The Ed25519
+                        // announce verify and the Single-destination ECDH
+                        // decrypt run right here on the loop thread — with NO
+                        // lock held — and the in-lock apply consumes the memo
+                        // instead of recomputing. Outbound callers (connect,
+                        // sends, resource commits) therefore never wait behind
+                        // inbound crypto anymore: the lock is free while it
+                        // runs. (A parallel worker-pool variant was measured
+                        // and rejected: on release builds the per-job task
+                        // overhead equals or exceeds the crypto being moved,
+                        // and it regressed announce throughput 2x. The memo
+                        // seam is host-independent; the placement is not.)
+                        //
+                        // IFAC-protected interfaces skip precompute — core
+                        // rewrites their bytes, invalidating anything computed
+                        // here.
+                        let prepared = if ifac_configs.contains_key(&iface_id.0) {
+                            prepare_cheap(iface_id, pkt.data)
+                        } else {
+                            match classify_rx(&pkt.data) {
+                                RxClass::Announce => precompute_announce(iface_id, pkt.data),
+                                RxClass::SingleDest(dest) => {
+                                    let decryptor = match sd_decryptors.get(&dest) {
+                                        Some(d) => Some(std::sync::Arc::clone(d)),
+                                        None => {
+                                            let exported = inner
+                                                .lock_recover()
+                                                .export_single_dest_decryptor(
+                                                    &leviculum_core::DestinationHash::new(dest),
+                                                )
+                                                .map(std::sync::Arc::new);
+                                            if let Some(d) = &exported {
+                                                sd_decryptors
+                                                    .insert(dest, std::sync::Arc::clone(d));
+                                            }
+                                            exported
+                                        }
+                                    };
+                                    match decryptor {
+                                        Some(d) => {
+                                            precompute_single_dest(iface_id, pkt.data, dest, d)
+                                        }
+                                        None => prepare_cheap(iface_id, pkt.data),
+                                    }
+                                }
+                                RxClass::Cheap => prepare_cheap(iface_id, pkt.data),
                             }
-                        }
-                        let processor_delay = dispatch_output(
-                            output,
-                            &mut registry,
-                            event_sink.as_mut(),
-                            &inner,
-                            &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
-                            remote_mgmt.as_ref(),
-                            discovery_storage.as_deref(),
-                            discovery_network_identity.as_deref(),
-                            &mut discovery_heard_ifac,
-                            core_processor.as_mut(),
-                        );
-                        tighten_next_poll(&mut next_poll, processor_delay);
+                        };
+                        apply_inbound!(prepared);
                     }
                     RecvEvent::Disconnected(iface_id) => {
                         tracing::warn!("Interface {} ({}) disconnected", iface_id, registry.name_of(iface_id));

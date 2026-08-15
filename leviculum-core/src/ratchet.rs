@@ -32,6 +32,7 @@ pub(crate) const DEFAULT_RETAINED_RATCHETS: usize = 512;
 ///
 /// Ratchets are ephemeral key pairs that are rotated periodically.
 /// The private key is used for decryption, the public key is announced.
+#[derive(Clone)]
 pub(crate) struct Ratchet {
     /// X25519 private key (32 bytes)
     private_key: x25519_dalek::StaticSecret,

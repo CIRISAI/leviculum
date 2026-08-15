@@ -151,6 +151,24 @@ fn ensure_single_segment_internal_resource_size(
 
 /// Link statistics for observability
 #[derive(Debug, Clone)]
+/// Work the std driver precomputed OFF the node lock for one inbound packet
+/// (leviculum#29 stages 2-3). Every field is advisory: absent or inapplicable
+/// memos simply mean the in-lock path does the work itself, so a wrong or
+/// stale memo can cost duplicate work but never skip a check — the announce
+/// memo is only produced by fully verifying these bytes, and the plaintext
+/// memo is self-authenticating (token HMAC) and destination-hash-guarded.
+#[derive(Default)]
+pub struct PrecomputedRx {
+    /// SHA-256 over the exact raw bytes (dedup hash). Discarded when an IFAC
+    /// strip rewrites them.
+    pub packet_hash: Option<[u8; 32]>,
+    /// `verify_announce_packet` succeeded for these exact bytes.
+    pub announce_verified: bool,
+    /// Plaintext from an off-lock Single-destination decrypt, tagged with the
+    /// destination hash it was decrypted for.
+    pub single_dest_plaintext: Option<([u8; crate::constants::TRUNCATED_HASHBYTES], Vec<u8>)>,
+}
+
 pub struct LinkStats {
     pub(crate) tx_ring_size: usize,
     pub(crate) window: usize,
@@ -341,6 +359,11 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// behaviour. Consulted on every scheduled announce; see
     /// [`AnnounceControl`].
     announce_control: Option<Box<dyn AnnounceControl>>,
+    /// Off-lock-decrypted plaintext staged by `handle_packet_precomputed` for
+    /// the ONE packet the current call is processing (leviculum#29). Tagged
+    /// with the destination hash; consumed take-once at the Single-destination
+    /// decrypt site and always cleared before the call returns.
+    pending_single_dest_plaintext: Option<([u8; crate::constants::TRUNCATED_HASHBYTES], Vec<u8>)>,
 }
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
@@ -395,6 +418,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             max_incoming_resource_size,
             resource_window_policy,
             announce_control: None,
+            pending_single_dest_plaintext: None,
         }
     }
 
@@ -1743,17 +1767,63 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         data: &[u8],
         precomputed_hash: [u8; 32],
     ) -> crate::transport::TickOutput {
-        if let Err(e) = self
-            .transport
-            .process_incoming_prehashed(iface.0, data, precomputed_hash)
-        {
+        self.handle_packet_precomputed(
+            iface,
+            data,
+            PrecomputedRx {
+                packet_hash: Some(precomputed_hash),
+                ..PrecomputedRx::default()
+            },
+        )
+    }
+
+    /// Like [`handle_packet`](Self::handle_packet), but consuming everything
+    /// the driver already computed OFF the node lock for this exact packet
+    /// (leviculum#29 stages 2-3): the dedup hash, an announce signature
+    /// verification, and/or a Single-destination decrypt. Every memo is
+    /// advisory — the in-lock path falls back to computing it itself when the
+    /// memo is absent or does not apply — and every memo is bound to the one
+    /// packet this call processes.
+    pub fn handle_packet_precomputed(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        data: &[u8],
+        pre: PrecomputedRx,
+    ) -> crate::transport::TickOutput {
+        // The plaintext memo is consumed downstream of the transport, at the
+        // Single-destination decrypt site inside the event pipeline. Stage it
+        // on the node for the duration of this call; take-once semantics plus
+        // the destination-hash guard at the consume site bind it to this
+        // packet alone.
+        debug_assert!(self.pending_single_dest_plaintext.is_none());
+        self.pending_single_dest_plaintext = pre.single_dest_plaintext;
+        if let Err(e) = self.transport.process_incoming_precomputed(
+            iface.0,
+            data,
+            pre.packet_hash,
+            pre.announce_verified,
+        ) {
             crate::tracing::trace!(
                 "Failed to process incoming packet on {}: {}",
                 self.transport.iface_name(iface.0),
                 e
             );
         }
-        self.process_events_and_actions()
+        let out = self.process_events_and_actions();
+        // A memo that found no consumer (dropped packet, wrong class) must not
+        // leak into a later call.
+        self.pending_single_dest_plaintext = None;
+        out
+    }
+
+    /// Snapshot the decrypt context for a registered Single destination, so
+    /// the driver can run the ECDH decrypt OFF the node lock (leviculum#29).
+    /// `None` for unknown, non-Single, or identity-less destinations.
+    pub fn export_single_dest_decryptor(
+        &self,
+        dest_hash: &DestinationHash,
+    ) -> Option<crate::destination::SingleDestDecryptor> {
+        self.destinations.get(dest_hash)?.export_decryptor()
     }
 
     /// Send management announces if their timer has expired.
@@ -2764,16 +2834,33 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 } else {
                     // Regular packet, decrypt if Single destination
                     let dest_hash_typed = DestinationHash::new(destination_hash);
+                    // Off-lock decrypt memo (leviculum#29): use the plaintext
+                    // the driver already produced for THIS packet, guarded by
+                    // the destination hash and consumed take-once. The memo is
+                    // self-authenticating (the off-lock decrypt verified the
+                    // token HMAC), so a hit is exactly what dest.decrypt would
+                    // have returned; a miss falls back to the in-lock path.
+                    let memo_plaintext = match self.pending_single_dest_plaintext.take() {
+                        Some((h, pt)) if h == destination_hash => Some(pt),
+                        other => {
+                            self.pending_single_dest_plaintext = other;
+                            None
+                        }
+                    };
                     let plaintext = if let Some(dest) = self.destinations.get(&dest_hash_typed) {
                         if dest.dest_type() == crate::destination::DestinationType::Single {
-                            match dest.decrypt(packet.data.as_slice()) {
-                                Ok(data) => data,
-                                Err(_) => {
-                                    crate::tracing::trace!(
-                                        dest = %HexShort(destination_hash.as_ref()),
-                                        "Dropped packet, decryption failed"
-                                    );
-                                    return;
+                            if let Some(pt) = memo_plaintext {
+                                pt
+                            } else {
+                                match dest.decrypt(packet.data.as_slice()) {
+                                    Ok(data) => data,
+                                    Err(_) => {
+                                        crate::tracing::trace!(
+                                            dest = %HexShort(destination_hash.as_ref()),
+                                            "Dropped packet, decryption failed"
+                                        );
+                                        return;
+                                    }
                                 }
                             }
                         } else {
