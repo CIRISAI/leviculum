@@ -2890,6 +2890,7 @@ impl ReticulumNode {
                 .map_err(Error::Resource)?;
             output
         };
+        self.completions.note_send_began(*link_id);
         self.action_dispatch_tx
             .send(output)
             .await
@@ -2915,6 +2916,7 @@ impl ReticulumNode {
                 .map_err(Error::Resource)?;
             output
         };
+        self.completions.note_send_began(*link_id);
         self.action_dispatch_tx
             .send(output)
             .await
@@ -2979,6 +2981,7 @@ impl ReticulumNode {
                 Err(e) => return Err(Error::Resource(e)),
             }
         };
+        self.completions.note_send_began(*link_id);
         self.action_dispatch_tx
             .send(output)
             .await
@@ -3206,6 +3209,7 @@ impl ReticulumNode {
                 Err(e) => return Err(Error::Resource(e)),
             }
         };
+        self.completions.note_send_began(*link_id);
         let sent = self
             .completions
             .register_resource_sent(resource_hash, *link_id);
@@ -3269,15 +3273,19 @@ impl ReticulumNode {
     ///
     /// Takes NO node lock, here or when polled (upstream #199). `link_id` is
     /// what lets a `LinkClosed` sweep resolve this waiter, so it never hangs
-    /// on a dead link. For split (multi-segment) transfers the completion is
-    /// matched by link — each segment carries its own hash on the wire — so
-    /// awaiting the hash `send_resource` returned still resolves.
+    /// on a dead link. For split (multi-segment) transfers still in flight
+    /// the completion is matched by link — each segment carries its own hash
+    /// on the wire — so awaiting the hash `send_resource` returned resolves.
     ///
-    /// A hash the node never sent (or one whose outcome already left the
-    /// bounded recent-outcomes ring) matches nothing, so only a later
-    /// `LinkClosed` for `link_id`, node stop, or the caller's own timeout
-    /// resolves it — for a mistyped/foreign id that timeout is the only
-    /// bound.
+    /// Two honest gaps, both bounded by the caller's own timeout: (1) a hash
+    /// the node never sent (or whose outcome already left the bounded
+    /// recent-outcomes ring) matches nothing — only a later `LinkClosed` for
+    /// `link_id` or node stop resolves it; (2) a split transfer that already
+    /// COMPLETED leaves its ring marker under the final segment's hash, not
+    /// the one `send_resource` returned, so a late awaiter parks the same
+    /// way. For split transfers prefer [`send_resource_awaited`]
+    /// (Self::send_resource_awaited), which registers before dispatch and
+    /// has neither gap.
     pub fn await_resource_sent(
         &self,
         resource_hash: &[u8; 32],
@@ -3544,6 +3552,18 @@ async fn run_event_loop(
     // inside its own call frame, several `dispatch_output` frames down from
     // here (Codeberg #196).
     let mut core_processor = core_processor.map(processor::ProcessorSlot::new);
+
+    /// Close the completion registry on ANY exit from the loop task —
+    /// orderly return or panic unwind. Without this, a panic in the loop
+    /// leaves the registry open: parked waiters hang forever and new
+    /// registrations park against a node that will never answer (C5).
+    struct CloseOnExit(Arc<CompletionRegistry>);
+    impl Drop for CloseOnExit {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+    let _close_on_exit = CloseOnExit(Arc::clone(&completions));
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
     let mut new_interface_rx = channels.new_interface_rx;
@@ -4309,8 +4329,10 @@ async fn run_event_loop(
     // No event can be observed past this point: resolve every pending
     // completion waiter with NodeStopped rather than letting it park on a
     // node that will never answer (C5), after the shutdown drain above has
-    // dispatched — and observed — everything still queued.
-    completions.close();
+    // dispatched — and observed — everything still queued. The close itself
+    // rides `_close_on_exit`'s Drop (armed at loop entry), so a panic
+    // unwinding out of the loop resolves waiters the same way an orderly
+    // exit does — a parked future must not outlive the loop task either way.
 }
 
 /// Production [`AutoConnectSpawner`](crate::autoconnect::AutoConnectSpawner):
