@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.15.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `0d93b29` (+107 since 0.8.1: LnFlash tooling,
+LXMF file storage + per-transfer limits, the driver-tick CoreProcessor,
+path-handling reference parity, radio PHY fixes — see upstream `0.8.1` notes;
+the fork's #29 stage 1, #35 telemetry, #38 host codecs, and both test-hygiene
+PRs are upstream code now, credited in their changelog).
+
+### Changed
+
+**leviculum#29 stages 2-3 — inbound crypto off the node lock.** The driver
+classifies each inbound packet from a header peek and precomputes announce
+Ed25519 verification and Single-destination X25519 decryption BEFORE taking
+the node mutex; the in-lock apply consumes the memo (`PrecomputedRx`) instead
+of recomputing. Measured per-packet lock-hold (release, 20-client floods):
+single-dest 35 µs → **1.2-2.3 µs** (~20×), announce 44 µs → **~21 µs** (~2×),
+link data unchanged (A/B control). With stage 1 (off-lock resource builds),
+every expensive crypto class now runs without the lock — the #29 exclusion
+between inbound crypto and outbound calls is structurally gone. Every memo is
+advisory and self-authenticating: a stale snapshot or failed off-lock step
+falls back to the in-lock path (never skips a check). Wire format untouched
+(rnsd interop 316/316). New API: `verify_announce_packet`,
+`Destination::export_decryptor`/`SingleDestDecryptor`, `PrecomputedRx`,
+`handle_packet_precomputed`. A parallel worker-pool variant was measured and
+rejected (task overhead ≥ the crypto moved; announce throughput regressed 2×).
+
 ## [0.14.1+ciris.1] — CIRIS fork
 
 ### Fixed
