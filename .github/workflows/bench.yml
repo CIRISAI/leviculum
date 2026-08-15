@@ -86,6 +86,9 @@ jobs:
       - name: Run the single-dest datagram flood (mode 3, ECDH/packet)
         run: |
           FLOOD_N=20 PACKETS=250 PAYLOAD=64 \
+          GIT_COMMIT="$GITHUB_SHA" \
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+          BENCH_RUNNER="github/ubuntu-latest (release)" \
           BENCH_JSON_OUT_SINGLEDEST="$PWD/bench_singledest.json" \
             cargo test --release -p leviculum-std --test transport_fanout_bench \
               single_dest_datagram_flood -- --ignored --nocapture
@@ -96,6 +99,9 @@ jobs:
       - name: Run the announce flood (mode 4, Ed25519 verify/announce)
         run: |
           FLOOD_N=10 ANNOUNCES=150 \
+          GIT_COMMIT="$GITHUB_SHA" \
+          BENCH_DATE="$(date -u +%Y-%m-%d)" \
+          BENCH_RUNNER="github/ubuntu-latest (release)" \
           BENCH_JSON_OUT_ANNOUNCE="$PWD/bench_announce.json" \
             cargo test --release -p leviculum-std --test transport_fanout_bench \
               announce_verify_flood -- --ignored --nocapture
