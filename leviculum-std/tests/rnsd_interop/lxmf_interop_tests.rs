@@ -41,6 +41,15 @@ use leviculum_std::interfaces::hdlc::{DeframeResult, Deframer};
 use crate::common::{connect_to_daemon, send_framed, TestClock};
 use crate::harness::{LxmfReceived, TestDaemon};
 
+/// Wall-clock microseconds since the epoch, comparable with the Python
+/// daemon's `time.time()` on the same host (Codeberg #156 latency probe).
+fn probe156_now_us() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_micros()
+}
+
 /// Msgpack-encode a byte slice as one bin value.
 fn msgpack_bin(data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -73,6 +82,9 @@ struct LxmfClient {
     delivery_hash: [u8; 16],
     events: Vec<RouterEvent>,
     stamp_requests: Vec<DeliveryStampRequest>,
+    /// Codeberg #156: emit `PROBE156` timeline lines on stderr. Off by
+    /// default; the latency-probe test switches it on after setup.
+    probe: bool,
 }
 
 impl LxmfClient {
@@ -102,6 +114,30 @@ impl LxmfClient {
             delivery_hash,
             events: Vec::new(),
             stamp_requests: Vec::new(),
+            probe: false,
+        }
+    }
+
+    /// Codeberg #156: log message-level router events with timestamps.
+    fn probe_log_events(&self, events: &[RouterEvent]) {
+        if !self.probe {
+            return;
+        }
+        for event in events {
+            match event {
+                RouterEvent::MessageReceived(m) => eprintln!(
+                    "PROBE156 MSG_RECEIVED id={} t={}",
+                    hex::encode(m.message_id),
+                    probe156_now_us()
+                ),
+                RouterEvent::MessageState { message_id, state } => eprintln!(
+                    "PROBE156 MSG_STATE id={} state={:?} t={}",
+                    hex::encode(message_id),
+                    state,
+                    probe156_now_us()
+                ),
+                _ => {}
+            }
         }
     }
 
@@ -120,6 +156,7 @@ impl LxmfClient {
 
     /// Absorb a router output: write wire actions, re-feed spawned events.
     async fn absorb(&mut self, output: RouterOutput) {
+        self.probe_log_events(&output.events);
         self.events.extend(
             output
                 .events
@@ -144,6 +181,13 @@ impl LxmfClient {
                 match action {
                     Action::SendPacket { data, .. } | Action::Broadcast { data, .. } => {
                         send_framed(&mut self.stream, data).await;
+                        if self.probe {
+                            eprintln!(
+                                "PROBE156 ACTION_TX len={} t={}",
+                                data.len(),
+                                probe156_now_us()
+                            );
+                        }
                     }
                 }
             }
@@ -152,6 +196,7 @@ impl LxmfClient {
                     .router
                     .handle_event(&mut self.node, &event)
                     .expect("router handle_event");
+                self.probe_log_events(&routed.events);
                 self.events.extend(
                     routed
                         .events
@@ -172,6 +217,9 @@ impl LxmfClient {
     /// One pump cycle: satisfy pending stamp work, read the wire, run timers
     /// and the router tick.
     async fn pump_once(&mut self) {
+        if self.probe {
+            eprintln!("PROBE156 PUMP t={}", probe156_now_us());
+        }
         while let Some(request) = self.stamp_requests.pop() {
             let mut stamper = CooperativeStamper::cooperative(OsRng);
             let stamp = request
@@ -189,6 +237,9 @@ impl LxmfClient {
         match timeout(Duration::from_millis(100), self.stream.read(&mut buf)).await {
             Ok(Ok(0)) => panic!("daemon closed the TCP connection"),
             Ok(Ok(n)) => {
+                if self.probe {
+                    eprintln!("PROBE156 READ n={} t={}", n, probe156_now_us());
+                }
                 let frames: Vec<Vec<u8>> = self
                     .deframer
                     .process(&buf[..n])
@@ -199,6 +250,13 @@ impl LxmfClient {
                     })
                     .collect();
                 for frame in frames {
+                    if self.probe {
+                        eprintln!(
+                            "PROBE156 FRAME_RX len={} t={}",
+                            frame.len(),
+                            probe156_now_us()
+                        );
+                    }
                     let output = self.node.handle_packet(InterfaceId(0), &frame);
                     self.absorb_core(output).await;
                 }
@@ -468,9 +526,16 @@ async fn test_lxmf_opportunistic_rust_to_python() {
 async fn test_lxmf_opportunistic_python_to_rust() {
     let (daemon, mut client, py_info) = setup_pair(None).await;
 
+    // Codeberg #156: timeline probe. All PROBE156 lines carry wall-clock
+    // epoch microseconds; the Python side reports epoch seconds from the
+    // same host clock, so segments are directly comparable.
+    client.probe = true;
+    eprintln!("PROBE156 SETUP_DONE t={}", probe156_now_us());
+
     let content = b"hello from python, opportunistically";
     let title = b"py title";
     let fields = msgpack_fields_map(&[(7, b"python-field-value")]);
+    let send_rpc_start = probe156_now_us();
     let message_hash = daemon
         .lxmf_send(
             &hex::encode(client.delivery_hash),
@@ -481,6 +546,12 @@ async fn test_lxmf_opportunistic_python_to_rust() {
         )
         .await
         .expect("lxmf_send");
+    eprintln!(
+        "PROBE156 SEND_RPC hash={} t_req={} t_resp={}",
+        message_hash,
+        send_rpc_start,
+        probe156_now_us()
+    );
 
     let py_hash = crate::common::parse_dest_hash(&py_info.delivery_hash);
     let got = client
@@ -510,18 +581,41 @@ async fn test_lxmf_opportunistic_python_to_rust() {
 
     // Our core auto-proves the packet (ProofStrategy::All on the delivery
     // destination) — Python's receipt must flip the message to DELIVERED.
+    // Codeberg #156: every poll is timestamped (request start, response
+    // arrival) and the final response carries Python's own timestamped
+    // state transitions, so a slow flip separates cleanly into segments.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut state = String::new();
+    let mut last_probe = serde_json::Value::Null;
     while tokio::time::Instant::now() < deadline {
-        state = daemon
-            .lxmf_get_outbound_status(&message_hash)
+        let poll_start = probe156_now_us();
+        let probe = daemon
+            .lxmf_get_outbound_probe(&message_hash)
             .await
-            .expect("lxmf_get_outbound_status");
+            .expect("lxmf_get_outbound_probe");
+        state = probe
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        eprintln!(
+            "PROBE156 POLL state={} t_req={} t_resp={}",
+            state,
+            poll_start,
+            probe156_now_us()
+        );
+        last_probe = probe;
         if state == "DELIVERED" {
             break;
         }
         client.pump_once().await;
     }
+    eprintln!(
+        "PROBE156 FINAL state={} t={} py={}",
+        state,
+        probe156_now_us(),
+        last_probe
+    );
     assert_eq!(state, "DELIVERED", "our proof must reach Python's receipt");
 }
 

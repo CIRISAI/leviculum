@@ -2502,6 +2502,20 @@ impl TestDaemon {
             .ok_or_else(|| HarnessError::ParseError("Missing state".to_string()))
     }
 
+    /// Codeberg #156 latency probe: outbound LXMessage state plus every
+    /// timestamped state transition recorded on the Python side (epoch
+    /// seconds), and Python's current wall clock for skew checks.
+    pub async fn lxmf_get_outbound_probe(
+        &self,
+        message_hash: &str,
+    ) -> Result<serde_json::Value, HarnessError> {
+        self.query(
+            "lxmf_get_outbound_probe",
+            serde_json::json!({ "message_hash": message_hash }),
+        )
+        .await
+    }
+
     /// Fetch all LXMF messages the Python router has delivered so far.
     pub async fn lxmf_get_received(&self) -> Result<Vec<LxmfReceived>, HarnessError> {
         let result = self

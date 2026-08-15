@@ -1931,7 +1931,7 @@ class TestDaemon:
                 from RNS.vendor import umsgpack
                 fields = umsgpack.unpackb(bytes.fromhex(fields_hex))
             try:
-                message = LXMF.LXMessage(
+                message = self._probe_lxmessage_class(LXMF)(
                     dest_out,
                     self.lxmf_dest,
                     content=content,
@@ -1951,17 +1951,26 @@ class TestDaemon:
             message = self.lxmf_sent.get(params.get("message_hash"))
             if message is None:
                 return {"error": "message not tracked"}
-            names = {
-                LXMF.LXMessage.GENERATING: "GENERATING",
-                LXMF.LXMessage.OUTBOUND: "OUTBOUND",
-                LXMF.LXMessage.SENDING: "SENDING",
-                LXMF.LXMessage.SENT: "SENT",
-                LXMF.LXMessage.DELIVERED: "DELIVERED",
-                LXMF.LXMessage.REJECTED: "REJECTED",
-                LXMF.LXMessage.CANCELLED: "CANCELLED",
-                LXMF.LXMessage.FAILED: "FAILED",
-            }
+            names = self._lxm_state_names(LXMF)
             return {"result": {"state": names.get(message.state, str(message.state))}}
+
+        elif method == "lxmf_get_outbound_probe":
+            # Codeberg #156 latency probe: state plus every state transition
+            # the message went through, wall-clock timestamped (epoch seconds).
+            import LXMF
+            message = self.lxmf_sent.get(params.get("message_hash"))
+            if message is None:
+                return {"error": "message not tracked"}
+            names = self._lxm_state_names(LXMF)
+            transitions = [
+                {"t": t, "state": names.get(s, str(s))}
+                for (t, s) in getattr(message, "probe_state_times", [])
+            ]
+            return {"result": {
+                "state": names.get(message.state, str(message.state)),
+                "transitions": transitions,
+                "now": time.time(),
+            }}
 
         elif method == "lxmf_get_received":
             return {"result": self.lxmf_received}
@@ -1999,6 +2008,35 @@ class TestDaemon:
 
         else:
             return {"error": f"Unknown method: {method}"}
+
+    def _lxm_state_names(self, LXMF):
+        """LXMessage state constant -> name, shared by the status/probe RPCs."""
+        return {
+            LXMF.LXMessage.GENERATING: "GENERATING",
+            LXMF.LXMessage.OUTBOUND: "OUTBOUND",
+            LXMF.LXMessage.SENDING: "SENDING",
+            LXMF.LXMessage.SENT: "SENT",
+            LXMF.LXMessage.DELIVERED: "DELIVERED",
+            LXMF.LXMessage.REJECTED: "REJECTED",
+            LXMF.LXMessage.CANCELLED: "CANCELLED",
+            LXMF.LXMessage.FAILED: "FAILED",
+        }
+
+    def _probe_lxmessage_class(self, LXMF):
+        """Codeberg #156 latency probe: an LXMessage that timestamps every
+        state transition (OUTBOUND -> SENDING -> SENT -> DELIVERED ...) so the
+        interop test can attribute proof-round-trip latency to a segment.
+        Wire behaviour is identical to the base class."""
+        if not hasattr(self, "_probe_lxm_cls"):
+            class ProbeLXMessage(LXMF.LXMessage):
+                def __setattr__(self, name, value):
+                    if name == "state":
+                        self.__dict__.setdefault("probe_state_times", []).append(
+                            (time.time(), value)
+                        )
+                    super().__setattr__(name, value)
+            self._probe_lxm_cls = ProbeLXMessage
+        return self._probe_lxm_cls
 
     def _on_lxmf_delivery(self, message):
         """LXMRouter delivery callback: record every asserted LXMessage field."""
