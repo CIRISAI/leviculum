@@ -204,6 +204,29 @@ interface — see [Interface isolation](interface-isolation.md) and
 such figure is to be described: modelled, and a floor rather than a
 total, because the board's own meter clears when it is read.
 
+The configuration surface itself is settled in #236: setting a target
+*is* the on-switch, and the tracker and station profiles bundle the
+cadence defaults.
+
+### Activation is configuration, not firmware
+
+Setting or changing the telemetry configuration never requires
+rewriting firmware. `lnflash` gains a config-only session — the same
+post-flash serial configuration channel, entered without a UF2 write —
+and the #238 control envelope and #235 remote management make the same
+configuration changeable at runtime later. The reason is operational: a
+node already running in the field must be adoptable into telemetry, and
+retirable from it, where it hangs.
+
+### Setting a target emits one immediate report
+
+When a telemetry target is set or changed, the node sends one report at
+once, regardless of the configured cadence. Success must be observable
+within seconds: a station profile on an hourly heartbeat would otherwise
+leave the operator without any confirmation for up to an hour. The
+immediate report follows every other rule in this document — no fix, no
+position; empty content and title.
+
 ### Fan-out is the expensive shape; collection is the cheaper one
 
 Telemetry to *n* recipients is *n* individually addressed and
