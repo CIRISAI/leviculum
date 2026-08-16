@@ -355,7 +355,7 @@ their index stamps (there is no re-index).
 - **A path, or a request for one.** `send_to_destination`
   (`leviculum-core/src/transport.rs:2509`) fails without a path entry.
   The primitive for obtaining one is `request_path`
-  (`leviculum-core/src/node/mod.rs:2446`); a node with the key but no
+  (`leviculum-core/src/node/mod.rs:2474`); a node with the key but no
   path asks and waits rather than giving up.
 - **An out-of-band trust step at the receiver, in the operator's hands.**
   Sideband can be configured to ingest telemetry only from trusted

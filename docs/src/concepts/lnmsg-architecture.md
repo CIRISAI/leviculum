@@ -469,7 +469,7 @@ carries hard obligations:
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`
-  (`leviculum-core/src/node/mod.rs:1350`) must not be called from a hook:
+  (`leviculum-core/src/node/mod.rs:1368`) must not be called from a hook:
   141 ms under the lock for 1 MiB.
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`

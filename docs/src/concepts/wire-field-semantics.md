@@ -199,7 +199,7 @@ reader drift together.
 The worked example of getting this right is the announce-signature
 pin from the #159 audit,
 `announce_signature_covers_reference_byte_order_on_the_wire`
-(`leviculum-core/src/destination.rs:2133`). It takes the raw wire
+(`leviculum-core/src/destination.rs:2235`). It takes the raw wire
 bytes of a packed announce, rebuilds the signed data in the exact
 order the reference composes it (`Destination.py:297-298`:
 `hash + public_key + name_hash + random_hash + ratchet [+ app_data]`),

@@ -43,7 +43,7 @@ non-behaviour.
 The rule: **a pin must contain an assertion that fails when the claim it
 pins is broken**, in the same test, on every run. The pattern is in the
 tree — `announce_signature_covers_reference_byte_order_on_the_wire`
-(`leviculum-core/src/destination.rs:2133`) verifies its signature, then
+(`leviculum-core/src/destination.rs:2235`) verifies its signature, then
 drops the destination hash from the front and asserts that verification
 now fails.
 

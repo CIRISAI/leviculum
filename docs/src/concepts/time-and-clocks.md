@@ -187,7 +187,7 @@ that passes the sanity window and is refused anyway, because its
 estimate is recognisably behind real time and every expiry it
 computes is already in the past on every healed peer. Today the gate
 is the value test `NodeCore::has_plausible_wall_clock`
-(`leviculum-core/src/node/mod.rs:2534`), which is correct only until
+(`leviculum-core/src/node/mod.rs:2586`), which is correct only until
 a port plumbs its build timestamp — the rank section says why, and
 binds the fix to the same change.
 
@@ -271,7 +271,7 @@ they stay keyed on the value:
   announce — the exact #161 §1 regression this page forbids —
   instead of healing in one step.
 - **The ticket refusal.** `NodeCore::has_plausible_wall_clock`
-  (`leviculum-core/src/node/mod.rs:2534`) becomes vacuously true at
+  (`leviculum-core/src/node/mod.rs:2586`) becomes vacuously true at
   the build floor: the refusal never fires, and a birth-anchored
   node issues tickets whose expiry is already in the past on every
   healed peer — the silently-discarded field the refusal exists to
@@ -336,7 +336,7 @@ carries UTC date and time in every fix.
 
 ### Arm 2: Host injection
 
-`Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:710`
+`Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:728`
 → `transport.rs:2941`), for deployments where a clockless node has a
 host that does know wall time — e.g. a control frame on the LNode
 serial channel (the radio-config envelope of
