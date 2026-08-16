@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [Unreleased] — CIRIS fork
+
+### Added
+
+**Scoped transit — proxy for members only (leviculum#48/#51/#52).** The
+closed-overlay relay posture, built harness-first: the executable spec
+(`leviculum-std/tests/scoped_transit.rs`, six scenarios) was written before
+the features and the features built to turn it green; it remains the
+permanent conformance suite. Three pieces:
+
+- **Declared per-interface transit policy (#51).** `transit = false` on an
+  interface makes it leaf-only, enforced symmetrically at the announce gate
+  (never rebroadcast across it, in OR out) with a defense-in-depth drop at
+  `forward_packet`. Declared, never silent: a peer on a no-transit interface
+  can never build a path expecting transit the node won't provide. Config
+  key `transit`, builder `add_tcp_server_no_transit`, spawned children
+  inherit it like `mode`. Default stays `true` (relay-by-default, #48).
+- **IFAC three-phase membership-key rotation (#52).** `ifac_install_next`
+  (accept old+new, send old) → `ifac_activate_next` (send new, accept both)
+  → `ifac_seal_rotation` (new only) on `ReticulumNode`, applied to every
+  IFAC'd interface. No fleet flag-day: stragglers keep full service in
+  phase 1, outbound-only in phase 2, are excluded at seal, readmitted on
+  re-key; live links survive all phases (IFAC is per-packet masking).
+  Connections accepted during a window inherit the rotated dual-key state.
+- **Builder surface**: `add_tcp_server_ifac` / `add_tcp_client_ifac`
+  (programmatic IFAC at last), and `add_interface_config` — the general
+  escape hatch equivalent to a config-file interface section (the surface
+  edge's adoption needs).
+
 ## [0.16.0+ciris.1] — CIRIS fork
 
 ### Added

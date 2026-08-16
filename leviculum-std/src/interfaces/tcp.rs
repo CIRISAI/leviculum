@@ -263,6 +263,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
 
     InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name,
             hw_mtu: Some(TCP_HW_MTU),
@@ -347,6 +348,9 @@ pub(crate) struct TcpServerConfig {
     pub corrupt_every: Option<u64>,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
     pub mode: leviculum_core::traits::InterfaceMode,
+    /// Declared transit policy (leviculum#51), inherited by every accepted
+    /// connection the same way `mode` is.
+    pub transit: bool,
     /// Resolved `ingress_control` of the listener, inherited by every accepted
     /// connection (Codeberg #189).
     pub ingress_control: bool,
@@ -368,6 +372,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
         corrupt_every,
         ifac,
         mode,
+        transit,
         ingress_control,
         listener_id,
         inventory,
@@ -436,6 +441,9 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                             // this server, mirroring Python
                             // `spawned_interface.mode = self.mode` (TCPInterface.py:625).
                             handle.info.mode = mode;
+                            // leviculum#51: and its declared transit policy —
+                            // a no-transit listener's children are leaf-only.
+                            handle.info.transit = transit;
                             // Codeberg #189: and its ingress control, mirroring
                             // `spawned_interface.ingress_control =
                             // self.ingress_control` (TCPInterface.py:582). The
@@ -510,6 +518,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
 
     InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name: config.name,
             hw_mtu: Some(TCP_HW_MTU),
@@ -1361,6 +1370,7 @@ mod tests {
         drop(std_listener); // free the port for spawn_tcp_server
 
         spawn_tcp_server(TcpServerConfig {
+            transit: true,
             bind_addr: bound_addr,
             section: "Test Server".to_string(),
             next_id: next_id.clone(),
@@ -1406,6 +1416,7 @@ mod tests {
         drop(std_listener);
 
         spawn_tcp_server(TcpServerConfig {
+            transit: true,
             bind_addr: bound_addr,
             section: "Test Server".to_string(),
             next_id: next_id.clone(),
@@ -1458,6 +1469,7 @@ mod tests {
             drop(std_listener);
 
             spawn_tcp_server(TcpServerConfig {
+                transit: true,
                 bind_addr: bound_addr,
                 section: "Test Server".to_string(),
                 next_id: next_id.clone(),
