@@ -2048,11 +2048,38 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.remove_ifac_config(id);
     }
 
+    /// Rotation phase 1 (leviculum#52): see `Transport::ifac_install_next`.
+    pub fn ifac_install_next(&mut self, next: &crate::ifac::IfacConfig) -> usize {
+        self.transport.ifac_install_next(next)
+    }
+
+    /// Rotation phase 2: see `Transport::ifac_activate_next`.
+    pub fn ifac_activate_next(&mut self) -> usize {
+        self.transport.ifac_activate_next()
+    }
+
+    /// Rotation phase 3: see `Transport::ifac_seal_rotation`.
+    pub fn ifac_seal_rotation(&mut self) -> usize {
+        self.transport.ifac_seal_rotation()
+    }
+
     /// Set the Reticulum propagation mode for an interface (Codeberg #91). The
     /// driver calls this during setup from the parsed config; transport applies
     /// the per-mode announce-propagation and path-expiry rules.
     pub fn set_interface_mode(&mut self, id: usize, mode: crate::traits::InterfaceMode) {
         self.transport.set_interface_mode(id, mode);
+    }
+
+    /// Declare an interface's transit policy (leviculum#51): `false` = leaf
+    /// only — never forward through it, never rebroadcast announces across
+    /// it. The driver calls this at registration from the parsed config.
+    pub fn set_interface_transit(&mut self, id: usize, transit: bool) {
+        self.transport.set_interface_transit(id, transit);
+    }
+
+    /// Declared transit policy for an interface (`true` when unset).
+    pub fn interface_transit(&self, id: usize) -> bool {
+        self.transport.interface_transit(id)
     }
 
     /// Propagation mode for an interface (`Full` when unset).
