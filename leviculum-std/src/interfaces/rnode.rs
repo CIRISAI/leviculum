@@ -3796,6 +3796,7 @@ where
     InterfaceHandle {
         next_tag: None,
         info: InterfaceInfo {
+            transit: true,
             id,
             name,
             hw_mtu: Some(rnode::HW_MTU as u32),
@@ -4745,6 +4746,7 @@ pub(crate) fn spawn_rnode_multi_interface(
         handles.push(InterfaceHandle {
             next_tag: None,
             info: InterfaceInfo {
+                transit: true,
                 id: sub.id,
                 name: sub.name.clone(),
                 hw_mtu: Some(rnode::HW_MTU as u32),

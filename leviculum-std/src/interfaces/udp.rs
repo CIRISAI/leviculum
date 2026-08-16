@@ -333,6 +333,7 @@ fn spawn_udp_interface_inner(
     Ok(InterfaceHandle {
         next_tag: None,
         info: InterfaceInfo {
+            transit: true,
             id,
             name,
             // A UDP interface signals no MTU, so a link crossing it stays at

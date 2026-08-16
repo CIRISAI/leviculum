@@ -201,6 +201,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
     InterfaceHandle {
         next_tag: None,
         info: InterfaceInfo {
+            transit: true,
             id,
             name: config.name,
             hw_mtu: Some(I2P_HW_MTU),
@@ -533,6 +534,7 @@ fn spawn_i2p_accepted(
     InterfaceHandle {
         next_tag: None,
         info: InterfaceInfo {
+            transit: true,
             id,
             name,
             hw_mtu: Some(I2P_HW_MTU),

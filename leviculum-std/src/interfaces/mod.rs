@@ -769,6 +769,12 @@ pub(crate) struct InterfaceInfo {
     /// (`LocalClientInterface.should_ingress_limit() -> False`,
     /// LocalInterface.py:137-138).
     pub ingress_control: Option<bool>,
+    /// Declared transit policy (leviculum#51), inherited by spawned children
+    /// the same way `mode` is: a `transit: false` listener's accepted
+    /// connections are leaf-only — the node never forwards through them and
+    /// never rebroadcasts announces across them. `true` for every interface
+    /// that doesn't declare otherwise (relay-by-default, leviculum#48).
+    pub transit: bool,
 }
 
 /// Event loop's handle to a spawned interface task
@@ -1051,6 +1057,7 @@ mod tests {
         let handle = InterfaceHandle {
             next_tag: None,
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(id),
                 name: format!("test-{id}"),
                 hw_mtu: None,
