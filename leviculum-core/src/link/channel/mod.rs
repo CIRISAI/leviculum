@@ -279,7 +279,7 @@ impl Channel {
     /// This is the link MDU minus the envelope header size, capped at the
     /// envelope's own hard ceiling: the wire length field is `u16`, so no
     /// channel payload can exceed `u16::MAX` bytes regardless of how large an
-    /// MTU the link negotiated (leviculum#39 — an uncapped value let an
+    /// MTU the link negotiated (#242 — an uncapped value let an
     /// oversized send pass the `TooLarge` guard and reach the `Envelope`
     /// length assert as a panic).
     pub fn mdu(&self, link_mdu: usize) -> usize {
@@ -566,7 +566,7 @@ impl Channel {
         let sequence = self.next_sequence();
         // Unreachable while the mdu() cap holds (checked above), but a length
         // that slipped through must surface as TooLarge, never as the
-        // Envelope assert panicking a lock-holding thread (leviculum#39).
+        // Envelope assert panicking a lock-holding thread (#242).
         let envelope =
             Envelope::try_new(msgtype, sequence, data.to_vec()).ok_or(ChannelError::TooLarge)?;
         let packed = envelope.pack();
@@ -1079,7 +1079,7 @@ mod tests {
         assert_eq!(result, Err(ChannelError::TooLarge));
     }
 
-    /// leviculum#39 field regression: on a link that negotiated a large MTU,
+    /// #242 field regression: on a link that negotiated a large MTU,
     /// an oversized send must be refused as `TooLarge` — the envelope's wire
     /// length field is u16, so the channel MDU is capped at `u16::MAX`
     /// regardless of link MDU. Before the cap, the guard passed and the
@@ -1107,7 +1107,7 @@ mod tests {
         assert!(channel.send(&ok, link_mdu, 2000, 100).is_ok());
     }
 
-    /// leviculum#39 boundary: one byte past the u16 wire ceiling is refused
+    /// #242 boundary: one byte past the u16 wire ceiling is refused
     /// at the channel guard, on a link whose MDU would otherwise allow it.
     #[test]
     fn test_send_one_past_u16_ceiling_is_too_large() {

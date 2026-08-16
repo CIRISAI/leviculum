@@ -33,14 +33,14 @@ impl Envelope {
     /// Panics if `data.len()` exceeds 65535 bytes (u16::MAX) — the wire length
     /// field is `u16`. The channel send path never constructs through here (it
     /// uses [`try_new`](Self::try_new), and its MDU is capped at the same
-    /// ceiling — leviculum#39); the assert guards direct construction in tests
+    /// ceiling — #242); the assert guards direct construction in tests
     /// and future callers.
     pub fn new(msgtype: u16, sequence: u16, data: Vec<u8>) -> Self {
         Self::try_new(msgtype, sequence, data).expect("envelope data length exceeds u16::MAX")
     }
 
     /// Fallible constructor: `None` when `data` exceeds the `u16` wire length
-    /// field (leviculum#39 — a caller-caused, recoverable condition must be
+    /// field (#242 — a caller-caused, recoverable condition must be
     /// reachable as a value, not only as a panic from a lock-holding thread).
     pub fn try_new(msgtype: u16, sequence: u16, data: Vec<u8>) -> Option<Self> {
         if data.len() > u16::MAX as usize {
@@ -327,7 +327,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// leviculum#39: the fallible constructor refuses what the wire length
+    /// #242: the fallible constructor refuses what the wire length
     /// field cannot carry; `new` remains available (and panics) for direct use.
     #[test]
     fn try_new_refuses_oversized_data() {
