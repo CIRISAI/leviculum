@@ -170,6 +170,7 @@ pub(crate) fn spawn_ble_interface(
     let ready = ReadySignal::new();
 
     let info = InterfaceInfo {
+        transit: true,
         id,
         name: name.clone(),
         // Reassembled packets carry the base protocol MTU; no link-MTU

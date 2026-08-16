@@ -118,6 +118,9 @@ pub(super) fn build_server(
         corrupt_every: ctx.corrupt_every,
         ifac,
         mode,
+        // leviculum#51: declared transit policy; every accepted connection
+        // inherits it (the listener itself never routes).
+        transit: config.transit.unwrap_or(true),
         // Codeberg #189: the listener resolves its ingress control once and
         // every accepted connection inherits it. The listener itself never
         // registers as a routable interface, so the startup config loop (which
