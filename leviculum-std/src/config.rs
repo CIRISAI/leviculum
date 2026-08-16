@@ -246,6 +246,14 @@ pub struct InterfaceConfig {
     /// alias (Reticulum.py:717-745). `None` means the `Full` default.
     #[serde(default, alias = "interface_mode")]
     pub mode: Option<String>,
+
+    /// Declared transit policy (leviculum#51). `false` = this interface
+    /// carries only traffic terminating or originating locally — the node
+    /// never forwards through it and never rebroadcasts announces across
+    /// it, so no peer can build a path expecting transit we won't provide.
+    /// Default (`None`) = `true`: relay-by-default stands (leviculum#48).
+    #[serde(default)]
+    pub transit: Option<bool>,
     /// Can send outgoing packets
     #[serde(default = "default_true")]
     pub outgoing: bool,
@@ -576,6 +584,7 @@ impl Default for InterfaceConfig {
             listen_port: None,
             target_host: None,
             target_port: None,
+            transit: None,
             forward_ip: None,
             forward_port: None,
             port: None,
