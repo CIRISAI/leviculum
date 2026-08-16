@@ -810,6 +810,12 @@ pub(crate) struct InterfaceInfo {
     /// interface's included; the `[reticulum] path_choice` key, when set,
     /// overrides it in the core (`TransportConfig::path_choice`).
     pub path_choice: leviculum_core::transport::PathChoice,
+    /// Declared transit policy (leviculum#51), inherited by spawned children
+    /// the same way `mode` is: a `transit: false` listener's accepted
+    /// connections are leaf-only — the node never forwards through them and
+    /// never rebroadcasts announces across them. `true` for every interface
+    /// that doesn't declare otherwise (relay-by-default, leviculum#48).
+    pub transit: bool,
 }
 
 /// Event loop's handle to a spawned interface task
@@ -1092,6 +1098,7 @@ mod tests {
         let handle = InterfaceHandle {
             next_tag: None,
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(id),
                 name: format!("test-{id}"),
                 hw_mtu: None,

@@ -3433,6 +3433,8 @@ pub struct Transport<C: Clock, S: Storage> {
     /// by the driver at registration; drives the per-mode announce-propagation
     /// and path-expiry rules (Python Transport.py:1193-1245, 773-778, 1875-1880).
     interface_modes: IfaceMap<InterfaceMode>,
+    /// Declared per-interface transit policy (leviculum#51); absent = true.
+    interface_transit: IfaceMap<bool>,
     interface_kinds: IfaceMap<InterfaceKind>,
 
     /// Per-interface ingress-control enable flag (Codeberg #8; Python
@@ -3714,6 +3716,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             ingress_peer: None,
             loop_refusals: None,
             interface_modes: IfaceMap::new(),
+            interface_transit: IfaceMap::new(),
             interface_kinds: IfaceMap::new(),
             interface_ingress_control: IfaceMap::new(),
             interface_egress_control: IfaceMap::new(),
@@ -8022,10 +8025,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             //     `enable_transport=false`.
             // Suppress rebroadcast when rate-limited (announce arrived within
             // rate window but had fewer hops, so path table was still updated).
+            // leviculum#51 - declared transit policy, ingress half: an
+            // announce learned through a `transit: false` interface is leaf
+            // traffic. The path table was already updated (this node may
+            // talk to the announcer), but the announce is never queued for
+            // rebroadcast - this node must not offer transit it declared it
+            // will not provide.
+            let transit_blocked = !self.interface_transit(interface_index);
             let should_rebroadcast = (self.config.enable_transport || from_local)
                 && !is_path_response
                 && !rate_blocked
-                && !rate_limited;
+                && !rate_limited
+                && !transit_blocked;
 
             crate::tracing::debug!(
                 dest = %HexShort(&dest_hash),
@@ -9753,6 +9764,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             return Ok(());
         };
 
+        // leviculum#51 — declared transit policy, defense in depth: the
+        // announce gate already prevents paths forming across a
+        // `transit: false` interface, so a relay crossing one here means a
+        // stale or hand-installed path. Drop rather than carry transit an
+        // interface declared it would not provide.
+        if !self.interface_transit(source_interface_index) || !self.interface_transit(target_iface)
+        {
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_DROP",
+                ph = %HexShort(&truncated_hash[..PKT_PH_BYTES]),
+                dst = %HexShort(&packet.destination_hash),
+                r#type = ?packet.flags.packet_type,
+                hops = packet.hops,
+                iface_in = %self.iface_name(source_interface_index),
+                reason = "no-transit-interface",
+            );
+            return Ok(());
+        }
+
         crate::tracing::debug!(
             "Forwarding packet for <{}> from {} to {}, {} hops",
             HexShort(&packet.destination_hash),
@@ -10604,6 +10635,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_modes.remove(&id);
     }
 
+    // Public: Interface Transit API (leviculum#51)
+    /// Declare an interface's transit policy. `false` = the interface carries
+    /// only locally-terminating/originating traffic: announces are never
+    /// rebroadcast across it (in either direction) and packets are never
+    /// forwarded through it, so no peer can build a path expecting transit
+    /// this node won't provide (declared policy, never silent selectivity).
+    /// `true` is the default and is stored as a removal to keep the map
+    /// sparse.
+    pub fn set_interface_transit(&mut self, id: usize, transit: bool) {
+        if transit {
+            self.interface_transit.remove(&id);
+        } else {
+            self.interface_transit.insert(id, false);
+        }
+    }
+
+    /// Declared transit policy for an interface (`true` when unset).
+    pub fn interface_transit(&self, id: usize) -> bool {
+        *self.interface_transit.get(&id).unwrap_or(&true)
+    }
+
+    /// Remove transit declaration (interface teardown cleanup).
+    pub fn remove_interface_transit(&mut self, id: usize) {
+        self.interface_transit.remove(&id);
+    }
+
     /// Set the transport medium for an interface (called by the driver at
     /// registration from the interface it built). `Unknown` is the default, so
     /// it is stored as an explicit removal to keep the map sparse.
@@ -10738,6 +10795,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         is_local: bool,
     ) -> bool {
+        // leviculum#51 — declared transit policy, checked before any mode
+        // logic: a transit announce (one we would relay for someone else)
+        // never crosses a `transit: false` interface in either direction.
+        // Egress: never rebroadcast OUT such an interface. Ingress: an
+        // announce whose path was learned ON such an interface is leaf
+        // traffic — this node may talk to the announcer, but must not offer
+        // it to anyone else. Local-origin announces are unaffected: a leaf
+        // interface still announces this node's own destinations.
+        if !is_local {
+            if !self.interface_transit(out_iface) {
+                return false;
+            }
+            if let Some(from_iface) = self.storage.get_path(dest_hash).map(|p| p.interface_index) {
+                if !self.interface_transit(from_iface) {
+                    return false;
+                }
+            }
+        }
         match self.interface_mode(out_iface) {
             InterfaceMode::AccessPoint => false,
             InterfaceMode::Roaming => {
@@ -10794,11 +10869,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         is_local: bool,
     ) -> Vec<usize> {
-        if self.interface_modes.is_empty() && self.duty_hold_ifaces.is_empty() {
+        if self.interface_modes.is_empty()
+            && self.duty_hold_ifaces.is_empty()
+            && self.interface_transit.is_empty()
+        {
             return Vec::new();
         }
         // Sorted and deduplicated because the chain can name an interface
-        // twice (duty-held AND moded), and the two sources interleave
+        // twice (duty-held AND moded), and the sources interleave
         // arbitrarily. By sorted insertion rather than through a
         // `BTreeSet<usize>`: the result is the same ascending list, and on a
         // board the set's collect pulled in a generic stable sort of about
@@ -10806,8 +10884,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut blocked: Vec<usize> = Vec::new();
         for idx in self
             .interface_modes
+            // An interface with only a `transit: false` declaration (leviculum#51)
+            // has no mode entry but must still be excluded from transit-announce
+            // egress, so its key joins the chain.
             .keys()
             .chain(self.duty_hold_ifaces.iter())
+            .chain(self.interface_transit.keys())
             .copied()
             .filter(|&idx| !self.announce_allowed_on_interface(idx, dest_hash, is_local))
         {
@@ -11050,6 +11132,41 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Clone all IFAC configurations (for passing to dispatch_actions outside the lock).
     pub fn clone_ifac_configs(&self) -> BTreeMap<usize, IfacConfig> {
         self.ifac_configs.clone()
+    }
+
+    /// Rotation phase 1 (leviculum#52): install `next` as the accept-only
+    /// alternate on every IFAC'd interface. Returns how many were updated.
+    pub fn ifac_install_next(&mut self, next: &IfacConfig) -> usize {
+        let mut n = 0;
+        for cfg in self.ifac_configs.values_mut() {
+            cfg.install_alt(next.clone());
+            n += 1;
+        }
+        n
+    }
+
+    /// Rotation phase 2: swap the alternate into primary everywhere.
+    pub fn ifac_activate_next(&mut self) -> usize {
+        let mut n = 0;
+        for cfg in self.ifac_configs.values_mut() {
+            if cfg.has_alt() {
+                cfg.activate_alt();
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Rotation phase 3: seal — drop every alternate.
+    pub fn ifac_seal_rotation(&mut self) -> usize {
+        let mut n = 0;
+        for cfg in self.ifac_configs.values_mut() {
+            if cfg.has_alt() {
+                cfg.seal_alt();
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Get the HW_MTU for the next-hop interface toward a destination.
