@@ -2074,11 +2074,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         };
 
-        // A precomputed dedup hash is over the caller's bytes; if the IFAC
-        // strip produced different bytes, it no longer applies.
-        let precomputed_hash = match &raw {
-            Cow::Owned(_) => None,
-            Cow::Borrowed(_) => precomputed_hash,
+        // A precomputed dedup hash and a precomputed announce verification
+        // are over the caller's bytes; if the IFAC strip produced different
+        // bytes, neither applies any longer.
+        let (precomputed_hash, announce_verified) = match &raw {
+            Cow::Owned(_) => (None, false),
+            Cow::Borrowed(_) => (precomputed_hash, announce_verified),
         };
 
         let mut packet = Packet::unpack(&raw)?;

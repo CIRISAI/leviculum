@@ -783,3 +783,45 @@ fn offlock_announce_verify_matches_inlock_and_tampering_is_dropped() {
         "tampered announce must be dropped"
     );
 }
+
+/// The announce memo is bound to the exact bytes the caller verified. On an
+/// IFAC interface core REWRITES the bytes (strip) before parsing, so the
+/// verified flag must be discarded together with the dedup hash — the
+/// stripped announce is re-validated in-lock and a tampered one dropped,
+/// no matter what the memo claims.
+#[test]
+fn offlock_announce_memo_is_discarded_with_ifac_rewrite() {
+    use crate::node::PrecomputedRx;
+
+    let (_initiator, _responder, _r, _dest, announce_raw) = single_dest_pair();
+
+    // Tamper the signature region of the inner announce, then wrap it in a
+    // valid IFAC envelope — the envelope authenticates, the announce does not.
+    let mut tampered = announce_raw;
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0xFF;
+    let cfg = crate::ifac::IfacConfig::new(Some("testnet"), Some("secret"), 16).unwrap();
+    let wrapped = cfg.apply_ifac(&tampered).unwrap();
+
+    let mut fresh = make_mem_node();
+    let f_iface = add_mem_iface(&mut fresh, "F_ifac");
+    fresh.set_ifac_config(f_iface, cfg);
+
+    // A (wrong) memo claiming the bytes were verified: after the IFAC strip
+    // the claim refers to bytes core never parses, so it must die with them.
+    let out = fresh.handle_packet_precomputed(
+        InterfaceId(f_iface),
+        &wrapped,
+        PrecomputedRx {
+            packet_hash: Some(crate::packet::packet_hash(&wrapped)),
+            announce_verified: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        !out.events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::AnnounceReceived { .. })),
+        "IFAC-stripped tampered announce must be dropped regardless of the memo"
+    );
+}
