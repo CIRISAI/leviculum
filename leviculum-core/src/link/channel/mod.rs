@@ -1107,6 +1107,20 @@ mod tests {
         assert!(channel.send(&ok, link_mdu, 2000, 100).is_ok());
     }
 
+    /// leviculum#39 boundary: one byte past the u16 wire ceiling is refused
+    /// at the channel guard, on a link whose MDU would otherwise allow it.
+    #[test]
+    fn test_send_one_past_u16_ceiling_is_too_large() {
+        let mut channel = Channel::new();
+        let msg = TestMessage {
+            data: vec![0; u16::MAX as usize + 1],
+        };
+        assert_eq!(
+            channel.send(&msg, 200_000, 1000, 100),
+            Err(ChannelError::TooLarge)
+        );
+    }
+
     #[test]
     fn test_send_busy() {
         let mut channel = Channel::new();
