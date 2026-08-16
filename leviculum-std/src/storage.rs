@@ -47,13 +47,12 @@ use leviculum_core::ratchet_store::RatchetStore;
 const FILE_STORAGE_PACKET_HASH_CAP: usize = 100_000;
 
 pub struct Storage {
-    // Read by category_path/read_root/write_root in #[cfg(test)] helpers only.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Snapshotted by take_flush_snapshot: the off-lock flush writer builds
+    // its own store handles from this root (leviculum#44).
     base_path: PathBuf,
     inner: MemoryStorage,
-    // Persistent stores
-    kd_store: FileKnownDestinationsStore,
-    ph_store: FilePacketHashStore,
+    // Persistent store for write-through ratchets. The flush-on-interval
+    // stores are stateless path wrappers, built on demand from base_path.
     ratchet_store: FileRatchetStore,
     // Known dest entries for merge logic
     known_dest_entries: BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>,
@@ -63,7 +62,15 @@ pub struct Storage {
     packet_hash_cap: usize,
     packet_hashes_dirty: bool,
     identities_dirty: bool,
+    // Bumped on every dirtying mutation, not just false→true transitions:
+    // finish_flush clears a dirty flag only while the generation still
+    // matches its snapshot, so state dirtied mid-write stays dirty for the
+    // next interval (leviculum#44).
+    packet_hashes_gen: u64,
+    identities_gen: u64,
     mono_offset_ms: u64,
+    #[cfg(test)]
+    flush_io_hook: Option<FlushIoHook>,
 }
 
 impl Storage {
@@ -149,8 +156,6 @@ impl Storage {
         Ok(Self {
             base_path,
             inner,
-            kd_store,
-            ph_store,
             ratchet_store,
             known_dest_entries,
             packet_cache,
@@ -158,7 +163,11 @@ impl Storage {
             packet_hash_cap: FILE_STORAGE_PACKET_HASH_CAP,
             packet_hashes_dirty: false,
             identities_dirty: false,
+            packet_hashes_gen: 0,
+            identities_gen: 0,
             mono_offset_ms,
+            #[cfg(test)]
+            flush_io_hook: None,
         })
     }
 
@@ -303,6 +312,159 @@ pub(crate) fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Test seam: stalls/observes the off-lock write (compiled out of release).
+#[cfg(test)]
+pub(crate) type FlushIoHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+/// Dirty state captured under the node lock for one flush, written off it
+/// (leviculum#44). Carries the storage root, not the live store handles:
+/// the file stores are stateless path wrappers, so the off-lock writer
+/// builds its own; the in-struct ratchet store stays with the write-through
+/// path.
+pub(crate) struct FlushSnapshot {
+    base_path: PathBuf,
+    identities: Option<(u64, BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>)>,
+    packet_hashes: Option<(u64, Vec<[u8; 32]>)>,
+    #[cfg(test)]
+    io_hook: Option<FlushIoHook>,
+}
+
+/// Which stores the write landed, tagged with the snapshot's generations;
+/// finish_flush clears a dirty flag only while its generation still matches.
+pub(crate) struct FlushOutcome {
+    identities_written: Option<u64>,
+    packet_hashes_written: Option<u64>,
+}
+
+impl FlushSnapshot {
+    /// Blocking file IO — blocking pool from the event loop, inline at
+    /// shutdown. Merges on-disk entries written by other processes
+    /// (Python-compatible) before rewriting. Never touches the node lock.
+    pub(crate) fn write(self) -> FlushOutcome {
+        #[cfg(test)]
+        if let Some(hook) = &self.io_hook {
+            hook();
+        }
+
+        let mut outcome = FlushOutcome {
+            identities_written: None,
+            packet_hashes_written: None,
+        };
+
+        if let Some((generation, entries)) = self.identities {
+            // Merge with on-disk entries (preserving entries added by other
+            // processes, matching Python behavior).
+            let mut kd_store = FileKnownDestinationsStore::new(&self.base_path);
+            let mut merged = entries;
+            if let Ok(disk_entries) = kd_store.load_all() {
+                for (hash, entry) in disk_entries {
+                    merged.entry(hash).or_insert(entry);
+                }
+            }
+            match kd_store.save_all(&merged) {
+                Ok(()) => {
+                    outcome.identities_written = Some(generation);
+                    tracing::debug!("Saved {} known destinations to storage", merged.len());
+                }
+                Err(e) => {
+                    tracing::error!("Failed to save known_destinations: {e}");
+                }
+            }
+        }
+
+        if let Some((generation, hashes)) = self.packet_hashes {
+            let mut ph_store = FilePacketHashStore::new(&self.base_path);
+            match ph_store.save_all(&hashes) {
+                Ok(()) => {
+                    outcome.packet_hashes_written = Some(generation);
+                    tracing::debug!("Saved {} packet hashes to storage", hashes.len());
+                }
+                Err(e) => {
+                    tracing::error!("Failed to save packet_hashlist: {e}");
+                }
+            }
+        }
+
+        outcome
+    }
+}
+
+impl Storage {
+    /// Phase 1, under the node lock, memory ops only: fold runtime
+    /// identities into known_dest_entries and clone out everything dirty.
+    /// None when nothing is dirty. Dirty flags stay set until finish_flush.
+    pub(crate) fn take_flush_snapshot(&mut self) -> Option<FlushSnapshot> {
+        if !self.identities_dirty && !self.packet_hashes_dirty {
+            tracing::debug!("Flush skipped — nothing dirty");
+            return None;
+        }
+
+        let identities = if self.identities_dirty {
+            let timestamp = unix_timestamp_secs();
+
+            // Merge runtime identities into known_dest_entries.
+            // New identities get a minimal entry; existing entries get their
+            // timestamp and public_key refreshed (the runtime version was just
+            // validated from a live announce, so it takes precedence over the
+            // disk version). app_data and packet_hash are preserved, they
+            // come from the original announce and are not available here.
+            for (hash, identity) in self.inner.known_identity_iter() {
+                self.known_dest_entries
+                    .entry(*hash)
+                    .and_modify(|e| {
+                        e.timestamp = timestamp;
+                        e.public_key = identity.public_key_bytes();
+                    })
+                    .or_insert_with(|| KnownDestEntry {
+                        timestamp,
+                        packet_hash: vec![0u8; PACKET_HASH_LEN],
+                        public_key: identity.public_key_bytes(),
+                        app_data: None,
+                    });
+            }
+            Some((self.identities_gen, self.known_dest_entries.clone()))
+        } else {
+            None
+        };
+
+        let packet_hashes = if self.packet_hashes_dirty {
+            let hashes: Vec<[u8; 32]> = self
+                .packet_cache
+                .iter()
+                .chain(self.packet_cache_prev.iter())
+                .copied()
+                .collect();
+            Some((self.packet_hashes_gen, hashes))
+        } else {
+            None
+        };
+
+        Some(FlushSnapshot {
+            base_path: self.base_path.clone(),
+            identities,
+            packet_hashes,
+            #[cfg(test)]
+            io_hook: self.flush_io_hook.clone(),
+        })
+    }
+
+    /// Phase 3, under the node lock, map ops only: generation-guarded
+    /// dirty-flag clear (an entry dirtied mid-write stays dirty).
+    pub(crate) fn finish_flush(&mut self, outcome: FlushOutcome) {
+        if outcome.identities_written == Some(self.identities_gen) {
+            self.identities_dirty = false;
+        }
+        if outcome.packet_hashes_written == Some(self.packet_hashes_gen) {
+            self.packet_hashes_dirty = false;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_flush_io_hook(&mut self, hook: FlushIoHook) {
+        self.flush_io_hook = Some(hook);
+    }
+}
+
 // Storage Trait Implementation
 //
 // All runtime collection methods delegate to the inner MemoryStorage.
@@ -321,6 +483,7 @@ impl leviculum_core::traits::Storage for Storage {
             self.packet_cache.clear();
         }
         self.packet_hashes_dirty = true;
+        self.packet_hashes_gen = self.packet_hashes_gen.wrapping_add(1);
     }
 
     // Path Table
@@ -553,6 +716,7 @@ impl leviculum_core::traits::Storage for Storage {
     ) {
         self.inner.set_identity(dest_hash, identity);
         self.identities_dirty = true;
+        self.identities_gen = self.identities_gen.wrapping_add(1);
     }
 
     // Cleanup
@@ -609,74 +773,14 @@ impl leviculum_core::traits::Storage for Storage {
     }
 
     // Flush (persist to disk)
+    //
+    // The synchronous shutdown entry: all three phases run back-to-back on
+    // the caller's thread. The event loop instead runs `FlushSnapshot::write`
+    // on the blocking pool between the two lock-holding phases
+    // (leviculum#44).
     fn flush(&mut self) {
-        if !self.identities_dirty && !self.packet_hashes_dirty {
-            tracing::debug!("Flush skipped — nothing dirty");
-            return;
-        }
-
-        // 1. Write known_destinations (only if identities changed)
-        if self.identities_dirty {
-            let timestamp = unix_timestamp_secs();
-
-            // Merge runtime identities into known_dest_entries.
-            // New identities get a minimal entry; existing entries get their
-            // timestamp and public_key refreshed (the runtime version was just
-            // validated from a live announce, so it takes precedence over the
-            // disk version). app_data and packet_hash are preserved, they
-            // come from the original announce and are not available here.
-            for (hash, identity) in self.inner.known_identity_iter() {
-                self.known_dest_entries
-                    .entry(*hash)
-                    .and_modify(|e| {
-                        e.timestamp = timestamp;
-                        e.public_key = identity.public_key_bytes();
-                    })
-                    .or_insert_with(|| KnownDestEntry {
-                        timestamp,
-                        packet_hash: vec![0u8; PACKET_HASH_LEN],
-                        public_key: identity.public_key_bytes(),
-                        app_data: None,
-                    });
-            }
-
-            // Merge with on-disk entries (preserving entries added by other
-            // processes, matching Python behavior).
-            let mut merged = self.known_dest_entries.clone();
-            if let Ok(disk_entries) = self.kd_store.load_all() {
-                for (hash, entry) in disk_entries {
-                    merged.entry(hash).or_insert(entry);
-                }
-            }
-
-            match self.kd_store.save_all(&merged) {
-                Ok(()) => {
-                    self.identities_dirty = false;
-                    tracing::debug!("Saved {} known destinations to storage", merged.len());
-                }
-                Err(e) => {
-                    tracing::error!("Failed to save known_destinations: {e}");
-                }
-            }
-        }
-
-        // 2. Write packet_hashlist (only if hashes changed)
-        if self.packet_hashes_dirty {
-            let hashes: Vec<[u8; 32]> = self
-                .packet_cache
-                .iter()
-                .chain(self.packet_cache_prev.iter())
-                .copied()
-                .collect();
-            match self.ph_store.save_all(&hashes) {
-                Ok(()) => {
-                    self.packet_hashes_dirty = false;
-                    tracing::debug!("Saved {} packet hashes to storage", hashes.len());
-                }
-                Err(e) => {
-                    tracing::error!("Failed to save packet_hashlist: {e}");
-                }
-            }
+        if let Some(snapshot) = self.take_flush_snapshot() {
+            self.finish_flush(snapshot.write());
         }
     }
 
@@ -845,7 +949,9 @@ mod tests {
     use std::env::temp_dir;
 
     use crate::file_ratchet_store::{RATCHETKEYS_DIR, RATCHETS_DIR};
-    use crate::known_destinations::{encode_known_destinations, KNOWN_DESTINATIONS_FILE};
+    use crate::known_destinations::{
+        decode_known_destinations, encode_known_destinations, KNOWN_DESTINATIONS_FILE,
+    };
     use crate::packet_hashlist::{encode_packet_hashlist, PACKET_HASHLIST_FILE};
 
     fn temp_storage() -> Storage {
@@ -1149,6 +1255,132 @@ mod tests {
                 "packet_hash should be preserved across flush"
             );
         }
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    // Three-phase flush (leviculum#44)
+
+    #[test]
+    fn test_take_flush_snapshot_defers_dirty_clear() {
+        let path = temp_dir().join(format!("reticulum_test_snap_defer_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let mut storage = Storage::new(&path).unwrap();
+        let id = Identity::generate(&mut rand_core::OsRng);
+        CoreStorage::set_identity(&mut storage, [0xA1; TRUNCATED_HASHBYTES], id);
+
+        let snapshot = storage
+            .take_flush_snapshot()
+            .expect("dirty storage must snapshot");
+        assert!(
+            storage.identities_dirty,
+            "the snapshot must not clear the dirty flag; only finish_flush may"
+        );
+
+        storage.finish_flush(snapshot.write());
+        assert!(
+            !storage.identities_dirty,
+            "an undisturbed write must clear the dirty flag"
+        );
+
+        let bytes = std::fs::read(path.join(KNOWN_DESTINATIONS_FILE)).unwrap();
+        let entries = decode_known_destinations(&bytes).unwrap();
+        assert!(
+            entries.contains_key(&[0xA1; TRUNCATED_HASHBYTES]),
+            "the snapshotted identity must land on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_dirtied_mid_write_stays_dirty() {
+        let path = temp_dir().join(format!("reticulum_test_snap_gen_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let mut storage = Storage::new(&path).unwrap();
+        let id_a = Identity::generate(&mut rand_core::OsRng);
+        CoreStorage::set_identity(&mut storage, [0x01; TRUNCATED_HASHBYTES], id_a);
+        CoreStorage::add_packet_hash(&mut storage, [0x0A; 32]);
+
+        let snapshot = storage.take_flush_snapshot().unwrap();
+
+        // Dirtied between snapshot and finish: both generations bump, so the
+        // finished write must not clear either flag.
+        let id_b = Identity::generate(&mut rand_core::OsRng);
+        CoreStorage::set_identity(&mut storage, [0x02; TRUNCATED_HASHBYTES], id_b);
+        CoreStorage::add_packet_hash(&mut storage, [0x0B; 32]);
+
+        storage.finish_flush(snapshot.write());
+        assert!(
+            storage.identities_dirty,
+            "identity added mid-write must stay dirty for the next interval"
+        );
+        assert!(
+            storage.packet_hashes_dirty,
+            "packet hash added mid-write must stay dirty for the next interval"
+        );
+
+        // The next snapshot carries both the flushed and the mid-write data.
+        let second = storage.take_flush_snapshot().unwrap();
+        let (_, entries) = second.identities.as_ref().unwrap();
+        assert!(entries.contains_key(&[0x01; TRUNCATED_HASHBYTES]));
+        assert!(entries.contains_key(&[0x02; TRUNCATED_HASHBYTES]));
+        let (_, hashes) = second.packet_hashes.as_ref().unwrap();
+        assert!(hashes.contains(&[0x0A; 32]));
+        assert!(hashes.contains(&[0x0B; 32]));
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_failed_write_leaves_dirty_for_retry() {
+        let path = temp_dir().join(format!("reticulum_test_snap_retry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let mut storage = Storage::new(&path).unwrap();
+        let id = Identity::generate(&mut rand_core::OsRng);
+        CoreStorage::set_identity(&mut storage, [0x03; TRUNCATED_HASHBYTES], id);
+        CoreStorage::add_packet_hash(&mut storage, [0x0C; 32]);
+
+        let snapshot = storage.take_flush_snapshot().unwrap();
+        // Yank the storage root: both saves fail, nothing is written.
+        std::fs::remove_dir_all(&path).unwrap();
+        storage.finish_flush(snapshot.write());
+        assert!(
+            storage.identities_dirty,
+            "a failed identities write must leave the flag set"
+        );
+        assert!(
+            storage.packet_hashes_dirty,
+            "a failed packet-hash write must leave the flag set"
+        );
+
+        // Next interval retries and succeeds.
+        std::fs::create_dir_all(&path).unwrap();
+        let snapshot = storage.take_flush_snapshot().unwrap();
+        storage.finish_flush(snapshot.write());
+        assert!(!storage.identities_dirty);
+        assert!(!storage.packet_hashes_dirty);
+        assert!(path.join(KNOWN_DESTINATIONS_FILE).exists());
+        assert!(path.join(PACKET_HASHLIST_FILE).exists());
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_take_flush_snapshot_none_when_clean() {
+        let path = temp_dir().join(format!("reticulum_test_snap_clean_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let mut storage = Storage::new(&path).unwrap();
+        assert!(storage.take_flush_snapshot().is_none());
+
+        // The trait-level shutdown flush stays a no-op on clean storage.
+        CoreStorage::flush(&mut storage);
+        assert!(!path.join(KNOWN_DESTINATIONS_FILE).exists());
+        assert!(!path.join(PACKET_HASHLIST_FILE).exists());
 
         let _ = std::fs::remove_dir_all(&path);
     }
