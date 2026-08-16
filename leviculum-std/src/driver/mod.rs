@@ -832,6 +832,9 @@ pub struct ReticulumNode {
     /// Crash protection only, normal shutdown calls flush() via signal handler.
     /// Lost data from a crash is recovered via fresh announces.
     flush_interval_secs: u64,
+    /// leviculum#52 — IFAC membership-key rotation state shared with the
+    /// event loop.
+    ifac_rotation: IfacRotation,
     /// Aggregated peer count across all AutoInterface sections (if any
     /// configured). Empty when no AutoInterface is present.
     auto_peer_count: AutoPeerCount,
@@ -1018,6 +1021,7 @@ impl ReticulumNode {
             corrupt_every,
             outbound_socket_hook: None,
             flush_interval_secs,
+            ifac_rotation: IfacRotation::default(),
             auto_peer_count: AutoPeerCount::default(),
             share_instance_name: None,
             connect_instance_name: None,
@@ -1384,6 +1388,12 @@ impl ReticulumNode {
                 // rules. An unrecognised value logs and keeps the Full default,
                 // matching Python (which leaves the mode unchanged on an
                 // unknown string).
+                if let Some(transit) = iface_config.transit {
+                    core.set_interface_transit(idx, transit);
+                    if !transit {
+                        tracing::info!("Interface {} declared no-transit (leaf only)", idx);
+                    }
+                }
                 if let Some(mode_str) = iface_config.mode.as_deref() {
                     match leviculum_core::traits::InterfaceMode::from_config_str(mode_str) {
                         Some(mode) => {
@@ -1528,6 +1538,7 @@ impl ReticulumNode {
         // must park rather than resolve NodeStopped.
         self.completions.reopen();
         let completions = Arc::clone(&self.completions);
+        let ifac_rotation = self.ifac_rotation.clone();
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -1562,6 +1573,7 @@ impl ReticulumNode {
                 discovery_announce,
                 core_processor,
                 completions,
+                ifac_rotation,
             )
             .await;
         });
@@ -2444,6 +2456,67 @@ impl ReticulumNode {
     }
 
     /// Check if a path to a destination is known
+    /// leviculum#52 — IFAC membership-key rotation, phase 1 of 3: derive a
+    /// new access-code config from `(netname, passphrase, ifac_size)` and
+    /// install it as the ACCEPT-ONLY alternate on every IFAC'd interface.
+    /// Outbound keeps masking with the current key, so stragglers keep
+    /// full bidirectional service; distribute the new key over the still-
+    /// working fabric, then [`ifac_activate_next`](Self::ifac_activate_next).
+    /// Returns how many interfaces were updated.
+    pub fn ifac_install_next(
+        &self,
+        netname: Option<&str>,
+        passphrase: &str,
+        ifac_size: usize,
+    ) -> Result<usize, Error> {
+        let next = leviculum_core::ifac::IfacConfig::new(netname, Some(passphrase), ifac_size)
+            .map_err(|e| Error::Config(format!("ifac: {e:?}")))?;
+        let (n, snapshot) = {
+            let mut core = self.inner.lock_recover();
+            let n = core.ifac_install_next(&next);
+            (n, core.clone_ifac_configs().into_values().next())
+        };
+        *self.ifac_rotation.child_override.lock_recover() = snapshot;
+        self.ifac_rotation
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+
+    /// Rotation phase 2: swap the alternate into primary — outbound now
+    /// masks with the NEW key; the old key stays accept-only, so a
+    /// straggler's outbound still lands while its inbound degrades until
+    /// it upgrades. Call once the new key is distributed.
+    pub fn ifac_activate_next(&self) -> usize {
+        let (n, snapshot) = {
+            let mut core = self.inner.lock_recover();
+            let n = core.ifac_activate_next();
+            (n, core.clone_ifac_configs().into_values().next())
+        };
+        *self.ifac_rotation.child_override.lock_recover() = snapshot;
+        self.ifac_rotation
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        n
+    }
+
+    /// Rotation phase 3: seal the window — only the new key is accepted
+    /// from here on. Members still on the old key are out until they
+    /// re-key. The child override is kept (new connections get the
+    /// sealed single-key state).
+    pub fn ifac_seal_rotation(&self) -> usize {
+        let (n, snapshot) = {
+            let mut core = self.inner.lock_recover();
+            let n = core.ifac_seal_rotation();
+            (n, core.clone_ifac_configs().into_values().next())
+        };
+        *self.ifac_rotation.child_override.lock_recover() = snapshot;
+        self.ifac_rotation
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        n
+    }
+
     pub fn has_path(&self, dest_hash: &leviculum_core::DestinationHash) -> bool {
         self.inner.lock_recover().has_path(dest_hash)
     }
@@ -3523,6 +3596,18 @@ fn precompute_single_dest(
     }
 }
 
+/// leviculum#52 — shared state for the three-phase IFAC membership-key
+/// rotation. `generation` bumps on every rotation phase so the event loop
+/// re-clones its local IFAC map (one relaxed load per wake otherwise);
+/// `child_override` carries the rotated dual-key state to connections
+/// accepted DURING a window, whose listeners captured the pre-rotation key
+/// at spawn.
+#[derive(Clone, Default)]
+pub(crate) struct IfacRotation {
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    child_override: Arc<Mutex<Option<leviculum_core::ifac::IfacConfig>>>,
+}
+
 /// Run the internal event loop (sans-I/O architecture)
 ///
 /// The driver owns the interfaces and acts as the I/O bridge between the
@@ -3545,6 +3630,7 @@ async fn run_event_loop(
     discovery_announce: Option<DiscoveryAnnounceWiring>,
     core_processor: Option<Box<dyn CoreProcessor>>,
     completions: Arc<CompletionRegistry>,
+    ifac_rotation: IfacRotation,
 ) {
     // A slot rather than the bare box: a panicking hook is detached from
     // inside its own call frame, several `dispatch_output` frames down from
@@ -3594,6 +3680,9 @@ async fn run_event_loop(
     // Clone IFAC configs from core so dispatch_output can apply IFAC outside the lock.
     // This is the canonical source of truth for "what IFAC config does interface N have
     // according to the INI config". On reconnect, we re-apply from this map.
+    let mut last_ifac_generation: u64 = ifac_rotation
+        .generation
+        .load(std::sync::atomic::Ordering::Relaxed);
     let mut ifac_configs: BTreeMap<usize, leviculum_core::ifac::IfacConfig> = {
         let core = inner.lock_recover();
         core.clone_ifac_configs()
@@ -3695,6 +3784,19 @@ async fn run_event_loop(
     }
 
     loop {
+        // leviculum#52: a rotation phase bumped the generation — re-clone
+        // the loop-local IFAC map so outbound masking and the precompute
+        // skip see the rotated keys. One relaxed load per wake otherwise.
+        {
+            let gen = ifac_rotation
+                .generation
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if gen != last_ifac_generation {
+                last_ifac_generation = gen;
+                ifac_configs = inner.lock_recover().clone_ifac_configs();
+            }
+        }
+
         // Auto-connect poll wake — only armed while the feature is enabled.
         let autoconnect_wake = autoconnect.as_ref().map(|_| next_autoconnect);
 
@@ -4059,7 +4161,18 @@ async fn run_event_loop(
                 tracing::info!("New connection: {} ({})", handle.info.name, handle.info.id);
                 let is_local = handle.info.is_local_client;
                 let iface_idx = handle.info.id.0;
-                let inherited_ifac = handle.info.ifac.clone();
+                let inherited_ifac = {
+                    let inherited = handle.info.ifac.clone();
+                    // leviculum#52: a connection accepted during a rotation
+                    // window inherits the listener's PRE-rotation key (the
+                    // accept loop captured it at spawn). If a rotation has
+                    // published an override, an IFAC'd child takes the
+                    // rotated dual-key state instead.
+                    match (&inherited, &*ifac_rotation.child_override.lock_recover()) {
+                        (Some(_), Some(rotated)) => Some(rotated.clone()),
+                        _ => inherited,
+                    }
+                };
                 let inherited_mode = handle.info.mode;
                 let inherited_kind = handle.info.kind;
                 let inherited_ingress = handle.info.ingress_control;
@@ -4078,6 +4191,11 @@ async fn run_event_loop(
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
                     core.set_interface_kind(iface_idx, inherited_kind);
+                    // leviculum#51: declared transit policy, inherited from
+                    // the listener exactly like mode — the only place a TCP
+                    // server's `transit` can take effect, since the listener
+                    // never registers as a routable interface.
+                    core.set_interface_transit(iface_idx, handle.info.transit);
                     // Ingress control (Codeberg #8, reshaped in #189): a
                     // dynamically-spawned interface inherits its listener's
                     // configured value, mirroring `spawned_interface
@@ -5287,6 +5405,7 @@ mod tests {
             let (out_tx, _out_rx) = mpsc::channel(1);
             InterfaceHandle {
                 info: InterfaceInfo {
+                    transit: true,
                     id: InterfaceId(7),
                     name: "udp_7".into(),
                     hw_mtu: None,
@@ -5838,6 +5957,7 @@ mod tests {
         drop(out_rx);
         registry.register(InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(12),
                 name: "tcp_server/dead".into(),
                 hw_mtu: None,
@@ -6367,6 +6487,7 @@ mod tests {
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(0),
                 name: "ready".into(),
                 hw_mtu: None,
@@ -6418,6 +6539,7 @@ mod tests {
             let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
             registry.register(InterfaceHandle {
                 info: InterfaceInfo {
+                    transit: true,
                     id: InterfaceId(idx),
                     name: format!("lora-{idx}"),
                     hw_mtu: None,
@@ -6486,6 +6608,7 @@ mod tests {
         let (l_out_tx, mut l_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(1),
                 name: "lora".into(),
                 hw_mtu: Some(500),
@@ -6509,6 +6632,7 @@ mod tests {
         let (p_out_tx, mut p_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(2),
                 name: "plain".into(),
                 hw_mtu: None,
@@ -6561,6 +6685,7 @@ mod tests {
         let (p_out_tx, mut p_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(0),
                 name: "tcp".into(),
                 hw_mtu: None,
@@ -6632,6 +6757,7 @@ mod tests {
         lora_credit.try_charge(500, 0).unwrap();
         let lora_handle = InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(1),
                 name: "lora-test".into(),
                 hw_mtu: Some(500),
@@ -6654,6 +6780,7 @@ mod tests {
         let (plain_out_tx, _plain_out_rx) = tokio::sync::mpsc::channel(4);
         let plain_handle = InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(2),
                 name: "plain-test".into(),
                 hw_mtu: None,
@@ -6728,6 +6855,7 @@ mod tests {
         let expected_airtime = credit.max_airtime_ms();
         let handle = InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(1),
                 name: "lora-sf10".into(),
                 hw_mtu: Some(500),
@@ -6782,6 +6910,7 @@ mod tests {
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
         let handle = InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(2),
                 name: "tcp-test".into(),
                 hw_mtu: None,
@@ -6836,6 +6965,7 @@ mod tests {
         let credit = Arc::new(Mutex::new(AirtimeCredit::new(125_000, 7, 5, 24, 500)));
         let handle = InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(1),
                 name: "lora-reconfig".into(),
                 hw_mtu: Some(500),
@@ -7105,6 +7235,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::channel(8);
         registry.register(InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(id),
                 name: "test/readable".into(),
                 hw_mtu: None,
@@ -8054,6 +8185,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::channel(8);
         registry.register(InterfaceHandle {
             info: InterfaceInfo {
+                transit: true,
                 id: InterfaceId(0),
                 name: "test/flush-loop".into(),
                 hw_mtu: None,
@@ -8110,6 +8242,7 @@ mod tests {
             None,
             None,
             CompletionRegistry::new(),
+            IfacRotation::default(),
         ));
 
         FlushLoopHarness {

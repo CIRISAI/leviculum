@@ -269,6 +269,7 @@ pub(crate) fn spawn_udp_interface_with_opts(
 
     Ok(InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name,
             hw_mtu: Some(1064),
