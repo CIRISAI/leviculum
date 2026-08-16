@@ -521,16 +521,73 @@ mod tests {
         assert!(split_command("   ").is_empty());
     }
 
-    /// A round-trip through the pipe interface: spawn `cat` as the command
-    /// (an echo bridge), send a packet out, and read it back on the incoming
+    /// The subprocess half of the bridge tests — NOT a real test. In a
+    /// normal suite run the marker is absent and this returns instantly.
+    /// When the bridge tests spawn THIS VERY TEST BINARY with the marker
+    /// argv (which libtest treats as one more never-matching filter), it
+    /// becomes a raw stdin→stdout echo: `..._LIMIT_<n>` copies exactly n
+    /// bytes then exits(0) (the respawn trigger), no suffix loops to EOF.
+    ///
+    /// Why self-spawn instead of `cat` / `sh -c 'head -c 8'`: on Windows
+    /// those resolve to msys2 utilities, and concurrent msys-2.0.dll
+    /// startups are a known CI flake class — the child spawns, its runtime
+    /// init stalls, and no bytes ever pump (RCA 2026-08-16, run
+    /// 31956940737: deterministic payload, interface online, 5 s recv
+    /// timeout, ~1-in-N). The test binary itself is the one subprocess
+    /// guaranteed present, portable, and msys-free. `std::process::exit`
+    /// skips the libtest trailer so nothing follows the echoed bytes.
+    #[test]
+    fn pipe_bridge_echo_helper() {
+        let marker = std::env::args().find(|a| a.starts_with("PIPE_BRIDGE_CHILD_MARKER"));
+        let Some(marker) = marker else { return };
+        let limit: u64 = marker
+            .strip_prefix("PIPE_BRIDGE_CHILD_MARKER_LIMIT_")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(u64::MAX);
+        let mut stdin = std::io::stdin().lock();
+        let mut stdout = std::io::stdout().lock();
+        let mut remaining = limit;
+        let mut buf = [0u8; 4096];
+        while remaining > 0 {
+            let want = buf.len().min(remaining.min(usize::MAX as u64) as usize);
+            match std::io::Read::read(&mut stdin, &mut buf[..want]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if std::io::Write::write_all(&mut stdout, &buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = std::io::Write::flush(&mut stdout);
+                    remaining -= n as u64;
+                }
+            }
+        }
+        std::process::exit(0);
+    }
+
+    /// Command string re-invoking this test binary in echo-helper mode.
+    fn bridge_command(limit: Option<u64>) -> String {
+        let exe = std::env::current_exe().expect("test binary path");
+        let marker = match limit {
+            Some(n) => format!("PIPE_BRIDGE_CHILD_MARKER_LIMIT_{n}"),
+            None => "PIPE_BRIDGE_CHILD_MARKER".to_string(),
+        };
+        format!(
+            "\"{}\" --exact interfaces::pipe::tests::pipe_bridge_echo_helper {marker} --nocapture --test-threads=1",
+            exe.display()
+        )
+    }
+
+    /// A round-trip through the pipe interface: spawn the self-echo bridge
+    /// as the command, send a packet out, and read it back on the incoming
     /// channel HDLC-deframed. Proves the framer, the child spawn, and both
     /// I/O directions line up end-to-end over a real subprocess.
     #[tokio::test]
-    async fn cat_bridge_round_trips_a_packet() {
+    async fn echo_bridge_round_trips_a_packet() {
         let mut handle = spawn_pipe_interface(PipeInterfaceConfig {
             id: InterfaceId(0),
             name: "pipe-test".to_string(),
-            command: "cat".to_string(),
+            // Self-spawn echo bridge — see pipe_bridge_echo_helper.
+            command: bridge_command(None),
             respawn_delay: PIPE_DEFAULT_RESPAWN_DELAY,
             buffer_size: PIPE_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
@@ -579,7 +636,9 @@ mod tests {
             // Echo exactly one HDLC frame's worth then exit, forcing a respawn.
             // `dd` copies a fixed byte count then exits(0); the interface must
             // respawn and accept the next packet.
-            command: "sh -c 'head -c 8; exit 0'".to_string(),
+            // Self-spawn bridge copying exactly one 8-byte frame then
+            // exiting — the respawn trigger. See pipe_bridge_echo_helper.
+            command: bridge_command(Some(8)),
             respawn_delay: Duration::from_millis(50),
             buffer_size: PIPE_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
