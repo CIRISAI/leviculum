@@ -47,15 +47,22 @@
 //! ```
 
 mod builder;
+mod completions;
 mod interface_build;
 mod processor;
 mod remote_mgmt;
 mod sender;
 mod stream;
 
+use completions::CompletionRegistry;
 use remote_mgmt::RemoteMgmtResponder;
 
 pub use builder::ReticulumNodeBuilder;
+pub use completions::{
+    Completion, CompletionError, EventTap, FilteredEventTap, LinkEstablishedFuture,
+    RequestResponseFuture, ResourceSentFuture, ResourceSentInfo, ResponseInfo, TapEvent,
+    DEFAULT_EVENT_TAP_CAPACITY,
+};
 pub use processor::{CoreProcessor, PROCESSOR_TICK_BUDGET};
 pub use sender::PacketSender;
 pub use stream::LinkHandle;
@@ -918,6 +925,11 @@ pub struct ReticulumNode {
     /// itself would instead tax every single-threaded state machine that will
     /// ever be plugged in here, for nothing.
     core_processor: Mutex<Option<Box<dyn CoreProcessor>>>,
+    /// Completion futures resolved at the dispatch layer (leviculum#42).
+    /// Arc-shared with the event loop like `iface_stats_map`; a LEAF lock,
+    /// never taken while the node lock is held (upstream #199: no new
+    /// lock-taking wait paths).
+    completions: Arc<CompletionRegistry>,
 }
 
 impl Drop for ReticulumNode {
@@ -1026,6 +1038,7 @@ impl ReticulumNode {
             discovery_network_identity: None,
             discovery_job_interval_secs: crate::config::DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,
             core_processor: Mutex::new(None),
+            completions: CompletionRegistry::new(),
         }
     }
 
@@ -1510,6 +1523,12 @@ impl ReticulumNode {
         let autoconnect_corrupt_every = self.corrupt_every;
         let autoconnect_socket_hook = self.outbound_socket_hook.clone();
 
+        // A previous stop() closed the completion registry when its event loop
+        // exited; this loop is about to observe events again, so registrations
+        // must park rather than resolve NodeStopped.
+        self.completions.reopen();
+        let completions = Arc::clone(&self.completions);
+
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
             run_event_loop(
@@ -1542,6 +1561,7 @@ impl ReticulumNode {
                 },
                 discovery_announce,
                 core_processor,
+                completions,
             )
             .await;
         });
@@ -2868,6 +2888,7 @@ impl ReticulumNode {
                 .map_err(Error::Resource)?;
             output
         };
+        self.completions.note_send_began(*link_id);
         self.action_dispatch_tx
             .send(output)
             .await
@@ -2893,6 +2914,7 @@ impl ReticulumNode {
                 .map_err(Error::Resource)?;
             output
         };
+        self.completions.note_send_began(*link_id);
         self.action_dispatch_tx
             .send(output)
             .await
@@ -2957,6 +2979,7 @@ impl ReticulumNode {
                 Err(e) => return Err(Error::Resource(e)),
             }
         };
+        self.completions.note_send_began(*link_id);
         self.action_dispatch_tx
             .send(output)
             .await
@@ -3093,6 +3116,214 @@ impl ReticulumNode {
     /// Returns 0 if no AutoInterface is configured.
     pub fn auto_interface_peer_count(&self) -> usize {
         self.auto_peer_count.total()
+    }
+
+    // Completion futures (leviculum#42). The awaited send variants register
+    // interest AFTER the core commit releases the node lock and BEFORE the
+    // TickOutput is handed to the event loop: only the event loop can produce
+    // the outcome, and it cannot act on a dispatch it has not received, so
+    // the outcome can never precede the registration (register-before-
+    // dispatch). The after-the-fact await_* variants are mirror/ring-backed.
+
+    /// [`connect`](Self::connect) plus a future for the establishment proof.
+    ///
+    /// Race-free by construction: the waiter is registered before the link
+    /// request is dispatched, so `LinkEstablished` cannot be missed. The
+    /// future resolves `Err(CompletionError::LinkClosed)` if the link dies
+    /// first (timeout, refusal) and `Err(NodeStopped)` on node stop — it
+    /// never hangs on a dead link. It is `tokio::select!`/cancel-safe
+    /// (dropping it unregisters the waiter). The caller owns any wall-clock
+    /// bound: wrap it in `tokio::time::timeout`.
+    pub async fn connect_awaited(
+        &self,
+        dest_hash: &DestinationHash,
+        dest_signing_key: &[u8; 32],
+    ) -> Result<(LinkHandle, LinkEstablishedFuture), Error> {
+        let (link_id, _was_routed, output) = {
+            let mut inner = self.inner.lock_recover();
+            inner.connect(*dest_hash, dest_signing_key)
+        };
+        let established = self.completions.register_link_established(link_id);
+        if self.action_dispatch_tx.send(output).await.is_err() {
+            // The request never left; Drop unregisters the waiter.
+            drop(established);
+            return Err(Error::NotRunning);
+        }
+        Ok((
+            LinkHandle::new(
+                link_id,
+                Arc::clone(&self.inner),
+                self.action_dispatch_tx.clone(),
+            ),
+            established,
+        ))
+    }
+
+    /// [`send_resource`](Self::send_resource) plus a future for the
+    /// sender-side transfer outcome (the peer's completion proof).
+    ///
+    /// The waiter is registered between the core commit and the dispatch; a
+    /// concurrent tick killing the link inside that microgap is caught by
+    /// the register-time check against the recently-closed ring, under the
+    /// same mutex observation takes. Resolves `Err(Resource)` on transfer
+    /// failure and `Err(LinkClosed)` if the link dies with the transfer in
+    /// flight and core reports only the link's death — typed either way,
+    /// never a hang. Cancel-safe; the caller owns timeouts.
+    pub async fn send_resource_awaited(
+        &self,
+        link_id: &LinkId,
+        data: &[u8],
+        metadata: Option<&[u8]>,
+        auto_compress: bool,
+    ) -> Result<([u8; 32], ResourceSentFuture), Error> {
+        // Same phased build as send_resource (leviculum#29): CPU work
+        // off-lock, one rebuild on a mid-build re-key (#66).
+        let mut attempts = 0;
+        let (resource_hash, output) = loop {
+            let params = {
+                let inner = self.inner.lock_recover();
+                inner
+                    .resource_send_params(link_id)
+                    .map_err(Error::Resource)?
+            };
+            let prepared = leviculum_core::resource::prepare_resource_send(
+                &params,
+                data,
+                metadata,
+                auto_compress,
+                &mut rand_core::OsRng,
+            )
+            .map_err(Error::Resource)?;
+            let committed = {
+                let mut inner = self.inner.lock_recover();
+                inner.commit_resource_send(prepared)
+            };
+            match committed {
+                Ok(pair) => break pair,
+                Err(leviculum_core::resource::ResourceError::LinkStateChanged) if attempts == 0 => {
+                    attempts += 1;
+                    continue;
+                }
+                Err(e) => return Err(Error::Resource(e)),
+            }
+        };
+        self.completions.note_send_began(*link_id);
+        let sent = self
+            .completions
+            .register_resource_sent(resource_hash, *link_id);
+        if self.action_dispatch_tx.send(output).await.is_err() {
+            drop(sent);
+            return Err(Error::NotRunning);
+        }
+        Ok((resource_hash, sent))
+    }
+
+    /// [`send_request`](Self::send_request) plus a future for the response.
+    ///
+    /// The waiter is registered between the core commit and the dispatch
+    /// (same microgap closure as
+    /// [`send_resource_awaited`](Self::send_resource_awaited)). Resolves
+    /// `Err(RequestTimedOut)` on the in-protocol timeout and
+    /// `Err(LinkClosed)` if the link dies first — never a hang. Cancel-safe;
+    /// the caller owns any additional wall-clock bound.
+    pub async fn send_request_awaited(
+        &self,
+        link_id: &LinkId,
+        path: &str,
+        data: Option<&[u8]>,
+        timeout_ms: Option<u64>,
+    ) -> Result<([u8; 16], RequestResponseFuture), Error> {
+        let (request_id, output) = {
+            let mut inner = self.inner.lock_recover();
+            inner
+                .send_request(link_id, path, data, timeout_ms)
+                .map_err(Error::Request)?
+        };
+        let response = self
+            .completions
+            .register_request_response(request_id, *link_id);
+        if self.action_dispatch_tx.send(output).await.is_err() {
+            drop(response);
+            return Err(Error::NotRunning);
+        }
+        Ok((request_id, response))
+    }
+
+    /// Await establishment of a link by id, after the fact.
+    ///
+    /// Takes NO node lock — neither here nor when polled (upstream
+    /// Lew_Palm/leviculum#199: wait paths must not add lock-taking pub fns);
+    /// only the leaf completion registry is consulted. A link that is
+    /// already established (per the bounded mirror) or recently closed (per
+    /// the recent-outcomes ring) resolves immediately.
+    ///
+    /// An id the node has NEVER issued matches nothing in the waiters map,
+    /// the established mirror, or the recent-outcomes ring, so nothing but a
+    /// later `LinkClosed` for the passed id, node stop, or the caller's own
+    /// timeout resolves it — for a mistyped or foreign id the caller-owned
+    /// timeout is the only bound. (The never-hang guarantee covers dead
+    /// objects the node knows about, not objects it never knew.)
+    pub fn await_link_established(&self, link_id: &LinkId) -> LinkEstablishedFuture {
+        self.completions.register_link_established(*link_id)
+    }
+
+    /// Await the sender-side outcome of a resource transfer, after the fact.
+    ///
+    /// Takes NO node lock, here or when polled (upstream #199). `link_id` is
+    /// what lets a `LinkClosed` sweep resolve this waiter, so it never hangs
+    /// on a dead link. For split (multi-segment) transfers still in flight
+    /// the completion is matched by link — each segment carries its own hash
+    /// on the wire — so awaiting the hash `send_resource` returned resolves.
+    ///
+    /// Two honest gaps, both bounded by the caller's own timeout: (1) a hash
+    /// the node never sent (or whose outcome already left the bounded
+    /// recent-outcomes ring) matches nothing — only a later `LinkClosed` for
+    /// `link_id` or node stop resolves it; (2) a split transfer that already
+    /// COMPLETED leaves its ring marker under the final segment's hash, not
+    /// the one `send_resource` returned, so a late awaiter parks the same
+    /// way. For split transfers prefer [`send_resource_awaited`]
+    /// (Self::send_resource_awaited), which registers before dispatch and
+    /// has neither gap.
+    pub fn await_resource_sent(
+        &self,
+        resource_hash: &[u8; 32],
+        link_id: &LinkId,
+    ) -> ResourceSentFuture {
+        self.completions
+            .register_resource_sent(*resource_hash, *link_id)
+    }
+
+    /// Await the response to a previously sent request, after the fact.
+    ///
+    /// Takes NO node lock, here or when polled (upstream #199). A response
+    /// that was already delivered on the event stream resolves
+    /// `Err(CompletionError::AlreadyCompleted)`: response payloads are
+    /// deliberately not mirrored (the ring stores markers, never bytes), so
+    /// the payload must come from the event stream that already carried it.
+    ///
+    /// A request id the node never issued matches nothing in the waiters
+    /// map or the recent-outcomes ring, so only a later `LinkClosed` for
+    /// `link_id`, node stop, or the caller's own timeout resolves it — for
+    /// a mistyped/foreign id that timeout is the only bound.
+    pub fn await_request_response(
+        &self,
+        request_id: &[u8; 16],
+        link_id: &LinkId,
+    ) -> RequestResponseFuture {
+        self.completions
+            .register_request_response(*request_id, *link_id)
+    }
+
+    /// Subscribe a secondary bounded event observer (leviculum#42).
+    ///
+    /// The tap is fed clones at the dispatch layer, BEFORE the two-plane
+    /// sink: it never consumes from or races the primary event receiver, it
+    /// sees events the data plane is entitled to drop, and it works on a
+    /// daemon-mode node built `without_events()`. A slow tap loses oldest
+    /// events (reported via [`TapEvent::Lagged`]); the node never blocks on
+    /// it. With no live subscriber the per-event cost is one atomic load.
+    pub fn subscribe_events(&self) -> EventTap {
+        self.completions.subscribe()
     }
 }
 
@@ -3319,11 +3550,24 @@ async fn run_event_loop(
     autoconnect_wiring: AutoConnectWiring,
     discovery_announce: Option<DiscoveryAnnounceWiring>,
     core_processor: Option<Box<dyn CoreProcessor>>,
+    completions: Arc<CompletionRegistry>,
 ) {
     // A slot rather than the bare box: a panicking hook is detached from
     // inside its own call frame, several `dispatch_output` frames down from
     // here (Codeberg #196).
     let mut core_processor = core_processor.map(processor::ProcessorSlot::new);
+
+    /// Close the completion registry on ANY exit from the loop task —
+    /// orderly return or panic unwind. Without this, a panic in the loop
+    /// leaves the registry open: parked waiters hang forever and new
+    /// registrations park against a node that will never answer (C5).
+    struct CloseOnExit(Arc<CompletionRegistry>);
+    impl Drop for CloseOnExit {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+    let _close_on_exit = CloseOnExit(Arc::clone(&completions));
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
     let mut new_interface_rx = channels.new_interface_rx;
@@ -3449,6 +3693,7 @@ async fn run_event_loop(
                 discovery_storage.as_deref(),
                 discovery_network_identity.as_deref(),
                 &mut discovery_heard_ifac,
+                &completions,
                 core_processor.as_mut(),
             );
             tighten_next_poll(&mut next_poll, processor_delay);
@@ -3569,6 +3814,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
+                            &completions,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -3618,6 +3864,7 @@ async fn run_event_loop(
                                     None,
                                     None,
                                     &mut discovery_heard_ifac,
+                                    &completions,
                                     core_processor.as_mut(),
                                 ));
                             }
@@ -3661,6 +3908,7 @@ async fn run_event_loop(
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
+                    &completions,
                     core_processor.as_mut(),
                 );
                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -3724,6 +3972,7 @@ async fn run_event_loop(
                     discovery_storage.as_deref(),
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
+                    &completions,
                     core_processor.as_mut(),
                 );
                 // The processor's periodic output goes out on the driver's own
@@ -3746,6 +3995,7 @@ async fn run_event_loop(
                             None,
                             None,
                             &mut discovery_heard_ifac,
+                            &completions,
                             None,
                         );
                     }
@@ -3785,6 +4035,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
+                            &completions,
                             core_processor.as_mut(),
                         );
                     }
@@ -3879,7 +4130,7 @@ async fn run_event_loop(
                         let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
-                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_mut()));
+                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
                 }
             }
 
@@ -3900,7 +4151,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
             }
 
             // Branch 6b: Tunnel synthesize initiation (Codeberg #64).
@@ -3914,7 +4165,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet
@@ -4004,6 +4255,7 @@ async fn run_event_loop(
                             discovery_storage.as_deref(),
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
+                            &completions,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -4084,6 +4336,7 @@ async fn run_event_loop(
                                     discovery_storage.as_deref(),
                                     discovery_network_identity.as_deref(),
                                     &mut discovery_heard_ifac,
+                                    &completions,
                                     core_processor.as_mut(),
                                 );
                                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -4102,6 +4355,14 @@ async fn run_event_loop(
             }
         }
     }
+
+    // No event can be observed past this point: resolve every pending
+    // completion waiter with NodeStopped rather than letting it park on a
+    // node that will never answer (C5), after the shutdown drain above has
+    // dispatched — and observed — everything still queued. The close itself
+    // rides `_close_on_exit`'s Drop (armed at loop entry), so a panic
+    // unwinding out of the loop resolves waiters the same way an orderly
+    // exit does — a parked future must not outlive the loop task either way.
 }
 
 /// Production [`AutoConnectSpawner`](crate::autoconnect::AutoConnectSpawner):
@@ -4328,6 +4589,7 @@ fn dispatch_output(
     discovery_storage: Option<&Path>,
     discovery_network_identity: Option<&leviculum_core::Identity>,
     discovery_heard_ifac: &mut HeardIfacMap,
+    completions: &CompletionRegistry,
     core_processor: Option<&mut processor::ProcessorSlot>,
 ) -> Option<Duration> {
     // Drain retry queues before dispatching new actions
@@ -4379,6 +4641,14 @@ fn dispatch_output(
             }
         })
         .collect();
+
+    // Completion futures (leviculum#42): observed here — the one place every
+    // event flows, ahead of `EventSink::emit` — so waiters resolve in daemon
+    // mode (`event_sink` None) too. The node lock is NOT held at this point;
+    // the registry is a leaf and must stay one (see completions.rs).
+    for ev in drop_events.iter().chain(output.events.iter()) {
+        completions.observe(ev);
+    }
 
     // Queue SendPacket retries (with cap enforcement)
     for retry in result.retries {
@@ -4544,6 +4814,7 @@ fn dispatch_output(
             None,
             None,
             discovery_heard_ifac,
+            completions,
             // The `/status` response is the driver's own; it is not the
             // processor's business and must not re-enter the tap.
             None,
@@ -4574,6 +4845,7 @@ fn dispatch_output(
             None,
             None,
             discovery_heard_ifac,
+            completions,
             None,
         );
     }
@@ -5535,6 +5807,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             None,
         );
     }
@@ -5620,6 +5893,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             None,
         );
 
@@ -6898,6 +7172,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
 
@@ -6963,6 +7238,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
 
@@ -7010,6 +7286,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
 
@@ -7058,6 +7335,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
 
@@ -7126,6 +7404,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
 
@@ -7204,6 +7483,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         )
         .expect("the tap asked for a deadline; the driver must be told");
@@ -7263,6 +7543,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
 
@@ -7318,6 +7599,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
         std::panic::set_hook(previous_hook);
@@ -7361,6 +7643,7 @@ mod tests {
             None,
             None,
             &mut BTreeMap::new(),
+            &CompletionRegistry::new(),
             Some(&mut slot),
         );
         assert!(
@@ -7800,6 +8083,258 @@ mod tests {
         assert!(
             entries.contains_key(&[0x3A; TRUNCATED_HASHBYTES]),
             "the joined write must have landed the snapshot on disk"
+        );
+    }
+
+    // ---- leviculum#42: completion futures at the dispatch layer ---------
+
+    /// Poll a completion exactly once with a no-op waker.
+    fn poll_completion<T>(
+        fut: &mut completions::Completion<T>,
+    ) -> Poll<std::result::Result<T, CompletionError>> {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        std::future::Future::poll(std::pin::Pin::new(fut), &mut cx)
+    }
+
+    /// C2 pin: the completion hook OBSERVES at the dispatch layer — the
+    /// registered waiter resolves AND the primary `EventReceiver` still gets
+    /// the same event. An observer that consumed would starve the stream the
+    /// application already reads.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_output_resolves_registered_link_waiter_and_still_forwards_event() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+
+        let link_id = LinkId::new([0x42; 16]);
+        let mut fut = completions.register_link_established(link_id);
+        assert!(poll_completion(&mut fut).is_pending());
+
+        let mut output = TickOutput::empty();
+        output.events.push(NodeEvent::LinkEstablished {
+            link_id,
+            is_initiator: true,
+            destination_hash: leviculum_core::DestinationHash::new([0xAA; 16]),
+        });
+
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &completions,
+            None,
+        );
+
+        assert_eq!(fut.await, Ok(()));
+        let ev = rx
+            .recv()
+            .await
+            .expect("the primary receiver must still get the event");
+        assert!(
+            matches!(ev, NodeEvent::LinkEstablished { .. }),
+            "expected LinkEstablished, got {ev:?}"
+        );
+    }
+
+    /// Daemon mode (`without_events()`, sink None) must still resolve
+    /// waiters: the hook sits ahead of event forwarding, on the raw
+    /// `TickOutput` the NRF daemon path simply drops.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_output_resolves_waiters_in_daemon_mode() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+
+        let link_id = LinkId::new([0x43; 16]);
+        let fut = completions.register_link_established(link_id);
+
+        let mut output = TickOutput::empty();
+        output.events.push(NodeEvent::LinkEstablished {
+            link_id,
+            is_initiator: true,
+            destination_hash: leviculum_core::DestinationHash::new([0xAB; 16]),
+        });
+
+        dispatch_output(
+            output,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &completions,
+            None,
+        );
+
+        assert_eq!(fut.await, Ok(()));
+    }
+
+    /// leviculum#42 end-to-end, sans-I/O (the #126 two-core harness): an
+    /// `await_link_established` registered while the link is Pending resolves
+    /// once the proof-bearing `TickOutput` passes through `dispatch_output`
+    /// with the node's own registry; a second await after establishment
+    /// resolves immediately via the mirror.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_link_established_resolves_through_dispatch_on_never_started_node() {
+        use leviculum_core::transport::{Action, InterfaceId, TickOutput};
+        use leviculum_core::{
+            Destination, DestinationType, Direction, Identity, NoStorage, NodeCoreBuilder,
+            ProofStrategy,
+        };
+
+        fn one_packet(output: &TickOutput) -> Vec<u8> {
+            let data: Vec<Vec<u8>> = output
+                .actions
+                .iter()
+                .map(|a| match a {
+                    Action::Broadcast { data, .. } | Action::SendPacket { data, .. } => {
+                        data.clone()
+                    }
+                })
+                .collect();
+            assert_eq!(data.len(), 1, "expected exactly one outbound packet");
+            data.into_iter().next().unwrap()
+        }
+
+        // Responder: bare sans-I/O core owning a link-accepting destination.
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let mut responder =
+            NodeCoreBuilder::new().build(rand_core::OsRng, SystemClock::new(), NoStorage);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "driverapp",
+            &["completions"],
+        )
+        .unwrap();
+        dest.set_accepts_links(true);
+        dest.set_proof_strategy(ProofStrategy::All);
+        let dest_hash = *dest.hash();
+        responder.register_destination(dest);
+
+        // The driver under test: daemon-mode ReticulumNode, never started.
+        let td = tempfile::tempdir().expect("tempdir");
+        let core = NodeCoreBuilder::new().build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(td.path()).unwrap(),
+        );
+        let node = ReticulumNode::new(core, Vec::new(), None, false, 60, 4, 4);
+
+        let (link_id, _routed, out) = node
+            .inner()
+            .lock()
+            .unwrap()
+            .connect(dest_hash, &signing_key);
+
+        // Registered while Pending: nothing to resolve yet.
+        let mut fut = node.await_link_established(&link_id);
+        assert!(poll_completion(&mut fut).is_pending());
+
+        // Shuttle by hand: request over, proof back; the proof's TickOutput
+        // goes through the dispatch layer exactly as the live loop would.
+        let request = one_packet(&out);
+        let out = responder.handle_packet(InterfaceId(0), &request);
+        let proof = one_packet(&out);
+        let out = node
+            .inner()
+            .lock()
+            .unwrap()
+            .handle_packet(InterfaceId(0), &proof);
+
+        let inner = node.inner();
+        let mut registry = InterfaceRegistry::new();
+        dispatch_output(
+            out,
+            &mut registry,
+            None,
+            &inner,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &node.completions,
+            None,
+        );
+
+        assert_eq!(fut.await, Ok(()));
+
+        // Immediate-resolve path: the mirror answers a second await without
+        // any event in flight.
+        assert_eq!(node.await_link_established(&link_id).await, Ok(()));
+    }
+
+    /// Surface (b), C2 pin: a tap subscriber receives the event AND the
+    /// primary `EventReceiver` still gets it — the tap is fed clones at the
+    /// dispatch layer, it never consumes from the two-plane channels.
+    #[tokio::test(flavor = "current_thread")]
+    async fn tap_receives_events_without_consuming_primary() {
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+        let mut tap = completions.subscribe();
+
+        let mut output = TickOutput::empty();
+        output.events.push(NodeEvent::LinkEstablished {
+            link_id: LinkId::new([0x44; 16]),
+            is_initiator: false,
+            destination_hash: leviculum_core::DestinationHash::new([0xAC; 16]),
+        });
+
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &completions,
+            None,
+        );
+
+        match tap.try_recv() {
+            Some(TapEvent::Event(NodeEvent::LinkEstablished { link_id, .. })) => {
+                assert_eq!(link_id, LinkId::new([0x44; 16]));
+            }
+            other => panic!("the tap must see the event, got {other:?}"),
+        }
+        let ev = rx
+            .recv()
+            .await
+            .expect("the primary receiver must be unaffected by the tap");
+        assert!(
+            matches!(ev, NodeEvent::LinkEstablished { .. }),
+            "expected LinkEstablished, got {ev:?}"
         );
     }
 }

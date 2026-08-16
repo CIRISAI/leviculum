@@ -360,6 +360,9 @@ pub trait AnnounceControl: Send + Sync {
 ///
 /// This struct holds the parsed components of an announce and provides
 /// methods to verify the signature and compute hashes.
+///
+/// `Clone` exists because [`crate::NodeEvent`] is `Clone` and carries one.
+#[derive(Clone)]
 pub struct ReceivedAnnounce {
     /// Destination hash from packet header
     destination_hash: DestinationHash,

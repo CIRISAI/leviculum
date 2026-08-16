@@ -32,7 +32,11 @@ pub enum FrameDropReason {
 ///
 /// This combines events from transport, link management, and channels into a
 /// single stream that applications can handle uniformly.
-#[derive(Debug)]
+///
+/// `Clone` exists for secondary observers (the std driver's event tap feeds
+/// subscribers clones at its dispatch layer); the primary event path still
+/// moves events, never copies them.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum NodeEvent {
     // Path Discovery Events
