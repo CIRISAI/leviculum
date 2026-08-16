@@ -58,6 +58,8 @@ mod mvr_diamond_return_path;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_establishment_loss;
 #[cfg(test)]
+mod mvr_explicit_hash_no_announce;
+#[cfg(test)]
 mod mvr_first_path_request;
 #[cfg(test)]
 mod mvr_generated_field_pins;
@@ -454,6 +456,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.transport.register_destination(hash.into_bytes());
         }
 
+        // Last-wins on hash collision. With derived hashes a collision is a
+        // 16-byte truncated-SHA accident; with `with_explicit_hash` the caller
+        // controls the index, so a collision with another local destination is
+        // reachable by misuse — make the displacement visible instead of
+        // silently swallowing the old destination.
+        if let Some(existing) = self.destinations.get(&hash) {
+            let same_dest = existing.name_hash() == dest.name_hash()
+                && existing.identity().map(|i| *i.hash()) == dest.identity().map(|i| *i.hash());
+            if !same_dest {
+                crate::tracing::warn!(
+                    "register_destination replaces a different destination under <{}> \
+                     (explicit-hash collision or misuse; last registration wins)",
+                    hash
+                );
+            }
+        }
         self.destinations.insert(hash, dest);
 
         // Load persisted ratchet keys if ratchets are enabled
@@ -3025,6 +3043,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     .destinations
                     .get_mut(&DestinationHash::new(destination_hash))
                 {
+                    // Explicit-hash destinations answer path requests with
+                    // silence: a path-response announce would carry a hash no
+                    // Python peer can validate (Identity.py:584-587 recomputes
+                    // truncated_hash(name_hash || identity_hash) and rejects
+                    // the mismatch). `Destination::announce` refuses anyway;
+                    // skipping here keeps a peer that polls path requests from
+                    // driving the warn path below at will.
+                    if dest.is_explicit_hash() {
+                        crate::tracing::debug!(
+                            "Path request for explicit-hash <{}> answered with silence",
+                            HexShort(&destination_hash),
+                        );
+                        self.events.push(NodeEvent::PathRequestReceived {
+                            destination_hash: DestinationHash::new(destination_hash),
+                        });
+                        return;
+                    }
                     match dest.announce(None, &mut self.rng, now_ms, emission_secs) {
                         Ok(packet) => {
                             let mut buf = [0u8; crate::constants::MTU];

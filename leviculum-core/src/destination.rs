@@ -419,6 +419,15 @@ impl Destination {
     ///
     /// Arguments mirror [`Destination::new`], plus `explicit_hash`: the exact
     /// 16 bytes to index this destination by.
+    ///
+    /// # Collisions
+    /// The caller controls the index, so it can collide with the derived hash
+    /// of another local destination or a known remote path. Registration is
+    /// last-wins: `NodeCore::register_destination` replaces the previous
+    /// entry under the same hash (and logs a warning when the displaced
+    /// destination is a different one). Callers must derive the override from
+    /// enough entropy (e.g. `sha256(pubkey)[..16]`) that collisions are as
+    /// unlikely as for derived hashes.
     pub fn with_explicit_hash(
         identity: Option<Identity>,
         direction: Direction,

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Destination::with_explicit_hash`: a Single destination indexed by a
+  caller-supplied 16-byte hash; never announced, reachable by direct link
+  only (#254).
 - Driver completion futures (`connect_awaited`, `send_resource_awaited`,
   `send_request_awaited`) and a bounded multi-consumer event tap, replacing
   consumer poll loops (#253).
