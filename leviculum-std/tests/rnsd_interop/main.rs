@@ -43,6 +43,7 @@ mod discovery_interop_tests;
 mod discovery_tests;
 mod edge_case_tests;
 mod encryption_tests;
+mod explicit_hash_interop_tests;
 mod flood_tests;
 mod flow_tests;
 mod group_crypto_tests;
