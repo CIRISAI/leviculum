@@ -3281,9 +3281,8 @@ impl ReticulumNode {
     /// `link_id` or node stop resolves it; (2) a split transfer that already
     /// COMPLETED leaves its ring marker under the final segment's hash, not
     /// the one `send_resource` returned, so a late awaiter parks the same
-    /// way. For split transfers prefer [`send_resource_awaited`]
-    /// (Self::send_resource_awaited), which registers before dispatch and
-    /// has neither gap.
+    /// way. For split transfers prefer [`Self::send_resource_awaited`],
+    /// which registers before dispatch and has neither gap.
     pub fn await_resource_sent(
         &self,
         resource_hash: &[u8; 32],
