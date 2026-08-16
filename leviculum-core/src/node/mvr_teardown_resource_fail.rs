@@ -649,11 +649,18 @@ fn single_dest_pair() -> (MemNode, MemNode, usize, crate::DestinationHash, Vec<u
     (initiator, responder, r_iface, dest_hash, announce_raw)
 }
 
-fn count_packet_received(events: &[NodeEvent]) -> usize {
+/// The plaintext of every `PacketReceived` this step, in order. The memo
+/// tests assert byte-exact payloads: delivery count alone cannot distinguish
+/// the in-lock fallback from a mis-consumed memo (a memo tagged for the wrong
+/// destination must never surface as the delivered plaintext).
+fn received_payloads(events: &[NodeEvent]) -> Vec<Vec<u8>> {
     events
         .iter()
-        .filter(|e| matches!(e, NodeEvent::PacketReceived { .. }))
-        .count()
+        .filter_map(|e| match e {
+            NodeEvent::PacketReceived { data, .. } => Some(data.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The single-destination plaintext memo: an off-lock decrypt via the exported
@@ -687,9 +694,9 @@ fn offlock_single_dest_memo_delivers_and_wrong_tag_falls_back() {
         },
     );
     assert_eq!(
-        count_packet_received(&out.events),
-        1,
-        "memo path must deliver the packet"
+        received_payloads(&out.events),
+        std::vec![b"memo-payload".to_vec()],
+        "memo path must deliver the packet with the memo plaintext"
     );
 
     // Packet 2: memo tagged with a WRONG destination hash — must be ignored,
@@ -708,9 +715,10 @@ fn offlock_single_dest_memo_delivers_and_wrong_tag_falls_back() {
         },
     );
     assert_eq!(
-        count_packet_received(&out.events),
-        1,
-        "wrong-tag memo must fall back to the in-lock decrypt"
+        received_payloads(&out.events),
+        std::vec![b"fallback-payload".to_vec()],
+        "wrong-tag memo must be ignored and the in-lock decrypt must deliver \
+         the TRUE plaintext, never the memo bytes"
     );
 }
 
