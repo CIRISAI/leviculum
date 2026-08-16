@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.18.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `9071f41a` (+38). The absorb cycle closed six
+of our seven offers — upstream merged the PR branches verbatim (#242
+envelope u16, #243 off-lock stages 2-3, #245 NTFS fixtures, #246 prctl gate
++ portable shell tests, #252 off-lock flush, #253 completion futures + tap
++ the sweep-race fix) and layered its own review fixes on top, which this
+release inherits:
+
+- ratchet enforcement applied live at the memo consume site (pr243 review);
+- the announce-verified memo is discarded when the IFAC strip rewrites the
+  packet bytes (pr243 review — composes with this fork's scoped-transit
+  IFAC surface);
+- the remote-mgmt response resource send is counted in the per-link
+  pending-send accounting (pr253 review);
+- byte-exact memo-path payload assertions and a stalled-flush-write
+  inbound-processing test.
+
+Also new upstream: the no_std Telemeter codec for FIELD_TELEMETRY (#237),
+SoftDevice-safe RNG and GPREGRET handling (#249/#250), LXMF opportunistic
+proof-latency instrumentation (#156), and the anchored-calendar time-model
+documentation. Remaining fork carry after the rebase: scoped transit
+(v0.17.0), the bench suite (modes 1-8 + CI publishing), explicit-hash
+listen (upstream PR #254, still open), fork infra, and release history.
+
 ## [0.17.0+ciris.1] — CIRIS fork
 
 ### Added
