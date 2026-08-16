@@ -557,6 +557,20 @@ impl ReceivedAnnounce {
     }
 }
 
+/// Fully verify an announce packet's signature and destination hash — a pure
+/// function of the packet bytes (the announce carries its own public key), so
+/// a driver can run it OFF the node lock and pass the result in as a
+/// [`crate::node::PrecomputedRx`] memo (leviculum#29 stages 2-3). Returns
+/// `false` for non-announce packets and for any parse/verify failure; the
+/// in-lock path then re-checks and drops exactly as before, so a wrong memo
+/// can only cost duplicate work, never skip verification.
+pub fn verify_announce_packet(packet: &Packet) -> bool {
+    match ReceivedAnnounce::from_packet(packet) {
+        Ok(a) => a.validate().is_ok(),
+        Err(_) => false,
+    }
+}
+
 impl core::fmt::Debug for ReceivedAnnounce {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ReceivedAnnounce")

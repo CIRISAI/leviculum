@@ -30,6 +30,7 @@ leviculum-core = { path = "../leviculum-core", default-features = true }
 leviculum-lxmf = { path = "../leviculum-lxmf" }
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
 
+futures.workspace = true
 tokio.workspace = true
 if-addrs.workspace = true
 socket2.workspace = true

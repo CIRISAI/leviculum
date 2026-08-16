@@ -774,6 +774,27 @@ impl Destination {
         Ok(plaintext)
     }
 
+    /// Snapshot everything needed to decrypt inbound packets for this Single
+    /// destination WITHOUT holding a borrow of the node (leviculum#29 stages
+    /// 2-3): the identity, the retained ratchets, and the enforcement flag.
+    /// `None` for non-Single destinations or ones without an identity.
+    ///
+    /// The snapshot decrypt is self-authenticating (the token HMAC must
+    /// verify), so a stale snapshot can only FAIL to decrypt — the caller then
+    /// falls back to the in-lock path against fresh state. It can never
+    /// produce a wrong plaintext.
+    pub fn export_decryptor(&self) -> Option<SingleDestDecryptor> {
+        if self.dest_type != DestinationType::Single {
+            return None;
+        }
+        let identity = self.identity.as_ref()?.clone();
+        Some(SingleDestDecryptor {
+            identity,
+            ratchets: self.ratchets.clone(),
+            enforce_ratchets: self.enforce_ratchets,
+        })
+    }
+
     /// Encrypt data for sending to another destination
     ///
     /// For OUT destinations, encrypts using the target identity and
@@ -1240,6 +1261,33 @@ fn read_msgpack_array_len(data: &[u8], pos: &mut usize) -> Option<usize> {
         Some(read_be_u32(data, pos)? as usize)
     } else {
         None
+    }
+}
+
+/// A detachable decrypt context for one Single destination — the key material
+/// [`Destination::export_decryptor`] snapshots so the CPU-heavy X25519 ECDH +
+/// HKDF decrypt can run off the node lock (leviculum#29). `Send + Sync`; cheap
+/// to clone per use via `Arc`.
+pub struct SingleDestDecryptor {
+    identity: Identity,
+    ratchets: Vec<Ratchet>,
+    enforce_ratchets: bool,
+}
+
+impl SingleDestDecryptor {
+    /// Decrypt exactly as [`Destination::decrypt`] would for a Single
+    /// destination, against the snapshotted keys. `None` on any failure —
+    /// including a post-snapshot ratchet rotation — in which case the caller
+    /// must fall back to the in-lock decrypt.
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
+        let (plaintext, ratchet_id) = self
+            .identity
+            .decrypt_with_ratchets(ciphertext, &self.ratchets, true)
+            .ok()?;
+        if self.enforce_ratchets && ratchet_id.is_none() {
+            return None;
+        }
+        Some(plaintext)
     }
 }
 
