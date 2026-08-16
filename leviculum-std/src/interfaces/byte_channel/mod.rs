@@ -77,6 +77,7 @@ where
 
     InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name: config.name,
             hw_mtu: Some(BYTE_CHANNEL_HW_MTU),
