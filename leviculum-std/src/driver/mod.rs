@@ -4712,7 +4712,8 @@ fn dispatch_output(
                 ..
             } = event
             {
-                if let Some(resp) = responder.handle_request(inner, link_id, request_id, path, data)
+                if let Some(resp) =
+                    responder.handle_request(inner, link_id, request_id, path, data, completions)
                 {
                     mgmt_responses.push(resp);
                 }
@@ -7863,6 +7864,7 @@ mod tests {
             },
             None,
             None,
+            CompletionRegistry::new(),
         ));
 
         FlushLoopHarness {
@@ -8336,5 +8338,258 @@ mod tests {
             matches!(ev, NodeEvent::LinkEstablished { .. }),
             "expected LinkEstablished, got {ev:?}"
         );
+    }
+
+    /// merge/pr253 review finding: the remote-management `/status` responder
+    /// commits its response Resource through `core.send_response_resource`
+    /// directly, so it must note the send like every driver send path does —
+    /// an un-noted transfer's terminal event under-counts `pending_sends` and
+    /// its link-scoped sweep resolves a waiter belonging to the NEXT send on
+    /// the link: the stale-sweep class 3d3d74f closed for app sends, reopened
+    /// through the mgmt side door.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mgmt_response_resource_is_noted_and_does_not_sweep_the_next_sends_waiter() {
+        use leviculum_core::traits::InterfaceMode;
+        use leviculum_core::transport::{Action, InterfaceId, TickOutput};
+        use leviculum_core::{
+            Destination, DestinationType, Direction, Identity, NoStorage, NodeCoreBuilder,
+            ProofStrategy, RequestPolicy,
+        };
+
+        fn packets(out: &TickOutput) -> Vec<Vec<u8>> {
+            out.actions
+                .iter()
+                .map(|a| match a {
+                    Action::Broadcast { data, .. } | Action::SendPacket { data, .. } => {
+                        data.clone()
+                    }
+                })
+                .collect()
+        }
+
+        // The driver under test, owning the destination the mgmt client calls.
+        let td = tempfile::tempdir().expect("tempdir");
+        let core = NodeCoreBuilder::new().build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(td.path()).unwrap(),
+        );
+        let node = ReticulumNode::new(core, Vec::new(), None, false, 60, 4, 4);
+
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "driverapp",
+            &["mgmtnote"],
+        )
+        .unwrap();
+        dest.set_accepts_links(true);
+        dest.set_proof_strategy(ProofStrategy::All);
+        let dest_hash = *dest.hash();
+        {
+            let inner = node.inner();
+            let mut core = inner.lock().unwrap();
+            core.register_destination(dest);
+            core.register_request_handler(dest_hash, "/status", RequestPolicy::AllowAll);
+        }
+
+        // The mgmt-client role: a bare sans-I/O core initiating the link.
+        let mut peer =
+            NodeCoreBuilder::new().build(rand_core::OsRng, SystemClock::new(), NoStorage);
+        let (peer_link_id, _routed, out) = peer.connect(dest_hash, &signing_key);
+
+        // Hand-shuttle until both sides go quiet. Observation stays manual:
+        // nothing reaches the completion registry until the test dispatches
+        // it, which is what lets the stale window be constructed exactly.
+        let mut node_outputs: Vec<TickOutput> = Vec::new();
+        let mut to_node: Vec<Vec<u8>> = packets(&out);
+        type PeerCore = leviculum_core::node::NodeCore<rand_core::OsRng, SystemClock, NoStorage>;
+        let pump = |peer: &mut PeerCore,
+                    to_node: &mut Vec<Vec<u8>>,
+                    node_outputs: &mut Vec<TickOutput>| {
+            for _ in 0..16 {
+                let mut to_peer: Vec<Vec<u8>> = Vec::new();
+                for pkt in to_node.drain(..) {
+                    let out = node
+                        .inner()
+                        .lock()
+                        .unwrap()
+                        .handle_packet(InterfaceId(0), &pkt);
+                    to_peer.extend(packets(&out));
+                    node_outputs.push(out);
+                }
+                if to_peer.is_empty() {
+                    break;
+                }
+                for pkt in to_peer.drain(..) {
+                    let out = peer.handle_packet(InterfaceId(0), &pkt);
+                    to_node.extend(packets(&out));
+                }
+                if to_node.is_empty() {
+                    break;
+                }
+            }
+        };
+        pump(&mut peer, &mut to_node, &mut node_outputs);
+
+        // The peer requests /status over the established link.
+        let (_req_id, out) = peer
+            .send_request(&peer_link_id, "/status", None, None)
+            .expect("request over the established link");
+        let mut to_node = packets(&out);
+        pump(&mut peer, &mut to_node, &mut node_outputs);
+
+        let (link_id, request_id) = node_outputs
+            .iter()
+            .find_map(|o| {
+                o.events.iter().find_map(|e| match e {
+                    NodeEvent::RequestReceived {
+                        link_id,
+                        request_id,
+                        ..
+                    } => Some((*link_id, *request_id)),
+                    _ => None,
+                })
+            })
+            .expect("the /status request must reach the node");
+
+        // A responder whose inventory inflates the response past the link
+        // MDU, forcing the response-Resource branch (the branch under test).
+        let stats_map: crate::interfaces::InterfaceStatsMap =
+            Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let online_map: crate::interfaces::InterfaceOnlineMap =
+            Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        {
+            let mut inv = inventory.lock_recover();
+            for i in 0..16usize {
+                inv.add_listener(
+                    1000 + i,
+                    crate::interfaces::inventory::ListenerRow {
+                        identity: crate::interfaces::inventory::InterfaceIdentity {
+                            name: format!(
+                                "TCPServerInterface[padding-{}/198.51.100.{}:4242]",
+                                "x".repeat(64),
+                                i
+                            ),
+                            short_name: format!("listener-{i}"),
+                            type_name: "TCPServerInterface",
+                            parent: None,
+                        },
+                        bitrate: 10_000_000,
+                        mode: InterfaceMode::Full,
+                        announce_rate: (None, None, None),
+                        ifac_size_bits: None,
+                        departed_rxb: 0,
+                        departed_txb: 0,
+                        bound_addr: None,
+                    },
+                );
+            }
+        }
+        let responder = RemoteMgmtResponder::new(
+            stats_map,
+            online_map,
+            inventory,
+            std::time::Instant::now(),
+            AutoPeerCount::default(),
+        );
+        let resp = responder
+            .handle_request(
+                &node.inner(),
+                &link_id,
+                &request_id,
+                "/status",
+                &[],
+                &node.completions,
+            )
+            .expect("a /status request gets a response");
+
+        // Shuttle the response Resource to completion; the proof-bearing
+        // terminal TickOutput is HELD, not dispatched — the stale window
+        // (transfer complete in core, terminal event not yet observed).
+        let mut to_node: Vec<Vec<u8>> = Vec::new();
+        for pkt in packets(&resp) {
+            let out = peer.handle_packet(InterfaceId(0), &pkt);
+            to_node.extend(packets(&out));
+        }
+        pump(&mut peer, &mut to_node, &mut node_outputs);
+        let term_idx = node_outputs
+            .iter()
+            .position(|o| {
+                o.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        NodeEvent::ResourceCompleted {
+                            is_sender: true,
+                            ..
+                        }
+                    )
+                })
+            })
+            .expect("the response resource must complete sender-side");
+        let term = node_outputs.swap_remove(term_idx);
+
+        // The NEXT send on the same link: note + register, exactly the pair
+        // `send_resource_awaited` performs before dispatching.
+        node.completions.note_send_began(link_id);
+        let mut fut = node.completions.register_resource_sent([0xB1; 32], link_id);
+        assert!(poll_completion(&mut fut).is_pending());
+
+        // Only now does the mgmt transfer's terminal event dispatch.
+        let inner = node.inner();
+        let mut registry = InterfaceRegistry::new();
+        dispatch_output(
+            term,
+            &mut registry,
+            None,
+            &inner,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &node.completions,
+            None,
+        );
+        assert!(
+            poll_completion(&mut fut).is_pending(),
+            "the mgmt response's terminal event must not sweep the next send's waiter"
+        );
+
+        // The newer send's own terminal event is what resolves it.
+        let mut own = TickOutput::empty();
+        own.events.push(NodeEvent::ResourceCompleted {
+            link_id,
+            resource_hash: [0xB1; 32],
+            data: Vec::new(),
+            metadata: None,
+            is_sender: true,
+            segment_index: 1,
+            total_segments: 1,
+        });
+        dispatch_output(
+            own,
+            &mut registry,
+            None,
+            &inner,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &node.completions,
+            None,
+        );
+        assert!(matches!(poll_completion(&mut fut), Poll::Ready(Ok(_))));
     }
 }

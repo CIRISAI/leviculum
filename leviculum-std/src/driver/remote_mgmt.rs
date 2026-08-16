@@ -29,6 +29,7 @@ use leviculum_core::link::LinkId;
 use leviculum_core::{RequestError, TickOutput};
 use serde_pickle::value::Value;
 
+use super::completions::CompletionRegistry;
 use super::StdNodeCore;
 use crate::interfaces::inventory::SharedInventory;
 use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
@@ -88,6 +89,7 @@ impl RemoteMgmtResponder {
         request_id: &[u8; TRUNCATED_HASHBYTES],
         path: &str,
         data: &[u8],
+        completions: &CompletionRegistry,
     ) -> Option<TickOutput> {
         if path != STATUS_PATH {
             return None;
@@ -133,22 +135,33 @@ impl RemoteMgmtResponder {
 
         // A small bundle fits one RESPONSE packet; a real bundle exceeds the
         // link MDU and is delivered as a response Resource (Python parity).
-        match core.send_response(link_id, request_id, &response_bytes) {
-            Ok(output) => Some(output),
-            Err(RequestError::PayloadTooLarge) => {
-                match core.send_response_resource(link_id, request_id, &response_bytes) {
-                    Ok((_, output)) => Some(output),
-                    Err(e) => {
-                        tracing::warn!("remote status: failed to send response resource: {e}");
-                        None
+        let (output, sent_as_resource) =
+            match core.send_response(link_id, request_id, &response_bytes) {
+                Ok(output) => (output, false),
+                Err(RequestError::PayloadTooLarge) => {
+                    match core.send_response_resource(link_id, request_id, &response_bytes) {
+                        Ok((_, output)) => (output, true),
+                        Err(e) => {
+                            tracing::warn!("remote status: failed to send response resource: {e}");
+                            return None;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::warn!("remote status: failed to send response: {e}");
-                None
-            }
+                Err(e) => {
+                    tracing::warn!("remote status: failed to send response: {e}");
+                    return None;
+                }
+            };
+        drop(core);
+        if sent_as_resource {
+            // The response Resource is an outgoing send like any driver send
+            // path: note it after the commit and before the caller dispatches
+            // the output, so its terminal event is never mistaken for the
+            // sole outstanding send on the link (see `pending_sends` in
+            // `completions.rs`).
+            completions.note_send_began(*link_id);
         }
+        Some(output)
     }
 }
 
