@@ -7670,6 +7670,69 @@ mod tests {
         harness.loop_handle.await.expect("loop exits cleanly");
     }
 
+    /// The inbound half of the deaf window: a live announce arriving from an
+    /// interface while the flush write is stalled must still be processed
+    /// under the (free) node lock — observed as the announced identity
+    /// landing in storage before the write is released.
+    #[tokio::test(flavor = "current_thread")]
+    async fn inbound_processing_proceeds_during_slow_flush() {
+        use leviculum_core::{DestinationType, Direction};
+
+        let (core, _td) = shared_test_core();
+        let (hook, mut gate) = gated_flush_hook(1);
+        core.lock_recover().storage_mut().set_flush_io_hook(hook);
+        dirty_identity(&core, 0x4A);
+
+        let harness = spawn_flush_loop(Arc::clone(&core), 1);
+        gate.entered_rx.recv().await.expect("flush begins");
+
+        // A real announce from a throwaway peer, fed through the registered
+        // interface's incoming channel while the write is gated.
+        let peer = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+        let mut dest = Destination::new(
+            Some(peer),
+            Direction::In,
+            DestinationType::Single,
+            "test",
+            &["flushgate"],
+        )
+        .unwrap();
+        let dest_hash = dest.hash().into_bytes();
+        let announce = dest
+            .announce(None, &mut rand_core::OsRng, 12_000, 1_700_000_000)
+            .unwrap();
+        let mut buf = [0u8; 500];
+        let len = announce.pack(&mut buf).unwrap();
+        harness
+            ._in_tx
+            .send(crate::interfaces::IncomingPacket {
+                data: buf[..len].to_vec(),
+            })
+            .await
+            .expect("loop is live");
+
+        // The identity must land while the flush write is still in flight.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if core
+                    .lock_recover()
+                    .storage()
+                    .get_identity(&dest_hash)
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the announce must be processed while the flush write is in flight");
+
+        gate.release_tx.send(()).expect("blocked hook receives");
+        harness.shutdown_tx.send(true).expect("loop is live");
+        harness.loop_handle.await.expect("loop exits cleanly");
+    }
+
     /// The JoinHandle is the overlap guard: timer fires during an in-flight
     /// write re-arm and do nothing, and the interval after the write settles
     /// retries whatever was dirtied mid-write.
