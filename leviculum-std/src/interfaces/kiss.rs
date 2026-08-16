@@ -421,6 +421,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
 
     InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name: handle_name,
             hw_mtu: Some(KISS_HW_MTU),
