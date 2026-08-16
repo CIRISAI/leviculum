@@ -35,6 +35,7 @@
 //! assert_eq!(clean_packet, raw_packet);
 //! ```
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -81,6 +82,13 @@ pub struct IfacConfig {
     ifac_key: [u8; IDENTITY_KEY_SIZE],
     /// Ed25519 identity derived from the key
     ifac_identity: Identity,
+    /// Alternate accept-only config (leviculum#52): during a membership-key
+    /// rotation window, inbound packets validate against the primary OR this
+    /// alternate, while outbound always masks with the primary. The
+    /// three-phase rotation (install-next / activate-next / seal) moves a
+    /// fleet across keys without a flag-day: stragglers on the old key keep
+    /// being accepted until the window seals.
+    alt: Option<Box<IfacConfig>>,
 }
 
 impl core::fmt::Debug for IfacConfig {
@@ -148,6 +156,7 @@ impl IfacConfig {
             ifac_size,
             ifac_key,
             ifac_identity,
+            alt: None,
         })
     }
 
@@ -159,6 +168,34 @@ impl IfacConfig {
     /// Get the IFAC identity
     pub fn identity(&self) -> &Identity {
         &self.ifac_identity
+    }
+
+    /// Rotation phase 1 (leviculum#52): install `next` as the accept-only
+    /// alternate. Outbound continues masking with the current key; inbound
+    /// accepts either.
+    pub fn install_alt(&mut self, next: IfacConfig) {
+        self.alt = Some(Box::new(next));
+    }
+
+    /// Rotation phase 2: swap the alternate into primary. Outbound now
+    /// masks with the new key; the old key remains accept-only so
+    /// stragglers' inbound still lands until the window seals.
+    pub fn activate_alt(&mut self) {
+        if let Some(alt) = self.alt.take() {
+            let old = core::mem::replace(self, *alt);
+            self.alt = Some(Box::new(old));
+        }
+    }
+
+    /// Rotation phase 3: seal — drop the alternate; only the current key
+    /// is accepted from here on.
+    pub fn seal_alt(&mut self) {
+        self.alt = None;
+    }
+
+    /// Whether a rotation window is open (an alternate is installed).
+    pub fn has_alt(&self) -> bool {
+        self.alt.is_some()
     }
 
     /// Apply IFAC to an outgoing packet
@@ -236,6 +273,20 @@ impl IfacConfig {
     /// * `Ok(Vec<u8>)` - The clean packet with IFAC removed
     /// * `Err(IfacError)` - If verification fails
     pub fn verify_ifac(&self, raw: &[u8]) -> Result<Vec<u8>, IfacError> {
+        // leviculum#52: during a rotation window, a packet masked with the
+        // alternate key is as valid as one masked with the primary. Primary
+        // first (the steady-state hit); the first error is kept when both
+        // fail so diagnostics name the primary key's failure.
+        match self.verify_ifac_single(raw) {
+            Ok(clean) => Ok(clean),
+            Err(primary_err) => match &self.alt {
+                Some(alt) => alt.verify_ifac_single(raw).map_err(|_| primary_err),
+                None => Err(primary_err),
+            },
+        }
+    }
+
+    fn verify_ifac_single(&self, raw: &[u8]) -> Result<Vec<u8>, IfacError> {
         // Minimum: header(2) + ifac(N) + at least some payload
         let min_len = 2 + self.ifac_size;
         if raw.len() < min_len {
@@ -296,6 +347,22 @@ impl IfacConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alt_key_accepts_during_rotation_window() {
+        let old_key = IfacConfig::new(Some("net"), Some("one"), 16).unwrap();
+        let mut dual = IfacConfig::new(Some("net"), Some("two"), 16).unwrap();
+        dual.install_alt(old_key.clone());
+        let packet = [0x02u8, 0x00, 0xAA, 0xBB, 0xCC, 0xDD];
+        let masked = old_key.apply_ifac(&packet).unwrap();
+        let clean = dual.verify_ifac(&masked).expect("alt key must be accepted");
+        assert_eq!(clean, packet);
+        dual.seal_alt();
+        assert!(
+            dual.verify_ifac(&masked).is_err(),
+            "sealed window rejects the old key"
+        );
+    }
 
     #[test]
     fn test_ifac_config_creation() {

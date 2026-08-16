@@ -94,6 +94,7 @@ pub(crate) fn spawn_pipe_interface(mut config: PipeInterfaceConfig) -> Interface
 
     InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name: handle_name,
             hw_mtu: Some(PIPE_HW_MTU),
