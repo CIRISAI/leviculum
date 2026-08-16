@@ -255,6 +255,15 @@ impl ReticulumNodeBuilder {
     /// Add a TCP client interface
     ///
     /// This connects to a remote Reticulum node as a client.
+    /// Add an interface from a fully-specified [`InterfaceConfig`] — the
+    /// general escape hatch when no dedicated `add_*` variant carries the
+    /// combination needed (IFAC + ingress control + mode + transit + ...).
+    /// Exactly equivalent to a config-file interface section.
+    pub fn add_interface_config(mut self, config: InterfaceConfig) -> Self {
+        self.interfaces.push(config);
+        self
+    }
+
     pub fn add_tcp_client(mut self, addr: SocketAddr) -> Self {
         self.interfaces.push(InterfaceConfig {
             interface_type: "TCPClientInterface".to_string(),
@@ -317,6 +326,70 @@ impl ReticulumNodeBuilder {
             interface_type: "TCPServerInterface".to_string(),
             listen_ip: Some(addr.ip().to_string()),
             listen_port: Some(addr.port()),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// [`add_tcp_server`](Self::add_tcp_server) with IFAC (Interface Access
+    /// Code) authentication — the closed-overlay membership gate: packets
+    /// not bearing a valid code derived from `(netname, passphrase)` are
+    /// dropped at the interface, so everything past it is member traffic by
+    /// construction. Equivalent to a config-file `[[TCPServerInterface]]`
+    /// block with `networkname`/`passphrase`/`ifac_size` set.
+    pub fn add_tcp_server_ifac(
+        mut self,
+        addr: SocketAddr,
+        netname: Option<&str>,
+        passphrase: &str,
+        ifac_size: usize,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            name: "TCP Server".to_string(),
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: Some(addr.ip().to_string()),
+            listen_port: Some(addr.port()),
+            networkname: netname.map(str::to_string),
+            passphrase: Some(passphrase.to_string()),
+            ifac_size: Some(ifac_size),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// [`add_tcp_server`](Self::add_tcp_server) declared no-transit
+    /// (leviculum#51): the interface serves only traffic terminating or
+    /// originating at this node — a public leaf port on a node whose transit
+    /// duty is scoped to other (e.g. IFAC-member) interfaces.
+    pub fn add_tcp_server_no_transit(mut self, addr: SocketAddr) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            name: "TCP Server".to_string(),
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: Some(addr.ip().to_string()),
+            listen_port: Some(addr.port()),
+            transit: Some(false),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// [`add_tcp_client`](Self::add_tcp_client) with IFAC authentication —
+    /// see [`add_tcp_server_ifac`](Self::add_tcp_server_ifac).
+    pub fn add_tcp_client_ifac(
+        mut self,
+        addr: SocketAddr,
+        netname: Option<&str>,
+        passphrase: &str,
+        ifac_size: usize,
+    ) -> Self {
+        self.interfaces.push(InterfaceConfig {
+            name: "TCP Client".to_string(),
+            interface_type: "TCPClientInterface".to_string(),
+            target_host: Some(addr.ip().to_string()),
+            target_port: Some(addr.port()),
+            networkname: netname.map(str::to_string),
+            passphrase: Some(passphrase.to_string()),
+            ifac_size: Some(ifac_size),
             ..Default::default()
         });
         self
