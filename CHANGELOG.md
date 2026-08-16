@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-## [Unreleased] — CIRIS fork
+## [0.17.0+ciris.1] — CIRIS fork
 
 ### Added
 
