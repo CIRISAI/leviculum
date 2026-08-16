@@ -163,6 +163,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
 
     InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name: handle_name,
             hw_mtu: Some(SERIAL_HW_MTU),

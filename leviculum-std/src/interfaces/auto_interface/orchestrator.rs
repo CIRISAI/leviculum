@@ -641,6 +641,7 @@ fn handle_discovery_packet(
 
     let handle = InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name: iface_name.clone(),
             hw_mtu: Some(AUTO_HW_MTU),

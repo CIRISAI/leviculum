@@ -342,6 +342,7 @@ fn spawn_local_interface_from_stream(
 
     InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name,
             hw_mtu: Some(LOCAL_HW_MTU),
@@ -435,6 +436,7 @@ pub(crate) fn spawn_local_client(
 
     Ok(InterfaceHandle {
         info: InterfaceInfo {
+            transit: true,
             id,
             name,
             hw_mtu: Some(LOCAL_HW_MTU),
