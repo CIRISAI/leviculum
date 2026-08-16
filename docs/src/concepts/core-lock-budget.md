@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:4077`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:4579`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -249,7 +249,7 @@ earlier, on the mutex.
 
 And no `block_on` is needed. `ReticulumNode` carries roughly forty
 plain synchronous `pub fn`s that open by locking the core —
-`has_path` (`leviculum-std/src/driver/mod.rs:2429`) is
+`has_path` (`leviculum-std/src/driver/mod.rs:2447`) is
 `self.inner.lock_recover().has_path(dest_hash)` and is entirely typical.
 A callee holding an `Arc<ReticulumNode>` deadlocks the node on its first
 invocation, in ordinary safe synchronous code, with no `.await`, no

@@ -20,7 +20,7 @@ seam.
 `std::sync::Mutex` is not reentrant. So any handle the consumer smuggled in
 that re-locks the core parks the driver's event loop on a lock only that same
 loop can release. `ReticulumNode::has_path`
-(`leviculum-std/src/driver/mod.rs:2428-2430`) does it in one line, and it is
+(`leviculum-std/src/driver/mod.rs:2447-2449`) does it in one line, and it is
 one of roughly forty synchronous `pub fn`s on `ReticulumNode` shaped exactly
 like it. No `.await`, no `unsafe`, no channel — nothing a compiler or a
 compile-fail fixture can see.
