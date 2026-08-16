@@ -5,18 +5,13 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.1] - 2026-08-16
 
 ### Added
 
 - `no_std` Telemeter codec in `leviculum-lxmf`: encode/decode of Sideband's
   `FIELD_TELEMETRY` sensor map and `FIELD_TELEMETRY_STREAM` rows, with
   golden vectors verified against Sideband and Columba (#237).
-
-## [0.8.1] - 2026-08-12
-
-### Added
-
 - `lnflash`, a new LNode flashing tool: the full bootloader/SoftDevice
   sequence with Nordic's S140 7.3.0 vendored (licence included), refusal
   of an image that would soft-brick the board, `just lnflash-bundle` for
@@ -53,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rendered as micron tables, per-day served-request counts.
 - lnomad: pictures drawn inline (Kitty/iTerm2/Sixel or half-blocks),
   with a bounded in-memory cache (`--image-cache`).
+- `api::NodeBuilder` installs a `CoreProcessor` and re-exports
+  `TickOutput`, so the facade covers the processor seam (#222, PAzter1101).
+- The LNode debug port replays the panic count and stored post-mortem
+  block on demand.
 
 ### Changed
 
@@ -75,12 +74,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-hashed outside it (#29 stage 1, emoore); a resource build can be
   handed to the caller, and superseded builds are refused (#196,
   PAzter1101).
+- Announce verify and single-destination decrypt run off the node lock
+  (#29 stages 2-3; #243, emoore); the verified memo is discarded when
+  the IFAC strip rewrites the bytes, and ratchet enforcement is read
+  live at the consume site.
 
 ### Fixed
 
 - A transport relay forwards path-directed packets back onto the
   receiving interface, so multi-hop over a single shared LoRa channel
   delivers (A-B-C repeater).
+- Shared-medium relays no longer echo-storm a link: a link request is
+  transported only by its designated hop, link DATA repeats are
+  deduplicated, and same-interface echoes drop as `LinkRepeatEcho`
+  (#226, #227).
+- A local client no longer hears an echo of every link data packet it
+  sends through its relay (#226).
+- A relayed link's timeout is a rolling inactivity window: the
+  link-table entry refreshes on every repeat, so a held link survives
+  past 15 minutes (#226).
 - COMPAT: path handling matches the reference — a shared-instance
   client's destination answers with a fresh path response (#171), a
   never-announced local destination answers its first request (#169),
@@ -117,6 +129,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails any firmware frame above 16 KB.
 - lnomad sizes half-block pictures by half-block geometry and renders
   table cells as the inline micron they are.
+- COMPAT: HKDF derives past the RFC 5869 block limit, as Python does
+  (#225, PAzter1101).
+- A channel send past the u16 envelope wire ceiling is refused instead
+  of panicking with the node lock held (#242, emoore).
+- The 1200-baud flash touch writes GPREGRET through SoftDevice
+  syscalls (#249), and the RNG never falls back to peripheral
+  registers while the SoftDevice runs (#250).
+- The repository checks out on Windows: no ':' in committed fixture
+  paths (#244/#245, emoore); the supervised-spawn probe builds off
+  Linux (#246, emoore).
 
 ### Internal
 
