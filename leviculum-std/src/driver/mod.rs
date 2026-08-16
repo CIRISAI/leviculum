@@ -3276,16 +3276,22 @@ fn precompute_single_dest(
     decryptor: std::sync::Arc<leviculum_core::SingleDestDecryptor>,
 ) -> PreparedRx {
     let packet_hash = leviculum_core::packet::packet_hash(&data);
-    let plaintext = leviculum_core::packet::Packet::unpack(&data)
+    let decrypted = leviculum_core::packet::Packet::unpack(&data)
         .ok()
         .and_then(|p| decryptor.decrypt(p.data.as_slice()));
-    let failed = plaintext.is_none();
+    let failed = decrypted.is_none();
     PreparedRx {
         iface,
         data,
         pre: leviculum_core::node::PrecomputedRx {
             packet_hash: Some(packet_hash),
-            single_dest_plaintext: plaintext.map(|pt| (dest, pt)),
+            single_dest_plaintext: decrypted.map(|(plaintext, ratchet_used)| {
+                leviculum_core::node::SingleDestPlaintext {
+                    dest_hash: dest,
+                    plaintext,
+                    ratchet_used,
+                }
+            }),
             ..Default::default()
         },
         evict_decryptor_for: failed.then_some(dest),

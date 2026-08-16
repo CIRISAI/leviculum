@@ -776,13 +776,16 @@ impl Destination {
 
     /// Snapshot everything needed to decrypt inbound packets for this Single
     /// destination WITHOUT holding a borrow of the node (leviculum#29 stages
-    /// 2-3): the identity, the retained ratchets, and the enforcement flag.
-    /// `None` for non-Single destinations or ones without an identity.
+    /// 2-3): the identity and the retained ratchets. `None` for non-Single
+    /// destinations or ones without an identity.
     ///
     /// The snapshot decrypt is self-authenticating (the token HMAC must
     /// verify), so a stale snapshot can only FAIL to decrypt — the caller then
     /// falls back to the in-lock path against fresh state. It can never
-    /// produce a wrong plaintext.
+    /// produce a wrong plaintext. Deliberately NOT snapshotted: the
+    /// enforce-ratchets policy — the memo consume site applies the LIVE
+    /// policy via the `ratchet_used` tag, so a stale snapshot cannot bypass
+    /// an enforcement change either.
     pub fn export_decryptor(&self) -> Option<SingleDestDecryptor> {
         if self.dest_type != DestinationType::Single {
             return None;
@@ -791,7 +794,6 @@ impl Destination {
         Some(SingleDestDecryptor {
             identity,
             ratchets: self.ratchets.clone(),
-            enforce_ratchets: self.enforce_ratchets,
         })
     }
 
@@ -1271,23 +1273,21 @@ fn read_msgpack_array_len(data: &[u8], pos: &mut usize) -> Option<usize> {
 pub struct SingleDestDecryptor {
     identity: Identity,
     ratchets: Vec<Ratchet>,
-    enforce_ratchets: bool,
 }
 
 impl SingleDestDecryptor {
     /// Decrypt exactly as [`Destination::decrypt`] would for a Single
-    /// destination, against the snapshotted keys. `None` on any failure —
+    /// destination, against the snapshotted keys. Returns the plaintext and
+    /// whether a ratchet key was used — the memo consume site needs the tag
+    /// to apply the LIVE enforce-ratchets policy. `None` on any failure —
     /// including a post-snapshot ratchet rotation — in which case the caller
     /// must fall back to the in-lock decrypt.
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Option<(Vec<u8>, bool)> {
         let (plaintext, ratchet_id) = self
             .identity
             .decrypt_with_ratchets(ciphertext, &self.ratchets, true)
             .ok()?;
-        if self.enforce_ratchets && ratchet_id.is_none() {
-            return None;
-        }
-        Some(plaintext)
+        Some((plaintext, ratchet_id.is_some()))
     }
 }
 

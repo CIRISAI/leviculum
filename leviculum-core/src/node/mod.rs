@@ -149,8 +149,6 @@ fn ensure_single_segment_internal_resource_size(
     }
 }
 
-/// Link statistics for observability
-#[derive(Debug, Clone)]
 /// Work the std driver precomputed OFF the node lock for one inbound packet
 /// (leviculum#29 stages 2-3). Every field is advisory: absent or inapplicable
 /// memos simply mean the in-lock path does the work itself, so a wrong or
@@ -166,9 +164,25 @@ pub struct PrecomputedRx {
     pub announce_verified: bool,
     /// Plaintext from an off-lock Single-destination decrypt, tagged with the
     /// destination hash it was decrypted for.
-    pub single_dest_plaintext: Option<([u8; crate::constants::TRUNCATED_HASHBYTES], Vec<u8>)>,
+    pub single_dest_plaintext: Option<SingleDestPlaintext>,
 }
 
+/// An off-lock Single-destination decrypt result staged as a memo
+/// (leviculum#29). The plaintext is self-authenticating (token HMAC), but the
+/// enforce-ratchets policy is NOT baked in: the consume site applies the LIVE
+/// policy using `ratchet_used`, so a snapshot taken before a policy change
+/// cannot bypass it.
+pub struct SingleDestPlaintext {
+    /// Destination hash the ciphertext was decrypted for; the consume site
+    /// ignores the memo unless it matches the packet's destination.
+    pub dest_hash: [u8; crate::constants::TRUNCATED_HASHBYTES],
+    pub plaintext: Vec<u8>,
+    /// The decrypt used a ratchet key (as opposed to the identity key alone).
+    pub ratchet_used: bool,
+}
+
+/// Link statistics for observability
+#[derive(Debug, Clone)]
 pub struct LinkStats {
     pub(crate) tx_ring_size: usize,
     pub(crate) window: usize,
@@ -363,7 +377,7 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// the ONE packet the current call is processing (leviculum#29). Tagged
     /// with the destination hash; consumed take-once at the Single-destination
     /// decrypt site and always cleared before the call returns.
-    pending_single_dest_plaintext: Option<([u8; crate::constants::TRUNCATED_HASHBYTES], Vec<u8>)>,
+    pending_single_dest_plaintext: Option<SingleDestPlaintext>,
 }
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
@@ -2841,7 +2855,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     // token HMAC), so a hit is exactly what dest.decrypt would
                     // have returned; a miss falls back to the in-lock path.
                     let memo_plaintext = match self.pending_single_dest_plaintext.take() {
-                        Some((h, pt)) if h == destination_hash => Some(pt),
+                        Some(m) if m.dest_hash == destination_hash => Some(m),
                         other => {
                             self.pending_single_dest_plaintext = other;
                             None
@@ -2849,8 +2863,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     };
                     let plaintext = if let Some(dest) = self.destinations.get(&dest_hash_typed) {
                         if dest.dest_type() == crate::destination::DestinationType::Single {
-                            if let Some(pt) = memo_plaintext {
-                                pt
+                            if let Some(m) = memo_plaintext {
+                                // Enforcement is applied LIVE, never from the
+                                // snapshot: a decryptor exported before
+                                // `set_enforce_ratchets(true)` must not
+                                // deliver what the in-lock decrypt would drop.
+                                if dest.enforces_ratchets() && !m.ratchet_used {
+                                    crate::tracing::trace!(
+                                        dest = %HexShort(destination_hash.as_ref()),
+                                        "Dropped packet, ratchet enforcement"
+                                    );
+                                    return;
+                                }
+                                m.plaintext
                             } else {
                                 match dest.decrypt(packet.data.as_slice()) {
                                     Ok(data) => data,

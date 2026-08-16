@@ -681,7 +681,7 @@ fn offlock_single_dest_memo_delivers_and_wrong_tag_falls_back() {
     let decryptor = responder
         .export_single_dest_decryptor(&dest_hash)
         .expect("exportable");
-    let plaintext = decryptor
+    let (plaintext, ratchet_used) = decryptor
         .decrypt(pkt1.data.as_slice())
         .expect("off-lock decrypt succeeds");
     let out = responder.handle_packet_precomputed(
@@ -689,7 +689,11 @@ fn offlock_single_dest_memo_delivers_and_wrong_tag_falls_back() {
         &raw1,
         PrecomputedRx {
             packet_hash: Some(crate::packet::packet_hash(&raw1)),
-            single_dest_plaintext: Some((dest_hash.into_bytes(), plaintext)),
+            single_dest_plaintext: Some(crate::node::SingleDestPlaintext {
+                dest_hash: dest_hash.into_bytes(),
+                plaintext,
+                ratchet_used,
+            }),
             ..Default::default()
         },
     );
@@ -710,7 +714,11 @@ fn offlock_single_dest_memo_delivers_and_wrong_tag_falls_back() {
         &raw2,
         PrecomputedRx {
             packet_hash: Some(crate::packet::packet_hash(&raw2)),
-            single_dest_plaintext: Some(([0xEE; 16], std::vec![1, 2, 3])),
+            single_dest_plaintext: Some(crate::node::SingleDestPlaintext {
+                dest_hash: [0xEE; 16],
+                plaintext: std::vec![1, 2, 3],
+                ratchet_used: true,
+            }),
             ..Default::default()
         },
     );
@@ -823,5 +831,81 @@ fn offlock_announce_memo_is_discarded_with_ifac_rewrite() {
             .iter()
             .any(|e| matches!(e, NodeEvent::AnnounceReceived { .. })),
         "IFAC-stripped tampered announce must be dropped regardless of the memo"
+    );
+}
+
+/// The ratchet-enforcement policy is applied LIVE at the memo consume site,
+/// not from the snapshot: a decryptor exported while enforcement was off must
+/// not deliver a ratchet-less packet after `set_enforce_ratchets(true)` — the
+/// in-lock decrypt would have dropped it.
+#[test]
+fn offlock_memo_respects_live_ratchet_enforcement() {
+    use crate::node::PrecomputedRx;
+
+    // Destination WITHOUT ratchets: the initiator encrypts to the identity
+    // key, so the decrypt reports "no ratchet used".
+    let identity = Identity::generate(&mut OsRng);
+    let mut responder = make_mem_node();
+    let dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["offlock-enforce"],
+    )
+    .unwrap();
+    let dest_hash = *dest.hash();
+    responder.register_destination(dest);
+    let r_iface = add_mem_iface(&mut responder, "R_enf");
+
+    let mut initiator = make_mem_node();
+    let i_iface = add_mem_iface(&mut initiator, "I_enf");
+    let out = responder.announce_destination(&dest_hash, None).unwrap();
+    let announce_raw = action_data(&out)
+        .into_iter()
+        .next()
+        .expect("announce bytes");
+    let _ = initiator.handle_packet(InterfaceId(i_iface), &announce_raw);
+
+    let (_h, out) = initiator
+        .send_single_packet(&dest_hash, b"no-ratchet-payload")
+        .unwrap();
+    let raw = action_data(&out).into_iter().next().expect("packet bytes");
+    let pkt = crate::packet::Packet::unpack(&raw).unwrap();
+
+    // Snapshot taken while enforcement is OFF; the off-lock decrypt succeeds.
+    let decryptor = responder
+        .export_single_dest_decryptor(&dest_hash)
+        .expect("exportable");
+    let (memo_plaintext, ratchet_used) = decryptor
+        .decrypt(pkt.data.as_slice())
+        .expect("off-lock decrypt succeeds without ratchet");
+    assert!(!ratchet_used, "identity-key decrypt must report no ratchet");
+
+    // Policy flips ON before the packet reaches the node. The in-lock decrypt
+    // would now drop it; the stale-snapshot memo must not smuggle it through.
+    responder
+        .destination_mut(&dest_hash)
+        .unwrap()
+        .set_enforce_ratchets(true);
+
+    let out = responder.handle_packet_precomputed(
+        InterfaceId(r_iface),
+        &raw,
+        PrecomputedRx {
+            packet_hash: Some(crate::packet::packet_hash(&raw)),
+            single_dest_plaintext: Some(crate::node::SingleDestPlaintext {
+                dest_hash: dest_hash.into_bytes(),
+                plaintext: memo_plaintext,
+                ratchet_used,
+            }),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        received_payloads(&out.events),
+        Vec::<Vec<u8>>::new(),
+        "ratchet-less packet must be dropped under LIVE enforcement even \
+         when a stale snapshot already decrypted it"
     );
 }
